@@ -27,6 +27,8 @@ betterdb-monitor/
 - **React** with TypeScript
 - **Vite** for build tooling
 - **TailwindCSS** for styling
+- **shadcn/ui** for component library
+- **Recharts** for data visualization
 - Runs on port **5173**
 
 ### Monorepo
