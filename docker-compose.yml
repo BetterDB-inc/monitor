@@ -6,7 +6,15 @@ services:
     container_name: betterdb-monitor-valkey
     ports:
       - "6380:6379"
-    command: valkey-server --requirepass devpassword
+    command: >
+      valkey-server
+      --requirepass devpassword
+      --slowlog-log-slower-than 0
+      --commandlog-request-larger-than 100
+      --commandlog-reply-larger-than 100
+      --commandlog-slow-execution-max-len 128
+      --commandlog-large-request-max-len 128
+      --commandlog-large-reply-max-len 128
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 10s
