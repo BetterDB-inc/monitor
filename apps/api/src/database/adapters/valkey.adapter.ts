@@ -213,16 +213,50 @@ export class ValkeyAdapter implements DatabasePort {
 
   async getLatencyHistogram(commands?: string[]): Promise<Record<string, LatencyHistogram>> {
     const args: string[] = commands && commands.length > 0 ? ['LATENCY', 'HISTOGRAM', ...commands] : ['LATENCY', 'HISTOGRAM'];
-    const rawHistogram = (await this.client.call(...(args as [string, ...string[]]))) as Record<string, unknown>;
+    const rawData = await this.client.call(...(args as [string, ...string[]]));
+
     const result: Record<string, LatencyHistogram> = {};
 
-    const histogramData = rawHistogram as Record<string, unknown>;
-    for (const [command, data] of Object.entries(histogramData)) {
-      const histData = data as Record<string, unknown>;
-      result[command] = {
-        calls: histData['calls'] as number,
-        histogram: histData['histogram'] as { [bucket: string]: number },
-      };
+    if (!Array.isArray(rawData)) {
+      return result;
+    }
+
+    for (let i = 0; i < rawData.length; i += 2) {
+      try {
+        const commandName = rawData[i] as string;
+        const details = rawData[i + 1] as unknown[];
+
+        if (!commandName || !Array.isArray(details) || details.length < 4) {
+          continue;
+        }
+
+        let calls = 0;
+        const histogram: { [bucket: string]: number } = {};
+
+        for (let j = 0; j < details.length; j++) {
+          if (details[j] === 'calls') {
+            calls = details[j + 1] as number;
+            j++;
+          } else if (details[j] === 'histogram_usec') {
+            const buckets = details[j + 1] as number[];
+            if (Array.isArray(buckets)) {
+              for (let k = 0; k < buckets.length; k += 2) {
+                const bucket = buckets[k];
+                const count = buckets[k + 1];
+                histogram[bucket.toString()] = count;
+              }
+            }
+            break;
+          }
+        }
+
+        result[commandName] = {
+          calls,
+          histogram,
+        };
+      } catch {
+        continue;
+      }
     }
 
     return result;

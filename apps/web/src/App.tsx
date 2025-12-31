@@ -4,6 +4,7 @@ import { metricsApi } from './api/metrics';
 import { CapabilitiesContext } from './hooks/useCapabilities';
 import { Dashboard } from './pages/Dashboard';
 import { SlowLog } from './pages/SlowLog';
+import { Latency } from './pages/Latency';
 import { Clients } from './pages/Clients';
 import type { DatabaseCapabilities } from './types/metrics';
 
@@ -45,6 +46,9 @@ function AppLayout() {
           <NavItem to="/slowlog" active={location.pathname === '/slowlog'}>
             Slow Log
           </NavItem>
+          <NavItem to="/latency" active={location.pathname === '/latency'}>
+            Latency
+          </NavItem>
           <NavItem to="/clients" active={location.pathname === '/clients'}>
             Clients
           </NavItem>
@@ -56,6 +60,7 @@ function AppLayout() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/slowlog" element={<SlowLog />} />
+            <Route path="/latency" element={<Latency />} />
             <Route path="/clients" element={<Clients />} />
           </Routes>
         </div>

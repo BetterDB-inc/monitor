@@ -7,6 +7,7 @@ import type {
   CommandLogType,
   LatencyEvent,
   LatencyHistoryEntry,
+  LatencyHistogram,
   MemoryStats,
   ClientInfo,
   AclLogEntry,
@@ -28,6 +29,10 @@ export const metricsApi = {
   getLatencyLatest: () => fetchApi<LatencyEvent[]>('/metrics/latency/latest'),
   getLatencyHistory: (eventName: string) =>
     fetchApi<LatencyHistoryEntry[]>(`/metrics/latency/history/${eventName}`),
+  getLatencyHistogram: (commands?: string[]) => {
+    const query = commands?.length ? `?commands=${commands.join(',')}` : '';
+    return fetchApi<Record<string, LatencyHistogram>>(`/metrics/latency/histogram${query}`);
+  },
   getMemoryStats: () => fetchApi<MemoryStats>('/metrics/memory/stats'),
   getClients: () => fetchApi<ClientInfo[]>('/metrics/clients'),
   getAclLog: (count = 50) => fetchApi<AclLogEntry[]>(`/metrics/acl/log?count=${count}`),

@@ -96,6 +96,11 @@ export interface LatencyHistoryEntry {
   latency: number;
 }
 
+export interface LatencyHistogram {
+  calls: number;
+  histogram: { [bucket: string]: number };
+}
+
 export interface MemoryStats {
   peakAllocated: number;
   totalAllocated: number;
