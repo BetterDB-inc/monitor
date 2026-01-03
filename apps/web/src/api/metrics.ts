@@ -13,6 +13,8 @@ import type {
   AclLogEntry,
   SlotStats,
   DatabaseCapabilities,
+  StoredAclEntry,
+  AuditStats,
 } from '../types/metrics';
 
 export const metricsApi = {
@@ -42,4 +44,47 @@ export const metricsApi = {
   getRole: () => fetchApi<{ role: string; replicationOffset?: number; replicas?: unknown[] }>('/metrics/role'),
   getLatencyDoctor: () => fetchApi<{ report: string }>('/metrics/latency/doctor'),
   getMemoryDoctor: () => fetchApi<{ report: string }>('/metrics/memory/doctor'),
+
+  // Audit Trail
+  getAuditEntries: (params?: {
+    username?: string;
+    reason?: string;
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.username) query.set('username', params.username);
+    if (params?.reason) query.set('reason', params.reason);
+    if (params?.startTime) query.set('startTime', params.startTime.toString());
+    if (params?.endTime) query.set('endTime', params.endTime.toString());
+    if (params?.limit) query.set('limit', params.limit.toString());
+    if (params?.offset) query.set('offset', params.offset.toString());
+    const queryString = query.toString();
+    return fetchApi<StoredAclEntry[]>(`/audit/entries${queryString ? `?${queryString}` : ''}`);
+  },
+  getAuditStats: (startTime?: number, endTime?: number) => {
+    const query = new URLSearchParams();
+    if (startTime) query.set('startTime', startTime.toString());
+    if (endTime) query.set('endTime', endTime.toString());
+    const queryString = query.toString();
+    return fetchApi<AuditStats>(`/audit/stats${queryString ? `?${queryString}` : ''}`);
+  },
+  getAuditFailedAuth: (startTime?: number, endTime?: number, limit = 100, offset = 0) => {
+    const query = new URLSearchParams();
+    if (startTime) query.set('startTime', startTime.toString());
+    if (endTime) query.set('endTime', endTime.toString());
+    query.set('limit', limit.toString());
+    query.set('offset', offset.toString());
+    return fetchApi<StoredAclEntry[]>(`/audit/failed-auth?${query.toString()}`);
+  },
+  getAuditByUser: (username: string, startTime?: number, endTime?: number, limit = 100, offset = 0) => {
+    const query = new URLSearchParams({ username });
+    if (startTime) query.set('startTime', startTime.toString());
+    if (endTime) query.set('endTime', endTime.toString());
+    query.set('limit', limit.toString());
+    query.set('offset', offset.toString());
+    return fetchApi<StoredAclEntry[]>(`/audit/by-user?${query.toString()}`);
+  },
 };

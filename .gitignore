@@ -11,6 +11,12 @@ dist
 build
 .next
 
+# Data
+apps/api/data/
+*.db
+*.db-shm
+*.db-wal
+
 # Misc
 .DS_Store
 *.pem

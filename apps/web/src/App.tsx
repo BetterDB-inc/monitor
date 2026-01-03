@@ -6,6 +6,7 @@ import { Dashboard } from './pages/Dashboard';
 import { SlowLog } from './pages/SlowLog';
 import { Latency } from './pages/Latency';
 import { Clients } from './pages/Clients';
+import { AuditTrail } from './pages/AuditTrail';
 import type { DatabaseCapabilities } from './types/metrics';
 
 function App() {
@@ -52,6 +53,9 @@ function AppLayout() {
           <NavItem to="/clients" active={location.pathname === '/clients'}>
             Clients
           </NavItem>
+          <NavItem to="/audit" active={location.pathname === '/audit'}>
+            Audit Trail
+          </NavItem>
         </nav>
       </aside>
 
@@ -62,6 +66,7 @@ function AppLayout() {
             <Route path="/slowlog" element={<SlowLog />} />
             <Route path="/latency" element={<Latency />} />
             <Route path="/clients" element={<Clients />} />
+            <Route path="/audit" element={<AuditTrail />} />
           </Routes>
         </div>
       </main>

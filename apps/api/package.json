@@ -17,6 +17,7 @@
     "@nestjs/config": "^3.3.0",
     "@nestjs/core": "^10.4.15",
     "@nestjs/platform-fastify": "^10.4.15",
+    "better-sqlite3": "^12.5.0",
     "iovalkey": "^0.3.3",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
@@ -24,6 +25,7 @@
   "devDependencies": {
     "@nestjs/cli": "^11.0.14",
     "@nestjs/schematics": "^11.0.3",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.5",
     "@typescript-eslint/eslint-plugin": "^8.19.1",
     "@typescript-eslint/parser": "^8.19.1",

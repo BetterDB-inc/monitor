@@ -157,3 +157,5 @@ export interface SlotStatsMetric {
 export interface SlotStats {
   [slot: string]: SlotStatsMetric;
 }
+
+export type { StoredAclEntry, AuditStats } from '@betterdb/shared';

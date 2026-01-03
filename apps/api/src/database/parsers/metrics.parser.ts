@@ -139,14 +139,26 @@ export class MetricsParser {
 
   static parseAclLog(rawEntries: unknown[]): AclLogEntry[] {
     return rawEntries.map((entry) => {
-      const obj = entry as Record<string, unknown>;
+      // ACL LOG returns flat arrays like ["count", 1, "reason", "auth", ...]
+      // Convert to object first
+      const arr = entry as unknown[];
+      const obj: Record<string, unknown> = {};
+
+      for (let i = 0; i < arr.length; i += 2) {
+        const key = arr[i] as string;
+        const value = arr[i + 1];
+        if (key && value !== undefined) {
+          obj[key] = value;
+        }
+      }
+
       return {
         count: obj['count'] as number,
         reason: obj['reason'] as string,
         context: obj['context'] as string,
         object: obj['object'] as string,
         username: obj['username'] as string,
-        ageSeconds: obj['age-seconds'] as number,
+        ageSeconds: parseFloat(obj['age-seconds'] as string),
         clientInfo: obj['client-info'] as string,
         timestampCreated: obj['timestamp-created'] as number,
         timestampLastUpdated: obj['timestamp-last-updated'] as number,
