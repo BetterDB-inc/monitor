@@ -5,6 +5,7 @@ import { HealthModule } from './health/health.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { AuditModule } from './audit/audit.module';
 import { ClientAnalyticsModule } from './client-analytics/client-analytics.module';
+import { PrometheusModule } from './prometheus/prometheus.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { ClientAnalyticsModule } from './client-analytics/client-analytics.modul
     MetricsModule,
     AuditModule,
     ClientAnalyticsModule,
+    PrometheusModule,
   ],
 })
 export class AppModule {}
