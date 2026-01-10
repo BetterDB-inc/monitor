@@ -4,6 +4,7 @@ import { AppModule } from './app.module';
 import { join } from 'path';
 import fastifyStatic from '@fastify/static';
 import { readFileSync } from 'fs';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -56,11 +57,29 @@ async function bootstrap(): Promise<void> {
     });
   }
 
+  // Setup Swagger documentation
+  const config = new DocumentBuilder()
+    .setTitle('BetterDB Monitor API')
+    .setDescription('Valkey/Redis monitoring and observability API')
+    .setVersion('0.1.0')
+    .addTag('metrics', 'Valkey/Redis metrics and diagnostics')
+    .addTag('audit', 'ACL audit trail and security events')
+    .addTag('client-analytics', 'Client connection history and analytics')
+    .addTag('prometheus', 'Prometheus metrics endpoint')
+    .addTag('health', 'Health check endpoint')
+    .build();
+
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('docs', app, document);
+
   const port = process.env.PORT || 3001;
   await app.listen(port, '0.0.0.0');
   console.log(`API server running on http://localhost:${port}`);
   if (isProduction) {
     console.log('Serving frontend from /public');
+    console.log(`API documentation available at http://localhost:${port}/api/docs`);
+  } else {
+    console.log(`API documentation available at http://localhost:${port}/docs`);
   }
 }
 

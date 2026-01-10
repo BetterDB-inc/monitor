@@ -1,4 +1,5 @@
 import { Controller, Get, Post, Delete, Query, Param, HttpException, HttpStatus } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { MetricsService } from './metrics.service';
 import {
   InfoResponse,
@@ -18,12 +19,37 @@ import {
   ConfigGetResponse,
   SlowLogPatternAnalysis,
 } from '../common/types/metrics.types';
+import {
+  SlowLogEntryDto,
+  CommandLogEntryDto,
+  LatencyEventDto,
+  LatencyHistoryEntryDto,
+  LatencyHistogramDto,
+  MemoryStatsDto,
+  ClientInfoDto,
+  AclLogEntryDto,
+  RoleInfoDto,
+  ClusterNodeDto,
+  SlotStatsMetricDto,
+  GenericSuccessDto,
+  LengthResponseDto,
+  ReportResponseDto,
+  KilledResponseDto,
+  ConfigValueResponseDto,
+  DbSizeResponseDto,
+  LastSaveResponseDto,
+} from '../common/dto/metrics.dto';
 
+@ApiTags('metrics')
 @Controller('metrics')
 export class MetricsController {
   constructor(private readonly metricsService: MetricsService) {}
 
   @Get('info')
+  @ApiOperation({ summary: 'Get parsed INFO response', description: 'Retrieve parsed Valkey/Redis INFO command output, optionally filtered by sections' })
+  @ApiQuery({ name: 'sections', required: false, description: 'Comma-separated list of INFO sections (server,clients,memory,etc.)' })
+  @ApiResponse({ status: 200, description: 'INFO response retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({ status: 500, description: 'Failed to get info' })
   async getInfo(@Query('sections') sections?: string): Promise<InfoResponse> {
     try {
       const sectionArray = sections ? sections.split(',') : undefined;
@@ -37,6 +63,10 @@ export class MetricsController {
   }
 
   @Get('slowlog')
+  @ApiOperation({ summary: 'Get slowlog entries', description: 'Retrieve slowlog entries from Valkey/Redis' })
+  @ApiQuery({ name: 'count', required: false, description: 'Number of entries to return' })
+  @ApiResponse({ status: 200, description: 'Slowlog entries retrieved successfully', type: [SlowLogEntryDto] })
+  @ApiResponse({ status: 500, description: 'Failed to get slowlog' })
   async getSlowLog(@Query('count') count?: string): Promise<SlowLogEntry[]> {
     try {
       const parsedCount = count ? parseInt(count, 10) : undefined;
@@ -50,6 +80,9 @@ export class MetricsController {
   }
 
   @Get('slowlog/length')
+  @ApiOperation({ summary: 'Get slowlog length', description: 'Get the current number of entries in the slowlog' })
+  @ApiResponse({ status: 200, description: 'Slowlog length retrieved successfully', type: LengthResponseDto })
+  @ApiResponse({ status: 500, description: 'Failed to get slowlog length' })
   async getSlowLogLength(): Promise<{ length: number }> {
     try {
       const length = await this.metricsService.getSlowLogLength();
@@ -63,6 +96,9 @@ export class MetricsController {
   }
 
   @Delete('slowlog')
+  @ApiOperation({ summary: 'Reset slowlog', description: 'Clear all entries from the slowlog' })
+  @ApiResponse({ status: 200, description: 'Slowlog reset successfully', type: GenericSuccessDto })
+  @ApiResponse({ status: 500, description: 'Failed to reset slowlog' })
   async resetSlowLog(): Promise<{ success: boolean }> {
     try {
       await this.metricsService.resetSlowLog();
@@ -76,6 +112,10 @@ export class MetricsController {
   }
 
   @Get('slowlog/patterns')
+  @ApiOperation({ summary: 'Analyze slowlog patterns', description: 'Get aggregated analysis of slowlog command patterns' })
+  @ApiQuery({ name: 'count', required: false, description: 'Number of slowlog entries to analyze' })
+  @ApiResponse({ status: 200, description: 'Slowlog pattern analysis retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({ status: 500, description: 'Failed to analyze slowlog patterns' })
   async getSlowLogPatternAnalysis(
     @Query('count') count?: string,
   ): Promise<SlowLogPatternAnalysis> {
@@ -91,6 +131,12 @@ export class MetricsController {
   }
 
   @Get('commandlog')
+  @ApiOperation({ summary: 'Get commandlog entries (Valkey 8.1+)', description: 'Retrieve commandlog entries from Valkey 8.1+' })
+  @ApiQuery({ name: 'count', required: false, description: 'Number of entries to return' })
+  @ApiQuery({ name: 'type', required: false, enum: ['slow', 'large-request', 'large-reply'], description: 'Filter by commandlog type' })
+  @ApiResponse({ status: 200, description: 'Commandlog entries retrieved successfully', type: [CommandLogEntryDto] })
+  @ApiResponse({ status: 501, description: 'Commandlog not supported on this server version' })
+  @ApiResponse({ status: 500, description: 'Failed to get commandlog' })
   async getCommandLog(@Query('count') count?: string, @Query('type') type?: string): Promise<CommandLogEntry[]> {
     try {
       const parsedCount = count ? parseInt(count, 10) : undefined;
@@ -108,6 +154,11 @@ export class MetricsController {
   }
 
   @Get('commandlog/length')
+  @ApiOperation({ summary: 'Get commandlog length (Valkey 8.1+)', description: 'Get the number of entries in commandlog' })
+  @ApiQuery({ name: 'type', required: false, enum: ['slow', 'large-request', 'large-reply'], description: 'Filter by commandlog type' })
+  @ApiResponse({ status: 200, description: 'Commandlog length retrieved successfully', type: LengthResponseDto })
+  @ApiResponse({ status: 501, description: 'Commandlog not supported' })
+  @ApiResponse({ status: 500, description: 'Failed to get commandlog length' })
   async getCommandLogLength(@Query('type') type?: string): Promise<{ length: number }> {
     try {
       const parsedType = type as CommandLogType | undefined;
@@ -125,6 +176,11 @@ export class MetricsController {
   }
 
   @Delete('commandlog')
+  @ApiOperation({ summary: 'Reset commandlog (Valkey 8.1+)', description: 'Clear all commandlog entries' })
+  @ApiQuery({ name: 'type', required: false, enum: ['slow', 'large-request', 'large-reply'], description: 'Filter by commandlog type' })
+  @ApiResponse({ status: 200, description: 'Commandlog reset successfully', type: GenericSuccessDto })
+  @ApiResponse({ status: 501, description: 'Commandlog not supported' })
+  @ApiResponse({ status: 500, description: 'Failed to reset commandlog' })
   async resetCommandLog(@Query('type') type?: string): Promise<{ success: boolean }> {
     try {
       const parsedType = type as CommandLogType | undefined;
@@ -142,6 +198,12 @@ export class MetricsController {
   }
 
   @Get('commandlog/patterns')
+  @ApiOperation({ summary: 'Analyze commandlog patterns (Valkey 8.1+)', description: 'Get aggregated analysis of commandlog patterns' })
+  @ApiQuery({ name: 'count', required: false, description: 'Number of commandlog entries to analyze' })
+  @ApiQuery({ name: 'type', required: false, enum: ['slow', 'large-request', 'large-reply'], description: 'Filter by commandlog type' })
+  @ApiResponse({ status: 200, description: 'Commandlog pattern analysis retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({ status: 501, description: 'Commandlog not supported' })
+  @ApiResponse({ status: 500, description: 'Failed to analyze commandlog patterns' })
   async getCommandLogPatternAnalysis(
     @Query('count') count?: string,
     @Query('type') type?: string,
@@ -166,6 +228,9 @@ export class MetricsController {
   }
 
   @Get('latency/latest')
+  @ApiOperation({ summary: 'Get latest latency events', description: 'Retrieve latest latency monitoring events' })
+  @ApiResponse({ status: 200, description: 'Latest latency events retrieved successfully', type: [LatencyEventDto] })
+  @ApiResponse({ status: 500, description: 'Failed to get latest latency events' })
   async getLatestLatencyEvents(): Promise<LatencyEvent[]> {
     try {
       return await this.metricsService.getLatestLatencyEvents();
@@ -178,6 +243,10 @@ export class MetricsController {
   }
 
   @Get('latency/history/:eventName')
+  @ApiOperation({ summary: 'Get latency history for event', description: 'Retrieve historical latency data for a specific event' })
+  @ApiParam({ name: 'eventName', description: 'Name of the latency event' })
+  @ApiResponse({ status: 200, description: 'Latency history retrieved successfully', type: [LatencyHistoryEntryDto] })
+  @ApiResponse({ status: 500, description: 'Failed to get latency history' })
   async getLatencyHistory(@Param('eventName') eventName: string): Promise<LatencyHistoryEntry[]> {
     try {
       return await this.metricsService.getLatencyHistory(eventName);
@@ -190,6 +259,10 @@ export class MetricsController {
   }
 
   @Get('latency/histogram')
+  @ApiOperation({ summary: 'Get latency histogram', description: 'Retrieve latency histogram for specified commands' })
+  @ApiQuery({ name: 'commands', required: false, description: 'Comma-separated list of commands' })
+  @ApiResponse({ status: 200, description: 'Latency histogram retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({ status: 500, description: 'Failed to get latency histogram' })
   async getLatencyHistogram(@Query('commands') commands?: string): Promise<Record<string, LatencyHistogram>> {
     try {
       const commandArray = commands ? commands.split(',') : undefined;
@@ -203,6 +276,9 @@ export class MetricsController {
   }
 
   @Get('latency/doctor')
+  @ApiOperation({ summary: 'Get LATENCY DOCTOR report', description: 'Retrieve automated latency analysis and recommendations' })
+  @ApiResponse({ status: 200, description: 'Latency doctor report retrieved successfully', type: ReportResponseDto })
+  @ApiResponse({ status: 500, description: 'Failed to get latency doctor report' })
   async getLatencyDoctor(): Promise<{ report: string }> {
     try {
       const report = await this.metricsService.getLatencyDoctor();
@@ -216,6 +292,10 @@ export class MetricsController {
   }
 
   @Delete('latency')
+  @ApiOperation({ summary: 'Reset latency events', description: 'Reset latency monitoring data for all or specific event' })
+  @ApiQuery({ name: 'eventName', required: false, description: 'Event name to reset (omit for all)' })
+  @ApiResponse({ status: 200, description: 'Latency events reset successfully', type: GenericSuccessDto })
+  @ApiResponse({ status: 500, description: 'Failed to reset latency events' })
   async resetLatencyEvents(@Query('eventName') eventName?: string): Promise<{ success: boolean }> {
     try {
       await this.metricsService.resetLatencyEvents(eventName);
@@ -229,6 +309,9 @@ export class MetricsController {
   }
 
   @Get('memory/stats')
+  @ApiOperation({ summary: 'Get memory statistics', description: 'Retrieve detailed memory usage statistics' })
+  @ApiResponse({ status: 200, description: 'Memory statistics retrieved successfully', type: MemoryStatsDto })
+  @ApiResponse({ status: 500, description: 'Failed to get memory stats' })
   async getMemoryStats(): Promise<MemoryStats> {
     try {
       return await this.metricsService.getMemoryStats();
@@ -241,6 +324,9 @@ export class MetricsController {
   }
 
   @Get('memory/doctor')
+  @ApiOperation({ summary: 'Get MEMORY DOCTOR report', description: 'Retrieve automated memory analysis and recommendations' })
+  @ApiResponse({ status: 200, description: 'Memory doctor report retrieved successfully', type: ReportResponseDto })
+  @ApiResponse({ status: 500, description: 'Failed to get memory doctor report' })
   async getMemoryDoctor(): Promise<{ report: string }> {
     try {
       const report = await this.metricsService.getMemoryDoctor();
@@ -254,6 +340,11 @@ export class MetricsController {
   }
 
   @Get('clients')
+  @ApiOperation({ summary: 'Get connected clients', description: 'Retrieve list of currently connected clients' })
+  @ApiQuery({ name: 'type', required: false, enum: ['normal', 'master', 'replica', 'pubsub'], description: 'Filter by client type' })
+  @ApiQuery({ name: 'id', required: false, description: 'Comma-separated list of client IDs' })
+  @ApiResponse({ status: 200, description: 'Clients retrieved successfully', type: [ClientInfoDto] })
+  @ApiResponse({ status: 500, description: 'Failed to get clients' })
   async getClients(@Query('type') type?: string, @Query('id') id?: string): Promise<ClientInfo[]> {
     try {
       const filters: ClientFilters = {};
@@ -269,6 +360,11 @@ export class MetricsController {
   }
 
   @Get('clients/:id')
+  @ApiOperation({ summary: 'Get client by ID', description: 'Retrieve information about a specific client' })
+  @ApiParam({ name: 'id', description: 'Client ID' })
+  @ApiResponse({ status: 200, description: 'Client retrieved successfully', type: ClientInfoDto })
+  @ApiResponse({ status: 404, description: 'Client not found' })
+  @ApiResponse({ status: 500, description: 'Failed to get client' })
   async getClientById(@Param('id') id: string): Promise<ClientInfo> {
     try {
       const client = await this.metricsService.getClientById(id);
@@ -286,6 +382,11 @@ export class MetricsController {
   }
 
   @Delete('clients')
+  @ApiOperation({ summary: 'Kill client connections', description: 'Terminate one or more client connections' })
+  @ApiQuery({ name: 'type', required: false, enum: ['normal', 'master', 'replica', 'pubsub'], description: 'Filter by client type' })
+  @ApiQuery({ name: 'id', required: false, description: 'Comma-separated list of client IDs' })
+  @ApiResponse({ status: 200, description: 'Clients killed successfully', type: KilledResponseDto })
+  @ApiResponse({ status: 500, description: 'Failed to kill client' })
   async killClient(@Query('type') type?: string, @Query('id') id?: string): Promise<{ killed: number }> {
     try {
       const filters: ClientFilters = {};
@@ -302,6 +403,11 @@ export class MetricsController {
   }
 
   @Get('acl/log')
+  @ApiOperation({ summary: 'Get ACL log entries', description: 'Retrieve ACL security log entries' })
+  @ApiQuery({ name: 'count', required: false, description: 'Number of entries to return' })
+  @ApiResponse({ status: 200, description: 'ACL log entries retrieved successfully', type: [AclLogEntryDto] })
+  @ApiResponse({ status: 501, description: 'ACL not supported' })
+  @ApiResponse({ status: 500, description: 'Failed to get ACL log' })
   async getAclLog(@Query('count') count?: string): Promise<AclLogEntry[]> {
     try {
       const parsedCount = count ? parseInt(count, 10) : undefined;
@@ -318,6 +424,10 @@ export class MetricsController {
   }
 
   @Delete('acl/log')
+  @ApiOperation({ summary: 'Reset ACL log', description: 'Clear all ACL log entries' })
+  @ApiResponse({ status: 200, description: 'ACL log reset successfully', type: GenericSuccessDto })
+  @ApiResponse({ status: 501, description: 'ACL not supported' })
+  @ApiResponse({ status: 500, description: 'Failed to reset ACL log' })
   async resetAclLog(): Promise<{ success: boolean }> {
     try {
       await this.metricsService.resetAclLog();
@@ -334,6 +444,9 @@ export class MetricsController {
   }
 
   @Get('role')
+  @ApiOperation({ summary: 'Get replication role', description: 'Retrieve replication role and status information' })
+  @ApiResponse({ status: 200, description: 'Role information retrieved successfully', type: RoleInfoDto })
+  @ApiResponse({ status: 500, description: 'Failed to get role' })
   async getRole(): Promise<RoleInfo> {
     try {
       return await this.metricsService.getRole();
@@ -346,6 +459,9 @@ export class MetricsController {
   }
 
   @Get('cluster/info')
+  @ApiOperation({ summary: 'Get cluster info', description: 'Retrieve cluster information and status' })
+  @ApiResponse({ status: 200, description: 'Cluster info retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({ status: 500, description: 'Failed to get cluster info' })
   async getClusterInfo(): Promise<Record<string, string>> {
     try {
       return await this.metricsService.getClusterInfo();
@@ -358,6 +474,9 @@ export class MetricsController {
   }
 
   @Get('cluster/nodes')
+  @ApiOperation({ summary: 'Get cluster nodes', description: 'Retrieve information about all cluster nodes' })
+  @ApiResponse({ status: 200, description: 'Cluster nodes retrieved successfully', type: [ClusterNodeDto] })
+  @ApiResponse({ status: 500, description: 'Failed to get cluster nodes' })
   async getClusterNodes(): Promise<ClusterNode[]> {
     try {
       return await this.metricsService.getClusterNodes();
@@ -370,6 +489,12 @@ export class MetricsController {
   }
 
   @Get('cluster/slot-stats')
+  @ApiOperation({ summary: 'Get cluster slot statistics', description: 'Retrieve per-slot statistics for cluster' })
+  @ApiQuery({ name: 'orderBy', required: false, enum: ['key-count', 'cpu-usec'], description: 'Sort order' })
+  @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of slots to return' })
+  @ApiResponse({ status: 200, description: 'Cluster slot stats retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({ status: 501, description: 'Cluster slot stats not supported' })
+  @ApiResponse({ status: 500, description: 'Failed to get cluster slot stats' })
   async getClusterSlotStats(
     @Query('orderBy') orderBy?: string,
     @Query('limit') limit?: string,
@@ -390,6 +515,10 @@ export class MetricsController {
   }
 
   @Get('config/:parameter')
+  @ApiOperation({ summary: 'Get config parameter', description: 'Retrieve value of a specific configuration parameter' })
+  @ApiParam({ name: 'parameter', description: 'Configuration parameter name' })
+  @ApiResponse({ status: 200, description: 'Config value retrieved successfully', type: ConfigValueResponseDto })
+  @ApiResponse({ status: 500, description: 'Failed to get config value' })
   async getConfigValue(@Param('parameter') parameter: string): Promise<{ value: string | null }> {
     try {
       const value = await this.metricsService.getConfigValue(parameter);
@@ -403,6 +532,10 @@ export class MetricsController {
   }
 
   @Get('config')
+  @ApiOperation({ summary: 'Get config values', description: 'Retrieve configuration values matching pattern' })
+  @ApiQuery({ name: 'pattern', required: false, description: 'Glob pattern for config keys (default: *)' })
+  @ApiResponse({ status: 200, description: 'Config values retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({ status: 500, description: 'Failed to get config values' })
   async getConfigValues(@Query('pattern') pattern: string = '*'): Promise<ConfigGetResponse> {
     try {
       return await this.metricsService.getConfigValues(pattern);
@@ -415,6 +548,9 @@ export class MetricsController {
   }
 
   @Get('dbsize')
+  @ApiOperation({ summary: 'Get database size', description: 'Retrieve the number of keys in the current database' })
+  @ApiResponse({ status: 200, description: 'Database size retrieved successfully', type: DbSizeResponseDto })
+  @ApiResponse({ status: 500, description: 'Failed to get database size' })
   async getDbSize(): Promise<{ size: number }> {
     try {
       const size = await this.metricsService.getDbSize();
@@ -428,6 +564,9 @@ export class MetricsController {
   }
 
   @Get('lastsave')
+  @ApiOperation({ summary: 'Get last save time', description: 'Retrieve Unix timestamp of last successful RDB save' })
+  @ApiResponse({ status: 200, description: 'Last save time retrieved successfully', type: LastSaveResponseDto })
+  @ApiResponse({ status: 500, description: 'Failed to get last save time' })
   async getLastSaveTime(): Promise<{ timestamp: number }> {
     try {
       const timestamp = await this.metricsService.getLastSaveTime();
