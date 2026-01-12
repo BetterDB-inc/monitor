@@ -8,6 +8,7 @@ import { Latency } from './pages/Latency';
 import { Clients } from './pages/Clients';
 import { AuditTrail } from './pages/AuditTrail';
 import { ClientAnalytics } from './pages/ClientAnalytics';
+import { AiAssistant } from './pages/AiAssistant';
 import type { DatabaseCapabilities } from './types/metrics';
 
 function App() {
@@ -60,11 +61,14 @@ function AppLayout() {
           <NavItem to="/audit" active={location.pathname === '/audit'}>
             Audit Trail
           </NavItem>
+          <NavItem to="/helper" active={location.pathname === '/helper'}>
+            AI Helper
+          </NavItem>
         </nav>
       </aside>
 
-      <main className="pl-64">
-        <div className="p-8">
+      <main className="pl-64 min-h-screen flex flex-col">
+        <div className="p-8 flex-1 flex flex-col">
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/slowlog" element={<SlowLog />} />
@@ -72,6 +76,7 @@ function AppLayout() {
             <Route path="/clients" element={<Clients />} />
             <Route path="/client-analytics" element={<ClientAnalytics />} />
             <Route path="/audit" element={<AuditTrail />} />
+            <Route path="/helper" element={<AiAssistant />} />
           </Routes>
         </div>
       </main>

@@ -20,6 +20,11 @@
     "docker:run": "docker run -p 3001:3001 --env-file .env betterdb/monitor",
     "docker:dev": "docker compose up -d",
     "docker:dev:down": "docker compose down",
+    "docs:download": "pnpm --filter api docs:download",
+    "docs:index": "pnpm --filter api docs:index",
+    "docs:index:valkey": "pnpm --filter api docs:index:valkey",
+    "docs:index:redis": "pnpm --filter api docs:index:redis",
+    "docs:clean": "pnpm --filter api docs:clean",
     "lint": "turbo lint",
     "clean": "turbo clean && rm -rf node_modules"
   },

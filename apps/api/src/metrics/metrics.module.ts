@@ -7,5 +7,6 @@ import { DatabaseModule } from '../database/database.module';
   imports: [DatabaseModule],
   controllers: [MetricsController],
   providers: [MetricsService],
+  exports: [MetricsService],
 })
 export class MetricsModule {}

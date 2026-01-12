@@ -13,9 +13,19 @@ build
 
 # Data
 apps/api/data/
+!apps/api/data/vector-store/
 *.db
 *.db-shm
 *.db-wal
+
+# Documentation indexing (regenerable)
+apps/api/data/docs/
+apps/api/data/chunks/
+
+# LanceDB vector store (AI feature)
+apps/api/lancedb/
+proprietary/lancedb/
+*.lance
 
 # Misc
 .DS_Store

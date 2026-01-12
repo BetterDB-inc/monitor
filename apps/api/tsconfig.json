@@ -9,7 +9,7 @@
     "target": "ES2022",
     "sourceMap": true,
     "outDir": "./dist",
-    "baseUrl": "./",
+    "baseUrl": "../../",
     "incremental": true,
     "skipLibCheck": true,
     "strictNullChecks": true,
@@ -18,8 +18,13 @@
     "forceConsistentCasingInFileNames": true,
     "noFallthroughCasesInSwitch": true,
     "esModuleInterop": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "moduleResolution": "node",
+    "paths": {
+      "@app/*": ["apps/api/src/*"],
+      "@proprietary/*": ["proprietary/*"]
+    }
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "../../proprietary/**/*"],
   "exclude": ["node_modules", "dist"]
 }

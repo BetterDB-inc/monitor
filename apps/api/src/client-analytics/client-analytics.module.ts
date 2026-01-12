@@ -9,5 +9,6 @@ import { PrometheusModule } from '../prometheus/prometheus.module';
   imports: [DatabaseModule, StorageModule, PrometheusModule],
   controllers: [ClientAnalyticsController],
   providers: [ClientAnalyticsService],
+  exports: [ClientAnalyticsService],
 })
 export class ClientAnalyticsModule {}

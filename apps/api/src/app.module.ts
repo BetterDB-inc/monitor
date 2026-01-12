@@ -7,15 +7,26 @@ import { AuditModule } from './audit/audit.module';
 import { ClientAnalyticsModule } from './client-analytics/client-analytics.module';
 import { PrometheusModule } from './prometheus/prometheus.module';
 
+let AiModule: any = null;
+try {
+  const module = require('@proprietary/ai/ai.module');
+  AiModule = module.AiModule;
+  console.log('[AI] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+const baseImports = [
+  ConfigModule,
+  DatabaseModule,
+  HealthModule,
+  MetricsModule,
+  AuditModule,
+  ClientAnalyticsModule,
+  PrometheusModule,
+];
+
 @Module({
-  imports: [
-    ConfigModule,
-    DatabaseModule,
-    HealthModule,
-    MetricsModule,
-    AuditModule,
-    ClientAnalyticsModule,
-    PrometheusModule,
-  ],
+  imports: AiModule ? [...baseImports, AiModule] : baseImports,
 })
 export class AppModule {}
