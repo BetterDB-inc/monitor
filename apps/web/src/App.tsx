@@ -62,7 +62,12 @@ function AppLayout() {
             Audit Trail
           </NavItem>
           <NavItem to="/helper" active={location.pathname === '/helper'}>
-            AI Helper
+            <span className="flex items-center justify-between w-full">
+              AI Helper
+              <span className="text-[10px] px-1.5 py-0.5 bg-amber-500 text-amber-950 rounded font-medium">
+                Experimental
+              </span>
+            </span>
           </NavItem>
         </nav>
       </aside>
