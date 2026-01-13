@@ -1,10 +1,21 @@
 import { Controller, Get, Delete, Query, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { ClientAnalyticsService } from './client-analytics.service';
+import { ClientAnalyticsAnalysisService } from './client-analytics-analysis.service';
 import {
   StoredClientSnapshot,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
+  CommandDistributionParams,
+  CommandDistributionResponse,
+  IdleConnectionsParams,
+  IdleConnectionsResponse,
+  BufferAnomaliesParams,
+  BufferAnomaliesResponse,
+  ActivityTimelineParams,
+  ActivityTimelineResponse,
+  SpikeDetectionParams,
+  SpikeDetectionResponse,
 } from '../common/interfaces/storage-port.interface';
 import {
   StoredClientSnapshotDto,
@@ -16,7 +27,10 @@ import {
 @ApiTags('client-analytics')
 @Controller('client-analytics')
 export class ClientAnalyticsController {
-  constructor(private service: ClientAnalyticsService) {}
+  constructor(
+    private service: ClientAnalyticsService,
+    private analysisService: ClientAnalyticsAnalysisService,
+  ) {}
 
   @Get('snapshots')
   @ApiOperation({ summary: 'Get client snapshots', description: 'Retrieve historical client connection snapshots with filters' })
@@ -118,5 +132,108 @@ export class ClientAnalyticsController {
   async cleanup(): Promise<{ pruned: number }> {
     const pruned = await this.service.cleanup();
     return { pruned };
+  }
+
+  @Get('command-distribution')
+  @ApiOperation({ summary: 'Get command distribution analysis', description: 'Returns command frequency distribution over a time range, grouped by client' })
+  @ApiQuery({ name: 'startTime', required: false, description: 'Start timestamp (Unix milliseconds), default: 1 hour ago' })
+  @ApiQuery({ name: 'endTime', required: false, description: 'End timestamp (Unix milliseconds), default: now' })
+  @ApiQuery({ name: 'groupBy', required: false, description: 'Group by: client_name | user | addr, default: client_name' })
+  @ApiResponse({ status: 200, description: 'Command distribution retrieved successfully' })
+  @ApiResponse({ status: 500, description: 'Failed to get command distribution' })
+  async getCommandDistribution(
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+    @Query('groupBy') groupBy?: 'client_name' | 'user' | 'addr',
+  ): Promise<CommandDistributionResponse> {
+    const params: CommandDistributionParams = {
+      startTime: startTime ? parseInt(startTime, 10) : undefined,
+      endTime: endTime ? parseInt(endTime, 10) : undefined,
+      groupBy,
+    };
+    return this.analysisService.getCommandDistribution(params);
+  }
+
+  @Get('idle-connections')
+  @ApiOperation({ summary: 'Get idle connections', description: 'Identifies connections that have been idle for extended periods' })
+  @ApiQuery({ name: 'idleThresholdSeconds', required: false, description: 'Idle threshold in seconds, default: 300 (5 min)' })
+  @ApiQuery({ name: 'minOccurrences', required: false, description: 'Minimum occurrences, default: 10' })
+  @ApiResponse({ status: 200, description: 'Idle connections retrieved successfully' })
+  @ApiResponse({ status: 500, description: 'Failed to get idle connections' })
+  async getIdleConnections(
+    @Query('idleThresholdSeconds') idleThresholdSeconds?: string,
+    @Query('minOccurrences') minOccurrences?: string,
+  ): Promise<IdleConnectionsResponse> {
+    const params: IdleConnectionsParams = {
+      idleThresholdSeconds: idleThresholdSeconds ? parseInt(idleThresholdSeconds, 10) : undefined,
+      minOccurrences: minOccurrences ? parseInt(minOccurrences, 10) : undefined,
+    };
+    return this.analysisService.getIdleConnections(params);
+  }
+
+  @Get('buffer-anomalies')
+  @ApiOperation({ summary: 'Get buffer anomalies', description: 'Detects clients with unusual buffer sizes that may indicate problematic queries' })
+  @ApiQuery({ name: 'startTime', required: false, description: 'Start timestamp (Unix milliseconds), default: 1 hour ago' })
+  @ApiQuery({ name: 'endTime', required: false, description: 'End timestamp (Unix milliseconds), default: now' })
+  @ApiQuery({ name: 'qbufThreshold', required: false, description: 'Input buffer threshold in bytes, default: 1MB' })
+  @ApiQuery({ name: 'omemThreshold', required: false, description: 'Output buffer threshold in bytes, default: 10MB' })
+  @ApiResponse({ status: 200, description: 'Buffer anomalies retrieved successfully' })
+  @ApiResponse({ status: 500, description: 'Failed to get buffer anomalies' })
+  async getBufferAnomalies(
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+    @Query('qbufThreshold') qbufThreshold?: string,
+    @Query('omemThreshold') omemThreshold?: string,
+  ): Promise<BufferAnomaliesResponse> {
+    const params: BufferAnomaliesParams = {
+      startTime: startTime ? parseInt(startTime, 10) : undefined,
+      endTime: endTime ? parseInt(endTime, 10) : undefined,
+      qbufThreshold: qbufThreshold ? parseInt(qbufThreshold, 10) : undefined,
+      omemThreshold: omemThreshold ? parseInt(omemThreshold, 10) : undefined,
+    };
+    return this.analysisService.getBufferAnomalies(params);
+  }
+
+  @Get('activity-timeline')
+  @ApiOperation({ summary: 'Get activity timeline', description: 'Returns activity over time for correlation with other metrics' })
+  @ApiQuery({ name: 'startTime', required: false, description: 'Start timestamp (Unix milliseconds), default: 1 hour ago' })
+  @ApiQuery({ name: 'endTime', required: false, description: 'End timestamp (Unix milliseconds), default: now' })
+  @ApiQuery({ name: 'bucketSizeMinutes', required: false, description: 'Bucket size in minutes, default: 5' })
+  @ApiQuery({ name: 'client', required: false, description: 'Optional filter by client name' })
+  @ApiResponse({ status: 200, description: 'Activity timeline retrieved successfully' })
+  @ApiResponse({ status: 500, description: 'Failed to get activity timeline' })
+  async getActivityTimeline(
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+    @Query('bucketSizeMinutes') bucketSizeMinutes?: string,
+    @Query('client') client?: string,
+  ): Promise<ActivityTimelineResponse> {
+    const params: ActivityTimelineParams = {
+      startTime: startTime ? parseInt(startTime, 10) : undefined,
+      endTime: endTime ? parseInt(endTime, 10) : undefined,
+      bucketSizeMinutes: bucketSizeMinutes ? parseInt(bucketSizeMinutes, 10) : undefined,
+      client,
+    };
+    return this.analysisService.getActivityTimeline(params);
+  }
+
+  @Get('spike-detection')
+  @ApiOperation({ summary: 'Detect activity spikes', description: 'Automatically detects unusual activity spikes' })
+  @ApiQuery({ name: 'startTime', required: false, description: 'Start timestamp (Unix milliseconds), default: 24 hours ago' })
+  @ApiQuery({ name: 'endTime', required: false, description: 'End timestamp (Unix milliseconds), default: now' })
+  @ApiQuery({ name: 'sensitivityMultiplier', required: false, description: 'Sensitivity multiplier (std dev), default: 2' })
+  @ApiResponse({ status: 200, description: 'Spike detection completed successfully' })
+  @ApiResponse({ status: 500, description: 'Failed to detect spikes' })
+  async detectSpikes(
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+    @Query('sensitivityMultiplier') sensitivityMultiplier?: string,
+  ): Promise<SpikeDetectionResponse> {
+    const params: SpikeDetectionParams = {
+      startTime: startTime ? parseInt(startTime, 10) : undefined,
+      endTime: endTime ? parseInt(endTime, 10) : undefined,
+      sensitivityMultiplier: sensitivityMultiplier ? parseFloat(sensitivityMultiplier) : undefined,
+    };
+    return this.analysisService.detectSpikes(params);
   }
 }

@@ -18,6 +18,16 @@ import type {
   StoredClientSnapshot,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
+  CommandDistributionParams,
+  CommandDistributionResponse,
+  IdleConnectionsParams,
+  IdleConnectionsResponse,
+  BufferAnomaliesParams,
+  BufferAnomaliesResponse,
+  ActivityTimelineParams,
+  ActivityTimelineResponse,
+  SpikeDetectionParams,
+  SpikeDetectionResponse,
 } from '../types/metrics';
 
 export const metricsApi = {
@@ -129,5 +139,52 @@ export const metricsApi = {
     if (startTime) params.append('startTime', startTime.toString());
     if (endTime) params.append('endTime', endTime.toString());
     return fetchApi<StoredClientSnapshot[]>(`/client-analytics/history?${params}`);
+  },
+
+  // Advanced Analytics
+  getCommandDistribution: (params?: CommandDistributionParams) => {
+    const query = new URLSearchParams();
+    if (params?.startTime) query.append('startTime', params.startTime.toString());
+    if (params?.endTime) query.append('endTime', params.endTime.toString());
+    if (params?.groupBy) query.append('groupBy', params.groupBy);
+    const queryString = query.toString();
+    return fetchApi<CommandDistributionResponse>(`/client-analytics/command-distribution${queryString ? `?${queryString}` : ''}`);
+  },
+
+  getIdleConnections: (params?: IdleConnectionsParams) => {
+    const query = new URLSearchParams();
+    if (params?.idleThresholdSeconds) query.append('idleThresholdSeconds', params.idleThresholdSeconds.toString());
+    if (params?.minOccurrences) query.append('minOccurrences', params.minOccurrences.toString());
+    const queryString = query.toString();
+    return fetchApi<IdleConnectionsResponse>(`/client-analytics/idle-connections${queryString ? `?${queryString}` : ''}`);
+  },
+
+  getBufferAnomalies: (params?: BufferAnomaliesParams) => {
+    const query = new URLSearchParams();
+    if (params?.startTime) query.append('startTime', params.startTime.toString());
+    if (params?.endTime) query.append('endTime', params.endTime.toString());
+    if (params?.qbufThreshold) query.append('qbufThreshold', params.qbufThreshold.toString());
+    if (params?.omemThreshold) query.append('omemThreshold', params.omemThreshold.toString());
+    const queryString = query.toString();
+    return fetchApi<BufferAnomaliesResponse>(`/client-analytics/buffer-anomalies${queryString ? `?${queryString}` : ''}`);
+  },
+
+  getActivityTimeline: (params?: ActivityTimelineParams) => {
+    const query = new URLSearchParams();
+    if (params?.startTime) query.append('startTime', params.startTime.toString());
+    if (params?.endTime) query.append('endTime', params.endTime.toString());
+    if (params?.bucketSizeMinutes) query.append('bucketSizeMinutes', params.bucketSizeMinutes.toString());
+    if (params?.client) query.append('client', params.client);
+    const queryString = query.toString();
+    return fetchApi<ActivityTimelineResponse>(`/client-analytics/activity-timeline${queryString ? `?${queryString}` : ''}`);
+  },
+
+  detectSpikes: (params?: SpikeDetectionParams) => {
+    const query = new URLSearchParams();
+    if (params?.startTime) query.append('startTime', params.startTime.toString());
+    if (params?.endTime) query.append('endTime', params.endTime.toString());
+    if (params?.sensitivityMultiplier) query.append('sensitivityMultiplier', params.sensitivityMultiplier.toString());
+    const queryString = query.toString();
+    return fetchApi<SpikeDetectionResponse>(`/client-analytics/spike-detection${queryString ? `?${queryString}` : ''}`);
   },
 };

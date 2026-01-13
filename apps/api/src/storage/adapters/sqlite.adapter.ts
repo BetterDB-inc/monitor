@@ -799,6 +799,11 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_client_name ON client_snapshots(name);
       CREATE INDEX IF NOT EXISTS idx_client_user ON client_snapshots(user);
       CREATE INDEX IF NOT EXISTS idx_client_addr ON client_snapshots(addr);
+      CREATE INDEX IF NOT EXISTS idx_client_idle ON client_snapshots(idle) WHERE idle > 300;
+      CREATE INDEX IF NOT EXISTS idx_client_qbuf ON client_snapshots(qbuf) WHERE qbuf > 1000000;
+      CREATE INDEX IF NOT EXISTS idx_client_omem ON client_snapshots(omem) WHERE omem > 10000000;
+      CREATE INDEX IF NOT EXISTS idx_client_cmd ON client_snapshots(cmd);
+      CREATE INDEX IF NOT EXISTS idx_client_captured_at_cmd ON client_snapshots(captured_at, cmd);
     `);
   }
 }

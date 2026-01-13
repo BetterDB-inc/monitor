@@ -4,6 +4,16 @@ export type {
   ClientSnapshotQueryOptions,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
+  CommandDistributionParams,
+  CommandDistributionResponse,
+  IdleConnectionsParams,
+  IdleConnectionsResponse,
+  BufferAnomaliesParams,
+  BufferAnomaliesResponse,
+  ActivityTimelineParams,
+  ActivityTimelineResponse,
+  SpikeDetectionParams,
+  SpikeDetectionResponse,
 } from '@betterdb/shared';
 import type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/shared';
 import type {
@@ -11,6 +21,16 @@ import type {
   ClientSnapshotQueryOptions,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
+  CommandDistributionParams,
+  CommandDistributionResponse,
+  IdleConnectionsParams,
+  IdleConnectionsResponse,
+  BufferAnomaliesParams,
+  BufferAnomaliesResponse,
+  ActivityTimelineParams,
+  ActivityTimelineResponse,
+  SpikeDetectionParams,
+  SpikeDetectionResponse,
 } from '@betterdb/shared';
 
 export interface StoragePort {
