@@ -10,6 +10,7 @@ import { AuditTrail } from './pages/AuditTrail';
 import { ClientAnalytics } from './pages/ClientAnalytics';
 import { ClientAnalyticsDeepDive } from './pages/ClientAnalyticsDeepDive';
 import { AiAssistant } from './pages/AiAssistant';
+import { AnomalyDashboard } from './pages/AnomalyDashboard';
 import type { DatabaseCapabilities } from './types/metrics';
 
 function App() {
@@ -62,6 +63,9 @@ function AppLayout() {
           <NavItem to="/client-analytics/deep-dive" active={location.pathname === '/client-analytics/deep-dive'}>
             Analytics Deep Dive
           </NavItem>
+          <NavItem to="/anomalies" active={location.pathname === '/anomalies'}>
+            Anomaly Detection
+          </NavItem>
           <NavItem to="/audit" active={location.pathname === '/audit'}>
             Audit Trail
           </NavItem>
@@ -85,6 +89,7 @@ function AppLayout() {
             <Route path="/clients" element={<Clients />} />
             <Route path="/client-analytics" element={<ClientAnalytics />} />
             <Route path="/client-analytics/deep-dive" element={<ClientAnalyticsDeepDive />} />
+            <Route path="/anomalies" element={<AnomalyDashboard />} />
             <Route path="/audit" element={<AuditTrail />} />
             <Route path="/helper" element={<AiAssistant />} />
           </Routes>

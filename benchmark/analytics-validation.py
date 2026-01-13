@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Validate client analytics anomaly detection using persistent Redis connections.
+Validate client analytics anomaly detection using persistent Valkey connections.
 """
 
 import subprocess
@@ -14,12 +14,12 @@ import random
 from datetime import datetime
 from pathlib import Path
 
-# Try to import redis-py (required for persistent connections)
+# Try to import valkey-py (required for persistent connections)
 try:
-    import redis
-    HAS_REDIS = True
+    import valkey
+    HAS_VALKEY = True
 except ImportError:
-    HAS_REDIS = False
+    HAS_VALKEY = False
 
 CONFIG = {
     "valkey_host": "localhost",
@@ -34,12 +34,12 @@ CONFIG = {
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-def create_redis_connection(decode_responses: bool = True):
-    """Create a Redis connection with proper configuration."""
-    if not HAS_REDIS:
-        raise ImportError("redis-py is required. Install with: pip install redis")
+def create_valkey_connection(decode_responses: bool = True):
+    """Create a Valkey connection with proper configuration."""
+    if not HAS_VALKEY:
+        raise ImportError("valkey-py is required. Install with: pip install valkey")
 
-    return redis.Redis(
+    return valkey.Valkey(
         host=CONFIG["valkey_host"],
         port=CONFIG["valkey_port"],
         password=CONFIG["valkey_password"],
@@ -68,7 +68,7 @@ def create_persistent_clients(count: int, name_prefix: str, command_type: str = 
 
     def client_worker(client_id):
         try:
-            r = create_redis_connection()
+            r = create_valkey_connection()
             r.client_setname(f"{name_prefix}{client_id}")
             clients.append(r)
 
@@ -191,9 +191,9 @@ def test_connection_spike():
     2. Add spike connections that also stay alive
     3. Verify spike detection captures the increase
     """
-    if not HAS_REDIS:
+    if not HAS_VALKEY:
         log("TEST: Connection spike detection")
-        log("  ⚠ SKIP: redis-py not installed (pip install redis)")
+        log("  ⚠ SKIP: valkey-py not installed (pip install valkey)")
         return True
 
     log("TEST: Connection spike detection")
@@ -267,9 +267,9 @@ def test_idle_connections():
     2. Wait for idle time to accumulate (connections do nothing)
     3. Verify /idle-connections finds them by name
     """
-    if not HAS_REDIS:
+    if not HAS_VALKEY:
         log("TEST: Idle connection detection")
-        log("  ⚠ SKIP: redis-py not installed (pip install redis)")
+        log("  ⚠ SKIP: valkey-py not installed (pip install valkey)")
         return True
 
     log("TEST: Idle connection detection")
@@ -278,7 +278,7 @@ def test_idle_connections():
     clients = []
     try:
         for i in range(20):
-            r = create_redis_connection()
+            r = create_valkey_connection()
             r.client_setname(f"idle_test_{i}")
             r.ping()  # Do one command to set 'cmd' field
             clients.append(r)
@@ -335,9 +335,9 @@ def test_command_distribution():
     2. Let them run for multiple snapshot cycles
     3. Verify command distribution shows correct mix
     """
-    if not HAS_REDIS:
+    if not HAS_VALKEY:
         log("TEST: Command distribution accuracy")
-        log("  ⚠ SKIP: redis-py not installed (pip install redis)")
+        log("  ⚠ SKIP: valkey-py not installed (pip install valkey)")
         return True
 
     log("TEST: Command distribution accuracy")
@@ -437,9 +437,9 @@ def test_buffer_anomalies():
     to queue multiple large responses, creating sustained buffer pressure that
     persists across the 1-second snapshot interval.
     """
-    if not HAS_REDIS:
+    if not HAS_VALKEY:
         log("TEST: Buffer anomaly detection")
-        log("  ⚠ SKIP: redis-py not installed (pip install redis)")
+        log("  ⚠ SKIP: valkey-py not installed (pip install valkey)")
         return True
 
     log("TEST: Buffer anomaly detection")
@@ -447,7 +447,7 @@ def test_buffer_anomalies():
     try:
         log("  Phase 1: Create large keys and persistent connection")
         # Use binary mode for large value handling
-        r = create_redis_connection(decode_responses=False)
+        r = create_valkey_connection(decode_responses=False)
         r.client_setname("buffer_test_pipelined")
 
         # Create multiple 1MB keys
@@ -513,7 +513,7 @@ def test_buffer_anomalies():
         log(f"  ✗ FAIL: Error - {e}")
         # Cleanup on failure
         try:
-            cleanup_conn = create_redis_connection(decode_responses=False)
+            cleanup_conn = create_valkey_connection(decode_responses=False)
             for i in range(10):
                 cleanup_conn.delete(f"__buffer_test_{i}__")
             cleanup_conn.close()
@@ -530,9 +530,9 @@ def test_activity_timeline():
     2. High activity period with more clients
     3. Verify timeline shows increase
     """
-    if not HAS_REDIS:
+    if not HAS_VALKEY:
         log("TEST: Activity timeline")
-        log("  ⚠ SKIP: redis-py not installed (pip install redis)")
+        log("  ⚠ SKIP: valkey-py not installed (pip install valkey)")
         return True
 
     log("TEST: Activity timeline")
@@ -660,13 +660,13 @@ def main():
     CONFIG["valkey_password"] = args.password
     CONFIG["betterdb_url"] = args.url
 
-    # Check if redis-py is installed
-    if not HAS_REDIS:
+    # Check if valkey-py is installed
+    if not HAS_VALKEY:
         log("=" * 60)
-        log("ERROR: redis-py is required for validation tests")
+        log("ERROR: valkey-py is required for validation tests")
         log("=" * 60)
         log("")
-        log("Install with: pip install redis")
+        log("Install with: pip install valkey")
         log("")
         return 1
 

@@ -6,6 +6,7 @@ import { MetricsModule } from './metrics/metrics.module';
 import { AuditModule } from './audit/audit.module';
 import { ClientAnalyticsModule } from './client-analytics/client-analytics.module';
 import { PrometheusModule } from './prometheus/prometheus.module';
+import { AnomalyModule } from './anomaly/anomaly.module';
 
 let AiModule: any = null;
 try {
@@ -24,6 +25,7 @@ const baseImports = [
   AuditModule,
   ClientAnalyticsModule,
   PrometheusModule,
+  AnomalyModule,
 ];
 
 @Module({

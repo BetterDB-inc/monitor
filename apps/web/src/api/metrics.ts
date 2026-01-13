@@ -187,4 +187,27 @@ export const metricsApi = {
     const queryString = query.toString();
     return fetchApi<SpikeDetectionResponse>(`/client-analytics/spike-detection${queryString ? `?${queryString}` : ''}`);
   },
+
+  // Anomaly Detection
+  getAnomalyEvents: (params?: { limit?: number; metricType?: string; startTime?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.limit) query.append('limit', params.limit.toString());
+    if (params?.metricType) query.append('metricType', params.metricType);
+    if (params?.startTime) query.append('startTime', params.startTime.toString());
+    const queryString = query.toString();
+    return fetchApi<any[]>(`/anomaly/events${queryString ? `?${queryString}` : ''}`);
+  },
+
+  getAnomalyGroups: (params?: { limit?: number; pattern?: string; startTime?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.limit) query.append('limit', params.limit.toString());
+    if (params?.pattern) query.append('pattern', params.pattern);
+    if (params?.startTime) query.append('startTime', params.startTime.toString());
+    const queryString = query.toString();
+    return fetchApi<any[]>(`/anomaly/groups${queryString ? `?${queryString}` : ''}`);
+  },
+
+  getAnomalySummary: () => fetchApi<any>('/anomaly/summary'),
+
+  getAnomalyBuffers: () => fetchApi<any[]>('/anomaly/buffers'),
 };

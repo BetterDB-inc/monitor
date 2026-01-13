@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
@@ -87,6 +88,12 @@ export function ClientAnalyticsDeepDive() {
   const { data: spikes } = usePolling<SpikeDetectionResponse>({
     fetcher: fetchSpikes,
     interval: 60000,
+  });
+
+  // Fetch anomaly summary
+  const { data: anomalySummary } = usePolling<any>({
+    fetcher: () => metricsApi.getAnomalySummary(),
+    interval: 5000,
   });
 
   // Conditionally fetch based on active tab
@@ -226,13 +233,23 @@ export function ClientAnalyticsDeepDive() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className={anomalySummary?.bySeverity?.critical > 0 ? 'border-red-500/50' : anomalySummary?.bySeverity?.warning > 0 ? 'border-yellow-500/50' : ''}>
           <CardHeader>
-            <CardTitle className="text-sm">Spikes Detected</CardTitle>
+            <CardTitle className="text-sm">Anomalies Detected</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{summaryData.todaySpikes}</div>
-            <div className="text-xs text-muted-foreground mt-1">In time range</div>
+            <div className="text-2xl font-bold">{anomalySummary?.totalEvents ?? 0}</div>
+            <div className="flex gap-2 mt-1 text-xs">
+              {anomalySummary?.bySeverity?.critical > 0 && (
+                <span className="text-red-500">{anomalySummary.bySeverity.critical} critical</span>
+              )}
+              {anomalySummary?.bySeverity?.warning > 0 && (
+                <span className="text-yellow-500">{anomalySummary.bySeverity.warning} warning</span>
+              )}
+            </div>
+            <Link to="/anomalies" className="text-xs text-primary hover:underline mt-2 inline-block">
+              View details →
+            </Link>
           </CardContent>
         </Card>
       </div>
