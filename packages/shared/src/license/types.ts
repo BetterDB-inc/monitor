@@ -49,6 +49,5 @@ export interface EntitlementResponse {
 
 export interface EntitlementRequest {
   licenseKey: string;
-  instanceId?: string;
   stats?: Record<string, any>;
 }

@@ -1,6 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'crypto';
 import { Tier, Feature, TIER_FEATURES, TIER_INSTANCE_LIMITS, EntitlementResponse } from './types';
 
 interface CachedEntitlement {
@@ -13,7 +12,6 @@ export class LicenseService implements OnModuleInit {
   private readonly logger = new Logger(LicenseService.name);
   private readonly licenseKey: string | null;
   private readonly entitlementUrl: string;
-  private readonly instanceId: string;
   private readonly cacheTtlMs: number;
   private readonly maxStaleCacheMs: number;
   private readonly timeoutMs: number;
@@ -23,16 +21,11 @@ export class LicenseService implements OnModuleInit {
 
   constructor(private readonly config: ConfigService) {
     this.licenseKey = process.env.BETTERDB_LICENSE_KEY || null;
-    this.entitlementUrl = process.env.ENTITLEMENT_URL || 'https://api.betterdb.com/v1/entitlements';
-    this.instanceId = process.env.INSTANCE_ID || randomUUID();
+    this.entitlementUrl = process.env.ENTITLEMENT_URL || 'https://betterdb.com/api/v1/entitlements';
     this.cacheTtlMs = parseInt(process.env.LICENSE_CACHE_TTL_MS || '3600000', 10);
     this.maxStaleCacheMs = parseInt(process.env.LICENSE_MAX_STALE_MS || '604800000', 10);
     this.timeoutMs = parseInt(process.env.LICENSE_TIMEOUT_MS || '10000', 10);
     this.devMode = process.env.NODE_ENV === 'development';
-
-    if (!process.env.INSTANCE_ID) {
-      this.logger.warn('INSTANCE_ID not set - auto-generated ID will change on restart');
-    }
   }
 
   async onModuleInit() {
@@ -74,7 +67,6 @@ export class LicenseService implements OnModuleInit {
   private async checkOnline(): Promise<EntitlementResponse> {
     const payload = {
       licenseKey: this.licenseKey,
-      instanceId: this.instanceId,
       stats: await this.collectStats(),
     };
 

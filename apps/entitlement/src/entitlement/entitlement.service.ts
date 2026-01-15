@@ -1,47 +1,19 @@
-import { Injectable, Logger, UnauthorizedException, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Tier } from '@prisma/client';
-import {
-  TIER_FEATURES,
-  TIER_INSTANCE_LIMITS,
-} from '../../../../proprietary/license/shared-types';
+import { TIER_FEATURES } from '@betterdb/shared';
+import type { EntitlementResponse, EntitlementRequest } from '@betterdb/shared';
 
-interface ValidateRequest {
-  licenseKey: string;
-  instanceId?: string;
-  stats?: {
-    version?: string;
-    platform?: string;
-    nodeVersion?: string;
-    uptime?: number;
-  };
-}
-
-interface EntitlementResponse {
-  valid: boolean;
-  tier: string;
-  features: string[];
-  instanceLimit: number;
-  expiresAt: string | null;
-  customer?: {
-    id: string;
-    name: string | null;
-    email: string;
-  };
-  error?: string;
-}
-
-const VALIDATION_LOG_INTERVAL_MS = 60000;
+type ValidateRequest = EntitlementRequest;
 
 @Injectable()
 export class EntitlementService {
   private readonly logger = new Logger(EntitlementService.name);
-  private lastValidationLog = new Map<string, number>();
 
   constructor(private readonly prisma: PrismaService) {}
 
   async validateLicense(req: ValidateRequest): Promise<EntitlementResponse> {
-    const { licenseKey, instanceId, stats } = req;
+    const { licenseKey } = req;
     const keyPrefix = licenseKey.substring(0, 8);
 
     const license = await this.prisma.license.findUnique({
@@ -78,22 +50,6 @@ export class EntitlementService {
       };
     }
 
-    if (instanceId) {
-      const uniqueInstances = await this.getUniqueInstanceCount(license.id);
-      const isNewInstance = !(await this.hasInstanceValidated(license.id, instanceId));
-
-      if (isNewInstance && uniqueInstances >= license.instanceLimit) {
-        this.logger.warn(
-          `Instance limit exceeded for license ${license.id}: ${uniqueInstances}/${license.instanceLimit}`,
-        );
-        throw new ForbiddenException(
-          `Instance limit exceeded (${uniqueInstances}/${license.instanceLimit}). Please upgrade your license.`,
-        );
-      }
-
-      await this.logValidation(license.id, instanceId, stats);
-    }
-
     this.logger.log(`License validated: ${license.id} (${license.tier})`);
 
     return {
@@ -106,73 +62,6 @@ export class EntitlementService {
         id: license.customer.id,
         name: license.customer.name,
         email: license.customer.email,
-      },
-    };
-  }
-
-  private async getUniqueInstanceCount(licenseId: string): Promise<number> {
-    const validations = await this.prisma.licenseValidation.groupBy({
-      by: ['instanceId'],
-      where: { licenseId },
-    });
-    return validations.length;
-  }
-
-  private async hasInstanceValidated(licenseId: string, instanceId: string): Promise<boolean> {
-    const count = await this.prisma.licenseValidation.count({
-      where: { licenseId, instanceId },
-    });
-    return count > 0;
-  }
-
-  private async logValidation(
-    licenseId: string,
-    instanceId: string,
-    stats?: ValidateRequest['stats'],
-  ): Promise<void> {
-    const cacheKey = `${licenseId}:${instanceId}`;
-    const lastLog = this.lastValidationLog.get(cacheKey) || 0;
-    const now = Date.now();
-
-    if (now - lastLog < VALIDATION_LOG_INTERVAL_MS) {
-      return;
-    }
-
-    await this.prisma.licenseValidation.create({
-      data: {
-        licenseId,
-        instanceId,
-        version: stats?.version,
-        platform: stats?.platform,
-        nodeVersion: stats?.nodeVersion,
-      },
-    });
-
-    this.lastValidationLog.set(cacheKey, now);
-  }
-
-  async getLicenseStats(licenseId: string, limit = 100, offset = 0) {
-    const [validations, totalCount, uniqueInstances] = await Promise.all([
-      this.prisma.licenseValidation.findMany({
-        where: { licenseId },
-        orderBy: { validatedAt: 'desc' },
-        take: limit,
-        skip: offset,
-      }),
-      this.prisma.licenseValidation.count({ where: { licenseId } }),
-      this.getUniqueInstanceCount(licenseId),
-    ]);
-
-    return {
-      totalValidations: totalCount,
-      uniqueInstances,
-      lastValidation: validations[0]?.validatedAt || null,
-      validations,
-      pagination: {
-        limit,
-        offset,
-        total: totalCount,
-        hasMore: offset + limit < totalCount,
       },
     };
   }

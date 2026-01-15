@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { randomBytes } from 'crypto';
-import { TIER_INSTANCE_LIMITS } from '../../../../proprietary/license/shared-types';
+import { TIER_INSTANCE_LIMITS } from '@betterdb/shared';
 
 @Injectable()
 export class AdminService {

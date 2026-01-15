@@ -1,8 +1,13 @@
 {
   "name": "@betterdb/shared",
   "version": "0.1.0",
+  "private": true,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./license": "./dist/license/index.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",

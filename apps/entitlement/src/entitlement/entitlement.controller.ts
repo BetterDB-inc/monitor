@@ -3,7 +3,6 @@ import { EntitlementService } from './entitlement.service';
 
 interface ValidateBody {
   licenseKey: string;
-  instanceId?: string;
   stats?: Record<string, any>;
 }
 
@@ -19,10 +18,6 @@ export class EntitlementController {
 
     if (body.licenseKey.length < 10 || body.licenseKey.length > 100) {
       throw new BadRequestException('Invalid license key format');
-    }
-
-    if (body.instanceId && typeof body.instanceId !== 'string') {
-      throw new BadRequestException('instanceId must be a string');
     }
 
     return this.entitlement.validateLicense(body);

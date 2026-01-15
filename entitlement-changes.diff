@@ -1,0 +1,1602 @@
+diff --git a/apps/entitlement/.env.example b/apps/entitlement/.env.example
+new file mode 100644
+index 0000000..43f742a
+--- /dev/null
++++ b/apps/entitlement/.env.example
+@@ -0,0 +1,16 @@
++# Server Configuration
++PORT=3001
++HOST=0.0.0.0
++NODE_ENV=production
++
++# Database
++ENTITLEMENT_DATABASE_URL=postgresql://user:password@localhost:5432/betterdb_entitlements
++
++# Stripe
++STRIPE_SECRET_KEY=sk_test_...
++STRIPE_WEBHOOK_SECRET=whsec_...
++STRIPE_PRO_PRICE_IDS=price_xxx,price_yyy
++STRIPE_ENTERPRISE_PRICE_IDS=price_zzz
++
++# Admin API
++ADMIN_API_TOKEN=your-secure-random-token-here
+diff --git a/apps/entitlement/nest-cli.json b/apps/entitlement/nest-cli.json
+new file mode 100644
+index 0000000..f9aa683
+--- /dev/null
++++ b/apps/entitlement/nest-cli.json
+@@ -0,0 +1,8 @@
++{
++  "$schema": "https://json.schemastore.org/nest-cli",
++  "collection": "@nestjs/schematics",
++  "sourceRoot": "src",
++  "compilerOptions": {
++    "deleteOutDir": true
++  }
++}
+diff --git a/apps/entitlement/package.json b/apps/entitlement/package.json
+new file mode 100644
+index 0000000..98b0613
+--- /dev/null
++++ b/apps/entitlement/package.json
+@@ -0,0 +1,30 @@
++{
++  "name": "@app/entitlement",
++  "version": "1.0.0",
++  "private": true,
++  "scripts": {
++    "dev": "nest start --watch",
++    "build": "nest build",
++    "start": "node dist/main",
++    "prisma:generate": "prisma generate",
++    "prisma:migrate": "prisma migrate dev",
++    "prisma:studio": "prisma studio"
++  },
++  "dependencies": {
++    "@nestjs/common": "^10.0.0",
++    "@nestjs/core": "^10.0.0",
++    "@nestjs/config": "^3.0.0",
++    "@nestjs/platform-fastify": "^10.0.0",
++    "@nestjs/throttler": "^5.0.0",
++    "@prisma/client": "^5.0.0",
++    "stripe": "^14.0.0",
++    "reflect-metadata": "^0.1.13",
++    "rxjs": "^7.8.1"
++  },
++  "devDependencies": {
++    "@nestjs/cli": "^10.0.0",
++    "@types/node": "^20.0.0",
++    "prisma": "^5.0.0",
++    "typescript": "^5.0.0"
++  }
++}
+diff --git a/apps/entitlement/prisma/schema.prisma b/apps/entitlement/prisma/schema.prisma
+new file mode 100644
+index 0000000..3d54848
+--- /dev/null
++++ b/apps/entitlement/prisma/schema.prisma
+@@ -0,0 +1,97 @@
++generator client {
++  provider = "prisma-client-js"
++}
++
++datasource db {
++  provider = "postgresql"
++  url      = env("ENTITLEMENT_DATABASE_URL")
++}
++
++enum Tier {
++  community
++  pro
++  enterprise
++}
++
++enum SubscriptionStatus {
++  active
++  canceled
++  past_due
++  trialing
++  incomplete
++  incomplete_expired
++  unpaid
++  paused
++}
++
++model Customer {
++  id             String   @id @default(cuid())
++  email          String   @unique
++  name           String?
++  stripeId       String?  @unique @map("stripe_id")
++  createdAt      DateTime @default(now()) @map("created_at")
++  updatedAt      DateTime @updatedAt @map("updated_at")
++
++  licenses       License[]
++  subscriptions  Subscription[]
++
++  @@map("customers")
++}
++
++model License {
++  id             String   @id @default(cuid())
++  key            String   @unique
++  customerId     String   @map("customer_id")
++  tier           Tier
++  instanceLimit  Int      @default(1) @map("instance_limit")
++  expiresAt      DateTime? @map("expires_at")
++  active         Boolean  @default(true)
++  createdAt      DateTime @default(now()) @map("created_at")
++  updatedAt      DateTime @updatedAt @map("updated_at")
++
++  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
++  validations    LicenseValidation[]
++
++  @@index([customerId])
++  @@index([key])
++  @@index([active])
++  @@map("licenses")
++}
++
++model Subscription {
++  id                String   @id @default(cuid())
++  customerId        String   @map("customer_id")
++  stripeSubscriptionId String @unique @map("stripe_subscription_id")
++  stripePriceId     String   @map("stripe_price_id")
++  stripeEventId     String?  @unique @map("stripe_event_id")
++  tier              Tier
++  status            SubscriptionStatus
++  currentPeriodStart DateTime @map("current_period_start")
++  currentPeriodEnd   DateTime @map("current_period_end")
++  cancelAtPeriodEnd  Boolean  @default(false) @map("cancel_at_period_end")
++  createdAt         DateTime @default(now()) @map("created_at")
++  updatedAt         DateTime @updatedAt @map("updated_at")
++
++  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
++
++  @@index([customerId])
++  @@index([stripeSubscriptionId])
++  @@map("subscriptions")
++}
++
++model LicenseValidation {
++  id          String   @id @default(cuid())
++  licenseId   String   @map("license_id")
++  instanceId  String   @map("instance_id")
++  version     String?
++  platform    String?
++  nodeVersion String?  @map("node_version")
++  validatedAt DateTime @default(now()) @map("validated_at")
++
++  license     License  @relation(fields: [licenseId], references: [id], onDelete: Cascade)
++
++  @@index([licenseId])
++  @@index([instanceId])
++  @@index([validatedAt])
++  @@map("license_validations")
++}
+diff --git a/apps/entitlement/src/admin/admin.controller.ts b/apps/entitlement/src/admin/admin.controller.ts
+new file mode 100644
+index 0000000..b8618ab
+--- /dev/null
++++ b/apps/entitlement/src/admin/admin.controller.ts
+@@ -0,0 +1,97 @@
++import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, BadRequestException } from '@nestjs/common';
++import { AdminService } from './admin.service';
++import { AdminGuard } from './admin.guard';
++
++const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
++const VALID_TIERS = ['community', 'pro', 'enterprise'];
++
++@Controller('admin')
++@UseGuards(AdminGuard)
++export class AdminController {
++  constructor(private readonly admin: AdminService) {}
++
++  @Post('customers')
++  createCustomer(@Body() body: { email: string; name?: string }) {
++    if (!body.email || !EMAIL_REGEX.test(body.email)) {
++      throw new BadRequestException('Valid email is required');
++    }
++    if (body.name && (typeof body.name !== 'string' || body.name.length > 200)) {
++      throw new BadRequestException('Invalid name');
++    }
++    return this.admin.createCustomer(body);
++  }
++
++  @Get('customers')
++  listCustomers(@Query('skip') skip?: string, @Query('take') take?: string) {
++    return this.admin.listCustomers({
++      skip: skip ? parseInt(skip, 10) : undefined,
++      take: take ? parseInt(take, 10) : undefined,
++    });
++  }
++
++  @Get('customers/:id')
++  getCustomer(@Param('id') id: string) {
++    return this.admin.getCustomer(id);
++  }
++
++  @Post('licenses')
++  createLicense(
++    @Body() body: { customerId: string; tier: string; instanceLimit?: number; expiresAt?: string },
++  ) {
++    if (!body.customerId || typeof body.customerId !== 'string') {
++      throw new BadRequestException('customerId is required');
++    }
++    if (!body.tier || !VALID_TIERS.includes(body.tier)) {
++      throw new BadRequestException(`tier must be one of: ${VALID_TIERS.join(', ')}`);
++    }
++    if (body.instanceLimit !== undefined && (typeof body.instanceLimit !== 'number' || body.instanceLimit < 1)) {
++      throw new BadRequestException('instanceLimit must be a positive number');
++    }
++    if (body.expiresAt && isNaN(Date.parse(body.expiresAt))) {
++      throw new BadRequestException('expiresAt must be a valid date');
++    }
++    return this.admin.createLicense({
++      ...body,
++      expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
++    });
++  }
++
++  @Get('licenses')
++  listLicenses(
++    @Query('customerId') customerId?: string,
++    @Query('skip') skip?: string,
++    @Query('take') take?: string,
++  ) {
++    return this.admin.listLicenses({
++      customerId,
++      skip: skip ? parseInt(skip, 10) : undefined,
++      take: take ? parseInt(take, 10) : undefined,
++    });
++  }
++
++  @Get('licenses/:id')
++  getLicense(@Param('id') id: string) {
++    return this.admin.getLicense(id);
++  }
++
++  @Put('licenses/:id')
++  updateLicense(
++    @Param('id') id: string,
++    @Body() body: { active?: boolean; expiresAt?: string; instanceLimit?: number },
++  ) {
++    return this.admin.updateLicense(id, {
++      ...body,
++      expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
++    });
++  }
++
++  @Delete('licenses/:id')
++  deleteLicense(@Param('id') id: string) {
++    return this.admin.deleteLicense(id);
++  }
++
++  @Get('licenses/:id/stats')
++  getLicenseStats(@Param('id') id: string) {
++    return this.admin.getLicenseStats(id);
++  }
++}
+diff --git a/apps/entitlement/src/admin/admin.guard.ts b/apps/entitlement/src/admin/admin.guard.ts
+new file mode 100644
+index 0000000..93852d8
+--- /dev/null
++++ b/apps/entitlement/src/admin/admin.guard.ts
+@@ -0,0 +1,42 @@
++import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from '@nestjs/common';
++import { ConfigService } from '@nestjs/config';
++import { timingSafeEqual } from 'crypto';
++
++@Injectable()
++export class AdminGuard implements CanActivate {
++  constructor(private readonly config: ConfigService) {}
++
++  canActivate(context: ExecutionContext): boolean {
++    const request = context.switchToHttp().getRequest();
++    const authHeader = request.headers['authorization'];
++
++    if (!authHeader) {
++      throw new UnauthorizedException('Missing authorization header');
++    }
++
++    const token = authHeader.replace('Bearer ', '');
++    const adminToken = this.config.get<string>('ADMIN_API_TOKEN');
++
++    if (!adminToken) {
++      throw new UnauthorizedException('Admin API not configured');
++    }
++
++    if (!this.constantTimeCompare(token, adminToken)) {
++      throw new UnauthorizedException('Invalid admin token');
++    }
++
++    return true;
++  }
++
++  private constantTimeCompare(a: string, b: string): boolean {
++    if (a.length !== b.length) {
++      return false;
++    }
++
++    try {
++      return timingSafeEqual(Buffer.from(a), Buffer.from(b));
++    } catch {
++      return false;
++    }
++  }
++}
+diff --git a/apps/entitlement/src/admin/admin.module.ts b/apps/entitlement/src/admin/admin.module.ts
+new file mode 100644
+index 0000000..7af13b6
+--- /dev/null
++++ b/apps/entitlement/src/admin/admin.module.ts
+@@ -0,0 +1,13 @@
++import { Module } from '@nestjs/common';
++import { ConfigModule } from '@nestjs/config';
++import { AdminService } from './admin.service';
++import { AdminController } from './admin.controller';
++import { AdminGuard } from './admin.guard';
++
++@Module({
++  imports: [ConfigModule],
++  controllers: [AdminController],
++  providers: [AdminService, AdminGuard],
++  exports: [AdminService],
++})
++export class AdminModule {}
+diff --git a/apps/entitlement/src/admin/admin.service.ts b/apps/entitlement/src/admin/admin.service.ts
+new file mode 100644
+index 0000000..eed6f06
+--- /dev/null
++++ b/apps/entitlement/src/admin/admin.service.ts
+@@ -0,0 +1,147 @@
++import { Injectable, Logger, NotFoundException } from '@nestjs/common';
++import { PrismaService } from '../prisma/prisma.service';
++import { randomBytes } from 'crypto';
++import { TIER_INSTANCE_LIMITS } from '../../../../proprietary/license/shared-types';
++
++@Injectable()
++export class AdminService {
++  private readonly logger = new Logger(AdminService.name);
++
++  constructor(private readonly prisma: PrismaService) {}
++
++  async createCustomer(data: { email: string; name?: string }) {
++    const customer = await this.prisma.customer.create({
++      data: {
++        email: data.email,
++        name: data.name,
++      },
++    });
++
++    this.logger.log(`Created customer: ${customer.id} (${customer.email})`);
++    return customer;
++  }
++
++  async listCustomers(params?: { skip?: number; take?: number }) {
++    return this.prisma.customer.findMany({
++      skip: params?.skip || 0,
++      take: params?.take || 50,
++      include: {
++        licenses: true,
++        subscriptions: true,
++      },
++      orderBy: { createdAt: 'desc' },
++    });
++  }
++
++  async getCustomer(id: string) {
++    const customer = await this.prisma.customer.findUnique({
++      where: { id },
++      include: {
++        licenses: true,
++        subscriptions: true,
++      },
++    });
++
++    if (!customer) {
++      throw new NotFoundException(`Customer ${id} not found`);
++    }
++
++    return customer;
++  }
++
++  async createLicense(data: {
++    customerId: string;
++    tier: string;
++    instanceLimit?: number;
++    expiresAt?: Date;
++  }) {
++    const licenseKey = this.generateLicenseKey();
++
++    const license = await this.prisma.license.create({
++      data: {
++        key: licenseKey,
++        customerId: data.customerId,
++        tier: data.tier,
++        instanceLimit: data.instanceLimit || this.getDefaultInstanceLimit(data.tier),
++        expiresAt: data.expiresAt,
++        active: true,
++      },
++    });
++
++    this.logger.log(`Created license: ${license.id} (${license.tier})`);
++    return license;
++  }
++
++  async listLicenses(params?: { customerId?: string; skip?: number; take?: number }) {
++    return this.prisma.license.findMany({
++      where: params?.customerId ? { customerId: params.customerId } : undefined,
++      skip: params?.skip || 0,
++      take: params?.take || 50,
++      include: {
++        customer: true,
++      },
++      orderBy: { createdAt: 'desc' },
++    });
++  }
++
++  async getLicense(id: string) {
++    const license = await this.prisma.license.findUnique({
++      where: { id },
++      include: {
++        customer: true,
++      },
++    });
++
++    if (!license) {
++      throw new NotFoundException(`License ${id} not found`);
++    }
++
++    return license;
++  }
++
++  async updateLicense(id: string, data: { active?: boolean; expiresAt?: Date; instanceLimit?: number }) {
++    const license = await this.prisma.license.update({
++      where: { id },
++      data,
++    });
++
++    this.logger.log(`Updated license: ${id}`);
++    return license;
++  }
++
++  async deleteLicense(id: string) {
++    await this.prisma.license.delete({
++      where: { id },
++    });
++
++    this.logger.log(`Deleted license: ${id}`);
++    return { success: true };
++  }
++
++  async getLicenseStats(licenseId: string) {
++    const validations = await this.prisma.licenseValidation.findMany({
++      where: { licenseId },
++      orderBy: { validatedAt: 'desc' },
++      take: 100,
++    });
++
++    const uniqueInstances = new Set(validations.map((v) => v.instanceId)).size;
++    const lastValidation = validations[0]?.validatedAt || null;
++
++    return {
++      totalValidations: validations.length,
++      uniqueInstances,
++      lastValidation,
++      recentValidations: validations.slice(0, 10),
++    };
++  }
++
++  private generateLicenseKey(): string {
++    return `btdb_${randomBytes(16).toString('hex')}`;
++  }
++
++  private getDefaultInstanceLimit(tier: string): number {
++    const limit = TIER_INSTANCE_LIMITS[tier as keyof typeof TIER_INSTANCE_LIMITS];
++    return Number.isFinite(limit) ? limit : 1;
++  }
++}
+diff --git a/apps/entitlement/src/app.module.ts b/apps/entitlement/src/app.module.ts
+new file mode 100644
+index 0000000..515fae0
+--- /dev/null
++++ b/apps/entitlement/src/app.module.ts
+@@ -0,0 +1,34 @@
++import { Module } from '@nestjs/common';
++import { ConfigModule } from '@nestjs/config';
++import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
++import { APP_GUARD } from '@nestjs/core';
++import { PrismaModule } from './prisma/prisma.module';
++import { EntitlementModule } from './entitlement/entitlement.module';
++import { StripeModule } from './stripe/stripe.module';
++import { AdminModule } from './admin/admin.module';
++import { HealthModule } from './health/health.module';
++
++@Module({
++  imports: [
++    ConfigModule.forRoot({
++      isGlobal: true,
++      envFilePath: '../../.env',
++    }),
++    ThrottlerModule.forRoot([{
++      ttl: 60000,
++      limit: 20,
++    }]),
++    PrismaModule,
++    HealthModule,
++    EntitlementModule,
++    StripeModule,
++    AdminModule,
++  ],
++  providers: [
++    {
++      provide: APP_GUARD,
++      useClass: ThrottlerGuard,
++    },
++  ],
++})
++export class AppModule {}
+diff --git a/apps/entitlement/src/entitlement/entitlement.controller.ts b/apps/entitlement/src/entitlement/entitlement.controller.ts
+new file mode 100644
+index 0000000..656d889
+--- /dev/null
++++ b/apps/entitlement/src/entitlement/entitlement.controller.ts
+@@ -0,0 +1,30 @@
++import { Controller, Post, Body, BadRequestException } from '@nestjs/common';
++import { EntitlementService } from './entitlement.service';
++
++interface ValidateBody {
++  licenseKey: string;
++  instanceId?: string;
++  stats?: Record<string, any>;
++}
++
++@Controller('v1/entitlements')
++export class EntitlementController {
++  constructor(private readonly entitlement: EntitlementService) {}
++
++  @Post()
++  async validate(@Body() body: ValidateBody) {
++    if (!body.licenseKey || typeof body.licenseKey !== 'string') {
++      throw new BadRequestException('licenseKey is required');
++    }
++
++    if (body.licenseKey.length < 10 || body.licenseKey.length > 100) {
++      throw new BadRequestException('Invalid license key format');
++    }
++
++    if (body.instanceId && typeof body.instanceId !== 'string') {
++      throw new BadRequestException('instanceId must be a string');
++    }
++
++    return this.entitlement.validateLicense(body);
++  }
++}
+diff --git a/apps/entitlement/src/entitlement/entitlement.module.ts b/apps/entitlement/src/entitlement/entitlement.module.ts
+new file mode 100644
+index 0000000..17368af
+--- /dev/null
++++ b/apps/entitlement/src/entitlement/entitlement.module.ts
+@@ -0,0 +1,10 @@
++import { Module } from '@nestjs/common';
++import { EntitlementService } from './entitlement.service';
++import { EntitlementController } from './entitlement.controller';
++
++@Module({
++  controllers: [EntitlementController],
++  providers: [EntitlementService],
++  exports: [EntitlementService],
++})
++export class EntitlementModule {}
+diff --git a/apps/entitlement/src/entitlement/entitlement.service.ts b/apps/entitlement/src/entitlement/entitlement.service.ts
+new file mode 100644
+index 0000000..f974d43
+--- /dev/null
++++ b/apps/entitlement/src/entitlement/entitlement.service.ts
+@@ -0,0 +1,179 @@
++import { Injectable, Logger, UnauthorizedException, ForbiddenException } from '@nestjs/common';
++import { PrismaService } from '../prisma/prisma.service';
++import { Tier } from '@prisma/client';
++import {
++  TIER_FEATURES,
++  TIER_INSTANCE_LIMITS,
++} from '../../../../proprietary/license/shared-types';
++
++interface ValidateRequest {
++  licenseKey: string;
++  instanceId?: string;
++  stats?: {
++    version?: string;
++    platform?: string;
++    nodeVersion?: string;
++    uptime?: number;
++  };
++}
++
++interface EntitlementResponse {
++  valid: boolean;
++  tier: string;
++  features: string[];
++  instanceLimit: number;
++  expiresAt: string | null;
++  customer?: {
++    id: string;
++    name: string | null;
++    email: string;
++  };
++  error?: string;
++}
++
++const VALIDATION_LOG_INTERVAL_MS = 60000;
++
++@Injectable()
++export class EntitlementService {
++  private readonly logger = new Logger(EntitlementService.name);
++  private lastValidationLog = new Map<string, number>();
++
++  constructor(private readonly prisma: PrismaService) {}
++
++  async validateLicense(req: ValidateRequest): Promise<EntitlementResponse> {
++    const { licenseKey, instanceId, stats } = req;
++    const keyPrefix = licenseKey.substring(0, 8);
++
++    const license = await this.prisma.license.findUnique({
++      where: { key: licenseKey },
++      include: { customer: true },
++    });
++
++    if (!license) {
++      this.logger.warn(`Invalid license key: ${keyPrefix}...`);
++      throw new UnauthorizedException('Invalid license key');
++    }
++
++    if (!license.active) {
++      this.logger.warn(`Inactive license: ${license.id}`);
++      return {
++        valid: false,
++        tier: 'community',
++        features: [],
++        instanceLimit: 1,
++        expiresAt: null,
++        error: 'License has been deactivated',
++      };
++    }
++
++    if (license.expiresAt && new Date(license.expiresAt) < new Date()) {
++      this.logger.warn(`Expired license: ${license.id}`);
++      return {
++        valid: false,
++        tier: 'community',
++        features: [],
++        instanceLimit: 1,
++        expiresAt: license.expiresAt.toISOString(),
++        error: 'License has expired',
++      };
++    }
++
++    if (instanceId) {
++      const uniqueInstances = await this.getUniqueInstanceCount(license.id);
++      const isNewInstance = !(await this.hasInstanceValidated(license.id, instanceId));
++
++      if (isNewInstance && uniqueInstances >= license.instanceLimit) {
++        this.logger.warn(
++          `Instance limit exceeded for license ${license.id}: ${uniqueInstances}/${license.instanceLimit}`,
++        );
++        throw new ForbiddenException(
++          `Instance limit exceeded (${uniqueInstances}/${license.instanceLimit}). Please upgrade your license.`,
++        );
++      }
++
++      await this.logValidation(license.id, instanceId, stats);
++    }
++
++    this.logger.log(`License validated: ${license.id} (${license.tier})`);
++
++    return {
++      valid: true,
++      tier: license.tier,
++      features: TIER_FEATURES[license.tier as Tier] || [],
++      instanceLimit: license.instanceLimit,
++      expiresAt: license.expiresAt ? license.expiresAt.toISOString() : null,
++      customer: {
++        id: license.customer.id,
++        name: license.customer.name,
++        email: license.customer.email,
++      },
++    };
++  }
++
++  private async getUniqueInstanceCount(licenseId: string): Promise<number> {
++    const validations = await this.prisma.licenseValidation.groupBy({
++      by: ['instanceId'],
++      where: { licenseId },
++    });
++    return validations.length;
++  }
++
++  private async hasInstanceValidated(licenseId: string, instanceId: string): Promise<boolean> {
++    const count = await this.prisma.licenseValidation.count({
++      where: { licenseId, instanceId },
++    });
++    return count > 0;
++  }
++
++  private async logValidation(
++    licenseId: string,
++    instanceId: string,
++    stats?: ValidateRequest['stats'],
++  ): Promise<void> {
++    const cacheKey = `${licenseId}:${instanceId}`;
++    const lastLog = this.lastValidationLog.get(cacheKey) || 0;
++    const now = Date.now();
++
++    if (now - lastLog < VALIDATION_LOG_INTERVAL_MS) {
++      return;
++    }
++
++    await this.prisma.licenseValidation.create({
++      data: {
++        licenseId,
++        instanceId,
++        version: stats?.version,
++        platform: stats?.platform,
++        nodeVersion: stats?.nodeVersion,
++      },
++    });
++
++    this.lastValidationLog.set(cacheKey, now);
++  }
++
++  async getLicenseStats(licenseId: string, limit = 100, offset = 0) {
++    const [validations, totalCount, uniqueInstances] = await Promise.all([
++      this.prisma.licenseValidation.findMany({
++        where: { licenseId },
++        orderBy: { validatedAt: 'desc' },
++        take: limit,
++        skip: offset,
++      }),
++      this.prisma.licenseValidation.count({ where: { licenseId } }),
++      this.getUniqueInstanceCount(licenseId),
++    ]);
++
++    return {
++      totalValidations: totalCount,
++      uniqueInstances,
++      lastValidation: validations[0]?.validatedAt || null,
++      validations,
++      pagination: {
++        limit,
++        offset,
++        total: totalCount,
++        hasMore: offset + limit < totalCount,
++      },
++    };
++  }
++}
+diff --git a/apps/entitlement/src/health/health.controller.ts b/apps/entitlement/src/health/health.controller.ts
+new file mode 100644
+index 0000000..cad89d2
+--- /dev/null
++++ b/apps/entitlement/src/health/health.controller.ts
+@@ -0,0 +1,27 @@
++import { Controller, Get } from '@nestjs/common';
++import { PrismaService } from '../prisma/prisma.service';
++
++@Controller('health')
++export class HealthController {
++  constructor(private readonly prisma: PrismaService) {}
++
++  @Get()
++  async check() {
++    // Check database connection
++    try {
++      await this.prisma.$queryRaw`SELECT 1`;
++    } catch (error) {
++      return {
++        status: 'unhealthy',
++        database: 'disconnected',
++        error: error.message,
++      };
++    }
++
++    return {
++      status: 'healthy',
++      database: 'connected',
++      timestamp: new Date().toISOString(),
++    };
++  }
++}
+diff --git a/apps/entitlement/src/health/health.module.ts b/apps/entitlement/src/health/health.module.ts
+new file mode 100644
+index 0000000..7476abe
+--- /dev/null
++++ b/apps/entitlement/src/health/health.module.ts
+@@ -0,0 +1,7 @@
++import { Module } from '@nestjs/common';
++import { HealthController } from './health.controller';
++
++@Module({
++  controllers: [HealthController],
++})
++export class HealthModule {}
+diff --git a/apps/entitlement/src/main.ts b/apps/entitlement/src/main.ts
+new file mode 100644
+index 0000000..80f7d16
+--- /dev/null
++++ b/apps/entitlement/src/main.ts
+@@ -0,0 +1,30 @@
++import { NestFactory } from '@nestjs/core';
++import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
++import { ConfigService } from '@nestjs/config';
++import { AppModule } from './app.module';
++import { Logger } from '@nestjs/common';
++
++async function bootstrap() {
++  const logger = new Logger('Bootstrap');
++
++  const fastifyAdapter = new FastifyAdapter();
++
++  fastifyAdapter.getInstance().addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
++    done(null, body);
++  });
++
++  const app = await NestFactory.create<NestFastifyApplication>(
++    AppModule,
++    fastifyAdapter,
++    { logger: ['log', 'error', 'warn', 'debug'], rawBody: true },
++  );
++
++  const config = app.get(ConfigService);
++  const port = config.get('PORT', 3001);
++  const host = config.get('HOST', '0.0.0.0');
++
++  await app.listen(port, host);
++  logger.log(`Entitlement server running on http://${host}:${port}`);
++}
++
++bootstrap();
+diff --git a/apps/entitlement/src/prisma/prisma.module.ts b/apps/entitlement/src/prisma/prisma.module.ts
+new file mode 100644
+index 0000000..23c626e
+--- /dev/null
++++ b/apps/entitlement/src/prisma/prisma.module.ts
+@@ -0,0 +1,9 @@
++import { Module, Global } from '@nestjs/common';
++import { PrismaService } from './prisma.service';
++
++@Global()
++@Module({
++  providers: [PrismaService],
++  exports: [PrismaService],
++})
++export class PrismaModule {}
+diff --git a/apps/entitlement/src/prisma/prisma.service.ts b/apps/entitlement/src/prisma/prisma.service.ts
+new file mode 100644
+index 0000000..9441d84
+--- /dev/null
++++ b/apps/entitlement/src/prisma/prisma.service.ts
+@@ -0,0 +1,17 @@
++import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
++import { PrismaClient } from '@prisma/client';
++
++@Injectable()
++export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
++  private readonly logger = new Logger(PrismaService.name);
++
++  async onModuleInit() {
++    await this.$connect();
++    this.logger.log('Connected to Prisma database');
++  }
++
++  async onModuleDestroy() {
++    await this.$disconnect();
++    this.logger.log('Disconnected from Prisma database');
++  }
++}
+diff --git a/apps/entitlement/src/stripe/stripe.controller.ts b/apps/entitlement/src/stripe/stripe.controller.ts
+new file mode 100644
+index 0000000..470173b
+--- /dev/null
++++ b/apps/entitlement/src/stripe/stripe.controller.ts
+@@ -0,0 +1,42 @@
++import { Controller, Post, Headers, RawBodyRequest, Req, Logger, BadRequestException } from '@nestjs/common';
++import { FastifyRequest } from 'fastify';
++import { StripeService } from './stripe.service';
++import Stripe from 'stripe';
++
++@Controller('webhooks/stripe')
++export class StripeController {
++  private readonly logger = new Logger(StripeController.name);
++
++  constructor(private readonly stripe: StripeService) {}
++
++  @Post()
++  async handleWebhook(@Headers('stripe-signature') signature: string, @Req() req: RawBodyRequest<FastifyRequest>) {
++    if (!signature || !req.rawBody) {
++      throw new BadRequestException('Missing signature or body');
++    }
++
++    let event: Stripe.Event;
++    try {
++      event = this.stripe.constructEvent(req.rawBody, signature);
++    } catch (err) {
++      this.logger.error(`Webhook signature failed: ${(err as Error).message}`);
++      throw new BadRequestException('Invalid signature');
++    }
++
++    this.logger.log(`Webhook: ${event.type} (${event.id})`);
++
++    switch (event.type) {
++      case 'checkout.session.completed':
++        await this.stripe.handleCheckoutCompleted(event.data.object as Stripe.Checkout.Session, event.id);
++        break;
++      case 'customer.subscription.updated':
++        await this.stripe.handleSubscriptionUpdated(event.data.object as Stripe.Subscription, event.id);
++        break;
++      case 'customer.subscription.deleted':
++        await this.stripe.handleSubscriptionDeleted(event.data.object as Stripe.Subscription, event.id);
++        break;
++    }
++
++    return { received: true };
++  }
++}
+diff --git a/apps/entitlement/src/stripe/stripe.module.ts b/apps/entitlement/src/stripe/stripe.module.ts
+new file mode 100644
+index 0000000..2c109b6
+--- /dev/null
++++ b/apps/entitlement/src/stripe/stripe.module.ts
+@@ -0,0 +1,12 @@
++import { Module } from '@nestjs/common';
++import { ConfigModule } from '@nestjs/config';
++import { StripeService } from './stripe.service';
++import { StripeController } from './stripe.controller';
++
++@Module({
++  imports: [ConfigModule],
++  controllers: [StripeController],
++  providers: [StripeService],
++  exports: [StripeService],
++})
++export class StripeModule {}
+diff --git a/apps/entitlement/src/stripe/stripe.service.ts b/apps/entitlement/src/stripe/stripe.service.ts
+new file mode 100644
+index 0000000..154e43f
+--- /dev/null
++++ b/apps/entitlement/src/stripe/stripe.service.ts
+@@ -0,0 +1,205 @@
++import { Injectable, Logger } from '@nestjs/common';
++import { ConfigService } from '@nestjs/config';
++import Stripe from 'stripe';
++import { PrismaService } from '../prisma/prisma.service';
++import { Tier, SubscriptionStatus } from '@prisma/client';
++import { randomBytes } from 'crypto';
++import { TIER_INSTANCE_LIMITS } from '../../../../proprietary/license/shared-types';
++
++const MAX_KEY_GENERATION_ATTEMPTS = 5;
++
++@Injectable()
++export class StripeService {
++  private readonly logger = new Logger(StripeService.name);
++  private readonly stripe: Stripe;
++  private readonly webhookSecret: string;
++
++  constructor(
++    private readonly config: ConfigService,
++    private readonly prisma: PrismaService,
++  ) {
++    const apiKey = this.config.get<string>('STRIPE_SECRET_KEY');
++    if (!apiKey) {
++      this.logger.warn('STRIPE_SECRET_KEY not set - Stripe integration disabled');
++    }
++    this.stripe = new Stripe(apiKey || 'sk_test_placeholder', {
++      apiVersion: '2024-11-20.acacia',
++    });
++    this.webhookSecret = this.config.get<string>('STRIPE_WEBHOOK_SECRET', '');
++  }
++
++  constructEvent(payload: string | Buffer, signature: string): Stripe.Event {
++    return this.stripe.webhooks.constructEvent(payload, signature, this.webhookSecret);
++  }
++
++  async handleCheckoutCompleted(session: Stripe.Checkout.Session, eventId: string) {
++    const customerId = session.customer as string;
++    const subscriptionId = session.subscription as string;
++
++    const existing = await this.prisma.subscription.findUnique({
++      where: { stripeEventId: eventId },
++    });
++
++    if (existing) {
++      this.logger.debug(`Event ${eventId} already processed, skipping`);
++      return;
++    }
++
++    const stripeCustomer = await this.stripe.customers.retrieve(customerId);
++    if (stripeCustomer.deleted) {
++      this.logger.error(`Customer ${customerId} was deleted`);
++      return;
++    }
++
++    let customer = await this.prisma.customer.findUnique({
++      where: { stripeId: customerId },
++    });
++
++    if (!customer) {
++      customer = await this.prisma.customer.create({
++        data: {
++          email: stripeCustomer.email!,
++          name: stripeCustomer.name,
++          stripeId: customerId,
++        },
++      });
++      this.logger.log(`Created customer: ${customer.id}`);
++    }
++
++    const subscription = await this.stripe.subscriptions.retrieve(subscriptionId);
++    const priceId = subscription.items.data[0].price.id;
++    const tier = this.getTierFromPriceId(priceId);
++
++    await this.prisma.subscription.create({
++      data: {
++        customerId: customer.id,
++        stripeSubscriptionId: subscriptionId,
++        stripePriceId: priceId,
++        stripeEventId: eventId,
++        tier,
++        status: subscription.status as SubscriptionStatus,
++        currentPeriodStart: new Date(subscription.current_period_start * 1000),
++        currentPeriodEnd: new Date(subscription.current_period_end * 1000),
++        cancelAtPeriodEnd: subscription.cancel_at_period_end,
++      },
++    });
++
++    const licenseKey = await this.generateUniqueLicenseKey();
++    const instanceLimit = TIER_INSTANCE_LIMITS[tier as keyof typeof TIER_INSTANCE_LIMITS] ?? 1;
++
++    await this.prisma.license.create({
++      data: {
++        key: licenseKey,
++        customerId: customer.id,
++        tier,
++        instanceLimit: Number.isFinite(instanceLimit) ? instanceLimit : 9999,
++        active: true,
++      },
++    });
++
++    this.logger.log(`Created license for ${customer.email}: ${licenseKey.substring(0, 8)}...`);
++  }
++
++  async handleSubscriptionUpdated(subscription: Stripe.Subscription, eventId: string) {
++    const existing = await this.prisma.subscription.findFirst({
++      where: { stripeSubscriptionId: subscription.id, stripeEventId: eventId },
++    });
++
++    if (existing) {
++      this.logger.debug(`Event ${eventId} already processed, skipping`);
++      return;
++    }
++
++    const dbSub = await this.prisma.subscription.findUnique({
++      where: { stripeSubscriptionId: subscription.id },
++    });
++
++    if (!dbSub) {
++      this.logger.error(`Subscription not found: ${subscription.id}`);
++      return;
++    }
++
++    await this.prisma.subscription.update({
++      where: { id: dbSub.id },
++      data: {
++        status: subscription.status as SubscriptionStatus,
++        currentPeriodStart: new Date(subscription.current_period_start * 1000),
++        currentPeriodEnd: new Date(subscription.current_period_end * 1000),
++        cancelAtPeriodEnd: subscription.cancel_at_period_end,
++        stripeEventId: eventId,
++      },
++    });
++
++    if (!['active', 'trialing'].includes(subscription.status)) {
++      await this.prisma.license.updateMany({
++        where: { customerId: dbSub.customerId },
++        data: { active: false },
++      });
++      this.logger.warn(`Deactivated licenses for subscription ${subscription.id}`);
++    }
++  }
++
++  async handleSubscriptionDeleted(subscription: Stripe.Subscription, eventId: string) {
++    const existing = await this.prisma.subscription.findFirst({
++      where: { stripeSubscriptionId: subscription.id, stripeEventId: eventId },
++    });
++
++    if (existing && existing.status === SubscriptionStatus.canceled) {
++      this.logger.debug(`Event ${eventId} already processed, skipping`);
++      return;
++    }
++
++    const dbSub = await this.prisma.subscription.findUnique({
++      where: { stripeSubscriptionId: subscription.id },
++    });
++
++    if (!dbSub) {
++      this.logger.error(`Subscription not found: ${subscription.id}`);
++      return;
++    }
++
++    await this.prisma.subscription.update({
++      where: { id: dbSub.id },
++      data: { status: SubscriptionStatus.canceled, stripeEventId: eventId },
++    });
++
++    await this.prisma.license.updateMany({
++      where: { customerId: dbSub.customerId },
++      data: { active: false },
++    });
++
++    this.logger.warn(`Deactivated all licenses for customer ${dbSub.customerId}`);
++  }
++
++  private getTierFromPriceId(priceId: string): Tier {
++    const proPrices = (this.config.get<string>('STRIPE_PRO_PRICE_IDS') || '').split(',');
++    const enterprisePrices = (this.config.get<string>('STRIPE_ENTERPRISE_PRICE_IDS') || '').split(',');
++
++    if (proPrices.includes(priceId)) return Tier.pro;
++    if (enterprisePrices.includes(priceId)) return Tier.enterprise;
++
++    this.logger.warn(`Unknown price ID: ${priceId}, defaulting to pro`);
++    return Tier.pro;
++  }
++
++  private async generateUniqueLicenseKey(): Promise<string> {
++    for (let attempt = 0; attempt < MAX_KEY_GENERATION_ATTEMPTS; attempt++) {
++      const key = this.generateLicenseKey();
++      const existing = await this.prisma.license.findUnique({ where: { key } });
++
++      if (!existing) {
++        return key;
++      }
++
++      this.logger.warn(`License key collision detected, retrying (attempt ${attempt + 1})`);
++    }
++
++    throw new Error('Failed to generate unique license key after maximum attempts');
++  }
++
++  private generateLicenseKey(): string {
++    const prefix = 'btdb';
++    const random = randomBytes(16).toString('hex');
++    return `${prefix}_${random}`;
++  }
++}
+diff --git a/apps/entitlement/tsconfig.json b/apps/entitlement/tsconfig.json
+new file mode 100644
+index 0000000..d069f4c
+--- /dev/null
++++ b/apps/entitlement/tsconfig.json
+@@ -0,0 +1,12 @@
++{
++  "extends": "../../tsconfig.json",
++  "compilerOptions": {
++    "outDir": "./dist",
++    "baseUrl": "./",
++    "paths": {
++      "@app/entitlement/*": ["src/*"]
++    }
++  },
++  "include": ["src/**/*"],
++  "exclude": ["node_modules", "dist"]
++}
+diff --git a/package.json b/package.json
+index 3e205a9..1e44095 100644
+--- a/package.json
++++ b/package.json
+@@ -9,12 +9,15 @@
+   "scripts": {
+     "dev": "concurrently -n \"web,api\" -c \"green,blue\" \"cd apps/web && pnpm dev\" \"cd apps/api && pnpm dev\"",
+     "dev:turbo": "turbo dev",
++    "dev:api": "turbo dev --filter=api",
++    "dev:web": "turbo dev --filter=web",
++    "dev:entitlement": "cd apps/entitlement && pnpm dev",
+     "build": "turbo build",
+     "build:api": "turbo build --filter=api",
+     "build:web": "turbo build --filter=web",
++    "build:entitlement": "cd apps/entitlement && pnpm build",
+     "start:prod": "NODE_ENV=production node apps/api/dist/main.js",
+-    "dev:api": "turbo dev --filter=api",
+-    "dev:web": "turbo dev --filter=web",
++    "start:entitlement": "cd apps/entitlement && pnpm start",
+     "docker:build": "docker build -t betterdb/monitor .",
+     "docker:build:multiarch": "docker buildx build --platform linux/amd64,linux/arm64 -t betterdb/monitor:latest .",
+     "docker:run": "docker run -p 3001:3001 --env-file .env betterdb/monitor",
+diff --git a/proprietary/license/index.ts b/proprietary/license/index.ts
+new file mode 100644
+index 0000000..6efedbd
+--- /dev/null
++++ b/proprietary/license/index.ts
+@@ -0,0 +1,7 @@
++export { LicenseModule } from './license.module';
++export { LicenseService } from './license.service';
++export { LicenseGuard } from './license.guard';
++export { LicenseController } from './license.controller';
++export { RequiresFeature } from './requires-feature.decorator';
++export { Tier, Feature, TIER_FEATURES, TIER_INSTANCE_LIMITS } from './shared-types';
++export type { EntitlementResponse, EntitlementRequest } from './shared-types';
+diff --git a/proprietary/license/license.controller.ts b/proprietary/license/license.controller.ts
+new file mode 100644
+index 0000000..75aacaa
+--- /dev/null
++++ b/proprietary/license/license.controller.ts
+@@ -0,0 +1,45 @@
++import { Controller, Get, Post, HttpCode } from '@nestjs/common';
++import { LicenseService } from './license.service';
++import { Feature } from './types';
++
++@Controller('license')
++export class LicenseController {
++  constructor(private readonly license: LicenseService) {}
++
++  @Get('status')
++  getStatus() {
++    const info = this.license.getLicenseInfo();
++    return {
++      tier: info.tier,
++      valid: info.valid,
++      features: info.features,
++      instanceLimit: info.instanceLimit,
++      expiresAt: info.expiresAt,
++      customer: info.customer,
++    };
++  }
++
++  @Get('features')
++  getFeatures() {
++    const info = this.license.getLicenseInfo();
++    const allFeatures = Object.values(Feature);
++    return {
++      tier: info.tier,
++      features: allFeatures.map(f => ({
++        id: f,
++        enabled: info.features.includes(f),
++      })),
++    };
++  }
++
++  @Post('refresh')
++  @HttpCode(200)
++  async refresh() {
++    const info = await this.license.refreshLicense();
++    return {
++      tier: info.tier,
++      valid: info.valid,
++      refreshedAt: new Date().toISOString(),
++    };
++  }
++}
+diff --git a/proprietary/license/license.guard.ts b/proprietary/license/license.guard.ts
+index cad5e46..965d0ba 100644
+--- a/proprietary/license/license.guard.ts
++++ b/proprietary/license/license.guard.ts
+@@ -1,28 +1,33 @@
+ import { Injectable, CanActivate, ExecutionContext, HttpException, HttpStatus } from '@nestjs/common';
+ import { Reflector } from '@nestjs/core';
+ import { LicenseService } from './license.service';
++import { Feature } from './types';
++
++const ENTERPRISE_ONLY_FEATURES = [Feature.AI_ASSISTANT, Feature.SSO_SAML, Feature.RBAC];
+ 
+ @Injectable()
+ export class LicenseGuard implements CanActivate {
+   constructor(
+     private readonly reflector: Reflector,
+     private readonly license: LicenseService,
+-  ) { }
++  ) {}
+ 
+   canActivate(context: ExecutionContext): boolean {
+-    const requiredFeature = this.reflector.get<string>('requiredFeature', context.getHandler());
+-
+-    if (!requiredFeature) {
+-      return true;
+-    }
++    const requiredFeature = this.reflector.get<Feature | string>('requiredFeature', context.getHandler());
++    if (!requiredFeature) return true;
+ 
+     if (!this.license.hasFeature(requiredFeature)) {
++      const requiredTier = ENTERPRISE_ONLY_FEATURES.includes(requiredFeature as Feature)
++        ? 'Enterprise'
++        : 'Pro or Enterprise';
++
+       throw new HttpException(
+         {
+           statusCode: HttpStatus.PAYMENT_REQUIRED,
+-          message: `This feature requires a Pro or Enterprise license`,
++          message: `This feature requires a ${requiredTier} license`,
+           feature: requiredFeature,
+           currentTier: this.license.getLicenseTier(),
++          requiredTier,
+           upgradeUrl: 'https://betterdb.dev/pricing',
+         },
+         HttpStatus.PAYMENT_REQUIRED,
+diff --git a/proprietary/license/license.module.ts b/proprietary/license/license.module.ts
+index dec7eef..69ef063 100644
+--- a/proprietary/license/license.module.ts
++++ b/proprietary/license/license.module.ts
+@@ -1,9 +1,13 @@
+ import { Module, Global } from '@nestjs/common';
++import { ConfigModule } from '@nestjs/config';
+ import { LicenseService } from './license.service';
+ import { LicenseGuard } from './license.guard';
++import { LicenseController } from './license.controller';
+ 
+ @Global()
+ @Module({
++  imports: [ConfigModule],
++  controllers: [LicenseController],
+   providers: [LicenseService, LicenseGuard],
+   exports: [LicenseService, LicenseGuard],
+ })
+diff --git a/proprietary/license/license.service.ts b/proprietary/license/license.service.ts
+index 22c6b94..5ac8d03 100644
+--- a/proprietary/license/license.service.ts
++++ b/proprietary/license/license.service.ts
+@@ -1,41 +1,151 @@
+-import { Injectable } from '@nestjs/common';
++import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+ import { ConfigService } from '@nestjs/config';
++import { randomUUID } from 'crypto';
++import { Tier, Feature, TIER_FEATURES, TIER_INSTANCE_LIMITS, EntitlementResponse } from './types';
++
++interface CachedEntitlement {
++  response: EntitlementResponse;
++  cachedAt: number;
++}
+ 
+ @Injectable()
+-export class LicenseService {
+-  private readonly licenseKey: string;
++export class LicenseService implements OnModuleInit {
++  private readonly logger = new Logger(LicenseService.name);
++  private readonly licenseKey: string | null;
++  private readonly entitlementUrl: string;
++  private readonly instanceId: string;
++  private readonly cacheTtlMs: number;
++  private readonly maxStaleCacheMs: number;
++  private readonly timeoutMs: number;
++  private readonly devMode: boolean;
++
++  private cache: CachedEntitlement | null = null;
+ 
+   constructor(private readonly config: ConfigService) {
+-    this.licenseKey = process.env.BETTERDB_LICENSE_KEY || 'community';
++    this.licenseKey = process.env.BETTERDB_LICENSE_KEY || null;
++    this.entitlementUrl = process.env.ENTITLEMENT_URL || 'https://api.betterdb.com/v1/entitlements';
++    this.instanceId = process.env.INSTANCE_ID || randomUUID();
++    this.cacheTtlMs = parseInt(process.env.LICENSE_CACHE_TTL_MS || '3600000', 10);
++    this.maxStaleCacheMs = parseInt(process.env.LICENSE_MAX_STALE_MS || '604800000', 10);
++    this.timeoutMs = parseInt(process.env.LICENSE_TIMEOUT_MS || '10000', 10);
++    this.devMode = process.env.NODE_ENV === 'development';
++
++    if (!process.env.INSTANCE_ID) {
++      this.logger.warn('INSTANCE_ID not set - auto-generated ID will change on restart');
++    }
+   }
+ 
+-  hasFeature(feature: string): boolean {
+-    const tier = this.getLicenseTier();
+-    const featureMap: Record<string, string[]> = {
+-      keyAnalytics: ['pro', 'enterprise', 'dev-pro', 'dev-enterprise'],
+-      aiAssistant: ['enterprise', 'dev-enterprise'],
++  async onModuleInit() {
++    await this.validateLicense();
++  }
++
++  async validateLicense(): Promise<EntitlementResponse> {
++    if (!this.licenseKey) {
++      this.logger.log('No license key provided, running in Community tier');
++      return this.getCommunityEntitlement();
++    }
++
++    if (this.devMode && this.licenseKey.startsWith('dev-')) {
++      return this.getDevEntitlement(this.licenseKey);
++    }
++
++    if (this.cache && Date.now() - this.cache.cachedAt < this.cacheTtlMs) {
++      this.logger.debug('Using cached entitlement');
++      return this.cache.response;
++    }
++
++    try {
++      const response = await this.checkOnline();
++      this.cache = { response, cachedAt: Date.now() };
++      this.logger.log(`License validated: ${response.tier}`);
++      return response;
++    } catch (error) {
++      this.logger.error(`License validation failed: ${(error as Error).message}`);
++
++      if (this.cache && Date.now() - this.cache.cachedAt < this.maxStaleCacheMs) {
++        this.logger.warn('Using stale cache');
++        return this.cache.response;
++      }
++
++      return this.getCommunityEntitlement('Validation failed');
++    }
++  }
++
++  private async checkOnline(): Promise<EntitlementResponse> {
++    const payload = {
++      licenseKey: this.licenseKey,
++      instanceId: this.instanceId,
++      stats: await this.collectStats(),
+     };
+ 
+-    const requiredTiers = featureMap[feature];
+-    if (!requiredTiers) return true;
+-    return requiredTiers.includes(tier);
++    const controller = new AbortController();
++    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
++
++    try {
++      const response = await fetch(this.entitlementUrl, {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify(payload),
++        signal: controller.signal,
++      });
++
++      if (!response.ok) {
++        throw new Error(`Entitlement server returned ${response.status}`);
++      }
++
++      return response.json();
++    } finally {
++      clearTimeout(timeout);
++    }
++  }
++
++  private async collectStats(): Promise<Record<string, any>> {
++    return {
++      version: process.env.npm_package_version || 'unknown',
++      uptime: process.uptime(),
++      nodeVersion: process.version,
++      platform: process.platform,
++    };
+   }
+ 
+-  getLicenseTier(): string {
+-    if (this.licenseKey === 'community') return 'community';
+-    if (this.licenseKey.startsWith('dev-')) return this.licenseKey;
+-    return 'pro';
++  private getCommunityEntitlement(error?: string): EntitlementResponse {
++    return {
++      valid: !error,
++      tier: Tier.community,
++      features: TIER_FEATURES[Tier.community],
++      instanceLimit: TIER_INSTANCE_LIMITS[Tier.community],
++      expiresAt: null,
++      error,
++    };
+   }
+ 
+-  getLicenseInfo() {
+-    const tier = this.getLicenseTier();
++  private getDevEntitlement(key: string): EntitlementResponse {
++    const tier = key.includes('enterprise') ? Tier.enterprise : Tier.pro;
++    this.logger.log(`Dev mode: ${tier} tier`);
+     return {
++      valid: true,
+       tier,
+-      features: {
+-        keyAnalytics: this.hasFeature('keyAnalytics'),
+-        aiAssistant: this.hasFeature('aiAssistant'),
+-      },
+-      isValid: tier !== 'community',
++      features: TIER_FEATURES[tier],
++      instanceLimit: TIER_INSTANCE_LIMITS[tier],
++      expiresAt: null,
+     };
+   }
++
++  hasFeature(feature: Feature | string): boolean {
++    const entitlement = this.cache?.response || this.getCommunityEntitlement();
++    return entitlement.features.includes(feature as Feature);
++  }
++
++  getLicenseTier(): Tier {
++    return this.cache?.response?.tier || Tier.community;
++  }
++
++  getLicenseInfo(): EntitlementResponse {
++    return this.cache?.response || this.getCommunityEntitlement();
++  }
++
++  async refreshLicense(): Promise<EntitlementResponse> {
++    this.cache = null;
++    return this.validateLicense();
++  }
+ }
+diff --git a/proprietary/license/requires-feature.decorator.ts b/proprietary/license/requires-feature.decorator.ts
+index 179fd27..1f46067 100644
+--- a/proprietary/license/requires-feature.decorator.ts
++++ b/proprietary/license/requires-feature.decorator.ts
+@@ -1,3 +1,4 @@
+ import { SetMetadata } from '@nestjs/common';
++import { Feature } from './types';
+ 
+-export const RequiresFeature = (feature: string) => SetMetadata('requiredFeature', feature);
++export const RequiresFeature = (feature: Feature | string) => SetMetadata('requiredFeature', feature);
+diff --git a/proprietary/license/shared-types.ts b/proprietary/license/shared-types.ts
+new file mode 100644
+index 0000000..e8797dd
+--- /dev/null
++++ b/proprietary/license/shared-types.ts
+@@ -0,0 +1,54 @@
++export enum Tier {
++  community = 'community',
++  pro = 'pro',
++  enterprise = 'enterprise',
++}
++
++export enum Feature {
++  KEY_ANALYTICS = 'keyAnalytics',
++  AI_ASSISTANT = 'aiAssistant',
++  HISTORICAL_DATA = 'historicalData',
++  ALERTING = 'alerting',
++  AUDIT_EXPORT = 'auditExport',
++  SSO_SAML = 'ssoSaml',
++  RBAC = 'rbac',
++  MULTI_INSTANCE = 'multiInstance',
++}
++
++export const TIER_FEATURES: Record<Tier, Feature[]> = {
++  [Tier.community]: [],
++  [Tier.pro]: [
++    Feature.KEY_ANALYTICS,
++    Feature.HISTORICAL_DATA,
++    Feature.ALERTING,
++    Feature.AUDIT_EXPORT,
++    Feature.MULTI_INSTANCE,
++  ],
++  [Tier.enterprise]: Object.values(Feature),
++};
++
++export const TIER_INSTANCE_LIMITS: Record<Tier, number> = {
++  [Tier.community]: 1,
++  [Tier.pro]: 10,
++  [Tier.enterprise]: Infinity,
++};
++
++export interface EntitlementResponse {
++  valid: boolean;
++  tier: Tier;
++  features: Feature[];
++  instanceLimit: number;
++  expiresAt: string | null;
++  customer?: {
++    id: string;
++    name: string | null;
++    email: string;
++  };
++  error?: string;
++}
++
++export interface EntitlementRequest {
++  licenseKey: string;
++  instanceId?: string;
++  stats?: Record<string, any>;
++}
+diff --git a/proprietary/license/types.ts b/proprietary/license/types.ts
+new file mode 100644
+index 0000000..01e92e9
+--- /dev/null
++++ b/proprietary/license/types.ts
+@@ -0,0 +1,8 @@
++export {
++  Tier,
++  Feature,
++  TIER_FEATURES,
++  TIER_INSTANCE_LIMITS,
++  type EntitlementResponse,
++  type EntitlementRequest,
++} from './shared-types';

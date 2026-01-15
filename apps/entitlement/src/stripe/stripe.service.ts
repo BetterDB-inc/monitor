@@ -4,7 +4,7 @@ import Stripe from 'stripe';
 import { PrismaService } from '../prisma/prisma.service';
 import { Tier, SubscriptionStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
-import { TIER_INSTANCE_LIMITS } from '../../../../proprietary/license/shared-types';
+import { TIER_INSTANCE_LIMITS } from '@betterdb/shared';
 
 const MAX_KEY_GENERATION_ATTEMPTS = 5;
 
