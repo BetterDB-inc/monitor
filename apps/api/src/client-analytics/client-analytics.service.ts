@@ -9,6 +9,7 @@ import {
   ClientAnalyticsStats,
 } from '../common/interfaces/storage-port.interface';
 import { PrometheusService } from '../prometheus/prometheus.service';
+import { RetentionService } from '@proprietary/license';
 
 @Injectable()
 export class ClientAnalyticsService implements OnModuleInit, OnModuleDestroy {
@@ -22,6 +23,7 @@ export class ClientAnalyticsService implements OnModuleInit, OnModuleDestroy {
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     private configService: ConfigService,
     private prometheusService: PrometheusService,
+    private retention: RetentionService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -107,15 +109,24 @@ export class ClientAnalyticsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getSnapshots(options?: ClientSnapshotQueryOptions): Promise<StoredClientSnapshot[]> {
-    return this.storage.getClientSnapshots(options);
+    const retentionCutoff = this.retention.getDataRetentionCutoff().getTime();
+    const enforcedOptions = {
+      ...options,
+      startTime: Math.max(options?.startTime || 0, retentionCutoff),
+    };
+    return this.storage.getClientSnapshots(enforcedOptions);
   }
 
   async getTimeSeries(startTime: number, endTime: number, bucketSizeMs?: number): Promise<ClientTimeSeriesPoint[]> {
-    return this.storage.getClientTimeSeries(startTime, endTime, bucketSizeMs);
+    const retentionCutoff = this.retention.getDataRetentionCutoff().getTime();
+    const enforcedStartTime = Math.max(startTime, retentionCutoff);
+    return this.storage.getClientTimeSeries(enforcedStartTime, endTime, bucketSizeMs);
   }
 
   async getStats(startTime?: number, endTime?: number): Promise<ClientAnalyticsStats> {
-    return this.storage.getClientAnalyticsStats(startTime, endTime);
+    const retentionCutoff = this.retention.getDataRetentionCutoff().getTime();
+    const enforcedStartTime = startTime ? Math.max(startTime, retentionCutoff) : retentionCutoff;
+    return this.storage.getClientAnalyticsStats(enforcedStartTime, endTime);
   }
 
   async getConnectionHistory(
@@ -123,7 +134,9 @@ export class ClientAnalyticsService implements OnModuleInit, OnModuleDestroy {
     startTime?: number,
     endTime?: number,
   ): Promise<StoredClientSnapshot[]> {
-    return this.storage.getClientConnectionHistory(identifier, startTime, endTime);
+    const retentionCutoff = this.retention.getDataRetentionCutoff().getTime();
+    const enforcedStartTime = startTime ? Math.max(startTime, retentionCutoff) : retentionCutoff;
+    return this.storage.getClientConnectionHistory(identifier, enforcedStartTime, endTime);
   }
 
   async cleanup(): Promise<number> {

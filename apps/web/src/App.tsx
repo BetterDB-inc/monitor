@@ -1,7 +1,11 @@
 import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
+import { Tooltip } from 'react-tooltip';
 import { metricsApi } from './api/metrics';
 import { CapabilitiesContext } from './hooks/useCapabilities';
+import { LicenseContext, useLicenseStatus, useLicense } from './hooks/useLicense';
+import { UpgradePromptContext, useUpgradePromptState } from './hooks/useUpgradePrompt';
+import { UpgradePrompt } from './components/UpgradePrompt';
 import { Dashboard } from './pages/Dashboard';
 import { SlowLog } from './pages/SlowLog';
 import { Latency } from './pages/Latency';
@@ -13,9 +17,12 @@ import { AiAssistant } from './pages/AiAssistant';
 import { AnomalyDashboard } from './pages/AnomalyDashboard';
 import { KeyAnalytics } from './pages/KeyAnalytics';
 import type { DatabaseCapabilities } from './types/metrics';
+import { Feature } from '@betterdb/shared';
 
 function App() {
   const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(null);
+  const { license } = useLicenseStatus();
+  const upgradePromptState = useUpgradePromptState();
 
   useEffect(() => {
     metricsApi.getHealth()
@@ -29,9 +36,20 @@ function App() {
 
   return (
     <BrowserRouter>
-      <CapabilitiesContext.Provider value={capabilities}>
-        <AppLayout />
-      </CapabilitiesContext.Provider>
+      <UpgradePromptContext.Provider value={upgradePromptState}>
+        <LicenseContext.Provider value={license}>
+          <CapabilitiesContext.Provider value={capabilities}>
+            <AppLayout />
+            <Tooltip id="license-tooltip" />
+            {upgradePromptState.error && (
+              <UpgradePrompt
+                error={upgradePromptState.error}
+                onDismiss={upgradePromptState.dismissUpgradePrompt}
+              />
+            )}
+          </CapabilitiesContext.Provider>
+        </LicenseContext.Provider>
+      </UpgradePromptContext.Provider>
     </BrowserRouter>
   );
 }
@@ -64,10 +82,18 @@ function AppLayout() {
           <NavItem to="/client-analytics/deep-dive" active={location.pathname === '/client-analytics/deep-dive'}>
             Analytics Deep Dive
           </NavItem>
-          <NavItem to="/anomalies" active={location.pathname === '/anomalies'}>
+          <NavItem
+            to="/anomalies"
+            active={location.pathname === '/anomalies'}
+            requiredFeature={Feature.ANOMALY_DETECTION}
+          >
             Anomaly Detection
           </NavItem>
-          <NavItem to="/key-analytics" active={location.pathname === '/key-analytics'}>
+          <NavItem
+            to="/key-analytics"
+            active={location.pathname === '/key-analytics'}
+            requiredFeature={Feature.KEY_ANALYTICS}
+          >
             Key Analytics
           </NavItem>
           <NavItem to="/audit" active={location.pathname === '/audit'}>
@@ -108,9 +134,32 @@ interface NavItemProps {
   children: React.ReactNode;
   active: boolean;
   to: string;
+  requiredFeature?: Feature;
 }
 
-function NavItem({ children, active, to }: NavItemProps) {
+function NavItem({ children, active, to, requiredFeature }: NavItemProps) {
+  const { hasFeature, tier } = useLicense();
+
+  const isLocked = requiredFeature && !hasFeature(requiredFeature);
+  const tooltipText = isLocked
+    ? `This feature requires a Pro or Enterprise license. Current tier: ${tier}`
+    : undefined;
+
+  if (isLocked) {
+    return (
+      <div
+        data-tooltip-id="license-tooltip"
+        data-tooltip-content={tooltipText}
+        className="block w-full rounded-md px-3 py-2 text-sm opacity-50 cursor-not-allowed flex items-center justify-between"
+      >
+        <span>{children}</span>
+        <span className="text-[10px] px-1.5 py-0.5 bg-yellow-500 text-yellow-950 rounded font-medium">
+          Pro+
+        </span>
+      </div>
+    );
+  }
+
   return (
     <Link
       to={to}

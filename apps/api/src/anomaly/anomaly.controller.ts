@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Query, Param, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Post, Query, Param, HttpCode, HttpStatus, UseGuards } from '@nestjs/common';
 import { AnomalyService } from './anomaly.service';
 import {
   AnomalyEvent,
@@ -8,12 +8,15 @@ import {
   MetricType,
   AnomalyPattern,
 } from './types';
+import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/license';
 
 @Controller('anomaly')
 export class AnomalyController {
   constructor(private readonly anomalyService: AnomalyService) {}
 
   @Get('events')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
   async getEvents(
     @Query('limit') limit?: string,
     @Query('metricType') metricType?: MetricType,
@@ -37,6 +40,8 @@ export class AnomalyController {
   }
 
   @Get('groups')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
   async getGroups(
     @Query('limit') limit?: string,
     @Query('pattern') pattern?: AnomalyPattern,
@@ -59,6 +64,8 @@ export class AnomalyController {
   }
 
   @Get('summary')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
   async getSummary(
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
@@ -73,11 +80,15 @@ export class AnomalyController {
   }
 
   @Get('buffers')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
   getBuffers(): BufferStats[] {
     return this.anomalyService.getBufferStats();
   }
 
   @Post('events/:id/resolve')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
   @HttpCode(HttpStatus.OK)
   resolveEvent(@Param('id') id: string): { success: boolean } {
     const success = this.anomalyService.resolveAnomaly(id);
@@ -85,6 +96,8 @@ export class AnomalyController {
   }
 
   @Post('groups/:correlationId/resolve')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
   @HttpCode(HttpStatus.OK)
   resolveGroup(@Param('correlationId') correlationId: string): { success: boolean } {
     const success = this.anomalyService.resolveGroup(correlationId);
@@ -92,6 +105,8 @@ export class AnomalyController {
   }
 
   @Post('events/clear-resolved')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
   @HttpCode(HttpStatus.OK)
   clearResolved(): { cleared: number } {
     const cleared = this.anomalyService.clearResolved();

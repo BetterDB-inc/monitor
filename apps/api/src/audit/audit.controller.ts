@@ -2,6 +2,7 @@ import { Controller, Get, Query, HttpException, HttpStatus, Inject } from '@nest
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { StoragePort, StoredAclEntry, AuditStats } from '../common/interfaces/storage-port.interface';
 import { StoredAclEntryDto, AuditStatsDto } from '../common/dto/audit.dto';
+import { RetentionService } from '@proprietary/license';
 
 @ApiTags('audit')
 @Controller('audit')
@@ -9,7 +10,14 @@ export class AuditController {
   constructor(
     @Inject('STORAGE_CLIENT')
     private readonly storageClient: StoragePort,
+    private readonly retention: RetentionService,
   ) {}
+
+  private enforceAclRetention(startTime?: string): number {
+    const retentionCutoff = Math.floor(this.retention.getAclRetentionCutoff().getTime() / 1000);
+    const requestedStartTime = startTime ? parseInt(startTime, 10) : undefined;
+    return requestedStartTime ? Math.max(requestedStartTime, retentionCutoff) : retentionCutoff;
+  }
 
   @Get('entries')
   @ApiOperation({ summary: 'Get audit entries', description: 'Retrieve persisted ACL audit log entries with optional filters' })
@@ -33,7 +41,7 @@ export class AuditController {
       const options = {
         username,
         reason,
-        startTime: startTime ? parseInt(startTime, 10) : undefined,
+        startTime: this.enforceAclRetention(startTime),
         endTime: endTime ? parseInt(endTime, 10) : undefined,
         limit: limit ? parseInt(limit, 10) : undefined,
         offset: offset ? parseInt(offset, 10) : undefined,
@@ -57,7 +65,7 @@ export class AuditController {
   async getStats(@Query('startTime') startTime?: string, @Query('endTime') endTime?: string): Promise<AuditStats> {
     try {
       return await this.storageClient.getAuditStats(
-        startTime ? parseInt(startTime, 10) : undefined,
+        this.enforceAclRetention(startTime),
         endTime ? parseInt(endTime, 10) : undefined,
       );
     } catch (error) {
@@ -85,7 +93,7 @@ export class AuditController {
     try {
       const options = {
         reason: 'auth',
-        startTime: startTime ? parseInt(startTime, 10) : undefined,
+        startTime: this.enforceAclRetention(startTime),
         endTime: endTime ? parseInt(endTime, 10) : undefined,
         limit: limit ? parseInt(limit, 10) : undefined,
         offset: offset ? parseInt(offset, 10) : undefined,
@@ -124,7 +132,7 @@ export class AuditController {
 
       const options = {
         username,
-        startTime: startTime ? parseInt(startTime, 10) : undefined,
+        startTime: this.enforceAclRetention(startTime),
         endTime: endTime ? parseInt(endTime, 10) : undefined,
         limit: limit ? parseInt(limit, 10) : undefined,
         offset: offset ? parseInt(offset, 10) : undefined,

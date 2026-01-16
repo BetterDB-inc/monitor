@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
+import { PaymentRequiredError } from '../api/client';
+import { useUpgradePrompt } from './useUpgradePrompt';
 
 interface UsePollingOptions<T> {
   fetcher: () => Promise<T>;
@@ -12,6 +14,7 @@ export function usePolling<T>({ fetcher, interval = 5000, enabled = true }: UseP
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const fetcherRef = useRef(fetcher);
+  const { showUpgradePrompt } = useUpgradePrompt();
 
   useEffect(() => {
     fetcherRef.current = fetcher;
@@ -29,6 +32,11 @@ export function usePolling<T>({ fetcher, interval = 5000, enabled = true }: UseP
         setData(result);
         setLastUpdated(new Date());
       } catch (e) {
+        if (e instanceof PaymentRequiredError) {
+          showUpgradePrompt(e);
+          setError(e);
+          return;
+        }
         setError(e instanceof Error ? e : new Error('Unknown error'));
       } finally {
         setLoading(false);
@@ -38,7 +46,7 @@ export function usePolling<T>({ fetcher, interval = 5000, enabled = true }: UseP
     refresh();
     const timer = setInterval(refresh, interval);
     return () => clearInterval(timer);
-  }, [interval, enabled]);
+  }, [interval, enabled, showUpgradePrompt]);
 
   const manualRefresh = async () => {
     try {
@@ -47,6 +55,11 @@ export function usePolling<T>({ fetcher, interval = 5000, enabled = true }: UseP
       setData(result);
       setLastUpdated(new Date());
     } catch (e) {
+      if (e instanceof PaymentRequiredError) {
+        showUpgradePrompt(e);
+        setError(e);
+        return;
+      }
       setError(e instanceof Error ? e : new Error('Unknown error'));
     }
   };

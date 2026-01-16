@@ -15,6 +15,7 @@ import {
   SlotStats,
   ConfigGetResponse,
 } from '../types/metrics.types';
+import type Valkey from 'iovalkey';
 
 export interface DatabaseCapabilities {
   dbType: 'valkey' | 'redis';
@@ -61,5 +62,5 @@ export interface DatabasePort {
   getConfigValues(pattern: string): Promise<ConfigGetResponse>;
   getDbSize(): Promise<number>;
   getLastSaveTime(): Promise<number>;
-  getClient(): unknown;
+  getClient(): Valkey;
 }

@@ -1,0 +1,97 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("ENTITLEMENT_DATABASE_URL")
+}
+
+enum Tier {
+  community
+  pro
+  enterprise
+}
+
+enum SubscriptionStatus {
+  active
+  canceled
+  past_due
+  trialing
+  incomplete
+  incomplete_expired
+  unpaid
+  paused
+}
+
+model Customer {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  name           String?
+  stripeId       String?  @unique @map("stripe_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  licenses       License[]
+  subscriptions  Subscription[]
+
+  @@map("customers")
+}
+
+model License {
+  id             String   @id @default(cuid())
+  key            String   @unique
+  customerId     String   @map("customer_id")
+  tier           Tier
+  instanceLimit  Int      @default(1) @map("instance_limit")
+  expiresAt      DateTime? @map("expires_at")
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  validations    LicenseValidation[]
+
+  @@index([customerId])
+  @@index([key])
+  @@index([active])
+  @@map("licenses")
+}
+
+model Subscription {
+  id                String   @id @default(cuid())
+  customerId        String   @map("customer_id")
+  stripeSubscriptionId String @unique @map("stripe_subscription_id")
+  stripePriceId     String   @map("stripe_price_id")
+  stripeEventId     String?  @unique @map("stripe_event_id")
+  tier              Tier
+  status            SubscriptionStatus
+  currentPeriodStart DateTime @map("current_period_start")
+  currentPeriodEnd   DateTime @map("current_period_end")
+  cancelAtPeriodEnd  Boolean  @default(false) @map("cancel_at_period_end")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([stripeSubscriptionId])
+  @@map("subscriptions")
+}
+
+model LicenseValidation {
+  id          String   @id @default(cuid())
+  licenseId   String   @map("license_id")
+  instanceId  String   @map("instance_id")
+  version     String?
+  platform    String?
+  nodeVersion String?  @map("node_version")
+  validatedAt DateTime @default(now()) @map("validated_at")
+
+  license     License  @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+
+  @@index([licenseId])
+  @@index([instanceId])
+  @@index([validatedAt])
+  @@map("license_validations")
+}

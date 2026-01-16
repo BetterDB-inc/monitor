@@ -2,9 +2,11 @@ import { useState, useMemo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
+import { useLicense } from '../hooks/useLicense';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Badge } from '../components/ui/badge';
+import { Feature } from '@betterdb/shared';
 import {
   AreaChart,
   Area,
@@ -51,6 +53,8 @@ const CHART_COLORS = ['hsl(var(--primary))', '#8884d8', '#82ca9d', '#ffc658', '#
 export function ClientAnalyticsDeepDive() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [activeTab, setActiveTab] = useState<string>('commands');
+  const { hasFeature } = useLicense();
+  const hasAnomalyDetection = hasFeature(Feature.ANOMALY_DETECTION);
 
   const timeRangeParams = useMemo(() => {
     const now = Date.now();
@@ -90,10 +94,11 @@ export function ClientAnalyticsDeepDive() {
     interval: 60000,
   });
 
-  // Fetch anomaly summary
+  // Fetch anomaly summary (only if user has the feature)
   const { data: anomalySummary } = usePolling<any>({
     fetcher: () => metricsApi.getAnomalySummary(),
     interval: 5000,
+    enabled: hasAnomalyDetection,
   });
 
   // Conditionally fetch based on active tab

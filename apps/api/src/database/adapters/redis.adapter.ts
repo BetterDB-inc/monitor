@@ -16,6 +16,7 @@ import {
   SlotStats,
   ConfigGetResponse,
 } from '../../common/types/metrics.types';
+import type Valkey from 'iovalkey';
 
 export interface RedisAdapterConfig {
   host: string;
@@ -179,7 +180,7 @@ export class RedisAdapter implements DatabasePort {
     throw new Error('Redis adapter not yet implemented');
   }
 
-  getClient(): unknown {
+  getClient(): Valkey {
     throw new Error('Redis adapter not yet implemented');
   }
 }

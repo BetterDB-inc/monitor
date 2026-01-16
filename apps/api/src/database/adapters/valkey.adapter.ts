@@ -414,7 +414,7 @@ export class ValkeyAdapter implements DatabasePort {
     return await this.client.lastsave();
   }
 
-  getClient(): unknown {
+  getClient(): Valkey {
     return this.client;
   }
 }
