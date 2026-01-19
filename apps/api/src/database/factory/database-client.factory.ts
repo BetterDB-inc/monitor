@@ -1,8 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
-import { ValkeyAdapter } from '../adapters/valkey.adapter';
-import { RedisAdapter } from '../adapters/redis.adapter';
+import { UnifiedDatabaseAdapter } from '../adapters/unified.adapter';
 import { DatabaseConfig } from '../../config/configuration';
 
 @Injectable()
@@ -15,25 +14,10 @@ export class DatabaseClientFactory {
       throw new Error('Database configuration not found');
     }
 
-    const { host, port, username, password, type } = dbConfig;
+    const { host, port, username, password } = dbConfig;
 
-    if (type === 'valkey') {
-      return new ValkeyAdapter({ host, port, username, password });
-    }
-
-    if (type === 'redis') {
-      return new RedisAdapter({ host, port, username, password });
-    }
-
-    return await this.autoDetect({ host, port, username, password });
-  }
-
-  private async autoDetect(config: {
-    host: string;
-    port: number;
-    username: string;
-    password: string;
-  }): Promise<DatabasePort> {
-    return new ValkeyAdapter(config);
+    // The UnifiedDatabaseAdapter works for both Valkey and Redis
+    // It auto-detects the database type during connection
+    return new UnifiedDatabaseAdapter({ host, port, username, password });
   }
 }

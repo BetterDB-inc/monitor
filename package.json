@@ -28,6 +28,12 @@
     "docs:index:valkey": "pnpm --filter api docs:index:valkey",
     "docs:index:redis": "pnpm --filter api docs:index:redis",
     "docs:clean": "pnpm --filter api docs:clean",
+    "test": "pnpm --filter api test",
+    "test:watch": "pnpm --filter api test:watch",
+    "test:cov": "pnpm --filter api test:cov",
+    "test:integration": "pnpm --filter api test:integration",
+    "test:integration:redis": "TEST_DB_PORT=6382 pnpm --filter api test:integration:redis",
+    "test:integration:valkey": "TEST_DB_PORT=6380 pnpm --filter api test:integration:valkey",
     "lint": "turbo lint",
     "clean": "turbo clean && rm -rf node_modules"
   },

@@ -26,10 +26,17 @@ services:
     image: redis:8-alpine
     container_name: betterdb-monitor-redis
     ports:
-      - "6381:6379"
-    command: redis-server --requirepass devpassword
+      - "6382:6379"
+    command: >
+      redis-server
+      --requirepass devpassword
+      --appendonly yes
+      --slowlog-log-slower-than 10000
+      --slowlog-max-len 128
+      --latency-monitor-threshold 100
+      --acllog-max-len 128
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "devpassword", "ping"]
       interval: 10s
       timeout: 3s
       retries: 3

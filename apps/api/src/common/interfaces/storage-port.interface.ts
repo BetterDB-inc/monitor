@@ -16,6 +16,9 @@ export type {
   SpikeDetectionResponse,
   AppSettings,
   SettingsUpdateRequest,
+  KeyPatternSnapshot,
+  KeyPatternQueryOptions,
+  KeyAnalyticsSummary,
 } from '@betterdb/shared';
 import type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/shared';
 import type {
@@ -35,6 +38,9 @@ import type {
   SpikeDetectionResponse,
   AppSettings,
   SettingsUpdateRequest,
+  KeyPatternSnapshot,
+  KeyPatternQueryOptions,
+  KeyAnalyticsSummary,
 } from '@betterdb/shared';
 
 // Anomaly Event Types
@@ -90,12 +96,6 @@ export interface AnomalyStats {
   byPattern: Record<string, number>;
   unresolvedCount: number;
 }
-
-export {
-  KeyPatternSnapshot,
-  KeyPatternQueryOptions,
-  KeyAnalyticsSummary,
-} from '@valkey-monitor/shared';
 
 export interface StoragePort {
   initialize(): Promise<void>;

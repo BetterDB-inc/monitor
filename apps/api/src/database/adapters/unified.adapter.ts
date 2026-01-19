@@ -1,4 +1,5 @@
 import Valkey from 'iovalkey';
+import { Logger } from '@nestjs/common';
 import { DatabasePort, DatabaseCapabilities } from '../../common/interfaces/database-port.interface';
 import { InfoParser } from '../parsers/info.parser';
 import { MetricsParser } from '../parsers/metrics.parser';
@@ -21,19 +22,20 @@ import {
   ConfigGetResponse,
 } from '../../common/types/metrics.types';
 
-export interface ValkeyAdapterConfig {
+export interface UnifiedDatabaseAdapterConfig {
   host: string;
   port: number;
   username: string;
   password: string;
 }
 
-export class ValkeyAdapter implements DatabasePort {
+export class UnifiedDatabaseAdapter implements DatabasePort {
+  private readonly logger = new Logger(UnifiedDatabaseAdapter.name);
   private client: Valkey;
   private connected: boolean = false;
   private capabilities: DatabaseCapabilities | null = null;
 
-  constructor(config: ValkeyAdapterConfig) {
+  constructor(config: UnifiedDatabaseAdapterConfig) {
     this.client = new Valkey({
       host: config.host,
       port: config.port,
@@ -48,7 +50,8 @@ export class ValkeyAdapter implements DatabasePort {
       this.connected = true;
     });
 
-    this.client.on('error', () => {
+    this.client.on('error', (err) => {
+      this.logger.error(`Connection error: ${err.message}`);
       this.connected = false;
     });
 
@@ -59,11 +62,15 @@ export class ValkeyAdapter implements DatabasePort {
 
   async connect(): Promise<void> {
     try {
+      this.logger.log(`Connecting to ${this.client.options.host}:${this.client.options.port}...`);
       await this.client.connect();
       this.connected = true;
+      this.logger.log('Connected successfully');
       await this.detectCapabilities();
+      this.logger.log(`Detected ${this.capabilities?.dbType} ${this.capabilities?.version}`);
     } catch (error) {
       this.connected = false;
+      this.logger.error(`Connection failed: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
   }
@@ -149,12 +156,9 @@ export class ValkeyAdapter implements DatabasePort {
       throw new Error('COMMANDLOG not supported on this database version');
     }
 
-    let rawLog: unknown[];
-    if (type) {
-      rawLog = (await this.client.call('COMMANDLOG', 'GET', count, type)) as unknown[];
-    } else {
-      rawLog = (await this.client.call('COMMANDLOG', 'GET', count)) as unknown[];
-    }
+    // COMMANDLOG requires a type parameter, default to 'slow' if not provided
+    const logType = type || 'slow';
+    const rawLog = (await this.client.call('COMMANDLOG', 'GET', count, logType)) as unknown[];
 
     return MetricsParser.parseCommandLog(rawLog);
   }
@@ -164,11 +168,9 @@ export class ValkeyAdapter implements DatabasePort {
       throw new Error('COMMANDLOG not supported on this database version');
     }
 
-    if (type) {
-      return (await this.client.call('COMMANDLOG', 'LEN', type)) as number;
-    } else {
-      return (await this.client.call('COMMANDLOG', 'LEN')) as number;
-    }
+    // COMMANDLOG requires a type parameter, default to 'slow' if not provided
+    const logType = type || 'slow';
+    return (await this.client.call('COMMANDLOG', 'LEN', logType)) as number;
   }
 
   async resetCommandLog(type?: CommandLogType): Promise<void> {
@@ -176,11 +178,9 @@ export class ValkeyAdapter implements DatabasePort {
       throw new Error('COMMANDLOG not supported on this database version');
     }
 
-    if (type) {
-      await this.client.call('COMMANDLOG', 'RESET', type);
-    } else {
-      await this.client.call('COMMANDLOG', 'RESET');
-    }
+    // COMMANDLOG requires a type parameter, default to 'slow' if not provided
+    const logType = type || 'slow';
+    await this.client.call('COMMANDLOG', 'RESET', logType);
   }
 
   async getLatestLatencyEvents(): Promise<LatencyEvent[]> {

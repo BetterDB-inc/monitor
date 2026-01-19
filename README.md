@@ -11,7 +11,7 @@ betterdb-monitor/
 │   └── web/                 # React frontend (Vite)
 ├── packages/
 │   └── shared/              # Shared TypeScript types
-├── docker-compose.yml       # Local Valkey and Redis for testing on 6380 and 6381 respectively
+├── docker-compose.yml       # Local Valkey (port 6380) and Redis (port 6382) for testing
 └── package.json             # Workspace root
 ```
 
@@ -39,7 +39,7 @@ betterdb-monitor/
 ### Prerequisites
 - Node.js >= 20.0.0
 - pnpm >= 9.0.0
-- Docker (for local Valkey instance)
+- Docker (for local Valkey or Redis instances)
 
 ### Installation
 
@@ -53,9 +53,14 @@ pnpm install
 cp .env.example .env
 ```
 
-3. Start local Valkey instance:
+3. Start local database instances (Valkey on 6380, Redis on 6382):
 ```bash
 pnpm docker:up
+```
+
+To connect to Redis instead of Valkey, update `.env`:
+```env
+DB_PORT=6382
 ```
 
 4. Start development servers:
@@ -244,14 +249,39 @@ docker rm betterdb-monitor
 - Version detection
 - Capability detection (Command Log, Slot Stats)
 - Auto-refresh every 5 seconds
+- Full Redis 6.x and 7.x support (85-90% feature parity with Valkey)
+- Graceful degradation for Valkey-only features
+
+### Supported Database Versions
+
+| Database | Minimum Version | Supported Features |
+|----------|----------------|-------------------|
+| **Valkey** | 8.0+ | All features including COMMANDLOG and CLUSTER SLOT-STATS |
+| **Redis** | 6.0+ | All features except COMMANDLOG and CLUSTER SLOT-STATS |
+
+### Feature Compatibility Matrix
+
+| Feature | Command | Valkey | Redis |
+|---------|---------|--------|-------|
+| Server Info | `INFO` | Yes | Yes |
+| Health Check | `PING` | Yes | Yes |
+| Slowlog | `SLOWLOG` | Yes | Yes (2.2+) |
+| Client List | `CLIENT LIST` | Yes | Yes (2.4+) |
+| Latency Monitor | `LATENCY` | Yes | Yes (2.8+) |
+| Memory Stats | `MEMORY STATS` | Yes | Yes (4.0+) |
+| ACL Log | `ACL LOG` | Yes | Yes (6.0+) |
+| Command Log | `COMMANDLOG` | Yes (8.1+) | No (Valkey-only) |
+| Cluster Slot Stats | `CLUSTER SLOT-STATS` | Yes (8.0+) | No (Valkey-only) |
 
 ### Architecture Highlights
 
-**Port/Adapter Pattern**: The backend uses a port interface (`DatabasePort`) with separate adapters for Valkey and Redis, making it easy to extend support for other databases.
+**Unified Adapter Pattern**: The backend uses a unified `UnifiedDatabaseAdapter` that works seamlessly with both Valkey and Redis through the wire-compatible `iovalkey` client library.
 
 **Auto-detection**: The application automatically detects whether it's connecting to Valkey or Redis by inspecting the `INFO` response.
 
-**Capability Detection**: Features like Command Log (Valkey 8.1+) and Slot Stats (Valkey 8.0+) are automatically detected based on database version.
+**Capability Detection**: Features like Command Log (Valkey 8.1+) and Slot Stats (Valkey 8.0+) are automatically detected based on database type and version. The UI gracefully degrades when connecting to Redis, showing only supported features.
+
+**Graceful Degradation**: When connected to Redis, Valkey-specific features return clear error messages indicating they're not supported, while all shared features work identically.
 
 ## Prometheus Metrics
 
