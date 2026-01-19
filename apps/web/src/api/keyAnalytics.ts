@@ -1,5 +1,5 @@
 import { fetchApi } from './client';
-import type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend } from '@valkey-monitor/shared';
+import type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend } from '@betterdb/shared';
 
 export type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend };
 

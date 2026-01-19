@@ -18,8 +18,8 @@ async function bootstrap(): Promise<void> {
     // Set global prefix for API routes FIRST
     app.setGlobalPrefix('api');
 
-    // Serve static files in production
-    const publicPath = join(__dirname, '..', 'public');
+    // Serve static files in production (path adjusted for Docker dist structure)
+    const publicPath = join(__dirname, '..', '..', '..', '..', 'public');
     const indexPath = join(publicPath, 'index.html');
 
     // Read index.html once at startup

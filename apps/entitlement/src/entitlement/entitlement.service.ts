@@ -1,7 +1,6 @@
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { Tier } from '@prisma/client';
-import { TIER_FEATURES } from '@betterdb/shared';
+import { Tier, TIER_RETENTION_LIMITS, parseTier } from '@betterdb/shared';
 import type { EntitlementResponse, EntitlementRequest } from '@betterdb/shared';
 
 type ValidateRequest = EntitlementRequest;
@@ -10,7 +9,7 @@ type ValidateRequest = EntitlementRequest;
 export class EntitlementService {
   private readonly logger = new Logger(EntitlementService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   async validateLicense(req: ValidateRequest): Promise<EntitlementResponse> {
     const { licenseKey } = req;
@@ -30,9 +29,9 @@ export class EntitlementService {
       this.logger.warn(`Inactive license: ${license.id}`);
       return {
         valid: false,
-        tier: 'community',
-        features: [],
+        tier: Tier.community,
         instanceLimit: 1,
+        retentionLimits: TIER_RETENTION_LIMITS[Tier.community],
         expiresAt: null,
         error: 'License has been deactivated',
       };
@@ -42,9 +41,9 @@ export class EntitlementService {
       this.logger.warn(`Expired license: ${license.id}`);
       return {
         valid: false,
-        tier: 'community',
-        features: [],
+        tier: Tier.community,
         instanceLimit: 1,
+        retentionLimits: TIER_RETENTION_LIMITS[Tier.community],
         expiresAt: license.expiresAt.toISOString(),
         error: 'License has expired',
       };
@@ -52,11 +51,12 @@ export class EntitlementService {
 
     this.logger.log(`License validated: ${license.id} (${license.tier})`);
 
+    const tier = parseTier(license.tier);
     return {
       valid: true,
-      tier: license.tier,
-      features: TIER_FEATURES[license.tier as Tier] || [],
+      tier,
       instanceLimit: license.instanceLimit,
+      retentionLimits: TIER_RETENTION_LIMITS[tier],
       expiresAt: license.expiresAt ? license.expiresAt.toISOString() : null,
       customer: {
         id: license.customer.id,

@@ -4,6 +4,25 @@ export enum Tier {
   enterprise = 'enterprise',
 }
 
+export enum SubscriptionStatus {
+  active = 'active',
+  canceled = 'canceled',
+  past_due = 'past_due',
+  trialing = 'trialing',
+  incomplete = 'incomplete',
+  incomplete_expired = 'incomplete_expired',
+  unpaid = 'unpaid',
+  paused = 'paused',
+}
+
+export function isValidTier(value: string): value is Tier {
+  return Object.values(Tier).includes(value as Tier);
+}
+
+export function parseTier(value: string, fallback: Tier = Tier.community): Tier {
+  return isValidTier(value) ? value : fallback;
+}
+
 // Feature enum - only features that are LOCKED behind tiers
 export enum Feature {
   // Pro+ features (completely locked for Community)

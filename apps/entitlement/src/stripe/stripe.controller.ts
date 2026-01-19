@@ -1,5 +1,4 @@
 import { Controller, Post, Headers, RawBodyRequest, Req, Logger, BadRequestException } from '@nestjs/common';
-import { FastifyRequest } from 'fastify';
 import { StripeService } from './stripe.service';
 import Stripe from 'stripe';
 
@@ -7,10 +6,10 @@ import Stripe from 'stripe';
 export class StripeController {
   private readonly logger = new Logger(StripeController.name);
 
-  constructor(private readonly stripe: StripeService) {}
+  constructor(private readonly stripe: StripeService) { }
 
   @Post()
-  async handleWebhook(@Headers('stripe-signature') signature: string, @Req() req: RawBodyRequest<FastifyRequest>) {
+  async handleWebhook(@Headers('stripe-signature') signature: string, @Req() req: RawBodyRequest<{ rawBody?: Buffer }>) {
     if (!signature || !req.rawBody) {
       throw new BadRequestException('Missing signature or body');
     }

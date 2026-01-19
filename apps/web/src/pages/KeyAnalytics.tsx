@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
-import { keyAnalyticsApi, type KeyPatternSnapshot } from '../api/keyAnalytics';
+import { keyAnalyticsApi } from '../api/keyAnalytics';
 import { usePolling } from '../hooks/usePolling';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
@@ -47,7 +47,7 @@ export function KeyAnalytics() {
     }
   }, [selectedPattern]);
 
-  const { data: summary, loading: summaryLoading, refetch: refetchSummary } = usePolling({
+  const { data: summary, loading: _summaryLoading, refresh: refetchSummary } = usePolling({
     fetcher: () => keyAnalyticsApi.getSummary(),
     interval: 60000, // 1 minute
   });
@@ -226,7 +226,7 @@ export function KeyAnalytics() {
                   <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
                   <YAxis />
                   <Tooltip
-                    formatter={(value: number, name: string, props: any) => [formatNumber(value), props.payload.fullName]}
+                    formatter={(value: number | undefined, _name: string | undefined, props: any) => [formatNumber(value || 0), props.payload.fullName]}
                   />
                   <Bar dataKey="value" fill="hsl(var(--primary))" />
                 </BarChart>
@@ -255,11 +255,11 @@ export function KeyAnalytics() {
                     outerRadius={80}
                     label={(entry) => `${entry.name}: ${formatBytes(entry.value)}`}
                   >
-                    {topPatternsByMemory.map((entry, index) => (
+                    {topPatternsByMemory.map((_entry, index) => (
                       <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>
-                  <Tooltip formatter={(value: number) => formatBytes(value)} />
+                  <Tooltip formatter={(value: number | undefined) => formatBytes(value || 0)} />
                   <Legend />
                 </PieChart>
               </ResponsiveContainer>
@@ -321,9 +321,8 @@ export function KeyAnalytics() {
                   {sortedPatterns.map((pattern) => (
                     <tr
                       key={pattern.id}
-                      className={`border-b hover:bg-muted cursor-pointer transition-colors ${
-                        selectedPattern === pattern.pattern ? 'bg-primary/10 border-l-4 border-l-primary' : ''
-                      }`}
+                      className={`border-b hover:bg-muted cursor-pointer transition-colors ${selectedPattern === pattern.pattern ? 'bg-primary/10 border-l-4 border-l-primary' : ''
+                        }`}
                       onClick={() => setSelectedPattern(pattern.pattern)}
                     >
                       <td className="p-2 font-mono text-xs">{pattern.pattern}</td>

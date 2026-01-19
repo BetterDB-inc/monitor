@@ -2,9 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { PrismaService } from '../prisma/prisma.service';
-import { Tier, SubscriptionStatus } from '@prisma/client';
+import { Tier, SubscriptionStatus, TIER_INSTANCE_LIMITS } from '@betterdb/shared';
 import { randomBytes } from 'crypto';
-import { TIER_INSTANCE_LIMITS } from '@betterdb/shared';
 
 const MAX_KEY_GENERATION_ATTEMPTS = 5;
 
@@ -23,7 +22,7 @@ export class StripeService {
       this.logger.warn('STRIPE_SECRET_KEY not set - Stripe integration disabled');
     }
     this.stripe = new Stripe(apiKey || 'sk_test_placeholder', {
-      apiVersion: '2024-11-20.acacia',
+      apiVersion: '2025-01-27.acacia',
     });
     this.webhookSecret = this.config.get<string>('STRIPE_WEBHOOK_SECRET', '');
   }

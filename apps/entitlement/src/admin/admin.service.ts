@@ -1,13 +1,13 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { randomBytes } from 'crypto';
-import { TIER_INSTANCE_LIMITS } from '@betterdb/shared';
+import { TIER_INSTANCE_LIMITS, isValidTier, Tier } from '@betterdb/shared';
 
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   async createCustomer(data: { email: string; name?: string }) {
     const customer = await this.prisma.customer.create({
@@ -55,6 +55,10 @@ export class AdminService {
     instanceLimit?: number;
     expiresAt?: Date;
   }) {
+    if (!isValidTier(data.tier)) {
+      throw new BadRequestException(`Invalid tier: ${data.tier}. Must be one of: ${Object.values(Tier).join(', ')}`);
+    }
+
     const licenseKey = this.generateLicenseKey();
 
     const license = await this.prisma.license.create({

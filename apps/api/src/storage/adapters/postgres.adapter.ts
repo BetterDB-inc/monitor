@@ -493,25 +493,27 @@ export class PostgresAdapter implements StoragePort {
 
     for (const row of byNameResult.rows) {
       if (row.name) {
+        const namePeakParams = [...params, row.name];
         const namePeakResult = await this.pool.query(
           `
           SELECT COUNT(*) as count
           FROM client_snapshots
-          WHERE name = $${currentParams.length + 1} ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
+          WHERE name = $${params.length + 1} ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
           GROUP BY captured_at
           ORDER BY count DESC
           LIMIT 1
         `,
-          [...params, row.name],
+          namePeakParams,
         );
 
+        const nameCurrentParams = [...currentParams, row.name];
         const nameCurrentResult = await this.pool.query(
           `
           SELECT COUNT(*) as count
           FROM client_snapshots
           WHERE name = $${currentParams.length + 1} ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
         `,
-          [...currentParams, row.name],
+          nameCurrentParams,
         );
 
         connectionsByName[row.name] = {
@@ -532,25 +534,27 @@ export class PostgresAdapter implements StoragePort {
 
     for (const row of byUserResult.rows) {
       if (row.user_name) {
+        const userPeakParams = [...params, row.user_name];
         const userPeakResult = await this.pool.query(
           `
           SELECT COUNT(*) as count
           FROM client_snapshots
-          WHERE user_name = $${currentParams.length + 1} ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
+          WHERE user_name = $${params.length + 1} ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
           GROUP BY captured_at
           ORDER BY count DESC
           LIMIT 1
         `,
-          [...params, row.user_name],
+          userPeakParams,
         );
 
+        const userCurrentParams = [...currentParams, row.user_name];
         const userCurrentResult = await this.pool.query(
           `
           SELECT COUNT(*) as count
           FROM client_snapshots
           WHERE user_name = $${currentParams.length + 1} ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
         `,
-          [...currentParams, row.user_name],
+          userCurrentParams,
         );
 
         connectionsByUser[row.user_name] = {
@@ -575,25 +579,27 @@ export class PostgresAdapter implements StoragePort {
     for (const row of byUserAndNameResult.rows) {
       const key = `${row.user_name}:${row.name}`;
 
+      const combinedPeakParams = [...params, row.user_name, row.name];
       const combinedPeakResult = await this.pool.query(
         `
         SELECT COUNT(*) as count
         FROM client_snapshots
-        WHERE user_name = $${currentParams.length + 1} AND name = $${currentParams.length + 2} ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
+        WHERE user_name = $${params.length + 1} AND name = $${params.length + 2} ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
         GROUP BY captured_at
         ORDER BY count DESC
         LIMIT 1
       `,
-        [...params, row.user_name, row.name],
+        combinedPeakParams,
       );
 
+      const combinedCurrentParams = [...currentParams, row.user_name, row.name];
       const combinedCurrentResult = await this.pool.query(
         `
         SELECT COUNT(*) as count
         FROM client_snapshots
         WHERE user_name = $${currentParams.length + 1} AND name = $${currentParams.length + 2} ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
       `,
-        [...currentParams, row.user_name, row.name],
+        combinedCurrentParams,
       );
 
       connectionsByUserAndName[key] = {
