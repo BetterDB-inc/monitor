@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# Pre-commit hook to check for TypeScript errors
+# This prevents commits that have TypeScript compilation errors
+
+echo "Running TypeScript type check..."
+
+# Run TypeScript compiler in all workspaces
+pnpm -r exec tsc --noEmit
+
+TSC_EXIT=$?
+
+if [ $TSC_EXIT -eq 0 ]; then
+  echo ""
+  echo "TypeScript compilation successful"
+  exit 0
+else
+  echo ""
+  echo "TypeScript compilation failed with exit code $TSC_EXIT"
+  echo ""
+  echo "Please fix the TypeScript errors before committing."
+  echo "To bypass this check (not recommended), use: git commit --no-verify"
+  exit 1
+fi

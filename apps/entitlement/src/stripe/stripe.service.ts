@@ -22,7 +22,7 @@ export class StripeService {
       this.logger.warn('STRIPE_SECRET_KEY not set - Stripe integration disabled');
     }
     this.stripe = new Stripe(apiKey || 'sk_test_placeholder', {
-      apiVersion: '2025-01-27.acacia',
+      apiVersion: '2023-10-16',
     });
     this.webhookSecret = this.config.get<string>('STRIPE_WEBHOOK_SECRET', '');
   }
