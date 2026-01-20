@@ -109,7 +109,15 @@ function AppLayout() {
             </span>
           </NavItem>
         </nav>
-        <div className="px-3 pb-4 border-t border-gray-200 pt-2">
+        <div className="px-3 pb-4 border-t border-gray-200 pt-2 space-y-1">
+          <a
+            href="https://github.com/betterdb-inc/monitor/issues/new"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block w-full rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
+          >
+            Report a Problem
+          </a>
           <NavItem to="/settings" active={location.pathname === '/settings'}>
             Settings
           </NavItem>
