@@ -1,0 +1,81 @@
+/* BetterDB Custom Styles - Teal Accent Theme */
+
+:root {
+  --link-color: #14B8A6;
+  --link-color-dark: #0d9488;
+}
+
+/* Links */
+a {
+  color: #14B8A6;
+}
+
+a:hover {
+  color: #0d9488;
+}
+
+/* Navigation */
+.site-nav .nav-link.active {
+  color: #14B8A6;
+}
+
+.navigation-list-link:hover {
+  color: #14B8A6;
+}
+
+/* Search */
+.search-result-title {
+  color: #14B8A6;
+}
+
+.search-input:focus {
+  border-color: #14B8A6;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(20, 184, 166, 0.1);
+}
+
+/* Header */
+.site-header {
+  border-bottom: 2px solid #14B8A6;
+}
+
+/* Back to Top Button */
+.back-to-top {
+  background-color: #14B8A6;
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  transition: background-color 0.2s ease;
+}
+
+.back-to-top:hover {
+  background-color: #0d9488;
+}
+
+/* Code Blocks - Add border radius */
+code {
+  border-radius: 4px;
+}
+
+pre {
+  border-radius: 8px;
+}
+
+.highlight {
+  border-radius: 8px;
+}
+
+/* Search Input - Add border radius */
+.search-input {
+  border-radius: 8px;
+}
+
+/* Buttons */
+.btn-primary {
+  background-color: #14B8A6;
+  color: #ffffff;
+}
+
+.btn-primary:hover {
+  background-color: #0d9488;
+}

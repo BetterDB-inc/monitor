@@ -8,7 +8,7 @@ baseurl: ""
 search_enabled: true
 search.heading_level: 3
 
-color_scheme: dark
+color_scheme: light
 
 # Header links
 aux_links:
@@ -16,11 +16,13 @@ aux_links:
     - "https://betterdb.com"
   "GitHub":
     - "https://github.com/betterdb-inc/monitor"
+  "Report Issue":
+    - "https://github.com/betterdb-inc/monitor/issues/new"
 
 aux_links_new_tab: false
 
 # Footer
-footer_content: "Copyright &copy; 2025 BetterDB. <a href=\"https://betterdb.com\">betterdb.com</a>"
+footer_content: "Copyright &copy; 2026 BetterDB Inc. <a href=\"https://betterdb.com\">betterdb.com</a>"
 
 back_to_top: true
 back_to_top_text: "Back to top"
