@@ -15,10 +15,11 @@ docker run -d \
   --name betterdb \
   -p 3001:3001 \
   -e DB_HOST=your-valkey-host \
+  -e BETTERDB_LICENSE_KEY=your-license-key \
   betterdb/monitor
 ```
 
-Open [http://localhost:3000](http://localhost:3000) to access the dashboard.
+Open [http://localhost:3001](http://localhost:3001) to access the dashboard.
 
 ## Documentation
 

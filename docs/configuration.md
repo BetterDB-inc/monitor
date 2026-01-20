@@ -140,6 +140,7 @@ docker run -d \
   -e DB_HOST=your-valkey-host \
   -e DB_PORT=6379 \
   -e DB_PASSWORD=your-password \
+  -e BETTERDB_LICENSE_KEY=your-license-key \
   -e STORAGE_TYPE=memory \
   betterdb/monitor
 ```
@@ -153,6 +154,7 @@ docker run -d \
   -e DB_HOST=your-valkey-host \
   -e DB_PORT=6379 \
   -e DB_PASSWORD=your-password \
+  -e BETTERDB_LICENSE_KEY=your-license-key \
   -e STORAGE_TYPE=postgres \
   -e STORAGE_URL=postgresql://user:pass@postgres-host:5432/dbname \
   betterdb/monitor
@@ -170,6 +172,7 @@ docker run -d \
   -e DB_HOST=your-valkey-host \
   -e DB_PORT=6379 \
   -e DB_PASSWORD=your-password \
+  -e BETTERDB_LICENSE_KEY=your-license-key \
   -e STORAGE_TYPE=memory \
   betterdb/monitor
 ```
@@ -187,6 +190,7 @@ docker run -d \
   -e DB_HOST=localhost \
   -e DB_PORT=6380 \
   -e DB_PASSWORD=devpassword \
+  -e BETTERDB_LICENSE_KEY=your-license-key \
   -e STORAGE_TYPE=postgres \
   -e STORAGE_URL=postgresql://dev:devpass@localhost:5432/postgres \
   betterdb/monitor
@@ -340,6 +344,7 @@ docker rm -f betterdb-monitor 2>/dev/null; docker run -d \
   -e DB_HOST=your-valkey-host \
   -e DB_PORT=6379 \
   -e DB_PASSWORD=your-password \
+  -e BETTERDB_LICENSE_KEY=your-license-key \
   -e STORAGE_TYPE=postgres \
   -e STORAGE_URL=postgresql://user:pass@postgres-host:5432/dbname \
   betterdb/monitor
