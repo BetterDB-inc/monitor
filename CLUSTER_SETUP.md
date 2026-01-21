@@ -4,20 +4,7 @@ This guide explains how to set up a Valkey cluster with replication for developm
 
 ## Quick Start
 
-### Option 1: Automated Setup (Recommended)
-
-Run the setup script to create a 6-node cluster (3 masters + 3 replicas):
-
-```bash
-./cluster-setup.sh
-```
-
-This will:
-- Start 6 Valkey nodes
-- Create a cluster with 3 masters and 3 replicas
-- Display connection information
-
-### Option 2: Manual Setup
+### Cluster Setup
 
 ```bash
 # Start the cluster
@@ -187,7 +174,7 @@ If cluster initialization fails:
 ```bash
 # Clean up and retry
 docker compose -f docker-compose.cluster.yml down -v
-./cluster-setup.sh
+docker compose -f docker-compose.cluster.yml up -d
 ```
 
 ### Connection Errors from Monitor

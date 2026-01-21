@@ -25,7 +25,7 @@ pip install -r requirements.txt
 cd ..
 
 # Run preflight checks
-./preflight-interleaved.sh
+../scripts/benchmark/preflight-interleaved.sh
 ```
 
 ### Usage
@@ -56,7 +56,7 @@ python3 interleaved_benchmark.py --runs 10 --config configs/betterdb-full.json
 ### Optional: System Tuning
 
 ```bash
-sudo ./system_prep.sh
+sudo ../scripts/benchmark/system-prep.sh
 ```
 
 Disables turbo boost, sets performance governor. Resets on reboot.
@@ -77,7 +77,7 @@ Validates that the Client Analytics endpoints correctly detect anomalies and tra
 
 **1. Run preflight checks:**
 ```bash
-./preflight-analytics.sh
+../scripts/benchmark/preflight-analytics.sh
 ```
 
 **2. Run all validation tests:**
