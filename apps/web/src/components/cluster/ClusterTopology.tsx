@@ -1,16 +1,22 @@
 import { useState, useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
 import { Badge } from '../ui/badge';
-import { Server, ChevronDown, ChevronUp } from 'lucide-react';
+import { Server, ChevronDown, ChevronUp, Grid3x3, Network } from 'lucide-react';
 import type { ClusterNode } from '../../types/metrics';
+import type { NodeStats } from '../../types/cluster';
 import { formatSlotRanges, countSlots } from '../../types/cluster';
+import { ClusterTopologyGraph } from './ClusterTopologyGraph';
+
+type ViewMode = 'grid' | 'graph';
 
 interface ClusterTopologyProps {
   nodes: ClusterNode[];
+  nodeStats?: NodeStats[];
 }
 
-export function ClusterTopology({ nodes }: ClusterTopologyProps) {
+export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+  const [viewMode, setViewMode] = useState<ViewMode>('grid');
 
   // Organize nodes by master-replica relationships
   const topology = useMemo(() => {
@@ -173,46 +179,94 @@ export function ClusterTopology({ nodes }: ClusterTopologyProps) {
     );
   };
 
+  const renderViewToggle = () => (
+    <div className="flex items-center gap-1 border rounded-md p-1">
+      <button
+        onClick={() => setViewMode('grid')}
+        className={`px-3 py-1.5 rounded text-sm flex items-center gap-2 transition-colors ${
+          viewMode === 'grid'
+            ? 'bg-primary text-primary-foreground'
+            : 'hover:bg-muted'
+        }`}
+        title="Grid View"
+        aria-label="Switch to grid view"
+      >
+        <Grid3x3 className="w-4 h-4" />
+        Grid
+      </button>
+      <button
+        onClick={() => setViewMode('graph')}
+        className={`px-3 py-1.5 rounded text-sm flex items-center gap-2 transition-colors ${
+          viewMode === 'graph'
+            ? 'bg-primary text-primary-foreground'
+            : 'hover:bg-muted'
+        }`}
+        title="Graph View"
+        aria-label="Switch to graph view"
+      >
+        <Network className="w-4 h-4" />
+        Graph
+      </button>
+    </div>
+  );
+
+  if (viewMode === 'graph') {
+    return (
+      <div className="animate-in fade-in duration-300">
+        <ClusterTopologyGraph
+          nodes={nodes}
+          nodeStats={nodeStats}
+          viewToggle={renderViewToggle()}
+        />
+      </div>
+    );
+  }
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-lg">Cluster Topology</CardTitle>
-        <p className="text-sm text-muted-foreground mt-1">
-          Master nodes with their replicas
-        </p>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-6">
-          {topology.map(({ master, replicas }) => (
-            <div key={master.id} className="space-y-3">
-              {/* Master Node */}
-              <div>
-                <div className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">
-                  Master
-                </div>
-                {renderNode(master, true)}
-              </div>
-
-              {/* Replica Nodes */}
-              {replicas.length > 0 && (
-                <div className="pl-6 border-l-2 border-muted space-y-2">
-                  <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                    Replicas ({replicas.length})
+    <div className="animate-in fade-in duration-300">
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-lg">Cluster Topology</CardTitle>
+              <p className="text-sm text-muted-foreground mt-1">
+                Master nodes with their replicas
+              </p>
+            </div>
+            {renderViewToggle()}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-6">
+            {topology.map(({ master, replicas }) => (
+              <div key={master.id} className="space-y-3">
+                <div>
+                  <div className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">
+                    Master
                   </div>
-                  {replicas.map((replica) => renderNode(replica, false))}
+                  {renderNode(master, true)}
                 </div>
-              )}
-            </div>
-          ))}
 
-          {topology.length === 0 && (
-            <div className="text-center py-8 text-muted-foreground">
-              <Server className="w-12 h-12 mx-auto mb-3 opacity-50" />
-              <p>No cluster nodes found</p>
-            </div>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+                {replicas.length > 0 && (
+                  <div className="pl-6 border-l-2 border-muted space-y-2">
+                    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      Replicas ({replicas.length})
+                    </div>
+                    {replicas.map((replica) => renderNode(replica, false))}
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {topology.length === 0 && (
+              <div className="text-center py-8 text-muted-foreground">
+                <Server className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                <p>No cluster nodes found</p>
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   );
 }

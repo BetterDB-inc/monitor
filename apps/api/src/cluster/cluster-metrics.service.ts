@@ -55,8 +55,22 @@ export interface SlotMigration {
 @Injectable()
 export class ClusterMetricsService {
   private readonly logger = new Logger(ClusterMetricsService.name);
+  private loggedErrors: Set<string> = new Set();
+  private readonly MAX_LOGGED_ERRORS = 500;
 
   constructor(private readonly discoveryService: ClusterDiscoveryService) {}
+
+  private addLoggedError(errorKey: string): void {
+    // Prevent unbounded growth
+    if (this.loggedErrors.size >= this.MAX_LOGGED_ERRORS) {
+      this.loggedErrors.clear();
+    }
+    this.loggedErrors.add(errorKey);
+  }
+
+  private clearNodeError(nodeId: string, operation: string): void {
+    this.loggedErrors.delete(`${operation}-${nodeId}`);
+  }
 
   async getClusterSlowlog(limit: number = 100): Promise<ClusterSlowlogEntry[]> {
     const nodes = await this.discoveryService.discoverNodes();
@@ -84,15 +98,23 @@ export class ClusterMetricsService {
       const rawLog = await client.slowlog('GET', limit);
       const entries = MetricsParser.parseSlowLog(rawLog as unknown[]);
 
+      // Clear error on success
+      this.clearNodeError(node.id, 'slowlog');
+
       return entries.map((entry) => ({
         ...entry,
         nodeId: node.id,
         nodeAddress: node.address,
       }));
     } catch (error) {
-      this.logger.error(
-        `Failed to get slowlog from node ${node.id}: ${error instanceof Error ? error.message : error}`,
-      );
+      // Only log each unique error once to avoid spam
+      const errorKey = `slowlog-${node.id}`;
+      if (!this.loggedErrors.has(errorKey)) {
+        this.logger.debug(
+          `Failed to get slowlog from node ${node.id}: ${error instanceof Error ? error.message : error}`,
+        );
+        this.addLoggedError(errorKey);
+      }
       return [];
     }
   }
@@ -191,9 +213,8 @@ export class ClusterMetricsService {
     for (const result of results) {
       if (result.status === 'fulfilled' && result.value) {
         allStats.push(result.value);
-      } else {
-        this.logger.warn(`Failed to fetch stats from a node: ${result.status === 'rejected' ? result.reason : 'unknown'}`);
       }
+      // Errors already logged at DEBUG level in getNodeStats, no need to log again
     }
 
     return allStats;
@@ -225,6 +246,9 @@ export class ClusterMetricsService {
 
       const uptimeSeconds = this.parseInfoValue(info, 'server.uptime_in_seconds');
 
+      // Clear error on success
+      this.clearNodeError(node.id, 'stats');
+
       return {
         nodeId: node.id,
         nodeAddress: node.address,
@@ -245,9 +269,14 @@ export class ClusterMetricsService {
         uptimeSeconds,
       };
     } catch (error) {
-      this.logger.error(
-        `Failed to get stats from node ${node.id}: ${error instanceof Error ? error.message : error}`,
-      );
+      // Only log each unique error once to avoid spam
+      const errorKey = `stats-${node.id}`;
+      if (!this.loggedErrors.has(errorKey)) {
+        this.logger.debug(
+          `Failed to get stats from node ${node.id}: ${error instanceof Error ? error.message : error}`,
+        );
+        this.addLoggedError(errorKey);
+      }
       return null;
     }
   }
@@ -259,69 +288,68 @@ export class ClusterMetricsService {
   }
 
   async getSlotMigrations(): Promise<SlotMigration[]> {
-    const nodes = await this.discoveryService.discoverNodes();
     const migrations: SlotMigration[] = [];
 
-    for (const node of nodes) {
-      try {
-        const client = await this.discoveryService.getNodeConnection(node.id);
-        const nodesString = (await client.call('CLUSTER', 'NODES')) as string;
-        const lines = nodesString.trim().split('\n');
+    try {
+      // Use primary connection instead of individual node connections
+      const client = this.discoveryService['dbClient'].getClient();
+      const nodesString = (await client.call('CLUSTER', 'NODES')) as string;
+      const lines = nodesString.trim().split('\n');
 
-        for (const line of lines) {
-          const parts = line.split(' ');
-          if (parts.length < 8) continue;
+      // Get all discovered nodes for lookup
+      const nodes = await this.discoveryService.discoverNodes();
 
-          const nodeId = parts[0];
-          const address = parts[1];
-          const slots = parts.slice(8);
+      for (const line of lines) {
+        const parts = line.split(' ');
+        if (parts.length < 8) continue;
 
-          for (const slotRange of slots) {
-            const migratingMatch = slotRange.match(/\[(\d+)->-([a-f0-9]+)\]/);
-            if (migratingMatch) {
-              const slot = parseInt(migratingMatch[1], 10);
-              const targetNodeId = migratingMatch[2];
-              const targetNode = nodes.find((n) => n.id.startsWith(targetNodeId));
+        const nodeId = parts[0];
+        const address = parts[1];
+        const slots = parts.slice(8);
 
-              if (targetNode) {
-                const keysRemaining = await this.getKeysInSlot(client, slot);
+        for (const slotRange of slots) {
+          const migratingMatch = slotRange.match(/\[(\d+)->-([a-f0-9]+)\]/i);
+          if (migratingMatch) {
+            const slot = parseInt(migratingMatch[1], 10);
+            const targetNodeId = migratingMatch[2];
+            const targetNode = nodes.find((n) => n.id.startsWith(targetNodeId));
 
-                migrations.push({
-                  slot,
-                  sourceNodeId: nodeId,
-                  sourceAddress: address,
-                  targetNodeId: targetNode.id,
-                  targetAddress: targetNode.address,
-                  state: 'migrating',
-                  keysRemaining,
-                });
-              }
+            if (targetNode) {
+              migrations.push({
+                slot,
+                sourceNodeId: nodeId,
+                sourceAddress: address,
+                targetNodeId: targetNode.id,
+                targetAddress: targetNode.address,
+                state: 'migrating',
+                keysRemaining: undefined, // Can't get this without node connection
+              });
             }
+          }
 
-            const importingMatch = slotRange.match(/\[(\d+)-<-([a-f0-9]+)\]/);
-            if (importingMatch) {
-              const slot = parseInt(importingMatch[1], 10);
-              const sourceNodeId = importingMatch[2];
-              const sourceNode = nodes.find((n) => n.id.startsWith(sourceNodeId));
+          const importingMatch = slotRange.match(/\[(\d+)-<-([a-f0-9]+)\]/i);
+          if (importingMatch) {
+            const slot = parseInt(importingMatch[1], 10);
+            const sourceNodeId = importingMatch[2];
+            const sourceNode = nodes.find((n) => n.id.startsWith(sourceNodeId));
 
-              if (sourceNode) {
-                migrations.push({
-                  slot,
-                  sourceNodeId: sourceNode.id,
-                  sourceAddress: sourceNode.address,
-                  targetNodeId: nodeId,
-                  targetAddress: address,
-                  state: 'importing',
-                });
-              }
+            if (sourceNode) {
+              migrations.push({
+                slot,
+                sourceNodeId: sourceNode.id,
+                sourceAddress: sourceNode.address,
+                targetNodeId: nodeId,
+                targetAddress: address,
+                state: 'importing',
+              });
             }
           }
         }
-      } catch (error) {
-        this.logger.error(
-          `Failed to check migrations on node ${node.id}: ${error instanceof Error ? error.message : error}`,
-        );
       }
+    } catch (error) {
+      this.logger.error(
+        `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
+      );
     }
 
     return migrations;

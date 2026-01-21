@@ -1,11 +1,18 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
 import { Badge } from '../ui/badge';
-import { CheckCircle, AlertTriangle, XCircle, GitBranch } from 'lucide-react';
+import { CheckCircle, AlertTriangle, XCircle, GitBranch, Info } from 'lucide-react';
 import { useReplicationLag } from '../../hooks/useReplicationLag';
-import type { ReplicationLagInfo } from '../../types/cluster';
+import type { ReplicationLagInfo, NodeStats } from '../../types/cluster';
+import type { ClusterNode } from '../../types/metrics';
 
-export function ReplicationLag() {
-  const { lagData, hasLaggingReplicas, maxLagMs, maxOffsetDiff } = useReplicationLag();
+interface ReplicationLagProps {
+  nodes: ClusterNode[];
+  nodeStats?: NodeStats[];
+}
+
+export function ReplicationLag({ nodes, nodeStats }: ReplicationLagProps) {
+  const { lagData, hasLaggingReplicas, maxLagMs, maxOffsetDiff } = useReplicationLag(nodes, nodeStats);
+  const hasDetailedStats = nodeStats && nodeStats.length > 0;
 
   if (lagData.length === 0) {
     return (
@@ -77,6 +84,18 @@ export function ReplicationLag() {
         </div>
       </CardHeader>
       <CardContent className="space-y-6">
+        {/* Info banner for basic stats */}
+        {!hasDetailedStats && (
+          <div className="px-4 py-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-sm text-blue-700 dark:text-blue-400">
+            <div className="flex items-center gap-2">
+              <Info className="w-4 h-4 flex-shrink-0" />
+              <div>
+                <strong>Basic replication info shown.</strong> Detailed lag metrics are unavailable because individual node connections cannot be established. The topology and health status are still accurate.
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Summary Stats */}
         <div className="grid grid-cols-3 gap-4">
           <div className="space-y-1">

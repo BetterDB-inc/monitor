@@ -180,23 +180,45 @@ export class MetricsParser {
         configEpoch: parseInt(parts[6] || '0', 10),
         linkState: parts[7] || '',
         slots: [],
+        migratingSlots: [],
+        importingSlots: [],
       };
 
       for (let i = 8; i < parts.length; i++) {
-        const slot = parts[i];
-        if (!slot) continue;
-        if (slot.includes('-')) {
-          const [start, end] = slot.split('-').map((s) => parseInt(s, 10));
+        const slotPart = parts[i];
+        if (!slotPart) continue;
+
+        const migratingMatch = slotPart.match(/\[(\d+)->-([a-f0-9]+)\]/i);
+        if (migratingMatch) {
+          const slot = parseInt(migratingMatch[1], 10);
+          const targetNodeId = migratingMatch[2];
+          node.migratingSlots?.push({ slot, targetNodeId });
+          continue;
+        }
+
+        const importingMatch = slotPart.match(/\[(\d+)-<-([a-f0-9]+)\]/i);
+        if (importingMatch) {
+          const slot = parseInt(importingMatch[1], 10);
+          const sourceNodeId = importingMatch[2];
+          node.importingSlots?.push({ slot, sourceNodeId });
+          continue;
+        }
+
+        if (slotPart.includes('-')) {
+          const [start, end] = slotPart.split('-').map((s) => parseInt(s, 10));
           if (!isNaN(start) && !isNaN(end)) {
             node.slots.push([start, end]);
           }
         } else {
-          const slotNum = parseInt(slot, 10);
+          const slotNum = parseInt(slotPart, 10);
           if (!isNaN(slotNum)) {
             node.slots.push([slotNum, slotNum]);
           }
         }
       }
+
+      if (node.migratingSlots?.length === 0) delete node.migratingSlots;
+      if (node.importingSlots?.length === 0) delete node.importingSlots;
 
       return node;
     });

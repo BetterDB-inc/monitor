@@ -1,0 +1,180 @@
+version: '3.8'
+
+# Valkey Cluster with 3 masters and 3 replicas
+# This creates a production-like cluster setup with replication
+# Usage: docker compose -f docker-compose.cluster.yml up -d
+
+services:
+  # Master Nodes
+  valkey-node-1:
+    image: valkey/valkey:8-alpine
+    container_name: valkey-node-1
+    ports:
+      - "7001:6379"
+      - "17001:16379"
+    command: >
+      valkey-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 6379
+      --slowlog-log-slower-than 0
+      --commandlog-request-larger-than 100
+      --commandlog-reply-larger-than 100
+    networks:
+      - valkey-cluster
+    volumes:
+      - valkey-node-1-data:/data
+    restart: unless-stopped
+
+  valkey-node-2:
+    image: valkey/valkey:8-alpine
+    container_name: valkey-node-2
+    ports:
+      - "7002:6379"
+      - "17002:16379"
+    command: >
+      valkey-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 6379
+      --slowlog-log-slower-than 0
+      --commandlog-request-larger-than 100
+      --commandlog-reply-larger-than 100
+    networks:
+      - valkey-cluster
+    volumes:
+      - valkey-node-2-data:/data
+    restart: unless-stopped
+
+  valkey-node-3:
+    image: valkey/valkey:8-alpine
+    container_name: valkey-node-3
+    ports:
+      - "7003:6379"
+      - "17003:16379"
+    command: >
+      valkey-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 6379
+      --slowlog-log-slower-than 0
+      --commandlog-request-larger-than 100
+      --commandlog-reply-larger-than 100
+    networks:
+      - valkey-cluster
+    volumes:
+      - valkey-node-3-data:/data
+    restart: unless-stopped
+
+  # Replica Nodes
+  valkey-node-4:
+    image: valkey/valkey:8-alpine
+    container_name: valkey-node-4
+    ports:
+      - "7004:6379"
+      - "17004:16379"
+    command: >
+      valkey-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 6379
+      --slowlog-log-slower-than 0
+      --commandlog-request-larger-than 100
+      --commandlog-reply-larger-than 100
+    networks:
+      - valkey-cluster
+    volumes:
+      - valkey-node-4-data:/data
+    restart: unless-stopped
+
+  valkey-node-5:
+    image: valkey/valkey:8-alpine
+    container_name: valkey-node-5
+    ports:
+      - "7005:6379"
+      - "17005:16379"
+    command: >
+      valkey-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 6379
+      --slowlog-log-slower-than 0
+      --commandlog-request-larger-than 100
+      --commandlog-reply-larger-than 100
+    networks:
+      - valkey-cluster
+    volumes:
+      - valkey-node-5-data:/data
+    restart: unless-stopped
+
+  valkey-node-6:
+    image: valkey/valkey:8-alpine
+    container_name: valkey-node-6
+    ports:
+      - "7006:6379"
+      - "17006:16379"
+    command: >
+      valkey-server
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 6379
+      --slowlog-log-slower-than 0
+      --commandlog-request-larger-than 100
+      --commandlog-reply-larger-than 100
+    networks:
+      - valkey-cluster
+    volumes:
+      - valkey-node-6-data:/data
+    restart: unless-stopped
+
+  # Cluster initialization container
+  valkey-cluster-init:
+    image: valkey/valkey:8-alpine
+    container_name: valkey-cluster-init
+    depends_on:
+      - valkey-node-1
+      - valkey-node-2
+      - valkey-node-3
+      - valkey-node-4
+      - valkey-node-5
+      - valkey-node-6
+    networks:
+      - valkey-cluster
+    command: >
+      sh -c "
+      sleep 5 &&
+      valkey-cli --cluster create
+      valkey-node-1:6379
+      valkey-node-2:6379
+      valkey-node-3:6379
+      valkey-node-4:6379
+      valkey-node-5:6379
+      valkey-node-6:6379
+      --cluster-replicas 1
+      --cluster-yes
+      "
+    restart: "no"
+
+networks:
+  valkey-cluster:
+    driver: bridge
+
+volumes:
+  valkey-node-1-data:
+  valkey-node-2-data:
+  valkey-node-3-data:
+  valkey-node-4-data:
+  valkey-node-5-data:
+  valkey-node-6-data:

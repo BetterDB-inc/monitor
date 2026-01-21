@@ -1,39 +1,13 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
 import { Badge } from '../ui/badge';
-import { ArrowRight, Database, Loader2 } from 'lucide-react';
-import { usePolling } from '../../hooks/usePolling';
-import { metricsApi } from '../../api/metrics';
+import { ArrowRight, Database } from 'lucide-react';
+import type { SlotMigration } from '../../types/cluster';
 
-export function SlotMigrations() {
-  const { data: migrations, loading, error } = usePolling({
-    fetcher: (signal?: AbortSignal) => metricsApi.getSlotMigrations(signal),
-    interval: 5000,
-    enabled: true,
-  });
+interface SlotMigrationsProps {
+  migrations?: SlotMigration[];
+}
 
-  if (loading && !migrations) {
-    return (
-      <Card>
-        <CardContent className="p-6">
-          <div className="text-center text-muted-foreground flex items-center justify-center gap-2">
-            <Loader2 className="w-4 h-4 animate-spin" />
-            Checking for slot migrations...
-          </div>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (error) {
-    return (
-      <Card>
-        <CardContent className="p-6">
-          <div className="text-center text-red-500">Error loading migrations: {error.message}</div>
-        </CardContent>
-      </Card>
-    );
-  }
-
+export function SlotMigrations({ migrations }: SlotMigrationsProps) {
   const activeMigrations = migrations || [];
 
   return (

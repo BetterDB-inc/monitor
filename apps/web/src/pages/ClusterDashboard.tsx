@@ -1,9 +1,11 @@
-import { useMemo } from 'react';
+import { useMemo, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Skeleton } from '../components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { RefreshCw, Server, Info } from 'lucide-react';
 import { useCluster } from '../hooks/useCluster';
+import { usePolling } from '../hooks/usePolling';
+import { metricsApi } from '../api/metrics';
 import { ClusterHealthCard } from '../components/cluster/ClusterHealthCard';
 import { ClusterTopology } from '../components/cluster/ClusterTopology';
 import { SlotHeatmap } from '../components/cluster/SlotHeatmap';
@@ -27,6 +29,35 @@ export function ClusterDashboard() {
     health,
     refetch,
   } = useCluster();
+
+  // Stabilize fetcher functions to prevent unnecessary re-renders
+  const nodeStatsFetcher = useCallback(
+    (signal?: AbortSignal) => metricsApi.getClusterNodeStats(signal),
+    []
+  );
+
+  const migrationsFetcher = useCallback(
+    (signal?: AbortSignal) => metricsApi.getSlotMigrations(signal),
+    []
+  );
+
+  // Only enable polling once we have successfully loaded cluster nodes
+  // Use useMemo to prevent re-enabling when isLoading toggles during refresh
+  const shouldPoll = useMemo(() => {
+    return isClusterMode && nodes.length > 0;
+  }, [isClusterMode, nodes.length]);
+
+  const { data: nodeStats } = usePolling({
+    fetcher: nodeStatsFetcher,
+    interval: 5000,
+    enabled: shouldPoll,
+  });
+
+  const { data: migrations } = usePolling({
+    fetcher: migrationsFetcher,
+    interval: 5000,
+    enabled: shouldPoll,
+  });
 
   // Memoize slot-to-node mapping separately for reuse
   const slotNodeMap = useMemo(() => buildSlotNodeMap(nodes), [nodes]);
@@ -167,14 +198,14 @@ export function ClusterDashboard() {
               />
             </div>
             <div className="md:col-span-3">
-              <ClusterTopology nodes={nodes} />
+              <ClusterTopology nodes={nodes} nodeStats={nodeStats || undefined} />
             </div>
           </div>
 
           {/* Heatmap + Migrations */}
           <div className="grid md:grid-cols-2 gap-4">
             <SlotHeatmap slotStats={slotStats} nodes={nodes} hasSlotStats={hasSlotStats} />
-            <SlotMigrations />
+            <SlotMigrations migrations={migrations || undefined} />
           </div>
 
           {/* Top Slots */}
@@ -229,13 +260,13 @@ export function ClusterDashboard() {
 
         {/* Nodes Tab */}
         <TabsContent value="nodes" className="space-y-4">
-          <NodeStatsComparison />
+          <NodeStatsComparison nodeStats={nodeStats || undefined} />
           <ClusterNodesTable nodes={nodes} />
         </TabsContent>
 
         {/* Replication Tab */}
         <TabsContent value="replication" className="space-y-4">
-          <ReplicationLag />
+          <ReplicationLag nodes={nodes} nodeStats={nodeStats || undefined} />
         </TabsContent>
 
         {/* Slowlog Tab */}

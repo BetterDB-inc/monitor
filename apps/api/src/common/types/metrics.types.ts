@@ -406,6 +406,8 @@ export interface ClusterNode {
   configEpoch: number;
   linkState: string;
   slots: number[][];
+  migratingSlots?: Array<{ slot: number; targetNodeId: string }>;
+  importingSlots?: Array<{ slot: number; sourceNodeId: string }>;
 }
 
 export interface SlotStatsMetric {

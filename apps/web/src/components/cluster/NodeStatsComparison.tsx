@@ -1,23 +1,43 @@
+import { useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
 import { Badge } from '../ui/badge';
 import { AlertTriangle, Activity, Database, Users } from 'lucide-react';
-import { useClusterNodes } from '../../hooks/useClusterNodes';
 import { formatBytes } from '../../lib/utils';
+import type { NodeStats } from '../../types/cluster';
 
-export function NodeStatsComparison() {
-  const { nodeStats, imbalancedNodes, isLoading } = useClusterNodes();
+interface NodeStatsComparisonProps {
+  nodeStats?: NodeStats[];
+}
 
-  if (isLoading) {
-    return (
-      <Card>
-        <CardContent className="p-6">
-          <div className="text-center text-muted-foreground">Loading node statistics...</div>
-        </CardContent>
-      </Card>
-    );
-  }
+export function NodeStatsComparison({ nodeStats }: NodeStatsComparisonProps) {
+  const statsArray = nodeStats || [];
 
-  if (nodeStats.length === 0) {
+  const { means, imbalancedNodes } = useMemo(() => {
+    if (statsArray.length === 0) {
+      return {
+        means: { memory: 0, ops: 0, clients: 0 },
+        imbalancedNodes: [],
+      };
+    }
+
+    const means = {
+      memory: statsArray.reduce((sum, n) => sum + n.memoryUsed, 0) / statsArray.length,
+      ops: statsArray.reduce((sum, n) => sum + n.opsPerSec, 0) / statsArray.length,
+      clients: statsArray.reduce((sum, n) => sum + n.connectedClients, 0) / statsArray.length,
+    };
+
+    const imbalancedNodes = statsArray.filter((node) => {
+      const memoryDeviation = Math.abs(node.memoryUsed - means.memory) / (means.memory || 1);
+      const opsDeviation = Math.abs(node.opsPerSec - means.ops) / (means.ops || 1);
+      const clientsDeviation = Math.abs(node.connectedClients - means.clients) / (means.clients || 1);
+
+      return memoryDeviation > 0.2 || opsDeviation > 0.2 || clientsDeviation > 0.2;
+    });
+
+    return { means, imbalancedNodes };
+  }, [statsArray]);
+
+  if (statsArray.length === 0) {
     return (
       <Card>
         <CardContent className="p-6">
@@ -26,13 +46,6 @@ export function NodeStatsComparison() {
       </Card>
     );
   }
-
-  // Calculate means for comparison
-  const means = {
-    memory: nodeStats.reduce((sum, n) => sum + n.memoryUsed, 0) / nodeStats.length,
-    ops: nodeStats.reduce((sum, n) => sum + n.opsPerSec, 0) / nodeStats.length,
-    clients: nodeStats.reduce((sum, n) => sum + n.connectedClients, 0) / nodeStats.length,
-  };
 
   const isImbalanced = (nodeId: string) =>
     imbalancedNodes.some((n) => n.nodeId === nodeId);
@@ -64,7 +77,7 @@ export function NodeStatsComparison() {
             </span>
           </div>
           <div className="space-y-2">
-            {nodeStats.map((node) => {
+            {statsArray.map((node) => {
               const percentage = (node.memoryUsed / node.memoryPeak) * 100;
               const imbalanced = isImbalanced(node.nodeId);
 
@@ -112,8 +125,8 @@ export function NodeStatsComparison() {
             </span>
           </div>
           <div className="space-y-2">
-            {nodeStats.map((node) => {
-              const maxOps = Math.max(...nodeStats.map((n) => n.opsPerSec));
+            {statsArray.map((node) => {
+              const maxOps = Math.max(...statsArray.map((n) => n.opsPerSec));
               const percentage = maxOps > 0 ? (node.opsPerSec / maxOps) * 100 : 0;
               const imbalanced = isImbalanced(node.nodeId);
 
@@ -153,8 +166,8 @@ export function NodeStatsComparison() {
             </span>
           </div>
           <div className="space-y-2">
-            {nodeStats.map((node) => {
-              const maxClients = Math.max(...nodeStats.map((n) => n.connectedClients));
+            {statsArray.map((node) => {
+              const maxClients = Math.max(...statsArray.map((n) => n.connectedClients));
               const percentage = maxClients > 0 ? (node.connectedClients / maxClients) * 100 : 0;
               const imbalanced = isImbalanced(node.nodeId);
 

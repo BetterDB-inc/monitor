@@ -33,6 +33,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private discoveredNodes: Map<string, NodeConnection> = new Map();
   private lastDiscoveryTime: number = 0;
   private discoveryCache: DiscoveredNode[] = [];
+  private loggedConnectionErrors: Set<string> = new Set();
+  private loggedGetConnectionErrors: Set<string> = new Set();
+  private readonly MAX_LOGGED_ERRORS = 1000; // Prevent unbounded growth
   private readonly DISCOVERY_CACHE_TTL = 30000; // 30 seconds
   private readonly CONNECTION_TIMEOUT = 5000; // 5 seconds
   private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
@@ -170,6 +173,23 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       connectionName: `BetterDB-Monitor-Node-${node.id.substring(0, 8)}`,
     });
 
+    // Add error handler to prevent unhandled error events
+    // Only log each unique connection error once to avoid log spam
+    client.on('error', (err) => {
+      const errorCode = (err as any).code || err.name;
+      const errorKey = `${nodeId}-${host}:${port}-${errorCode}`;
+      if (!this.loggedConnectionErrors.has(errorKey)) {
+        this.logger.warn(
+          `Cannot connect to node ${nodeId.substring(0, 12)} at ${host}:${port}: ${err.message}`,
+        );
+        // Prevent unbounded growth
+        if (this.loggedConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {
+          this.loggedConnectionErrors.clear();
+        }
+        this.loggedConnectionErrors.add(errorKey);
+      }
+    });
+
     try {
       await Promise.race([
         client.connect(),
@@ -188,16 +208,38 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       this.discoveredNodes.set(nodeId, connection);
       this.logger.log(`Connected to node ${nodeId} at ${host}:${port}`);
 
+      // Clear logged errors for this node on successful connection
+      this.clearNodeErrors(nodeId);
+
       return client;
     } catch (error) {
-      this.logger.error(
-        `Failed to connect to node ${nodeId} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
-      );
+      // Only log each unique connection error once to avoid spam
+      const errorKey = `connect-${nodeId}`;
+      if (!this.loggedGetConnectionErrors.has(errorKey)) {
+        this.logger.debug(
+          `Failed to connect to node ${nodeId} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
+        );
+        // Prevent unbounded growth
+        if (this.loggedGetConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {
+          this.loggedGetConnectionErrors.clear();
+        }
+        this.loggedGetConnectionErrors.add(errorKey);
+      }
 
       await client.quit().catch(() => {});
 
       throw error;
     }
+  }
+
+  private clearNodeErrors(nodeId: string): void {
+    // Remove all logged errors for this node
+    for (const key of this.loggedConnectionErrors) {
+      if (key.startsWith(nodeId)) {
+        this.loggedConnectionErrors.delete(key);
+      }
+    }
+    this.loggedGetConnectionErrors.delete(`connect-${nodeId}`);
   }
 
   async healthCheckAll(): Promise<NodeHealth[]> {
