@@ -16,10 +16,16 @@ from pathlib import Path
 from datetime import datetime
 import urllib.request
 
+from dotenv import load_dotenv
+
+# Load .env from project root
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 CONFIG = {
     "betterdb_url": os.getenv("BETTERDB_URL", "http://localhost:3002"),
     "betterdb_container": os.getenv("BETTERDB_CONTAINER", "benchmark-betterdb"),
     "valkey_port": os.getenv("VALKEY_PORT", "6382"),
+    "valkey_password": os.getenv("VALKEY_PASSWORD", ""),
     "benchmark_config": "configs/betterdb-quick.json",
     "stabilization_time": 10,  # seconds after starting/stopping BetterDB
 }
@@ -93,6 +99,10 @@ def run_single_benchmark(results_dir: Path, run_id: str, config_file: str) -> bo
         "-t", ",".join(config.get("commands", ["SET", "GET"])),
         "--csv"
     ]
+
+    # Add password if configured
+    if CONFIG["valkey_password"]:
+        cmd.extend(["-a", CONFIG["valkey_password"]])
 
     log(f"  Running benchmark → {run_id}")
     result = subprocess.run(cmd, capture_output=True, text=True)

@@ -1,3 +1,4 @@
+import { INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
@@ -7,10 +8,11 @@ import { readFileSync } from 'fs';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create<NestFastifyApplication>(
+  // Type assertion required due to NestJS/Fastify adapter version mismatch during transition
+  const app = await (NestFactory.create as Function)(
     AppModule,
     new FastifyAdapter(),
-  );
+  ) as NestFastifyApplication;
 
   const isProduction = process.env.NODE_ENV === 'production';
 
@@ -69,8 +71,8 @@ async function bootstrap(): Promise<void> {
     .addTag('health', 'Health check endpoint')
     .build();
 
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('docs', app, document);
+  const document = SwaggerModule.createDocument(app as unknown as INestApplication, config);
+  SwaggerModule.setup('docs', app as unknown as INestApplication, document);
 
   const port = process.env.PORT || 3001;
   await app.listen(port, '0.0.0.0');

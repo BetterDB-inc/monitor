@@ -14,16 +14,26 @@ Measures BetterDB's monitoring overhead on Valkey using interleaved randomized p
 ### Setup
 
 ```bash
+# Create venv and install dependencies
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Setup valkey-perf-benchmark (optional, for extended benchmarks)
 cd valkey-perf-benchmark
-python3 -m venv venv && venv/bin/pip install -r requirements.txt
+pip install -r requirements.txt
 cd ..
 
+# Run preflight checks
 ./preflight-interleaved.sh
 ```
 
 ### Usage
 
 ```bash
+# Activate venv first
+source venv/bin/activate
+
 # Quick (~5 min)
 python3 interleaved_benchmark.py --runs 5 --config configs/betterdb-quick.json
 

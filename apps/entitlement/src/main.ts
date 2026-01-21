@@ -13,11 +13,12 @@ async function bootstrap() {
     done(null, body);
   });
 
-  const app = await NestFactory.create<NestFastifyApplication>(
+  // Type assertion required due to NestJS/Fastify adapter version mismatch during transition
+  const app = await (NestFactory.create as Function)(
     AppModule,
     fastifyAdapter,
     { logger: ['log', 'error', 'warn', 'debug'], rawBody: true },
-  );
+  ) as NestFastifyApplication;
 
   const config = app.get(ConfigService);
   const port = config.get('PORT', 3001);

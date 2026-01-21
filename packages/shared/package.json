@@ -5,8 +5,16 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js",
-    "./license": "./dist/license/index.js"
+    ".": {
+      "require": "./dist/index.js",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./license": {
+      "require": "./dist/license/index.js",
+      "import": "./dist/license/index.js",
+      "default": "./dist/license/index.js"
+    }
   },
   "scripts": {
     "build": "tsc",

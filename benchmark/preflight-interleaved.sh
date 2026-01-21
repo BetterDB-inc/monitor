@@ -27,6 +27,7 @@ check() {
 check "interleaved_benchmark.py exists" "[[ -f interleaved_benchmark.py ]]"
 check "python3" "command -v python3"
 check "python stdlib imports" "python3 -c 'import subprocess, json, random, urllib.request'"
+check "python-dotenv" "python3 -c 'import dotenv'"
 
 # valkey-cli or redis-cli
 printf "%-40s" "valkey-cli or redis-cli"

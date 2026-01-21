@@ -12,9 +12,9 @@
   },
   "dependencies": {
     "@betterdb/shared": "workspace:*",
-    "@nestjs/common": "^10.0.0",
-    "@nestjs/core": "^10.0.0",
-    "@nestjs/config": "^3.0.0",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/config": "^4.0.0",
     "@nestjs/platform-fastify": "^11.1.10",
     "@nestjs/throttler": "^5.0.0",
     "@prisma/client": "^5.0.0",
