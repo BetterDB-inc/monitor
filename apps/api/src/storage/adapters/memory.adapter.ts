@@ -555,9 +555,27 @@ export class MemoryAdapter implements StoragePort {
       throw new Error('Settings not found. Initialize settings first.');
     }
 
+    // Only update valid settings fields, ignore any extra fields
+    const validUpdates: Partial<AppSettings> = {};
+    if (updates.auditPollIntervalMs !== undefined) {
+      validUpdates.auditPollIntervalMs = updates.auditPollIntervalMs;
+    }
+    if (updates.clientAnalyticsPollIntervalMs !== undefined) {
+      validUpdates.clientAnalyticsPollIntervalMs = updates.clientAnalyticsPollIntervalMs;
+    }
+    if (updates.anomalyPollIntervalMs !== undefined) {
+      validUpdates.anomalyPollIntervalMs = updates.anomalyPollIntervalMs;
+    }
+    if (updates.anomalyCacheTtlMs !== undefined) {
+      validUpdates.anomalyCacheTtlMs = updates.anomalyCacheTtlMs;
+    }
+    if (updates.anomalyPrometheusIntervalMs !== undefined) {
+      validUpdates.anomalyPrometheusIntervalMs = updates.anomalyPrometheusIntervalMs;
+    }
+
     this.settings = {
       ...this.settings,
-      ...updates,
+      ...validUpdates,
       updatedAt: Date.now(),
     };
     return { ...this.settings };

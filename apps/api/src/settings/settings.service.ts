@@ -49,11 +49,11 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     const now = Date.now();
     return {
       id: 1,
-      auditPollIntervalMs: this.configService.get<number>('AUDIT_POLL_INTERVAL_MS', 60000),
-      clientAnalyticsPollIntervalMs: this.configService.get<number>('CLIENT_ANALYTICS_POLL_INTERVAL_MS', 60000),
-      anomalyPollIntervalMs: this.configService.get<number>('ANOMALY_POLL_INTERVAL_MS', 1000),
-      anomalyCacheTtlMs: this.configService.get<number>('ANOMALY_CACHE_TTL_MS', 3600000),
-      anomalyPrometheusIntervalMs: this.configService.get<number>('ANOMALY_PROMETHEUS_INTERVAL_MS', 30000),
+      auditPollIntervalMs: parseInt(this.configService.get('AUDIT_POLL_INTERVAL_MS', '60000'), 10),
+      clientAnalyticsPollIntervalMs: parseInt(this.configService.get('CLIENT_ANALYTICS_POLL_INTERVAL_MS', '60000'), 10),
+      anomalyPollIntervalMs: parseInt(this.configService.get('ANOMALY_POLL_INTERVAL_MS', '1000'), 10),
+      anomalyCacheTtlMs: parseInt(this.configService.get('ANOMALY_CACHE_TTL_MS', '3600000'), 10),
+      anomalyPrometheusIntervalMs: parseInt(this.configService.get('ANOMALY_PROMETHEUS_INTERVAL_MS', '30000'), 10),
       createdAt: now,
       updatedAt: now,
     };

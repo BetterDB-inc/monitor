@@ -12,6 +12,7 @@ module.exports = {
   testEnvironment: 'node',
   testTimeout: 30000,
   forceExit: true,
+  setupFiles: ['<rootDir>/test/setup-env.ts'],
   moduleNameMapper: {
     '^src/(.*)$': '<rootDir>/src/$1',
     '^@proprietary/ai/(.*)$': '<rootDir>/test/__mocks__/@proprietary/ai/$1',
