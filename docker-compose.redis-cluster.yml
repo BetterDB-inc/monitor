@@ -1,0 +1,99 @@
+# docker-compose.redis-cluster.yml with host networking
+services:
+  redis-node-1:
+    image: redis:8.4-alpine
+    container_name: redis-node-1
+    network_mode: host
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes-7101.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 7101
+      --slowlog-log-slower-than 0
+    volumes:
+      - redis-node-1-data:/data
+
+  redis-node-2:
+    image: redis:8.4-alpine
+    container_name: redis-node-2
+    network_mode: host
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes-7102.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 7102
+      --slowlog-log-slower-than 0
+    volumes:
+      - redis-node-2-data:/data
+
+  redis-node-3:
+    image: redis:8.4-alpine
+    container_name: redis-node-3
+    network_mode: host
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes-7103.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 7103
+      --slowlog-log-slower-than 0
+    volumes:
+      - redis-node-3-data:/data
+
+  redis-node-4:
+    image: redis:8.4-alpine
+    container_name: redis-node-4
+    network_mode: host
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes-7104.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 7104
+      --slowlog-log-slower-than 0
+    volumes:
+      - redis-node-4-data:/data
+
+  redis-node-5:
+    image: redis:8.4-alpine
+    container_name: redis-node-5
+    network_mode: host
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes-7105.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 7105
+      --slowlog-log-slower-than 0
+    volumes:
+      - redis-node-5-data:/data
+
+  redis-node-6:
+    image: redis:8.4-alpine
+    container_name: redis-node-6
+    network_mode: host
+    command: >
+      redis-server
+      --cluster-enabled yes
+      --cluster-config-file nodes-7106.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --port 7106
+      --slowlog-log-slower-than 0
+    volumes:
+      - redis-node-6-data:/data
+
+volumes:
+  redis-node-1-data:
+  redis-node-2-data:
+  redis-node-3-data:
+  redis-node-4-data:
+  redis-node-5-data:
+  redis-node-6-data:

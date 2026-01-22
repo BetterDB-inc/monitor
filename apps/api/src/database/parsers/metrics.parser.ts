@@ -267,7 +267,7 @@ export class MetricsParser {
         };
       }
 
-      switch (metricName) {
+      switch (metricName.toLowerCase()) {
         case 'key-count':
           stats[slotKey].key_count = metricValue;
           break;

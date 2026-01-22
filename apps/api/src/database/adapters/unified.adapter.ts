@@ -122,12 +122,14 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const majorVersion = versionParts[0] || 0;
     const minorVersion = versionParts[1] || 0;
 
+    const redisSupportsSlotStats = !isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 2));
+
     this.capabilities = {
       dbType: isValkey ? 'valkey' : 'redis',
       version,
-      hasSlotStats: isValkey && majorVersion >= 8,
-      hasCommandLog: isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 1)),
-      hasClusterSlotStats: isValkey && majorVersion >= 8,
+      hasSlotStats: (isValkey && majorVersion >= 8) || redisSupportsSlotStats,
+      hasCommandLog: isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 1)),  // Still Valkey-only
+      hasClusterSlotStats: (isValkey && majorVersion >= 8) || redisSupportsSlotStats,
       hasLatencyMonitor: true,
       hasAclLog: majorVersion >= 6,
       hasMemoryDoctor: true,
