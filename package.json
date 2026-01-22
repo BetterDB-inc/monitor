@@ -52,7 +52,8 @@
   "pnpm": {
     "overrides": {
       "@fastify/middie": "9.1.0",
-      "glob": "10.5.0"
+      "glob": "10.5.0",
+      "lodash": "4.17.23"
     }
   }
 }
