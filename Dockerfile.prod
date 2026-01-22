@@ -1,13 +1,13 @@
 # ============================================
 # Build Stage
 # ============================================
-FROM node:20-alpine AS builder
+FROM node:25-alpine AS builder
 
-# Install build dependencies for native modules (hnswlib-node)
-RUN apk add --no-cache python3 make g++
+# Install build dependencies for native modules (hnswlib-node) and npm (for corepack)
+RUN apk add --no-cache python3 make g++ npm
 
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+# Install pnpm via corepack (use --force to handle yarn symlink conflict)
+RUN npm install -g --force corepack && corepack enable && corepack prepare pnpm@9.15.0 --activate
 
 WORKDIR /app
 
@@ -35,7 +35,7 @@ RUN pnpm --filter api --filter web --filter @betterdb/shared build
 # ============================================
 # Cleanup Stage - Remove AI dependencies
 # ============================================
-FROM node:20-alpine AS cleanup
+FROM node:25-alpine AS cleanup
 
 WORKDIR /app
 
@@ -110,7 +110,7 @@ RUN rm -rf /app/apps/api/dist/proprietary/ai
 # ============================================
 # Production Stage (Without AI Features)
 # ============================================
-FROM node:20-alpine AS production
+FROM node:25-alpine AS production
 
 # Install only wget for healthcheck (no build tools)
 RUN apk add --no-cache wget

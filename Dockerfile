@@ -1,13 +1,13 @@
 # ============================================
 # Build Stage
 # ============================================
-FROM node:20-alpine AS builder
+FROM node:25-alpine AS builder
 
-# Install build dependencies for native modules (hnswlib-node)
-RUN apk add --no-cache python3 make g++
+# Install build dependencies for native modules (hnswlib-node) and npm (for corepack)
+RUN apk add --no-cache python3 make g++ npm
 
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+# Install pnpm via corepack (use --force to handle yarn symlink conflict)
+RUN npm install -g --force corepack && corepack enable && corepack prepare pnpm@9.15.0 --activate
 
 WORKDIR /app
 
@@ -35,7 +35,7 @@ RUN pnpm --filter api --filter web --filter @betterdb/shared build
 # ============================================
 # Production Stage
 # ============================================
-FROM node:20-alpine AS production
+FROM node:25-alpine AS production
 
 # Only wget needed for healthcheck - no build tools!
 RUN apk add --no-cache wget

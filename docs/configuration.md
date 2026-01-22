@@ -372,7 +372,7 @@ docker port betterdb-monitor
 
 ## Docker Image Details
 
-- **Base Image**: `node:20-alpine`
+- **Base Image**: `node:25-alpine`
 - **Size**: ~188MB (optimized, no build tools)
 - **Platforms**: `linux/amd64`, `linux/arm64`
 - **Contains**: Backend API + Frontend static files (served by Fastify)
