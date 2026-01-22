@@ -42,6 +42,10 @@ RUN apk add --no-cache wget
 
 WORKDIR /app
 
+# Set APP_VERSION from build argument
+ARG APP_VERSION=0.1.0
+ENV APP_VERSION=$APP_VERSION
+
 # Copy pre-built node_modules from builder (includes native modules already compiled)
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/apps/api/node_modules ./apps/api/node_modules

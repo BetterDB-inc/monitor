@@ -87,7 +87,7 @@ export class LicenseService implements OnModuleInit {
 
   private async collectStats(): Promise<Record<string, any>> {
     return {
-      version: process.env.npm_package_version || 'unknown',
+      version: process.env.APP_VERSION || process.env.npm_package_version || 'unknown',
       uptime: process.uptime(),
       nodeVersion: process.version,
       platform: process.platform,
