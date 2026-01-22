@@ -757,7 +757,7 @@ BetterDB is designed to incorporate upcoming Valkey features as they become avai
 ### Contributing
 
 Feature requests for Valkey integration:
-1. Open issue at [BetterDB GitHub](https://github.com/yourusername/betterdb/issues)
+1. Open issue at [BetterDB GitHub](https://github.com/betterdb-inc/monitor/issues)
 2. Check [Valkey roadmap](https://github.com/valkey-io/valkey/issues)
 3. Propose implementation in BetterDB
 
