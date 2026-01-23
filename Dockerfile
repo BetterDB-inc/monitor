@@ -45,7 +45,7 @@ RUN apk add --no-cache wget tar>=7.5.4 && \
 WORKDIR /app
 
 # Set APP_VERSION from build argument
-ARG APP_VERSION=0.1.0
+ARG APP_VERSION=0.1.1
 ENV APP_VERSION=$APP_VERSION
 
 # Copy pre-built node_modules from builder (includes native modules already compiled)

@@ -63,7 +63,7 @@ async function bootstrap(): Promise<void> {
   const config = new DocumentBuilder()
     .setTitle('BetterDB Monitor API')
     .setDescription('Valkey/Redis monitoring and observability API')
-    .setVersion('0.1.0')
+    .setVersion('0.1.1')
     .addTag('metrics', 'Valkey/Redis metrics and diagnostics')
     .addTag('audit', 'ACL audit trail and security events')
     .addTag('client-analytics', 'Client connection history and analytics')

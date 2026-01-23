@@ -120,7 +120,7 @@ RUN apk add --no-cache wget tar>=7.5.4 && \
 WORKDIR /app
 
 # Set APP_VERSION from build argument
-ARG APP_VERSION=0.1.0
+ARG APP_VERSION=0.1.1
 ENV APP_VERSION=$APP_VERSION
 
 # Copy CLEANED node_modules from cleanup stage (no AI packages in this layer)
