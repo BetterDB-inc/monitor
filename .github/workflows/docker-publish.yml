@@ -1,0 +1,116 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., 0.1.1)'
+        required: false
+        type: string
+
+env:
+  IMAGE_NAME: betterdb/monitor
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract metadata (with AI)
+        id: meta-with-ai
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/tags/v{0}', steps.version.outputs.version) }}
+
+      - name: Extract metadata (without AI)
+        id: meta-without-ai
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}-no-ai
+            type=semver,pattern={{major}}.{{minor}}-no-ai
+
+      - name: Build and push (with AI)
+        id: push-with-ai
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-with-ai.outputs.tags }}
+          labels: ${{ steps.meta-with-ai.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=with-ai
+          cache-to: type=gha,mode=max,scope=with-ai
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+
+      - name: Build and push (without AI)
+        id: push-without-ai
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.prod
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-without-ai.outputs.tags }}
+          labels: ${{ steps.meta-without-ai.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=without-ai
+          cache-to: type=gha,mode=max,scope=without-ai
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+
+      - name: Generate artifact attestation (with AI)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: docker.io/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push-with-ai.outputs.digest }}
+          push-to-registry: true
+
+      - name: Generate artifact attestation (without AI)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: docker.io/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push-without-ai.outputs.digest }}
+          push-to-registry: true

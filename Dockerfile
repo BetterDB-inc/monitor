@@ -78,6 +78,15 @@ ENV DB_TYPE=auto
 ENV DB_USERNAME=default
 ENV STORAGE_TYPE=memory
 
+# Create non-root user for security (Docker Scout compliance)
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 --ingroup nodejs betterdb
+
+# Change ownership of app directory
+RUN chown -R betterdb:nodejs /app
+
+USER betterdb
+
 # Expose port (can be overridden with -e PORT=<port> at runtime)
 # Note: EXPOSE is documentation only - actual port binding happens via -p flag
 EXPOSE 3001
