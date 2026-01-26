@@ -1,17 +1,21 @@
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, Optional, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { HealthResponse } from '@betterdb/shared';
+import { HealthResponse, WebhookEventType } from '@betterdb/shared';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { DatabaseConfig } from '../config/configuration';
+import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 
 @Injectable()
 export class HealthService {
+  private readonly logger = new Logger(HealthService.name);
   private dbConfig: DatabaseConfig;
+  private instanceUp = true; // Track instance health state
 
   constructor(
     @Inject('DATABASE_CLIENT')
     private readonly dbClient: DatabasePort,
     private readonly configService: ConfigService,
+    @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
   ) {
     const config = this.configService.get<DatabaseConfig>('database');
     if (!config) {
@@ -22,6 +26,7 @@ export class HealthService {
 
   async getHealth(): Promise<HealthResponse> {
     if (!this.dbClient) {
+      await this.handleInstanceDown('Database client not initialized');
       return {
         status: 'disconnected',
         database: {
@@ -39,6 +44,7 @@ export class HealthService {
       const isConnected = this.dbClient.isConnected();
 
       if (!isConnected) {
+        await this.handleInstanceDown('Not connected to database');
         return {
           status: 'disconnected',
           database: {
@@ -55,6 +61,7 @@ export class HealthService {
       const canPing = await this.dbClient.ping();
 
       if (!canPing) {
+        await this.handleInstanceDown('Database ping failed');
         return {
           status: 'error',
           database: {
@@ -67,6 +74,9 @@ export class HealthService {
           error: 'Database ping failed',
         };
       }
+
+      // Instance is up - check if it recovered
+      await this.handleInstanceUp();
 
       const capabilities = this.dbClient.getCapabilities();
 
@@ -81,6 +91,8 @@ export class HealthService {
         capabilities,
       };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      await this.handleInstanceDown(errorMessage);
       return {
         status: 'error',
         database: {
@@ -90,8 +102,49 @@ export class HealthService {
           port: this.dbConfig.port,
         },
         capabilities: null,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: errorMessage,
       };
+    }
+  }
+
+  /**
+   * Handle instance going down - dispatch webhook if state changed
+   */
+  private async handleInstanceDown(reason: string): Promise<void> {
+    if (this.instanceUp && this.webhookDispatcher) {
+      this.logger.warn(`Instance went down: ${reason}`);
+      this.instanceUp = false;
+      try {
+        await this.webhookDispatcher.dispatchHealthChange(WebhookEventType.INSTANCE_DOWN, {
+          detectedAt: new Date().toISOString(),
+          reason,
+          host: this.dbConfig.host,
+          port: this.dbConfig.port,
+          message: `Database instance unreachable: ${reason}`,
+        });
+      } catch (err) {
+        this.logger.error('Failed to dispatch instance.down webhook', err);
+      }
+    }
+  }
+
+  /**
+   * Handle instance coming back up - dispatch webhook if state changed
+   */
+  private async handleInstanceUp(): Promise<void> {
+    if (!this.instanceUp && this.webhookDispatcher) {
+      this.logger.log('Instance recovered');
+      this.instanceUp = true;
+      try {
+        await this.webhookDispatcher.dispatchHealthChange(WebhookEventType.INSTANCE_UP, {
+          recoveredAt: new Date().toISOString(),
+          host: this.dbConfig.host,
+          port: this.dbConfig.port,
+          message: 'Database instance recovered',
+        });
+      } catch (err) {
+        this.logger.error('Failed to dispatch instance.up webhook', err);
+      }
     }
   }
 }

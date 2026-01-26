@@ -3,6 +3,7 @@
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
+import { randomUUID } from 'crypto';
 import {
   StoragePort,
   StoredAclEntry,
@@ -21,6 +22,10 @@ import {
   KeyAnalyticsSummary,
   AppSettings,
   SettingsUpdateRequest,
+  Webhook,
+  WebhookDelivery,
+  WebhookEventType,
+  DeliveryStatus,
 } from '../../common/interfaces/storage-port.interface';
 
 export interface SqliteAdapterConfig {
@@ -898,6 +903,37 @@ export class SqliteAdapter implements StoragePort {
         updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
         created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
       );
+
+      CREATE TABLE IF NOT EXISTS webhooks (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        secret TEXT,
+        enabled INTEGER DEFAULT 1,
+        events TEXT NOT NULL,
+        headers TEXT DEFAULT '{}',
+        retry_policy TEXT NOT NULL,
+        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+        updated_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+      );
+
+      CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        id TEXT PRIMARY KEY,
+        webhook_id TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        status_code INTEGER,
+        response_body TEXT,
+        attempts INTEGER DEFAULT 0,
+        next_retry_at INTEGER,
+        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+        completed_at INTEGER,
+        duration_ms INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_id ON webhook_deliveries(webhook_id);
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry ON webhook_deliveries(next_retry_at) WHERE status = 'retrying';
     `);
   }
 
@@ -1526,5 +1562,323 @@ export class SqliteAdapter implements StoragePort {
     };
 
     return this.saveSettings(merged);
+  }
+
+  async createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const id = randomUUID();
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      INSERT INTO webhooks (id, name, url, secret, enabled, events, headers, retry_policy, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      id,
+      webhook.name,
+      webhook.url,
+      webhook.secret,
+      webhook.enabled ? 1 : 0,
+      JSON.stringify(webhook.events),
+      JSON.stringify(webhook.headers || {}),
+      JSON.stringify(webhook.retryPolicy),
+      now,
+      now
+    );
+
+    return {
+      id,
+      name: webhook.name,
+      url: webhook.url,
+      secret: webhook.secret,
+      enabled: webhook.enabled,
+      events: webhook.events,
+      headers: webhook.headers,
+      retryPolicy: webhook.retryPolicy,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  async getWebhook(id: string): Promise<Webhook | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const row = this.db.prepare('SELECT * FROM webhooks WHERE id = ?').get(id) as any;
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      secret: row.secret,
+      enabled: row.enabled === 1,
+      events: JSON.parse(row.events),
+      headers: JSON.parse(row.headers),
+      retryPolicy: JSON.parse(row.retry_policy),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async getWebhooksByInstance(): Promise<Webhook[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const rows = this.db.prepare('SELECT * FROM webhooks ORDER BY created_at DESC').all() as any[];
+    return rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      secret: row.secret,
+      enabled: row.enabled === 1,
+      events: JSON.parse(row.events),
+      headers: JSON.parse(row.headers),
+      retryPolicy: JSON.parse(row.retry_policy),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const rows = this.db.prepare('SELECT * FROM webhooks WHERE enabled = 1').all() as any[];
+    return rows
+      .map(row => ({
+        id: row.id,
+        name: row.name,
+        url: row.url,
+        secret: row.secret,
+        enabled: row.enabled === 1,
+        events: JSON.parse(row.events) as WebhookEventType[],
+        headers: JSON.parse(row.headers),
+        retryPolicy: JSON.parse(row.retry_policy),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }))
+      .filter(webhook => webhook.events.includes(event));
+  }
+
+  async updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const setClauses: string[] = [];
+    const params: any[] = [];
+
+    if (updates.name !== undefined) {
+      setClauses.push('name = ?');
+      params.push(updates.name);
+    }
+    if (updates.url !== undefined) {
+      setClauses.push('url = ?');
+      params.push(updates.url);
+    }
+    if (updates.secret !== undefined) {
+      setClauses.push('secret = ?');
+      params.push(updates.secret);
+    }
+    if (updates.enabled !== undefined) {
+      setClauses.push('enabled = ?');
+      params.push(updates.enabled ? 1 : 0);
+    }
+    if (updates.events !== undefined) {
+      setClauses.push('events = ?');
+      params.push(JSON.stringify(updates.events));
+    }
+    if (updates.headers !== undefined) {
+      setClauses.push('headers = ?');
+      params.push(JSON.stringify(updates.headers));
+    }
+    if (updates.retryPolicy !== undefined) {
+      setClauses.push('retry_policy = ?');
+      params.push(JSON.stringify(updates.retryPolicy));
+    }
+
+    if (setClauses.length === 0) {
+      return this.getWebhook(id);
+    }
+
+    setClauses.push('updated_at = ?');
+    params.push(Date.now());
+    params.push(id);
+
+    const stmt = this.db.prepare(`UPDATE webhooks SET ${setClauses.join(', ')} WHERE id = ?`);
+    const result = stmt.run(...params);
+
+    if (result.changes === 0) return null;
+    return this.getWebhook(id);
+  }
+
+  async deleteWebhook(id: string): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const result = this.db.prepare('DELETE FROM webhooks WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  async createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const id = randomUUID();
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      INSERT INTO webhook_deliveries (
+        id, webhook_id, event_type, payload, status, status_code, response_body,
+        attempts, next_retry_at, completed_at, duration_ms, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      id,
+      delivery.webhookId,
+      delivery.eventType,
+      JSON.stringify(delivery.payload),
+      delivery.status,
+      delivery.statusCode || null,
+      delivery.responseBody || null,
+      delivery.attempts,
+      delivery.nextRetryAt || null,
+      delivery.completedAt || null,
+      delivery.durationMs || null,
+      now
+    );
+
+    return {
+      id,
+      webhookId: delivery.webhookId,
+      eventType: delivery.eventType,
+      payload: delivery.payload,
+      status: delivery.status,
+      statusCode: delivery.statusCode,
+      responseBody: delivery.responseBody,
+      attempts: delivery.attempts,
+      nextRetryAt: delivery.nextRetryAt,
+      createdAt: now,
+      completedAt: delivery.completedAt,
+      durationMs: delivery.durationMs,
+    };
+  }
+
+  async getDelivery(id: string): Promise<WebhookDelivery | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const row = this.db.prepare('SELECT * FROM webhook_deliveries WHERE id = ?').get(id) as any;
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      webhookId: row.webhook_id,
+      eventType: row.event_type,
+      payload: JSON.parse(row.payload),
+      status: row.status,
+      statusCode: row.status_code,
+      responseBody: row.response_body,
+      attempts: row.attempts,
+      nextRetryAt: row.next_retry_at || undefined,
+      createdAt: row.created_at,
+      completedAt: row.completed_at || undefined,
+      durationMs: row.duration_ms,
+    };
+  }
+
+  async getDeliveriesByWebhook(webhookId: string, limit: number = 50): Promise<WebhookDelivery[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const rows = this.db.prepare('SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY created_at DESC LIMIT ?').all(webhookId, limit) as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      webhookId: row.webhook_id,
+      eventType: row.event_type,
+      payload: JSON.parse(row.payload),
+      status: row.status,
+      statusCode: row.status_code,
+      responseBody: row.response_body,
+      attempts: row.attempts,
+      nextRetryAt: row.next_retry_at || undefined,
+      createdAt: row.created_at,
+      completedAt: row.completed_at || undefined,
+      durationMs: row.duration_ms,
+    }));
+  }
+
+  async updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const setClauses: string[] = [];
+    const params: any[] = [];
+
+    if (updates.status !== undefined) {
+      setClauses.push('status = ?');
+      params.push(updates.status);
+    }
+    if (updates.statusCode !== undefined) {
+      setClauses.push('status_code = ?');
+      params.push(updates.statusCode);
+    }
+    if (updates.responseBody !== undefined) {
+      setClauses.push('response_body = ?');
+      params.push(updates.responseBody);
+    }
+    if (updates.attempts !== undefined) {
+      setClauses.push('attempts = ?');
+      params.push(updates.attempts);
+    }
+    if (updates.nextRetryAt !== undefined) {
+      setClauses.push('next_retry_at = ?');
+      params.push(updates.nextRetryAt !== undefined ? updates.nextRetryAt : null);
+    }
+    if (updates.completedAt !== undefined) {
+      setClauses.push('completed_at = ?');
+      params.push(updates.completedAt !== undefined ? updates.completedAt : null);
+    }
+    if (updates.durationMs !== undefined) {
+      setClauses.push('duration_ms = ?');
+      params.push(updates.durationMs);
+    }
+
+    if (setClauses.length === 0) return true;
+
+    params.push(id);
+
+    const stmt = this.db.prepare(`UPDATE webhook_deliveries SET ${setClauses.join(', ')} WHERE id = ?`);
+    const result = stmt.run(...params);
+
+    return result.changes > 0;
+  }
+
+  async getRetriableDeliveries(limit: number = 100): Promise<WebhookDelivery[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const now = Date.now();
+    const rows = this.db.prepare(
+      `SELECT * FROM webhook_deliveries
+       WHERE status = 'retrying' AND next_retry_at <= ?
+       ORDER BY next_retry_at ASC
+       LIMIT ?`
+    ).all(now, limit) as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      webhookId: row.webhook_id,
+      eventType: row.event_type,
+      payload: JSON.parse(row.payload),
+      status: row.status,
+      statusCode: row.status_code,
+      responseBody: row.response_body,
+      attempts: row.attempts,
+      nextRetryAt: row.next_retry_at || undefined,
+      createdAt: row.created_at,
+      completedAt: row.completed_at || undefined,
+      durationMs: row.duration_ms,
+    }));
+  }
+
+  async pruneOldDeliveries(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const result = this.db.prepare('DELETE FROM webhook_deliveries WHERE created_at < ?').run(cutoffTimestamp);
+    return result.changes;
   }
 }

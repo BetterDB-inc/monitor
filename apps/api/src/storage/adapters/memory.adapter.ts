@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import {
   StoragePort,
   StoredAclEntry,
@@ -16,6 +17,10 @@ import {
   KeyAnalyticsSummary,
   AppSettings,
   SettingsUpdateRequest,
+  Webhook,
+  WebhookDelivery,
+  WebhookEventType,
+  DeliveryStatus,
 } from '../../common/interfaces/storage-port.interface';
 
 export class MemoryAdapter implements StoragePort {
@@ -24,8 +29,11 @@ export class MemoryAdapter implements StoragePort {
   private anomalyEvents: StoredAnomalyEvent[] = [];
   private correlatedGroups: StoredCorrelatedGroup[] = [];
   private settings: AppSettings | null = null;
+  private webhooks: Map<string, Webhook> = new Map();
+  private deliveries: Map<string, WebhookDelivery> = new Map();
   private idCounter = 1;
   private ready: boolean = false;
+  private readonly MAX_DELIVERIES_PER_WEBHOOK = 1000;
 
   async initialize(): Promise<void> {
     this.ready = true;
@@ -579,5 +587,128 @@ export class MemoryAdapter implements StoragePort {
       updatedAt: Date.now(),
     };
     return { ...this.settings };
+  }
+
+  async createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook> {
+    const id = randomUUID();
+    const now = Date.now();
+    const newWebhook: Webhook = {
+      id,
+      ...webhook,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.webhooks.set(id, newWebhook);
+    return { ...newWebhook };
+  }
+
+  async getWebhook(id: string): Promise<Webhook | null> {
+    const webhook = this.webhooks.get(id);
+    return webhook ? { ...webhook } : null;
+  }
+
+  async getWebhooksByInstance(): Promise<Webhook[]> {
+    return Array.from(this.webhooks.values())
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(w => ({ ...w }));
+  }
+
+  async getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]> {
+    return Array.from(this.webhooks.values())
+      .filter(w => w.enabled && w.events.includes(event))
+      .map(w => ({ ...w }));
+  }
+
+  async updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null> {
+    const webhook = this.webhooks.get(id);
+    if (!webhook) return null;
+
+    const updated: Webhook = {
+      ...webhook,
+      ...updates,
+      id,
+      createdAt: webhook.createdAt,
+      updatedAt: Date.now(),
+    };
+    this.webhooks.set(id, updated);
+    return { ...updated };
+  }
+
+  async deleteWebhook(id: string): Promise<boolean> {
+    const deleted = this.webhooks.delete(id);
+    if (deleted) {
+      const deliveriesToDelete = Array.from(this.deliveries.entries())
+        .filter(([_, d]) => d.webhookId === id)
+        .map(([id]) => id);
+      deliveriesToDelete.forEach(deliveryId => this.deliveries.delete(deliveryId));
+    }
+    return deleted;
+  }
+
+  async createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery> {
+    const now = Date.now();
+    const id = randomUUID();
+    const newDelivery: WebhookDelivery = {
+      id,
+      ...delivery,
+      createdAt: now,
+    };
+    this.deliveries.set(id, newDelivery);
+
+    const webhookDeliveries = Array.from(this.deliveries.values())
+      .filter(d => d.webhookId === delivery.webhookId)
+      .sort((a, b) => b.createdAt - a.createdAt);
+
+    if (webhookDeliveries.length > this.MAX_DELIVERIES_PER_WEBHOOK) {
+      const toDelete = webhookDeliveries.slice(this.MAX_DELIVERIES_PER_WEBHOOK);
+      toDelete.forEach(d => this.deliveries.delete(d.id));
+    }
+
+    return { ...newDelivery };
+  }
+
+  async getDelivery(id: string): Promise<WebhookDelivery | null> {
+    const delivery = this.deliveries.get(id);
+    return delivery ? { ...delivery } : null;
+  }
+
+  async getDeliveriesByWebhook(webhookId: string, limit: number = 50): Promise<WebhookDelivery[]> {
+    return Array.from(this.deliveries.values())
+      .filter(d => d.webhookId === webhookId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, limit)
+      .map(d => ({ ...d }));
+  }
+
+  async updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean> {
+    const delivery = this.deliveries.get(id);
+    if (!delivery) return false;
+
+    const updated: WebhookDelivery = {
+      ...delivery,
+      ...updates,
+      id,
+      webhookId: delivery.webhookId,
+      createdAt: delivery.createdAt,
+    };
+    this.deliveries.set(id, updated);
+    return true;
+  }
+
+  async getRetriableDeliveries(limit: number = 100): Promise<WebhookDelivery[]> {
+    const now = Date.now();
+    return Array.from(this.deliveries.values())
+      .filter(d => d.status === 'retrying' && d.nextRetryAt && d.nextRetryAt <= now)
+      .sort((a, b) => (a.nextRetryAt || 0) - (b.nextRetryAt || 0))
+      .slice(0, limit)
+      .map(d => ({ ...d }));
+  }
+
+  async pruneOldDeliveries(cutoffTimestamp: number): Promise<number> {
+    const before = this.deliveries.size;
+    Array.from(this.deliveries.entries())
+      .filter(([_, d]) => d.createdAt < cutoffTimestamp)
+      .forEach(([id]) => this.deliveries.delete(id));
+    return before - this.deliveries.size;
   }
 }

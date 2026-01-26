@@ -19,6 +19,10 @@ export type {
   KeyPatternSnapshot,
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
+  Webhook,
+  WebhookDelivery,
+  WebhookEventType,
+  DeliveryStatus,
 } from '@betterdb/shared';
 import type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/shared';
 import type {
@@ -41,6 +45,10 @@ import type {
   KeyPatternSnapshot,
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
+  Webhook,
+  WebhookDelivery,
+  WebhookEventType,
+  DeliveryStatus,
 } from '@betterdb/shared';
 
 // Anomaly Event Types
@@ -142,4 +150,20 @@ export interface StoragePort {
   getSettings(): Promise<AppSettings | null>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
   updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings>;
+
+  // Webhook Methods
+  createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook>;
+  getWebhook(id: string): Promise<Webhook | null>;
+  getWebhooksByInstance(): Promise<Webhook[]>;
+  getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]>;
+  updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null>;
+  deleteWebhook(id: string): Promise<boolean>;
+
+  // Webhook Delivery Methods
+  createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery>;
+  getDelivery(id: string): Promise<WebhookDelivery | null>;
+  getDeliveriesByWebhook(webhookId: string, limit?: number): Promise<WebhookDelivery[]>;
+  updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean>;
+  getRetriableDeliveries(limit?: number): Promise<WebhookDelivery[]>;
+  pruneOldDeliveries(cutoffTimestamp: number): Promise<number>;
 }

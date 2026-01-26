@@ -7,11 +7,13 @@ import { AuditModule } from './audit/audit.module';
 import { ClientAnalyticsModule } from './client-analytics/client-analytics.module';
 import { PrometheusModule } from './prometheus/prometheus.module';
 import { SettingsModule } from './settings/settings.module';
+import { WebhooksModule } from './webhooks/webhooks.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
 let KeyAnalyticsModule: any = null;
 let AnomalyModule: any = null;
+let WebhookProModule: any = null;
 
 try {
   const module = require('@proprietary/ai/ai.module');
@@ -45,6 +47,14 @@ try {
   // Proprietary module not available
 }
 
+try {
+  const webhookProModule = require('@proprietary/webhook-pro');
+  WebhookProModule = webhookProModule.WebhookProModule;
+  console.log('[WebhookPro] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
 const baseImports = [
   ConfigModule,
   DatabaseModule,
@@ -54,12 +64,14 @@ const baseImports = [
   ClientAnalyticsModule,
   PrometheusModule,
   SettingsModule,
+  WebhooksModule,
 ];
 
 const proprietaryImports = [
   LicenseModule,
   KeyAnalyticsModule,
   AnomalyModule,
+  WebhookProModule,
   AiModule,
 ].filter(Boolean);
 

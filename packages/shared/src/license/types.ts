@@ -31,11 +31,17 @@ export enum Feature {
   ALERTING = 'alerting',
   WORKSPACES = 'workspaces',
   MULTI_INSTANCE = 'multiInstance',
+  WEBHOOK_OPERATIONAL_EVENTS = 'webhookOperationalEvents',
+  WEBHOOK_CUSTOM_HEADERS = 'webhookCustomHeaders',
+  WEBHOOK_DELIVERY_PAYLOAD = 'webhookDeliveryPayload',
+  WEBHOOK_CONFIGURABLE_RETRY = 'webhookConfigurableRetry',
   // Enterprise-only features
   SSO_SAML = 'ssoSaml',
   COMPLIANCE_EXPORT = 'complianceExport',
   RBAC = 'rbac',
   AI_CLOUD = 'aiCloud',
+  WEBHOOK_COMPLIANCE_EVENTS = 'webhookComplianceEvents',
+  WEBHOOK_DLQ = 'webhookDlq',
 }
 
 export const TIER_FEATURES: Record<Tier, Feature[]> = {
@@ -46,6 +52,10 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
     Feature.ALERTING,
     Feature.WORKSPACES,
     Feature.MULTI_INSTANCE,
+    Feature.WEBHOOK_OPERATIONAL_EVENTS,
+    Feature.WEBHOOK_CUSTOM_HEADERS,
+    Feature.WEBHOOK_DELIVERY_PAYLOAD,
+    Feature.WEBHOOK_CONFIGURABLE_RETRY,
   ],
   [Tier.enterprise]: Object.values(Feature),
 };

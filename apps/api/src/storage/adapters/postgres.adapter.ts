@@ -17,6 +17,10 @@ import {
   KeyAnalyticsSummary,
   AppSettings,
   SettingsUpdateRequest,
+  Webhook,
+  WebhookDelivery,
+  WebhookEventType,
+  DeliveryStatus,
 } from '../../common/interfaces/storage-port.interface';
 
 export interface PostgresAdapterConfig {
@@ -871,6 +875,37 @@ export class PostgresAdapter implements StoragePort {
         updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
         created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
       );
+
+      CREATE TABLE IF NOT EXISTS webhooks (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(255) NOT NULL,
+        url TEXT NOT NULL,
+        secret TEXT,
+        enabled BOOLEAN DEFAULT true,
+        events TEXT[] NOT NULL,
+        headers JSONB DEFAULT '{}',
+        retry_policy JSONB NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        webhook_id UUID NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+        event_type VARCHAR(50) NOT NULL,
+        payload JSONB NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        status_code INT,
+        response_body TEXT,
+        attempts INT DEFAULT 0,
+        next_retry_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        duration_ms INT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_id ON webhook_deliveries(webhook_id);
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry ON webhook_deliveries(next_retry_at) WHERE status = 'retrying';
     `);
   }
 
@@ -1506,5 +1541,345 @@ export class PostgresAdapter implements StoragePort {
     };
 
     return this.saveSettings(merged);
+  }
+
+  async createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `INSERT INTO webhooks (name, url, secret, enabled, events, headers, retry_policy)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [
+        webhook.name,
+        webhook.url,
+        webhook.secret,
+        webhook.enabled,
+        webhook.events,
+        JSON.stringify(webhook.headers || {}),
+        JSON.stringify(webhook.retryPolicy),
+      ]
+    );
+
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      secret: row.secret,
+      enabled: row.enabled,
+      events: row.events,
+      headers: row.headers,
+      retryPolicy: row.retry_policy,
+      createdAt: new Date(row.created_at).getTime(),
+      updatedAt: new Date(row.updated_at).getTime(),
+    };
+  }
+
+  async getWebhook(id: string): Promise<Webhook | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query('SELECT * FROM webhooks WHERE id = $1', [id]);
+    if (result.rows.length === 0) return null;
+
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      secret: row.secret,
+      enabled: row.enabled,
+      events: row.events,
+      headers: row.headers,
+      retryPolicy: row.retry_policy,
+      createdAt: new Date(row.created_at).getTime(),
+      updatedAt: new Date(row.updated_at).getTime(),
+    };
+  }
+
+  async getWebhooksByInstance(): Promise<Webhook[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query('SELECT * FROM webhooks ORDER BY created_at DESC');
+    return result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      secret: row.secret,
+      enabled: row.enabled,
+      events: row.events,
+      headers: row.headers,
+      retryPolicy: row.retry_policy,
+      createdAt: new Date(row.created_at).getTime(),
+      updatedAt: new Date(row.updated_at).getTime(),
+    }));
+  }
+
+  async getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      'SELECT * FROM webhooks WHERE enabled = true AND $1 = ANY(events)',
+      [event]
+    );
+
+    return result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      secret: row.secret,
+      enabled: row.enabled,
+      events: row.events,
+      headers: row.headers,
+      retryPolicy: row.retry_policy,
+      createdAt: new Date(row.created_at).getTime(),
+      updatedAt: new Date(row.updated_at).getTime(),
+    }));
+  }
+
+  async updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const setClauses: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (updates.name !== undefined) {
+      setClauses.push(`name = $${paramIndex++}`);
+      params.push(updates.name);
+    }
+    if (updates.url !== undefined) {
+      setClauses.push(`url = $${paramIndex++}`);
+      params.push(updates.url);
+    }
+    if (updates.secret !== undefined) {
+      setClauses.push(`secret = $${paramIndex++}`);
+      params.push(updates.secret);
+    }
+    if (updates.enabled !== undefined) {
+      setClauses.push(`enabled = $${paramIndex++}`);
+      params.push(updates.enabled);
+    }
+    if (updates.events !== undefined) {
+      setClauses.push(`events = $${paramIndex++}`);
+      params.push(updates.events);
+    }
+    if (updates.headers !== undefined) {
+      setClauses.push(`headers = $${paramIndex++}`);
+      params.push(JSON.stringify(updates.headers));
+    }
+    if (updates.retryPolicy !== undefined) {
+      setClauses.push(`retry_policy = $${paramIndex++}`);
+      params.push(JSON.stringify(updates.retryPolicy));
+    }
+
+    if (setClauses.length === 0) {
+      return this.getWebhook(id);
+    }
+
+    setClauses.push(`updated_at = NOW()`);
+    params.push(id);
+
+    const result = await this.pool.query(
+      `UPDATE webhooks SET ${setClauses.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
+      params
+    );
+
+    if (result.rows.length === 0) return null;
+
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      secret: row.secret,
+      enabled: row.enabled,
+      events: row.events,
+      headers: row.headers,
+      retryPolicy: row.retry_policy,
+      createdAt: new Date(row.created_at).getTime(),
+      updatedAt: new Date(row.updated_at).getTime(),
+    };
+  }
+
+  async deleteWebhook(id: string): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query('DELETE FROM webhooks WHERE id = $1', [id]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `INSERT INTO webhook_deliveries (
+        webhook_id, event_type, payload, status, status_code, response_body,
+        attempts, next_retry_at, completed_at, duration_ms
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING *`,
+      [
+        delivery.webhookId,
+        delivery.eventType,
+        JSON.stringify(delivery.payload),
+        delivery.status,
+        delivery.statusCode || null,
+        delivery.responseBody || null,
+        delivery.attempts,
+        delivery.nextRetryAt ? delivery.nextRetryAt : null,
+        delivery.completedAt ? delivery.completedAt : null,
+        delivery.durationMs || null,
+      ]
+    );
+
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      webhookId: row.webhook_id,
+      eventType: row.event_type,
+      payload: row.payload,
+      status: row.status,
+      statusCode: row.status_code,
+      responseBody: row.response_body,
+      attempts: row.attempts,
+      nextRetryAt: row.next_retry_at ? new Date(row.next_retry_at).getTime() : undefined,
+      createdAt: new Date(row.created_at).getTime(),
+      completedAt: row.completed_at ? new Date(row.completed_at).getTime() : undefined,
+      durationMs: row.duration_ms,
+    };
+  }
+
+  async getDelivery(id: string): Promise<WebhookDelivery | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query('SELECT * FROM webhook_deliveries WHERE id = $1', [id]);
+    if (result.rows.length === 0) return null;
+
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      webhookId: row.webhook_id,
+      eventType: row.event_type,
+      payload: row.payload,
+      status: row.status,
+      statusCode: row.status_code,
+      responseBody: row.response_body,
+      attempts: row.attempts,
+      nextRetryAt: row.next_retry_at ? new Date(row.next_retry_at).getTime() : undefined,
+      createdAt: new Date(row.created_at).getTime(),
+      completedAt: row.completed_at ? new Date(row.completed_at).getTime() : undefined,
+      durationMs: row.duration_ms,
+    };
+  }
+
+  async getDeliveriesByWebhook(webhookId: string, limit: number = 50): Promise<WebhookDelivery[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      'SELECT * FROM webhook_deliveries WHERE webhook_id = $1 ORDER BY created_at DESC LIMIT $2',
+      [webhookId, limit]
+    );
+
+    return result.rows.map(row => ({
+      id: row.id,
+      webhookId: row.webhook_id,
+      eventType: row.event_type,
+      payload: row.payload,
+      status: row.status,
+      statusCode: row.status_code,
+      responseBody: row.response_body,
+      attempts: row.attempts,
+      nextRetryAt: row.next_retry_at ? new Date(row.next_retry_at).getTime() : undefined,
+      createdAt: new Date(row.created_at).getTime(),
+      completedAt: row.completed_at ? new Date(row.completed_at).getTime() : undefined,
+      durationMs: row.duration_ms,
+    }));
+  }
+
+  async updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const setClauses: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (updates.status !== undefined) {
+      setClauses.push(`status = $${paramIndex++}`);
+      params.push(updates.status);
+    }
+    if (updates.statusCode !== undefined) {
+      setClauses.push(`status_code = $${paramIndex++}`);
+      params.push(updates.statusCode);
+    }
+    if (updates.responseBody !== undefined) {
+      setClauses.push(`response_body = $${paramIndex++}`);
+      params.push(updates.responseBody);
+    }
+    if (updates.attempts !== undefined) {
+      setClauses.push(`attempts = $${paramIndex++}`);
+      params.push(updates.attempts);
+    }
+    if (updates.nextRetryAt !== undefined) {
+      setClauses.push(`next_retry_at = $${paramIndex++}`);
+      params.push(updates.nextRetryAt || null);
+    }
+    if (updates.completedAt !== undefined) {
+      setClauses.push(`completed_at = $${paramIndex++}`);
+      params.push(updates.completedAt || null);
+    }
+    if (updates.durationMs !== undefined) {
+      setClauses.push(`duration_ms = $${paramIndex++}`);
+      params.push(updates.durationMs);
+    }
+
+    if (setClauses.length === 0) return true;
+
+    params.push(id);
+
+    const result = await this.pool.query(
+      `UPDATE webhook_deliveries SET ${setClauses.join(', ')} WHERE id = $${paramIndex}`,
+      params
+    );
+
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async getRetriableDeliveries(limit: number = 100): Promise<WebhookDelivery[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `SELECT * FROM webhook_deliveries
+       WHERE status = 'retrying' AND next_retry_at <= NOW()
+       ORDER BY next_retry_at ASC
+       LIMIT $1`,
+      [limit]
+    );
+
+    return result.rows.map(row => ({
+      id: row.id,
+      webhookId: row.webhook_id,
+      eventType: row.event_type,
+      payload: row.payload,
+      status: row.status,
+      statusCode: row.status_code,
+      responseBody: row.response_body,
+      attempts: row.attempts,
+      nextRetryAt: row.next_retry_at ? new Date(row.next_retry_at).getTime() : undefined,
+      createdAt: new Date(row.created_at).getTime(),
+      completedAt: row.completed_at ? new Date(row.completed_at).getTime() : undefined,
+      durationMs: row.duration_ms,
+    }));
+  }
+
+  async pruneOldDeliveries(cutoffTimestamp: number): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      'DELETE FROM webhook_deliveries WHERE EXTRACT(EPOCH FROM created_at) * 1000 < $1',
+      [cutoffTimestamp]
+    );
+
+    return result.rowCount ?? 0;
   }
 }
