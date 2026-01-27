@@ -33,7 +33,8 @@
     "docs:index": "ts-node -r tsconfig-paths/register scripts/index-docs.ts",
     "docs:index:valkey": "SOURCE=valkey ts-node -r tsconfig-paths/register scripts/index-docs.ts",
     "docs:index:redis": "SOURCE=redis ts-node -r tsconfig-paths/register scripts/index-docs.ts",
-    "docs:clean": "rm -rf data/docs data/chunks data/vector-store"
+    "docs:clean": "rm -rf data/docs data/chunks data/vector-store",
+    "seed:demo": "ts-node -r tsconfig-paths/register scripts/seed-demo-data.ts"
   },
   "dependencies": {
     "@betterdb/shared": "workspace:*",

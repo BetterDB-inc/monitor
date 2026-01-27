@@ -1,12 +1,15 @@
 import { Injectable, Inject, OnModuleInit, OnModuleDestroy, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { WebhookEventType } from '@betterdb/shared';
+import { WebhookEventType, IWebhookEventsEnterpriseService } from '@betterdb/shared';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { StoragePort, StoredAclEntry } from '../common/interfaces/storage-port.interface';
 import { AclLogEntry } from '../common/types/metrics.types';
 import { PrometheusService } from '../prometheus/prometheus.service';
 import { SettingsService } from '../settings/settings.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
+
+// Note: WebhookEventsEnterpriseService is injected via DI when proprietary module is available
+// The interface IWebhookEventsEnterpriseService provides type safety for the optional injection
 
 @Injectable()
 export class AuditService implements OnModuleInit, OnModuleDestroy {
@@ -25,6 +28,7 @@ export class AuditService implements OnModuleInit, OnModuleDestroy {
     private readonly prometheusService: PrometheusService,
     private readonly settingsService: SettingsService,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
+    @Optional() private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
   ) {
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
     this.sourcePort = this.configService.get<number>('database.port', 6379);
@@ -137,13 +141,17 @@ export class AuditService implements OnModuleInit, OnModuleDestroy {
               });
             }
 
-            // Enterprise tier: audit.policy.violation for command/key violations
-            if (entry.reason === 'command' || entry.reason === 'key') {
-              await this.webhookDispatcher.dispatchEvent(WebhookEventType.AUDIT_POLICY_VIOLATION, {
-                ...webhookData,
+            // Enterprise tier: audit.policy.violation for command/key violations (handled by proprietary service)
+            if ((entry.reason === 'command' || entry.reason === 'key') && this.webhookEventsEnterpriseService) {
+              await this.webhookEventsEnterpriseService.dispatchAuditPolicyViolation({
+                username: entry.username,
+                clientInfo: entry.clientInfo,
                 violationType: entry.reason,
-                severity: 'high',
-                message: `Audit policy violation: ${entry.reason} access denied for ${entry.username}@${entry.clientInfo} - ${entry.context} ${entry.object}`,
+                violatedCommand: entry.reason === 'command' ? entry.object : undefined,
+                violatedKey: entry.reason === 'key' ? entry.object : undefined,
+                count: entry.count,
+                timestamp: entry.timestampLastUpdated * 1000, // Convert to ms
+                instance: { host: this.sourceHost, port: this.sourcePort },
               });
             }
           } catch (err) {

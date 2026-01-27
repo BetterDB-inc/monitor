@@ -1,10 +1,14 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Inject, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Registry, Gauge, Counter, Histogram, collectDefaultMetrics } from 'prom-client';
-import { WebhookEventType } from '@betterdb/shared';
+import { WebhookEventType, IWebhookEventsProService, IWebhookEventsEnterpriseService } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
+
+// Note: WebhookEventsProService and WebhookEventsEnterpriseService are injected via DI
+// when proprietary module is available. Interfaces provide type safety for optional injection.
 
 @Injectable()
 export class PrometheusService implements OnModuleInit, OnModuleDestroy {
@@ -117,12 +121,20 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
   private anomalyDetectionBufferMean: Gauge;
   private anomalyDetectionBufferStdDev: Gauge;
 
+  private readonly dbHost: string;
+  private readonly dbPort: number;
+
   constructor(
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     @Inject('DATABASE_CLIENT') private dbClient: DatabasePort,
+    private readonly configService: ConfigService,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
+    @Optional() private readonly webhookEventsProService?: IWebhookEventsProService,
+    @Optional() private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
   ) {
     this.registry = new Registry();
+    this.dbHost = this.configService.get<string>('database.host', 'localhost');
+    this.dbPort = this.configService.get<number>('database.port', 6379);
     this.initializeMetrics();
   }
 
@@ -400,27 +412,18 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
         this.logger.error('Failed to dispatch memory.critical webhook', err);
       });
 
-      // Webhook dispatch for compliance.alert (Enterprise tier)
+      // Webhook dispatch for compliance.alert (Enterprise tier - handled by proprietary service)
       // Trigger when memory is high AND eviction policy is 'noeviction' (data loss risk)
-      if (usedPercent > 80 && maxmemoryPolicy === 'noeviction') {
-        this.webhookDispatcher.dispatchThresholdAlert(
-          WebhookEventType.COMPLIANCE_ALERT,
-          'compliance_noeviction',
-          usedPercent,
-          80,
-          true,
-          {
-            complianceRule: 'data_retention',
-            severity: 'high',
-            usedBytes: memoryUsed,
-            maxBytes: maxMemory,
-            usedPercent: parseFloat(usedPercent.toFixed(2)),
-            maxmemoryPolicy,
-            issue: 'noeviction_policy_with_high_memory',
-            message: `Compliance alert: Memory at ${usedPercent.toFixed(1)}% with 'noeviction' policy may cause data loss and violate retention policies`,
-            recommendation: 'Consider changing maxmemory-policy to volatile-lru or allkeys-lru, or increase maxmemory limit',
-          }
-        ).catch(err => {
+      if (usedPercent > 80 && maxmemoryPolicy === 'noeviction' && this.webhookEventsEnterpriseService) {
+        this.webhookEventsEnterpriseService.dispatchComplianceAlert({
+          complianceType: 'data_retention',
+          severity: 'high',
+          memoryUsedPercent: usedPercent,
+          maxmemoryPolicy,
+          message: `Compliance alert: Memory at ${usedPercent.toFixed(1)}% with 'noeviction' policy may cause data loss and violate retention policies`,
+          timestamp: Date.now(),
+          instance: { host: this.dbHost, port: this.dbPort },
+        }).catch(err => {
           this.logger.error('Failed to dispatch compliance.alert webhook', err);
         });
       }
@@ -466,24 +469,16 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
         this.replicationOffset.set(parseInt(info.replication.slave_repl_offset) || 0);
       }
 
-      // Webhook dispatch for replication.lag (Pro tier feature)
-      if (this.webhookDispatcher && masterLinkStatus === 'up') {
+      // Webhook dispatch for replication.lag (Pro tier - handled by proprietary service)
+      if (this.webhookEventsProService && masterLinkStatus === 'up') {
         // Trigger if replication lag exceeds 10 seconds
-        this.webhookDispatcher.dispatchThresholdAlert(
-          WebhookEventType.REPLICATION_LAG,
-          'replication_lag',
-          lastIoSecondsAgo,
-          10, // 10 seconds threshold
-          true, // fire when ABOVE
-          {
-            lagSeconds: lastIoSecondsAgo,
-            threshold: 10,
-            masterLinkStatus,
-            replicaOffset: parseInt(info.replication.slave_repl_offset) || 0,
-            masterOffset: parseInt(info.replication.master_repl_offset) || 0,
-            message: `Replication lag detected: ${lastIoSecondsAgo} seconds behind master (threshold: 10s)`,
-          }
-        ).catch(err => {
+        this.webhookEventsProService.dispatchReplicationLag({
+          lagSeconds: lastIoSecondsAgo,
+          threshold: 10,
+          masterLinkStatus,
+          timestamp: Date.now(),
+          instance: { host: this.dbHost, port: this.dbPort },
+        }).catch(err => {
           this.logger.error('Failed to dispatch replication.lag webhook', err);
         });
       }
@@ -554,8 +549,8 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
         this.clusterSlotsPfail.set(parseInt(clusterInfo.cluster_slots_pfail) || 0);
       }
 
-      // Webhook dispatch for cluster.failover (Pro tier feature)
-      if (this.webhookDispatcher) {
+      // Webhook dispatch for cluster.failover (Pro tier - handled by proprietary service)
+      if (this.webhookEventsProService) {
         // Detect cluster state change from 'ok' to 'fail'
         const stateChanged = this.previousClusterState === 'ok' && clusterState === 'fail';
 
@@ -564,16 +559,14 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
 
         if (stateChanged || newSlotFailures) {
           try {
-            await this.webhookDispatcher.dispatchEvent(WebhookEventType.CLUSTER_FAILOVER, {
+            await this.webhookEventsProService.dispatchClusterFailover({
               clusterState,
-              previousState: this.previousClusterState,
-              slotsFail,
-              previousSlotsFail: this.previousSlotsFail,
-              slotsOk: parseInt(clusterInfo.cluster_slots_ok) || 0,
+              previousState: this.previousClusterState ?? undefined,
+              slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
+              slotsFailed: slotsFail,
               knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
-              message: stateChanged
-                ? `Cluster failover detected: state changed from ${this.previousClusterState} to ${clusterState}`
-                : `Cluster slot failures increased: ${this.previousSlotsFail} → ${slotsFail} failed slots`,
+              timestamp: Date.now(),
+              instance: { host: this.dbHost, port: this.dbPort },
             });
           } catch (err) {
             this.logger.error('Failed to dispatch cluster.failover webhook', err);
@@ -718,20 +711,14 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
         this.slowlogLastId.set(entries[0].id);
       }
 
-      // Webhook dispatch for slowlog.threshold (Pro tier feature)
-      if (this.webhookDispatcher) {
-        this.webhookDispatcher.dispatchThresholdAlert(
-          WebhookEventType.SLOWLOG_THRESHOLD,
-          'slowlog_threshold',
-          length,
-          100, // 100 entries threshold (configurable via env later)
-          true,
-          {
-            slowlogLength: length,
-            threshold: 100,
-            message: `Slowlog threshold exceeded: ${length} entries (threshold: 100)`,
-          }
-        ).catch(err => {
+      // Webhook dispatch for slowlog.threshold (Pro tier - handled by proprietary service)
+      if (this.webhookEventsProService) {
+        this.webhookEventsProService.dispatchSlowlogThreshold({
+          slowlogCount: length,
+          threshold: 100, // 100 entries threshold (configurable via env later)
+          timestamp: Date.now(),
+          instance: { host: this.dbHost, port: this.dbPort },
+        }).catch(err => {
           this.logger.error('Failed to dispatch slowlog.threshold webhook', err);
         });
       }

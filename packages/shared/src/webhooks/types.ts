@@ -104,3 +104,126 @@ export interface WebhookPayload {
   };
   data: Record<string, any>;
 }
+
+// Instance info used across all webhook events
+export interface WebhookInstanceInfo {
+  host: string;
+  port: number;
+}
+
+// ============================================================================
+// Webhook Events Service Interfaces (for OCV dynamic imports)
+// These interfaces allow open source code to safely type proprietary services
+// ============================================================================
+
+/**
+ * PRO tier webhook events service interface
+ * Implemented by proprietary/webhook-pro/webhook-events-pro.service.ts
+ */
+export interface IWebhookEventsProService {
+  dispatchSlowlogThreshold(data: {
+    slowlogCount: number;
+    threshold: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+
+  dispatchReplicationLag(data: {
+    lagSeconds: number;
+    threshold: number;
+    masterLinkStatus: string;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+
+  dispatchClusterFailover(data: {
+    clusterState: string;
+    previousState?: string;
+    slotsAssigned: number;
+    slotsFailed: number;
+    knownNodes: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+
+  dispatchAnomalyDetected(data: {
+    anomalyId: string;
+    metricType: string;
+    severity: string;
+    value: number;
+    baseline: number;
+    threshold: number;
+    message: string;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+
+  dispatchLatencySpike(data: {
+    currentLatency: number;
+    baseline: number;
+    threshold: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+
+  dispatchConnectionSpike(data: {
+    currentConnections: number;
+    baseline: number;
+    threshold: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+}
+
+/**
+ * ENTERPRISE tier webhook events service interface
+ * Implemented by proprietary/webhook-pro/webhook-events-enterprise.service.ts
+ */
+export interface IWebhookEventsEnterpriseService {
+  dispatchComplianceAlert(data: {
+    complianceType: string;
+    severity: string;
+    memoryUsedPercent?: number;
+    maxmemoryPolicy?: string;
+    message: string;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+
+  dispatchAuditPolicyViolation(data: {
+    username: string;
+    clientInfo: string;
+    violationType: 'command' | 'key';
+    violatedCommand?: string;
+    violatedKey?: string;
+    count: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+
+  dispatchAclViolation(data: {
+    username: string;
+    command: string;
+    key?: string;
+    reason: string;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+
+  dispatchAclModified(data: {
+    modifiedBy?: string;
+    changeType: 'user_added' | 'user_removed' | 'user_updated' | 'permissions_changed';
+    affectedUser?: string;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+
+  dispatchConfigChanged(data: {
+    configKey: string;
+    oldValue?: string;
+    newValue: string;
+    modifiedBy?: string;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+  }): Promise<void>;
+}

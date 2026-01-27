@@ -39,9 +39,13 @@ import type {
 } from '../types/cluster';
 
 export const metricsApi = {
-  getHealth: () => fetchApi<HealthResponse>('/health'),
-  getInfo: (sections?: string[]) => {
-    const query = sections ? `?sections=${sections.join(',')}` : '';
+  getHealth: (signal?: AbortSignal) => fetchApi<HealthResponse>('/health', { signal }),
+  getInfo: (sectionsOrSignal?: string[] | AbortSignal) => {
+    // Handle both (signal) from usePolling and (sections) from direct calls
+    if (sectionsOrSignal instanceof AbortSignal) {
+      return fetchApi<InfoResponse>('/metrics/info', { signal: sectionsOrSignal });
+    }
+    const query = sectionsOrSignal ? `?sections=${sectionsOrSignal.join(',')}` : '';
     return fetchApi<InfoResponse>(`/metrics/info${query}`);
   },
   getSlowLog: (count = 50) => fetchApi<SlowLogEntry[]>(`/metrics/slowlog?count=${count}`),
