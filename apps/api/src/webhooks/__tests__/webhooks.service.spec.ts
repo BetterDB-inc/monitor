@@ -1,11 +1,14 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { WebhooksService } from '../webhooks.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { LicenseService } from '@proprietary/license';
+import { WebhookEventType, Tier } from '@betterdb/shared';
 
 describe('WebhooksService', () => {
   let service: WebhooksService;
   let storageClient: jest.Mocked<StoragePort>;
+  let licenseService: jest.Mocked<LicenseService>;
 
   beforeEach(async () => {
     storageClient = {
@@ -20,12 +23,20 @@ describe('WebhooksService', () => {
       pruneOldDeliveries: jest.fn(),
     } as any;
 
+    licenseService = {
+      getLicenseTier: jest.fn().mockReturnValue(Tier.community),
+    } as any;
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         WebhooksService,
         {
           provide: 'STORAGE_CLIENT',
           useValue: storageClient,
+        },
+        {
+          provide: LicenseService,
+          useValue: licenseService,
         },
       ],
     }).compile();
@@ -197,6 +208,280 @@ describe('WebhooksService', () => {
 
       const redacted = service.redactSecret(webhook as any);
       expect(redacted.secret).toBeUndefined();
+    });
+  });
+
+  describe('Tier Validation', () => {
+    beforeEach(() => {
+      // Reset to non-production environment for tier validation tests
+      process.env.NODE_ENV = 'test';
+      storageClient.createWebhook.mockResolvedValue({
+        id: '123',
+        name: 'Test',
+        url: 'https://example.com/webhook',
+        secret: 'whsec_test',
+        enabled: true,
+        events: [],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      } as any);
+      storageClient.updateWebhook.mockResolvedValue({
+        id: '123',
+        name: 'Test',
+        url: 'https://example.com/webhook',
+        secret: 'whsec_test',
+        enabled: true,
+        events: [],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      } as any);
+    });
+
+    describe('Community Tier', () => {
+      beforeEach(() => {
+        licenseService.getLicenseTier.mockReturnValue(Tier.community);
+      });
+
+      it('should allow community events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.INSTANCE_DOWN, WebhookEventType.MEMORY_CRITICAL],
+          })
+        ).resolves.toBeDefined();
+      });
+
+      it('should reject pro events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.SLOWLOG_THRESHOLD],
+          })
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should reject enterprise events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.COMPLIANCE_ALERT],
+          })
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should reject mixed community and pro events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.INSTANCE_DOWN, WebhookEventType.ANOMALY_DETECTED],
+          })
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should provide helpful error message with required tier', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.SLOWLOG_THRESHOLD],
+          })
+        ).rejects.toThrow(/requires PRO tier/);
+      });
+    });
+
+    describe('Pro Tier', () => {
+      beforeEach(() => {
+        licenseService.getLicenseTier.mockReturnValue(Tier.pro);
+      });
+
+      it('should allow community events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.INSTANCE_DOWN, WebhookEventType.MEMORY_CRITICAL],
+          })
+        ).resolves.toBeDefined();
+      });
+
+      it('should allow pro events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.SLOWLOG_THRESHOLD, WebhookEventType.ANOMALY_DETECTED],
+          })
+        ).resolves.toBeDefined();
+      });
+
+      it('should allow mixed community and pro events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.INSTANCE_DOWN, WebhookEventType.SLOWLOG_THRESHOLD],
+          })
+        ).resolves.toBeDefined();
+      });
+
+      it('should reject enterprise events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.COMPLIANCE_ALERT],
+          })
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should provide helpful error message for enterprise events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.AUDIT_POLICY_VIOLATION],
+          })
+        ).rejects.toThrow(/requires ENTERPRISE tier/);
+      });
+    });
+
+    describe('Enterprise Tier', () => {
+      beforeEach(() => {
+        licenseService.getLicenseTier.mockReturnValue(Tier.enterprise);
+      });
+
+      it('should allow community events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.INSTANCE_DOWN, WebhookEventType.MEMORY_CRITICAL],
+          })
+        ).resolves.toBeDefined();
+      });
+
+      it('should allow pro events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.SLOWLOG_THRESHOLD, WebhookEventType.ANOMALY_DETECTED],
+          })
+        ).resolves.toBeDefined();
+      });
+
+      it('should allow enterprise events', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [WebhookEventType.COMPLIANCE_ALERT, WebhookEventType.AUDIT_POLICY_VIOLATION],
+          })
+        ).resolves.toBeDefined();
+      });
+
+      it('should allow all event types', async () => {
+        await expect(
+          service.createWebhook({
+            name: 'Test',
+            url: 'https://example.com/webhook',
+            events: [
+              WebhookEventType.INSTANCE_DOWN,
+              WebhookEventType.SLOWLOG_THRESHOLD,
+              WebhookEventType.COMPLIANCE_ALERT,
+            ],
+          })
+        ).resolves.toBeDefined();
+      });
+    });
+
+    describe('Update Webhook Tier Validation', () => {
+      it('should validate events on update for community tier', async () => {
+        licenseService.getLicenseTier.mockReturnValue(Tier.community);
+
+        await expect(
+          service.updateWebhook('123', {
+            events: [WebhookEventType.SLOWLOG_THRESHOLD],
+          })
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('should allow valid events on update', async () => {
+        licenseService.getLicenseTier.mockReturnValue(Tier.pro);
+
+        await expect(
+          service.updateWebhook('123', {
+            events: [WebhookEventType.INSTANCE_DOWN, WebhookEventType.SLOWLOG_THRESHOLD],
+          })
+        ).resolves.toBeDefined();
+      });
+
+      it('should not validate events if not provided in update', async () => {
+        licenseService.getLicenseTier.mockReturnValue(Tier.community);
+
+        await expect(
+          service.updateWebhook('123', {
+            name: 'New Name',
+          })
+        ).resolves.toBeDefined();
+      });
+    });
+
+    describe('getAllowedEvents', () => {
+      it('should return community tier events for community users', () => {
+        licenseService.getLicenseTier.mockReturnValue(Tier.community);
+
+        const result = service.getAllowedEvents();
+
+        expect(result.tier).toBe(Tier.community);
+        expect(result.allowedEvents).toContain(WebhookEventType.INSTANCE_DOWN);
+        expect(result.allowedEvents).toContain(WebhookEventType.MEMORY_CRITICAL);
+        expect(result.lockedEvents).toContain(WebhookEventType.SLOWLOG_THRESHOLD);
+        expect(result.lockedEvents).toContain(WebhookEventType.COMPLIANCE_ALERT);
+      });
+
+      it('should return pro tier events for pro users', () => {
+        licenseService.getLicenseTier.mockReturnValue(Tier.pro);
+
+        const result = service.getAllowedEvents();
+
+        expect(result.tier).toBe(Tier.pro);
+        expect(result.allowedEvents).toContain(WebhookEventType.INSTANCE_DOWN);
+        expect(result.allowedEvents).toContain(WebhookEventType.SLOWLOG_THRESHOLD);
+        expect(result.lockedEvents).toContain(WebhookEventType.COMPLIANCE_ALERT);
+        expect(result.lockedEvents).not.toContain(WebhookEventType.INSTANCE_DOWN);
+      });
+
+      it('should return all events for enterprise users', () => {
+        licenseService.getLicenseTier.mockReturnValue(Tier.enterprise);
+
+        const result = service.getAllowedEvents();
+
+        expect(result.tier).toBe(Tier.enterprise);
+        expect(result.allowedEvents).toContain(WebhookEventType.INSTANCE_DOWN);
+        expect(result.allowedEvents).toContain(WebhookEventType.SLOWLOG_THRESHOLD);
+        expect(result.allowedEvents).toContain(WebhookEventType.COMPLIANCE_ALERT);
+        expect(result.lockedEvents).toHaveLength(0);
+      });
+
+      it('should default to community tier if no license service', () => {
+        // Create service without license service
+        const serviceWithoutLicense = new WebhooksService(storageClient, undefined);
+
+        const result = serviceWithoutLicense.getAllowedEvents();
+
+        expect(result.tier).toBe(Tier.community);
+        expect(result.allowedEvents).toContain(WebhookEventType.INSTANCE_DOWN);
+        expect(result.lockedEvents).toContain(WebhookEventType.SLOWLOG_THRESHOLD);
+      });
     });
   });
 });

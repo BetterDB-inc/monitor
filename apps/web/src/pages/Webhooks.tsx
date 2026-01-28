@@ -128,7 +128,7 @@ export function Webhooks() {
           <div className="flex items-start justify-between">
             <div className="flex-1">
               <h3 className="font-semibold mb-2">
-                {testResult.success ? '✅ Test Successful' : '❌ Test Failed'}
+                {testResult.success ? 'Test Successful' : 'Test Failed'}
               </h3>
               <div className="space-y-1 text-sm">
                 {testResult.statusCode && (

@@ -44,6 +44,110 @@ export const ENTERPRISE_EVENTS: WebhookEventType[] = [
   WebhookEventType.CONFIG_CHANGED,
 ];
 
+// ============================================================================
+// Tier System for Event Subscription Gating
+// ============================================================================
+
+import { Tier } from '../license/types';
+export { Tier };
+
+/**
+ * Maps each webhook event to its minimum required tier
+ */
+export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
+  // Community tier events
+  [WebhookEventType.INSTANCE_DOWN]: Tier.community,
+  [WebhookEventType.INSTANCE_UP]: Tier.community,
+  [WebhookEventType.MEMORY_CRITICAL]: Tier.community,
+  [WebhookEventType.CONNECTION_CRITICAL]: Tier.community,
+  [WebhookEventType.CLIENT_BLOCKED]: Tier.community,
+
+  // Pro tier events
+  [WebhookEventType.ANOMALY_DETECTED]: Tier.pro,
+  [WebhookEventType.SLOWLOG_THRESHOLD]: Tier.pro,
+  [WebhookEventType.REPLICATION_LAG]: Tier.pro,
+  [WebhookEventType.CLUSTER_FAILOVER]: Tier.pro,
+  [WebhookEventType.LATENCY_SPIKE]: Tier.pro,
+  [WebhookEventType.CONNECTION_SPIKE]: Tier.pro,
+
+  // Enterprise tier events
+  [WebhookEventType.AUDIT_POLICY_VIOLATION]: Tier.enterprise,
+  [WebhookEventType.COMPLIANCE_ALERT]: Tier.enterprise,
+  [WebhookEventType.ACL_VIOLATION]: Tier.enterprise,
+  [WebhookEventType.ACL_MODIFIED]: Tier.enterprise,
+  [WebhookEventType.CONFIG_CHANGED]: Tier.enterprise,
+};
+
+/**
+ * Tier hierarchy for comparison
+ */
+const TIER_HIERARCHY: Record<Tier, number> = {
+  [Tier.community]: 0,
+  [Tier.pro]: 1,
+  [Tier.enterprise]: 2,
+};
+
+/**
+ * Get the minimum tier required for a specific event
+ */
+export function getRequiredTierForEvent(event: WebhookEventType): Tier {
+  return WEBHOOK_EVENT_TIERS[event];
+}
+
+/**
+ * Check if a specific event is allowed for the given tier
+ */
+export function isEventAllowedForTier(event: WebhookEventType, userTier: Tier): boolean {
+  const requiredTier = WEBHOOK_EVENT_TIERS[event];
+  return TIER_HIERARCHY[userTier] >= TIER_HIERARCHY[requiredTier];
+}
+
+/**
+ * Get all events allowed for a specific tier (including lower tiers)
+ */
+export function getEventsForTier(tier: Tier): WebhookEventType[] {
+  switch (tier) {
+    case Tier.community:
+      return [...FREE_EVENTS];
+    case Tier.pro:
+      return [...PRO_EVENTS];
+    case Tier.enterprise:
+      return [...ENTERPRISE_EVENTS];
+  }
+}
+
+/**
+ * Get events that are locked (not available) for a specific tier
+ */
+export function getLockedEventsForTier(tier: Tier): WebhookEventType[] {
+  const allowedEvents = getEventsForTier(tier);
+  return Object.values(WebhookEventType).filter(
+    (event) => !allowedEvents.includes(event)
+  );
+}
+
+/**
+ * Group all events by their tier category for UI display
+ */
+export function getEventsByTierCategory(): Record<Tier, WebhookEventType[]> {
+  return {
+    [Tier.community]: [...FREE_EVENTS],
+    [Tier.pro]: PRO_EVENTS.filter((e) => !FREE_EVENTS.includes(e)),
+    [Tier.enterprise]: ENTERPRISE_EVENTS.filter((e) => !PRO_EVENTS.includes(e)),
+  };
+}
+
+/**
+ * Validate that all requested events are allowed for the user's tier
+ * Returns array of disallowed events (empty if all allowed)
+ */
+export function validateEventsForTier(
+  events: WebhookEventType[],
+  userTier: Tier
+): WebhookEventType[] {
+  return events.filter((event) => !isEventAllowedForTier(event, userTier));
+}
+
 export enum DeliveryStatus {
   PENDING = 'pending',
   SUCCESS = 'success',

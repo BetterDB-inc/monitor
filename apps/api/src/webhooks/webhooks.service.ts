@@ -1,9 +1,11 @@
-import { Injectable, Inject, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, Inject, Logger, BadRequestException, NotFoundException, ForbiddenException, Optional } from '@nestjs/common';
 import { randomBytes, createHmac } from 'crypto';
 import { promises as dns } from 'dns';
 import type { Webhook, WebhookDelivery, WebhookEventType, DEFAULT_RETRY_POLICY } from '@betterdb/shared';
+import { Tier, validateEventsForTier, getRequiredTierForEvent, getEventsForTier, getLockedEventsForTier } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CreateWebhookDto, UpdateWebhookDto } from '../common/dto/webhook.dto';
+import { LicenseService } from '@proprietary/license';
 
 @Injectable()
 export class WebhooksService {
@@ -23,6 +25,7 @@ export class WebhooksService {
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
+    @Optional() private readonly licenseService?: LicenseService,
   ) {}
 
   /**
@@ -134,11 +137,38 @@ export class WebhooksService {
   }
 
   /**
+   * Validate that requested events are allowed for the user's license tier
+   * @throws ForbiddenException if any events are not allowed
+   */
+  private validateEventTiers(events: WebhookEventType[]): void {
+    // If no license service available, default to community tier
+    const userTier: Tier = this.licenseService?.getLicenseTier() || Tier.community;
+
+    // Check which events are not allowed
+    const disallowedEvents = validateEventsForTier(events, userTier);
+
+    if (disallowedEvents.length > 0) {
+      const eventDetails = disallowedEvents.map(event => {
+        const requiredTier = getRequiredTierForEvent(event);
+        return `${event} (requires ${requiredTier.toUpperCase()} tier)`;
+      }).join(', ');
+
+      throw new ForbiddenException(
+        `Your ${userTier.toUpperCase()} tier does not have access to the following events: ${eventDetails}. ` +
+        `Please upgrade your license to subscribe to these events.`
+      );
+    }
+  }
+
+  /**
    * Create a new webhook
    */
   async createWebhook(dto: CreateWebhookDto): Promise<Webhook> {
     // Validate URL for SSRF
     await this.validateUrl(dto.url);
+
+    // Validate event tier access
+    this.validateEventTiers(dto.events);
 
     // Generate secret if not provided
     const secret = dto.secret || this.generateSecret();
@@ -215,6 +245,11 @@ export class WebhooksService {
       await this.validateUrl(dto.url);
     }
 
+    // Validate event tier access if events are being updated
+    if (dto.events) {
+      this.validateEventTiers(dto.events);
+    }
+
     const updated = await this.storageClient.updateWebhook(id, dto);
     if (!updated) {
       throw new NotFoundException(`Webhook with ID ${id} not found`);
@@ -252,6 +287,25 @@ export class WebhooksService {
       throw new NotFoundException(`Delivery with ID ${id} not found`);
     }
     return delivery;
+  }
+
+  /**
+   * Get allowed and locked events for the user's tier
+   */
+  getAllowedEvents(): {
+    tier: Tier;
+    allowedEvents: WebhookEventType[];
+    lockedEvents: WebhookEventType[];
+  } {
+    const tier: Tier = this.licenseService?.getLicenseTier() || Tier.community;
+    const allowedEvents = getEventsForTier(tier);
+    const lockedEvents = getLockedEventsForTier(tier);
+
+    return {
+      tier,
+      allowedEvents,
+      lockedEvents,
+    };
   }
 
   /**

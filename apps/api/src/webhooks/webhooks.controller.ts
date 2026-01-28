@@ -52,6 +52,24 @@ export class WebhooksController {
     return this.webhooksService.getAllWebhooksRedacted() as Promise<WebhookDto[]>;
   }
 
+  @Get('allowed-events')
+  @ApiOperation({ summary: 'Get allowed and locked webhook events for current license tier' })
+  @ApiResponse({
+    status: 200,
+    description: 'Allowed and locked events',
+    schema: {
+      type: 'object',
+      properties: {
+        tier: { type: 'string', enum: ['community', 'pro', 'enterprise'], example: 'pro' },
+        allowedEvents: { type: 'array', items: { type: 'string' }, example: ['instance.down', 'instance.up', 'anomaly.detected'] },
+        lockedEvents: { type: 'array', items: { type: 'string' }, example: ['compliance.alert', 'audit.policy.violation'] },
+      },
+    },
+  })
+  async getAllowedEvents() {
+    return this.webhooksService.getAllowedEvents();
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get a webhook by ID' })
   @ApiParam({ name: 'id', description: 'Webhook ID' })

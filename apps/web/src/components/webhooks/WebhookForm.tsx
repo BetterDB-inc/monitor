@@ -1,6 +1,12 @@
 import { useState, useEffect } from 'react';
 import { Webhook, WebhookFormData, WebhookEventType } from '../../types/webhooks';
+import {
+  Tier,
+  getEventsByTierCategory,
+  isEventAllowedForTier
+} from '@betterdb/shared';
 import { Card } from '../ui/card';
+import { licenseApi } from '../../api/license';
 
 interface WebhookFormProps {
   webhook?: Webhook;
@@ -8,24 +14,32 @@ interface WebhookFormProps {
   onCancel: () => void;
 }
 
-// Available webhook events
-const WEBHOOK_EVENTS: { value: WebhookEventType; label: string; tier: string }[] = [
-  // Free tier events
-  { value: 'instance.down' as WebhookEventType, label: 'Instance Down', tier: 'Free' },
-  { value: 'instance.up' as WebhookEventType, label: 'Instance Up', tier: 'Free' },
-  { value: 'memory.critical' as WebhookEventType, label: 'Memory Critical', tier: 'Free' },
-  { value: 'client.blocked' as WebhookEventType, label: 'Client Blocked', tier: 'Free' },
+// Human-readable event labels
+const EVENT_LABELS: Record<WebhookEventType, string> = {
+  'instance.down': 'Instance Down',
+  'instance.up': 'Instance Up',
+  'memory.critical': 'Memory Critical',
+  'connection.critical': 'Connection Critical',
+  'client.blocked': 'Client Blocked',
+  'anomaly.detected': 'Anomaly Detected',
+  'slowlog.threshold': 'Slowlog Threshold',
+  'replication.lag': 'Replication Lag',
+  'cluster.failover': 'Cluster Failover',
+  'latency.spike': 'Latency Spike',
+  'connection.spike': 'Connection Spike',
+  'audit.policy.violation': 'Audit Policy Violation',
+  'compliance.alert': 'Compliance Alert',
+  'acl.violation': 'ACL Violation',
+  'acl.modified': 'ACL Modified',
+  'config.changed': 'Config Changed',
+};
 
-  // Pro tier events
-  { value: 'replication.lag' as WebhookEventType, label: 'Replication Lag', tier: 'Pro' },
-  { value: 'cluster.failover' as WebhookEventType, label: 'Cluster Failover', tier: 'Pro' },
-  { value: 'anomaly.detected' as WebhookEventType, label: 'Anomaly Detected', tier: 'Pro' },
-  { value: 'slowlog.threshold' as WebhookEventType, label: 'Slowlog Threshold', tier: 'Pro' },
-
-  // Enterprise tier events
-  { value: 'audit.policy.violation' as WebhookEventType, label: 'Audit Policy Violation', tier: 'Enterprise' },
-  { value: 'compliance.alert' as WebhookEventType, label: 'Compliance Alert', tier: 'Enterprise' },
-];
+// Tier display names
+const TIER_DISPLAY: Record<Tier, string> = {
+  [Tier.community]: 'Community',
+  [Tier.pro]: 'Pro',
+  [Tier.enterprise]: 'Enterprise',
+};
 
 export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
   const [formData, setFormData] = useState<WebhookFormData>({
@@ -44,6 +58,25 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
   });
   const [customHeaders, setCustomHeaders] = useState<Array<{ key: string; value: string }>>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [userTier, setUserTier] = useState<Tier>(Tier.community);
+  const [loadingTier, setLoadingTier] = useState(true);
+
+  useEffect(() => {
+    // Fetch user's license tier
+    const fetchTier = async () => {
+      try {
+        const license = await licenseApi.getStatus();
+        setUserTier(license.tier);
+      } catch (error) {
+        console.error('Failed to fetch license status:', error);
+        // Default to community tier on error
+        setUserTier(Tier.community);
+      } finally {
+        setLoadingTier(false);
+      }
+    };
+    fetchTier();
+  }, []);
 
   useEffect(() => {
     if (webhook) {
@@ -92,6 +125,11 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
   };
 
   const handleEventToggle = (event: WebhookEventType) => {
+    // Prevent toggling locked events
+    if (!isEventAllowedForTier(event, userTier)) {
+      return;
+    }
+
     setFormData((prev) => ({
       ...prev,
       events: prev.events.includes(event)
@@ -177,19 +215,93 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
           {/* Events */}
           <div>
             <label className="block text-sm font-medium mb-2">Events to Subscribe *</label>
-            <div className="grid grid-cols-2 gap-2 border rounded-md p-3 max-h-60 overflow-y-auto">
-              {WEBHOOK_EVENTS.map((event) => (
-                <label key={event.value} className="flex items-center space-x-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={formData.events.includes(event.value)}
-                    onChange={() => handleEventToggle(event.value)}
-                  />
-                  <span className="text-sm">{event.label}</span>
-                  <span className="text-xs text-gray-500">({event.tier})</span>
-                </label>
-              ))}
-            </div>
+            {loadingTier ? (
+              <div className="border rounded-md p-4 text-center text-sm text-gray-500">
+                Loading available events...
+              </div>
+            ) : (
+              <div className="border rounded-md p-3 max-h-96 overflow-y-auto space-y-4">
+                {(Object.entries(getEventsByTierCategory()) as [Tier, WebhookEventType[]][]).map(
+                  ([tier, events]) => {
+                    const tierAllowed = isEventAllowedForTier(events[0] || 'instance.down' as WebhookEventType, userTier);
+
+                    return (
+                      <div key={tier}>
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+                            {TIER_DISPLAY[tier]} Tier
+                          </h4>
+                          {!tierAllowed && (
+                            <span className="text-xs px-2 py-0.5 bg-yellow-100 text-yellow-800 rounded">
+                              Requires {TIER_DISPLAY[tier]}
+                            </span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {events.map((event) => {
+                            const isAllowed = isEventAllowedForTier(event, userTier);
+                            const isChecked = formData.events.includes(event);
+
+                            return (
+                              <label
+                                key={event}
+                                className={`flex items-center space-x-2 p-2 rounded ${
+                                  isAllowed
+                                    ? 'cursor-pointer hover:bg-gray-50'
+                                    : 'cursor-not-allowed opacity-60 bg-gray-50'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  disabled={!isAllowed}
+                                  onChange={() => handleEventToggle(event)}
+                                  className={!isAllowed ? 'cursor-not-allowed' : ''}
+                                />
+                                <span className="text-sm flex-1">
+                                  {EVENT_LABELS[event]}
+                                </span>
+                                {!isAllowed && (
+                                  <svg
+                                    className="w-4 h-4 text-gray-400"
+                                    fill="currentColor"
+                                    viewBox="0 0 20 20"
+                                  >
+                                    <path
+                                      fillRule="evenodd"
+                                      d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z"
+                                      clipRule="evenodd"
+                                    />
+                                  </svg>
+                                )}
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  }
+                )}
+
+                {/* Upgrade CTA */}
+                {userTier !== Tier.enterprise && (
+                  <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-md">
+                    <p className="text-sm text-blue-900">
+                      {userTier === Tier.community && (
+                        <>
+                          <strong>Unlock more events:</strong> Upgrade to Pro for advanced monitoring events or Enterprise for compliance and audit events.
+                        </>
+                      )}
+                      {userTier === Tier.pro && (
+                        <>
+                          <strong>Unlock Enterprise events:</strong> Upgrade to Enterprise for compliance alerts, audit policy violations, and more.
+                        </>
+                      )}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
             {formData.events.length === 0 && (
               <p className="text-xs text-red-500 mt-1">Please select at least one event</p>
             )}
