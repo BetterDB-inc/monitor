@@ -139,6 +139,18 @@ export class AuditService implements OnModuleInit, OnModuleDestroy {
                 ...webhookData,
                 message: `Client blocked: authentication failure by ${entry.username}@${entry.clientInfo} (count: ${entry.count})`,
               });
+
+              // Enterprise tier: also dispatch acl.violation for auth denials
+              if (this.webhookEventsEnterpriseService) {
+                await this.webhookEventsEnterpriseService.dispatchAclViolation({
+                  username: entry.username,
+                  command: entry.context || 'AUTH',
+                  key: entry.object,
+                  reason: 'Authentication denied',
+                  timestamp: entry.timestampLastUpdated * 1000,
+                  instance: { host: this.sourceHost, port: this.sourcePort },
+                });
+              }
             }
 
             // Enterprise tier: audit.policy.violation for command/key violations (handled by proprietary service)
@@ -151,6 +163,16 @@ export class AuditService implements OnModuleInit, OnModuleDestroy {
                 violatedKey: entry.reason === 'key' ? entry.object : undefined,
                 count: entry.count,
                 timestamp: entry.timestampLastUpdated * 1000, // Convert to ms
+                instance: { host: this.sourceHost, port: this.sourcePort },
+              });
+
+              // Enterprise tier: also dispatch acl.violation for command/key access denials
+              await this.webhookEventsEnterpriseService.dispatchAclViolation({
+                username: entry.username,
+                command: entry.reason === 'command' ? entry.object : entry.context || 'UNKNOWN',
+                key: entry.reason === 'key' ? entry.object : undefined,
+                reason: entry.reason === 'command' ? 'Command access denied' : 'Key access denied',
+                timestamp: entry.timestampLastUpdated * 1000,
                 instance: { host: this.sourceHost, port: this.sourcePort },
               });
             }

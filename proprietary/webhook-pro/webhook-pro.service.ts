@@ -57,6 +57,7 @@ export class WebhookProService implements OnModuleInit {
     baseline: number;
     threshold: number;
     timestamp: number;
+    instance: { host: string; port: number };
   }): Promise<void> {
     await this.dispatcherService.dispatchEvent('latency.spike' as WebhookEventType, data);
   }
@@ -69,6 +70,7 @@ export class WebhookProService implements OnModuleInit {
     baseline: number;
     threshold: number;
     timestamp: number;
+    instance: { host: string; port: number };
   }): Promise<void> {
     await this.dispatcherService.dispatchEvent('connection.spike' as WebhookEventType, data);
   }

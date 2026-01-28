@@ -333,6 +333,16 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     await this.client.call('ACL', 'LOG', 'RESET');
   }
 
+  async getAclUsers(): Promise<string[]> {
+    const users = await this.client.call('ACL', 'USERS');
+    return users as string[];
+  }
+
+  async getAclList(): Promise<string[]> {
+    const aclList = await this.client.call('ACL', 'LIST');
+    return aclList as string[];
+  }
+
   async getRole(): Promise<RoleInfo> {
     const roleData = await this.client.call('ROLE');
     const role = roleData as unknown[];

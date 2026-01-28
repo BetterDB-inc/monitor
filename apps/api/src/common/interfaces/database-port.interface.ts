@@ -54,6 +54,8 @@ export interface DatabasePort {
   killClient(filters: ClientFilters): Promise<number>;
   getAclLog(count?: number): Promise<AclLogEntry[]>;
   resetAclLog(): Promise<void>;
+  getAclUsers(): Promise<string[]>;
+  getAclList(): Promise<string[]>;
   getRole(): Promise<RoleInfo>;
   getClusterInfo(): Promise<Record<string, string>>;
   getClusterNodes(): Promise<ClusterNode[]>;

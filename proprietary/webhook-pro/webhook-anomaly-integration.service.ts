@@ -109,7 +109,32 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
         sourcePort: anomaly.sourcePort,
       };
 
+      // Always dispatch the generic anomaly.detected event
       await this.webhookProService.dispatchAnomalyDetected(data);
+
+      // Dispatch specific spike events for connection and latency metrics
+      if (anomaly.metricType === 'connections' && anomaly.anomalyType === 'spike') {
+        await this.webhookProService.dispatchConnectionSpike({
+          currentConnections: anomaly.value,
+          baseline: anomaly.baseline,
+          threshold: anomaly.threshold,
+          timestamp: anomaly.timestamp,
+          instance: { host: anomaly.sourceHost || 'unknown', port: anomaly.sourcePort || 0 },
+        });
+        this.logger.debug(`Dispatched connection.spike for anomaly ${anomaly.id}`);
+      }
+
+      // Latency spike = drop in ops_per_sec (fewer operations = higher latency per operation)
+      if (anomaly.metricType === 'ops_per_sec' && anomaly.anomalyType === 'drop') {
+        await this.webhookProService.dispatchLatencySpike({
+          currentLatency: anomaly.baseline > 0 ? anomaly.baseline / anomaly.value : 0,
+          baseline: 1.0, // Normalized baseline
+          threshold: anomaly.threshold,
+          timestamp: anomaly.timestamp,
+          instance: { host: anomaly.sourceHost || 'unknown', port: anomaly.sourcePort || 0 },
+        });
+        this.logger.debug(`Dispatched latency.spike for anomaly ${anomaly.id}`);
+      }
 
       this.logger.debug(
         `Dispatched webhook for anomaly ${anomaly.id}: ${anomaly.metricType} (${anomaly.severity})`
