@@ -39,12 +39,81 @@ import type {
 } from '../types/cluster';
 
 export const metricsApi = {
-  getHealth: () => fetchApi<HealthResponse>('/health'),
-  getInfo: (sections?: string[]) => {
-    const query = sections ? `?sections=${sections.join(',')}` : '';
+  getHealth: (signal?: AbortSignal) => fetchApi<HealthResponse>('/health', { signal }),
+  getInfo: (sectionsOrSignal?: string[] | AbortSignal) => {
+    // Handle both (signal) from usePolling and (sections) from direct calls
+    if (sectionsOrSignal instanceof AbortSignal) {
+      return fetchApi<InfoResponse>('/metrics/info', { signal: sectionsOrSignal });
+    }
+    const query = sectionsOrSignal ? `?sections=${sectionsOrSignal.join(',')}` : '';
     return fetchApi<InfoResponse>(`/metrics/info${query}`);
   },
-  getSlowLog: (count = 50) => fetchApi<SlowLogEntry[]>(`/metrics/slowlog?count=${count}`),
+  getSlowLog: (count = 50, excludeMonitor = true) => {
+    const params = new URLSearchParams({
+      count: count.toString(),
+      excludeMonitor: excludeMonitor.toString(),
+    });
+    return fetchApi<SlowLogEntry[]>(`/metrics/slowlog?${params}`);
+  },
+  // Get stored slow log entries with time filtering from the persistence layer
+  getStoredSlowLog: (options?: {
+    startTime?: number;
+    endTime?: number;
+    command?: string;
+    clientName?: string;
+    minDuration?: number;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (options?.startTime) params.set('startTime', options.startTime.toString());
+    if (options?.endTime) params.set('endTime', options.endTime.toString());
+    if (options?.command) params.set('command', options.command);
+    if (options?.clientName) params.set('clientName', options.clientName);
+    if (options?.minDuration) params.set('minDuration', options.minDuration.toString());
+    if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.offset) params.set('offset', options.offset.toString());
+    const queryString = params.toString();
+    return fetchApi<SlowLogEntry[]>(`/slowlog-analytics/entries${queryString ? `?${queryString}` : ''}`);
+  },
+  // Get stored command log entries with time filtering from the persistence layer (Valkey-specific)
+  getStoredCommandLog: (options?: {
+    startTime?: number;
+    endTime?: number;
+    command?: string;
+    clientName?: string;
+    type?: CommandLogType;
+    minDuration?: number;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (options?.startTime) params.set('startTime', options.startTime.toString());
+    if (options?.endTime) params.set('endTime', options.endTime.toString());
+    if (options?.command) params.set('command', options.command);
+    if (options?.clientName) params.set('clientName', options.clientName);
+    if (options?.type) params.set('type', options.type);
+    if (options?.minDuration) params.set('minDuration', options.minDuration.toString());
+    if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.offset) params.set('offset', options.offset.toString());
+    const queryString = params.toString();
+    return fetchApi<CommandLogEntry[]>(`/commandlog-analytics/entries${queryString ? `?${queryString}` : ''}`);
+  },
+  // Get stored command log pattern analysis with time filtering
+  getStoredCommandLogPatternAnalysis: (options?: {
+    startTime?: number;
+    endTime?: number;
+    type?: CommandLogType;
+    limit?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (options?.startTime) params.set('startTime', options.startTime.toString());
+    if (options?.endTime) params.set('endTime', options.endTime.toString());
+    if (options?.type) params.set('type', options.type);
+    if (options?.limit) params.set('limit', options.limit.toString());
+    const queryString = params.toString();
+    return fetchApi<SlowLogPatternAnalysis>(`/commandlog-analytics/patterns${queryString ? `?${queryString}` : ''}`);
+  },
   getSlowLogPatternAnalysis: (count?: number) => {
     const params = count ? `?count=${count}` : '';
     return fetchApi<SlowLogPatternAnalysis>(`/metrics/slowlog/patterns${params}`);

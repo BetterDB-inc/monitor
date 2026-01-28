@@ -6,9 +6,11 @@ interface UsePollingOptions<T> {
   fetcher: ((signal?: AbortSignal) => Promise<T>) | ((...args: any[]) => Promise<T>);
   interval?: number;
   enabled?: boolean;
+  /** Optional key that triggers a refetch when changed (e.g., filter parameters) */
+  refetchKey?: string | number;
 }
 
-export function usePolling<T>({ fetcher, interval = 5000, enabled = true }: UsePollingOptions<T>) {
+export function usePolling<T>({ fetcher, interval = 5000, enabled = true, refetchKey }: UsePollingOptions<T>) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState(true);
@@ -70,7 +72,7 @@ export function usePolling<T>({ fetcher, interval = 5000, enabled = true }: UseP
         abortControllerRef.current = null;
       }
     };
-  }, [interval, enabled, showUpgradePrompt]);
+  }, [interval, enabled, showUpgradePrompt, refetchKey]);
 
   const manualRefresh = async () => {
     try {

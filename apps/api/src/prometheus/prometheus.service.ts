@@ -1,13 +1,26 @@
-import { Injectable, OnModuleInit, Inject, Logger } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Inject, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Registry, Gauge, Counter, Histogram, collectDefaultMetrics } from 'prom-client';
+import { WebhookEventType, IWebhookEventsProService, IWebhookEventsEnterpriseService } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
-import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
+import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
+import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.service';
+import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
+
+// Note: WebhookEventsProService and WebhookEventsEnterpriseService are injected via DI
+// when proprietary module is available. Interfaces provide type safety for optional injection.
 
 @Injectable()
-export class PrometheusService implements OnModuleInit {
+export class PrometheusService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrometheusService.name);
   private registry: Registry;
+  private pollInterval: NodeJS.Timeout | null = null;
+  private readonly pollIntervalMs = 5000; // Poll every 5 seconds
+
+  // Track cluster state for failover detection
+  private previousClusterState: string | null = null;
+  private previousSlotsFail: number = 0;
 
   // ACL Audit Metrics
   private aclDeniedTotal: Gauge;
@@ -109,17 +122,57 @@ export class PrometheusService implements OnModuleInit {
   private anomalyDetectionBufferMean: Gauge;
   private anomalyDetectionBufferStdDev: Gauge;
 
+  private readonly dbHost: string;
+  private readonly dbPort: number;
+
   constructor(
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     @Inject('DATABASE_CLIENT') private dbClient: DatabasePort,
+    private readonly configService: ConfigService,
+    private readonly slowLogAnalytics: SlowLogAnalyticsService,
+    private readonly commandLogAnalytics: CommandLogAnalyticsService,
+    @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
+    @Optional() private readonly webhookEventsProService?: IWebhookEventsProService,
+    @Optional() private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
   ) {
     this.registry = new Registry();
+    this.dbHost = this.configService.get<string>('database.host', 'localhost');
+    this.dbPort = this.configService.get<number>('database.port', 6379);
     this.initializeMetrics();
   }
 
   async onModuleInit(): Promise<void> {
     collectDefaultMetrics({ register: this.registry, prefix: 'betterdb_' });
-    this.logger.log('Prometheus metrics initialized');
+    this.logger.log(`Starting Prometheus metrics polling (interval: ${this.pollIntervalMs}ms)`);
+
+    // Do initial update
+    await this.updateMetrics().catch(err =>
+      this.logger.error('Failed initial metrics update', err)
+    );
+
+    // Start polling
+    this.startPolling();
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
+    }
+  }
+
+  private startPolling(): void {
+    const scheduleNextPoll = () => {
+      this.pollInterval = setTimeout(async () => {
+        try {
+          await this.updateMetrics();
+        } catch (error) {
+          this.logger.error(`Failed to update metrics: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+        scheduleNextPoll();
+      }, this.pollIntervalMs);
+    };
+    scheduleNextPoll();
   }
 
   private createGauge(name: string, help: string, labelNames?: string[]): Gauge {
@@ -295,23 +348,89 @@ export class PrometheusService implements OnModuleInit {
 
   private updateClientInfoMetrics(info: Record<string, any>): void {
     if (!info.clients) return;
-    
-    this.connectedClients.set(parseInt(info.clients.connected_clients) || 0);
+
+    const connectedClients = parseInt(info.clients.connected_clients) || 0;
+    const maxClients = parseInt(info.clients.maxclients) || 10000; // Default maxclients
+
+    this.connectedClients.set(connectedClients);
     this.blockedClients.set(parseInt(info.clients.blocked_clients) || 0);
     if (info.clients.tracking_clients) {
       this.trackingClients.set(parseInt(info.clients.tracking_clients) || 0);
+    }
+
+    // Webhook dispatch for connection.critical
+    if (this.webhookDispatcher && maxClients > 0) {
+      const usedPercent = (connectedClients / maxClients) * 100;
+      this.webhookDispatcher.dispatchThresholdAlert(
+        WebhookEventType.CONNECTION_CRITICAL,
+        'connection_critical',
+        usedPercent,
+        90, // 90% threshold
+        true,
+        {
+          currentConnections: connectedClients,
+          maxConnections: maxClients,
+          usedPercent: parseFloat(usedPercent.toFixed(2)),
+          message: `Connection usage critical: ${usedPercent.toFixed(1)}% (${connectedClients} / ${maxClients})`,
+        }
+      ).catch(err => {
+        this.logger.error('Failed to dispatch connection.critical webhook', err);
+      });
     }
   }
 
   private updateMemoryMetrics(info: Record<string, any>): void {
     if (!info.memory) return;
-    
-    this.memoryUsedBytes.set(parseInt(info.memory.used_memory) || 0);
+
+    const memoryUsed = parseInt(info.memory.used_memory) || 0;
+    const maxMemory = parseInt(info.memory.maxmemory) || 0;
+    const maxmemoryPolicy = info.memory.maxmemory_policy || 'noeviction';
+
+    this.memoryUsedBytes.set(memoryUsed);
     this.memoryUsedRssBytes.set(parseInt(info.memory.used_memory_rss) || 0);
     this.memoryUsedPeakBytes.set(parseInt(info.memory.used_memory_peak) || 0);
-    this.memoryMaxBytes.set(parseInt(info.memory.maxmemory) || 0);
+    this.memoryMaxBytes.set(maxMemory);
     this.memoryFragmentationRatio.set(parseFloat(info.memory.mem_fragmentation_ratio) || 0);
     this.memoryFragmentationBytes.set(parseInt(info.memory.mem_fragmentation_bytes) || 0);
+
+    if (this.webhookDispatcher && maxMemory > 0) {
+      const usedPercent = (memoryUsed / maxMemory) * 100;
+
+      // Webhook dispatch for memory.critical
+      this.webhookDispatcher.dispatchThresholdAlert(
+        WebhookEventType.MEMORY_CRITICAL,
+        'memory_critical',
+        usedPercent,
+        90, // 90% threshold
+        true, // fire when ABOVE
+        {
+          usedBytes: memoryUsed,
+          maxBytes: maxMemory,
+          usedPercent: parseFloat(usedPercent.toFixed(2)),
+          usedMemoryHuman: this.formatBytes(memoryUsed),
+          maxMemoryHuman: this.formatBytes(maxMemory),
+          message: `Memory usage critical: ${usedPercent.toFixed(1)}% (${this.formatBytes(memoryUsed)} / ${this.formatBytes(maxMemory)})`,
+        }
+      ).catch(err => {
+        this.logger.error('Failed to dispatch memory.critical webhook', err);
+      });
+
+      // Webhook dispatch for compliance.alert (Enterprise tier - handled by proprietary service)
+      // Trigger when memory is high AND eviction policy is 'noeviction' (data loss risk)
+      if (usedPercent > 80 && maxmemoryPolicy === 'noeviction' && this.webhookEventsEnterpriseService) {
+        this.webhookEventsEnterpriseService.dispatchComplianceAlert({
+          complianceType: 'data_retention',
+          severity: 'high',
+          memoryUsedPercent: usedPercent,
+          maxmemoryPolicy,
+          message: `Compliance alert: Memory at ${usedPercent.toFixed(1)}% with 'noeviction' policy may cause data loss and violate retention policies`,
+          timestamp: Date.now(),
+          instance: { host: this.dbHost, port: this.dbPort },
+        }).catch(err => {
+          this.logger.error('Failed to dispatch compliance.alert webhook', err);
+        });
+      }
+    }
   }
 
   private updateStatsMetrics(info: Record<string, any>): void {
@@ -332,7 +451,7 @@ export class PrometheusService implements OnModuleInit {
 
   private updateReplicationMetrics(info: Record<string, any>): void {
     if (!info.replication) return;
-    
+
     const role = info.replication.role;
 
     if (role === 'master') {
@@ -344,12 +463,27 @@ export class PrometheusService implements OnModuleInit {
       const masterLinkStatus = info.replication.master_link_status;
       this.masterLinkUp.set(masterLinkStatus === 'up' ? 1 : 0);
 
+      const lastIoSecondsAgo = parseInt(info.replication.master_last_io_seconds_ago) || 0;
       if (info.replication.master_last_io_seconds_ago) {
-        this.masterLastIoSecondsAgo.set(parseInt(info.replication.master_last_io_seconds_ago) || 0);
+        this.masterLastIoSecondsAgo.set(lastIoSecondsAgo);
       }
 
       if (info.replication.slave_repl_offset) {
         this.replicationOffset.set(parseInt(info.replication.slave_repl_offset) || 0);
+      }
+
+      // Webhook dispatch for replication.lag (Pro tier - handled by proprietary service)
+      if (this.webhookEventsProService && masterLinkStatus === 'up') {
+        // Trigger if replication lag exceeds 10 seconds
+        this.webhookEventsProService.dispatchReplicationLag({
+          lagSeconds: lastIoSecondsAgo,
+          threshold: 10,
+          masterLinkStatus,
+          timestamp: Date.now(),
+          instance: { host: this.dbHost, port: this.dbPort },
+        }).catch(err => {
+          this.logger.error('Failed to dispatch replication.lag webhook', err);
+        });
       }
     }
   }
@@ -396,6 +530,9 @@ export class PrometheusService implements OnModuleInit {
     try {
       const clusterInfo = await this.dbClient.getClusterInfo();
 
+      const clusterState = clusterInfo.cluster_state;
+      const slotsFail = parseInt(clusterInfo.cluster_slots_fail) || 0;
+
       if (clusterInfo.cluster_known_nodes) {
         this.clusterKnownNodes.set(parseInt(clusterInfo.cluster_known_nodes) || 0);
       }
@@ -409,10 +546,39 @@ export class PrometheusService implements OnModuleInit {
         this.clusterSlotsOk.set(parseInt(clusterInfo.cluster_slots_ok) || 0);
       }
       if (clusterInfo.cluster_slots_fail) {
-        this.clusterSlotsFail.set(parseInt(clusterInfo.cluster_slots_fail) || 0);
+        this.clusterSlotsFail.set(slotsFail);
       }
       if (clusterInfo.cluster_slots_pfail) {
         this.clusterSlotsPfail.set(parseInt(clusterInfo.cluster_slots_pfail) || 0);
+      }
+
+      // Webhook dispatch for cluster.failover (Pro tier - handled by proprietary service)
+      if (this.webhookEventsProService) {
+        // Detect cluster state change from 'ok' to 'fail'
+        const stateChanged = this.previousClusterState === 'ok' && clusterState === 'fail';
+
+        // Detect new slot failures
+        const newSlotFailures = this.previousSlotsFail < slotsFail && slotsFail > 0;
+
+        if (stateChanged || newSlotFailures) {
+          try {
+            await this.webhookEventsProService.dispatchClusterFailover({
+              clusterState,
+              previousState: this.previousClusterState ?? undefined,
+              slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
+              slotsFailed: slotsFail,
+              knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
+              timestamp: Date.now(),
+              instance: { host: this.dbHost, port: this.dbPort },
+            });
+          } catch (err) {
+            this.logger.error('Failed to dispatch cluster.failover webhook', err);
+          }
+        }
+
+        // Update tracked state
+        this.previousClusterState = clusterState;
+        this.previousSlotsFail = slotsFail;
       }
 
       const capabilities = this.dbClient.getCapabilities();
@@ -484,13 +650,17 @@ export class PrometheusService implements OnModuleInit {
 
   private async updateSlowlogMetrics(): Promise<void> {
     try {
-      const entries = await this.dbClient.getSlowLog(128);
-      const analysis = analyzeSlowLogPatterns(entries);
+      // Use cached data from SlowLogAnalyticsService (avoids duplicate Valkey calls)
+      const analysis = this.slowLogAnalytics.getCachedAnalysis();
 
       // Reset all pattern metrics
       this.slowlogPatternCount.reset();
       this.slowlogPatternDuration.reset();
       this.slowlogPatternPercentage.reset();
+
+      if (!analysis) {
+        return; // No data yet from analytics service
+      }
 
       // Update with top patterns
       for (const p of analysis.patterns) {
@@ -505,32 +675,34 @@ export class PrometheusService implements OnModuleInit {
 
   private async updateCommandlogMetrics(): Promise<void> {
     try {
-      const capabilities = this.dbClient.getCapabilities();
-      if (!capabilities.hasCommandLog) {
+      // Use cached data from CommandLogAnalyticsService (avoids duplicate Valkey calls)
+      if (!this.commandLogAnalytics.hasCommandLogSupport()) {
         return;
       }
 
       // Update large request patterns
-      const largeRequests = await this.dbClient.getCommandLog(128, 'large-request');
-      const requestAnalysis = analyzeSlowLogPatterns(largeRequests as any);
+      const requestAnalysis = this.commandLogAnalytics.getCachedAnalysis('large-request');
 
       this.commandlogLargeRequestByPattern.reset();
       let requestTotal = 0;
-      for (const p of requestAnalysis.patterns) {
-        this.commandlogLargeRequestByPattern.labels(p.pattern).set(p.count);
-        requestTotal += p.count;
+      if (requestAnalysis) {
+        for (const p of requestAnalysis.patterns) {
+          this.commandlogLargeRequestByPattern.labels(p.pattern).set(p.count);
+          requestTotal += p.count;
+        }
       }
       this.commandlogLargeRequestCount.set(requestTotal);
 
       // Update large reply patterns
-      const largeReplies = await this.dbClient.getCommandLog(128, 'large-reply');
-      const replyAnalysis = analyzeSlowLogPatterns(largeReplies as any);
+      const replyAnalysis = this.commandLogAnalytics.getCachedAnalysis('large-reply');
 
       this.commandlogLargeReplyByPattern.reset();
       let replyTotal = 0;
-      for (const p of replyAnalysis.patterns) {
-        this.commandlogLargeReplyByPattern.labels(p.pattern).set(p.count);
-        replyTotal += p.count;
+      if (replyAnalysis) {
+        for (const p of replyAnalysis.patterns) {
+          this.commandlogLargeReplyByPattern.labels(p.pattern).set(p.count);
+          replyTotal += p.count;
+        }
       }
       this.commandlogLargeReplyCount.set(replyTotal);
     } catch (error) {
@@ -540,12 +712,26 @@ export class PrometheusService implements OnModuleInit {
 
   private async updateSlowlogRawMetrics(): Promise<void> {
     try {
-      const length = await this.dbClient.getSlowLogLength();
+      // Use analytics service for length (lightweight SLOWLOG LEN call)
+      const length = await this.slowLogAnalytics.getSlowLogLength();
       this.slowlogLength.set(length);
 
-      const entries = await this.dbClient.getSlowLog(1);
-      if (entries.length > 0) {
-        this.slowlogLastId.set(entries[0].id);
+      // Use cached lastSeenId from analytics service (no extra Valkey call)
+      const lastId = this.slowLogAnalytics.getLastSeenId();
+      if (lastId !== null) {
+        this.slowlogLastId.set(lastId);
+      }
+
+      // Webhook dispatch for slowlog.threshold (Pro tier - handled by proprietary service)
+      if (this.webhookEventsProService) {
+        this.webhookEventsProService.dispatchSlowlogThreshold({
+          slowlogCount: length,
+          threshold: 100, // 100 entries threshold (configurable via env later)
+          timestamp: Date.now(),
+          instance: { host: this.dbHost, port: this.dbPort },
+        }).catch(err => {
+          this.logger.error('Failed to dispatch slowlog.threshold webhook', err);
+        });
       }
     } catch (error) {
       this.logger.error('Failed to update slowlog raw metrics', error);
@@ -608,5 +794,15 @@ export class PrometheusService implements OnModuleInit {
       this.anomalyDetectionBufferMean.labels(buf.metricType).set(buf.mean);
       this.anomalyDetectionBufferStdDev.labels(buf.metricType).set(buf.stdDev);
     }
+  }
+
+  /**
+   * Format bytes to human-readable format
+   */
+  private formatBytes(bytes: number): string {
+    if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
+    if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(2)} MB`;
+    if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(2)} KB`;
+    return `${bytes} B`;
   }
 }

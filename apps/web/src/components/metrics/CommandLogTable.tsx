@@ -10,13 +10,21 @@ import { Tabs, TabsList, TabsTrigger } from '../ui/tabs';
 import { Badge } from '../ui/badge';
 import type { CommandLogEntry, CommandLogType } from '../../types/metrics';
 
+interface PaginationProps {
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+  onPageChange: (page: number) => void;
+}
+
 interface Props {
   entries: Record<CommandLogType, CommandLogEntry[]>;
   activeTab?: CommandLogType;
   onTabChange?: (type: CommandLogType) => void;
+  pagination?: PaginationProps;
 }
 
-export function CommandLogTable({ entries, activeTab = 'slow', onTabChange }: Props) {
+export function CommandLogTable({ entries, activeTab = 'slow', onTabChange, pagination }: Props) {
 
   const formatDuration = (duration: number) => {
     if (duration < 1000) return `${duration}µs`;
@@ -80,6 +88,30 @@ export function CommandLogTable({ entries, activeTab = 'slow', onTabChange }: Pr
           )}
         </TableBody>
       </Table>
+
+      {pagination && (
+        <div className="flex items-center justify-between mt-4 pt-4 border-t">
+          <span className="text-sm text-muted-foreground">
+            Page {pagination.page + 1} ({currentEntries.length} entries)
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => pagination.onPageChange(pagination.page - 1)}
+              disabled={pagination.page === 0}
+              className="px-3 py-1 text-sm rounded border border-input bg-background hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => pagination.onPageChange(pagination.page + 1)}
+              disabled={!pagination.hasMore}
+              className="px-3 py-1 text-sm rounded border border-input bg-background hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

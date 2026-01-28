@@ -77,12 +77,23 @@ export class MetricsController {
   @Get('slowlog')
   @ApiOperation({ summary: 'Get slowlog entries', description: 'Retrieve slowlog entries from Valkey/Redis' })
   @ApiQuery({ name: 'count', required: false, description: 'Number of entries to return' })
+  @ApiQuery({ name: 'excludeMonitor', required: false, description: 'Set to true to exclude BetterDB-Monitor commands' })
+  @ApiQuery({ name: 'startTime', required: false, description: 'Filter entries after this Unix timestamp (seconds)' })
+  @ApiQuery({ name: 'endTime', required: false, description: 'Filter entries before this Unix timestamp (seconds)' })
   @ApiResponse({ status: 200, description: 'Slowlog entries retrieved successfully', type: [SlowLogEntryDto] })
   @ApiResponse({ status: 500, description: 'Failed to get slowlog' })
-  async getSlowLog(@Query('count') count?: string): Promise<SlowLogEntry[]> {
+  async getSlowLog(
+    @Query('count') count?: string,
+    @Query('excludeMonitor') excludeMonitor?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+  ): Promise<SlowLogEntry[]> {
     try {
       const parsedCount = count ? parseInt(count, 10) : undefined;
-      return await this.metricsService.getSlowLog(parsedCount);
+      const excludeClientName = excludeMonitor === 'true' ? 'BetterDB-Monitor' : undefined;
+      const parsedStartTime = startTime ? parseInt(startTime, 10) : undefined;
+      const parsedEndTime = endTime ? parseInt(endTime, 10) : undefined;
+      return await this.metricsService.getSlowLog(parsedCount, excludeClientName, parsedStartTime, parsedEndTime);
     } catch (error) {
       throw new HttpException(
         `Failed to get slowlog: ${error instanceof Error ? error.message : 'Unknown error'}`,

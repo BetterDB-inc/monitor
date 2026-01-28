@@ -19,6 +19,10 @@ export type {
   KeyPatternSnapshot,
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
+  Webhook,
+  WebhookDelivery,
+  WebhookEventType,
+  DeliveryStatus,
 } from '@betterdb/shared';
 import type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/shared';
 import type {
@@ -41,6 +45,10 @@ import type {
   KeyPatternSnapshot,
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
+  Webhook,
+  WebhookDelivery,
+  WebhookEventType,
+  DeliveryStatus,
 } from '@betterdb/shared';
 
 // Anomaly Event Types
@@ -97,6 +105,56 @@ export interface AnomalyStats {
   unresolvedCount: number;
 }
 
+// Slow Log Entry Types
+export interface StoredSlowLogEntry {
+  id: number;  // Original slowlog ID from Valkey/Redis
+  timestamp: number;  // Unix timestamp in seconds
+  duration: number;  // Microseconds
+  command: string[];  // Command name + args (e.g., ['GET', 'key1'])
+  clientAddress: string;
+  clientName: string;
+  capturedAt: number;  // When we captured this entry (ms)
+  sourceHost: string;
+  sourcePort: number;
+}
+
+export interface SlowLogQueryOptions {
+  startTime?: number;  // Unix timestamp in seconds
+  endTime?: number;
+  command?: string;
+  clientName?: string;
+  minDuration?: number;  // Microseconds
+  limit?: number;
+  offset?: number;
+}
+
+// Command Log Entry Types (Valkey-specific)
+export type CommandLogType = 'slow' | 'large-request' | 'large-reply';
+
+export interface StoredCommandLogEntry {
+  id: number;  // Original commandlog ID from Valkey
+  timestamp: number;  // Unix timestamp in seconds
+  duration: number;  // Microseconds
+  command: string[];  // Command name + args
+  clientAddress: string;
+  clientName: string;
+  type: CommandLogType;  // slow, large-request, or large-reply
+  capturedAt: number;  // When we captured this entry (ms)
+  sourceHost: string;
+  sourcePort: number;
+}
+
+export interface CommandLogQueryOptions {
+  startTime?: number;  // Unix timestamp in seconds
+  endTime?: number;
+  command?: string;
+  clientName?: string;
+  type?: CommandLogType;
+  minDuration?: number;  // Microseconds
+  limit?: number;
+  offset?: number;
+}
+
 export interface StoragePort {
   initialize(): Promise<void>;
   close(): Promise<void>;
@@ -142,4 +200,32 @@ export interface StoragePort {
   getSettings(): Promise<AppSettings | null>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
   updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings>;
+
+  // Webhook Methods
+  createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook>;
+  getWebhook(id: string): Promise<Webhook | null>;
+  getWebhooksByInstance(): Promise<Webhook[]>;
+  getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]>;
+  updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null>;
+  deleteWebhook(id: string): Promise<boolean>;
+
+  // Webhook Delivery Methods
+  createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery>;
+  getDelivery(id: string): Promise<WebhookDelivery | null>;
+  getDeliveriesByWebhook(webhookId: string, limit?: number, offset?: number): Promise<WebhookDelivery[]>;
+  updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean>;
+  getRetriableDeliveries(limit?: number): Promise<WebhookDelivery[]>;
+  pruneOldDeliveries(cutoffTimestamp: number): Promise<number>;
+
+  // Slow Log Methods
+  saveSlowLogEntries(entries: StoredSlowLogEntry[]): Promise<number>;
+  getSlowLogEntries(options?: SlowLogQueryOptions): Promise<StoredSlowLogEntry[]>;
+  getLatestSlowLogId(): Promise<number | null>;
+  pruneOldSlowLogEntries(cutoffTimestamp: number): Promise<number>;
+
+  // Command Log Methods (Valkey-specific)
+  saveCommandLogEntries(entries: StoredCommandLogEntry[]): Promise<number>;
+  getCommandLogEntries(options?: CommandLogQueryOptions): Promise<StoredCommandLogEntry[]>;
+  getLatestCommandLogId(type: CommandLogType): Promise<number | null>;
+  pruneOldCommandLogEntries(cutoffTimestamp: number): Promise<number>;
 }

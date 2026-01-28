@@ -31,8 +31,8 @@ export class MetricsService {
     return this.dbClient.getInfoParsed(sections);
   }
 
-  async getSlowLog(count?: number): Promise<SlowLogEntry[]> {
-    return this.dbClient.getSlowLog(count);
+  async getSlowLog(count?: number, excludeClientName?: string, startTime?: number, endTime?: number): Promise<SlowLogEntry[]> {
+    return this.dbClient.getSlowLog(count, excludeClientName, startTime, endTime);
   }
 
   async getSlowLogLength(): Promise<number> {

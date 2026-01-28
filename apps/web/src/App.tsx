@@ -18,6 +18,7 @@ import { AnomalyDashboard } from './pages/AnomalyDashboard';
 import { KeyAnalytics } from './pages/KeyAnalytics';
 import { ClusterDashboard } from './pages/ClusterDashboard';
 import { Settings } from './pages/Settings';
+import { Webhooks } from './pages/Webhooks';
 import type { DatabaseCapabilities } from './types/metrics';
 import { Feature } from '@betterdb/shared';
 
@@ -104,6 +105,9 @@ function AppLayout() {
           <NavItem to="/audit" active={location.pathname === '/audit'}>
             Audit Trail
           </NavItem>
+          <NavItem to="/webhooks" active={location.pathname === '/webhooks'}>
+            Webhooks
+          </NavItem>
           <NavItem to="/helper" active={location.pathname === '/helper'}>
             <span className="flex items-center justify-between w-full">
               AI Helper
@@ -150,6 +154,7 @@ function AppLayout() {
             <Route path="/cluster" element={<ClusterDashboard />} />
             <Route path="/audit" element={<AuditTrail />} />
             <Route path="/helper" element={<AiAssistant />} />
+            <Route path="/webhooks" element={<Webhooks />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </div>

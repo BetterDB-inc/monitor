@@ -15,6 +15,9 @@ import {
   SlotStats,
   ConfigGetResponse,
 } from '../types/metrics.types';
+
+// Re-export types that are commonly needed alongside DatabasePort
+export { SlowLogEntry, CommandLogEntry, CommandLogType };
 import type Valkey from 'iovalkey';
 
 export interface DatabaseCapabilities {
@@ -36,7 +39,7 @@ export interface DatabasePort {
   getInfo(sections?: string[]): Promise<Record<string, unknown>>;
   getCapabilities(): DatabaseCapabilities;
   getInfoParsed(sections?: string[]): Promise<InfoResponse>;
-  getSlowLog(count?: number): Promise<SlowLogEntry[]>;
+  getSlowLog(count?: number, excludeClientName?: string, startTime?: number, endTime?: number): Promise<SlowLogEntry[]>;
   getSlowLogLength(): Promise<number>;
   resetSlowLog(): Promise<void>;
   getCommandLog(count?: number, type?: CommandLogType): Promise<CommandLogEntry[]>;
@@ -54,6 +57,8 @@ export interface DatabasePort {
   killClient(filters: ClientFilters): Promise<number>;
   getAclLog(count?: number): Promise<AclLogEntry[]>;
   resetAclLog(): Promise<void>;
+  getAclUsers(): Promise<string[]>;
+  getAclList(): Promise<string[]>;
   getRole(): Promise<RoleInfo>;
   getClusterInfo(): Promise<Record<string, string>>;
   getClusterNodes(): Promise<ClusterNode[]>;

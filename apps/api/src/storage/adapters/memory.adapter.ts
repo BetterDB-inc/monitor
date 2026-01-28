@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import {
   StoragePort,
   StoredAclEntry,
@@ -16,6 +17,15 @@ import {
   KeyAnalyticsSummary,
   AppSettings,
   SettingsUpdateRequest,
+  Webhook,
+  WebhookDelivery,
+  WebhookEventType,
+  DeliveryStatus,
+  StoredSlowLogEntry,
+  SlowLogQueryOptions,
+  StoredCommandLogEntry,
+  CommandLogQueryOptions,
+  CommandLogType,
 } from '../../common/interfaces/storage-port.interface';
 
 export class MemoryAdapter implements StoragePort {
@@ -23,9 +33,14 @@ export class MemoryAdapter implements StoragePort {
   private clientSnapshots: StoredClientSnapshot[] = [];
   private anomalyEvents: StoredAnomalyEvent[] = [];
   private correlatedGroups: StoredCorrelatedGroup[] = [];
+  private slowLogEntries: StoredSlowLogEntry[] = [];
+  private commandLogEntries: StoredCommandLogEntry[] = [];
   private settings: AppSettings | null = null;
+  private webhooks: Map<string, Webhook> = new Map();
+  private deliveries: Map<string, WebhookDelivery> = new Map();
   private idCounter = 1;
   private ready: boolean = false;
+  private readonly MAX_DELIVERIES_PER_WEBHOOK = 1000;
 
   async initialize(): Promise<void> {
     this.ready = true;
@@ -579,5 +594,243 @@ export class MemoryAdapter implements StoragePort {
       updatedAt: Date.now(),
     };
     return { ...this.settings };
+  }
+
+  async createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook> {
+    const id = randomUUID();
+    const now = Date.now();
+    const newWebhook: Webhook = {
+      id,
+      ...webhook,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.webhooks.set(id, newWebhook);
+    return { ...newWebhook };
+  }
+
+  async getWebhook(id: string): Promise<Webhook | null> {
+    const webhook = this.webhooks.get(id);
+    return webhook ? { ...webhook } : null;
+  }
+
+  async getWebhooksByInstance(): Promise<Webhook[]> {
+    return Array.from(this.webhooks.values())
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(w => ({ ...w }));
+  }
+
+  async getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]> {
+    return Array.from(this.webhooks.values())
+      .filter(w => w.enabled && w.events.includes(event))
+      .map(w => ({ ...w }));
+  }
+
+  async updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null> {
+    const webhook = this.webhooks.get(id);
+    if (!webhook) return null;
+
+    // Filter out undefined values to prevent overwriting existing fields
+    const definedUpdates = Object.fromEntries(
+      Object.entries(updates).filter(([_, value]) => value !== undefined)
+    );
+
+    const updated: Webhook = {
+      ...webhook,
+      ...definedUpdates,
+      id,
+      createdAt: webhook.createdAt,
+      updatedAt: Date.now(),
+    };
+    this.webhooks.set(id, updated);
+    return { ...updated };
+  }
+
+  async deleteWebhook(id: string): Promise<boolean> {
+    const deleted = this.webhooks.delete(id);
+    if (deleted) {
+      const deliveriesToDelete = Array.from(this.deliveries.entries())
+        .filter(([_, d]) => d.webhookId === id)
+        .map(([id]) => id);
+      deliveriesToDelete.forEach(deliveryId => this.deliveries.delete(deliveryId));
+    }
+    return deleted;
+  }
+
+  async createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery> {
+    const now = Date.now();
+    const id = randomUUID();
+    const newDelivery: WebhookDelivery = {
+      id,
+      ...delivery,
+      createdAt: now,
+    };
+    this.deliveries.set(id, newDelivery);
+
+    const webhookDeliveries = Array.from(this.deliveries.values())
+      .filter(d => d.webhookId === delivery.webhookId)
+      .sort((a, b) => b.createdAt - a.createdAt);
+
+    if (webhookDeliveries.length > this.MAX_DELIVERIES_PER_WEBHOOK) {
+      const toDelete = webhookDeliveries.slice(this.MAX_DELIVERIES_PER_WEBHOOK);
+      toDelete.forEach(d => this.deliveries.delete(d.id));
+    }
+
+    return { ...newDelivery };
+  }
+
+  async getDelivery(id: string): Promise<WebhookDelivery | null> {
+    const delivery = this.deliveries.get(id);
+    return delivery ? { ...delivery } : null;
+  }
+
+  async getDeliveriesByWebhook(webhookId: string, limit: number = 50, offset: number = 0): Promise<WebhookDelivery[]> {
+    return Array.from(this.deliveries.values())
+      .filter(d => d.webhookId === webhookId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(offset, offset + limit)
+      .map(d => ({ ...d }));
+  }
+
+  async updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean> {
+    const delivery = this.deliveries.get(id);
+    if (!delivery) return false;
+
+    const updated: WebhookDelivery = {
+      ...delivery,
+      ...updates,
+      id,
+      webhookId: delivery.webhookId,
+      createdAt: delivery.createdAt,
+    };
+    this.deliveries.set(id, updated);
+    return true;
+  }
+
+  async getRetriableDeliveries(limit: number = 100): Promise<WebhookDelivery[]> {
+    const now = Date.now();
+    return Array.from(this.deliveries.values())
+      .filter(d => d.status === 'retrying' && d.nextRetryAt && d.nextRetryAt <= now)
+      .sort((a, b) => (a.nextRetryAt || 0) - (b.nextRetryAt || 0))
+      .slice(0, limit)
+      .map(d => ({ ...d }));
+  }
+
+  async pruneOldDeliveries(cutoffTimestamp: number): Promise<number> {
+    const before = this.deliveries.size;
+    Array.from(this.deliveries.entries())
+      .filter(([_, d]) => d.createdAt < cutoffTimestamp)
+      .forEach(([id]) => this.deliveries.delete(id));
+    return before - this.deliveries.size;
+  }
+
+  // Slow Log Methods
+  async saveSlowLogEntries(entries: StoredSlowLogEntry[]): Promise<number> {
+    let savedCount = 0;
+    for (const entry of entries) {
+      // Check for duplicates based on unique constraint
+      const exists = this.slowLogEntries.some(
+        e => e.id === entry.id && e.sourceHost === entry.sourceHost && e.sourcePort === entry.sourcePort
+      );
+      if (!exists) {
+        this.slowLogEntries.push(entry);
+        savedCount++;
+      }
+    }
+    return savedCount;
+  }
+
+  async getSlowLogEntries(options: SlowLogQueryOptions = {}): Promise<StoredSlowLogEntry[]> {
+    let filtered = [...this.slowLogEntries];
+
+    if (options.startTime) {
+      filtered = filtered.filter(e => e.timestamp >= options.startTime!);
+    }
+    if (options.endTime) {
+      filtered = filtered.filter(e => e.timestamp <= options.endTime!);
+    }
+    if (options.command) {
+      const cmd = options.command.toLowerCase();
+      // command is an array, check if the first element (command name) matches
+      filtered = filtered.filter(e => e.command[0]?.toLowerCase().includes(cmd));
+    }
+    if (options.clientName) {
+      const name = options.clientName.toLowerCase();
+      filtered = filtered.filter(e => e.clientName.toLowerCase().includes(name));
+    }
+    if (options.minDuration) {
+      filtered = filtered.filter(e => e.duration >= options.minDuration!);
+    }
+
+    return filtered
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
+  }
+
+  async getLatestSlowLogId(): Promise<number | null> {
+    if (this.slowLogEntries.length === 0) return null;
+    return Math.max(...this.slowLogEntries.map(e => e.id));
+  }
+
+  async pruneOldSlowLogEntries(cutoffTimestamp: number): Promise<number> {
+    const before = this.slowLogEntries.length;
+    this.slowLogEntries = this.slowLogEntries.filter(e => e.capturedAt >= cutoffTimestamp);
+    return before - this.slowLogEntries.length;
+  }
+
+  // Command Log Methods
+  async saveCommandLogEntries(entries: StoredCommandLogEntry[]): Promise<number> {
+    let savedCount = 0;
+    for (const entry of entries) {
+      const exists = this.commandLogEntries.some(
+        e => e.id === entry.id && e.type === entry.type && e.sourceHost === entry.sourceHost && e.sourcePort === entry.sourcePort
+      );
+      if (!exists) {
+        this.commandLogEntries.push(entry);
+        savedCount++;
+      }
+    }
+    return savedCount;
+  }
+
+  async getCommandLogEntries(options: CommandLogQueryOptions = {}): Promise<StoredCommandLogEntry[]> {
+    let filtered = [...this.commandLogEntries];
+
+    if (options.startTime) {
+      filtered = filtered.filter(e => e.timestamp >= options.startTime!);
+    }
+    if (options.endTime) {
+      filtered = filtered.filter(e => e.timestamp <= options.endTime!);
+    }
+    if (options.command) {
+      const cmd = options.command.toLowerCase();
+      filtered = filtered.filter(e => e.command[0]?.toLowerCase().includes(cmd));
+    }
+    if (options.clientName) {
+      const name = options.clientName.toLowerCase();
+      filtered = filtered.filter(e => e.clientName.toLowerCase().includes(name));
+    }
+    if (options.type) {
+      filtered = filtered.filter(e => e.type === options.type);
+    }
+    if (options.minDuration) {
+      filtered = filtered.filter(e => e.duration >= options.minDuration!);
+    }
+
+    return filtered
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
+  }
+
+  async getLatestCommandLogId(type: CommandLogType): Promise<number | null> {
+    const entriesOfType = this.commandLogEntries.filter(e => e.type === type);
+    if (entriesOfType.length === 0) return null;
+    return Math.max(...entriesOfType.map(e => e.id));
+  }
+
+  async pruneOldCommandLogEntries(cutoffTimestamp: number): Promise<number> {
+    const before = this.commandLogEntries.length;
+    this.commandLogEntries = this.commandLogEntries.filter(e => e.capturedAt >= cutoffTimestamp);
+    return before - this.commandLogEntries.length;
   }
 }
