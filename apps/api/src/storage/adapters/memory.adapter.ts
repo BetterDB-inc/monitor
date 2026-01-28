@@ -623,9 +623,14 @@ export class MemoryAdapter implements StoragePort {
     const webhook = this.webhooks.get(id);
     if (!webhook) return null;
 
+    // Filter out undefined values to prevent overwriting existing fields
+    const definedUpdates = Object.fromEntries(
+      Object.entries(updates).filter(([_, value]) => value !== undefined)
+    );
+
     const updated: Webhook = {
       ...webhook,
-      ...updates,
+      ...definedUpdates,
       id,
       createdAt: webhook.createdAt,
       updatedAt: Date.now(),

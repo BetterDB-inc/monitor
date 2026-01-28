@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsUrl, IsBoolean, IsArray, IsObject, IsOptional, IsInt, Min, IsEnum } from 'class-validator';
-import { Transform } from 'class-transformer';
+import { IsString, IsUrl, IsBoolean, IsArray, IsObject, IsOptional, IsInt, Min, IsEnum, ArrayMinSize } from 'class-validator';
+import { Type } from 'class-transformer';
 import type {
   Webhook,
   WebhookDelivery,
@@ -40,6 +40,7 @@ export class CreateWebhookDto {
     enum: EventTypeEnum,
   })
   @IsArray()
+  @ArrayMinSize(1, { message: 'At least one event must be specified' })
   @IsEnum(EventTypeEnum, { each: true, message: 'Each event must be a valid webhook event type' })
   events: WebhookEventType[];
 
@@ -208,12 +209,14 @@ export class GetDeliveriesQueryDto {
   webhookId?: string;
 
   @ApiPropertyOptional({ description: 'Maximum number of deliveries to return', example: 50, default: 100 })
+  @Type(() => Number)
   @IsInt()
   @Min(1)
   @IsOptional()
   limit?: number;
 
   @ApiPropertyOptional({ description: 'Number of deliveries to skip (for pagination)', example: 0, default: 0 })
+  @Type(() => Number)
   @IsInt()
   @Min(0)
   @IsOptional()

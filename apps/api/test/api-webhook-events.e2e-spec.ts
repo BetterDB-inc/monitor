@@ -20,7 +20,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
 
     // Create a webhook pointing to our mock server
     const res = await request(app.getHttpServer())
-      .post('/api/webhooks')
+      .post('/webhooks')
       .send({
         name: 'Event Test Webhook',
         url: `http://localhost:${MOCK_SERVER_PORT}/hook`,
@@ -46,7 +46,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
 
   describe('Instance Events', () => {
     it('should dispatch instance.down event', async () => {
-      await dispatcher.dispatch(WebhookEventType.INSTANCE_DOWN, {
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, {
         message: 'Database instance is down',
         host: 'localhost',
         port: 6379,
@@ -67,7 +67,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
     });
 
     it('should dispatch instance.up event', async () => {
-      await dispatcher.dispatch(WebhookEventType.INSTANCE_UP, {
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_UP, {
         message: 'Database instance is up',
         host: 'localhost',
         port: 6379,
@@ -102,10 +102,9 @@ describe('Webhook Event Dispatch (e2e)', () => {
       expect(requests[0].body).toMatchObject({
         event: WebhookEventType.MEMORY_CRITICAL,
         data: expect.objectContaining({
-          metric: 'memory_usage',
-          currentValue: 95.5,
-          threshold: 90,
-          exceeded: true,
+          usedMemory: 950000000,
+          maxMemory: 1000000000,
+          usedPercent: '95.50',
         }),
       });
     });
@@ -161,28 +160,28 @@ describe('Webhook Event Dispatch (e2e)', () => {
   });
 
   describe('Signature Verification', () => {
-    it('should include valid X-BetterDB-Signature header', async () => {
-      await dispatcher.dispatch(WebhookEventType.INSTANCE_DOWN, {
+    it('should include valid X-Webhook-Signature header', async () => {
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, {
         message: 'Test signature',
         timestamp: Date.now(),
       });
 
       const requests = await mockServer.waitForRequests(1, 3000);
 
-      expect(requests[0].headers['x-betterdb-signature']).toBeDefined();
-      expect(requests[0].headers['x-betterdb-signature']).toMatch(/^[a-f0-9]{64}$/);
+      expect(requests[0].headers['x-webhook-signature']).toBeDefined();
+      expect(requests[0].headers['x-webhook-signature']).toMatch(/^[a-f0-9]{64}$/);
     });
 
-    it('should include timestamp in X-BetterDB-Timestamp header', async () => {
-      await dispatcher.dispatch(WebhookEventType.INSTANCE_UP, {
+    it('should include timestamp in X-Webhook-Timestamp header', async () => {
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_UP, {
         message: 'Test timestamp',
         timestamp: Date.now(),
       });
 
       const requests = await mockServer.waitForRequests(1, 3000);
 
-      expect(requests[0].headers['x-betterdb-timestamp']).toBeDefined();
-      const timestamp = Number(requests[0].headers['x-betterdb-timestamp']);
+      expect(requests[0].headers['x-webhook-timestamp']).toBeDefined();
+      const timestamp = Number(requests[0].headers['x-webhook-timestamp']);
       expect(timestamp).toBeGreaterThan(Date.now() - 10000); // Within last 10 seconds
     });
   });
@@ -191,10 +190,10 @@ describe('Webhook Event Dispatch (e2e)', () => {
     it('should not dispatch to disabled webhooks', async () => {
       // Disable the webhook
       await request(app.getHttpServer())
-        .put(`/api/webhooks/${webhookId}`)
+        .put(`/webhooks/${webhookId}`)
         .send({ enabled: false });
 
-      await dispatcher.dispatch(WebhookEventType.INSTANCE_DOWN, {
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, {
         message: 'Should not dispatch',
         timestamp: Date.now(),
       });
@@ -206,7 +205,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
 
       // Re-enable for other tests
       await request(app.getHttpServer())
-        .put(`/api/webhooks/${webhookId}`)
+        .put(`/webhooks/${webhookId}`)
         .send({ enabled: true });
     });
   });
@@ -216,7 +215,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
       // Make mock server return 500
       mockServer.setResponseCode(500);
 
-      await dispatcher.dispatch(WebhookEventType.INSTANCE_DOWN, {
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, {
         message: 'Test retry',
         timestamp: Date.now(),
       });
@@ -226,7 +225,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
 
       // Check that delivery was marked for retry
       const deliveries = await request(app.getHttpServer())
-        .get(`/api/webhooks/${webhookId}/deliveries`)
+        .get(`/webhooks/${webhookId}/deliveries`)
         .expect(200);
 
       const failedDeliveries = deliveries.body.filter(
@@ -242,7 +241,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
       // Make mock server return 400
       mockServer.setResponseCode(400);
 
-      await dispatcher.dispatch(WebhookEventType.INSTANCE_DOWN, {
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, {
         message: 'Test no retry on 4xx',
         timestamp: Date.now(),
       });
@@ -252,7 +251,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
 
       // Check that delivery was marked as failed (not retrying)
       const deliveries = await request(app.getHttpServer())
-        .get(`/api/webhooks/${webhookId}/deliveries`)
+        .get(`/webhooks/${webhookId}/deliveries`)
         .expect(200);
 
       const recentDeliveries = deliveries.body.slice(0, 5);
@@ -270,7 +269,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
     it('should include custom headers in webhook request', async () => {
       // Create webhook with custom headers
       const res = await request(app.getHttpServer())
-        .post('/api/webhooks')
+        .post('/webhooks')
         .send({
           name: 'Custom Headers Webhook',
           url: `http://localhost:${MOCK_SERVER_PORT}/hook`,
@@ -283,19 +282,23 @@ describe('Webhook Event Dispatch (e2e)', () => {
 
       const customWebhookId = res.body.id;
 
-      await dispatcher.dispatch(WebhookEventType.INSTANCE_DOWN, {
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, {
         message: 'Test custom headers',
         timestamp: Date.now(),
       });
 
-      const requests = await mockServer.waitForRequests(1, 3000);
+      // Wait for 2 requests (main webhook + custom headers webhook)
+      const requests = await mockServer.waitForRequests(2, 3000);
 
-      expect(requests[0].headers['x-custom-header']).toBe('custom-value');
-      expect(requests[0].headers['authorization']).toBe('Bearer test-token');
+      // Find the request with custom headers (from the new webhook)
+      const customHeadersRequest = requests.find((r) => r.headers['x-custom-header'] === 'custom-value');
+      expect(customHeadersRequest).toBeDefined();
+      expect(customHeadersRequest!.headers['x-custom-header']).toBe('custom-value');
+      expect(customHeadersRequest!.headers['authorization']).toBe('Bearer test-token');
 
       // Cleanup
       await request(app.getHttpServer())
-        .delete(`/api/webhooks/${customWebhookId}`);
+        .delete(`/webhooks/${customWebhookId}`);
     });
   });
 
@@ -303,7 +306,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
     it('should only dispatch to webhooks subscribed to the event', async () => {
       // Create webhook for different event
       const res = await request(app.getHttpServer())
-        .post('/api/webhooks')
+        .post('/webhooks')
         .send({
           name: 'Client Blocked Only',
           url: `http://localhost:${MOCK_SERVER_PORT}/hook`,
@@ -313,7 +316,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
       const filteredWebhookId = res.body.id;
 
       // Dispatch instance.down (which filtered webhook is NOT subscribed to)
-      await dispatcher.dispatch(WebhookEventType.INSTANCE_DOWN, {
+      await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, {
         message: 'Should not reach client.blocked webhook',
         timestamp: Date.now(),
       });
@@ -326,7 +329,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
 
       // Cleanup
       await request(app.getHttpServer())
-        .delete(`/api/webhooks/${filteredWebhookId}`);
+        .delete(`/webhooks/${filteredWebhookId}`);
     });
   });
 });

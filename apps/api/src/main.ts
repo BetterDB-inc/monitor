@@ -1,4 +1,4 @@
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
@@ -13,6 +13,13 @@ async function bootstrap(): Promise<void> {
     AppModule,
     new FastifyAdapter(),
   ) as NestFastifyApplication;
+
+  // Enable validation pipes globally
+  app.useGlobalPipes(new ValidationPipe({
+    whitelist: true,
+    forbidNonWhitelisted: true,
+    transform: true,
+  }));
 
   const isProduction = process.env.NODE_ENV === 'production';
 

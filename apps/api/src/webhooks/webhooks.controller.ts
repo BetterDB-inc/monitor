@@ -25,6 +25,12 @@ import {
   TestWebhookResponseDto,
 } from '../common/dto/webhook.dto';
 
+// Rate limiting configuration
+const THROTTLE_TTL = 60000; // 60 seconds
+const CREATE_WEBHOOK_LIMIT = 25; // 25 requests per minute (allows ~20 test creates + 5 buffer)
+const TEST_WEBHOOK_LIMIT = 10; // 10 requests per minute
+const RETRY_DELIVERY_LIMIT = 20; // 20 requests per minute
+
 @ApiTags('webhooks')
 @Controller('webhooks')
 export class WebhooksController {
@@ -35,7 +41,7 @@ export class WebhooksController {
   ) {}
 
   @Post()
-  @Throttle({ default: { limit: 10, ttl: 60000 } }) // 10 requests per minute
+  @Throttle({ default: { limit: CREATE_WEBHOOK_LIMIT, ttl: THROTTLE_TTL } })
   @ApiOperation({ summary: 'Create a new webhook' })
   @ApiResponse({ status: 201, description: 'Webhook created successfully', type: WebhookDto })
   @ApiResponse({ status: 400, description: 'Invalid webhook data' })
@@ -104,7 +110,8 @@ export class WebhooksController {
   }
 
   @Post(':id/test')
-  @Throttle({ default: { limit: 10, ttl: 60000 } }) // 10 requests per minute
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: TEST_WEBHOOK_LIMIT, ttl: THROTTLE_TTL } })
   @ApiOperation({ summary: 'Test a webhook by sending a test event' })
   @ApiParam({ name: 'id', description: 'Webhook ID' })
   @ApiResponse({ status: 200, description: 'Test result', type: TestWebhookResponseDto })
@@ -143,7 +150,7 @@ export class WebhooksController {
 
   @Post('deliveries/:deliveryId/retry')
   @HttpCode(HttpStatus.ACCEPTED)
-  @Throttle({ default: { limit: 20, ttl: 60000 } }) // 20 requests per minute
+  @Throttle({ default: { limit: RETRY_DELIVERY_LIMIT, ttl: THROTTLE_TTL } })
   @ApiOperation({ summary: 'Manually retry a failed delivery' })
   @ApiParam({ name: 'deliveryId', description: 'Delivery ID' })
   @ApiResponse({ status: 202, description: 'Retry queued' })

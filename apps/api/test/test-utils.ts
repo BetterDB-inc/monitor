@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { NestFastifyApplication, FastifyAdapter } from '@nestjs/platform-fastify';
+import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from '../src/app.module';
 import { HealthResponse, DatabaseCapabilities } from '@betterdb/shared';
 
@@ -19,6 +20,13 @@ export async function createTestApp(): Promise<NestFastifyApplication> {
   const app = moduleFixture.createNestApplication<NestFastifyApplication>(
     new FastifyAdapter(),
   );
+
+  // Enable validation pipes globally (same as main.ts)
+  app.useGlobalPipes(new ValidationPipe({
+    whitelist: true,
+    forbidNonWhitelisted: true,
+    transform: true,
+  }));
 
   await app.init();
   await app.getHttpAdapter().getInstance().ready();

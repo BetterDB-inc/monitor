@@ -123,4 +123,10 @@ export class ClientAnalyticsService implements OnModuleInit, OnModuleDestroy {
   ): Promise<StoredClientSnapshot[]> {
     return this.storage.getClientConnectionHistory(identifier, startTime, endTime);
   }
+
+  async cleanup(olderThanTimestamp?: number): Promise<number> {
+    // Default to 30 days ago if no timestamp provided
+    const cutoff = olderThanTimestamp || Date.now() - (30 * 24 * 60 * 60 * 1000);
+    return this.storage.pruneOldClientSnapshots(cutoff);
+  }
 }

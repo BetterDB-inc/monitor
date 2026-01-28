@@ -227,4 +227,16 @@ export class ClientAnalyticsController {
     };
     return this.analysisService.detectSpikes(params);
   }
+
+  @Delete('cleanup')
+  @ApiOperation({ summary: 'Cleanup old snapshots', description: 'Prune client snapshots older than specified timestamp' })
+  @ApiQuery({ name: 'olderThan', required: false, description: 'Timestamp in milliseconds, default: 30 days ago' })
+  @ApiResponse({ status: 200, description: 'Cleanup completed successfully', type: CleanupResponseDto })
+  @ApiResponse({ status: 500, description: 'Failed to cleanup' })
+  async cleanup(@Query('olderThan') olderThan?: string): Promise<CleanupResponseDto> {
+    const pruned = await this.service.cleanup(
+      olderThan ? parseInt(olderThan, 10) : undefined
+    );
+    return { pruned };
+  }
 }

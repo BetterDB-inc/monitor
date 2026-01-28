@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ConfigModule } from './config/config.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
@@ -57,6 +59,10 @@ try {
 
 const baseImports = [
   ConfigModule,
+  ThrottlerModule.forRoot([{
+    ttl: 60000, // 60 seconds
+    limit: 10000, // Very high default - endpoint-specific limits provide actual rate limiting
+  }]),
   DatabaseModule,
   HealthModule,
   MetricsModule,
@@ -77,5 +83,11 @@ const proprietaryImports = [
 
 @Module({
   imports: [...baseImports, ...proprietaryImports],
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+  ],
 })
 export class AppModule {}

@@ -275,10 +275,17 @@ export class WebhookDispatcherService {
         if (response.ok) {
           status = DeliveryStatus.SUCCESS;
           this.logger.log(`Webhook delivered successfully: ${webhook.id} -> ${webhook.url}`);
+        } else if (statusCode >= 400 && statusCode < 500) {
+          // 4xx errors are client errors - don't retry
+          status = DeliveryStatus.FAILED;
+          this.logger.warn(
+            `Webhook delivery failed with client error ${statusCode}: ${webhook.id} -> ${webhook.url}`
+          );
         } else {
+          // 5xx errors are server errors - retry
           status = DeliveryStatus.RETRYING;
           this.logger.warn(
-            `Webhook delivery failed with status ${statusCode}: ${webhook.id} -> ${webhook.url}`
+            `Webhook delivery failed with server error ${statusCode}: ${webhook.id} -> ${webhook.url}`
           );
         }
 
