@@ -1,5 +1,7 @@
 # Dependencies
 node_modules
+# Keep proprietary symlink for CI dependency resolution
+!proprietary/node_modules
 .pnp
 .pnp.js
 
