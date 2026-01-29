@@ -975,7 +975,13 @@ export class PostgresAdapter implements StoragePort {
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
         source_host, source_port
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+      ON CONFLICT (id) DO UPDATE SET
+        correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
+        related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
+        resolved = EXCLUDED.resolved,
+        resolved_at = EXCLUDED.resolved_at,
+        duration_ms = EXCLUDED.duration_ms`,
       [
         event.id,
         event.timestamp,
@@ -1044,7 +1050,13 @@ export class PostgresAdapter implements StoragePort {
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
         source_host, source_port
-      ) VALUES ${placeholders.join(', ')}`,
+      ) VALUES ${placeholders.join(', ')}
+      ON CONFLICT (id) DO UPDATE SET
+        correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
+        related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
+        resolved = EXCLUDED.resolved,
+        resolved_at = EXCLUDED.resolved_at,
+        duration_ms = EXCLUDED.duration_ms`,
       values
     );
 
