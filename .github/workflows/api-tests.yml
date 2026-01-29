@@ -9,9 +9,12 @@ on:
         type: string
         default: 'main'
   pull_request:
+    branches:
+      - master
     paths:
       - 'apps/api/**'
       - 'packages/**'
+      - 'proprietary/**'
       - 'pnpm-lock.yaml'
 
 jobs:

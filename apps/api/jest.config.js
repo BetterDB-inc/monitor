@@ -11,6 +11,7 @@ module.exports = {
   ],
   coverageDirectory: './coverage',
   testEnvironment: 'node',
+  testPathIgnorePatterns: ['/node_modules/', '/proprietary/'],
   testTimeout: 30000,
   forceExit: true,
   setupFiles: ['<rootDir>/test/setup-env.ts'],

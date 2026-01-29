@@ -4,7 +4,8 @@
   "private": true,
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "proprietary/*"
   ],
   "scripts": {
     "dev": "concurrently -n \"web,api\" -c \"green,blue\" \"cd apps/web && pnpm dev\" \"cd apps/api && pnpm dev\"",
