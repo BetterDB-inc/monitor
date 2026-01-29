@@ -27,7 +27,7 @@ export default async function globalSetup() {
 
     // Stop any existing containers (cleanup from previous failed runs)
     try {
-      execSync('docker compose -f docker compose.yml down --remove-orphans', {
+      execSync('docker compose -f docker-compose.yml down --remove-orphans', {
         cwd: projectRoot,
         stdio: 'ignore',
       });
@@ -52,7 +52,7 @@ export default async function globalSetup() {
 
     // Start Docker containers
     console.log('   Starting valkey, redis, and postgres...');
-    execSync('docker compose -f docker compose.yml up -d valkey redis postgres', {
+    execSync('docker compose -f docker-compose.yml up -d valkey redis postgres', {
       cwd: projectRoot,
       stdio: 'inherit',
     });
@@ -132,7 +132,7 @@ export default async function globalSetup() {
     // Show container logs for debugging
     try {
       console.log('\nContainer logs:');
-      execSync('docker compose -f docker compose.yml logs --tail=50', {
+      execSync('docker compose -f docker-compose.yml logs --tail=50', {
         cwd: projectRoot,
         stdio: 'inherit',
       });
