@@ -332,4 +332,185 @@ describe('Webhook Event Dispatch (e2e)', () => {
         .delete(`/webhooks/${filteredWebhookId}`);
     });
   });
+
+  describe('Per-Webhook Thresholds (E2E)', () => {
+    it('should respect per-webhook memory threshold', async () => {
+      // Create webhook with low threshold
+      const res = await request(app.getHttpServer())
+        .post('/webhooks')
+        .send({
+          name: 'Low Memory Threshold',
+          url: `http://localhost:${MOCK_SERVER_PORT}/hook`,
+          events: [WebhookEventType.MEMORY_CRITICAL],
+          thresholds: { memoryCriticalPercent: 50 },
+        })
+        .expect(201);
+
+      const customWebhookId = res.body.id;
+      mockServer.clearReceivedRequests();
+
+      // Dispatch at 60% - should trigger (above 50%)
+      await dispatcher.dispatchThresholdAlertPerWebhook(
+        WebhookEventType.MEMORY_CRITICAL,
+        `memory_e2e_${customWebhookId}`,
+        60,
+        'memoryCriticalPercent',
+        true,
+        { usedPercent: 60 }
+      );
+
+      const requests = await mockServer.waitForRequests(1, 3000);
+      expect(requests.length).toBeGreaterThanOrEqual(1);
+
+      // Find request from our custom webhook
+      const customRequest = requests.find(r => r.body.data?.usedPercent === 60);
+      expect(customRequest).toBeDefined();
+
+      // Cleanup
+      await request(app.getHttpServer()).delete(`/webhooks/${customWebhookId}`);
+    });
+
+    it('should include threshold value in payload', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/webhooks')
+        .send({
+          name: 'Threshold in Payload',
+          url: `http://localhost:${MOCK_SERVER_PORT}/hook`,
+          events: [WebhookEventType.MEMORY_CRITICAL],
+          thresholds: { memoryCriticalPercent: 75 },
+        })
+        .expect(201);
+
+      const customWebhookId = res.body.id;
+      mockServer.clearReceivedRequests();
+
+      await dispatcher.dispatchThresholdAlertPerWebhook(
+        WebhookEventType.MEMORY_CRITICAL,
+        `memory_payload_e2e_${customWebhookId}`,
+        80,
+        'memoryCriticalPercent',
+        true,
+        { usedPercent: 80 }
+      );
+
+      const requests = await mockServer.waitForRequests(1, 3000);
+      expect(requests.length).toBeGreaterThanOrEqual(1);
+
+      // Find request with threshold info
+      const thresholdRequest = requests.find(r => r.body.data?.threshold === 75);
+      expect(thresholdRequest).toBeDefined();
+      expect(thresholdRequest!.body.data.thresholdKey).toBe('memoryCriticalPercent');
+
+      await request(app.getHttpServer()).delete(`/webhooks/${customWebhookId}`);
+    });
+
+    it('should not trigger when value below per-webhook threshold', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/webhooks')
+        .send({
+          name: 'High Threshold Webhook',
+          url: `http://localhost:${MOCK_SERVER_PORT}/hook`,
+          events: [WebhookEventType.MEMORY_CRITICAL],
+          thresholds: { memoryCriticalPercent: 95 },
+        })
+        .expect(201);
+
+      const customWebhookId = res.body.id;
+      mockServer.clearReceivedRequests();
+
+      // 85% should NOT trigger for webhook with 95% threshold
+      await dispatcher.dispatchThresholdAlertPerWebhook(
+        WebhookEventType.MEMORY_CRITICAL,
+        `memory_no_trigger_e2e_${customWebhookId}`,
+        85,
+        'memoryCriticalPercent',
+        true,
+        { usedPercent: 85 }
+      );
+
+      // Wait briefly to ensure no requests arrive
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      // Check no new requests were received for this specific threshold
+      const allRequests = mockServer.getReceivedRequests();
+      const thresholdRequests = allRequests.filter(r =>
+        r.body.data?.threshold === 95 && r.body.data?.usedPercent === 85
+      );
+      expect(thresholdRequests).toHaveLength(0);
+
+      await request(app.getHttpServer()).delete(`/webhooks/${customWebhookId}`);
+    });
+
+    it('should persist and retrieve webhook with custom thresholds', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/webhooks')
+        .send({
+          name: 'Persisted Thresholds',
+          url: `http://localhost:${MOCK_SERVER_PORT}/hook`,
+          events: [WebhookEventType.MEMORY_CRITICAL, WebhookEventType.CONNECTION_CRITICAL],
+          thresholds: {
+            memoryCriticalPercent: 85,
+            connectionCriticalPercent: 80,
+          },
+          deliveryConfig: {
+            timeoutMs: 15000,
+          },
+          alertConfig: {
+            hysteresisFactor: 0.85,
+          },
+        })
+        .expect(201);
+
+      const customWebhookId = res.body.id;
+
+      // Retrieve and verify
+      const getRes = await request(app.getHttpServer())
+        .get(`/webhooks/${customWebhookId}`)
+        .expect(200);
+
+      expect(getRes.body.thresholds).toEqual({
+        memoryCriticalPercent: 85,
+        connectionCriticalPercent: 80,
+      });
+      expect(getRes.body.deliveryConfig).toEqual({
+        timeoutMs: 15000,
+      });
+      expect(getRes.body.alertConfig).toEqual({
+        hysteresisFactor: 0.85,
+      });
+
+      await request(app.getHttpServer()).delete(`/webhooks/${customWebhookId}`);
+    });
+
+    it('should update webhook thresholds', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/webhooks')
+        .send({
+          name: 'Updatable Thresholds',
+          url: `http://localhost:${MOCK_SERVER_PORT}/hook`,
+          events: [WebhookEventType.MEMORY_CRITICAL],
+          thresholds: { memoryCriticalPercent: 90 },
+        })
+        .expect(201);
+
+      const customWebhookId = res.body.id;
+
+      // Update thresholds
+      await request(app.getHttpServer())
+        .put(`/webhooks/${customWebhookId}`)
+        .send({
+          thresholds: { memoryCriticalPercent: 75 },
+        })
+        .expect(200);
+
+      // Verify update
+      const getRes = await request(app.getHttpServer())
+        .get(`/webhooks/${customWebhookId}`)
+        .expect(200);
+
+      expect(getRes.body.thresholds.memoryCriticalPercent).toBe(75);
+
+      await request(app.getHttpServer()).delete(`/webhooks/${customWebhookId}`);
+    });
+  });
 });

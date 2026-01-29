@@ -189,6 +189,9 @@ export class WebhooksService {
       events: dto.events,
       headers: dto.headers || {},
       retryPolicy,
+      deliveryConfig: dto.deliveryConfig,
+      alertConfig: dto.alertConfig,
+      thresholds: dto.thresholds,
     });
 
     this.logger.log(`Webhook created: ${webhook.id} - ${webhook.name}`);

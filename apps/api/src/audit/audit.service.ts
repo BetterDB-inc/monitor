@@ -1,6 +1,6 @@
 import { Injectable, Inject, OnModuleInit, OnModuleDestroy, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { WebhookEventType, IWebhookEventsEnterpriseService } from '@betterdb/shared';
+import { WebhookEventType, IWebhookEventsEnterpriseService, WEBHOOK_EVENTS_ENTERPRISE_SERVICE } from '@betterdb/shared';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { StoragePort, StoredAclEntry } from '../common/interfaces/storage-port.interface';
 import { AclLogEntry } from '../common/types/metrics.types';
@@ -28,7 +28,7 @@ export class AuditService implements OnModuleInit, OnModuleDestroy {
     private readonly prometheusService: PrometheusService,
     private readonly settingsService: SettingsService,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
-    @Optional() private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
+    @Optional() @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE) private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
   ) {
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
     this.sourcePort = this.configService.get<number>('database.port', 6379);

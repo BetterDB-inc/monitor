@@ -179,6 +179,277 @@ describe('Webhook Storage', () => {
     });
   });
 
+  describe('Per-Webhook Configuration', () => {
+    it('should create webhook with deliveryConfig', async () => {
+      const webhook = await adapter.createWebhook({
+        name: 'Delivery Config Webhook',
+        url: 'https://example.com/hook',
+        enabled: true,
+        events: [WebhookEventType.INSTANCE_DOWN],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        deliveryConfig: {
+          timeoutMs: 15000,
+          maxResponseBodyBytes: 50000,
+        },
+      });
+
+      expect(webhook.deliveryConfig).toEqual({
+        timeoutMs: 15000,
+        maxResponseBodyBytes: 50000,
+      });
+
+      const retrieved = await adapter.getWebhook(webhook.id);
+      expect(retrieved?.deliveryConfig).toEqual({
+        timeoutMs: 15000,
+        maxResponseBodyBytes: 50000,
+      });
+    });
+
+    it('should create webhook with alertConfig', async () => {
+      const webhook = await adapter.createWebhook({
+        name: 'Alert Config Webhook',
+        url: 'https://example.com/hook',
+        enabled: true,
+        events: [WebhookEventType.MEMORY_CRITICAL],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        alertConfig: {
+          hysteresisFactor: 0.85,
+        },
+      });
+
+      expect(webhook.alertConfig).toEqual({
+        hysteresisFactor: 0.85,
+      });
+
+      const retrieved = await adapter.getWebhook(webhook.id);
+      expect(retrieved?.alertConfig).toEqual({
+        hysteresisFactor: 0.85,
+      });
+    });
+
+    it('should create webhook with thresholds', async () => {
+      const webhook = await adapter.createWebhook({
+        name: 'Thresholds Webhook',
+        url: 'https://example.com/hook',
+        enabled: true,
+        events: [WebhookEventType.MEMORY_CRITICAL, WebhookEventType.CONNECTION_CRITICAL],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        thresholds: {
+          memoryCriticalPercent: 75,
+          connectionCriticalPercent: 80,
+        },
+      });
+
+      expect(webhook.thresholds).toEqual({
+        memoryCriticalPercent: 75,
+        connectionCriticalPercent: 80,
+      });
+
+      const retrieved = await adapter.getWebhook(webhook.id);
+      expect(retrieved?.thresholds).toEqual({
+        memoryCriticalPercent: 75,
+        connectionCriticalPercent: 80,
+      });
+    });
+
+    it('should create webhook with all config fields', async () => {
+      const webhook = await adapter.createWebhook({
+        name: 'Full Config Webhook',
+        url: 'https://example.com/hook',
+        enabled: true,
+        events: [WebhookEventType.MEMORY_CRITICAL],
+        headers: {},
+        retryPolicy: { maxRetries: 5, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        deliveryConfig: {
+          timeoutMs: 10000,
+          maxResponseBodyBytes: 20000,
+        },
+        alertConfig: {
+          hysteresisFactor: 0.8,
+        },
+        thresholds: {
+          memoryCriticalPercent: 85,
+          slowlogCount: 50,
+        },
+      });
+
+      expect(webhook.deliveryConfig).toEqual({
+        timeoutMs: 10000,
+        maxResponseBodyBytes: 20000,
+      });
+      expect(webhook.alertConfig).toEqual({
+        hysteresisFactor: 0.8,
+      });
+      expect(webhook.thresholds).toEqual({
+        memoryCriticalPercent: 85,
+        slowlogCount: 50,
+      });
+    });
+
+    it('should create webhook without config fields (undefined)', async () => {
+      const webhook = await adapter.createWebhook({
+        name: 'No Config Webhook',
+        url: 'https://example.com/hook',
+        enabled: true,
+        events: [WebhookEventType.INSTANCE_DOWN],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+      });
+
+      // Should be undefined, not empty objects
+      expect(webhook.deliveryConfig).toBeUndefined();
+      expect(webhook.alertConfig).toBeUndefined();
+      expect(webhook.thresholds).toBeUndefined();
+    });
+
+    it('should update webhook deliveryConfig', async () => {
+      const webhook = await adapter.createWebhook({
+        name: 'Update Config Test',
+        url: 'https://example.com/hook',
+        enabled: true,
+        events: [WebhookEventType.INSTANCE_DOWN],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+      });
+
+      const updated = await adapter.updateWebhook(webhook.id, {
+        deliveryConfig: {
+          timeoutMs: 5000,
+        },
+      });
+
+      expect(updated?.deliveryConfig).toEqual({
+        timeoutMs: 5000,
+      });
+
+      const retrieved = await adapter.getWebhook(webhook.id);
+      expect(retrieved?.deliveryConfig).toEqual({
+        timeoutMs: 5000,
+      });
+    });
+
+    it('should update webhook alertConfig', async () => {
+      const webhook = await adapter.createWebhook({
+        name: 'Update Alert Test',
+        url: 'https://example.com/hook',
+        enabled: true,
+        events: [WebhookEventType.MEMORY_CRITICAL],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+      });
+
+      const updated = await adapter.updateWebhook(webhook.id, {
+        alertConfig: {
+          hysteresisFactor: 0.75,
+        },
+      });
+
+      expect(updated?.alertConfig).toEqual({
+        hysteresisFactor: 0.75,
+      });
+    });
+
+    it('should update webhook thresholds', async () => {
+      const webhook = await adapter.createWebhook({
+        name: 'Update Thresholds Test',
+        url: 'https://example.com/hook',
+        enabled: true,
+        events: [WebhookEventType.MEMORY_CRITICAL],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        thresholds: {
+          memoryCriticalPercent: 90,
+        },
+      });
+
+      const updated = await adapter.updateWebhook(webhook.id, {
+        thresholds: {
+          memoryCriticalPercent: 70,
+          connectionCriticalPercent: 75,
+        },
+      });
+
+      expect(updated?.thresholds).toEqual({
+        memoryCriticalPercent: 70,
+        connectionCriticalPercent: 75,
+      });
+    });
+
+    it('should preserve config fields when updating other fields', async () => {
+      const webhook = await adapter.createWebhook({
+        name: 'Preserve Config Test',
+        url: 'https://example.com/hook',
+        enabled: true,
+        events: [WebhookEventType.MEMORY_CRITICAL],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        deliveryConfig: { timeoutMs: 5000 },
+        thresholds: { memoryCriticalPercent: 80 },
+      });
+
+      // Update only the name
+      const updated = await adapter.updateWebhook(webhook.id, {
+        name: 'New Name',
+      });
+
+      expect(updated?.name).toBe('New Name');
+      expect(updated?.deliveryConfig).toEqual({ timeoutMs: 5000 });
+      expect(updated?.thresholds).toEqual({ memoryCriticalPercent: 80 });
+    });
+
+    it('should return config fields in getWebhooksByInstance', async () => {
+      await adapter.createWebhook({
+        name: 'List Test 1',
+        url: 'https://example.com/1',
+        enabled: true,
+        events: [WebhookEventType.MEMORY_CRITICAL],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        thresholds: { memoryCriticalPercent: 75 },
+      });
+
+      await adapter.createWebhook({
+        name: 'List Test 2',
+        url: 'https://example.com/2',
+        enabled: true,
+        events: [WebhookEventType.CONNECTION_CRITICAL],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        deliveryConfig: { timeoutMs: 10000 },
+      });
+
+      const webhooks = await adapter.getWebhooksByInstance();
+
+      const webhook1 = webhooks.find(w => w.name === 'List Test 1');
+      const webhook2 = webhooks.find(w => w.name === 'List Test 2');
+
+      expect(webhook1?.thresholds).toEqual({ memoryCriticalPercent: 75 });
+      expect(webhook2?.deliveryConfig).toEqual({ timeoutMs: 10000 });
+    });
+
+    it('should return config fields in getWebhooksByEvent', async () => {
+      await adapter.createWebhook({
+        name: 'Event Filter Test',
+        url: 'https://example.com/hook',
+        enabled: true,
+        events: [WebhookEventType.MEMORY_CRITICAL],
+        headers: {},
+        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+        thresholds: { memoryCriticalPercent: 65 },
+        alertConfig: { hysteresisFactor: 0.85 },
+      });
+
+      const webhooks = await adapter.getWebhooksByEvent(WebhookEventType.MEMORY_CRITICAL);
+
+      expect(webhooks).toHaveLength(1);
+      expect(webhooks[0].thresholds).toEqual({ memoryCriticalPercent: 65 });
+      expect(webhooks[0].alertConfig).toEqual({ hysteresisFactor: 0.85 });
+    });
+  });
+
   describe('Delivery CRUD', () => {
     let webhookId: string;
 

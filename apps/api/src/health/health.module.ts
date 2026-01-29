@@ -8,5 +8,6 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
   imports: [DatabaseModule, WebhooksModule],
   controllers: [HealthController],
   providers: [HealthService],
+  exports: [HealthService],
 })
 export class HealthModule {}

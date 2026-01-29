@@ -17,6 +17,10 @@ export enum WebhookEventType {
   COMPLIANCE_ALERT = 'compliance.alert',
 }
 
+// Injection tokens for proprietary webhook services
+export const WEBHOOK_EVENTS_PRO_SERVICE = 'WEBHOOK_EVENTS_PRO_SERVICE';
+export const WEBHOOK_EVENTS_ENTERPRISE_SERVICE = 'WEBHOOK_EVENTS_ENTERPRISE_SERVICE';
+
 export const FREE_EVENTS: WebhookEventType[] = [
   WebhookEventType.INSTANCE_DOWN,
   WebhookEventType.INSTANCE_UP,
@@ -170,6 +174,25 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxDelayMs: 60000,
 };
 
+export interface WebhookDeliveryConfig {
+  timeoutMs?: number;              // Default: 30000
+  maxResponseBodyBytes?: number;   // Default: 10000
+}
+
+export interface WebhookAlertConfig {
+  hysteresisFactor?: number;       // Default: 0.9
+}
+
+export interface WebhookThresholds {
+  memoryCriticalPercent?: number;      // Default: 90
+  connectionCriticalPercent?: number;  // Default: 90
+  complianceMemoryPercent?: number;    // Default: 80
+  slowlogCount?: number;               // Default: 100
+  replicationLagSeconds?: number;      // Default: 10
+  latencySpikeMs?: number;             // Default: 0 (baseline)
+  connectionSpikeCount?: number;       // Default: 0 (baseline)
+}
+
 export interface Webhook {
   id: string;
   name: string;
@@ -179,6 +202,9 @@ export interface Webhook {
   events: WebhookEventType[];
   headers?: Record<string, string>;
   retryPolicy: RetryPolicy;
+  deliveryConfig?: WebhookDeliveryConfig;
+  alertConfig?: WebhookAlertConfig;
+  thresholds?: WebhookThresholds;
   createdAt: number;
   updatedAt: number;
 }

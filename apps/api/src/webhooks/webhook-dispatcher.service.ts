@@ -1,8 +1,15 @@
 import { Injectable, Inject, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { LRUCache } from 'lru-cache';
-import type { Webhook, WebhookPayload, WebhookEventType } from '@betterdb/shared';
-import { DeliveryStatus } from '@betterdb/shared';
+import type { Webhook, WebhookPayload, WebhookEventType, WebhookThresholds } from '@betterdb/shared';
+import {
+  DeliveryStatus,
+  getDeliveryConfig,
+  getAlertConfig,
+  getThreshold,
+  DEFAULT_DELIVERY_CONFIG,
+  DEFAULT_ALERT_CONFIG,
+} from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { WebhooksService } from './webhooks.service';
 
@@ -15,15 +22,15 @@ interface AlertState {
 @Injectable()
 export class WebhookDispatcherService {
   private readonly logger = new Logger(WebhookDispatcherService.name);
-  private readonly REQUEST_TIMEOUT_MS: number;
+  private readonly DEFAULT_REQUEST_TIMEOUT_MS: number;
   private readonly BLOCKED_HEADERS = ['host', 'content-length', 'transfer-encoding', 'connection', 'upgrade'];
 
-  // Alert hysteresis configuration
+  // Alert hysteresis configuration (default, can be overridden per-webhook)
   // 10% hysteresis prevents alert flapping - e.g., for 90% threshold:
   // - Alert fires at 90%
   // - Alert clears only when drops below 81% (90% * 0.9)
   // - This prevents oscillation around the threshold boundary
-  private readonly ALERT_HYSTERESIS_FACTOR = 0.9; // 10% margin below threshold for recovery
+  private readonly DEFAULT_ALERT_HYSTERESIS_FACTOR = DEFAULT_ALERT_CONFIG.hysteresisFactor;
 
   // Alert state cache configuration
   // Max 1000 alerts: Sufficient for typical deployments (even 100 instances × 10 metrics = 1000)
@@ -34,11 +41,11 @@ export class WebhookDispatcherService {
   // After 24h, an alert can re-fire even if never recovered (acceptable for persistent issues)
   private readonly ALERT_STATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-  // Response body size limits
+  // Response body size limits (defaults, can be overridden per-webhook)
   // 10KB limit: Balances debug utility vs. database storage costs
   // Large HTML error pages (500 errors) often exceed this, but we capture enough for debugging
   // For full responses, consider object storage integration (S3, etc.)
-  private readonly MAX_STORED_RESPONSE_BODY_BYTES = 10_000;
+  private readonly DEFAULT_MAX_STORED_RESPONSE_BODY_BYTES = DEFAULT_DELIVERY_CONFIG.maxResponseBodyBytes;
 
   // Test webhook response preview limit (1KB)
   // Smaller than delivery limit since test responses are returned synchronously to API caller
@@ -59,7 +66,7 @@ export class WebhookDispatcherService {
     private readonly webhooksService: WebhooksService,
     private readonly configService: ConfigService,
   ) {
-    this.REQUEST_TIMEOUT_MS = this.configService.get<number>('WEBHOOK_TIMEOUT_MS', 30000);
+    this.DEFAULT_REQUEST_TIMEOUT_MS = this.configService.get<number>('WEBHOOK_TIMEOUT_MS', DEFAULT_DELIVERY_CONFIG.timeoutMs);
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
     this.sourcePort = this.configService.get<number>('database.port', 6379);
   }
@@ -99,6 +106,7 @@ export class WebhookDispatcherService {
     currentValue: number,
     threshold: number,
     isAbove: boolean,
+    hysteresisFactor: number = this.DEFAULT_ALERT_HYSTERESIS_FACTOR,
   ): boolean {
     const state = this.alertStates.get(alertKey);
     const conditionMet = isAbove ? currentValue >= threshold : currentValue <= threshold;
@@ -118,8 +126,8 @@ export class WebhookDispatcherService {
 
     // Already fired - check for recovery (configurable hysteresis)
     const recoveryThreshold = isAbove
-      ? threshold * this.ALERT_HYSTERESIS_FACTOR
-      : threshold * (2 - this.ALERT_HYSTERESIS_FACTOR); // Mirror for below-threshold alerts
+      ? threshold * hysteresisFactor
+      : threshold * (2 - hysteresisFactor); // Mirror for below-threshold alerts
     const recovered = isAbove ? currentValue < recoveryThreshold : currentValue > recoveryThreshold;
 
     if (recovered) {
@@ -132,6 +140,7 @@ export class WebhookDispatcherService {
 
   /**
    * Dispatch threshold-based alert (e.g., memory.critical, connection.critical)
+   * Uses global threshold - consider using dispatchThresholdAlertPerWebhook for per-webhook thresholds
    */
   async dispatchThresholdAlert(
     eventType: WebhookEventType,
@@ -146,6 +155,58 @@ export class WebhookDispatcherService {
         `Threshold alert triggered: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`
       );
       await this.dispatchEvent(eventType, data);
+    }
+  }
+
+  /**
+   * Dispatch threshold-based alert with per-webhook threshold configuration
+   * Each webhook can have its own threshold for the same alert type
+   */
+  async dispatchThresholdAlertPerWebhook(
+    eventType: WebhookEventType,
+    alertKeyPrefix: string,
+    currentValue: number,
+    thresholdKey: keyof WebhookThresholds,
+    isAbove: boolean,
+    data: Record<string, any>,
+  ): Promise<void> {
+    try {
+      const webhooks = await this.webhooksService.getWebhooksByEvent(eventType);
+
+      if (webhooks.length === 0) {
+        this.logger.debug(`No webhooks subscribed to event: ${eventType}`);
+        return;
+      }
+
+      // Dispatch to each webhook with its own threshold
+      await Promise.allSettled(
+        webhooks.map(async webhook => {
+          // Get per-webhook threshold and alert config
+          const threshold = getThreshold(webhook, thresholdKey);
+          const alertConfig = getAlertConfig(webhook);
+
+          // Use per-webhook alert key to track state independently
+          const alertKey = `${alertKeyPrefix}:${webhook.id}`;
+
+          if (this.shouldFireAlert(alertKey, currentValue, threshold, isAbove, alertConfig.hysteresisFactor)) {
+            this.logger.log(
+              `Threshold alert triggered for webhook ${webhook.id}: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`
+            );
+
+            // Add threshold info to data
+            const enrichedData = {
+              ...data,
+              threshold,
+              thresholdKey,
+            };
+
+            await this.dispatchToWebhook(webhook, eventType, enrichedData);
+          }
+        })
+      );
+
+    } catch (error) {
+      this.logger.error(`Failed to dispatch per-webhook threshold alert ${eventType}:`, error);
     }
   }
 
@@ -234,6 +295,11 @@ export class WebhookDispatcherService {
     let statusCode: number | undefined;
     let responseBody: string | undefined;
 
+    // Get per-webhook delivery config
+    const deliveryConfig = getDeliveryConfig(webhook);
+    const timeoutMs = deliveryConfig.timeoutMs;
+    const maxResponseBodyBytes = deliveryConfig.maxResponseBodyBytes;
+
     try {
       // Prepare request
       const payloadString = JSON.stringify(payload);
@@ -256,7 +322,7 @@ export class WebhookDispatcherService {
 
       // Send request with timeout
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.REQUEST_TIMEOUT_MS);
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
         const response = await fetch(webhook.url, {
@@ -315,7 +381,7 @@ export class WebhookDispatcherService {
     // Update delivery record
     await this.updateDelivery(deliveryId, webhook, status, {
       statusCode,
-      responseBody: responseBody?.substring(0, this.MAX_STORED_RESPONSE_BODY_BYTES),
+      responseBody: responseBody?.substring(0, maxResponseBodyBytes),
       durationMs,
     });
   }
@@ -387,6 +453,10 @@ export class WebhookDispatcherService {
   }> {
     const startTime = Date.now();
 
+    // Get per-webhook delivery config
+    const deliveryConfig = getDeliveryConfig(webhook);
+    const timeoutMs = deliveryConfig.timeoutMs;
+
     try {
       // Use first subscribed event for testing, or instance.down as fallback
       const testEventType = webhook.events.length > 0 ? webhook.events[0] : ('instance.down' as WebhookEventType);
@@ -424,7 +494,7 @@ export class WebhookDispatcherService {
       };
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.REQUEST_TIMEOUT_MS);
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       const response = await fetch(webhook.url, {
         method: 'POST',

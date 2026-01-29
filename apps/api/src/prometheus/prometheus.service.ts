@@ -1,12 +1,19 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Inject, Logger, Optional } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Inject, Logger, Optional, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Registry, Gauge, Counter, Histogram, collectDefaultMetrics } from 'prom-client';
-import { WebhookEventType, IWebhookEventsProService, IWebhookEventsEnterpriseService } from '@betterdb/shared';
+import {
+  WebhookEventType,
+  IWebhookEventsProService,
+  IWebhookEventsEnterpriseService,
+  WEBHOOK_EVENTS_PRO_SERVICE,
+  WEBHOOK_EVENTS_ENTERPRISE_SERVICE,
+} from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.service';
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
+import { HealthService } from '../health/health.service';
 
 // Note: WebhookEventsProService and WebhookEventsEnterpriseService are injected via DI
 // when proprietary module is available. Interfaces provide type safety for optional injection.
@@ -131,9 +138,10 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
     private readonly configService: ConfigService,
     private readonly slowLogAnalytics: SlowLogAnalyticsService,
     private readonly commandLogAnalytics: CommandLogAnalyticsService,
+    @Inject(forwardRef(() => HealthService)) private readonly healthService: HealthService,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
-    @Optional() private readonly webhookEventsProService?: IWebhookEventsProService,
-    @Optional() private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
+    @Optional() @Inject(WEBHOOK_EVENTS_PRO_SERVICE) private readonly webhookEventsProService?: IWebhookEventsProService,
+    @Optional() @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE) private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
   ) {
     this.registry = new Registry();
     this.dbHost = this.configService.get<string>('database.host', 'localhost');
@@ -166,8 +174,12 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
       this.pollInterval = setTimeout(async () => {
         try {
           await this.updateMetrics();
+          // Check health on successful update (will trigger instance.up if recovered)
+          await this.healthService.getHealth().catch(() => {});
         } catch (error) {
           this.logger.error(`Failed to update metrics: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          // Check health on failure (will trigger instance.down webhook)
+          await this.healthService.getHealth().catch(() => {});
         }
         scheduleNextPoll();
       }, this.pollIntervalMs);
@@ -358,14 +370,14 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
       this.trackingClients.set(parseInt(info.clients.tracking_clients) || 0);
     }
 
-    // Webhook dispatch for connection.critical
+    // Webhook dispatch for connection.critical (per-webhook thresholds)
     if (this.webhookDispatcher && maxClients > 0) {
       const usedPercent = (connectedClients / maxClients) * 100;
-      this.webhookDispatcher.dispatchThresholdAlert(
+      this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
         WebhookEventType.CONNECTION_CRITICAL,
         'connection_critical',
         usedPercent,
-        90, // 90% threshold
+        'connectionCriticalPercent',
         true,
         {
           currentConnections: connectedClients,
@@ -396,12 +408,12 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
     if (this.webhookDispatcher && maxMemory > 0) {
       const usedPercent = (memoryUsed / maxMemory) * 100;
 
-      // Webhook dispatch for memory.critical
-      this.webhookDispatcher.dispatchThresholdAlert(
+      // Webhook dispatch for memory.critical (per-webhook thresholds)
+      this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
         WebhookEventType.MEMORY_CRITICAL,
         'memory_critical',
         usedPercent,
-        90, // 90% threshold
+        'memoryCriticalPercent',
         true, // fire when ABOVE
         {
           usedBytes: memoryUsed,

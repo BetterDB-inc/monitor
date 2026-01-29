@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, Global } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { StorageModule } from '@app/storage/storage.module';
 import { WebhooksModule } from '@app/webhooks/webhooks.module';
@@ -11,7 +11,12 @@ import { WebhookDlqService } from './webhook-dlq.service';
 import { WebhookEventsProService } from './webhook-events-pro.service';
 import { WebhookEventsEnterpriseService } from './webhook-events-enterprise.service';
 import { ConfigMonitorService } from './config-monitor.service';
+import {
+  WEBHOOK_EVENTS_PRO_SERVICE,
+  WEBHOOK_EVENTS_ENTERPRISE_SERVICE,
+} from '@betterdb/shared';
 
+@Global()
 @Module({
   imports: [ConfigModule, StorageModule, WebhooksModule, DatabaseModule, SettingsModule, LicenseModule],
   providers: [
@@ -19,7 +24,9 @@ import { ConfigMonitorService } from './config-monitor.service';
     WebhookAnomalyIntegrationService,
     WebhookDlqService,
     WebhookEventsProService,
+    { provide: WEBHOOK_EVENTS_PRO_SERVICE, useExisting: WebhookEventsProService },
     WebhookEventsEnterpriseService,
+    { provide: WEBHOOK_EVENTS_ENTERPRISE_SERVICE, useExisting: WebhookEventsEnterpriseService },
     ConfigMonitorService,
   ],
   exports: [
@@ -27,7 +34,9 @@ import { ConfigMonitorService } from './config-monitor.service';
     WebhookAnomalyIntegrationService,
     WebhookDlqService,
     WebhookEventsProService,
+    WEBHOOK_EVENTS_PRO_SERVICE,
     WebhookEventsEnterpriseService,
+    WEBHOOK_EVENTS_ENTERPRISE_SERVICE,
     ConfigMonitorService,
   ],
 })
