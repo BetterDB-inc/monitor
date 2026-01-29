@@ -1,12 +1,44 @@
 import { useState, useEffect } from 'react';
-import { Webhook, WebhookFormData, WebhookEventType } from '../../types/webhooks';
+import { Webhook, WebhookFormData, WebhookEventType, WebhookThresholds } from '../../types/webhooks';
 import {
   Tier,
   getEventsByTierCategory,
-  isEventAllowedForTier
+  isEventAllowedForTier,
+  WebhookEventType as WebhookEventTypeEnum
 } from '@betterdb/shared';
 import { Card } from '../ui/card';
 import { licenseApi } from '../../api/license';
+
+// Events that have configurable thresholds
+const THRESHOLD_EVENTS: WebhookEventType[] = [
+  WebhookEventTypeEnum.MEMORY_CRITICAL,
+  WebhookEventTypeEnum.CONNECTION_CRITICAL,
+  WebhookEventTypeEnum.COMPLIANCE_ALERT,
+  WebhookEventTypeEnum.SLOWLOG_THRESHOLD,
+  WebhookEventTypeEnum.REPLICATION_LAG,
+  WebhookEventTypeEnum.LATENCY_SPIKE,
+  WebhookEventTypeEnum.CONNECTION_SPIKE,
+];
+
+function hasThresholdEvents(events?: WebhookEventType[]): boolean {
+  return events?.some(e => THRESHOLD_EVENTS.includes(e)) ?? false;
+}
+
+function cleanEmptyObjects(data: WebhookFormData): WebhookFormData {
+  const cleaned = { ...data };
+
+  if (cleaned.deliveryConfig && Object.keys(cleaned.deliveryConfig).length === 0) {
+    delete cleaned.deliveryConfig;
+  }
+  if (cleaned.alertConfig && Object.keys(cleaned.alertConfig).length === 0) {
+    delete cleaned.alertConfig;
+  }
+  if (cleaned.thresholds && Object.keys(cleaned.thresholds).length === 0) {
+    delete cleaned.thresholds;
+  }
+
+  return cleaned;
+}
 
 interface WebhookFormProps {
   webhook?: Webhook;
@@ -55,6 +87,9 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
       initialDelayMs: 1000,
       maxDelayMs: 60000,
     },
+    deliveryConfig: {},
+    alertConfig: {},
+    thresholds: {},
   });
   const [customHeaders, setCustomHeaders] = useState<Array<{ key: string; value: string }>>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -88,6 +123,9 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
         events: webhook.events,
         headers: webhook.headers || {},
         retryPolicy: webhook.retryPolicy,
+        deliveryConfig: webhook.deliveryConfig ?? {},
+        alertConfig: webhook.alertConfig ?? {},
+        thresholds: webhook.thresholds ?? {},
       });
 
       if (webhook.headers) {
@@ -112,10 +150,13 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
         }
       });
 
-      await onSubmit({
+      // Clean empty objects before submitting
+      const payload = cleanEmptyObjects({
         ...formData,
         headers: Object.keys(headers).length > 0 ? headers : undefined,
       });
+
+      await onSubmit(payload);
     } catch (error) {
       console.error('Failed to submit webhook:', error);
       alert('Failed to save webhook. Please try again.');
@@ -150,6 +191,16 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
     const updated = [...customHeaders];
     updated[index][field] = value;
     setCustomHeaders(updated);
+  };
+
+  const updateThreshold = (key: keyof WebhookThresholds, value: string) => {
+    setFormData({
+      ...formData,
+      thresholds: {
+        ...formData.thresholds,
+        [key]: value ? parseInt(value) : undefined,
+      },
+    });
   };
 
   return (
@@ -421,6 +472,228 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
               </div>
             </div>
           </div>
+
+          {/* Advanced Configuration */}
+          <details className="mt-6">
+            <summary className="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900">
+              Advanced Configuration
+            </summary>
+
+            <div className="mt-4 space-y-6 pl-4 border-l-2 border-gray-200">
+              {/* Delivery Settings */}
+              <div>
+                <h4 className="text-sm font-medium text-gray-700 mb-2">Delivery Settings</h4>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">
+                      Request Timeout (ms)
+                    </label>
+                    <input
+                      type="number"
+                      min={1000}
+                      max={120000}
+                      placeholder="30000"
+                      value={formData.deliveryConfig?.timeoutMs ?? ''}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          deliveryConfig: {
+                            ...formData.deliveryConfig,
+                            timeoutMs: e.target.value ? parseInt(e.target.value) : undefined,
+                          },
+                        })
+                      }
+                      className="w-full px-3 py-2 border rounded-md text-sm"
+                    />
+                    <p className="text-xs text-gray-400 mt-1">Default: 30000ms</p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">
+                      Max Response Body (bytes)
+                    </label>
+                    <input
+                      type="number"
+                      min={1000}
+                      max={100000}
+                      placeholder="10000"
+                      value={formData.deliveryConfig?.maxResponseBodyBytes ?? ''}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          deliveryConfig: {
+                            ...formData.deliveryConfig,
+                            maxResponseBodyBytes: e.target.value ? parseInt(e.target.value) : undefined,
+                          },
+                        })
+                      }
+                      className="w-full px-3 py-2 border rounded-md text-sm"
+                    />
+                    <p className="text-xs text-gray-400 mt-1">Default: 10000 bytes</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Alert Settings */}
+              <div>
+                <h4 className="text-sm font-medium text-gray-700 mb-2">Alert Settings</h4>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">
+                    Hysteresis Factor
+                  </label>
+                  <input
+                    type="number"
+                    min={0.5}
+                    max={0.99}
+                    step={0.01}
+                    placeholder="0.9"
+                    value={formData.alertConfig?.hysteresisFactor ?? ''}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        alertConfig: {
+                          ...formData.alertConfig,
+                          hysteresisFactor: e.target.value ? parseFloat(e.target.value) : undefined,
+                        },
+                      })
+                    }
+                    className="w-full max-w-xs px-3 py-2 border rounded-md text-sm"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">
+                    Recovery threshold = trigger threshold x factor. Default: 0.9 (10% margin)
+                  </p>
+                </div>
+              </div>
+
+              {/* Thresholds - only show relevant ones based on subscribed events */}
+              {hasThresholdEvents(formData.events) && (
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">Alert Thresholds</h4>
+                  <p className="text-xs text-gray-500 mb-3">
+                    Override default thresholds for subscribed events. Leave blank for defaults.
+                  </p>
+                  <div className="grid grid-cols-2 gap-4">
+                    {formData.events?.includes(WebhookEventTypeEnum.MEMORY_CRITICAL) && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">
+                          Memory Critical (%)
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          placeholder="90"
+                          value={formData.thresholds?.memoryCriticalPercent ?? ''}
+                          onChange={(e) => updateThreshold('memoryCriticalPercent', e.target.value)}
+                          className="w-full px-3 py-2 border rounded-md text-sm"
+                        />
+                      </div>
+                    )}
+
+                    {formData.events?.includes(WebhookEventTypeEnum.CONNECTION_CRITICAL) && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">
+                          Connection Critical (%)
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          placeholder="90"
+                          value={formData.thresholds?.connectionCriticalPercent ?? ''}
+                          onChange={(e) => updateThreshold('connectionCriticalPercent', e.target.value)}
+                          className="w-full px-3 py-2 border rounded-md text-sm"
+                        />
+                      </div>
+                    )}
+
+                    {formData.events?.includes(WebhookEventTypeEnum.COMPLIANCE_ALERT) && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">
+                          Compliance Memory (%)
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          placeholder="80"
+                          value={formData.thresholds?.complianceMemoryPercent ?? ''}
+                          onChange={(e) => updateThreshold('complianceMemoryPercent', e.target.value)}
+                          className="w-full px-3 py-2 border rounded-md text-sm"
+                        />
+                      </div>
+                    )}
+
+                    {formData.events?.includes(WebhookEventTypeEnum.SLOWLOG_THRESHOLD) && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">
+                          Slowlog Count
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          placeholder="100"
+                          value={formData.thresholds?.slowlogCount ?? ''}
+                          onChange={(e) => updateThreshold('slowlogCount', e.target.value)}
+                          className="w-full px-3 py-2 border rounded-md text-sm"
+                        />
+                      </div>
+                    )}
+
+                    {formData.events?.includes(WebhookEventTypeEnum.REPLICATION_LAG) && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">
+                          Replication Lag (seconds)
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          placeholder="10"
+                          value={formData.thresholds?.replicationLagSeconds ?? ''}
+                          onChange={(e) => updateThreshold('replicationLagSeconds', e.target.value)}
+                          className="w-full px-3 py-2 border rounded-md text-sm"
+                        />
+                      </div>
+                    )}
+
+                    {formData.events?.includes(WebhookEventTypeEnum.LATENCY_SPIKE) && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">
+                          Latency Spike (ms)
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          placeholder="0 (auto)"
+                          value={formData.thresholds?.latencySpikeMs ?? ''}
+                          onChange={(e) => updateThreshold('latencySpikeMs', e.target.value)}
+                          className="w-full px-3 py-2 border rounded-md text-sm"
+                        />
+                        <p className="text-xs text-gray-400 mt-1">0 = auto baseline</p>
+                      </div>
+                    )}
+
+                    {formData.events?.includes(WebhookEventTypeEnum.CONNECTION_SPIKE) && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">
+                          Connection Spike Count
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          placeholder="0 (auto)"
+                          value={formData.thresholds?.connectionSpikeCount ?? ''}
+                          onChange={(e) => updateThreshold('connectionSpikeCount', e.target.value)}
+                          className="w-full px-3 py-2 border rounded-md text-sm"
+                        />
+                        <p className="text-xs text-gray-400 mt-1">0 = auto baseline</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </details>
         </div>
 
         {/* Actions */}

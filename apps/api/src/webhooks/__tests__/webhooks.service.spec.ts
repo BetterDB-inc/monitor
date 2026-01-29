@@ -435,6 +435,215 @@ describe('WebhooksService', () => {
       });
     });
 
+    describe('Per-Webhook Configuration', () => {
+      beforeEach(() => {
+        process.env.NODE_ENV = 'test';
+        licenseService.getLicenseTier.mockReturnValue(Tier.community);
+      });
+
+      it('should create webhook with deliveryConfig', async () => {
+        storageClient.createWebhook.mockResolvedValue({
+          id: '123',
+          name: 'Config Test',
+          url: 'https://example.com/webhook',
+          secret: 'whsec_test',
+          enabled: true,
+          events: [WebhookEventType.INSTANCE_DOWN],
+          headers: {},
+          retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+          deliveryConfig: { timeoutMs: 15000, maxResponseBodyBytes: 50000 },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+
+        const result = await service.createWebhook({
+          name: 'Config Test',
+          url: 'https://example.com/webhook',
+          events: [WebhookEventType.INSTANCE_DOWN],
+          deliveryConfig: { timeoutMs: 15000, maxResponseBodyBytes: 50000 },
+        });
+
+        expect(storageClient.createWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            deliveryConfig: { timeoutMs: 15000, maxResponseBodyBytes: 50000 },
+          })
+        );
+        expect(result.deliveryConfig).toEqual({ timeoutMs: 15000, maxResponseBodyBytes: 50000 });
+      });
+
+      it('should create webhook with alertConfig', async () => {
+        storageClient.createWebhook.mockResolvedValue({
+          id: '123',
+          name: 'Alert Config Test',
+          url: 'https://example.com/webhook',
+          secret: 'whsec_test',
+          enabled: true,
+          events: [WebhookEventType.MEMORY_CRITICAL],
+          headers: {},
+          retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+          alertConfig: { hysteresisFactor: 0.85 },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+
+        const result = await service.createWebhook({
+          name: 'Alert Config Test',
+          url: 'https://example.com/webhook',
+          events: [WebhookEventType.MEMORY_CRITICAL],
+          alertConfig: { hysteresisFactor: 0.85 },
+        });
+
+        expect(storageClient.createWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            alertConfig: { hysteresisFactor: 0.85 },
+          })
+        );
+        expect(result.alertConfig).toEqual({ hysteresisFactor: 0.85 });
+      });
+
+      it('should create webhook with thresholds', async () => {
+        storageClient.createWebhook.mockResolvedValue({
+          id: '123',
+          name: 'Thresholds Test',
+          url: 'https://example.com/webhook',
+          secret: 'whsec_test',
+          enabled: true,
+          events: [WebhookEventType.MEMORY_CRITICAL],
+          headers: {},
+          retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+          thresholds: { memoryCriticalPercent: 75, connectionCriticalPercent: 80 },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+
+        const result = await service.createWebhook({
+          name: 'Thresholds Test',
+          url: 'https://example.com/webhook',
+          events: [WebhookEventType.MEMORY_CRITICAL],
+          thresholds: { memoryCriticalPercent: 75, connectionCriticalPercent: 80 },
+        });
+
+        expect(storageClient.createWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            thresholds: { memoryCriticalPercent: 75, connectionCriticalPercent: 80 },
+          })
+        );
+        expect(result.thresholds).toEqual({ memoryCriticalPercent: 75, connectionCriticalPercent: 80 });
+      });
+
+      it('should create webhook with all config fields', async () => {
+        const fullConfig = {
+          deliveryConfig: { timeoutMs: 10000, maxResponseBodyBytes: 25000 },
+          alertConfig: { hysteresisFactor: 0.8 },
+          thresholds: { memoryCriticalPercent: 85, slowlogCount: 50 },
+        };
+
+        storageClient.createWebhook.mockResolvedValue({
+          id: '123',
+          name: 'Full Config',
+          url: 'https://example.com/webhook',
+          secret: 'whsec_test',
+          enabled: true,
+          events: [WebhookEventType.INSTANCE_DOWN],
+          headers: {},
+          retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+          ...fullConfig,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+
+        const result = await service.createWebhook({
+          name: 'Full Config',
+          url: 'https://example.com/webhook',
+          events: [WebhookEventType.INSTANCE_DOWN],
+          ...fullConfig,
+        });
+
+        expect(storageClient.createWebhook).toHaveBeenCalledWith(
+          expect.objectContaining(fullConfig)
+        );
+        expect(result.deliveryConfig).toEqual(fullConfig.deliveryConfig);
+        expect(result.alertConfig).toEqual(fullConfig.alertConfig);
+        expect(result.thresholds).toEqual(fullConfig.thresholds);
+      });
+
+      it('should update webhook with deliveryConfig', async () => {
+        storageClient.updateWebhook.mockResolvedValue({
+          id: '123',
+          name: 'Updated',
+          url: 'https://example.com/webhook',
+          secret: 'whsec_test',
+          enabled: true,
+          events: [WebhookEventType.INSTANCE_DOWN],
+          headers: {},
+          retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+          deliveryConfig: { timeoutMs: 5000 },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+
+        const result = await service.updateWebhook('123', {
+          deliveryConfig: { timeoutMs: 5000 },
+        });
+
+        expect(result.deliveryConfig).toEqual({ timeoutMs: 5000 });
+      });
+
+      it('should update webhook with thresholds', async () => {
+        storageClient.updateWebhook.mockResolvedValue({
+          id: '123',
+          name: 'Updated',
+          url: 'https://example.com/webhook',
+          secret: 'whsec_test',
+          enabled: true,
+          events: [WebhookEventType.MEMORY_CRITICAL],
+          headers: {},
+          retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+          thresholds: { memoryCriticalPercent: 70 },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+
+        const result = await service.updateWebhook('123', {
+          thresholds: { memoryCriticalPercent: 70 },
+        });
+
+        expect(result.thresholds).toEqual({ memoryCriticalPercent: 70 });
+      });
+
+      it('should handle undefined config fields in create', async () => {
+        storageClient.createWebhook.mockResolvedValue({
+          id: '123',
+          name: 'No Config',
+          url: 'https://example.com/webhook',
+          secret: 'whsec_test',
+          enabled: true,
+          events: [WebhookEventType.INSTANCE_DOWN],
+          headers: {},
+          retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+
+        const result = await service.createWebhook({
+          name: 'No Config',
+          url: 'https://example.com/webhook',
+          events: [WebhookEventType.INSTANCE_DOWN],
+        });
+
+        expect(storageClient.createWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            deliveryConfig: undefined,
+            alertConfig: undefined,
+            thresholds: undefined,
+          })
+        );
+        expect(result.deliveryConfig).toBeUndefined();
+        expect(result.alertConfig).toBeUndefined();
+        expect(result.thresholds).toBeUndefined();
+      });
+    });
+
     describe('getAllowedEvents', () => {
       it('should return community tier events for community users', () => {
         licenseService.getLicenseTier.mockReturnValue(Tier.community);

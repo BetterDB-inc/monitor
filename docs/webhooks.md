@@ -14,6 +14,7 @@ BetterDB can send HTTP POST requests to your endpoints when monitoring events oc
 - [Payload Format](#payload-format)
 - [Signature Verification](#signature-verification)
 - [Retry Policy](#retry-policy)
+- [Per-Webhook Configuration](#per-webhook-configuration)
 - [Rate Limiting & Hysteresis](#rate-limiting--hysteresis)
 - [API Reference](#api-reference)
 - [Troubleshooting](#troubleshooting)
@@ -503,6 +504,131 @@ A webhook delivery is considered successful when:
 
 Any other response (4xx, 5xx, timeout, network error) triggers a retry.
 
+## Per-Webhook Configuration
+
+Each webhook can be individually configured with custom delivery settings, alert behavior, and thresholds. This enables different notification channels to have different sensitivity levels.
+
+### Delivery Configuration
+
+Control how webhook requests are sent:
+
+```json
+{
+  "name": "Slow Endpoint",
+  "url": "https://slow-api.example.com/webhook",
+  "events": ["instance.down"],
+  "deliveryConfig": {
+    "timeoutMs": 60000,
+    "maxResponseBodyBytes": 50000
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `timeoutMs` | integer | 30000 | Request timeout in milliseconds (1000-120000) |
+| `maxResponseBodyBytes` | integer | 10000 | Max response body to store (1000-100000) |
+
+### Alert Configuration
+
+Control hysteresis behavior for threshold-based alerts:
+
+```json
+{
+  "name": "Sensitive Alerts",
+  "url": "https://api.example.com/webhook",
+  "events": ["memory.critical"],
+  "alertConfig": {
+    "hysteresisFactor": 0.95
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `hysteresisFactor` | number | 0.9 | Recovery threshold = trigger x factor (0.5-0.99) |
+
+**How hysteresis works:**
+- Alert fires when metric crosses threshold
+- Alert clears when metric drops below `threshold x hysteresisFactor`
+- Example: 90% threshold with 0.9 factor -> clears at 81%
+- Lower factor = wider buffer = fewer false re-triggers
+
+### Custom Thresholds
+
+Override default alert thresholds per webhook. This enables different notification channels for different severity levels:
+
+```json
+{
+  "name": "Early Warning - Slack",
+  "url": "https://hooks.slack.com/services/...",
+  "events": ["memory.critical", "connection.critical"],
+  "thresholds": {
+    "memoryCriticalPercent": 75,
+    "connectionCriticalPercent": 70
+  }
+}
+```
+
+```json
+{
+  "name": "Critical - PagerDuty",
+  "url": "https://events.pagerduty.com/...",
+  "events": ["memory.critical", "connection.critical"],
+  "thresholds": {
+    "memoryCriticalPercent": 95,
+    "connectionCriticalPercent": 95
+  }
+}
+```
+
+| Field | Type | Default | Applies To |
+|-------|------|---------|------------|
+| `memoryCriticalPercent` | integer | 90 | `memory.critical` |
+| `connectionCriticalPercent` | integer | 90 | `connection.critical` |
+| `complianceMemoryPercent` | integer | 80 | `compliance.alert` |
+| `slowlogCount` | integer | 100 | `slowlog.threshold` |
+| `replicationLagSeconds` | integer | 10 | `replication.lag` |
+| `latencySpikeMs` | integer | 0 (auto) | `latency.spike` |
+| `connectionSpikeCount` | integer | 0 (auto) | `connection.spike` |
+
+**Notes:**
+- Thresholds only apply to events the webhook subscribes to
+- Value of `0` for spike thresholds means "use automatic baseline detection"
+- Each webhook tracks alert state independently (one webhook recovering doesn't affect others)
+
+### Full Configuration Example
+
+```json
+{
+  "name": "Production Critical Alerts",
+  "url": "https://api.pagerduty.com/webhooks",
+  "secret": "whsec_abc123",
+  "enabled": true,
+  "events": ["instance.down", "instance.up", "memory.critical", "connection.critical"],
+  "headers": {
+    "X-Routing-Key": "prod-database-alerts"
+  },
+  "retryPolicy": {
+    "maxRetries": 5,
+    "initialDelayMs": 2000,
+    "backoffMultiplier": 2,
+    "maxDelayMs": 300000
+  },
+  "deliveryConfig": {
+    "timeoutMs": 10000,
+    "maxResponseBodyBytes": 5000
+  },
+  "alertConfig": {
+    "hysteresisFactor": 0.85
+  },
+  "thresholds": {
+    "memoryCriticalPercent": 95,
+    "connectionCriticalPercent": 90
+  }
+}
+```
+
 ## Rate Limiting & Hysteresis
 
 To prevent alert fatigue from metrics oscillating around thresholds, BetterDB implements **hysteresis**:
@@ -527,15 +653,19 @@ BetterDB maintains alert state in memory using an LRU cache:
 
 ### Threshold-Based Events
 
-The following events use hysteresis:
+The following events use configurable thresholds with hysteresis:
 
-- `memory.critical`
-- `connection.critical`
-- `slowlog.threshold` (Pro)
-- `replication.lag` (Pro)
-- `latency.spike` (Pro)
-- `connection.spike` (Pro)
-- `compliance.alert` (Enterprise)
+| Event | Default Threshold | Config Key |
+|-------|-------------------|------------|
+| `memory.critical` | 90% | `memoryCriticalPercent` |
+| `connection.critical` | 90% | `connectionCriticalPercent` |
+| `slowlog.threshold` (Pro) | 100 entries | `slowlogCount` |
+| `replication.lag` (Pro) | 10 seconds | `replicationLagSeconds` |
+| `latency.spike` (Pro) | 0 (auto) | `latencySpikeMs` |
+| `connection.spike` (Pro) | 0 (auto) | `connectionSpikeCount` |
+| `compliance.alert` (Enterprise) | 80% | `complianceMemoryPercent` |
+
+See [Custom Thresholds](#custom-thresholds) for per-webhook configuration.
 
 ### Non-Threshold Events
 

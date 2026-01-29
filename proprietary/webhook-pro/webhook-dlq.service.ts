@@ -1,7 +1,10 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
-import type { WebhookDelivery } from '@betterdb/shared';
+import type { Webhook, WebhookDelivery } from '@betterdb/shared';
 import { DeliveryStatus } from '@betterdb/shared';
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
+
+/** Default max retries if webhook not found or has no retry policy */
+const DEFAULT_MAX_RETRIES = 3;
 
 /**
  * Webhook Dead Letter Queue (DLQ) Service - Enterprise Tier
@@ -13,10 +16,43 @@ import type { StoragePort } from '@app/common/interfaces/storage-port.interface'
 @Injectable()
 export class WebhookDlqService {
   private readonly logger = new Logger(WebhookDlqService.name);
+  // Cache webhooks to avoid repeated lookups
+  private webhookCache: Map<string, Webhook | null> = new Map();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
   ) {}
+
+  /**
+   * Get max retries for a webhook, using cache to reduce DB lookups
+   */
+  private async getMaxRetriesForWebhook(webhookId: string): Promise<number> {
+    // Check cache first
+    if (this.webhookCache.has(webhookId)) {
+      const cached = this.webhookCache.get(webhookId);
+      return cached?.retryPolicy?.maxRetries ?? DEFAULT_MAX_RETRIES;
+    }
+
+    // Lookup webhook
+    const webhook = await this.storageClient.getWebhook(webhookId);
+    this.webhookCache.set(webhookId, webhook);
+
+    // Clear cache after 60 seconds to allow for config changes
+    setTimeout(() => this.webhookCache.delete(webhookId), 60000);
+
+    return webhook?.retryPolicy?.maxRetries ?? DEFAULT_MAX_RETRIES;
+  }
+
+  /**
+   * Check if a delivery has exceeded its webhook's max retries
+   */
+  private async isDeadLettered(delivery: WebhookDelivery): Promise<boolean> {
+    if (delivery.status !== DeliveryStatus.FAILED) {
+      return false;
+    }
+    const maxRetries = await this.getMaxRetriesForWebhook(delivery.webhookId);
+    return delivery.attempts >= maxRetries;
+  }
 
   /**
    * Get all dead-lettered deliveries
@@ -29,9 +65,17 @@ export class WebhookDlqService {
       const allDeliveries = await this.getRecentFailedDeliveries(limit * 2);
 
       // Filter for deliveries that have truly failed (not just retrying)
-      const deadLettered = allDeliveries.filter(delivery => {
-        return delivery.status === DeliveryStatus.FAILED && delivery.attempts >= 3; // Assuming max 3 retries
-      });
+      // Uses per-webhook maxRetries configuration
+      const deadLetteredChecks = await Promise.all(
+        allDeliveries.map(async delivery => ({
+          delivery,
+          isDeadLettered: await this.isDeadLettered(delivery),
+        }))
+      );
+
+      const deadLettered = deadLetteredChecks
+        .filter(item => item.isDeadLettered)
+        .map(item => item.delivery);
 
       return deadLettered.slice(0, limit);
 
@@ -75,8 +119,11 @@ export class WebhookDlqService {
     try {
       const deliveries = await this.storageClient.getDeliveriesByWebhook(webhookId, limit * 2);
 
+      // Get maxRetries for this specific webhook
+      const maxRetries = await this.getMaxRetriesForWebhook(webhookId);
+
       const deadLettered = deliveries.filter(delivery => {
-        return delivery.status === DeliveryStatus.FAILED && delivery.attempts >= 3;
+        return delivery.status === DeliveryStatus.FAILED && delivery.attempts >= maxRetries;
       });
 
       return deadLettered.slice(0, limit);

@@ -58,10 +58,36 @@ export class SqliteAdapter implements StoragePort {
 
       // Create schema
       this.createSchema();
+      // Run migrations for existing databases
+      this.runMigrations();
       this.ready = true;
     } catch (error) {
       this.ready = false;
       throw new Error(`Failed to initialize SQLite: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Run migrations to add new columns to existing databases
+   */
+  private runMigrations(): void {
+    if (!this.db) return;
+
+    // Get existing columns in webhooks table
+    const tableInfo = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
+    const existingColumns = new Set(tableInfo.map(col => col.name));
+
+    // Add new columns if they don't exist
+    const newColumns = [
+      { name: 'delivery_config', type: 'TEXT' },
+      { name: 'alert_config', type: 'TEXT' },
+      { name: 'thresholds', type: 'TEXT' },
+    ];
+
+    for (const col of newColumns) {
+      if (!existingColumns.has(col.name)) {
+        this.db.exec(`ALTER TABLE webhooks ADD COLUMN ${col.name} ${col.type}`);
+      }
     }
   }
 
@@ -918,6 +944,9 @@ export class SqliteAdapter implements StoragePort {
         events TEXT NOT NULL,
         headers TEXT DEFAULT '{}',
         retry_policy TEXT NOT NULL,
+        delivery_config TEXT,
+        alert_config TEXT,
+        thresholds TEXT,
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
         updated_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
@@ -1595,8 +1624,8 @@ export class SqliteAdapter implements StoragePort {
     const id = randomUUID();
     const now = Date.now();
     const stmt = this.db.prepare(`
-      INSERT INTO webhooks (id, name, url, secret, enabled, events, headers, retry_policy, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (id, name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -1608,6 +1637,9 @@ export class SqliteAdapter implements StoragePort {
       JSON.stringify(webhook.events),
       JSON.stringify(webhook.headers || {}),
       JSON.stringify(webhook.retryPolicy),
+      webhook.deliveryConfig ? JSON.stringify(webhook.deliveryConfig) : null,
+      webhook.alertConfig ? JSON.stringify(webhook.alertConfig) : null,
+      webhook.thresholds ? JSON.stringify(webhook.thresholds) : null,
       now,
       now
     );
@@ -1621,6 +1653,9 @@ export class SqliteAdapter implements StoragePort {
       events: webhook.events,
       headers: webhook.headers,
       retryPolicy: webhook.retryPolicy,
+      deliveryConfig: webhook.deliveryConfig,
+      alertConfig: webhook.alertConfig,
+      thresholds: webhook.thresholds,
       createdAt: now,
       updatedAt: now,
     };
@@ -1641,6 +1676,9 @@ export class SqliteAdapter implements StoragePort {
       events: JSON.parse(row.events),
       headers: JSON.parse(row.headers),
       retryPolicy: JSON.parse(row.retry_policy),
+      deliveryConfig: row.delivery_config ? JSON.parse(row.delivery_config) : undefined,
+      alertConfig: row.alert_config ? JSON.parse(row.alert_config) : undefined,
+      thresholds: row.thresholds ? JSON.parse(row.thresholds) : undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1659,6 +1697,9 @@ export class SqliteAdapter implements StoragePort {
       events: JSON.parse(row.events),
       headers: JSON.parse(row.headers),
       retryPolicy: JSON.parse(row.retry_policy),
+      deliveryConfig: row.delivery_config ? JSON.parse(row.delivery_config) : undefined,
+      alertConfig: row.alert_config ? JSON.parse(row.alert_config) : undefined,
+      thresholds: row.thresholds ? JSON.parse(row.thresholds) : undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }));
@@ -1678,6 +1719,9 @@ export class SqliteAdapter implements StoragePort {
         events: JSON.parse(row.events) as WebhookEventType[],
         headers: JSON.parse(row.headers),
         retryPolicy: JSON.parse(row.retry_policy),
+        deliveryConfig: row.delivery_config ? JSON.parse(row.delivery_config) : undefined,
+        alertConfig: row.alert_config ? JSON.parse(row.alert_config) : undefined,
+        thresholds: row.thresholds ? JSON.parse(row.thresholds) : undefined,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       }))
@@ -1717,6 +1761,18 @@ export class SqliteAdapter implements StoragePort {
     if (updates.retryPolicy !== undefined) {
       setClauses.push('retry_policy = ?');
       params.push(JSON.stringify(updates.retryPolicy));
+    }
+    if (updates.deliveryConfig !== undefined) {
+      setClauses.push('delivery_config = ?');
+      params.push(JSON.stringify(updates.deliveryConfig));
+    }
+    if (updates.alertConfig !== undefined) {
+      setClauses.push('alert_config = ?');
+      params.push(JSON.stringify(updates.alertConfig));
+    }
+    if (updates.thresholds !== undefined) {
+      setClauses.push('thresholds = ?');
+      params.push(JSON.stringify(updates.thresholds));
     }
 
     if (setClauses.length === 0) {

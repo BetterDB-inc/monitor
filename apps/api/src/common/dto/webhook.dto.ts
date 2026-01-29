@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsUrl, IsBoolean, IsArray, IsObject, IsOptional, IsInt, Min, IsEnum, ArrayMinSize } from 'class-validator';
+import { IsString, IsUrl, IsBoolean, IsArray, IsObject, IsOptional, IsInt, Min, Max, IsNumber, IsEnum, ArrayMinSize, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import type {
   Webhook,
@@ -7,9 +7,143 @@ import type {
   WebhookEventType,
   DeliveryStatus,
   RetryPolicy,
-  WebhookPayload
+  WebhookPayload,
+  WebhookDeliveryConfig,
+  WebhookAlertConfig,
+  WebhookThresholds
 } from '@betterdb/shared';
 import { WebhookEventType as EventTypeEnum } from '@betterdb/shared';
+
+/**
+ * DTO for webhook delivery configuration
+ */
+export class WebhookDeliveryConfigDto implements WebhookDeliveryConfig {
+  @ApiPropertyOptional({
+    description: 'Request timeout in milliseconds (1000-120000)',
+    example: 30000,
+    minimum: 1000,
+    maximum: 120000,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1000)
+  @Max(120000)
+  timeoutMs?: number;
+
+  @ApiPropertyOptional({
+    description: 'Maximum response body size to store in bytes (1000-100000)',
+    example: 10000,
+    minimum: 1000,
+    maximum: 100000,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1000)
+  @Max(100000)
+  maxResponseBodyBytes?: number;
+}
+
+/**
+ * DTO for webhook alert configuration
+ */
+export class WebhookAlertConfigDto implements WebhookAlertConfig {
+  @ApiPropertyOptional({
+    description: 'Hysteresis factor for alert recovery (0.5-0.99). Lower values require bigger recovery.',
+    example: 0.9,
+    minimum: 0.5,
+    maximum: 0.99,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0.5)
+  @Max(0.99)
+  hysteresisFactor?: number;
+}
+
+/**
+ * DTO for webhook threshold configuration
+ */
+export class WebhookThresholdsDto implements WebhookThresholds {
+  @ApiPropertyOptional({
+    description: 'Memory critical threshold percentage (1-100)',
+    example: 90,
+    minimum: 1,
+    maximum: 100,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  memoryCriticalPercent?: number;
+
+  @ApiPropertyOptional({
+    description: 'Connection critical threshold percentage (1-100)',
+    example: 90,
+    minimum: 1,
+    maximum: 100,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  connectionCriticalPercent?: number;
+
+  @ApiPropertyOptional({
+    description: 'Compliance memory threshold percentage (1-100)',
+    example: 80,
+    minimum: 1,
+    maximum: 100,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  complianceMemoryPercent?: number;
+
+  @ApiPropertyOptional({
+    description: 'Slowlog count threshold (1-10000)',
+    example: 100,
+    minimum: 1,
+    maximum: 10000,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  slowlogCount?: number;
+
+  @ApiPropertyOptional({
+    description: 'Replication lag threshold in seconds (1-3600)',
+    example: 10,
+    minimum: 1,
+    maximum: 3600,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(3600)
+  replicationLagSeconds?: number;
+
+  @ApiPropertyOptional({
+    description: 'Latency spike threshold in milliseconds (0 = baseline)',
+    example: 0,
+    minimum: 0,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  latencySpikeMs?: number;
+
+  @ApiPropertyOptional({
+    description: 'Connection spike threshold count (0 = baseline)',
+    example: 0,
+    minimum: 0,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  connectionSpikeCount?: number;
+}
 
 /**
  * DTO for creating a new webhook
@@ -59,6 +193,33 @@ export class CreateWebhookDto {
   @IsObject()
   @IsOptional()
   retryPolicy?: RetryPolicy;
+
+  @ApiPropertyOptional({
+    description: 'Delivery configuration (timeout, response size limits)',
+    type: WebhookDeliveryConfigDto,
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => WebhookDeliveryConfigDto)
+  deliveryConfig?: WebhookDeliveryConfigDto;
+
+  @ApiPropertyOptional({
+    description: 'Alert configuration (hysteresis settings)',
+    type: WebhookAlertConfigDto,
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => WebhookAlertConfigDto)
+  alertConfig?: WebhookAlertConfigDto;
+
+  @ApiPropertyOptional({
+    description: 'Custom thresholds for this webhook',
+    type: WebhookThresholdsDto,
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => WebhookThresholdsDto)
+  thresholds?: WebhookThresholdsDto;
 }
 
 /**
@@ -111,6 +272,33 @@ export class UpdateWebhookDto {
   @IsObject()
   @IsOptional()
   retryPolicy?: RetryPolicy;
+
+  @ApiPropertyOptional({
+    description: 'Delivery configuration (timeout, response size limits)',
+    type: WebhookDeliveryConfigDto,
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => WebhookDeliveryConfigDto)
+  deliveryConfig?: WebhookDeliveryConfigDto;
+
+  @ApiPropertyOptional({
+    description: 'Alert configuration (hysteresis settings)',
+    type: WebhookAlertConfigDto,
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => WebhookAlertConfigDto)
+  alertConfig?: WebhookAlertConfigDto;
+
+  @ApiPropertyOptional({
+    description: 'Custom thresholds for this webhook',
+    type: WebhookThresholdsDto,
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => WebhookThresholdsDto)
+  thresholds?: WebhookThresholdsDto;
 }
 
 /**
@@ -150,6 +338,24 @@ export class WebhookDto implements Webhook {
     example: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 }
   })
   retryPolicy: RetryPolicy;
+
+  @ApiPropertyOptional({
+    description: 'Delivery configuration',
+    type: WebhookDeliveryConfigDto,
+  })
+  deliveryConfig?: WebhookDeliveryConfig;
+
+  @ApiPropertyOptional({
+    description: 'Alert configuration',
+    type: WebhookAlertConfigDto,
+  })
+  alertConfig?: WebhookAlertConfig;
+
+  @ApiPropertyOptional({
+    description: 'Custom thresholds',
+    type: WebhookThresholdsDto,
+  })
+  thresholds?: WebhookThresholds;
 
   @ApiProperty({ description: 'Creation timestamp (ms)', example: 1704934800000 })
   createdAt: number;

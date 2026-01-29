@@ -890,9 +890,17 @@ export class PostgresAdapter implements StoragePort {
         events TEXT[] NOT NULL,
         headers JSONB DEFAULT '{}',
         retry_policy JSONB NOT NULL,
+        delivery_config JSONB,
+        alert_config JSONB,
+        thresholds JSONB,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      -- Add columns if they don't exist (for existing databases)
+      ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS delivery_config JSONB;
+      ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS alert_config JSONB;
+      ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS thresholds JSONB;
 
       CREATE TABLE IF NOT EXISTS webhook_deliveries (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1595,8 +1603,8 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     const result = await this.pool.query(
-      `INSERT INTO webhooks (name, url, secret, enabled, events, headers, retry_policy)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO webhooks (name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [
         webhook.name,
@@ -1606,6 +1614,9 @@ export class PostgresAdapter implements StoragePort {
         webhook.events,
         JSON.stringify(webhook.headers || {}),
         JSON.stringify(webhook.retryPolicy),
+        webhook.deliveryConfig ? JSON.stringify(webhook.deliveryConfig) : null,
+        webhook.alertConfig ? JSON.stringify(webhook.alertConfig) : null,
+        webhook.thresholds ? JSON.stringify(webhook.thresholds) : null,
       ]
     );
 
@@ -1619,6 +1630,9 @@ export class PostgresAdapter implements StoragePort {
       events: row.events,
       headers: row.headers,
       retryPolicy: row.retry_policy,
+      deliveryConfig: row.delivery_config || undefined,
+      alertConfig: row.alert_config || undefined,
+      thresholds: row.thresholds || undefined,
       createdAt: new Date(row.created_at).getTime(),
       updatedAt: new Date(row.updated_at).getTime(),
     };
@@ -1640,6 +1654,9 @@ export class PostgresAdapter implements StoragePort {
       events: row.events,
       headers: row.headers,
       retryPolicy: row.retry_policy,
+      deliveryConfig: row.delivery_config || undefined,
+      alertConfig: row.alert_config || undefined,
+      thresholds: row.thresholds || undefined,
       createdAt: new Date(row.created_at).getTime(),
       updatedAt: new Date(row.updated_at).getTime(),
     };
@@ -1658,6 +1675,9 @@ export class PostgresAdapter implements StoragePort {
       events: row.events,
       headers: row.headers,
       retryPolicy: row.retry_policy,
+      deliveryConfig: row.delivery_config || undefined,
+      alertConfig: row.alert_config || undefined,
+      thresholds: row.thresholds || undefined,
       createdAt: new Date(row.created_at).getTime(),
       updatedAt: new Date(row.updated_at).getTime(),
     }));
@@ -1680,6 +1700,9 @@ export class PostgresAdapter implements StoragePort {
       events: row.events,
       headers: row.headers,
       retryPolicy: row.retry_policy,
+      deliveryConfig: row.delivery_config || undefined,
+      alertConfig: row.alert_config || undefined,
+      thresholds: row.thresholds || undefined,
       createdAt: new Date(row.created_at).getTime(),
       updatedAt: new Date(row.updated_at).getTime(),
     }));
@@ -1720,6 +1743,18 @@ export class PostgresAdapter implements StoragePort {
       setClauses.push(`retry_policy = $${paramIndex++}`);
       params.push(JSON.stringify(updates.retryPolicy));
     }
+    if (updates.deliveryConfig !== undefined) {
+      setClauses.push(`delivery_config = $${paramIndex++}`);
+      params.push(JSON.stringify(updates.deliveryConfig));
+    }
+    if (updates.alertConfig !== undefined) {
+      setClauses.push(`alert_config = $${paramIndex++}`);
+      params.push(JSON.stringify(updates.alertConfig));
+    }
+    if (updates.thresholds !== undefined) {
+      setClauses.push(`thresholds = $${paramIndex++}`);
+      params.push(JSON.stringify(updates.thresholds));
+    }
 
     if (setClauses.length === 0) {
       return this.getWebhook(id);
@@ -1745,6 +1780,9 @@ export class PostgresAdapter implements StoragePort {
       events: row.events,
       headers: row.headers,
       retryPolicy: row.retry_policy,
+      deliveryConfig: row.delivery_config || undefined,
+      alertConfig: row.alert_config || undefined,
+      thresholds: row.thresholds || undefined,
       createdAt: new Date(row.created_at).getTime(),
       updatedAt: new Date(row.updated_at).getTime(),
     };
@@ -1899,7 +1937,7 @@ export class PostgresAdapter implements StoragePort {
     const result = await this.pool.query(
       `SELECT * FROM webhook_deliveries
        WHERE status = 'retrying'
-       AND next_retry_at <= EXTRACT(EPOCH FROM NOW()) * 1000
+       AND next_retry_at <= NOW()
        ORDER BY next_retry_at ASC
        LIMIT $1
        FOR UPDATE SKIP LOCKED`,
