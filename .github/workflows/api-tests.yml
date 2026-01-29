@@ -1,195 +1,48 @@
 name: API Tests
 
 on:
-  # Manual trigger with branch selection
   workflow_dispatch:
     inputs:
       branch:
-        description: 'Branch to test (e.g., main, develop, feature/my-feature)'
-        required: true
+        description: 'Branch to test'
+        required: false
         type: string
         default: 'main'
-      test_pattern:
-        description: 'Test pattern (e.g., api-health, api-webhooks, or leave empty for all tests)'
-        required: false
-        type: string
-      keep_containers:
-        description: 'Keep Docker containers running after tests (for debugging)'
-        required: false
-        type: boolean
-        default: false
-
-env:
-  NODE_VERSION: '20'
-  PNPM_VERSION: '8'
+  pull_request:
+    paths:
+      - 'apps/api/**'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
 
 jobs:
   api-tests:
-    name: Run API Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
-          fetch-depth: 1
+          ref: ${{ inputs.branch || github.ref }}
 
-      - name: Display test configuration
-        run: |
-          echo "### 🧪 Test Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch**: \`${{ inputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Test Pattern**: \`${{ inputs.test_pattern || 'all tests' }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Keep Containers**: \`${{ inputs.keep_containers }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Node Version**: \`${{ env.NODE_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Runner**: \`${{ runner.os }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+      - uses: pnpm/action-setup@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: '20'
+          cache: 'pnpm'
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v2
-        with:
-          version: ${{ env.PNPM_VERSION }}
-
-      - name: Get pnpm store directory
-        id: pnpm-cache
-        shell: bash
-        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
-
-      - name: Setup pnpm cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify Docker
-        run: |
-          echo "### 🐳 Docker Information" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          docker --version >> $GITHUB_STEP_SUMMARY
-          docker compose version >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+      - run: pnpm install --frozen-lockfile
 
       - name: Run API tests
         working-directory: apps/api
-        env:
-          KEEP_TEST_CONTAINERS: ${{ inputs.keep_containers }}
-        run: |
-          echo "Starting API tests..."
-          START_TIME=$(date +%s)
-
-          if [ -n "${{ inputs.test_pattern }}" ]; then
-            echo "Running tests matching pattern: ${{ inputs.test_pattern }}"
-            pnpm test -- "${{ inputs.test_pattern }}"
-          else
-            echo "Running all API tests..."
-            pnpm test
-          fi
-
-          END_TIME=$(date +%s)
-          DURATION=$((END_TIME - START_TIME))
-
-          echo "### ✅ Tests Completed Successfully" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Duration**: ${DURATION} seconds" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-      - name: Show Docker container status
-        if: always()
-        run: |
-          echo "### 🐳 Docker Container Status" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          docker ps -a | grep betterdb-monitor || echo "No test containers found" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+        run: pnpm test
 
       - name: Show container logs on failure
         if: failure()
         run: |
-          echo "### 📋 Container Logs" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          echo "<details>" >> $GITHUB_STEP_SUMMARY
-          echo "<summary>Valkey Logs</summary>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          docker logs betterdb-monitor-valkey 2>&1 | tail -100 >> $GITHUB_STEP_SUMMARY || echo "Container not found" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "</details>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          echo "<details>" >> $GITHUB_STEP_SUMMARY
-          echo "<summary>Redis Logs</summary>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          docker logs betterdb-monitor-redis 2>&1 | tail -100 >> $GITHUB_STEP_SUMMARY || echo "Container not found" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "</details>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          echo "<details>" >> $GITHUB_STEP_SUMMARY
-          echo "<summary>PostgreSQL Logs</summary>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          docker logs betterdb-monitor-postgres 2>&1 | tail -100 >> $GITHUB_STEP_SUMMARY || echo "Container not found" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "</details>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-      - name: Upload test artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-${{ inputs.branch }}-${{ github.run_number }}
-          path: |
-            apps/api/coverage/
-            apps/api/test-results/
-          retention-days: 7
-          if-no-files-found: ignore
-
-      - name: Cleanup Docker containers
-        if: always() && !inputs.keep_containers
-        run: |
-          cd ${{ github.workspace }}
-          docker-compose down --remove-orphans || true
-          docker stop betterdb-monitor-valkey betterdb-monitor-redis betterdb-monitor-postgres 2>/dev/null || true
-          docker rm betterdb-monitor-valkey betterdb-monitor-redis betterdb-monitor-postgres 2>/dev/null || true
-          echo "### 🧹 Cleanup Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Docker containers have been stopped and removed." >> $GITHUB_STEP_SUMMARY
-
-      - name: Keep containers notice
-        if: always() && inputs.keep_containers
-        run: |
-          echo "### ⚠️ Containers Kept Running" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Docker containers are still running for debugging purposes." >> $GITHUB_STEP_SUMMARY
-          echo "They will be automatically cleaned up when the job terminates." >> $GITHUB_STEP_SUMMARY
-
-      - name: Post test summary
-        if: always()
-        run: |
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📊 Test Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Workflow Run**: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Triggered by**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "=== Valkey Logs ==="
+          docker logs betterdb-monitor-valkey 2>&1 | tail -50 || echo "Container not found"
+          echo "=== Redis Logs ==="
+          docker logs betterdb-monitor-redis 2>&1 | tail -50 || echo "Container not found"
+          echo "=== PostgreSQL Logs ==="
+          docker logs betterdb-monitor-postgres 2>&1 | tail -50 || echo "Container not found"
