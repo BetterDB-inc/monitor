@@ -24,7 +24,7 @@ export default async function globalTeardown() {
 
   try {
     // Stop and remove containers
-    execSync('docker-compose -f docker-compose.yml down --remove-orphans', {
+    execSync('docker compose -f docker-compose.yml down --remove-orphans', {
       cwd: projectRoot,
       stdio: 'inherit',
     });
