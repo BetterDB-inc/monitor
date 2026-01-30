@@ -6,8 +6,11 @@ import { join } from 'path';
 import fastifyStatic from '@fastify/static';
 import { readFileSync } from 'fs';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { validateEnv } from './config/env.schema';
 
 async function bootstrap(): Promise<void> {
+  // Validate environment variables before anything else
+  validateEnv();
   // Type assertion required due to NestJS/Fastify adapter version mismatch during transition
   const app = await (NestFactory.create as Function)(
     AppModule,

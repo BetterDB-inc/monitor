@@ -1,4 +1,4 @@
-import { Injectable, Inject, OnModuleInit, OnModuleDestroy, Logger, Optional } from '@nestjs/common';
+import { Injectable, Inject, OnModuleInit, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WebhookEventType, IWebhookEventsEnterpriseService, WEBHOOK_EVENTS_ENTERPRISE_SERVICE } from '@betterdb/shared';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
@@ -7,14 +7,14 @@ import { AclLogEntry } from '../common/types/metrics.types';
 import { PrometheusService } from '../prometheus/prometheus.service';
 import { SettingsService } from '../settings/settings.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
+import { BasePollingService } from '../common/services/base-polling.service';
 
 // Note: WebhookEventsEnterpriseService is injected via DI when proprietary module is available
 // The interface IWebhookEventsEnterpriseService provides type safety for the optional injection
 
 @Injectable()
-export class AuditService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(AuditService.name);
-  private pollInterval: NodeJS.Timeout | null = null;
+export class AuditService extends BasePollingService implements OnModuleInit {
+  protected readonly logger = new Logger(AuditService.name);
   private lastSeenTimestamp: number = 0;
   private readonly sourceHost: string;
   private readonly sourcePort: number;
@@ -30,6 +30,7 @@ export class AuditService implements OnModuleInit, OnModuleDestroy {
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
     @Optional() @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE) private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
   ) {
+    super();
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
     this.sourcePort = this.configService.get<number>('database.port', 6379);
   }
@@ -44,31 +45,11 @@ export class AuditService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    this.logger.log(`Starting audit trail polling (interval: ${this.pollIntervalMs}ms)`);
-
-    await this.pollAclLog();
-    this.startPolling();
-  }
-
-  private startPolling(): void {
-    const scheduleNextPoll = () => {
-      this.pollInterval = setTimeout(async () => {
-        try {
-          await this.pollAclLog();
-        } catch (error) {
-          this.logger.error(`Failed to poll ACL log: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-        scheduleNextPoll();
-      }, this.pollIntervalMs);
-    };
-    scheduleNextPoll();
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    if (this.pollInterval) {
-      clearInterval(this.pollInterval);
-      this.pollInterval = null;
-    }
+    this.startPollingLoop({
+      name: 'acl-log',
+      getIntervalMs: () => this.pollIntervalMs,
+      poll: () => this.pollAclLog(),
+    });
   }
 
   private async pollAclLog(): Promise<void> {

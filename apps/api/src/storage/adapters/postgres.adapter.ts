@@ -27,6 +27,7 @@ import {
   CommandLogQueryOptions,
   CommandLogType,
 } from '../../common/interfaces/storage-port.interface';
+import { PostgresDialect, RowMappers } from './base-sql.adapter';
 
 export interface PostgresAdapterConfig {
   connectionString: string;
@@ -35,6 +36,7 @@ export interface PostgresAdapterConfig {
 export class PostgresAdapter implements StoragePort {
   private pool: Pool | null = null;
   private ready: boolean = false;
+  private readonly mappers = new RowMappers(PostgresDialect);
 
   constructor(private config: PostgresAdapterConfig) { }
 
@@ -165,21 +167,7 @@ export class PostgresAdapter implements StoragePort {
     params.push(limit, offset);
 
     const result = await this.pool.query(query, params);
-    return result.rows.map((row) => ({
-      id: row.id,
-      count: row.count,
-      reason: row.reason,
-      context: row.context,
-      object: row.object,
-      username: row.username,
-      ageSeconds: row.age_seconds,
-      clientInfo: row.client_info,
-      timestampCreated: row.timestamp_created,
-      timestampLastUpdated: row.timestamp_last_updated,
-      capturedAt: row.captured_at,
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return result.rows.map((row) => this.mappers.mapAclEntryRow(row));
   }
 
   async getAuditStats(startTime?: number, endTime?: number): Promise<AuditStats> {
@@ -372,7 +360,7 @@ export class PostgresAdapter implements StoragePort {
     params.push(limit, offset);
 
     const result = await this.pool.query(query, params);
-    return result.rows.map(this.mapClientRow);
+    return result.rows.map((row) => this.mappers.mapClientRow(row));
   }
 
   async getClientTimeSeries(
@@ -694,7 +682,7 @@ export class PostgresAdapter implements StoragePort {
     `;
 
     const result = await this.pool.query(query, params);
-    return result.rows.map(this.mapClientRow);
+    return result.rows.map((row) => this.mappers.mapClientRow(row));
   }
 
   async pruneOldClientSnapshots(olderThanTimestamp: number): Promise<number> {
@@ -707,31 +695,6 @@ export class PostgresAdapter implements StoragePort {
     ]);
 
     return result.rowCount || 0;
-  }
-
-  private mapClientRow(row: any): StoredClientSnapshot {
-    return {
-      id: row.id,
-      clientId: row.client_id,
-      addr: row.addr,
-      name: row.name,
-      user: row.user_name,
-      db: row.db,
-      cmd: row.cmd,
-      age: row.age,
-      idle: row.idle,
-      flags: row.flags,
-      sub: row.sub,
-      psub: row.psub,
-      qbuf: row.qbuf,
-      qbufFree: row.qbuf_free,
-      obl: row.obl,
-      oll: row.oll,
-      omem: row.omem,
-      capturedAt: row.captured_at,
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    };
   }
 
   private async createSchema(): Promise<void> {
@@ -1109,26 +1072,7 @@ export class PostgresAdapter implements StoragePort {
       [...params, limit, offset]
     );
 
-    return result.rows.map(row => ({
-      id: row.id,
-      timestamp: parseInt(row.timestamp),
-      metricType: row.metric_type,
-      anomalyType: row.anomaly_type,
-      severity: row.severity,
-      value: parseFloat(row.value),
-      baseline: parseFloat(row.baseline),
-      stdDev: parseFloat(row.std_dev),
-      zScore: parseFloat(row.z_score),
-      threshold: parseFloat(row.threshold),
-      message: row.message,
-      correlationId: row.correlation_id,
-      relatedMetrics: row.related_metrics,
-      resolved: row.resolved,
-      resolvedAt: row.resolved_at ? parseInt(row.resolved_at) : undefined,
-      durationMs: row.duration_ms ? parseInt(row.duration_ms) : undefined,
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return result.rows.map((row) => this.mappers.mapAnomalyEventRow(row));
   }
 
   async getAnomalyStats(startTime?: number, endTime?: number): Promise<AnomalyStats> {
@@ -1290,18 +1234,7 @@ export class PostgresAdapter implements StoragePort {
       [...params, limit, offset]
     );
 
-    return result.rows.map(row => ({
-      correlationId: row.correlation_id,
-      timestamp: parseInt(row.timestamp),
-      pattern: row.pattern,
-      severity: row.severity,
-      diagnosis: row.diagnosis,
-      recommendations: row.recommendations,
-      anomalyCount: row.anomaly_count,
-      metricTypes: row.metric_types,
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return result.rows.map((row) => this.mappers.mapCorrelatedGroupRow(row));
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number): Promise<number> {
@@ -1390,26 +1323,7 @@ export class PostgresAdapter implements StoragePort {
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
     `, [...params, limit, offset]);
 
-    return result.rows.map(row => ({
-      id: row.id,
-      timestamp: parseInt(row.timestamp),
-      pattern: row.pattern,
-      keyCount: row.key_count,
-      sampledKeyCount: row.sampled_key_count,
-      keysWithTtl: row.keys_with_ttl,
-      keysExpiringSoon: row.keys_expiring_soon,
-      totalMemoryBytes: parseInt(row.total_memory_bytes),
-      avgMemoryBytes: row.avg_memory_bytes,
-      maxMemoryBytes: row.max_memory_bytes,
-      avgAccessFrequency: row.avg_access_frequency,
-      hotKeyCount: row.hot_key_count,
-      coldKeyCount: row.cold_key_count,
-      avgIdleTimeSeconds: row.avg_idle_time_seconds,
-      staleKeyCount: row.stale_key_count,
-      avgTtlSeconds: row.avg_ttl_seconds,
-      minTtlSeconds: row.min_ttl_seconds,
-      maxTtlSeconds: row.max_ttl_seconds,
-    }));
+    return result.rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
   }
 
   async getKeyAnalyticsSummary(startTime?: number, endTime?: number): Promise<KeyAnalyticsSummary | null> {
@@ -1546,17 +1460,7 @@ export class PostgresAdapter implements StoragePort {
       return null;
     }
 
-    const row = result.rows[0];
-    return {
-      id: row.id,
-      auditPollIntervalMs: row.audit_poll_interval_ms,
-      clientAnalyticsPollIntervalMs: row.client_analytics_poll_interval_ms,
-      anomalyPollIntervalMs: row.anomaly_poll_interval_ms,
-      anomalyCacheTtlMs: row.anomaly_cache_ttl_ms,
-      anomalyPrometheusIntervalMs: row.anomaly_prometheus_interval_ms,
-      updatedAt: parseInt(row.updated_at),
-      createdAt: parseInt(row.created_at),
-    };
+    return this.mappers.mapSettingsRow(result.rows[0]);
   }
 
   async saveSettings(settings: AppSettings): Promise<AppSettings> {
@@ -1632,22 +1536,7 @@ export class PostgresAdapter implements StoragePort {
       ]
     );
 
-    const row = result.rows[0];
-    return {
-      id: row.id,
-      name: row.name,
-      url: row.url,
-      secret: row.secret,
-      enabled: row.enabled,
-      events: row.events,
-      headers: row.headers,
-      retryPolicy: row.retry_policy,
-      deliveryConfig: row.delivery_config || undefined,
-      alertConfig: row.alert_config || undefined,
-      thresholds: row.thresholds || undefined,
-      createdAt: new Date(row.created_at).getTime(),
-      updatedAt: new Date(row.updated_at).getTime(),
-    };
+    return this.mappers.mapWebhookRow(result.rows[0]);
   }
 
   async getWebhook(id: string): Promise<Webhook | null> {
@@ -1656,43 +1545,14 @@ export class PostgresAdapter implements StoragePort {
     const result = await this.pool.query('SELECT * FROM webhooks WHERE id = $1', [id]);
     if (result.rows.length === 0) return null;
 
-    const row = result.rows[0];
-    return {
-      id: row.id,
-      name: row.name,
-      url: row.url,
-      secret: row.secret,
-      enabled: row.enabled,
-      events: row.events,
-      headers: row.headers,
-      retryPolicy: row.retry_policy,
-      deliveryConfig: row.delivery_config || undefined,
-      alertConfig: row.alert_config || undefined,
-      thresholds: row.thresholds || undefined,
-      createdAt: new Date(row.created_at).getTime(),
-      updatedAt: new Date(row.updated_at).getTime(),
-    };
+    return this.mappers.mapWebhookRow(result.rows[0]);
   }
 
   async getWebhooksByInstance(): Promise<Webhook[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const result = await this.pool.query('SELECT * FROM webhooks ORDER BY created_at DESC');
-    return result.rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      url: row.url,
-      secret: row.secret,
-      enabled: row.enabled,
-      events: row.events,
-      headers: row.headers,
-      retryPolicy: row.retry_policy,
-      deliveryConfig: row.delivery_config || undefined,
-      alertConfig: row.alert_config || undefined,
-      thresholds: row.thresholds || undefined,
-      createdAt: new Date(row.created_at).getTime(),
-      updatedAt: new Date(row.updated_at).getTime(),
-    }));
+    return result.rows.map((row) => this.mappers.mapWebhookRow(row));
   }
 
   async getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]> {
@@ -1703,21 +1563,7 @@ export class PostgresAdapter implements StoragePort {
       [event]
     );
 
-    return result.rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      url: row.url,
-      secret: row.secret,
-      enabled: row.enabled,
-      events: row.events,
-      headers: row.headers,
-      retryPolicy: row.retry_policy,
-      deliveryConfig: row.delivery_config || undefined,
-      alertConfig: row.alert_config || undefined,
-      thresholds: row.thresholds || undefined,
-      createdAt: new Date(row.created_at).getTime(),
-      updatedAt: new Date(row.updated_at).getTime(),
-    }));
+    return result.rows.map((row) => this.mappers.mapWebhookRow(row));
   }
 
   async updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null> {
@@ -1782,22 +1628,7 @@ export class PostgresAdapter implements StoragePort {
 
     if (result.rows.length === 0) return null;
 
-    const row = result.rows[0];
-    return {
-      id: row.id,
-      name: row.name,
-      url: row.url,
-      secret: row.secret,
-      enabled: row.enabled,
-      events: row.events,
-      headers: row.headers,
-      retryPolicy: row.retry_policy,
-      deliveryConfig: row.delivery_config || undefined,
-      alertConfig: row.alert_config || undefined,
-      thresholds: row.thresholds || undefined,
-      createdAt: new Date(row.created_at).getTime(),
-      updatedAt: new Date(row.updated_at).getTime(),
-    };
+    return this.mappers.mapWebhookRow(result.rows[0]);
   }
 
   async deleteWebhook(id: string): Promise<boolean> {
@@ -1831,21 +1662,7 @@ export class PostgresAdapter implements StoragePort {
       ]
     );
 
-    const row = result.rows[0];
-    return {
-      id: row.id,
-      webhookId: row.webhook_id,
-      eventType: row.event_type,
-      payload: row.payload,
-      status: row.status,
-      statusCode: row.status_code,
-      responseBody: row.response_body,
-      attempts: row.attempts,
-      nextRetryAt: row.next_retry_at ? new Date(row.next_retry_at).getTime() : undefined,
-      createdAt: new Date(row.created_at).getTime(),
-      completedAt: row.completed_at ? new Date(row.completed_at).getTime() : undefined,
-      durationMs: row.duration_ms,
-    };
+    return this.mappers.mapDeliveryRow(result.rows[0]);
   }
 
   async getDelivery(id: string): Promise<WebhookDelivery | null> {
@@ -1854,21 +1671,7 @@ export class PostgresAdapter implements StoragePort {
     const result = await this.pool.query('SELECT * FROM webhook_deliveries WHERE id = $1', [id]);
     if (result.rows.length === 0) return null;
 
-    const row = result.rows[0];
-    return {
-      id: row.id,
-      webhookId: row.webhook_id,
-      eventType: row.event_type,
-      payload: row.payload,
-      status: row.status,
-      statusCode: row.status_code,
-      responseBody: row.response_body,
-      attempts: row.attempts,
-      nextRetryAt: row.next_retry_at ? new Date(row.next_retry_at).getTime() : undefined,
-      createdAt: new Date(row.created_at).getTime(),
-      completedAt: row.completed_at ? new Date(row.completed_at).getTime() : undefined,
-      durationMs: row.duration_ms,
-    };
+    return this.mappers.mapDeliveryRow(result.rows[0]);
   }
 
   async getDeliveriesByWebhook(webhookId: string, limit: number = 50, offset: number = 0): Promise<WebhookDelivery[]> {
@@ -1879,20 +1682,7 @@ export class PostgresAdapter implements StoragePort {
       [webhookId, limit, offset]
     );
 
-    return result.rows.map(row => ({
-      id: row.id,
-      webhookId: row.webhook_id,
-      eventType: row.event_type,
-      payload: row.payload,
-      status: row.status,
-      statusCode: row.status_code,
-      responseBody: row.response_body,
-      attempts: row.attempts,
-      nextRetryAt: row.next_retry_at ? new Date(row.next_retry_at).getTime() : undefined,
-      createdAt: new Date(row.created_at).getTime(),
-      completedAt: row.completed_at ? new Date(row.completed_at).getTime() : undefined,
-      durationMs: row.duration_ms,
-    }));
+    return result.rows.map((row) => this.mappers.mapDeliveryRow(row));
   }
 
   async updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean> {
@@ -1956,20 +1746,7 @@ export class PostgresAdapter implements StoragePort {
       [limit]
     );
 
-    return result.rows.map(row => ({
-      id: row.id,
-      webhookId: row.webhook_id,
-      eventType: row.event_type,
-      payload: row.payload,
-      status: row.status,
-      statusCode: row.status_code,
-      responseBody: row.response_body,
-      attempts: row.attempts,
-      nextRetryAt: row.next_retry_at ? new Date(row.next_retry_at).getTime() : undefined,
-      createdAt: new Date(row.created_at).getTime(),
-      completedAt: row.completed_at ? new Date(row.completed_at).getTime() : undefined,
-      durationMs: row.duration_ms,
-    }));
+    return result.rows.map((row) => this.mappers.mapDeliveryRow(row));
   }
 
   async pruneOldDeliveries(cutoffTimestamp: number): Promise<number> {
@@ -2065,17 +1842,7 @@ export class PostgresAdapter implements StoragePort {
       [...params, limit, offset]
     );
 
-    return result.rows.map(row => ({
-      id: parseInt(row.slowlog_id),
-      timestamp: parseInt(row.timestamp),
-      duration: parseInt(row.duration),
-      command: row.command || [],
-      clientAddress: row.client_address,
-      clientName: row.client_name,
-      capturedAt: parseInt(row.captured_at),
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return result.rows.map((row) => this.mappers.mapSlowLogEntryRow(row));
   }
 
   async getLatestSlowLogId(): Promise<number | null> {
@@ -2187,18 +1954,7 @@ export class PostgresAdapter implements StoragePort {
       [...params, limit, offset]
     );
 
-    return result.rows.map(row => ({
-      id: parseInt(row.commandlog_id),
-      timestamp: parseInt(row.timestamp),
-      duration: parseInt(row.duration),
-      command: row.command || [],
-      clientAddress: row.client_address,
-      clientName: row.client_name,
-      type: row.log_type as CommandLogType,
-      capturedAt: parseInt(row.captured_at),
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return result.rows.map((row) => this.mappers.mapCommandLogEntryRow(row));
   }
 
   async getLatestCommandLogId(type: CommandLogType): Promise<number | null> {

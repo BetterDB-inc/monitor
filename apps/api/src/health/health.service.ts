@@ -1,21 +1,25 @@
 import { Injectable, Inject, Optional, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { HealthResponse, WebhookEventType } from '@betterdb/shared';
+import { HealthResponse, DetailedHealthResponse, WebhookEventType, ANOMALY_SERVICE, IAnomalyService } from '@betterdb/shared';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { DatabaseConfig } from '../config/configuration';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
+import { LicenseService } from '@proprietary/license';
 
 @Injectable()
 export class HealthService {
   private readonly logger = new Logger(HealthService.name);
   private dbConfig: DatabaseConfig;
   private instanceUp = true; // Track instance health state
+  private readonly startTime = Date.now();
 
   constructor(
     @Inject('DATABASE_CLIENT')
     private readonly dbClient: DatabasePort,
     private readonly configService: ConfigService,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
+    @Optional() @Inject(ANOMALY_SERVICE) private readonly anomalyService?: IAnomalyService,
+    @Optional() private readonly licenseService?: LicenseService,
   ) {
     const config = this.configService.get<DatabaseConfig>('database');
     if (!config) {
@@ -146,5 +150,33 @@ export class HealthService {
         this.logger.error('Failed to dispatch instance.up webhook', err);
       }
     }
+  }
+
+  /**
+   * Get detailed health information including warmup status
+   */
+  async getDetailedHealth(): Promise<DetailedHealthResponse> {
+    const basicHealth = await this.getHealth();
+
+    const detailed: DetailedHealthResponse = {
+      ...basicHealth,
+      uptime: Math.floor((Date.now() - this.startTime) / 1000),
+      timestamp: Date.now(),
+    };
+
+    // Add anomaly detection warmup status if available
+    if (this.anomalyService) {
+      detailed.anomalyDetection = this.anomalyService.getWarmupStatus();
+    }
+
+    // Add license validation status if available
+    if (this.licenseService) {
+      detailed.license = {
+        isValidated: this.licenseService.isValidationComplete(),
+        tier: this.licenseService.getLicenseTier(),
+      };
+    }
+
+    return detailed;
   }
 }

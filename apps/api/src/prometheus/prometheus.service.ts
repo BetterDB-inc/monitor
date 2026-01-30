@@ -29,6 +29,20 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
   private previousClusterState: string | null = null;
   private previousSlotsFail: number = 0;
 
+  // Track current labels to avoid race conditions with reset()
+  // Setting new values before removing stale ones prevents Prometheus from scraping zeros
+  private currentAclReasonLabels = new Set<string>();
+  private currentAclUserLabels = new Set<string>();
+  private currentClientNameLabels = new Set<string>();
+  private currentClientUserLabels = new Set<string>();
+  private currentSlowlogPatternLabels = new Set<string>();
+  private currentCommandlogRequestPatternLabels = new Set<string>();
+  private currentCommandlogReplyPatternLabels = new Set<string>();
+  private currentKeyspaceDbLabels = new Set<string>();
+  private currentClusterSlotLabels = new Set<string>();
+  private currentAnomalyMetricLabels = new Set<string>();
+  private currentCorrelatedPatternLabels = new Set<string>();
+
   // ACL Audit Metrics
   private aclDeniedTotal: Gauge;
   private aclDeniedByReason: Gauge;
@@ -502,13 +516,13 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
 
   private updateKeyspaceMetricsFromInfo(info: Record<string, any>): void {
     if (!info.keyspace) return;
-    
-    this.dbKeys.reset();
-    this.dbKeysExpiring.reset();
-    this.dbAvgTtlSeconds.reset();
 
+    const newDbLabels = new Set<string>();
+
+    // Set new values first
     for (const [dbKey, dbInfo] of Object.entries(info.keyspace as Record<string, unknown>)) {
       const dbNumber = dbKey;
+      newDbLabels.add(dbNumber);
 
       if (typeof dbInfo === 'string') {
         const parts = dbInfo.split(',');
@@ -531,6 +545,17 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
         this.dbAvgTtlSeconds.labels(dbNumber).set((parsedInfo.avg_ttl || 0) / 1000);
       }
     }
+
+    // Remove stale labels (set to 0)
+    for (const staleDb of this.currentKeyspaceDbLabels) {
+      if (!newDbLabels.has(staleDb)) {
+        this.dbKeys.labels(staleDb).set(0);
+        this.dbKeysExpiring.labels(staleDb).set(0);
+        this.dbAvgTtlSeconds.labels(staleDb).set(0);
+      }
+    }
+
+    this.currentKeyspaceDbLabels = newDbLabels;
   }
 
   private async updateClusterMetricsFromInfo(info: Record<string, any>): Promise<void> {
@@ -595,19 +620,29 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
 
       const capabilities = this.dbClient.getCapabilities();
       if (capabilities.hasClusterSlotStats) {
-        this.clusterSlotKeys.reset();
-        this.clusterSlotExpires.reset();
-        this.clusterSlotReadsTotal.reset();
-        this.clusterSlotWritesTotal.reset();
-
+        const newSlotLabels = new Set<string>();
         const slotStats = await this.dbClient.getClusterSlotStats('key-count', 100);
 
+        // Set new values first
         for (const [slot, stats] of Object.entries(slotStats)) {
+          newSlotLabels.add(slot);
           this.clusterSlotKeys.labels(slot).set(stats.key_count || 0);
           this.clusterSlotExpires.labels(slot).set(stats.expires_count || 0);
           this.clusterSlotReadsTotal.labels(slot).set(stats.total_reads || 0);
           this.clusterSlotWritesTotal.labels(slot).set(stats.total_writes || 0);
         }
+
+        // Remove stale slot labels (set to 0)
+        for (const staleSlot of this.currentClusterSlotLabels) {
+          if (!newSlotLabels.has(staleSlot)) {
+            this.clusterSlotKeys.labels(staleSlot).set(0);
+            this.clusterSlotExpires.labels(staleSlot).set(0);
+            this.clusterSlotReadsTotal.labels(staleSlot).set(0);
+            this.clusterSlotWritesTotal.labels(staleSlot).set(0);
+          }
+        }
+
+        this.currentClusterSlotLabels = newSlotLabels;
       }
     } catch (error) {
       this.logger.error('Failed to update cluster metrics', error);
@@ -621,17 +656,33 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
       // Update total
       this.aclDeniedTotal.set(stats.totalEntries);
 
-      // Reset and update by reason
-      this.aclDeniedByReason.reset();
+      const newReasonLabels = new Set<string>();
+      const newUserLabels = new Set<string>();
+
+      // Set new values first
       for (const [reason, count] of Object.entries(stats.entriesByReason)) {
+        newReasonLabels.add(reason);
         this.aclDeniedByReason.labels(reason).set(count);
       }
-
-      // Reset and update by user
-      this.aclDeniedByUser.reset();
       for (const [user, count] of Object.entries(stats.entriesByUser)) {
+        newUserLabels.add(user);
         this.aclDeniedByUser.labels(user).set(count);
       }
+
+      // Remove stale labels (set to 0)
+      for (const staleReason of this.currentAclReasonLabels) {
+        if (!newReasonLabels.has(staleReason)) {
+          this.aclDeniedByReason.labels(staleReason).set(0);
+        }
+      }
+      for (const staleUser of this.currentAclUserLabels) {
+        if (!newUserLabels.has(staleUser)) {
+          this.aclDeniedByUser.labels(staleUser).set(0);
+        }
+      }
+
+      this.currentAclReasonLabels = newReasonLabels;
+      this.currentAclUserLabels = newUserLabels;
     } catch (error) {
       this.logger.error('Failed to update ACL audit metrics', error);
     }
@@ -644,17 +695,34 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
       this.clientConnectionsCurrent.set(stats.currentConnections);
       this.clientConnectionsPeak.set(stats.peakConnections);
 
-      // Reset gauges before updating
-      this.clientConnectionsByName.reset();
-      this.clientConnectionsByUser.reset();
+      const newNameLabels = new Set<string>();
+      const newUserLabels = new Set<string>();
 
+      // Set new values first
       for (const [name, data] of Object.entries(stats.connectionsByName)) {
-        this.clientConnectionsByName.labels(name || 'unnamed').set(data.current);
+        const label = name || 'unnamed';
+        newNameLabels.add(label);
+        this.clientConnectionsByName.labels(label).set(data.current);
       }
-
       for (const [user, data] of Object.entries(stats.connectionsByUser)) {
+        newUserLabels.add(user);
         this.clientConnectionsByUser.labels(user).set(data.current);
       }
+
+      // Remove stale labels (set to 0)
+      for (const staleName of this.currentClientNameLabels) {
+        if (!newNameLabels.has(staleName)) {
+          this.clientConnectionsByName.labels(staleName).set(0);
+        }
+      }
+      for (const staleUser of this.currentClientUserLabels) {
+        if (!newUserLabels.has(staleUser)) {
+          this.clientConnectionsByUser.labels(staleUser).set(0);
+        }
+      }
+
+      this.currentClientNameLabels = newNameLabels;
+      this.currentClientUserLabels = newUserLabels;
     } catch (error) {
       this.logger.error('Failed to update client analytics metrics', error);
     }
@@ -665,21 +733,30 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
       // Use cached data from SlowLogAnalyticsService (avoids duplicate Valkey calls)
       const analysis = this.slowLogAnalytics.getCachedAnalysis();
 
-      // Reset all pattern metrics
-      this.slowlogPatternCount.reset();
-      this.slowlogPatternDuration.reset();
-      this.slowlogPatternPercentage.reset();
-
       if (!analysis) {
         return; // No data yet from analytics service
       }
 
-      // Update with top patterns
+      const newPatternLabels = new Set<string>();
+
+      // Set new values first
       for (const p of analysis.patterns) {
+        newPatternLabels.add(p.pattern);
         this.slowlogPatternCount.labels(p.pattern).set(p.count);
         this.slowlogPatternDuration.labels(p.pattern).set(p.avgDuration);
         this.slowlogPatternPercentage.labels(p.pattern).set(p.percentage);
       }
+
+      // Remove stale patterns (set to 0)
+      for (const stalePattern of this.currentSlowlogPatternLabels) {
+        if (!newPatternLabels.has(stalePattern)) {
+          this.slowlogPatternCount.labels(stalePattern).set(0);
+          this.slowlogPatternDuration.labels(stalePattern).set(0);
+          this.slowlogPatternPercentage.labels(stalePattern).set(0);
+        }
+      }
+
+      this.currentSlowlogPatternLabels = newPatternLabels;
     } catch (error) {
       this.logger.error('Failed to update slowlog metrics', error);
     }
@@ -692,13 +769,15 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
+      const newRequestPatternLabels = new Set<string>();
+      const newReplyPatternLabels = new Set<string>();
+
       // Update large request patterns
       const requestAnalysis = this.commandLogAnalytics.getCachedAnalysis('large-request');
-
-      this.commandlogLargeRequestByPattern.reset();
       let requestTotal = 0;
       if (requestAnalysis) {
         for (const p of requestAnalysis.patterns) {
+          newRequestPatternLabels.add(p.pattern);
           this.commandlogLargeRequestByPattern.labels(p.pattern).set(p.count);
           requestTotal += p.count;
         }
@@ -707,16 +786,31 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
 
       // Update large reply patterns
       const replyAnalysis = this.commandLogAnalytics.getCachedAnalysis('large-reply');
-
-      this.commandlogLargeReplyByPattern.reset();
       let replyTotal = 0;
       if (replyAnalysis) {
         for (const p of replyAnalysis.patterns) {
+          newReplyPatternLabels.add(p.pattern);
           this.commandlogLargeReplyByPattern.labels(p.pattern).set(p.count);
           replyTotal += p.count;
         }
       }
       this.commandlogLargeReplyCount.set(replyTotal);
+
+      // Remove stale request patterns (set to 0)
+      for (const stalePattern of this.currentCommandlogRequestPatternLabels) {
+        if (!newRequestPatternLabels.has(stalePattern)) {
+          this.commandlogLargeRequestByPattern.labels(stalePattern).set(0);
+        }
+      }
+      // Remove stale reply patterns (set to 0)
+      for (const stalePattern of this.currentCommandlogReplyPatternLabels) {
+        if (!newReplyPatternLabels.has(stalePattern)) {
+          this.commandlogLargeReplyByPattern.labels(stalePattern).set(0);
+        }
+      }
+
+      this.currentCommandlogRequestPatternLabels = newRequestPatternLabels;
+      this.currentCommandlogReplyPatternLabels = newReplyPatternLabels;
     } catch (error) {
       this.logger.error('Failed to update commandlog metrics', error);
     }
@@ -787,16 +881,33 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
       this.anomalyEventsCurrent.labels(sev).set(summary.unresolvedBySeverity[sev] ?? 0);
     }
 
-    // Dynamic labels need reset to clear stale entries
-    this.anomalyByMetric.reset();
-    this.correlatedGroupsByPattern.reset();
+    const newMetricLabels = new Set<string>();
+    const newPatternLabels = new Set<string>();
 
+    // Set new values first
     for (const [metric, count] of Object.entries(summary.byMetric)) {
+      newMetricLabels.add(metric);
       this.anomalyByMetric.labels(metric).set(count);
     }
     for (const [pattern, count] of Object.entries(summary.byPattern)) {
+      newPatternLabels.add(pattern);
       this.correlatedGroupsByPattern.labels(pattern).set(count);
     }
+
+    // Remove stale labels (set to 0)
+    for (const staleMetric of this.currentAnomalyMetricLabels) {
+      if (!newMetricLabels.has(staleMetric)) {
+        this.anomalyByMetric.labels(staleMetric).set(0);
+      }
+    }
+    for (const stalePattern of this.currentCorrelatedPatternLabels) {
+      if (!newPatternLabels.has(stalePattern)) {
+        this.correlatedGroupsByPattern.labels(stalePattern).set(0);
+      }
+    }
+
+    this.currentAnomalyMetricLabels = newMetricLabels;
+    this.currentCorrelatedPatternLabels = newPatternLabels;
   }
 
   updateAnomalyBufferStats(buffers: Array<{ metricType: string; mean: number; stdDev: number; ready: boolean }>): void {

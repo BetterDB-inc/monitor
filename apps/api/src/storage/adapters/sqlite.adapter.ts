@@ -32,6 +32,7 @@ import {
   CommandLogQueryOptions,
   CommandLogType,
 } from '../../common/interfaces/storage-port.interface';
+import { SqliteDialect, RowMappers } from './base-sql.adapter';
 
 export interface SqliteAdapterConfig {
   filepath: string;
@@ -40,6 +41,7 @@ export interface SqliteAdapterConfig {
 export class SqliteAdapter implements StoragePort {
   private db: Database.Database | null = null;
   private ready: boolean = false;
+  private readonly mappers = new RowMappers(SqliteDialect);
 
   constructor(private config: SqliteAdapterConfig) { }
 
@@ -195,37 +197,9 @@ export class SqliteAdapter implements StoragePort {
 
     params.push(limit, offset);
 
-    const rows = this.db.prepare(query).all(...params) as Array<{
-      id: number;
-      count: number;
-      reason: string;
-      context: string;
-      object: string;
-      username: string;
-      age_seconds: number;
-      client_info: string;
-      timestamp_created: number;
-      timestamp_last_updated: number;
-      captured_at: number;
-      source_host: string;
-      source_port: number;
-    }>;
+    const rows = this.db.prepare(query).all(...params) as any[];
 
-    return rows.map((row) => ({
-      id: row.id,
-      count: row.count,
-      reason: row.reason,
-      context: row.context,
-      object: row.object,
-      username: row.username,
-      ageSeconds: row.age_seconds,
-      clientInfo: row.client_info,
-      timestampCreated: row.timestamp_created,
-      timestampLastUpdated: row.timestamp_last_updated,
-      capturedAt: row.captured_at,
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return rows.map((row) => this.mappers.mapAclEntryRow(row));
   }
 
   async getAuditStats(startTime?: number, endTime?: number): Promise<AuditStats> {
@@ -400,51 +374,9 @@ export class SqliteAdapter implements StoragePort {
 
     params.push(limit, offset);
 
-    const rows = this.db.prepare(query).all(...params) as Array<{
-      id: number;
-      client_id: string;
-      addr: string;
-      name: string;
-      user: string;
-      db: number;
-      cmd: string;
-      age: number;
-      idle: number;
-      flags: string;
-      sub: number;
-      psub: number;
-      qbuf: number;
-      qbuf_free: number;
-      obl: number;
-      oll: number;
-      omem: number;
-      captured_at: number;
-      source_host: string;
-      source_port: number;
-    }>;
+    const rows = this.db.prepare(query).all(...params) as any[];
 
-    return rows.map((row) => ({
-      id: row.id,
-      clientId: row.client_id,
-      addr: row.addr,
-      name: row.name,
-      user: row.user,
-      db: row.db,
-      cmd: row.cmd,
-      age: row.age,
-      idle: row.idle,
-      flags: row.flags,
-      sub: row.sub,
-      psub: row.psub,
-      qbuf: row.qbuf,
-      qbufFree: row.qbuf_free,
-      obl: row.obl,
-      oll: row.oll,
-      omem: row.omem,
-      capturedAt: row.captured_at,
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return rows.map((row) => this.mappers.mapClientRow(row));
   }
 
   async getClientTimeSeries(startTime: number, endTime: number, bucketSizeMs: number = 60000): Promise<ClientTimeSeriesPoint[]> {
@@ -731,51 +663,9 @@ export class SqliteAdapter implements StoragePort {
       ORDER BY captured_at ASC
     `;
 
-    const rows = this.db.prepare(query).all(...params) as Array<{
-      id: number;
-      client_id: string;
-      addr: string;
-      name: string;
-      user: string;
-      db: number;
-      cmd: string;
-      age: number;
-      idle: number;
-      flags: string;
-      sub: number;
-      psub: number;
-      qbuf: number;
-      qbuf_free: number;
-      obl: number;
-      oll: number;
-      omem: number;
-      captured_at: number;
-      source_host: string;
-      source_port: number;
-    }>;
+    const rows = this.db.prepare(query).all(...params) as any[];
 
-    return rows.map((row) => ({
-      id: row.id,
-      clientId: row.client_id,
-      addr: row.addr,
-      name: row.name,
-      user: row.user,
-      db: row.db,
-      cmd: row.cmd,
-      age: row.age,
-      idle: row.idle,
-      flags: row.flags,
-      sub: row.sub,
-      psub: row.psub,
-      qbuf: row.qbuf,
-      qbufFree: row.qbuf_free,
-      obl: row.obl,
-      oll: row.oll,
-      omem: row.omem,
-      capturedAt: row.captured_at,
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return rows.map((row) => this.mappers.mapClientRow(row));
   }
 
   async pruneOldClientSnapshots(olderThanTimestamp: number): Promise<number> {
@@ -1117,26 +1007,7 @@ export class SqliteAdapter implements StoragePort {
 
     const rows = this.db.prepare(query).all(...params) as any[];
 
-    return rows.map(row => ({
-      id: row.id,
-      timestamp: row.timestamp,
-      metricType: row.metric_type,
-      anomalyType: row.anomaly_type,
-      severity: row.severity,
-      value: row.value,
-      baseline: row.baseline,
-      stdDev: row.std_dev,
-      zScore: row.z_score,
-      threshold: row.threshold,
-      message: row.message,
-      correlationId: row.correlation_id,
-      relatedMetrics: row.related_metrics ? JSON.parse(row.related_metrics) : undefined,
-      resolved: row.resolved === 1,
-      resolvedAt: row.resolved_at,
-      durationMs: row.duration_ms,
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return rows.map((row) => this.mappers.mapAnomalyEventRow(row));
   }
 
   async getAnomalyStats(startTime?: number, endTime?: number): Promise<AnomalyStats> {
@@ -1280,18 +1151,7 @@ export class SqliteAdapter implements StoragePort {
 
     const rows = this.db.prepare(query).all(...params) as any[];
 
-    return rows.map(row => ({
-      correlationId: row.correlation_id,
-      timestamp: row.timestamp,
-      pattern: row.pattern,
-      severity: row.severity,
-      diagnosis: row.diagnosis,
-      recommendations: JSON.parse(row.recommendations),
-      anomalyCount: row.anomaly_count,
-      metricTypes: JSON.parse(row.metric_types),
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return rows.map((row) => this.mappers.mapCorrelatedGroupRow(row));
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number): Promise<number> {
@@ -1377,26 +1237,7 @@ export class SqliteAdapter implements StoragePort {
 
     const rows = this.db.prepare(query).all(...params) as any[];
 
-    return rows.map(row => ({
-      id: row.id,
-      timestamp: row.timestamp,
-      pattern: row.pattern,
-      keyCount: row.key_count,
-      sampledKeyCount: row.sampled_key_count,
-      keysWithTtl: row.keys_with_ttl,
-      keysExpiringSoon: row.keys_expiring_soon,
-      totalMemoryBytes: row.total_memory_bytes,
-      avgMemoryBytes: row.avg_memory_bytes,
-      maxMemoryBytes: row.max_memory_bytes,
-      avgAccessFrequency: row.avg_access_frequency,
-      hotKeyCount: row.hot_key_count,
-      coldKeyCount: row.cold_key_count,
-      avgIdleTimeSeconds: row.avg_idle_time_seconds,
-      staleKeyCount: row.stale_key_count,
-      avgTtlSeconds: row.avg_ttl_seconds,
-      minTtlSeconds: row.min_ttl_seconds,
-      maxTtlSeconds: row.max_ttl_seconds,
-    }));
+    return rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
   }
 
   async getKeyAnalyticsSummary(startTime?: number, endTime?: number): Promise<KeyAnalyticsSummary | null> {
@@ -1553,16 +1394,7 @@ export class SqliteAdapter implements StoragePort {
       return null;
     }
 
-    return {
-      id: row.id,
-      auditPollIntervalMs: row.audit_poll_interval_ms,
-      clientAnalyticsPollIntervalMs: row.client_analytics_poll_interval_ms,
-      anomalyPollIntervalMs: row.anomaly_poll_interval_ms,
-      anomalyCacheTtlMs: row.anomaly_cache_ttl_ms,
-      anomalyPrometheusIntervalMs: row.anomaly_prometheus_interval_ms,
-      updatedAt: row.updated_at,
-      createdAt: row.created_at,
-    };
+    return this.mappers.mapSettingsRow(row);
   }
 
   async saveSettings(settings: AppSettings): Promise<AppSettings> {
@@ -1667,42 +1499,14 @@ export class SqliteAdapter implements StoragePort {
     const row = this.db.prepare('SELECT * FROM webhooks WHERE id = ?').get(id) as any;
     if (!row) return null;
 
-    return {
-      id: row.id,
-      name: row.name,
-      url: row.url,
-      secret: row.secret,
-      enabled: row.enabled === 1,
-      events: JSON.parse(row.events),
-      headers: JSON.parse(row.headers),
-      retryPolicy: JSON.parse(row.retry_policy),
-      deliveryConfig: row.delivery_config ? JSON.parse(row.delivery_config) : undefined,
-      alertConfig: row.alert_config ? JSON.parse(row.alert_config) : undefined,
-      thresholds: row.thresholds ? JSON.parse(row.thresholds) : undefined,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
+    return this.mappers.mapWebhookRow(row);
   }
 
   async getWebhooksByInstance(): Promise<Webhook[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const rows = this.db.prepare('SELECT * FROM webhooks ORDER BY created_at DESC').all() as any[];
-    return rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      url: row.url,
-      secret: row.secret,
-      enabled: row.enabled === 1,
-      events: JSON.parse(row.events),
-      headers: JSON.parse(row.headers),
-      retryPolicy: JSON.parse(row.retry_policy),
-      deliveryConfig: row.delivery_config ? JSON.parse(row.delivery_config) : undefined,
-      alertConfig: row.alert_config ? JSON.parse(row.alert_config) : undefined,
-      thresholds: row.thresholds ? JSON.parse(row.thresholds) : undefined,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+    return rows.map((row) => this.mappers.mapWebhookRow(row));
   }
 
   async getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]> {
@@ -1710,22 +1514,8 @@ export class SqliteAdapter implements StoragePort {
 
     const rows = this.db.prepare('SELECT * FROM webhooks WHERE enabled = 1').all() as any[];
     return rows
-      .map(row => ({
-        id: row.id,
-        name: row.name,
-        url: row.url,
-        secret: row.secret,
-        enabled: row.enabled === 1,
-        events: JSON.parse(row.events) as WebhookEventType[],
-        headers: JSON.parse(row.headers),
-        retryPolicy: JSON.parse(row.retry_policy),
-        deliveryConfig: row.delivery_config ? JSON.parse(row.delivery_config) : undefined,
-        alertConfig: row.alert_config ? JSON.parse(row.alert_config) : undefined,
-        thresholds: row.thresholds ? JSON.parse(row.thresholds) : undefined,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      }))
-      .filter(webhook => webhook.events.includes(event));
+      .map((row) => this.mappers.mapWebhookRow(row))
+      .filter((webhook) => webhook.events.includes(event));
   }
 
   async updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null> {
@@ -1847,20 +1637,7 @@ export class SqliteAdapter implements StoragePort {
     const row = this.db.prepare('SELECT * FROM webhook_deliveries WHERE id = ?').get(id) as any;
     if (!row) return null;
 
-    return {
-      id: row.id,
-      webhookId: row.webhook_id,
-      eventType: row.event_type,
-      payload: JSON.parse(row.payload),
-      status: row.status,
-      statusCode: row.status_code,
-      responseBody: row.response_body,
-      attempts: row.attempts,
-      nextRetryAt: row.next_retry_at || undefined,
-      createdAt: row.created_at,
-      completedAt: row.completed_at || undefined,
-      durationMs: row.duration_ms,
-    };
+    return this.mappers.mapDeliveryRow(row);
   }
 
   async getDeliveriesByWebhook(webhookId: string, limit: number = 50, offset: number = 0): Promise<WebhookDelivery[]> {
@@ -1868,20 +1645,7 @@ export class SqliteAdapter implements StoragePort {
 
     const rows = this.db.prepare('SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?').all(webhookId, limit, offset) as any[];
 
-    return rows.map(row => ({
-      id: row.id,
-      webhookId: row.webhook_id,
-      eventType: row.event_type,
-      payload: JSON.parse(row.payload),
-      status: row.status,
-      statusCode: row.status_code,
-      responseBody: row.response_body,
-      attempts: row.attempts,
-      nextRetryAt: row.next_retry_at || undefined,
-      createdAt: row.created_at,
-      completedAt: row.completed_at || undefined,
-      durationMs: row.duration_ms,
-    }));
+    return rows.map((row) => this.mappers.mapDeliveryRow(row));
   }
 
   async updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean> {
@@ -1940,20 +1704,7 @@ export class SqliteAdapter implements StoragePort {
        LIMIT ?`
     ).all(now, limit) as any[];
 
-    return rows.map(row => ({
-      id: row.id,
-      webhookId: row.webhook_id,
-      eventType: row.event_type,
-      payload: JSON.parse(row.payload),
-      status: row.status,
-      statusCode: row.status_code,
-      responseBody: row.response_body,
-      attempts: row.attempts,
-      nextRetryAt: row.next_retry_at || undefined,
-      createdAt: row.created_at,
-      completedAt: row.completed_at || undefined,
-      durationMs: row.duration_ms,
-    }));
+    return rows.map((row) => this.mappers.mapDeliveryRow(row));
   }
 
   async pruneOldDeliveries(cutoffTimestamp: number): Promise<number> {
@@ -2036,17 +1787,7 @@ export class SqliteAdapter implements StoragePort {
        LIMIT ? OFFSET ?`
     ).all(...params, limit, offset) as any[];
 
-    return rows.map(row => ({
-      id: row.slowlog_id,
-      timestamp: row.timestamp,
-      duration: row.duration,
-      command: JSON.parse(row.command || '[]'),  // Parse JSON string back to array
-      clientAddress: row.client_address,
-      clientName: row.client_name,
-      capturedAt: row.captured_at,
-      sourceHost: row.source_host,
-      sourcePort: row.source_port,
-    }));
+    return rows.map((row) => this.mappers.mapSlowLogEntryRow(row));
   }
 
   async getLatestSlowLogId(): Promise<number | null> {
