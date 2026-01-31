@@ -846,7 +846,13 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
 
   async getMetrics(): Promise<string> {
     await this.updateMetrics();
-    return this.registry.metrics();
+    const metrics = await this.registry.metrics();
+    // Filter out lines with NaN values - these are invalid in Prometheus exposition format
+    // and can occur when event loop metrics haven't collected enough samples yet
+    return metrics
+      .split('\n')
+      .filter(line => !line.match(/\s+[Nn]a[Nn]\s*$/))
+      .join('\n');
   }
 
   getContentType(): string {
