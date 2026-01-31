@@ -5,5 +5,6 @@ export * from './types/client-analytics';
 export * from './types/ai';
 export * from './types/key-analytics';
 export * from './types/settings.types';
+export * from './types/anomaly';
 export * from './license/index';
 export * from './webhooks/index';

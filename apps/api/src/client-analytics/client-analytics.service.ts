@@ -1,4 +1,4 @@
-import { Injectable, Inject, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import {
@@ -10,12 +10,11 @@ import {
 } from '../common/interfaces/storage-port.interface';
 import { PrometheusService } from '../prometheus/prometheus.service';
 import { SettingsService } from '../settings/settings.service';
+import { BasePollingService } from '../common/services/base-polling.service';
 
 @Injectable()
-export class ClientAnalyticsService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(ClientAnalyticsService.name);
-  private pollInterval: NodeJS.Timeout | null = null;
-  private isPolling = false;
+export class ClientAnalyticsService extends BasePollingService implements OnModuleInit {
+  protected readonly logger = new Logger(ClientAnalyticsService.name);
 
   constructor(
     @Inject('DATABASE_CLIENT') private dbClient: DatabasePort,
@@ -23,48 +22,23 @@ export class ClientAnalyticsService implements OnModuleInit, OnModuleDestroy {
     private configService: ConfigService,
     private prometheusService: PrometheusService,
     private settingsService: SettingsService,
-  ) {}
+  ) {
+    super();
+  }
 
   private get pollIntervalMs(): number {
     return this.settingsService.getCachedSettings().clientAnalyticsPollIntervalMs;
   }
 
   async onModuleInit(): Promise<void> {
-    this.logger.log(`Starting client analytics polling (interval: ${this.pollIntervalMs}ms)`);
-    await this.startPolling();
-  }
-
-  onModuleDestroy(): void {
-    this.stopPolling();
-  }
-
-  private async startPolling(): Promise<void> {
-    await this.captureSnapshot();
-
-    const scheduleNextPoll = () => {
-      this.pollInterval = setTimeout(async () => {
-        if (!this.isPolling) {
-          try {
-            await this.captureSnapshot();
-          } catch (err) {
-            this.logger.error('Client snapshot capture failed:', err);
-          }
-        }
-        scheduleNextPoll();
-      }, this.pollIntervalMs);
-    };
-    scheduleNextPoll();
-  }
-
-  private stopPolling(): void {
-    if (this.pollInterval) {
-      clearTimeout(this.pollInterval);
-      this.pollInterval = null;
-    }
+    this.startPollingLoop({
+      name: 'client-snapshot',
+      getIntervalMs: () => this.pollIntervalMs,
+      poll: () => this.captureSnapshot(),
+    });
   }
 
   private async captureSnapshot(): Promise<void> {
-    this.isPolling = true;
     const endTimer = this.prometheusService.startPollTimer('client-analytics');
 
     try {
@@ -100,7 +74,6 @@ export class ClientAnalyticsService implements OnModuleInit, OnModuleDestroy {
       this.prometheusService.incrementPollCounter();
     } finally {
       endTimer();
-      this.isPolling = false;
     }
   }
 

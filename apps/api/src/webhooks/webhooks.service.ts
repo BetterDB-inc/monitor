@@ -313,16 +313,28 @@ export class WebhooksService {
 
   /**
    * Redact webhook secret for API responses
+   * Shows only a small prefix to help identify the secret without revealing it
    */
   redactSecret(webhook: Webhook): Webhook {
     if (!webhook.secret) {
       return webhook;
     }
 
-    return {
-      ...webhook,
-      secret: `${webhook.secret.substring(0, 10)}***`,
-    };
+    const secret = webhook.secret;
+    let redacted: string;
+
+    if (secret.startsWith('whsec_')) {
+      // For whsec_ prefixed secrets, show prefix + up to 4 chars
+      const rest = secret.slice(6);
+      const visibleChars = Math.min(4, rest.length);
+      redacted = `whsec_${rest.substring(0, visibleChars)}***`;
+    } else {
+      // For other secrets, show 2-4 chars based on length
+      const visibleChars = secret.length < 8 ? 2 : 4;
+      redacted = `${secret.substring(0, Math.min(visibleChars, secret.length))}***`;
+    }
+
+    return { ...webhook, secret: redacted };
   }
 
   /**

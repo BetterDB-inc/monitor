@@ -20,3 +20,22 @@ export interface HealthResponse {
   capabilities: DatabaseCapabilities | null;
   error?: string;
 }
+
+export interface AnomalyWarmupStatus {
+  isReady: boolean;
+  buffersReady: number;
+  buffersTotal: number;
+  warmupProgress: number; // 0-100 percentage
+}
+
+export interface LicenseWarmupStatus {
+  isValidated: boolean;
+  tier: string;
+}
+
+export interface DetailedHealthResponse extends HealthResponse {
+  uptime: number;
+  timestamp: number;
+  anomalyDetection?: AnomalyWarmupStatus;
+  license?: LicenseWarmupStatus;
+}

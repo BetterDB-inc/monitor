@@ -1,9 +1,10 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
+import { BasePollingService } from '@app/common/services/base-polling.service';
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
@@ -24,11 +25,8 @@ interface MetricExtractor {
 }
 
 @Injectable()
-export class AnomalyService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(AnomalyService.name);
-  private pollInterval: NodeJS.Timeout | null = null;
-  private correlationInterval: NodeJS.Timeout | null = null;
-  private summaryInterval: NodeJS.Timeout | null = null;
+export class AnomalyService extends BasePollingService implements OnModuleInit {
+  protected readonly logger = new Logger(AnomalyService.name);
 
   private buffers = new Map<MetricType, MetricBuffer>();
   private detectors = new Map<MetricType, SpikeDetector>();
@@ -51,6 +49,7 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     private readonly prometheusService: PrometheusService,
     private readonly settingsService: SettingsService,
   ) {
+    super();
     this.correlator = new Correlator(this.correlationIntervalMs);
     this.metricExtractors = this.initializeMetricExtractors();
     this.initializeBuffersAndDetectors();
@@ -70,22 +69,28 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit() {
     this.logger.log('Starting anomaly detection service...');
-    this.startPolling();
-    this.startCorrelation();
-    this.startPrometheusSummaryUpdates();
-  }
 
-  onModuleDestroy() {
-    this.logger.log('Stopping anomaly detection service...');
-    if (this.pollInterval) {
-      clearInterval(this.pollInterval);
-    }
-    if (this.correlationInterval) {
-      clearInterval(this.correlationInterval);
-    }
-    if (this.summaryInterval) {
-      clearInterval(this.summaryInterval);
-    }
+    // Start metrics polling loop
+    this.startPollingLoop({
+      name: 'metrics',
+      getIntervalMs: () => this.pollIntervalMs,
+      poll: () => this.pollMetrics(),
+    });
+
+    // Start correlation loop
+    this.startPollingLoop({
+      name: 'correlation',
+      getIntervalMs: () => this.correlationIntervalMs,
+      poll: () => this.correlateAnomalies(),
+      initialPoll: false,
+    });
+
+    // Start prometheus summary loop
+    this.startPollingLoop({
+      name: 'prometheus-summary',
+      getIntervalMs: () => this.prometheusSummaryIntervalMs,
+      poll: () => this.updatePrometheusSummary(),
+    });
   }
 
   private initializeMetricExtractors(): Map<MetricType, MetricExtractor> {
@@ -159,24 +164,6 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     if (!value) return null;
     const parsed = parseFloat(value);
     return isNaN(parsed) ? null : parsed;
-  }
-
-  private startPolling(): void {
-    this.pollMetrics().catch(err => {
-      this.logger.error('Error in initial poll:', err);
-    });
-
-    const scheduleNextPoll = () => {
-      this.pollInterval = setTimeout(async () => {
-        try {
-          await this.pollMetrics();
-        } catch (err) {
-          this.logger.error('Error polling metrics:', err);
-        }
-        scheduleNextPoll();
-      }, this.pollIntervalMs);
-    };
-    scheduleNextPoll();
   }
 
   private async pollMetrics(): Promise<void> {
@@ -267,14 +254,6 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error('Failed to persist anomaly event:', err);
     }
-  }
-
-  private startCorrelation(): void {
-    this.correlationInterval = setInterval(() => {
-      this.correlateAnomalies().catch(err => {
-        this.logger.error('Error in correlation:', err);
-      });
-    }, this.correlationIntervalMs);
   }
 
   private async correlateAnomalies(): Promise<void> {
@@ -451,6 +430,19 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     return stats.sort((a, b) => a.metricType.localeCompare(b.metricType));
   }
 
+  getWarmupStatus(): { isReady: boolean; buffersReady: number; buffersTotal: number; warmupProgress: number } {
+    const stats = this.getBufferStats();
+    const buffersTotal = stats.length;
+    const buffersReady = stats.filter(s => s.isReady).length;
+
+    return {
+      isReady: buffersReady === buffersTotal,
+      buffersReady,
+      buffersTotal,
+      warmupProgress: buffersTotal > 0 ? Math.round((buffersReady / buffersTotal) * 100) : 100,
+    };
+  }
+
   async getSummary(startTime?: number, endTime?: number): Promise<AnomalySummary> {
     const cacheThreshold = Date.now() - this.cacheTtlMs;
 
@@ -566,24 +558,6 @@ export class AnomalyService implements OnModuleInit, OnModuleDestroy {
     const beforeCount = this.recentAnomalies.length;
     this.recentAnomalies = this.recentAnomalies.filter(a => !a.resolved);
     return beforeCount - this.recentAnomalies.length;
-  }
-
-  private startPrometheusSummaryUpdates(): void {
-    this.updatePrometheusSummary().catch(err =>
-      this.logger.error('Failed to update initial Prometheus summary:', err)
-    );
-
-    const scheduleNextUpdate = () => {
-      this.summaryInterval = setTimeout(async () => {
-        try {
-          await this.updatePrometheusSummary();
-        } catch (err) {
-          this.logger.error('Failed to update Prometheus summary:', err);
-        }
-        scheduleNextUpdate();
-      }, this.prometheusSummaryIntervalMs);
-    };
-    scheduleNextUpdate();
   }
 
   private async updatePrometheusSummary(): Promise<void> {

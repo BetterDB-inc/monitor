@@ -175,39 +175,67 @@ describe('WebhooksService', () => {
   });
 
   describe('Secret Redaction', () => {
-    it('should redact webhook secret', () => {
-      const webhook = {
-        id: '123',
-        name: 'Test',
-        url: 'https://example.com',
-        secret: 'whsec_1234567890abcdef',
-        enabled: true,
-        events: [],
-        headers: {},
-        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
+    const createWebhookWithSecret = (secret?: string) => ({
+      id: '123',
+      name: 'Test',
+      url: 'https://example.com',
+      secret,
+      enabled: true,
+      events: [],
+      headers: {},
+      retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
 
+    it('should redact whsec_ prefixed secret showing prefix + 4 chars', () => {
+      const webhook = createWebhookWithSecret('whsec_1234567890abcdef');
       const redacted = service.redactSecret(webhook);
       expect(redacted.secret).toBe('whsec_1234***');
     });
 
-    it('should handle webhooks without secrets', () => {
-      const webhook = {
-        id: '123',
-        name: 'Test',
-        url: 'https://example.com',
-        enabled: true,
-        events: [],
-        headers: {},
-        retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
+    it('should redact short whsec_ secret showing all available chars', () => {
+      const webhook = createWebhookWithSecret('whsec_ab');
+      const redacted = service.redactSecret(webhook);
+      expect(redacted.secret).toBe('whsec_ab***');
+    });
 
+    it('should redact non-prefixed long secret (8+ chars) showing 4 chars', () => {
+      const webhook = createWebhookWithSecret('mysupersecret');
+      const redacted = service.redactSecret(webhook);
+      expect(redacted.secret).toBe('mysu***');
+    });
+
+    it('should redact non-prefixed short secret (<8 chars) showing 2 chars', () => {
+      const webhook = createWebhookWithSecret('short');
+      const redacted = service.redactSecret(webhook);
+      expect(redacted.secret).toBe('sh***');
+    });
+
+    it('should redact very short secret showing 2 chars', () => {
+      const webhook = createWebhookWithSecret('ab');
+      const redacted = service.redactSecret(webhook);
+      expect(redacted.secret).toBe('ab***');
+    });
+
+    it('should handle empty string secret', () => {
+      const webhook = createWebhookWithSecret('');
+      const redacted = service.redactSecret(webhook as any);
+      // Empty string is falsy, so it returns the webhook unchanged
+      expect(redacted.secret).toBe('');
+    });
+
+    it('should handle webhooks without secrets', () => {
+      const webhook = createWebhookWithSecret(undefined);
       const redacted = service.redactSecret(webhook as any);
       expect(redacted.secret).toBeUndefined();
+    });
+
+    it('should not modify the original webhook object', () => {
+      const webhook = createWebhookWithSecret('whsec_secret123');
+      const originalSecret = webhook.secret;
+      service.redactSecret(webhook);
+      expect(webhook.secret).toBe(originalSecret);
     });
   });
 

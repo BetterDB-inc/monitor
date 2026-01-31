@@ -20,6 +20,8 @@ export class LicenseService implements OnModuleInit {
   private readonly instanceId: string;
 
   private cache: CachedEntitlement | null = null;
+  private validationPromise: Promise<EntitlementResponse> | null = null;
+  private isValidated = false;
 
   constructor(private readonly config: ConfigService) {
     this.licenseKey = process.env.BETTERDB_LICENSE_KEY || null;
@@ -42,11 +44,39 @@ export class LicenseService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    if (!this.licenseKey && this.telemetryEnabled) {
-      // Community tier with telemetry enabled - send ping
-      await this.pingTelemetry();
+    if (!this.licenseKey) {
+      // No license key - definitely community tier
+      this.isValidated = true;
+      this.logger.log('No license key provided, running in Community tier');
+
+      if (this.telemetryEnabled) {
+        // Send telemetry ping in background (don't await)
+        this.pingTelemetry().catch(err => {
+          this.logger.debug(`Telemetry ping failed: ${err.message}`);
+        });
+      }
+      return;
     }
-    await this.validateLicense();
+
+    // Start validation in background (don't block startup)
+    this.logger.log('Starting license validation in background...');
+    this.validationPromise = this.validateLicenseBackground();
+  }
+
+  private async validateLicenseBackground(): Promise<EntitlementResponse> {
+    try {
+      const result = await this.validateLicense();
+      this.isValidated = true;
+
+      if (result.tier !== Tier.community) {
+        this.logger.log(`License validated: upgraded to ${result.tier} tier`);
+      }
+      return result;
+    } catch (error) {
+      this.logger.warn(`License validation failed: ${(error as Error).message}, remaining in Community tier`);
+      this.isValidated = true;
+      return this.getCommunityEntitlement('Validation failed');
+    }
   }
 
   async validateLicense(): Promise<EntitlementResponse> {
@@ -179,6 +209,44 @@ export class LicenseService implements OnModuleInit {
 
   async refreshLicense(): Promise<EntitlementResponse> {
     this.cache = null;
-    return this.validateLicense();
+    this.isValidated = false;
+    this.validationPromise = this.validateLicenseBackground();
+    return this.validationPromise;
+  }
+
+  /**
+   * Wait for license validation to complete (with timeout).
+   * Use this for routes that require paid tier access.
+   * Returns cached result if already validated.
+   */
+  async ensureValidated(timeoutMs = 5000): Promise<EntitlementResponse> {
+    // Already validated - return cached result
+    if (this.isValidated && this.cache) {
+      return this.cache.response;
+    }
+
+    // No validation in progress (community tier)
+    if (!this.validationPromise) {
+      return this.getCommunityEntitlement();
+    }
+
+    // Wait for validation with timeout
+    const timeout = new Promise<EntitlementResponse>((_, reject) =>
+      setTimeout(() => reject(new Error('License validation timeout')), timeoutMs),
+    );
+
+    try {
+      return await Promise.race([this.validationPromise, timeout]);
+    } catch (error) {
+      this.logger.warn(`ensureValidated timeout, using community tier: ${(error as Error).message}`);
+      return this.getCommunityEntitlement('Validation timeout');
+    }
+  }
+
+  /**
+   * Check if license validation has completed
+   */
+  isValidationComplete(): boolean {
+    return this.isValidated;
   }
 }
