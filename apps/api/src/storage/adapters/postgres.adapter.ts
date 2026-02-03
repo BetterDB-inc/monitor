@@ -1049,12 +1049,16 @@ export class PostgresAdapter implements StoragePort {
         port INTEGER NOT NULL,
         username TEXT,
         password TEXT,
+        password_encrypted BOOLEAN NOT NULL DEFAULT false,
         db_index INTEGER NOT NULL DEFAULT 0,
         tls BOOLEAN NOT NULL DEFAULT false,
         is_default BOOLEAN NOT NULL DEFAULT false,
         created_at BIGINT NOT NULL,
         updated_at BIGINT
       );
+
+      -- Migration: add password_encrypted column if it doesn't exist
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS password_encrypted BOOLEAN NOT NULL DEFAULT false;
 
       CREATE INDEX IF NOT EXISTS idx_connections_is_default ON connections(is_default);
     `);
@@ -2261,14 +2265,15 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     await this.pool.query(`
-      INSERT INTO connections (id, name, host, port, username, password, db_index, tls, is_default, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, is_default, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       ON CONFLICT(id) DO UPDATE SET
         name = EXCLUDED.name,
         host = EXCLUDED.host,
         port = EXCLUDED.port,
         username = EXCLUDED.username,
         password = EXCLUDED.password,
+        password_encrypted = EXCLUDED.password_encrypted,
         db_index = EXCLUDED.db_index,
         tls = EXCLUDED.tls,
         is_default = EXCLUDED.is_default,
@@ -2280,6 +2285,7 @@ export class PostgresAdapter implements StoragePort {
       config.port,
       config.username || null,
       config.password || null,
+      config.passwordEncrypted || false,
       config.dbIndex || 0,
       config.tls || false,
       config.isDefault || false,
@@ -2300,6 +2306,7 @@ export class PostgresAdapter implements StoragePort {
       port: row.port,
       username: row.username || undefined,
       password: row.password || undefined,
+      passwordEncrypted: row.password_encrypted || false,
       dbIndex: row.db_index,
       tls: row.tls,
       isDefault: row.is_default,
@@ -2322,6 +2329,7 @@ export class PostgresAdapter implements StoragePort {
       port: row.port,
       username: row.username || undefined,
       password: row.password || undefined,
+      passwordEncrypted: row.password_encrypted || false,
       dbIndex: row.db_index,
       tls: row.tls,
       isDefault: row.is_default,

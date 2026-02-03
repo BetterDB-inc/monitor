@@ -2059,6 +2059,7 @@ export class SqliteAdapter implements StoragePort {
         port INTEGER NOT NULL,
         username TEXT,
         password TEXT,
+        password_encrypted INTEGER DEFAULT 0,
         db_index INTEGER DEFAULT 0,
         tls INTEGER DEFAULT 0,
         is_default INTEGER DEFAULT 0,
@@ -2067,15 +2068,22 @@ export class SqliteAdapter implements StoragePort {
       )
     `);
 
+    // Migration: add password_encrypted column if it doesn't exist
+    const columns = this.db.prepare("PRAGMA table_info(connections)").all() as { name: string }[];
+    if (!columns.some(c => c.name === 'password_encrypted')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN password_encrypted INTEGER DEFAULT 0');
+    }
+
     const stmt = this.db.prepare(`
-      INSERT INTO connections (id, name, host, port, username, password, db_index, tls, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
         port = excluded.port,
         username = excluded.username,
         password = excluded.password,
+        password_encrypted = excluded.password_encrypted,
         db_index = excluded.db_index,
         tls = excluded.tls,
         is_default = excluded.is_default,
@@ -2089,6 +2097,7 @@ export class SqliteAdapter implements StoragePort {
       config.port,
       config.username || null,
       config.password || null,
+      config.passwordEncrypted ? 1 : 0,
       config.dbIndex || 0,
       config.tls ? 1 : 0,
       config.isDefault ? 1 : 0,
@@ -2113,6 +2122,7 @@ export class SqliteAdapter implements StoragePort {
       port: row.port,
       username: row.username || undefined,
       password: row.password || undefined,
+      passwordEncrypted: row.password_encrypted === 1,
       dbIndex: row.db_index,
       tls: row.tls === 1,
       isDefault: row.is_default === 1,
@@ -2137,6 +2147,7 @@ export class SqliteAdapter implements StoragePort {
       port: row.port,
       username: row.username || undefined,
       password: row.password || undefined,
+      passwordEncrypted: row.password_encrypted === 1,
       dbIndex: row.db_index,
       tls: row.tls === 1,
       isDefault: row.is_default === 1,

@@ -124,13 +124,21 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw error;
     }
 
-    // Connection succeeded - now persist state atomically
-    // Store encrypted config in DB, decrypted config in memory
-    await this.storage.saveConnection(this.encryptConfig(config));
-    this.configs.set(config.id, config);
-    this.connections.set(config.id, adapter);
-    this.defaultId = config.id;
-    this.logger.log('Created and connected to default connection from env vars');
+    // Connection succeeded - now persist state
+    // If storage fails, disconnect the adapter to prevent leaks
+    try {
+      // Store encrypted config in DB, decrypted config in memory
+      await this.storage.saveConnection(this.encryptConfig(config));
+      this.configs.set(config.id, config);
+      this.connections.set(config.id, adapter);
+      this.defaultId = config.id;
+      this.logger.log('Created and connected to default connection from env vars');
+    } catch (error) {
+      // Storage failed - disconnect the adapter to prevent leaks
+      await adapter.disconnect().catch(() => {});
+      this.logger.error(`Failed to persist default connection: ${error instanceof Error ? error.message : error}`);
+      throw error;
+    }
   }
 
   private createAdapter(config: DatabaseConnectionConfig): DatabasePort {
@@ -247,19 +255,27 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw new Error(`Connection failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
 
-    // Connection succeeded - now persist state atomically
-    // Store encrypted config in DB, decrypted config in memory
-    await this.storage.saveConnection(this.encryptConfig(config));
-    this.configs.set(id, config);
-    this.connections.set(id, adapter);
+    // Connection succeeded - now persist state
+    // If storage fails, disconnect the adapter to prevent leaks
+    try {
+      // Store encrypted config in DB, decrypted config in memory
+      await this.storage.saveConnection(this.encryptConfig(config));
+      this.configs.set(id, config);
+      this.connections.set(id, adapter);
 
-    // Handle setAsDefault parameter
-    if (request.setAsDefault) {
-      await this.setDefault(id);
+      // Handle setAsDefault parameter
+      if (request.setAsDefault) {
+        await this.setDefault(id);
+      }
+
+      this.logger.log(`Added connection: ${config.name} (${config.host}:${config.port})`);
+      return id;
+    } catch (error) {
+      // Storage failed - disconnect the adapter to prevent leaks
+      await adapter.disconnect().catch(() => {});
+      this.logger.error(`Failed to persist connection ${config.name}: ${error instanceof Error ? error.message : error}`);
+      throw error;
     }
-
-    this.logger.log(`Added connection: ${config.name} (${config.host}:${config.port})`);
-    return id;
   }
 
   async removeConnection(id: string): Promise<void> {
