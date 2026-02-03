@@ -1693,13 +1693,15 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
+      // Return webhooks scoped to this connection OR global webhooks (no connectionId)
       const rows = this.db.prepare('SELECT * FROM webhooks WHERE enabled = 1 AND (connection_id = ? OR connection_id IS NULL)').all(connectionId) as any[];
       return rows
         .map((row) => this.mappers.mapWebhookRow(row))
         .filter((webhook) => webhook.events.includes(event));
     }
 
-    const rows = this.db.prepare('SELECT * FROM webhooks WHERE enabled = 1').all() as any[];
+    // No connectionId provided - only return global webhooks (not scoped to any connection)
+    const rows = this.db.prepare('SELECT * FROM webhooks WHERE enabled = 1 AND connection_id IS NULL').all() as any[];
     return rows
       .map((row) => this.mappers.mapWebhookRow(row))
       .filter((webhook) => webhook.events.includes(event));

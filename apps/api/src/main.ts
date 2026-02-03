@@ -73,6 +73,7 @@ async function bootstrap(): Promise<void> {
         }
         callback(new Error('Not allowed by CORS'), false);
       },
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
       credentials: true,
     });
   }
