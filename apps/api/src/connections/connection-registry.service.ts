@@ -100,21 +100,22 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       updatedAt: now,
     };
 
-    await this.storage.saveConnection(config);
-    this.configs.set(config.id, config);
-
+    // Create and test connection BEFORE persisting state
     const adapter = this.createAdapter(config);
     try {
       await adapter.connect();
-      this.connections.set(config.id, adapter);
-      this.defaultId = config.id;
-      this.logger.log('Created and connected to default connection from env vars');
     } catch (error) {
-      this.connections.set(config.id, adapter);
-      this.defaultId = config.id;
+      // Connection failed - don't persist anything, let the error bubble up
       this.logger.error(`Failed to connect to default: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
+
+    // Connection succeeded - now persist state atomically
+    await this.storage.saveConnection(config);
+    this.configs.set(config.id, config);
+    this.connections.set(config.id, adapter);
+    this.defaultId = config.id;
+    this.logger.log('Created and connected to default connection from env vars');
   }
 
   private createAdapter(config: DatabaseConnectionConfig): DatabasePort {

@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { setCurrentConnectionId } from '../api/client';
+import { setCurrentConnectionId, fetchApi } from '../api/client';
 
 export interface Connection {
   id: string;
@@ -49,18 +49,9 @@ export function useConnectionState(): ConnectionContextValue {
       setLoading(true);
       setError(null);
 
-      // Fetch connections from API
-      const response = await fetch(
-        import.meta.env.PROD ? '/api/connections' : 'http://localhost:3001/connections'
-      );
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch connections: ${response.statusText}`);
-      }
-
-      const responseData = await response.json();
-      // Backend returns { connections: [...], currentId: ... }
-      const data: Connection[] = responseData.connections || responseData;
+      // Fetch connections from API using centralized client
+      const responseData = await fetchApi<{ connections: Connection[]; currentId: string | null }>('/connections');
+      const data: Connection[] = responseData.connections || [];
       setConnections(data);
 
       // If no current connection is set, select the first connected one or use currentId from response
