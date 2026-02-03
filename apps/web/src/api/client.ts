@@ -4,6 +4,27 @@ const API_BASE = import.meta.env.PROD
   ? '/api'
   : 'http://localhost:3001';
 
+// Connection ID header name (must match backend CONNECTION_ID_HEADER)
+const CONNECTION_ID_HEADER = 'x-connection-id';
+
+// Module-level state for current connection ID
+let currentConnectionId: string | null = null;
+
+/**
+ * Set the current connection ID for all subsequent API requests.
+ * This is called by the ConnectionContext when the user switches connections.
+ */
+export function setCurrentConnectionId(connectionId: string | null): void {
+  currentConnectionId = connectionId;
+}
+
+/**
+ * Get the current connection ID.
+ */
+export function getCurrentConnectionId(): string | null {
+  return currentConnectionId;
+}
+
 export class PaymentRequiredError extends Error {
   public readonly feature: string;
   public readonly currentTier: string;
@@ -36,6 +57,11 @@ export async function fetchApi<T>(
 
   if (options?.body) {
     headers['Content-Type'] = 'application/json';
+  }
+
+  // Inject connection ID header if set
+  if (currentConnectionId) {
+    headers[CONNECTION_ID_HEADER] = currentConnectionId;
   }
 
   const response = await fetch(`${API_BASE}${endpoint}`, {

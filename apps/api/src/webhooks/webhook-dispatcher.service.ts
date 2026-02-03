@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { LRUCache } from 'lru-cache';
 import type { Webhook, WebhookPayload, WebhookEventType, WebhookThresholds } from '@betterdb/shared';
@@ -12,6 +12,7 @@ import {
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { WebhooksService } from './webhooks.service';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 interface AlertState {
   fired: boolean;
@@ -65,6 +66,7 @@ export class WebhookDispatcherService {
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
     private readonly webhooksService: WebhooksService,
     private readonly configService: ConfigService,
+    @Optional() private readonly connectionRegistry?: ConnectionRegistry,
   ) {
     this.DEFAULT_REQUEST_TIMEOUT_MS = this.configService.get<number>('WEBHOOK_TIMEOUT_MS', DEFAULT_DELIVERY_CONFIG.timeoutMs);
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
@@ -72,25 +74,49 @@ export class WebhookDispatcherService {
   }
 
   /**
+   * Get host/port for a connection, falling back to default config values
+   */
+  private getInstanceInfo(connectionId?: string): { host: string; port: number } {
+    if (connectionId && this.connectionRegistry) {
+      const config = this.connectionRegistry.getConfig(connectionId);
+      if (config) {
+        return { host: config.host, port: config.port };
+      }
+    }
+    return { host: this.sourceHost, port: this.sourcePort };
+  }
+
+  /**
    * Dispatch a webhook event to all subscribed webhooks
+   * @param eventType The type of event to dispatch
+   * @param data Event data payload
+   * @param connectionId Optional connection ID to filter webhooks and include in payload
    */
   async dispatchEvent(
     eventType: WebhookEventType,
     data: Record<string, any>,
+    connectionId?: string,
   ): Promise<void> {
     try {
-      const webhooks = await this.webhooksService.getWebhooksByEvent(eventType);
+      // Get webhooks subscribed to this event, filtered by connectionId
+      // This returns webhooks that are either:
+      // - Globally scoped (no connectionId set)
+      // - Scoped to the specific connectionId
+      const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
 
       if (webhooks.length === 0) {
-        this.logger.debug(`No webhooks subscribed to event: ${eventType}`);
+        this.logger.debug(`No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`);
         return;
       }
 
-      this.logger.log(`Dispatching ${eventType} to ${webhooks.length} webhook(s)`);
+      this.logger.log(`Dispatching ${eventType} to ${webhooks.length} webhook(s)${connectionId ? ` for connection ${connectionId}` : ''}`);
+
+      // Enrich data with connectionId if provided
+      const enrichedData = connectionId ? { ...data, connectionId } : data;
 
       // Dispatch to all webhooks in parallel
       await Promise.allSettled(
-        webhooks.map(webhook => this.dispatchToWebhook(webhook, eventType, data))
+        webhooks.map(webhook => this.dispatchToWebhook(webhook, eventType, enrichedData, connectionId))
       );
 
     } catch (error) {
@@ -149,18 +175,26 @@ export class WebhookDispatcherService {
     threshold: number,
     isAbove: boolean,
     data: Record<string, any>,
+    connectionId?: string,
   ): Promise<void> {
     if (this.shouldFireAlert(alertKey, currentValue, threshold, isAbove)) {
       this.logger.log(
         `Threshold alert triggered: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`
       );
-      await this.dispatchEvent(eventType, data);
+      await this.dispatchEvent(eventType, data, connectionId);
     }
   }
 
   /**
    * Dispatch threshold-based alert with per-webhook threshold configuration
    * Each webhook can have its own threshold for the same alert type
+   * @param eventType The event type to dispatch
+   * @param alertKeyPrefix Prefix for alert state tracking
+   * @param currentValue The current metric value
+   * @param thresholdKey The threshold key to use
+   * @param isAbove True if alert fires when value is above threshold
+   * @param data Event data payload
+   * @param connectionId Optional connection ID to filter webhooks and include in payload
    */
   async dispatchThresholdAlertPerWebhook(
     eventType: WebhookEventType,
@@ -169,12 +203,14 @@ export class WebhookDispatcherService {
     thresholdKey: keyof WebhookThresholds,
     isAbove: boolean,
     data: Record<string, any>,
+    connectionId?: string,
   ): Promise<void> {
     try {
-      const webhooks = await this.webhooksService.getWebhooksByEvent(eventType);
+      // Get webhooks subscribed to this event, filtered by connectionId
+      const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
 
       if (webhooks.length === 0) {
-        this.logger.debug(`No webhooks subscribed to event: ${eventType}`);
+        this.logger.debug(`No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`);
         return;
       }
 
@@ -186,7 +222,10 @@ export class WebhookDispatcherService {
           const alertConfig = getAlertConfig(webhook);
 
           // Use per-webhook alert key to track state independently
-          const alertKey = `${alertKeyPrefix}:${webhook.id}`;
+          // Include connectionId in alert key for per-connection tracking
+          const alertKey = connectionId
+            ? `${alertKeyPrefix}:${connectionId}:${webhook.id}`
+            : `${alertKeyPrefix}:${webhook.id}`;
 
           if (this.shouldFireAlert(alertKey, currentValue, threshold, isAbove, alertConfig.hysteresisFactor)) {
             this.logger.log(
@@ -198,9 +237,10 @@ export class WebhookDispatcherService {
               ...data,
               threshold,
               thresholdKey,
+              ...(connectionId && { connectionId }),
             };
 
-            await this.dispatchToWebhook(webhook, eventType, enrichedData);
+            await this.dispatchToWebhook(webhook, eventType, enrichedData, connectionId);
           }
         })
       );
@@ -212,12 +252,16 @@ export class WebhookDispatcherService {
 
   /**
    * Dispatch health change events (instance.down, instance.up)
+   * @param eventType The health event type
+   * @param data Event data payload
+   * @param connectionId Optional connection ID to include in payload
    */
   async dispatchHealthChange(
     eventType: WebhookEventType.INSTANCE_DOWN | WebhookEventType.INSTANCE_UP,
     data: Record<string, any>,
+    connectionId?: string,
   ): Promise<void> {
-    await this.dispatchEvent(eventType, data);
+    await this.dispatchEvent(eventType, data, connectionId);
   }
 
   /**
@@ -246,11 +290,16 @@ export class WebhookDispatcherService {
 
   /**
    * Dispatch event to a single webhook
+   * @param webhook The webhook to dispatch to
+   * @param eventType The event type
+   * @param data Event data payload
+   * @param connectionId Optional connection ID to include in payload
    */
   private async dispatchToWebhook(
     webhook: Webhook,
     eventType: WebhookEventType,
     data: Record<string, any>,
+    connectionId?: string,
   ): Promise<void> {
     // Skip if webhook is disabled
     if (!webhook.enabled) {
@@ -258,24 +307,27 @@ export class WebhookDispatcherService {
       return;
     }
 
+    const instanceInfo = this.getInstanceInfo(connectionId);
     const payload: WebhookPayload = {
       id: crypto.randomUUID(),
       event: eventType,
       timestamp: Date.now(),
       instance: {
-        host: this.sourceHost,
-        port: this.sourcePort,
+        host: instanceInfo.host,
+        port: instanceInfo.port,
+        connectionId,
       },
       data,
     };
 
-    // Create delivery record
+    // Create delivery record with connectionId for scoping
     const delivery = await this.storageClient.createDelivery({
       webhookId: webhook.id,
       eventType,
       payload,
       status: DeliveryStatus.PENDING,
       attempts: 0,
+      connectionId,
     });
 
     // Send webhook immediately

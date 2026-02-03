@@ -5,6 +5,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { RefreshCw, Server, Info } from 'lucide-react';
 import { useCluster } from '../hooks/useCluster';
 import { usePolling } from '../hooks/usePolling';
+import { useConnection } from '../hooks/useConnection';
 import { metricsApi } from '../api/metrics';
 import { ClusterHealthCard } from '../components/cluster/ClusterHealthCard';
 import { ClusterTopology } from '../components/cluster/ClusterTopology';
@@ -17,6 +18,7 @@ import { SlotMigrations } from '../components/cluster/SlotMigrations';
 import { buildSlotNodeMap } from '../types/cluster';
 
 export function ClusterDashboard() {
+  const { currentConnection } = useConnection();
   const {
     isClusterMode,
     isLoading,
@@ -51,12 +53,14 @@ export function ClusterDashboard() {
     fetcher: nodeStatsFetcher,
     interval: 5000,
     enabled: shouldPoll,
+    refetchKey: currentConnection?.id,
   });
 
   const { data: migrations } = usePolling({
     fetcher: migrationsFetcher,
     interval: 5000,
     enabled: shouldPoll,
+    refetchKey: currentConnection?.id,
   });
 
   // Memoize slot-to-node mapping separately for reuse

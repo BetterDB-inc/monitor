@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { usePolling } from '../hooks/usePolling';
+import { useConnection } from '../hooks/useConnection';
 import { metricsApi } from '../api/metrics';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import {
@@ -113,6 +114,7 @@ function formatValue(value: number, metric: string): string {
 }
 
 export function AnomalyDashboard() {
+  const { currentConnection } = useConnection();
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
@@ -122,21 +124,25 @@ export function AnomalyDashboard() {
   const { data: summary } = usePolling<AnomalySummary>({
     fetcher: () => metricsApi.getAnomalySummary(),
     interval: 5000,
+    refetchKey: currentConnection?.id,
   });
 
   const { data: events } = usePolling<AnomalyEvent[]>({
     fetcher: () => metricsApi.getAnomalyEvents({ startTime }),
     interval: 5000,
+    refetchKey: currentConnection?.id,
   });
 
   const { data: groups } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime }),
     interval: 5000,
+    refetchKey: currentConnection?.id,
   });
 
   const { data: buffers } = usePolling<any[]>({
     fetcher: () => metricsApi.getAnomalyBuffers(),
     interval: 10000,
+    refetchKey: currentConnection?.id,
   });
 
   const toggleGroup = (id: string) => {

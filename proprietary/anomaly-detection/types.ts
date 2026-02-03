@@ -49,6 +49,7 @@ export interface AnomalyEvent {
   correlationId?: string;
   relatedMetrics?: MetricType[];
   resolved: boolean;
+  connectionId?: string;
 }
 
 export interface CorrelatedAnomalyGroup {
@@ -68,6 +69,7 @@ export interface MetricSample {
 
 export interface BufferStats {
   metricType: MetricType;
+  connectionId?: string;
   sampleCount: number;
   mean: number;
   stdDev: number;

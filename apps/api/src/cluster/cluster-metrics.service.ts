@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ClusterDiscoveryService, DiscoveredNode } from './cluster-discovery.service';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { InfoParser } from '../database/parsers/info.parser';
 import { SlowLogEntry, ClientInfo, CommandLogEntry, CommandLogType } from '../common/types/metrics.types';
@@ -58,7 +59,10 @@ export class ClusterMetricsService {
   private loggedErrors: Set<string> = new Set();
   private readonly MAX_LOGGED_ERRORS = 500;
 
-  constructor(private readonly discoveryService: ClusterDiscoveryService) {}
+  constructor(
+    private readonly discoveryService: ClusterDiscoveryService,
+    private readonly connectionRegistry: ConnectionRegistry,
+  ) {}
 
   private addLoggedError(errorKey: string): void {
     // Prevent unbounded growth
@@ -292,7 +296,7 @@ export class ClusterMetricsService {
 
     try {
       // Use primary connection instead of individual node connections
-      const client = this.discoveryService['dbClient'].getClient();
+      const client = this.connectionRegistry.get().getClient();
       const nodesString = (await client.call('CLUSTER', 'NODES')) as string;
       const lines = nodesString.trim().split('\n');
 

@@ -1,5 +1,5 @@
-import { Injectable, Inject } from '@nestjs/common';
-import { DatabasePort } from '../common/interfaces/database-port.interface';
+import { Injectable } from '@nestjs/common';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 import {
   InfoResponse,
   SlowLogEntry,
@@ -23,158 +23,163 @@ import { analyzeSlowLogPatterns } from './slowlog-analyzer';
 @Injectable()
 export class MetricsService {
   constructor(
-    @Inject('DATABASE_CLIENT')
-    private readonly dbClient: DatabasePort,
+    private readonly connectionRegistry: ConnectionRegistry,
   ) {}
 
-  async getInfoParsed(sections?: string[]): Promise<InfoResponse> {
-    return this.dbClient.getInfoParsed(sections);
+  private getClient(connectionId?: string) {
+    return this.connectionRegistry.get(connectionId);
   }
 
-  async getSlowLog(count?: number, excludeClientName?: string, startTime?: number, endTime?: number): Promise<SlowLogEntry[]> {
-    return this.dbClient.getSlowLog(count, excludeClientName, startTime, endTime);
+  async getInfoParsed(sections?: string[], connectionId?: string): Promise<InfoResponse> {
+    return this.getClient(connectionId).getInfoParsed(sections);
   }
 
-  async getSlowLogLength(): Promise<number> {
-    return this.dbClient.getSlowLogLength();
+  async getSlowLog(count?: number, excludeClientName?: string, startTime?: number, endTime?: number, connectionId?: string): Promise<SlowLogEntry[]> {
+    return this.getClient(connectionId).getSlowLog(count, excludeClientName, startTime, endTime);
   }
 
-  async resetSlowLog(): Promise<void> {
-    return this.dbClient.resetSlowLog();
+  async getSlowLogLength(connectionId?: string): Promise<number> {
+    return this.getClient(connectionId).getSlowLogLength();
   }
 
-  async getCommandLog(count?: number, type?: CommandLogType): Promise<CommandLogEntry[]> {
-    const capabilities = this.dbClient.getCapabilities();
+  async resetSlowLog(connectionId?: string): Promise<void> {
+    return this.getClient(connectionId).resetSlowLog();
+  }
+
+  async getCommandLog(count?: number, type?: CommandLogType, connectionId?: string): Promise<CommandLogEntry[]> {
+    const client = this.getClient(connectionId);
+    const capabilities = client.getCapabilities();
     if (!capabilities.hasCommandLog) {
       throw new Error('COMMANDLOG not supported on this database version');
     }
-    return this.dbClient.getCommandLog(count, type);
+    return client.getCommandLog(count, type);
   }
 
-  async getCommandLogLength(type?: CommandLogType): Promise<number> {
-    const capabilities = this.dbClient.getCapabilities();
+  async getCommandLogLength(type?: CommandLogType, connectionId?: string): Promise<number> {
+    const client = this.getClient(connectionId);
+    const capabilities = client.getCapabilities();
     if (!capabilities.hasCommandLog) {
       throw new Error('COMMANDLOG not supported on this database version');
     }
-    return this.dbClient.getCommandLogLength(type);
+    return client.getCommandLogLength(type);
   }
 
-  async resetCommandLog(type?: CommandLogType): Promise<void> {
-    const capabilities = this.dbClient.getCapabilities();
+  async resetCommandLog(type?: CommandLogType, connectionId?: string): Promise<void> {
+    const client = this.getClient(connectionId);
+    const capabilities = client.getCapabilities();
     if (!capabilities.hasCommandLog) {
       throw new Error('COMMANDLOG not supported on this database version');
     }
-    return this.dbClient.resetCommandLog(type);
+    return client.resetCommandLog(type);
   }
 
-  async getLatestLatencyEvents(): Promise<LatencyEvent[]> {
-    return this.dbClient.getLatestLatencyEvents();
+  async getLatestLatencyEvents(connectionId?: string): Promise<LatencyEvent[]> {
+    return this.getClient(connectionId).getLatestLatencyEvents();
   }
 
-  async getLatencyHistory(eventName: string): Promise<LatencyHistoryEntry[]> {
-    return this.dbClient.getLatencyHistory(eventName);
+  async getLatencyHistory(eventName: string, connectionId?: string): Promise<LatencyHistoryEntry[]> {
+    return this.getClient(connectionId).getLatencyHistory(eventName);
   }
 
-  async getLatencyHistogram(commands?: string[]): Promise<Record<string, LatencyHistogram>> {
-    return this.dbClient.getLatencyHistogram(commands);
+  async getLatencyHistogram(commands?: string[], connectionId?: string): Promise<Record<string, LatencyHistogram>> {
+    return this.getClient(connectionId).getLatencyHistogram(commands);
   }
 
-  async resetLatencyEvents(eventName?: string): Promise<void> {
-    return this.dbClient.resetLatencyEvents(eventName);
+  async resetLatencyEvents(eventName?: string, connectionId?: string): Promise<void> {
+    return this.getClient(connectionId).resetLatencyEvents(eventName);
   }
 
-  async getLatencyDoctor(): Promise<string> {
-    return this.dbClient.getLatencyDoctor();
+  async getLatencyDoctor(connectionId?: string): Promise<string> {
+    return this.getClient(connectionId).getLatencyDoctor();
   }
 
-  async getMemoryStats(): Promise<MemoryStats> {
-    return this.dbClient.getMemoryStats();
+  async getMemoryStats(connectionId?: string): Promise<MemoryStats> {
+    return this.getClient(connectionId).getMemoryStats();
   }
 
-  async getMemoryDoctor(): Promise<string> {
-    return this.dbClient.getMemoryDoctor();
+  async getMemoryDoctor(connectionId?: string): Promise<string> {
+    return this.getClient(connectionId).getMemoryDoctor();
   }
 
-  async getClients(filters?: ClientFilters): Promise<ClientInfo[]> {
-    return this.dbClient.getClients(filters);
+  async getClients(filters?: ClientFilters, connectionId?: string): Promise<ClientInfo[]> {
+    return this.getClient(connectionId).getClients(filters);
   }
 
-  async getClientById(id: string): Promise<ClientInfo | null> {
-    return this.dbClient.getClientById(id);
+  async getClientById(id: string, connectionId?: string): Promise<ClientInfo | null> {
+    return this.getClient(connectionId).getClientById(id);
   }
 
-  async killClient(filters: ClientFilters): Promise<number> {
-    return this.dbClient.killClient(filters);
+  async killClient(filters: ClientFilters, connectionId?: string): Promise<number> {
+    return this.getClient(connectionId).killClient(filters);
   }
 
-  async getAclLog(count?: number): Promise<AclLogEntry[]> {
-    const capabilities = this.dbClient.getCapabilities();
+  async getAclLog(count?: number, connectionId?: string): Promise<AclLogEntry[]> {
+    const client = this.getClient(connectionId);
+    const capabilities = client.getCapabilities();
     if (!capabilities.hasAclLog) {
       throw new Error('ACL LOG not supported on this database version');
     }
-    return this.dbClient.getAclLog(count);
+    return client.getAclLog(count);
   }
 
-  async resetAclLog(): Promise<void> {
-    const capabilities = this.dbClient.getCapabilities();
+  async resetAclLog(connectionId?: string): Promise<void> {
+    const client = this.getClient(connectionId);
+    const capabilities = client.getCapabilities();
     if (!capabilities.hasAclLog) {
       throw new Error('ACL LOG not supported on this database version');
     }
-    return this.dbClient.resetAclLog();
+    return client.resetAclLog();
   }
 
-  async getRole(): Promise<RoleInfo> {
-    return this.dbClient.getRole();
+  async getRole(connectionId?: string): Promise<RoleInfo> {
+    return this.getClient(connectionId).getRole();
   }
 
-  async getClusterInfo(): Promise<Record<string, string>> {
-    return this.dbClient.getClusterInfo();
+  async getClusterInfo(connectionId?: string): Promise<Record<string, string>> {
+    return this.getClient(connectionId).getClusterInfo();
   }
 
-  async getClusterNodes(): Promise<ClusterNode[]> {
-    return this.dbClient.getClusterNodes();
+  async getClusterNodes(connectionId?: string): Promise<ClusterNode[]> {
+    return this.getClient(connectionId).getClusterNodes();
   }
 
-  async getClusterSlotStats(orderBy?: 'key-count' | 'cpu-usec', limit?: number): Promise<SlotStats> {
-    const capabilities = this.dbClient.getCapabilities();
+  async getClusterSlotStats(orderBy?: 'key-count' | 'cpu-usec', limit?: number, connectionId?: string): Promise<SlotStats> {
+    const client = this.getClient(connectionId);
+    const capabilities = client.getCapabilities();
     if (!capabilities.hasClusterSlotStats) {
       throw new Error('CLUSTER SLOT-STATS not supported on this database version');
     }
-    return this.dbClient.getClusterSlotStats(orderBy, limit);
+    return client.getClusterSlotStats(orderBy, limit);
   }
 
-  async getConfigValue(parameter: string): Promise<string | null> {
-    return this.dbClient.getConfigValue(parameter);
+  async getConfigValue(parameter: string, connectionId?: string): Promise<string | null> {
+    return this.getClient(connectionId).getConfigValue(parameter);
   }
 
-  async getConfigValues(pattern: string): Promise<ConfigGetResponse> {
-    return this.dbClient.getConfigValues(pattern);
+  async getConfigValues(pattern: string, connectionId?: string): Promise<ConfigGetResponse> {
+    return this.getClient(connectionId).getConfigValues(pattern);
   }
 
-  async getDbSize(): Promise<number> {
-    return this.dbClient.getDbSize();
+  async getDbSize(connectionId?: string): Promise<number> {
+    return this.getClient(connectionId).getDbSize();
   }
 
-  async getLastSaveTime(): Promise<number> {
-    return this.dbClient.getLastSaveTime();
+  async getLastSaveTime(connectionId?: string): Promise<number> {
+    return this.getClient(connectionId).getLastSaveTime();
   }
 
-  async getSlowLogPatternAnalysis(
-    count?: number,
-  ): Promise<SlowLogPatternAnalysis> {
-    const entries = await this.dbClient.getSlowLog(count || 128);
+  async getSlowLogPatternAnalysis(count?: number, connectionId?: string): Promise<SlowLogPatternAnalysis> {
+    const entries = await this.getClient(connectionId).getSlowLog(count || 128);
     return analyzeSlowLogPatterns(entries);
   }
 
-  async getCommandLogPatternAnalysis(
-    count?: number,
-    type?: CommandLogType,
-  ): Promise<SlowLogPatternAnalysis> {
-    const capabilities = this.dbClient.getCapabilities();
+  async getCommandLogPatternAnalysis(count?: number, type?: CommandLogType, connectionId?: string): Promise<SlowLogPatternAnalysis> {
+    const client = this.getClient(connectionId);
+    const capabilities = client.getCapabilities();
     if (!capabilities.hasCommandLog) {
       throw new Error('COMMANDLOG not supported on this database version');
     }
-    const entries = await this.dbClient.getCommandLog(count || 128, type);
+    const entries = await client.getCommandLog(count || 128, type);
     return analyzeSlowLogPatterns(entries as SlowLogEntry[]);
   }
 }

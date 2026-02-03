@@ -1,9 +1,11 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ClusterDiscoveryService, DiscoveredNode } from './cluster-discovery.service';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 describe('ClusterDiscoveryService', () => {
   let service: ClusterDiscoveryService;
   let mockDbClient: any;
+  let mockConnectionRegistry: any;
 
   const mockClusterNodes = [
     {
@@ -46,10 +48,22 @@ describe('ClusterDiscoveryService', () => {
       }),
     };
 
+    mockConnectionRegistry = {
+      get: jest.fn().mockReturnValue(mockDbClient),
+      getDefaultId: jest.fn().mockReturnValue('test-connection'),
+      list: jest.fn().mockReturnValue([{
+        id: 'test-connection',
+        name: 'Test Connection',
+        host: 'localhost',
+        port: 6379,
+        isConnected: true,
+      }]),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ClusterDiscoveryService,
-        { provide: 'DATABASE_CLIENT', useValue: mockDbClient },
+        { provide: ConnectionRegistry, useValue: mockConnectionRegistry },
       ],
     }).compile();
 

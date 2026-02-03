@@ -1,4 +1,5 @@
 import { Controller, Get, Post, Query, Param, HttpCode, HttpStatus, UseGuards } from '@nestjs/common';
+import { ApiHeader } from '@nestjs/swagger';
 import { AnomalyService } from './anomaly.service';
 import {
   AnomalyEvent,
@@ -9,6 +10,7 @@ import {
   AnomalyPattern,
 } from './types';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/license';
+import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
 
 @Controller('anomaly')
 export class AnomalyController {
@@ -17,7 +19,9 @@ export class AnomalyController {
   @Get('events')
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   async getEvents(
+    @ConnectionId() connectionId?: string,
     @Query('limit') limit?: string,
     @Query('metricType') metricType?: MetricType,
     @Query('startTime') startTime?: string,
@@ -35,14 +39,17 @@ export class AnomalyController {
       parsedEndTime,
       undefined,
       metricType,
-      parsedLimit
+      parsedLimit,
+      connectionId
     );
   }
 
   @Get('groups')
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   async getGroups(
+    @ConnectionId() connectionId?: string,
     @Query('limit') limit?: string,
     @Query('pattern') pattern?: AnomalyPattern,
     @Query('startTime') startTime?: string,
@@ -59,14 +66,17 @@ export class AnomalyController {
       defaultStartTime,
       parsedEndTime,
       pattern,
-      parsedLimit
+      parsedLimit,
+      connectionId
     );
   }
 
   @Get('summary')
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   async getSummary(
+    @ConnectionId() connectionId?: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
   ): Promise<AnomalySummary> {
@@ -76,14 +86,15 @@ export class AnomalyController {
     // Default to last 24 hours to include persisted data
     const defaultStartTime = parsedStartTime || (Date.now() - 24 * 60 * 60 * 1000);
 
-    return this.anomalyService.getSummary(defaultStartTime, parsedEndTime);
+    return this.anomalyService.getSummary(defaultStartTime, parsedEndTime, connectionId);
   }
 
   @Get('buffers')
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
-  getBuffers(): BufferStats[] {
-    return this.anomalyService.getBufferStats();
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  getBuffers(@ConnectionId() connectionId?: string): BufferStats[] {
+    return this.anomalyService.getBufferStats(connectionId);
   }
 
   @Post('events/:id/resolve')

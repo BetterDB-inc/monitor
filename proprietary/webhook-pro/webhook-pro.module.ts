@@ -2,7 +2,6 @@ import { Module, Global } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { StorageModule } from '@app/storage/storage.module';
 import { WebhooksModule } from '@app/webhooks/webhooks.module';
-import { DatabaseModule } from '@app/database/database.module';
 import { SettingsModule } from '@app/settings/settings.module';
 import { LicenseModule } from '@proprietary/license';
 import { WebhookProService } from './webhook-pro.service';
@@ -18,7 +17,7 @@ import {
 
 @Global()
 @Module({
-  imports: [ConfigModule, StorageModule, WebhooksModule, DatabaseModule, SettingsModule, LicenseModule],
+  imports: [ConfigModule, StorageModule, WebhooksModule, SettingsModule, LicenseModule],
   providers: [
     WebhookProService,
     WebhookAnomalyIntegrationService,

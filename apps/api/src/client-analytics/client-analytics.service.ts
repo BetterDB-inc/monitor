@@ -1,6 +1,4 @@
 import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { DatabasePort } from '../common/interfaces/database-port.interface';
 import {
   StoragePort,
   StoredClientSnapshot,
@@ -10,41 +8,36 @@ import {
 } from '../common/interfaces/storage-port.interface';
 import { PrometheusService } from '../prometheus/prometheus.service';
 import { SettingsService } from '../settings/settings.service';
-import { BasePollingService } from '../common/services/base-polling.service';
+import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 @Injectable()
-export class ClientAnalyticsService extends BasePollingService implements OnModuleInit {
+export class ClientAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(ClientAnalyticsService.name);
 
   constructor(
-    @Inject('DATABASE_CLIENT') private dbClient: DatabasePort,
+    connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
-    private configService: ConfigService,
     private prometheusService: PrometheusService,
     private settingsService: SettingsService,
   ) {
-    super();
+    super(connectionRegistry);
   }
 
-  private get pollIntervalMs(): number {
+  protected getIntervalMs(): number {
     return this.settingsService.getCachedSettings().clientAnalyticsPollIntervalMs;
   }
 
   async onModuleInit(): Promise<void> {
-    this.startPollingLoop({
-      name: 'client-snapshot',
-      getIntervalMs: () => this.pollIntervalMs,
-      poll: () => this.captureSnapshot(),
-    });
+    this.start();
   }
 
-  private async captureSnapshot(): Promise<void> {
-    const endTimer = this.prometheusService.startPollTimer('client-analytics');
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    const endTimer = this.prometheusService.startPollTimer('client-analytics', ctx.connectionId);
 
     try {
-      const clients = await this.dbClient.getClients();
+      const clients = await ctx.client.getClients();
       const now = Date.now();
-      const dbConfig = this.configService.get('database');
 
       const snapshots: StoredClientSnapshot[] = clients.map((c) => ({
         id: 0,
@@ -65,13 +58,14 @@ export class ClientAnalyticsService extends BasePollingService implements OnModu
         oll: c.oll,
         omem: c.omem,
         capturedAt: now,
-        sourceHost: dbConfig.host,
-        sourcePort: dbConfig.port,
+        sourceHost: ctx.host,
+        sourcePort: ctx.port,
+        connectionId: ctx.connectionId,
       }));
 
-      const saved = await this.storage.saveClientSnapshot(snapshots);
-      this.logger.debug(`Saved ${saved} client snapshots`);
-      this.prometheusService.incrementPollCounter();
+      const saved = await this.storage.saveClientSnapshot(snapshots, ctx.connectionId);
+      this.logger.debug(`Saved ${saved} client snapshots for ${ctx.connectionName}`);
+      this.prometheusService.incrementPollCounter(ctx.connectionId);
     } finally {
       endTimer();
     }
@@ -81,25 +75,26 @@ export class ClientAnalyticsService extends BasePollingService implements OnModu
     return this.storage.getClientSnapshots(options);
   }
 
-  async getTimeSeries(startTime: number, endTime: number, bucketSizeMs?: number): Promise<ClientTimeSeriesPoint[]> {
-    return this.storage.getClientTimeSeries(startTime, endTime, bucketSizeMs);
+  async getTimeSeries(startTime: number, endTime: number, bucketSizeMs?: number, connectionId?: string): Promise<ClientTimeSeriesPoint[]> {
+    return this.storage.getClientTimeSeries(startTime, endTime, bucketSizeMs, connectionId);
   }
 
-  async getStats(startTime?: number, endTime?: number): Promise<ClientAnalyticsStats> {
-    return this.storage.getClientAnalyticsStats(startTime, endTime);
+  async getStats(startTime?: number, endTime?: number, connectionId?: string): Promise<ClientAnalyticsStats> {
+    return this.storage.getClientAnalyticsStats(startTime, endTime, connectionId);
   }
 
   async getConnectionHistory(
     identifier: { name?: string; user?: string; addr?: string },
     startTime?: number,
     endTime?: number,
+    connectionId?: string,
   ): Promise<StoredClientSnapshot[]> {
-    return this.storage.getClientConnectionHistory(identifier, startTime, endTime);
+    return this.storage.getClientConnectionHistory(identifier, startTime, endTime, connectionId);
   }
 
-  async cleanup(olderThanTimestamp?: number): Promise<number> {
+  async cleanup(olderThanTimestamp?: number, connectionId?: string): Promise<number> {
     // Default to 30 days ago if no timestamp provided
     const cutoff = olderThanTimestamp || Date.now() - (30 * 24 * 60 * 60 * 1000);
-    return this.storage.pruneOldClientSnapshots(cutoff);
+    return this.storage.pruneOldClientSnapshots(cutoff, connectionId);
   }
 }

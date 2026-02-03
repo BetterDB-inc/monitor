@@ -54,6 +54,7 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
     message: string;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Compliance alert event skipped - requires ENTERPRISE license');
@@ -74,7 +75,8 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         message: data.message,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 
@@ -91,6 +93,7 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
     count: number;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Audit policy violation event skipped - requires ENTERPRISE license');
@@ -109,7 +112,8 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         message: `ACL ${data.violationType} violation by ${data.username}@${data.clientInfo} (count: ${data.count})`,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 
@@ -124,6 +128,7 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
     reason: string;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('ACL violation event skipped - requires ENTERPRISE license');
@@ -140,7 +145,8 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         message: `ACL access denied: ${data.username} attempted ${data.command}${data.key ? ` on ${data.key}` : ''}`,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 
@@ -154,6 +160,7 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
     affectedUser?: string;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('ACL modified event skipped - requires ENTERPRISE license');
@@ -169,7 +176,8 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         message: `ACL configuration changed: ${data.changeType}${data.affectedUser ? ` (user: ${data.affectedUser})` : ''}`,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 
@@ -184,6 +192,7 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
     modifiedBy?: string;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Config changed event skipped - requires ENTERPRISE license');
@@ -200,7 +209,8 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         message: `Configuration changed: ${data.configKey} = ${data.newValue}${data.oldValue ? ` (was: ${data.oldValue})` : ''}`,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 }

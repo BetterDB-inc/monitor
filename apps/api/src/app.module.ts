@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ConfigModule } from './config/config.module';
-import { DatabaseModule } from './database/database.module';
+import { ConnectionsModule } from './connections/connections.module';
 import { HealthModule } from './health/health.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { AuditModule } from './audit/audit.module';
@@ -65,7 +65,7 @@ const baseImports = [
     ttl: 60000, // 60 seconds
     limit: 10000, // Very high default - endpoint-specific limits provide actual rate limiting
   }]),
-  DatabaseModule,
+  ConnectionsModule, // Must come early - provides ConnectionRegistry globally
   HealthModule,
   MetricsModule,
   AuditModule,

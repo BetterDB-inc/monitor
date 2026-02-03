@@ -91,6 +91,44 @@ export class SqliteAdapter implements StoragePort {
         this.db.exec(`ALTER TABLE webhooks ADD COLUMN ${col.name} ${col.type}`);
       }
     }
+
+    // Migrate connection_id to all data tables for multi-database support
+    this.migrateConnectionId();
+  }
+
+  /**
+   * Add connection_id column to all data tables for multi-database support.
+   * This migration is idempotent and safe to run multiple times.
+   */
+  private migrateConnectionId(): void {
+    if (!this.db) return;
+
+    const tables = [
+      'acl_audit',
+      'client_snapshots',
+      'anomaly_events',
+      'correlated_anomaly_groups',
+      'key_pattern_snapshots',
+      'webhooks',
+      'webhook_deliveries',
+      'slow_log_entries',
+      'command_log_entries',
+    ];
+
+    for (const table of tables) {
+      try {
+        // Check if column exists
+        const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+        if (!columns.some(c => c.name === 'connection_id')) {
+          // Add connection_id column with default value
+          this.db.exec(`ALTER TABLE ${table} ADD COLUMN connection_id TEXT DEFAULT 'env-default'`);
+          // Create index
+          this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_connection_id ON ${table}(connection_id)`);
+        }
+      } catch (error) {
+        // Table might not exist yet - that's fine, createSchema will handle it
+      }
+    }
   }
 
   async close(): Promise<void> {
@@ -105,7 +143,7 @@ export class SqliteAdapter implements StoragePort {
     return this.ready && this.db !== null;
   }
 
-  async saveAclEntries(entries: StoredAclEntry[]): Promise<number> {
+  async saveAclEntries(entries: StoredAclEntry[], connectionId: string): Promise<number> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -123,9 +161,10 @@ export class SqliteAdapter implements StoragePort {
         timestamp_last_updated,
         captured_at,
         source_host,
-        source_port
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(timestamp_created, username, object, reason, source_host, source_port)
+        source_port,
+        connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(timestamp_created, username, object, reason, source_host, source_port, connection_id)
       DO UPDATE SET
         count = excluded.count,
         age_seconds = excluded.age_seconds,
@@ -133,7 +172,7 @@ export class SqliteAdapter implements StoragePort {
         captured_at = excluded.captured_at
     `);
 
-    const insertMany = this.db.transaction((entries: StoredAclEntry[]) => {
+    const insertMany = this.db.transaction((entries: StoredAclEntry[], connId: string) => {
       for (const entry of entries) {
         insert.run(
           entry.count,
@@ -148,11 +187,12 @@ export class SqliteAdapter implements StoragePort {
           entry.capturedAt,
           entry.sourceHost,
           entry.sourcePort,
+          connId,
         );
       }
     });
 
-    insertMany(entries);
+    insertMany(entries, connectionId);
     return entries.length;
   }
 
@@ -163,6 +203,11 @@ export class SqliteAdapter implements StoragePort {
 
     const conditions: string[] = [];
     const params: (string | number)[] = [];
+
+    if (options.connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
 
     if (options.username) {
       conditions.push('username = ?');
@@ -202,13 +247,18 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapAclEntryRow(row));
   }
 
-  async getAuditStats(startTime?: number, endTime?: number): Promise<AuditStats> {
+  async getAuditStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AuditStats> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
 
     const conditions: string[] = [];
-    const params: number[] = [];
+    const params: (number | string)[] = [];
+
+    if (connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(connectionId);
+    }
 
     if (startTime) {
       conditions.push('captured_at >= ?');
@@ -271,9 +321,14 @@ export class SqliteAdapter implements StoragePort {
     };
   }
 
-  async pruneOldEntries(olderThanTimestamp: number): Promise<number> {
+  async pruneOldEntries(olderThanTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) {
       throw new Error('Database not initialized');
+    }
+
+    if (connectionId) {
+      const result = this.db.prepare('DELETE FROM acl_audit WHERE captured_at < ? AND connection_id = ?').run(olderThanTimestamp, connectionId);
+      return result.changes;
     }
 
     const result = this.db.prepare('DELETE FROM acl_audit WHERE captured_at < ?').run(olderThanTimestamp);
@@ -281,7 +336,7 @@ export class SqliteAdapter implements StoragePort {
     return result.changes;
   }
 
-  async saveClientSnapshot(clients: StoredClientSnapshot[]): Promise<number> {
+  async saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -290,11 +345,11 @@ export class SqliteAdapter implements StoragePort {
       INSERT INTO client_snapshots (
         client_id, addr, name, user, db, cmd, age, idle, flags,
         sub, psub, qbuf, qbuf_free, obl, oll, omem,
-        captured_at, source_host, source_port
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        captured_at, source_host, source_port, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const insertMany = this.db.transaction((clients: StoredClientSnapshot[]) => {
+    const insertMany = this.db.transaction((clients: StoredClientSnapshot[], connId: string) => {
       for (const client of clients) {
         insert.run(
           client.clientId,
@@ -316,11 +371,12 @@ export class SqliteAdapter implements StoragePort {
           client.capturedAt,
           client.sourceHost,
           client.sourcePort,
+          connId,
         );
       }
     });
 
-    insertMany(clients);
+    insertMany(clients, connectionId);
     return clients.length;
   }
 
@@ -331,6 +387,11 @@ export class SqliteAdapter implements StoragePort {
 
     const conditions: string[] = [];
     const params: (string | number)[] = [];
+
+    if (options.connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
 
     if (options.clientName) {
       conditions.push('name = ?');
@@ -379,9 +440,17 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapClientRow(row));
   }
 
-  async getClientTimeSeries(startTime: number, endTime: number, bucketSizeMs: number = 60000): Promise<ClientTimeSeriesPoint[]> {
+  async getClientTimeSeries(startTime: number, endTime: number, bucketSizeMs: number = 60000, connectionId?: string): Promise<ClientTimeSeriesPoint[]> {
     if (!this.db) {
       throw new Error('Database not initialized');
+    }
+
+    const conditions = ['captured_at >= ?', 'captured_at <= ?'];
+    const params: any[] = [bucketSizeMs, bucketSizeMs, startTime, endTime];
+
+    if (connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(connectionId);
     }
 
     const query = `
@@ -392,12 +461,12 @@ export class SqliteAdapter implements StoragePort {
         user,
         addr
       FROM client_snapshots
-      WHERE captured_at >= ? AND captured_at <= ?
+      WHERE ${conditions.join(' AND ')}
       GROUP BY bucket_time, name, user, addr
       ORDER BY bucket_time
     `;
 
-    const rows = this.db.prepare(query).all(bucketSizeMs, bucketSizeMs, startTime, endTime) as Array<{
+    const rows = this.db.prepare(query).all(...params) as Array<{
       bucket_time: number;
       total_connections: number;
       name: string;
@@ -434,13 +503,18 @@ export class SqliteAdapter implements StoragePort {
     return Array.from(pointsMap.values()).sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  async getClientAnalyticsStats(startTime?: number, endTime?: number): Promise<ClientAnalyticsStats> {
+  async getClientAnalyticsStats(startTime?: number, endTime?: number, connectionId?: string): Promise<ClientAnalyticsStats> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
 
     const conditions: string[] = [];
-    const params: number[] = [];
+    const params: (number | string)[] = [];
+
+    if (connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(connectionId);
+    }
 
     if (startTime) {
       conditions.push('captured_at >= ?');
@@ -622,6 +696,7 @@ export class SqliteAdapter implements StoragePort {
     identifier: { name?: string; user?: string; addr?: string },
     startTime?: number,
     endTime?: number,
+    connectionId?: string,
   ): Promise<StoredClientSnapshot[]> {
     if (!this.db) {
       throw new Error('Database not initialized');
@@ -629,6 +704,11 @@ export class SqliteAdapter implements StoragePort {
 
     const conditions: string[] = [];
     const params: (string | number)[] = [];
+
+    if (connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(connectionId);
+    }
 
     if (identifier.name) {
       conditions.push('name = ?');
@@ -668,9 +748,14 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapClientRow(row));
   }
 
-  async pruneOldClientSnapshots(olderThanTimestamp: number): Promise<number> {
+  async pruneOldClientSnapshots(olderThanTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) {
       throw new Error('Database not initialized');
+    }
+
+    if (connectionId) {
+      const result = this.db.prepare('DELETE FROM client_snapshots WHERE captured_at < ? AND connection_id = ?').run(olderThanTimestamp, connectionId);
+      return result.changes;
     }
 
     const result = this.db.prepare('DELETE FROM client_snapshots WHERE captured_at < ?').run(olderThanTimestamp);
@@ -698,14 +783,16 @@ export class SqliteAdapter implements StoragePort {
         captured_at INTEGER NOT NULL,
         source_host TEXT NOT NULL,
         source_port INTEGER NOT NULL,
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at INTEGER DEFAULT (strftime('%s', 'now')),
-        UNIQUE(timestamp_created, username, object, reason, source_host, source_port)
+        UNIQUE(timestamp_created, username, object, reason, source_host, source_port, connection_id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_acl_username ON acl_audit(username);
       CREATE INDEX IF NOT EXISTS idx_acl_reason ON acl_audit(reason);
       CREATE INDEX IF NOT EXISTS idx_acl_captured_at ON acl_audit(captured_at);
       CREATE INDEX IF NOT EXISTS idx_acl_timestamp_created ON acl_audit(timestamp_created);
+      CREATE INDEX IF NOT EXISTS idx_acl_connection_id ON acl_audit(connection_id);
 
       CREATE TABLE IF NOT EXISTS client_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -727,7 +814,8 @@ export class SqliteAdapter implements StoragePort {
         omem INTEGER NOT NULL DEFAULT 0,
         captured_at INTEGER NOT NULL,
         source_host TEXT NOT NULL,
-        source_port INTEGER NOT NULL
+        source_port INTEGER NOT NULL,
+        connection_id TEXT NOT NULL DEFAULT 'env-default'
       );
 
       CREATE INDEX IF NOT EXISTS idx_client_captured_at ON client_snapshots(captured_at);
@@ -739,6 +827,7 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_client_omem ON client_snapshots(omem) WHERE omem > 10000000;
       CREATE INDEX IF NOT EXISTS idx_client_cmd ON client_snapshots(cmd);
       CREATE INDEX IF NOT EXISTS idx_client_captured_at_cmd ON client_snapshots(captured_at, cmd);
+      CREATE INDEX IF NOT EXISTS idx_client_connection_id ON client_snapshots(connection_id);
 
       -- Anomaly Events Table
       CREATE TABLE IF NOT EXISTS anomaly_events (
@@ -760,6 +849,7 @@ export class SqliteAdapter implements StoragePort {
         duration_ms INTEGER,
         source_host TEXT,
         source_port INTEGER,
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
 
@@ -768,6 +858,7 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_metric ON anomaly_events(metric_type, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_correlation ON anomaly_events(correlation_id);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_unresolved ON anomaly_events(resolved, timestamp DESC) WHERE resolved = 0;
+      CREATE INDEX IF NOT EXISTS idx_anomaly_events_connection_id ON anomaly_events(connection_id);
 
       -- Correlated Anomaly Groups Table
       CREATE TABLE IF NOT EXISTS correlated_anomaly_groups (
@@ -781,12 +872,14 @@ export class SqliteAdapter implements StoragePort {
         metric_types TEXT NOT NULL,
         source_host TEXT,
         source_port INTEGER,
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
 
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_timestamp ON correlated_anomaly_groups(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_pattern ON correlated_anomaly_groups(pattern, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_severity ON correlated_anomaly_groups(severity, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_correlated_groups_connection_id ON correlated_anomaly_groups(connection_id);
 
       CREATE TABLE IF NOT EXISTS key_pattern_snapshots (
         id TEXT PRIMARY KEY,
@@ -807,12 +900,14 @@ export class SqliteAdapter implements StoragePort {
         avg_ttl_seconds INTEGER,
         min_ttl_seconds INTEGER,
         max_ttl_seconds INTEGER,
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
 
       CREATE INDEX IF NOT EXISTS idx_kps_timestamp ON key_pattern_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_kps_pattern ON key_pattern_snapshots(pattern, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_kps_pattern_timestamp ON key_pattern_snapshots(pattern, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_kps_connection_id ON key_pattern_snapshots(connection_id);
 
       CREATE TABLE IF NOT EXISTS app_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -837,9 +932,12 @@ export class SqliteAdapter implements StoragePort {
         delivery_config TEXT,
         alert_config TEXT,
         thresholds TEXT,
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
         updated_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
+
+      CREATE INDEX IF NOT EXISTS idx_webhooks_connection_id ON webhooks(connection_id);
 
       CREATE TABLE IF NOT EXISTS webhook_deliveries (
         id TEXT PRIMARY KEY,
@@ -851,6 +949,7 @@ export class SqliteAdapter implements StoragePort {
         response_body TEXT,
         attempts INTEGER DEFAULT 0,
         next_retry_at INTEGER,
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
         completed_at INTEGER,
         duration_ms INTEGER
@@ -858,6 +957,7 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_id ON webhook_deliveries(webhook_id);
       CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry ON webhook_deliveries(next_retry_at) WHERE status = 'retrying';
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_connection_id ON webhook_deliveries(connection_id);
 
       CREATE TABLE IF NOT EXISTS slow_log_entries (
         pk INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -870,7 +970,8 @@ export class SqliteAdapter implements StoragePort {
         captured_at INTEGER NOT NULL,
         source_host TEXT NOT NULL,
         source_port INTEGER NOT NULL,
-        UNIQUE(slowlog_id, source_host, source_port)
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
+        UNIQUE(slowlog_id, source_host, source_port, connection_id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_slowlog_timestamp ON slow_log_entries(timestamp DESC);
@@ -878,10 +979,35 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_slowlog_duration ON slow_log_entries(duration DESC);
       CREATE INDEX IF NOT EXISTS idx_slowlog_client_name ON slow_log_entries(client_name);
       CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_slowlog_connection_id ON slow_log_entries(connection_id);
+
+      -- Command Log Entries Table (Valkey-specific)
+      CREATE TABLE IF NOT EXISTS command_log_entries (
+        pk INTEGER PRIMARY KEY AUTOINCREMENT,
+        commandlog_id INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        duration INTEGER NOT NULL,
+        command TEXT NOT NULL DEFAULT '[]',
+        client_address TEXT,
+        client_name TEXT,
+        log_type TEXT NOT NULL,
+        captured_at INTEGER NOT NULL,
+        source_host TEXT NOT NULL,
+        source_port INTEGER NOT NULL,
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
+        UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_commandlog_timestamp ON command_log_entries(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_commandlog_type ON command_log_entries(log_type);
+      CREATE INDEX IF NOT EXISTS idx_commandlog_duration ON command_log_entries(duration DESC);
+      CREATE INDEX IF NOT EXISTS idx_commandlog_client_name ON command_log_entries(client_name);
+      CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_commandlog_connection_id ON command_log_entries(connection_id);
     `);
   }
 
-  async saveAnomalyEvent(event: StoredAnomalyEvent): Promise<string> {
+  async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
     if (!this.db) throw new Error('Database not initialized');
 
     const stmt = this.db.prepare(`
@@ -890,8 +1016,8 @@ export class SqliteAdapter implements StoragePort {
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
-        source_host, source_port
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = excluded.correlation_id,
         resolved = excluded.resolved,
@@ -917,13 +1043,14 @@ export class SqliteAdapter implements StoragePort {
       event.resolvedAt || null,
       event.durationMs || null,
       event.sourceHost || null,
-      event.sourcePort || null
+      event.sourcePort || null,
+      connectionId,
     );
 
     return event.id;
   }
 
-  async saveAnomalyEvents(events: StoredAnomalyEvent[]): Promise<number> {
+  async saveAnomalyEvents(events: StoredAnomalyEvent[], connectionId: string): Promise<number> {
     if (!this.db || events.length === 0) return 0;
 
     const stmt = this.db.prepare(`
@@ -932,11 +1059,11 @@ export class SqliteAdapter implements StoragePort {
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
-        source_host, source_port
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const insertMany = this.db.transaction((events: StoredAnomalyEvent[]) => {
+    const insertMany = this.db.transaction((events: StoredAnomalyEvent[], connId: string) => {
       for (const event of events) {
         stmt.run(
           event.id,
@@ -956,12 +1083,13 @@ export class SqliteAdapter implements StoragePort {
           event.resolvedAt || null,
           event.durationMs || null,
           event.sourceHost || null,
-          event.sourcePort || null
+          event.sourcePort || null,
+          connId,
         );
       }
     });
 
-    insertMany(events);
+    insertMany(events, connectionId);
     return events.length;
   }
 
@@ -971,6 +1099,10 @@ export class SqliteAdapter implements StoragePort {
     const conditions: string[] = [];
     const params: any[] = [];
 
+    if (options.connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
     if (options.startTime) {
       conditions.push('timestamp >= ?');
       params.push(options.startTime);
@@ -1010,12 +1142,16 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapAnomalyEventRow(row));
   }
 
-  async getAnomalyStats(startTime?: number, endTime?: number): Promise<AnomalyStats> {
+  async getAnomalyStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AnomalyStats> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
-    const params: number[] = [];
+    const params: (number | string)[] = [];
 
+    if (connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(connectionId);
+    }
     if (startTime) {
       conditions.push('timestamp >= ?');
       params.push(startTime);
@@ -1075,22 +1211,27 @@ export class SqliteAdapter implements StoragePort {
     return result.changes > 0;
   }
 
-  async pruneOldAnomalyEvents(cutoffTimestamp: number): Promise<number> {
+  async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db.prepare('DELETE FROM anomaly_events WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
 
     const result = this.db.prepare('DELETE FROM anomaly_events WHERE timestamp < ?').run(cutoffTimestamp);
     return result.changes;
   }
 
-  async saveCorrelatedGroup(group: StoredCorrelatedGroup): Promise<string> {
+  async saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string> {
     if (!this.db) throw new Error('Database not initialized');
 
     const stmt = this.db.prepare(`
       INSERT INTO correlated_anomaly_groups (
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(correlation_id) DO UPDATE SET
         diagnosis = excluded.diagnosis,
         recommendations = excluded.recommendations,
@@ -1107,7 +1248,8 @@ export class SqliteAdapter implements StoragePort {
       group.anomalyCount,
       JSON.stringify(group.metricTypes),
       group.sourceHost || null,
-      group.sourcePort || null
+      group.sourcePort || null,
+      connectionId,
     );
 
     return group.correlationId;
@@ -1119,6 +1261,10 @@ export class SqliteAdapter implements StoragePort {
     const conditions: string[] = [];
     const params: any[] = [];
 
+    if (options.connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
     if (options.startTime) {
       conditions.push('timestamp >= ?');
       params.push(options.startTime);
@@ -1154,14 +1300,19 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapCorrelatedGroupRow(row));
   }
 
-  async pruneOldCorrelatedGroups(cutoffTimestamp: number): Promise<number> {
+  async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db.prepare('DELETE FROM correlated_anomaly_groups WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
 
     const result = this.db.prepare('DELETE FROM correlated_anomaly_groups WHERE timestamp < ?').run(cutoffTimestamp);
     return result.changes;
   }
 
-  async saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[]): Promise<number> {
+  async saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[], connectionId: string): Promise<number> {
     if (!this.db || snapshots.length === 0) return 0;
 
     const stmt = this.db.prepare(`
@@ -1170,11 +1321,11 @@ export class SqliteAdapter implements StoragePort {
         keys_with_ttl, keys_expiring_soon, total_memory_bytes,
         avg_memory_bytes, max_memory_bytes, avg_access_frequency,
         hot_key_count, cold_key_count, avg_idle_time_seconds,
-        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const insertMany = this.db.transaction((snapshots: KeyPatternSnapshot[]) => {
+    const insertMany = this.db.transaction((snapshots: KeyPatternSnapshot[], connId: string) => {
       for (const snapshot of snapshots) {
         stmt.run(
           snapshot.id,
@@ -1195,11 +1346,12 @@ export class SqliteAdapter implements StoragePort {
           snapshot.avgTtlSeconds ?? null,
           snapshot.minTtlSeconds ?? null,
           snapshot.maxTtlSeconds ?? null,
+          connId,
         );
       }
     });
 
-    insertMany(snapshots);
+    insertMany(snapshots, connectionId);
     return snapshots.length;
   }
 
@@ -1209,6 +1361,10 @@ export class SqliteAdapter implements StoragePort {
     const conditions: string[] = [];
     const params: any[] = [];
 
+    if (options.connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
     if (options.startTime) {
       conditions.push('timestamp >= ?');
       params.push(options.startTime);
@@ -1240,12 +1396,16 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
   }
 
-  async getKeyAnalyticsSummary(startTime?: number, endTime?: number): Promise<KeyAnalyticsSummary | null> {
+  async getKeyAnalyticsSummary(startTime?: number, endTime?: number, connectionId?: string): Promise<KeyAnalyticsSummary | null> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
-    const params: number[] = [];
+    const params: (number | string)[] = [];
 
+    if (connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(connectionId);
+    }
     if (startTime) {
       conditions.push('timestamp >= ?');
       params.push(startTime);
@@ -1349,13 +1509,21 @@ export class SqliteAdapter implements StoragePort {
     };
   }
 
-  async getKeyPatternTrends(pattern: string, startTime: number, endTime: number): Promise<Array<{
+  async getKeyPatternTrends(pattern: string, startTime: number, endTime: number, connectionId?: string): Promise<Array<{
     timestamp: number;
     keyCount: number;
     memoryBytes: number;
     staleCount: number;
   }>> {
     if (!this.db) throw new Error('Database not initialized');
+
+    const conditions = ['pattern = ?', 'timestamp >= ?', 'timestamp <= ?'];
+    const params: any[] = [pattern, startTime, endTime];
+
+    if (connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(connectionId);
+    }
 
     const query = `
       SELECT
@@ -1364,11 +1532,11 @@ export class SqliteAdapter implements StoragePort {
         total_memory_bytes,
         stale_key_count
       FROM key_pattern_snapshots
-      WHERE pattern = ? AND timestamp >= ? AND timestamp <= ?
+      WHERE ${conditions.join(' AND ')}
       ORDER BY timestamp ASC
     `;
 
-    const rows = this.db.prepare(query).all(pattern, startTime, endTime) as any[];
+    const rows = this.db.prepare(query).all(...params) as any[];
 
     return rows.map(row => ({
       timestamp: row.timestamp,
@@ -1378,8 +1546,13 @@ export class SqliteAdapter implements StoragePort {
     }));
   }
 
-  async pruneOldKeyPatternSnapshots(cutoffTimestamp: number): Promise<number> {
+  async pruneOldKeyPatternSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db.prepare('DELETE FROM key_pattern_snapshots WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
 
     const result = this.db.prepare('DELETE FROM key_pattern_snapshots WHERE timestamp < ?').run(cutoffTimestamp);
     return result.changes;
@@ -1456,8 +1629,8 @@ export class SqliteAdapter implements StoragePort {
     const id = randomUUID();
     const now = Date.now();
     const stmt = this.db.prepare(`
-      INSERT INTO webhooks (id, name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (id, name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, connection_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -1472,6 +1645,7 @@ export class SqliteAdapter implements StoragePort {
       webhook.deliveryConfig ? JSON.stringify(webhook.deliveryConfig) : null,
       webhook.alertConfig ? JSON.stringify(webhook.alertConfig) : null,
       webhook.thresholds ? JSON.stringify(webhook.thresholds) : null,
+      webhook.connectionId || null,
       now,
       now
     );
@@ -1488,6 +1662,7 @@ export class SqliteAdapter implements StoragePort {
       deliveryConfig: webhook.deliveryConfig,
       alertConfig: webhook.alertConfig,
       thresholds: webhook.thresholds,
+      connectionId: webhook.connectionId,
       createdAt: now,
       updatedAt: now,
     };
@@ -1502,15 +1677,27 @@ export class SqliteAdapter implements StoragePort {
     return this.mappers.mapWebhookRow(row);
   }
 
-  async getWebhooksByInstance(): Promise<Webhook[]> {
+  async getWebhooksByInstance(connectionId?: string): Promise<Webhook[]> {
     if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const rows = this.db.prepare('SELECT * FROM webhooks WHERE connection_id = ? OR connection_id IS NULL ORDER BY created_at DESC').all(connectionId) as any[];
+      return rows.map((row) => this.mappers.mapWebhookRow(row));
+    }
 
     const rows = this.db.prepare('SELECT * FROM webhooks ORDER BY created_at DESC').all() as any[];
     return rows.map((row) => this.mappers.mapWebhookRow(row));
   }
 
-  async getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]> {
+  async getWebhooksByEvent(event: WebhookEventType, connectionId?: string): Promise<Webhook[]> {
     if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const rows = this.db.prepare('SELECT * FROM webhooks WHERE enabled = 1 AND (connection_id = ? OR connection_id IS NULL)').all(connectionId) as any[];
+      return rows
+        .map((row) => this.mappers.mapWebhookRow(row))
+        .filter((webhook) => webhook.events.includes(event));
+    }
 
     const rows = this.db.prepare('SELECT * FROM webhooks WHERE enabled = 1').all() as any[];
     return rows
@@ -1564,6 +1751,10 @@ export class SqliteAdapter implements StoragePort {
       setClauses.push('thresholds = ?');
       params.push(JSON.stringify(updates.thresholds));
     }
+    if (updates.connectionId !== undefined) {
+      setClauses.push('connection_id = ?');
+      params.push(updates.connectionId);
+    }
 
     if (setClauses.length === 0) {
       return this.getWebhook(id);
@@ -1595,9 +1786,9 @@ export class SqliteAdapter implements StoragePort {
     const stmt = this.db.prepare(`
       INSERT INTO webhook_deliveries (
         id, webhook_id, event_type, payload, status, status_code, response_body,
-        attempts, next_retry_at, completed_at, duration_ms, created_at
+        attempts, next_retry_at, completed_at, duration_ms, connection_id, created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -1612,6 +1803,7 @@ export class SqliteAdapter implements StoragePort {
       delivery.nextRetryAt || null,
       delivery.completedAt || null,
       delivery.durationMs || null,
+      delivery.connectionId || null,
       now
     );
 
@@ -1625,6 +1817,7 @@ export class SqliteAdapter implements StoragePort {
       responseBody: delivery.responseBody,
       attempts: delivery.attempts,
       nextRetryAt: delivery.nextRetryAt,
+      connectionId: delivery.connectionId,
       createdAt: now,
       completedAt: delivery.completedAt,
       durationMs: delivery.durationMs,
@@ -1693,10 +1886,21 @@ export class SqliteAdapter implements StoragePort {
     return result.changes > 0;
   }
 
-  async getRetriableDeliveries(limit: number = 100): Promise<WebhookDelivery[]> {
+  async getRetriableDeliveries(limit: number = 100, connectionId?: string): Promise<WebhookDelivery[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const now = Date.now();
+
+    if (connectionId) {
+      const rows = this.db.prepare(
+        `SELECT * FROM webhook_deliveries
+         WHERE status = 'retrying' AND next_retry_at <= ? AND connection_id = ?
+         ORDER BY next_retry_at ASC
+         LIMIT ?`
+      ).all(now, connectionId, limit) as any[];
+      return rows.map((row) => this.mappers.mapDeliveryRow(row));
+    }
+
     const rows = this.db.prepare(
       `SELECT * FROM webhook_deliveries
        WHERE status = 'retrying' AND next_retry_at <= ?
@@ -1707,26 +1911,31 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapDeliveryRow(row));
   }
 
-  async pruneOldDeliveries(cutoffTimestamp: number): Promise<number> {
+  async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db.prepare('DELETE FROM webhook_deliveries WHERE created_at < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
 
     const result = this.db.prepare('DELETE FROM webhook_deliveries WHERE created_at < ?').run(cutoffTimestamp);
     return result.changes;
   }
 
   // Slow Log Methods
-  async saveSlowLogEntries(entries: StoredSlowLogEntry[]): Promise<number> {
+  async saveSlowLogEntries(entries: StoredSlowLogEntry[], connectionId: string): Promise<number> {
     if (!this.db || entries.length === 0) return 0;
 
     const stmt = this.db.prepare(`
       INSERT OR IGNORE INTO slow_log_entries (
         slowlog_id, timestamp, duration, command,
-        client_address, client_name, captured_at, source_host, source_port
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        client_address, client_name, captured_at, source_host, source_port, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
-    const transaction = this.db.transaction(() => {
+    const transaction = this.db.transaction((connId: string) => {
       for (const entry of entries) {
         const result = stmt.run(
           entry.id,
@@ -1738,11 +1947,12 @@ export class SqliteAdapter implements StoragePort {
           entry.capturedAt,
           entry.sourceHost,
           entry.sourcePort,
+          connId,
         );
         count += result.changes;
       }
     });
-    transaction();
+    transaction(connectionId);
 
     return count;
   }
@@ -1753,6 +1963,10 @@ export class SqliteAdapter implements StoragePort {
     const conditions: string[] = [];
     const params: any[] = [];
 
+    if (options.connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
     if (options.startTime) {
       conditions.push('timestamp >= ?');
       params.push(options.startTime);
@@ -1780,7 +1994,7 @@ export class SqliteAdapter implements StoragePort {
 
     const rows = this.db.prepare(
       `SELECT slowlog_id, timestamp, duration, command,
-              client_address, client_name, captured_at, source_host, source_port
+              client_address, client_name, captured_at, source_host, source_port, connection_id
        FROM slow_log_entries
        ${whereClause}
        ORDER BY timestamp DESC
@@ -1790,22 +2004,32 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapSlowLogEntryRow(row));
   }
 
-  async getLatestSlowLogId(): Promise<number | null> {
+  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
     if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const row = this.db.prepare('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = ?').get(connectionId) as any;
+      return row?.max_id ?? null;
+    }
 
     const row = this.db.prepare('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries').get() as any;
     return row?.max_id ?? null;
   }
 
-  async pruneOldSlowLogEntries(cutoffTimestamp: number): Promise<number> {
+  async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db.prepare('DELETE FROM slow_log_entries WHERE captured_at < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
 
     const result = this.db.prepare('DELETE FROM slow_log_entries WHERE captured_at < ?').run(cutoffTimestamp);
     return result.changes;
   }
 
   // Command Log Methods (stub implementations for SQLite)
-  async saveCommandLogEntries(entries: StoredCommandLogEntry[]): Promise<number> {
+  async saveCommandLogEntries(entries: StoredCommandLogEntry[], connectionId: string): Promise<number> {
     // SQLite not used for command log persistence in this implementation
     return 0;
   }
@@ -1814,11 +2038,164 @@ export class SqliteAdapter implements StoragePort {
     return [];
   }
 
-  async getLatestCommandLogId(type: CommandLogType): Promise<number | null> {
+  async getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null> {
     return null;
   }
 
-  async pruneOldCommandLogEntries(cutoffTimestamp: number): Promise<number> {
+  async pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     return 0;
+  }
+
+  // Connection Management Methods
+  async saveConnection(config: import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Ensure connections table exists
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS connections (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        username TEXT,
+        password TEXT,
+        db_index INTEGER DEFAULT 0,
+        tls INTEGER DEFAULT 0,
+        is_default INTEGER DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER
+      )
+    `);
+
+    const stmt = this.db.prepare(`
+      INSERT INTO connections (id, name, host, port, username, password, db_index, tls, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        host = excluded.host,
+        port = excluded.port,
+        username = excluded.username,
+        password = excluded.password,
+        db_index = excluded.db_index,
+        tls = excluded.tls,
+        is_default = excluded.is_default,
+        updated_at = excluded.updated_at
+    `);
+
+    stmt.run(
+      config.id,
+      config.name,
+      config.host,
+      config.port,
+      config.username || null,
+      config.password || null,
+      config.dbIndex || 0,
+      config.tls ? 1 : 0,
+      config.isDefault ? 1 : 0,
+      config.createdAt,
+      config.updatedAt || null,
+    );
+  }
+
+  async getConnections(): Promise<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Return empty array if table doesn't exist
+    const tableExists = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='connections'").get();
+    if (!tableExists) return [];
+
+    const rows = this.db.prepare('SELECT * FROM connections ORDER BY created_at ASC').all() as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      host: row.host,
+      port: row.port,
+      username: row.username || undefined,
+      password: row.password || undefined,
+      dbIndex: row.db_index,
+      tls: row.tls === 1,
+      isDefault: row.is_default === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at || undefined,
+    }));
+  }
+
+  async getConnection(id: string): Promise<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const tableExists = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='connections'").get();
+    if (!tableExists) return null;
+
+    const row = this.db.prepare('SELECT * FROM connections WHERE id = ?').get(id) as any;
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      name: row.name,
+      host: row.host,
+      port: row.port,
+      username: row.username || undefined,
+      password: row.password || undefined,
+      dbIndex: row.db_index,
+      tls: row.tls === 1,
+      isDefault: row.is_default === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at || undefined,
+    };
+  }
+
+  async deleteConnection(id: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    this.db.prepare('DELETE FROM connections WHERE id = ?').run(id);
+  }
+
+  async updateConnection(id: string, updates: Partial<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig>): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const setClauses: string[] = [];
+    const params: any[] = [];
+
+    if (updates.name !== undefined) {
+      setClauses.push('name = ?');
+      params.push(updates.name);
+    }
+    if (updates.host !== undefined) {
+      setClauses.push('host = ?');
+      params.push(updates.host);
+    }
+    if (updates.port !== undefined) {
+      setClauses.push('port = ?');
+      params.push(updates.port);
+    }
+    if (updates.username !== undefined) {
+      setClauses.push('username = ?');
+      params.push(updates.username);
+    }
+    if (updates.password !== undefined) {
+      setClauses.push('password = ?');
+      params.push(updates.password);
+    }
+    if (updates.dbIndex !== undefined) {
+      setClauses.push('db_index = ?');
+      params.push(updates.dbIndex);
+    }
+    if (updates.tls !== undefined) {
+      setClauses.push('tls = ?');
+      params.push(updates.tls ? 1 : 0);
+    }
+    if (updates.isDefault !== undefined) {
+      setClauses.push('is_default = ?');
+      params.push(updates.isDefault ? 1 : 0);
+    }
+
+    if (setClauses.length === 0) return;
+
+    setClauses.push('updated_at = ?');
+    params.push(Date.now());
+    params.push(id);
+
+    this.db.prepare(`UPDATE connections SET ${setClauses.join(', ')} WHERE id = ?`).run(...params);
   }
 }

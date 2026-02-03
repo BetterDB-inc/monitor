@@ -1,6 +1,6 @@
-import { Injectable, Logger, Inject, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import Valkey from 'iovalkey';
-import { DatabasePort } from '../common/interfaces/database-port.interface';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { ClusterNode } from '../common/types/metrics.types';
 
 export interface DiscoveredNode {
@@ -42,15 +42,14 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly MAX_CONNECTIONS = 100; // Maximum number of concurrent connections
 
   constructor(
-    @Inject('DATABASE_CLIENT')
-    private readonly dbClient: DatabasePort,
+    private readonly connectionRegistry: ConnectionRegistry,
   ) {}
 
   async onModuleDestroy() {
     await this.disconnectAll();
   }
 
-  async discoverNodes(): Promise<DiscoveredNode[]> {
+  async discoverNodes(connectionId?: string): Promise<DiscoveredNode[]> {
     if (
       this.discoveryCache.length > 0 &&
       Date.now() - this.lastDiscoveryTime < this.DISCOVERY_CACHE_TTL
@@ -59,7 +58,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     }
 
     try {
-      const clusterNodes: ClusterNode[] = await this.dbClient.getClusterNodes();
+      const client = this.connectionRegistry.get(connectionId);
+      const clusterNodes: ClusterNode[] = await client.getClusterNodes();
       const discovered: DiscoveredNode[] = [];
 
       for (const node of clusterNodes) {
@@ -100,7 +100,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     }
   }
 
-  async getNodeConnection(nodeId: string): Promise<Valkey> {
+  async getNodeConnection(nodeId: string, connectionId?: string): Promise<Valkey> {
     const existingConnection = this.discoveredNodes.get(nodeId);
     if (existingConnection) {
       if (
@@ -158,7 +158,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Invalid node address: ${node.address}`);
     }
 
-    const primaryClient = this.dbClient.getClient();
+    const dbClient = this.connectionRegistry.get(connectionId);
+    const primaryClient = dbClient.getClient();
     const username = primaryClient.options.username || '';
     const password = primaryClient.options.password || '';
 

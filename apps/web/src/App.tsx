@@ -5,7 +5,9 @@ import { metricsApi } from './api/metrics';
 import { CapabilitiesContext } from './hooks/useCapabilities';
 import { LicenseContext, useLicenseStatus, useLicense } from './hooks/useLicense';
 import { UpgradePromptContext, useUpgradePromptState } from './hooks/useUpgradePrompt';
+import { ConnectionContext, useConnectionState } from './hooks/useConnection';
 import { UpgradePrompt } from './components/UpgradePrompt';
+import { ConnectionSelector } from './components/ConnectionSelector';
 import { Dashboard } from './pages/Dashboard';
 import { SlowLog } from './pages/SlowLog';
 import { Latency } from './pages/Latency';
@@ -26,6 +28,7 @@ function App() {
   const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(null);
   const { license } = useLicenseStatus();
   const upgradePromptState = useUpgradePromptState();
+  const connectionState = useConnectionState();
 
   useEffect(() => {
     metricsApi.getHealth()
@@ -39,20 +42,22 @@ function App() {
 
   return (
     <BrowserRouter>
-      <UpgradePromptContext.Provider value={upgradePromptState}>
-        <LicenseContext.Provider value={license}>
-          <CapabilitiesContext.Provider value={capabilities}>
-            <AppLayout />
-            <Tooltip id="license-tooltip" />
-            {upgradePromptState.error && (
-              <UpgradePrompt
-                error={upgradePromptState.error}
-                onDismiss={upgradePromptState.dismissUpgradePrompt}
-              />
-            )}
-          </CapabilitiesContext.Provider>
-        </LicenseContext.Provider>
-      </UpgradePromptContext.Provider>
+      <ConnectionContext.Provider value={connectionState}>
+        <UpgradePromptContext.Provider value={upgradePromptState}>
+          <LicenseContext.Provider value={license}>
+            <CapabilitiesContext.Provider value={capabilities}>
+              <AppLayout />
+              <Tooltip id="license-tooltip" />
+              {upgradePromptState.error && (
+                <UpgradePrompt
+                  error={upgradePromptState.error}
+                  onDismiss={upgradePromptState.dismissUpgradePrompt}
+                />
+              )}
+            </CapabilitiesContext.Provider>
+          </LicenseContext.Provider>
+        </UpgradePromptContext.Provider>
+      </ConnectionContext.Provider>
     </BrowserRouter>
   );
 }
@@ -63,8 +68,11 @@ function AppLayout() {
   return (
     <div className="min-h-screen bg-background">
       <aside className="fixed left-0 top-0 z-40 h-screen w-64 border-r bg-card flex flex-col">
-        <div className="p-6">
+        <div className="p-6 pb-2">
           <h2 className="text-lg font-semibold">BetterDB Monitor</h2>
+        </div>
+        <div className="border-b pb-2 mb-2">
+          <ConnectionSelector />
         </div>
         <nav className="space-y-1 px-3 flex-1">
           <NavItem to="/" active={location.pathname === '/'}>

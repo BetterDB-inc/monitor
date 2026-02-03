@@ -1,27 +1,32 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject } from '@nestjs/common';
-import { DatabasePort } from '@app/common/interfaces/database-port.interface';
+import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
 import { StoragePort, KeyPatternSnapshot } from '@app/common/interfaces/storage-port.interface';
+import { MultiConnectionPoller, ConnectionContext } from '@app/common/services/multi-connection-poller';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseService } from '@proprietary/license/license.service';
 import { randomUUID } from 'crypto';
 
 @Injectable()
-export class KeyAnalyticsService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(KeyAnalyticsService.name);
-  private intervalId: NodeJS.Timeout | null = null;
-  private isRunning = false;
+export class KeyAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
+  protected readonly logger = new Logger(KeyAnalyticsService.name);
+  private isRunning = new Map<string, boolean>();
 
   private readonly sampleSize: number;
   private readonly scanBatchSize: number;
   private readonly intervalMs: number;
 
   constructor(
-    @Inject('DATABASE_CLIENT') private readonly dbClient: DatabasePort,
+    connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly license: LicenseService,
   ) {
+    super(connectionRegistry);
     this.sampleSize = parseInt(process.env.KEY_ANALYTICS_SAMPLE_SIZE || '10000', 10);
     this.scanBatchSize = parseInt(process.env.KEY_ANALYTICS_SCAN_BATCH_SIZE || '1000', 10);
     this.intervalMs = parseInt(process.env.KEY_ANALYTICS_INTERVAL_MS || '300000', 10);
+  }
+
+  protected getIntervalMs(): number {
+    return this.intervalMs;
   }
 
   async onModuleInit() {
@@ -34,39 +39,24 @@ export class KeyAnalyticsService implements OnModuleInit, OnModuleDestroy {
       `Key Analytics service initialized (sample: ${this.sampleSize}, interval: ${this.intervalMs}ms)`,
     );
 
-    this.startPeriodicCollection();
+    this.start();
   }
 
-  async onModuleDestroy() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
+  protected onConnectionRemoved(connectionId: string): void {
+    this.isRunning.delete(connectionId);
   }
 
-  private startPeriodicCollection() {
-    this.collectKeyAnalytics().catch((err) => {
-      this.logger.error('Failed initial key analytics collection:', err);
-    });
-
-    this.intervalId = setInterval(() => {
-      this.collectKeyAnalytics().catch((err) => {
-        this.logger.error('Failed key analytics collection:', err);
-      });
-    }, this.intervalMs);
-  }
-
-  async collectKeyAnalytics() {
-    if (this.isRunning) {
-      this.logger.warn('Key analytics collection already running, skipping');
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    if (this.isRunning.get(ctx.connectionId)) {
+      this.logger.debug(`Key analytics collection already running for ${ctx.connectionName}, skipping`);
       return;
     }
 
-    this.isRunning = true;
+    this.isRunning.set(ctx.connectionId, true);
     const startTime = Date.now();
 
     try {
-      const client = this.dbClient.getClient();
+      const client = ctx.client.getClient();
       const dbSize = await client.dbsize();
 
       if (dbSize === 0) {
@@ -210,18 +200,18 @@ export class KeyAnalyticsService implements OnModuleInit, OnModuleDestroy {
         });
       }
 
-      await this.storage.saveKeyPatternSnapshots(snapshots);
+      await this.storage.saveKeyPatternSnapshots(snapshots, ctx.connectionId);
 
       const duration = Date.now() - startTime;
       this.logger.log(
-        `Key Analytics: sampled ${scanned}/${dbSize} keys (${(samplingRatio * 100).toFixed(1)}%), ` +
+        `Key Analytics (${ctx.connectionName}): sampled ${scanned}/${dbSize} keys (${(samplingRatio * 100).toFixed(1)}%), ` +
         `found ${patterns.size} patterns in ${duration}ms`,
       );
     } catch (error) {
-      this.logger.error('Error collecting key analytics:', error);
+      this.logger.error(`Error collecting key analytics for ${ctx.connectionName}:`, error);
       throw error;
     } finally {
-      this.isRunning = false;
+      this.isRunning.set(ctx.connectionId, false);
     }
   }
 
@@ -237,8 +227,8 @@ export class KeyAnalyticsService implements OnModuleInit, OnModuleDestroy {
     return patternParts.join(':');
   }
 
-  async getSummary(startTime?: number, endTime?: number) {
-    return this.storage.getKeyAnalyticsSummary(startTime, endTime);
+  async getSummary(startTime?: number, endTime?: number, connectionId?: string) {
+    return this.storage.getKeyAnalyticsSummary(startTime, endTime, connectionId);
   }
 
   async getPatternSnapshots(options?: {
@@ -246,15 +236,51 @@ export class KeyAnalyticsService implements OnModuleInit, OnModuleDestroy {
     startTime?: number;
     endTime?: number;
     limit?: number;
+    connectionId?: string;
   }) {
     return this.storage.getKeyPatternSnapshots(options);
   }
 
-  async getPatternTrends(pattern: string, startTime: number, endTime: number) {
-    return this.storage.getKeyPatternTrends(pattern, startTime, endTime);
+  async getPatternTrends(pattern: string, startTime: number, endTime: number, connectionId?: string) {
+    return this.storage.getKeyPatternTrends(pattern, startTime, endTime, connectionId);
   }
 
-  async pruneOldSnapshots(cutoffTimestamp: number): Promise<number> {
-    return this.storage.pruneOldKeyPatternSnapshots(cutoffTimestamp);
+  async pruneOldSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    return this.storage.pruneOldKeyPatternSnapshots(cutoffTimestamp, connectionId);
+  }
+
+  /**
+   * Manually trigger key analytics collection for all connected databases.
+   * Returns a promise that resolves when collection is complete for all connections.
+   */
+  async triggerCollection(): Promise<void> {
+    const connections = this.connectionRegistry.list();
+    const connectedConnections = connections.filter((conn) => conn.isConnected);
+
+    if (connectedConnections.length === 0) {
+      this.logger.warn('No connected databases found for key analytics collection');
+      return;
+    }
+
+    this.logger.log(`Manually triggering key analytics collection for ${connectedConnections.length} connection(s)`);
+
+    const promises = connectedConnections.map(async (conn) => {
+      try {
+        const client = this.connectionRegistry.get(conn.id);
+        await this.pollConnection({
+          connectionId: conn.id,
+          connectionName: conn.name,
+          client,
+          host: conn.host,
+          port: conn.port,
+        });
+      } catch (error) {
+        this.logger.warn(
+          `Manual collection failed for ${conn.name}: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+    });
+
+    await Promise.allSettled(promises);
   }
 }

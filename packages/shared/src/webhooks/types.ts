@@ -205,6 +205,7 @@ export interface Webhook {
   deliveryConfig?: WebhookDeliveryConfig;
   alertConfig?: WebhookAlertConfig;
   thresholds?: WebhookThresholds;
+  connectionId?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -219,26 +220,25 @@ export interface WebhookDelivery {
   responseBody?: string;
   attempts: number;
   nextRetryAt?: number;
+  connectionId?: string;
   createdAt: number;
   completedAt?: number;
   durationMs?: number;
-}
-
-export interface WebhookPayload {
-  id?: string;
-  event: WebhookEventType;
-  timestamp: number;
-  instance?: {
-    host: string;
-    port: number;
-  };
-  data: Record<string, any>;
 }
 
 // Instance info used across all webhook events
 export interface WebhookInstanceInfo {
   host: string;
   port: number;
+  connectionId?: string;
+}
+
+export interface WebhookPayload {
+  id?: string;
+  event: WebhookEventType;
+  timestamp: number;
+  instance?: WebhookInstanceInfo;
+  data: Record<string, any>;
 }
 
 // ============================================================================
@@ -256,6 +256,7 @@ export interface IWebhookEventsProService {
     threshold: number;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 
   dispatchReplicationLag(data: {
@@ -264,6 +265,7 @@ export interface IWebhookEventsProService {
     masterLinkStatus: string;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 
   dispatchClusterFailover(data: {
@@ -274,6 +276,7 @@ export interface IWebhookEventsProService {
     knownNodes: number;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 
   dispatchAnomalyDetected(data: {
@@ -286,6 +289,7 @@ export interface IWebhookEventsProService {
     message: string;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 
   dispatchLatencySpike(data: {
@@ -294,6 +298,7 @@ export interface IWebhookEventsProService {
     threshold: number;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 
   dispatchConnectionSpike(data: {
@@ -302,6 +307,7 @@ export interface IWebhookEventsProService {
     threshold: number;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 }
 
@@ -318,6 +324,7 @@ export interface IWebhookEventsEnterpriseService {
     message: string;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 
   dispatchAuditPolicyViolation(data: {
@@ -329,6 +336,7 @@ export interface IWebhookEventsEnterpriseService {
     count: number;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 
   dispatchAclViolation(data: {
@@ -338,6 +346,7 @@ export interface IWebhookEventsEnterpriseService {
     reason: string;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 
   dispatchAclModified(data: {
@@ -346,6 +355,7 @@ export interface IWebhookEventsEnterpriseService {
     affectedUser?: string;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 
   dispatchConfigChanged(data: {
@@ -355,5 +365,6 @@ export interface IWebhookEventsEnterpriseService {
     modifiedBy?: string;
     timestamp: number;
     instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 }

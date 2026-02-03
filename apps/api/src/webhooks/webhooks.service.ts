@@ -163,7 +163,7 @@ export class WebhooksService {
   /**
    * Create a new webhook
    */
-  async createWebhook(dto: CreateWebhookDto): Promise<Webhook> {
+  async createWebhook(dto: CreateWebhookDto & { connectionId?: string }): Promise<Webhook> {
     // Validate URL for SSRF
     await this.validateUrl(dto.url);
 
@@ -192,6 +192,7 @@ export class WebhooksService {
       deliveryConfig: dto.deliveryConfig,
       alertConfig: dto.alertConfig,
       thresholds: dto.thresholds,
+      connectionId: dto.connectionId,
     });
 
     this.logger.log(`Webhook created: ${webhook.id} - ${webhook.name}`);
@@ -220,23 +221,25 @@ export class WebhooksService {
   /**
    * Get all webhooks for the current instance
    */
-  async getAllWebhooks(): Promise<Webhook[]> {
-    return this.storageClient.getWebhooksByInstance();
+  async getAllWebhooks(connectionId?: string): Promise<Webhook[]> {
+    return this.storageClient.getWebhooksByInstance(connectionId);
   }
 
   /**
    * Get all webhooks with redacted secrets (for API responses)
    */
-  async getAllWebhooksRedacted(): Promise<Webhook[]> {
-    const webhooks = await this.getAllWebhooks();
+  async getAllWebhooksRedacted(connectionId?: string): Promise<Webhook[]> {
+    const webhooks = await this.getAllWebhooks(connectionId);
     return webhooks.map(webhook => this.redactSecret(webhook));
   }
 
   /**
    * Get webhooks subscribed to a specific event
+   * @param event The event type to filter by
+   * @param connectionId Optional connection ID to filter webhooks (null = global webhooks only)
    */
-  async getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]> {
-    return this.storageClient.getWebhooksByEvent(event);
+  async getWebhooksByEvent(event: WebhookEventType, connectionId?: string): Promise<Webhook[]> {
+    return this.storageClient.getWebhooksByEvent(event, connectionId);
   }
 
   /**
