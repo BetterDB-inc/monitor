@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Inject, Logger, Optional, forwardRef } from '@nestjs/common';
+import { Injectable, OnModuleInit, Inject, Logger, Optional, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Registry, Gauge, Counter, Histogram, collectDefaultMetrics } from 'prom-client';
 import {
@@ -15,6 +15,7 @@ import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
 import { HealthService } from '../health/health.service';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
+import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
@@ -36,11 +37,10 @@ interface ConnectionMetricState {
 }
 
 @Injectable()
-export class PrometheusService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(PrometheusService.name);
+export class PrometheusService extends MultiConnectionPoller implements OnModuleInit {
+  protected readonly logger = new Logger(PrometheusService.name);
   private registry: Registry;
-  private pollInterval: NodeJS.Timeout | null = null;
-  private readonly pollIntervalMs = 5000; // Poll every 5 seconds
+  private readonly pollIntervalMs: number;
 
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
@@ -147,7 +147,7 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
-    private readonly connectionRegistry: ConnectionRegistry,
+    connectionRegistry: ConnectionRegistry,
     private readonly configService: ConfigService,
     private readonly slowLogAnalytics: SlowLogAnalyticsService,
     private readonly commandLogAnalytics: CommandLogAnalyticsService,
@@ -156,8 +156,36 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
     @Optional() @Inject(WEBHOOK_EVENTS_PRO_SERVICE) private readonly webhookEventsProService?: IWebhookEventsProService,
     @Optional() @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE) private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
   ) {
+    super(connectionRegistry);
+    this.pollIntervalMs = this.configService.get<number>('PROMETHEUS_POLL_INTERVAL_MS', 5000);
     this.registry = new Registry();
     this.initializeMetrics();
+  }
+
+  protected getIntervalMs(): number {
+    return this.pollIntervalMs;
+  }
+
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    try {
+      // Update INFO-based metrics for this connection
+      await this.updateMetricsForConnection(ctx.connectionId);
+
+      // Update storage-based metrics for this connection
+      await this.updateStorageBasedMetricsForConnection(ctx.connectionId);
+
+      // Trigger health check on successful metrics update - may fire instance.up webhook if recovered
+      await this.healthService.getHealth(ctx.connectionId).catch(() => {});
+    } catch (error) {
+      // Trigger health check on failure - may fire instance.down webhook
+      await this.healthService.getHealth(ctx.connectionId).catch(() => {});
+      throw error; // Re-throw so base class logs the error
+    }
+  }
+
+  protected onConnectionRemoved(connectionId: string): void {
+    this.cleanupConnectionMetrics(connectionId);
+    this.logger.debug(`Cleaned up metrics state for removed connection: ${connectionId}`);
   }
 
   /**
@@ -204,39 +232,7 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit(): Promise<void> {
     collectDefaultMetrics({ register: this.registry, prefix: 'betterdb_' });
     this.logger.log(`Starting Prometheus metrics polling (interval: ${this.pollIntervalMs}ms)`);
-
-    // Do initial update
-    await this.updateMetrics().catch(err =>
-      this.logger.error('Failed initial metrics update', err)
-    );
-
-    // Start polling
-    this.startPolling();
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    if (this.pollInterval) {
-      clearInterval(this.pollInterval);
-      this.pollInterval = null;
-    }
-  }
-
-  private startPolling(): void {
-    const scheduleNextPoll = () => {
-      this.pollInterval = setTimeout(async () => {
-        try {
-          await this.updateMetrics();
-          // Check health on successful update (will trigger instance.up if recovered)
-          await this.healthService.getHealth().catch(() => {});
-        } catch (error) {
-          this.logger.error(`Failed to update metrics: ${error instanceof Error ? error.message : 'Unknown error'}`);
-          // Check health on failure (will trigger instance.down webhook)
-          await this.healthService.getHealth().catch(() => {});
-        }
-        scheduleNextPoll();
-      }, this.pollIntervalMs);
-    };
-    scheduleNextPoll();
+    this.start();
   }
 
   /**
@@ -375,48 +371,36 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Update metrics for ALL registered connections
+   * Update metrics for ALL registered connections (used by /metrics endpoint)
    */
   async updateMetrics(): Promise<void> {
     const connections = this.connectionRegistry.list();
     const connectedConnections = connections.filter(c => c.isConnected);
 
-    // Update INFO-based metrics for all connections
+    // Update both INFO-based and storage-based metrics for all connections
     for (const conn of connectedConnections) {
       try {
         await this.updateMetricsForConnection(conn.id);
+        await this.updateStorageBasedMetricsForConnection(conn.id);
       } catch (error) {
         this.logger.warn(
           `Failed to update metrics for connection ${conn.name}: ${error instanceof Error ? error.message : 'Unknown'}`
         );
       }
     }
-
-    // Update storage-based metrics (per-connection)
-    await this.updateStorageBasedMetrics();
   }
 
   /**
-   * Update all storage-based metrics for ALL registered connections
+   * Update storage-based metrics for a specific connection
    */
-  private async updateStorageBasedMetrics(): Promise<void> {
-    const connections = this.connectionRegistry.list();
+  private async updateStorageBasedMetricsForConnection(connectionId: string): Promise<void> {
+    const connLabel = this.getConnectionLabel(connectionId);
+    const state = this.getConnectionState(connectionId);
 
-    for (const conn of connections) {
-      const connLabel = this.getConnectionLabel(conn.id);
-      const state = this.getConnectionState(conn.id);
-
-      try {
-        await this.updateAclMetrics(conn.id, connLabel, state);
-        await this.updateClientMetrics(conn.id, connLabel, state);
-        await this.updateSlowlogMetrics(conn.id, connLabel, state);
-        await this.updateCommandlogMetrics(conn.id, connLabel, state);
-      } catch (error) {
-        this.logger.warn(
-          `Failed to update storage metrics for ${conn.name}: ${error instanceof Error ? error.message : 'Unknown'}`
-        );
-      }
-    }
+    await this.updateAclMetrics(connectionId, connLabel, state);
+    await this.updateClientMetrics(connectionId, connLabel, state);
+    await this.updateSlowlogMetrics(connectionId, connLabel, state);
+    await this.updateCommandlogMetrics(connectionId, connLabel, state);
   }
 
   /**
