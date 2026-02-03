@@ -206,8 +206,14 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
     return ['help', '?', 'commands', 'what can you do'].includes(normalized);
   }
 
-  private getHelpMessage(): string {
-    const dbType = this.connectionRegistry.get().getCapabilities().dbType.toUpperCase();
+  private getHelpMessage(connectionId?: string): string {
+    let dbType = 'DATABASE';
+    try {
+      const connection = this.connectionRegistry.get(connectionId);
+      dbType = connection.getCapabilities().dbType.toUpperCase();
+    } catch {
+      // Fall back to generic label if connection not found
+    }
     return `I can help you monitor your ${dbType} database. Try asking:
 
 **Server Status:**

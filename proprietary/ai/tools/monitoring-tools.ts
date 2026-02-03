@@ -35,7 +35,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'get_server_status',
       description: 'Get current server status: connected clients, memory usage, ops/sec, total keys, uptime',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
@@ -50,7 +50,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'get_connected_clients',
       description: 'Get number of connected and blocked clients',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
@@ -66,7 +66,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'get_memory_usage',
       description: 'Get memory usage statistics',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
@@ -78,7 +78,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'get_key_count',
       description: 'Get total number of keys in the database',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
@@ -99,7 +99,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
       description: 'Get slow command log entries',
       schema: z.object({
         count: z.number().default(10).describe('Number of entries to return'),
-      }),
+      }).passthrough(),
     }
   );
 
@@ -119,7 +119,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'get_slowlog_patterns',
       description: 'Analyze slow command patterns to identify common slow queries',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
@@ -145,7 +145,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
       description: 'Get list of connected clients grouped by name',
       schema: z.object({
         limit: z.number().default(10).describe('Max number of client groups to return'),
-      }),
+      }).passthrough(),
     }
   );
 
@@ -176,7 +176,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
       description: 'Get ACL/authentication failures from audit log',
       schema: z.object({
         hours: z.number().default(24).describe('Look back period in hours'),
-      }),
+      }).passthrough(),
     }
   );
 
@@ -200,7 +200,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
       description: 'Get client connection analytics and trends',
       schema: z.object({
         hours: z.number().default(24).describe('Look back period in hours'),
-      }),
+      }).passthrough(),
     }
   );
 
@@ -212,7 +212,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'run_latency_diagnosis',
       description: 'Run latency diagnostic analysis',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
@@ -224,7 +224,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'run_memory_diagnosis',
       description: 'Run memory diagnostic analysis',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
