@@ -2,9 +2,11 @@ import { useState, useRef, useEffect } from 'react';
 import { aiApi } from '../api/ai';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
 import { MessageCircle, Send, Loader2, Sparkles } from 'lucide-react';
+import { useConnection } from '../hooks/useConnection';
 import type { ChatMessage } from '@betterdb/shared';
 
 export function AiAssistant() {
+  const { currentConnection } = useConnection();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -19,6 +21,12 @@ export function AiAssistant() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Clear chat when connection changes
+  useEffect(() => {
+    setMessages([]);
+    setError(null);
+  }, [currentConnection?.id]);
 
   const suggestedQuestions = [
     "How many clients are connected?",

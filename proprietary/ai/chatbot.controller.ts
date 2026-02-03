@@ -1,12 +1,28 @@
 import { Controller, Post, Get, Body } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiHeader } from '@nestjs/swagger';
+import { IsString, IsArray, IsOptional, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ConnectionId, CONNECTION_ID_HEADER } from '@app/common/decorators';
 import { ChatbotService } from './chatbot.service';
 import { OllamaService } from './ollama.service';
 import type { ChatMessage } from '@betterdb/shared';
 
+class ChatMessageDto {
+  @IsString()
+  role: 'user' | 'assistant';
+
+  @IsString()
+  content: string;
+}
+
 class ChatRequestDto {
+  @IsString()
   message: string;
+
+  @IsArray()
+  @IsOptional()
+  @ValidateNested({ each: true })
+  @Type(() => ChatMessageDto)
   history?: ChatMessage[];
 }
 
