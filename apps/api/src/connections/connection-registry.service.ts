@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, DatabaseConnectionConfig } from '@betterdb/shared';
@@ -201,12 +201,14 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   get(id?: string): DatabasePort {
     const targetId = id || this.defaultId;
     if (!targetId) {
-      throw new Error('No connection available');
+      throw new NotFoundException('No connection available');
     }
 
     const connection = this.connections.get(targetId);
     if (!connection) {
-      throw new Error(`Connection ${targetId} not found`);
+      throw new NotFoundException(
+        `Connection '${targetId}' not found. Use GET /connections to list available connections.`
+      );
     }
 
     return connection;
@@ -306,7 +308,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async setDefault(id: string): Promise<void> {
     if (!this.configs.has(id)) {
-      throw new Error(`Connection ${id} not found`);
+      throw new NotFoundException(
+        `Connection '${id}' not found. Use GET /connections to list available connections.`
+      );
     }
 
     // Unmark old default
@@ -401,7 +405,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   async reconnect(id: string): Promise<void> {
     const config = this.configs.get(id);
     if (!config) {
-      throw new Error(`Connection ${id} not found`);
+      throw new NotFoundException(
+        `Connection '${id}' not found. Use GET /connections to list available connections.`
+      );
     }
 
     const oldAdapter = this.connections.get(id);
