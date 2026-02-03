@@ -231,24 +231,32 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: request.password,
       dbIndex: request.dbIndex,
       tls: request.tls,
-      isDefault: false,
+      isDefault: false, // Will be set via setDefault() if requested
       createdAt: now,
       updatedAt: now,
     };
 
-    // Test connection first
-    const testResult = await this.testConnection(request);
-    if (!testResult.success) {
-      throw new Error(testResult.error || 'Connection test failed');
+    // Create and connect adapter BEFORE persisting to storage
+    // This ensures we don't end up with config in storage but no working connection
+    const adapter = this.createAdapter(config);
+    try {
+      await adapter.connect();
+    } catch (error) {
+      // Connection failed - don't persist anything
+      this.logger.error(`Failed to connect to ${config.name}: ${error instanceof Error ? error.message : error}`);
+      throw new Error(`Connection failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
 
+    // Connection succeeded - now persist state atomically
     // Store encrypted config in DB, decrypted config in memory
     await this.storage.saveConnection(this.encryptConfig(config));
     this.configs.set(id, config);
-
-    const adapter = this.createAdapter(config);
-    await adapter.connect();
     this.connections.set(id, adapter);
+
+    // Handle setAsDefault parameter
+    if (request.setAsDefault) {
+      await this.setDefault(id);
+    }
 
     this.logger.log(`Added connection: ${config.name} (${config.host}:${config.port})`);
     return id;
