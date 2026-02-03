@@ -8,6 +8,8 @@ export interface DatabaseConnectionConfig {
   port: number;
   username?: string;
   password?: string;
+  /** Whether the password is encrypted (envelope encryption) */
+  passwordEncrypted?: boolean;
   dbIndex?: number;
   tls?: boolean;
   isDefault?: boolean;

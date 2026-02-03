@@ -146,6 +146,19 @@ This means:
 | `PORT` | No | `3001` | Application HTTP port |
 | `NODE_ENV` | No | `production` | Node environment (`production` or `development`) |
 
+### Security
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ENCRYPTION_KEY` | No | - | Master key for encrypting stored passwords (min 16 characters) |
+
+**Password Encryption**: When `ENCRYPTION_KEY` is set, all connection passwords are encrypted at rest using envelope encryption (AES-256-GCM). Each password gets a unique encryption key (DEK) that is itself encrypted with a master key (KEK) derived from your `ENCRYPTION_KEY`.
+
+- If not set, passwords are stored in plaintext (a warning is logged at startup)
+- Use a strong, random key (e.g., `openssl rand -base64 32`)
+- Store the key securely (e.g., in a secrets manager)
+- If you lose the key, encrypted passwords cannot be recovered
+
 ### Audit Trail
 
 | Variable | Required | Default | Description |

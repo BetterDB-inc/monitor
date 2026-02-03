@@ -5,6 +5,7 @@ import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, Data
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
+import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils/encryption';
 
 const ENV_DEFAULT_ID = 'env-default';
 
@@ -14,11 +15,22 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private connections = new Map<string, DatabasePort>();
   private configs = new Map<string, DatabaseConnectionConfig>();
   private defaultId: string | null = null;
+  private readonly encryption: EnvelopeEncryptionService | null;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly configService: ConfigService,
-  ) {}
+  ) {
+    this.encryption = getEncryptionService();
+    if (this.encryption) {
+      this.logger.log('Password encryption enabled');
+    } else {
+      this.logger.warn(
+        'ENCRYPTION_KEY not set - connection passwords will be stored in plaintext. ' +
+        'Set ENCRYPTION_KEY environment variable (min 16 chars) to enable password encryption.'
+      );
+    }
+  }
 
   async onModuleInit(): Promise<void> {
     await this.loadConnections();
@@ -51,9 +63,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       await this.createEnvDefaultConnection();
     } else {
       for (const config of savedConnections) {
-        this.configs.set(config.id, config);
+        // Decrypt password if encrypted
+        const decryptedConfig = this.decryptConfig(config);
+        this.configs.set(config.id, decryptedConfig);
         try {
-          const adapter = this.createAdapter(config);
+          const adapter = this.createAdapter(decryptedConfig);
           await adapter.connect();
           this.connections.set(config.id, adapter);
           this.logger.log(`Connected to ${config.name} (${config.host}:${config.port})`);
@@ -64,7 +78,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         } catch (error) {
           this.logger.warn(`Failed to connect to ${config.name}: ${error instanceof Error ? error.message : error}`);
           // Still store the adapter even if connection failed - allows reconnection
-          const adapter = this.createAdapter(config);
+          const adapter = this.createAdapter(decryptedConfig);
           this.connections.set(config.id, adapter);
         }
       }
@@ -111,7 +125,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
 
     // Connection succeeded - now persist state atomically
-    await this.storage.saveConnection(config);
+    // Store encrypted config in DB, decrypted config in memory
+    await this.storage.saveConnection(this.encryptConfig(config));
     this.configs.set(config.id, config);
     this.connections.set(config.id, adapter);
     this.defaultId = config.id;
@@ -125,6 +140,54 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       username: config.username || 'default',
       password: config.password || '',
     });
+  }
+
+  /**
+   * Encrypt password in config for storage.
+   * Returns a new config object with encrypted password.
+   */
+  private encryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    if (!this.encryption || !config.password) {
+      return config;
+    }
+
+    return {
+      ...config,
+      password: this.encryption.encrypt(config.password),
+      passwordEncrypted: true,
+    };
+  }
+
+  /**
+   * Decrypt password in config for use.
+   * Returns a new config object with decrypted password.
+   */
+  private decryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    if (!config.passwordEncrypted || !config.password) {
+      return config;
+    }
+
+    if (!this.encryption) {
+      this.logger.error(
+        `Cannot decrypt password for ${config.name}: ENCRYPTION_KEY not set. ` +
+        'The password was encrypted but the key is not available.'
+      );
+      // Return config without password - connection will fail but won't crash
+      return { ...config, password: undefined };
+    }
+
+    try {
+      return {
+        ...config,
+        password: this.encryption.decrypt(config.password),
+        passwordEncrypted: false, // Mark as decrypted in memory
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to decrypt password for ${config.name}: ${error instanceof Error ? error.message : error}`
+      );
+      return { ...config, password: undefined };
+    }
   }
 
   get(id?: string): DatabasePort {
@@ -179,7 +242,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw new Error(testResult.error || 'Connection test failed');
     }
 
-    await this.storage.saveConnection(config);
+    // Store encrypted config in DB, decrypted config in memory
+    await this.storage.saveConnection(this.encryptConfig(config));
     this.configs.set(id, config);
 
     const adapter = this.createAdapter(config);

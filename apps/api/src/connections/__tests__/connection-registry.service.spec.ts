@@ -4,6 +4,7 @@ import { ConnectionRegistry } from '../connection-registry.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
 import { DatabaseConnectionConfig } from '@betterdb/shared';
+import { resetEncryptionService } from '../../common/utils/encryption';
 
 // Mock UnifiedDatabaseAdapter
 jest.mock('../../database/adapters/unified.adapter', () => ({
@@ -466,5 +467,205 @@ describe('ConnectionRegistry', () => {
     it('should return false for other ids', () => {
       expect(registry.isEnvDefault('some-other-id')).toBe(false);
     });
+  });
+});
+
+describe('ConnectionRegistry with encryption', () => {
+  let registry: ConnectionRegistry;
+  let mockStorage: jest.Mocked<StoragePort>;
+  let mockConfigService: jest.Mocked<ConfigService>;
+  const originalEnv = process.env.ENCRYPTION_KEY;
+
+  const createMockStorage = (): jest.Mocked<StoragePort> => ({
+    initialize: jest.fn().mockResolvedValue(undefined),
+    close: jest.fn().mockResolvedValue(undefined),
+    isReady: jest.fn().mockReturnValue(true),
+    getConnections: jest.fn().mockResolvedValue([]),
+    saveConnection: jest.fn().mockResolvedValue(undefined),
+    getConnection: jest.fn().mockResolvedValue(null),
+    deleteConnection: jest.fn().mockResolvedValue(undefined),
+    updateConnection: jest.fn().mockResolvedValue(undefined),
+    saveAclEntries: jest.fn(),
+    getAclEntries: jest.fn(),
+    getAuditStats: jest.fn(),
+    pruneOldEntries: jest.fn(),
+    saveClientSnapshot: jest.fn(),
+    getClientSnapshots: jest.fn(),
+    getClientTimeSeries: jest.fn(),
+    getClientAnalyticsStats: jest.fn(),
+    getClientConnectionHistory: jest.fn(),
+    pruneOldClientSnapshots: jest.fn(),
+    saveAnomalyEvent: jest.fn(),
+    saveAnomalyEvents: jest.fn(),
+    getAnomalyEvents: jest.fn(),
+    getAnomalyStats: jest.fn(),
+    resolveAnomaly: jest.fn(),
+    pruneOldAnomalyEvents: jest.fn(),
+    saveCorrelatedGroup: jest.fn(),
+    getCorrelatedGroups: jest.fn(),
+    pruneOldCorrelatedGroups: jest.fn(),
+    saveKeyPatternSnapshots: jest.fn(),
+    getKeyPatternSnapshots: jest.fn(),
+    getKeyAnalyticsSummary: jest.fn(),
+    getKeyPatternTrends: jest.fn(),
+    pruneOldKeyPatternSnapshots: jest.fn(),
+    getSettings: jest.fn(),
+    saveSettings: jest.fn(),
+    updateSettings: jest.fn(),
+    createWebhook: jest.fn(),
+    getWebhook: jest.fn(),
+    getWebhooksByInstance: jest.fn(),
+    getWebhooksByEvent: jest.fn(),
+    updateWebhook: jest.fn(),
+    deleteWebhook: jest.fn(),
+    createDelivery: jest.fn(),
+    getDelivery: jest.fn(),
+    getDeliveriesByWebhook: jest.fn(),
+    updateDelivery: jest.fn(),
+    getRetriableDeliveries: jest.fn(),
+    pruneOldDeliveries: jest.fn(),
+    saveSlowLogEntries: jest.fn(),
+    getSlowLogEntries: jest.fn(),
+    getLatestSlowLogId: jest.fn(),
+    pruneOldSlowLogEntries: jest.fn(),
+    saveCommandLogEntries: jest.fn(),
+    getCommandLogEntries: jest.fn(),
+    getLatestCommandLogId: jest.fn(),
+    pruneOldCommandLogEntries: jest.fn(),
+  } as unknown as jest.Mocked<StoragePort>);
+
+  beforeAll(() => {
+    process.env.ENCRYPTION_KEY = 'test-encryption-key-for-tests';
+  });
+
+  afterAll(() => {
+    if (originalEnv !== undefined) {
+      process.env.ENCRYPTION_KEY = originalEnv;
+    } else {
+      delete process.env.ENCRYPTION_KEY;
+    }
+    resetEncryptionService();
+  });
+
+  beforeEach(async () => {
+    resetEncryptionService();
+    mockStorage = createMockStorage();
+    mockConfigService = {
+      get: jest.fn().mockImplementation((key: string) => {
+        if (key === 'database') {
+          return {
+            host: 'localhost',
+            port: 6379,
+            username: 'default',
+            password: 'secret-password',
+          };
+        }
+        return undefined;
+      }),
+    } as unknown as jest.Mocked<ConfigService>;
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        ConnectionRegistry,
+        { provide: 'STORAGE_CLIENT', useValue: mockStorage },
+        { provide: ConfigService, useValue: mockConfigService },
+      ],
+    }).compile();
+
+    registry = module.get<ConnectionRegistry>(ConnectionRegistry);
+  });
+
+  it('should encrypt password when saving default connection', async () => {
+    mockStorage.getConnections.mockResolvedValue([]);
+
+    await registry.onModuleInit();
+
+    expect(mockStorage.saveConnection).toHaveBeenCalledTimes(1);
+    const savedConfig = mockStorage.saveConnection.mock.calls[0][0];
+
+    // Password should be encrypted (JSON envelope format)
+    expect(savedConfig.password).toBeDefined();
+    expect(savedConfig.password).not.toBe('secret-password');
+    expect(savedConfig.passwordEncrypted).toBe(true);
+
+    // Verify it's valid envelope format
+    const envelope = JSON.parse(savedConfig.password!);
+    expect(envelope.v).toBe(1);
+    expect(envelope.dek).toBeDefined();
+    expect(envelope.data).toBeDefined();
+  });
+
+  it('should encrypt password when adding new connection', async () => {
+    mockStorage.getConnections.mockResolvedValue([]);
+    await registry.onModuleInit();
+
+    await registry.addConnection({
+      name: 'New Connection',
+      host: 'redis.example.com',
+      port: 6380,
+      password: 'new-secret-password',
+    });
+
+    // Second call is for the added connection
+    expect(mockStorage.saveConnection).toHaveBeenCalledTimes(2);
+    const savedConfig = mockStorage.saveConnection.mock.calls[1][0];
+
+    expect(savedConfig.password).not.toBe('new-secret-password');
+    expect(savedConfig.passwordEncrypted).toBe(true);
+  });
+
+  it('should decrypt password when loading saved connections', async () => {
+    // Simulate a previously saved encrypted connection
+    const { EnvelopeEncryptionService } = require('../../common/utils/encryption');
+    const encryptor = new EnvelopeEncryptionService('test-encryption-key-for-tests');
+    const encryptedPassword = encryptor.encrypt('loaded-password');
+
+    const savedConfig: DatabaseConnectionConfig = {
+      id: 'saved-conn',
+      name: 'Saved Connection',
+      host: 'redis.example.com',
+      port: 6380,
+      password: encryptedPassword,
+      passwordEncrypted: true,
+      isDefault: true,
+      createdAt: Date.now(),
+    };
+    mockStorage.getConnections.mockResolvedValue([savedConfig]);
+
+    await registry.onModuleInit();
+
+    // The config in memory should have decrypted password
+    const config = registry.getConfig('saved-conn');
+    expect(config?.password).toBe('loaded-password');
+  });
+
+  it('should handle connection without password', async () => {
+    mockStorage.getConnections.mockResolvedValue([]);
+    mockConfigService.get = jest.fn().mockImplementation((key: string) => {
+      if (key === 'database') {
+        return {
+          host: 'localhost',
+          port: 6379,
+          username: 'default',
+          // No password
+        };
+      }
+      return undefined;
+    });
+
+    // Need to recreate registry with new config
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        ConnectionRegistry,
+        { provide: 'STORAGE_CLIENT', useValue: mockStorage },
+        { provide: ConfigService, useValue: mockConfigService },
+      ],
+    }).compile();
+
+    const newRegistry = module.get<ConnectionRegistry>(ConnectionRegistry);
+    await newRegistry.onModuleInit();
+
+    const savedConfig = mockStorage.saveConnection.mock.calls[0][0];
+    expect(savedConfig.passwordEncrypted).toBeFalsy();
   });
 });

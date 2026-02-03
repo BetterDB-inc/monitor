@@ -50,6 +50,9 @@ export const envSchema = z.object({
   // Webhook configuration
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).optional(),
   WEBHOOK_MAX_RESPONSE_BODY_BYTES: z.coerce.number().int().min(0).optional(),
+
+  // Security
+  ENCRYPTION_KEY: z.string().min(16).optional(),
 }).superRefine((data, ctx) => {
   // Require STORAGE_URL when using postgres
   if ((data.STORAGE_TYPE === 'postgres' || data.STORAGE_TYPE === 'postgresql') && !data.STORAGE_URL) {
