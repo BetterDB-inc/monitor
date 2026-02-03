@@ -22,6 +22,17 @@ interface ConnectionMetricState {
   previousSlotsFail: number;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
+  // Storage-based metric labels (per-connection)
+  currentAclReasonLabels: Set<string>;
+  currentAclUserLabels: Set<string>;
+  currentClientNameLabels: Set<string>;
+  currentClientUserLabels: Set<string>;
+  currentSlowlogPatternLabels: Set<string>;
+  currentCommandlogRequestPatternLabels: Set<string>;
+  currentCommandlogReplyPatternLabels: Set<string>;
+  // Anomaly detection labels (per-connection)
+  currentAnomalyMetricLabels: Set<string>;
+  currentCorrelatedPatternLabels: Set<string>;
 }
 
 @Injectable()
@@ -33,17 +44,6 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
 
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
-
-  // Global label tracking (storage-based metrics are aggregated)
-  private currentAclReasonLabels = new Set<string>();
-  private currentAclUserLabels = new Set<string>();
-  private currentClientNameLabels = new Set<string>();
-  private currentClientUserLabels = new Set<string>();
-  private currentSlowlogPatternLabels = new Set<string>();
-  private currentCommandlogRequestPatternLabels = new Set<string>();
-  private currentCommandlogReplyPatternLabels = new Set<string>();
-  private currentAnomalyMetricLabels = new Set<string>();
-  private currentCorrelatedPatternLabels = new Set<string>();
 
   // ACL Audit Metrics
   private aclDeniedTotal: Gauge;
@@ -185,6 +185,17 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
         previousSlotsFail: 0,
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
+        // Storage-based metric labels
+        currentAclReasonLabels: new Set(),
+        currentAclUserLabels: new Set(),
+        currentClientNameLabels: new Set(),
+        currentClientUserLabels: new Set(),
+        currentSlowlogPatternLabels: new Set(),
+        currentCommandlogRequestPatternLabels: new Set(),
+        currentCommandlogReplyPatternLabels: new Set(),
+        // Anomaly detection labels
+        currentAnomalyMetricLabels: new Set(),
+        currentCorrelatedPatternLabels: new Set(),
       });
     }
     return this.perConnectionState.get(connectionId)!;
@@ -241,92 +252,27 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
   }
 
   private initializeMetrics(): void {
-    // ACL Audit (storage-based, aggregated - no connection label needed)
-    this.aclDeniedTotal = new Gauge({
-      name: 'betterdb_acl_denied',
-      help: 'Total ACL denied events captured',
-      registers: [this.registry],
-    });
-    this.aclDeniedByReason = new Gauge({
-      name: 'betterdb_acl_denied_by_reason',
-      help: 'ACL denied events by reason',
-      labelNames: ['reason'],
-      registers: [this.registry],
-    });
-    this.aclDeniedByUser = new Gauge({
-      name: 'betterdb_acl_denied_by_user',
-      help: 'ACL denied events by username',
-      labelNames: ['username'],
-      registers: [this.registry],
-    });
+    // ACL Audit (storage-based, per-connection)
+    this.aclDeniedTotal = this.createGauge('acl_denied', 'Total ACL denied events captured');
+    this.aclDeniedByReason = this.createGauge('acl_denied_by_reason', 'ACL denied events by reason', ['reason']);
+    this.aclDeniedByUser = this.createGauge('acl_denied_by_user', 'ACL denied events by username', ['username']);
 
-    // Client Analytics (storage-based, aggregated - no connection label needed)
-    this.clientConnectionsCurrent = new Gauge({
-      name: 'betterdb_client_connections_current',
-      help: 'Current number of client connections',
-      registers: [this.registry],
-    });
-    this.clientConnectionsByName = new Gauge({
-      name: 'betterdb_client_connections_by_name',
-      help: 'Current connections by client name',
-      labelNames: ['client_name'],
-      registers: [this.registry],
-    });
-    this.clientConnectionsByUser = new Gauge({
-      name: 'betterdb_client_connections_by_user',
-      help: 'Current connections by ACL user',
-      labelNames: ['user'],
-      registers: [this.registry],
-    });
-    this.clientConnectionsPeak = new Gauge({
-      name: 'betterdb_client_connections_peak',
-      help: 'Peak connections in retention period',
-      registers: [this.registry],
-    });
+    // Client Analytics (storage-based, per-connection)
+    this.clientConnectionsCurrent = this.createGauge('client_connections_current', 'Current number of client connections');
+    this.clientConnectionsByName = this.createGauge('client_connections_by_name', 'Current connections by client name', ['client_name']);
+    this.clientConnectionsByUser = this.createGauge('client_connections_by_user', 'Current connections by ACL user', ['user']);
+    this.clientConnectionsPeak = this.createGauge('client_connections_peak', 'Peak connections in retention period');
 
-    // Slowlog Patterns (storage-based, aggregated)
-    this.slowlogPatternCount = new Gauge({
-      name: 'betterdb_slowlog_pattern_count',
-      help: 'Number of slow queries per pattern',
-      labelNames: ['pattern'],
-      registers: [this.registry],
-    });
-    this.slowlogPatternDuration = new Gauge({
-      name: 'betterdb_slowlog_pattern_avg_duration_us',
-      help: 'Average duration in microseconds per pattern',
-      labelNames: ['pattern'],
-      registers: [this.registry],
-    });
-    this.slowlogPatternPercentage = new Gauge({
-      name: 'betterdb_slowlog_pattern_percentage',
-      help: 'Percentage of slow queries per pattern',
-      labelNames: ['pattern'],
-      registers: [this.registry],
-    });
+    // Slowlog Patterns (storage-based, per-connection)
+    this.slowlogPatternCount = this.createGauge('slowlog_pattern_count', 'Number of slow queries per pattern', ['pattern']);
+    this.slowlogPatternDuration = this.createGauge('slowlog_pattern_avg_duration_us', 'Average duration in microseconds per pattern', ['pattern']);
+    this.slowlogPatternPercentage = this.createGauge('slowlog_pattern_percentage', 'Percentage of slow queries per pattern', ['pattern']);
 
-    // COMMANDLOG (Valkey 8.1+) - storage-based, aggregated
-    this.commandlogLargeRequestCount = new Gauge({
-      name: 'betterdb_commandlog_large_request',
-      help: 'Total large request entries',
-      registers: [this.registry],
-    });
-    this.commandlogLargeReplyCount = new Gauge({
-      name: 'betterdb_commandlog_large_reply',
-      help: 'Total large reply entries',
-      registers: [this.registry],
-    });
-    this.commandlogLargeRequestByPattern = new Gauge({
-      name: 'betterdb_commandlog_large_request_by_pattern',
-      help: 'Large request count by command pattern',
-      labelNames: ['pattern'],
-      registers: [this.registry],
-    });
-    this.commandlogLargeReplyByPattern = new Gauge({
-      name: 'betterdb_commandlog_large_reply_by_pattern',
-      help: 'Large reply count by command pattern',
-      labelNames: ['pattern'],
-      registers: [this.registry],
-    });
+    // COMMANDLOG (Valkey 8.1+) - storage-based, per-connection
+    this.commandlogLargeRequestCount = this.createGauge('commandlog_large_request', 'Total large request entries');
+    this.commandlogLargeReplyCount = this.createGauge('commandlog_large_reply', 'Total large reply entries');
+    this.commandlogLargeRequestByPattern = this.createGauge('commandlog_large_request_by_pattern', 'Large request count by command pattern', ['pattern']);
+    this.commandlogLargeReplyByPattern = this.createGauge('commandlog_large_reply_by_pattern', 'Large reply count by command pattern', ['pattern']);
 
     // Standard INFO - Server (per connection)
     this.uptimeInSeconds = this.createGauge('uptime_in_seconds', 'Server uptime in seconds');
@@ -446,11 +392,31 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // Update storage-based metrics (aggregated across all connections)
-    await this.updateAclMetrics();
-    await this.updateClientMetrics();
-    await this.updateSlowlogMetrics();
-    await this.updateCommandlogMetrics();
+    // Update storage-based metrics (per-connection)
+    await this.updateStorageBasedMetrics();
+  }
+
+  /**
+   * Update all storage-based metrics for ALL registered connections
+   */
+  private async updateStorageBasedMetrics(): Promise<void> {
+    const connections = this.connectionRegistry.list();
+
+    for (const conn of connections) {
+      const connLabel = this.getConnectionLabel(conn.id);
+      const state = this.getConnectionState(conn.id);
+
+      try {
+        await this.updateAclMetrics(conn.id, connLabel, state);
+        await this.updateClientMetrics(conn.id, connLabel, state);
+        await this.updateSlowlogMetrics(conn.id, connLabel, state);
+        await this.updateCommandlogMetrics(conn.id, connLabel, state);
+      } catch (error) {
+        this.logger.warn(
+          `Failed to update storage metrics for ${conn.name}: ${error instanceof Error ? error.message : 'Unknown'}`
+        );
+      }
+    }
   }
 
   /**
@@ -792,48 +758,57 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async updateAclMetrics(): Promise<void> {
+  private async updateAclMetrics(
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+  ): Promise<void> {
     try {
-      const stats = await this.storage.getAuditStats();
+      const stats = await this.storage.getAuditStats(undefined, undefined, connectionId);
 
-      this.aclDeniedTotal.set(stats.totalEntries);
+      this.aclDeniedTotal.labels(connLabel).set(stats.totalEntries);
 
       const newReasonLabels = new Set<string>();
       const newUserLabels = new Set<string>();
 
       for (const [reason, count] of Object.entries(stats.entriesByReason)) {
         newReasonLabels.add(reason);
-        this.aclDeniedByReason.labels(reason).set(count);
+        this.aclDeniedByReason.labels(connLabel, reason).set(count);
       }
       for (const [user, count] of Object.entries(stats.entriesByUser)) {
         newUserLabels.add(user);
-        this.aclDeniedByUser.labels(user).set(count);
+        this.aclDeniedByUser.labels(connLabel, user).set(count);
       }
 
-      for (const staleReason of this.currentAclReasonLabels) {
+      // Clean up stale labels for this connection
+      for (const staleReason of state.currentAclReasonLabels) {
         if (!newReasonLabels.has(staleReason)) {
-          this.aclDeniedByReason.labels(staleReason).set(0);
+          this.aclDeniedByReason.labels(connLabel, staleReason).set(0);
         }
       }
-      for (const staleUser of this.currentAclUserLabels) {
+      for (const staleUser of state.currentAclUserLabels) {
         if (!newUserLabels.has(staleUser)) {
-          this.aclDeniedByUser.labels(staleUser).set(0);
+          this.aclDeniedByUser.labels(connLabel, staleUser).set(0);
         }
       }
 
-      this.currentAclReasonLabels = newReasonLabels;
-      this.currentAclUserLabels = newUserLabels;
+      state.currentAclReasonLabels = newReasonLabels;
+      state.currentAclUserLabels = newUserLabels;
     } catch (error) {
-      this.logger.error('Failed to update ACL audit metrics', error);
+      this.logger.error(`Failed to update ACL audit metrics for ${connLabel}`, error);
     }
   }
 
-  private async updateClientMetrics(): Promise<void> {
+  private async updateClientMetrics(
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+  ): Promise<void> {
     try {
-      const stats = await this.storage.getClientAnalyticsStats();
+      const stats = await this.storage.getClientAnalyticsStats(undefined, undefined, connectionId);
 
-      this.clientConnectionsCurrent.set(stats.currentConnections);
-      this.clientConnectionsPeak.set(stats.peakConnections);
+      this.clientConnectionsCurrent.labels(connLabel).set(stats.currentConnections);
+      this.clientConnectionsPeak.labels(connLabel).set(stats.peakConnections);
 
       const newNameLabels = new Set<string>();
       const newUserLabels = new Set<string>();
@@ -841,34 +816,39 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
       for (const [name, data] of Object.entries(stats.connectionsByName)) {
         const label = name || 'unnamed';
         newNameLabels.add(label);
-        this.clientConnectionsByName.labels(label).set(data.current);
+        this.clientConnectionsByName.labels(connLabel, label).set(data.current);
       }
       for (const [user, data] of Object.entries(stats.connectionsByUser)) {
         newUserLabels.add(user);
-        this.clientConnectionsByUser.labels(user).set(data.current);
+        this.clientConnectionsByUser.labels(connLabel, user).set(data.current);
       }
 
-      for (const staleName of this.currentClientNameLabels) {
+      // Clean up stale labels for this connection
+      for (const staleName of state.currentClientNameLabels) {
         if (!newNameLabels.has(staleName)) {
-          this.clientConnectionsByName.labels(staleName).set(0);
+          this.clientConnectionsByName.labels(connLabel, staleName).set(0);
         }
       }
-      for (const staleUser of this.currentClientUserLabels) {
+      for (const staleUser of state.currentClientUserLabels) {
         if (!newUserLabels.has(staleUser)) {
-          this.clientConnectionsByUser.labels(staleUser).set(0);
+          this.clientConnectionsByUser.labels(connLabel, staleUser).set(0);
         }
       }
 
-      this.currentClientNameLabels = newNameLabels;
-      this.currentClientUserLabels = newUserLabels;
+      state.currentClientNameLabels = newNameLabels;
+      state.currentClientUserLabels = newUserLabels;
     } catch (error) {
-      this.logger.error('Failed to update client analytics metrics', error);
+      this.logger.error(`Failed to update client analytics metrics for ${connLabel}`, error);
     }
   }
 
-  private async updateSlowlogMetrics(): Promise<void> {
+  private async updateSlowlogMetrics(
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+  ): Promise<void> {
     try {
-      const analysis = this.slowLogAnalytics.getCachedAnalysis();
+      const analysis = this.slowLogAnalytics.getCachedAnalysis(connectionId);
 
       if (!analysis) {
         return;
@@ -878,71 +858,77 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
 
       for (const p of analysis.patterns) {
         newPatternLabels.add(p.pattern);
-        this.slowlogPatternCount.labels(p.pattern).set(p.count);
-        this.slowlogPatternDuration.labels(p.pattern).set(p.avgDuration);
-        this.slowlogPatternPercentage.labels(p.pattern).set(p.percentage);
+        this.slowlogPatternCount.labels(connLabel, p.pattern).set(p.count);
+        this.slowlogPatternDuration.labels(connLabel, p.pattern).set(p.avgDuration);
+        this.slowlogPatternPercentage.labels(connLabel, p.pattern).set(p.percentage);
       }
 
-      for (const stalePattern of this.currentSlowlogPatternLabels) {
+      // Clean up stale labels for this connection
+      for (const stalePattern of state.currentSlowlogPatternLabels) {
         if (!newPatternLabels.has(stalePattern)) {
-          this.slowlogPatternCount.labels(stalePattern).set(0);
-          this.slowlogPatternDuration.labels(stalePattern).set(0);
-          this.slowlogPatternPercentage.labels(stalePattern).set(0);
+          this.slowlogPatternCount.labels(connLabel, stalePattern).set(0);
+          this.slowlogPatternDuration.labels(connLabel, stalePattern).set(0);
+          this.slowlogPatternPercentage.labels(connLabel, stalePattern).set(0);
         }
       }
 
-      this.currentSlowlogPatternLabels = newPatternLabels;
+      state.currentSlowlogPatternLabels = newPatternLabels;
     } catch (error) {
-      this.logger.error('Failed to update slowlog metrics', error);
+      this.logger.error(`Failed to update slowlog metrics for ${connLabel}`, error);
     }
   }
 
-  private async updateCommandlogMetrics(): Promise<void> {
+  private async updateCommandlogMetrics(
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+  ): Promise<void> {
     try {
-      if (!this.commandLogAnalytics.hasCommandLogSupport()) {
+      if (!this.commandLogAnalytics.hasCommandLogSupport(connectionId)) {
         return;
       }
 
       const newRequestPatternLabels = new Set<string>();
       const newReplyPatternLabels = new Set<string>();
 
-      const requestAnalysis = this.commandLogAnalytics.getCachedAnalysis('large-request');
+      const requestAnalysis = this.commandLogAnalytics.getCachedAnalysis('large-request', connectionId);
       let requestTotal = 0;
       if (requestAnalysis) {
         for (const p of requestAnalysis.patterns) {
           newRequestPatternLabels.add(p.pattern);
-          this.commandlogLargeRequestByPattern.labels(p.pattern).set(p.count);
+          this.commandlogLargeRequestByPattern.labels(connLabel, p.pattern).set(p.count);
           requestTotal += p.count;
         }
       }
-      this.commandlogLargeRequestCount.set(requestTotal);
+      this.commandlogLargeRequestCount.labels(connLabel).set(requestTotal);
 
-      const replyAnalysis = this.commandLogAnalytics.getCachedAnalysis('large-reply');
+      const replyAnalysis = this.commandLogAnalytics.getCachedAnalysis('large-reply', connectionId);
       let replyTotal = 0;
       if (replyAnalysis) {
         for (const p of replyAnalysis.patterns) {
           newReplyPatternLabels.add(p.pattern);
-          this.commandlogLargeReplyByPattern.labels(p.pattern).set(p.count);
+          this.commandlogLargeReplyByPattern.labels(connLabel, p.pattern).set(p.count);
           replyTotal += p.count;
         }
       }
-      this.commandlogLargeReplyCount.set(replyTotal);
+      this.commandlogLargeReplyCount.labels(connLabel).set(replyTotal);
 
-      for (const stalePattern of this.currentCommandlogRequestPatternLabels) {
+      // Clean up stale labels for this connection
+      for (const stalePattern of state.currentCommandlogRequestPatternLabels) {
         if (!newRequestPatternLabels.has(stalePattern)) {
-          this.commandlogLargeRequestByPattern.labels(stalePattern).set(0);
+          this.commandlogLargeRequestByPattern.labels(connLabel, stalePattern).set(0);
         }
       }
-      for (const stalePattern of this.currentCommandlogReplyPatternLabels) {
+      for (const stalePattern of state.currentCommandlogReplyPatternLabels) {
         if (!newReplyPatternLabels.has(stalePattern)) {
-          this.commandlogLargeReplyByPattern.labels(stalePattern).set(0);
+          this.commandlogLargeReplyByPattern.labels(connLabel, stalePattern).set(0);
         }
       }
 
-      this.currentCommandlogRequestPatternLabels = newRequestPatternLabels;
-      this.currentCommandlogReplyPatternLabels = newReplyPatternLabels;
+      state.currentCommandlogRequestPatternLabels = newRequestPatternLabels;
+      state.currentCommandlogReplyPatternLabels = newReplyPatternLabels;
     } catch (error) {
-      this.logger.error('Failed to update commandlog metrics', error);
+      this.logger.error(`Failed to update commandlog metrics for ${connLabel}`, error);
     }
   }
 
@@ -1019,7 +1005,9 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
     },
     connectionId?: string,
   ): void {
-    const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
+    const effectiveConnectionId = connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
+    const connLabel = this.getConnectionLabel(effectiveConnectionId);
+    const state = this.getConnectionState(effectiveConnectionId);
 
     for (const sev of ['info', 'warning', 'critical']) {
       this.anomalyBySeverity.labels(connLabel, sev).set(summary.bySeverity[sev] ?? 0);
@@ -1038,19 +1026,20 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
       this.correlatedGroupsByPattern.labels(connLabel, pattern).set(count);
     }
 
-    for (const staleMetric of this.currentAnomalyMetricLabels) {
+    // Clean up stale labels for this connection
+    for (const staleMetric of state.currentAnomalyMetricLabels) {
       if (!newMetricLabels.has(staleMetric)) {
         this.anomalyByMetric.labels(connLabel, staleMetric).set(0);
       }
     }
-    for (const stalePattern of this.currentCorrelatedPatternLabels) {
+    for (const stalePattern of state.currentCorrelatedPatternLabels) {
       if (!newPatternLabels.has(stalePattern)) {
         this.correlatedGroupsByPattern.labels(connLabel, stalePattern).set(0);
       }
     }
 
-    this.currentAnomalyMetricLabels = newMetricLabels;
-    this.currentCorrelatedPatternLabels = newPatternLabels;
+    state.currentAnomalyMetricLabels = newMetricLabels;
+    state.currentCorrelatedPatternLabels = newPatternLabels;
   }
 
   updateAnomalyBufferStats(
