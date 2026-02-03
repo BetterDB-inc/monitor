@@ -1,5 +1,6 @@
 import { Controller, Post, Get, Body } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiHeader } from '@nestjs/swagger';
+import { ConnectionId, CONNECTION_ID_HEADER } from '@app/common/decorators';
 import { ChatbotService } from './chatbot.service';
 import { OllamaService } from './ollama.service';
 import type { ChatMessage } from '@betterdb/shared';
@@ -33,9 +34,13 @@ export class ChatbotController {
 
   @Post('chat')
   @ApiOperation({ summary: 'Chat with AI assistant' })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to query' })
   @ApiResponse({ status: 200, description: 'AI response generated', type: ChatResponseDto })
-  async chat(@Body() body: ChatRequestDto): Promise<ChatResponseDto> {
-    const response = await this.chatbotService.chat(body.message, body.history);
+  async chat(
+    @Body() body: ChatRequestDto,
+    @ConnectionId() connectionId?: string,
+  ): Promise<ChatResponseDto> {
+    const response = await this.chatbotService.chat(body.message, body.history, connectionId);
     return { response };
   }
 
