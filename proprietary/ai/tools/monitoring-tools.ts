@@ -15,11 +15,18 @@ export interface ToolDependencies {
 export function createMonitoringTools(deps: ToolDependencies) {
   const { metricsService, storageClient, clientAnalyticsService, connectionRegistry } = deps;
 
+  // Note: connectionId is injected by chatbot service at runtime for multi-database scoping
+  // It's intentionally not exposed in tool schemas to prevent LLM from providing incorrect values
+
   const getServerStatus = tool(
-    async () => {
-      const info = await metricsService.getInfoParsed(['server', 'clients', 'memory', 'stats']);
-      const dbSize = await metricsService.getDbSize();
-      const capabilities = connectionRegistry.get().getCapabilities();
+    async ({ connectionId }: { connectionId?: string }) => {
+      const info = await metricsService.getInfoParsed(['server', 'clients', 'memory', 'stats'], connectionId);
+      const dbSize = await metricsService.getDbSize(connectionId);
+      const connection = connectionRegistry.get(connectionId);
+      if (!connection) {
+        return JSON.stringify({ error: `Connection not found: ${connectionId ?? 'default'}` });
+      }
+      const capabilities = connection.getCapabilities();
 
       return JSON.stringify({
         database: `${capabilities.dbType} ${capabilities.version}`,
@@ -40,8 +47,8 @@ export function createMonitoringTools(deps: ToolDependencies) {
   );
 
   const getConnectedClients = tool(
-    async () => {
-      const info = await metricsService.getInfoParsed(['clients']);
+    async ({ connectionId }: { connectionId?: string }) => {
+      const info = await metricsService.getInfoParsed(['clients'], connectionId);
       return JSON.stringify({
         connected: info.clients?.connected_clients ?? 0,
         blocked: info.clients?.blocked_clients ?? 0,
@@ -55,8 +62,8 @@ export function createMonitoringTools(deps: ToolDependencies) {
   );
 
   const getMemoryUsage = tool(
-    async () => {
-      const info = await metricsService.getInfoParsed(['memory']);
+    async ({ connectionId }: { connectionId?: string }) => {
+      const info = await metricsService.getInfoParsed(['memory'], connectionId);
       return JSON.stringify({
         used: info.memory?.used_memory_human ?? 'unknown',
         peak: info.memory?.used_memory_peak_human ?? 'unknown',
@@ -71,8 +78,8 @@ export function createMonitoringTools(deps: ToolDependencies) {
   );
 
   const getKeyCount = tool(
-    async () => {
-      const dbSize = await metricsService.getDbSize();
+    async ({ connectionId }: { connectionId?: string }) => {
+      const dbSize = await metricsService.getDbSize(connectionId);
       return JSON.stringify({ total_keys: dbSize });
     },
     {
@@ -83,8 +90,9 @@ export function createMonitoringTools(deps: ToolDependencies) {
   );
 
   const getSlowlog = tool(
-    async ({ count }) => {
-      const entries = await metricsService.getSlowLog(count);
+    async ({ count, connectionId }: { count: number; connectionId?: string }) => {
+      // Parameters: count, excludeClientName, startTime, endTime, connectionId
+      const entries = await metricsService.getSlowLog(count, undefined, undefined, undefined, connectionId);
       return JSON.stringify(
         entries.slice(0, count).map((e) => ({
           command: e.command.slice(0, 5).join(' '),
@@ -104,8 +112,8 @@ export function createMonitoringTools(deps: ToolDependencies) {
   );
 
   const getSlowlogPatterns = tool(
-    async () => {
-      const analysis = await metricsService.getSlowLogPatternAnalysis();
+    async ({ connectionId }: { connectionId?: string }) => {
+      const analysis = await metricsService.getSlowLogPatternAnalysis(undefined, connectionId);
       return JSON.stringify({
         total_entries: analysis.totalEntries,
         patterns: analysis.patterns.slice(0, 5).map((p) => ({
@@ -124,8 +132,8 @@ export function createMonitoringTools(deps: ToolDependencies) {
   );
 
   const getClientList = tool(
-    async ({ limit }) => {
-      const clients = await metricsService.getClients();
+    async ({ limit, connectionId }: { limit: number; connectionId?: string }) => {
+      const clients = await metricsService.getClients(undefined, connectionId);
       const byName: Record<string, number> = {};
       clients.forEach((c) => {
         const name = c.name || 'unnamed';
@@ -150,7 +158,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
   );
 
   const getAclFailures = tool(
-    async ({ hours }) => {
+    async ({ hours, connectionId }: { hours: number; connectionId?: string }) => {
       const endTime = Date.now();
       const startTime = endTime - hours * 60 * 60 * 1000;
 
@@ -158,6 +166,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
         startTime,
         endTime,
         limit: 20,
+        connectionId,
       });
 
       return JSON.stringify({
@@ -181,10 +190,10 @@ export function createMonitoringTools(deps: ToolDependencies) {
   );
 
   const getClientAnalytics = tool(
-    async ({ hours }) => {
+    async ({ hours, connectionId }: { hours: number; connectionId?: string }) => {
       const endTime = Date.now();
       const startTime = endTime - hours * 60 * 60 * 1000;
-      const stats = await clientAnalyticsService.getStats(startTime, endTime);
+      const stats = await clientAnalyticsService.getStats(startTime, endTime, connectionId);
 
       return JSON.stringify({
         period_hours: hours,
@@ -205,8 +214,8 @@ export function createMonitoringTools(deps: ToolDependencies) {
   );
 
   const runLatencyDiagnosis = tool(
-    async () => {
-      const report = await metricsService.getLatencyDoctor();
+    async ({ connectionId }: { connectionId?: string }) => {
+      const report = await metricsService.getLatencyDoctor(connectionId);
       return report;
     },
     {
@@ -217,8 +226,8 @@ export function createMonitoringTools(deps: ToolDependencies) {
   );
 
   const runMemoryDiagnosis = tool(
-    async () => {
-      const report = await metricsService.getMemoryDoctor();
+    async ({ connectionId }: { connectionId?: string }) => {
+      const report = await metricsService.getMemoryDoctor(connectionId);
       return report;
     },
     {
