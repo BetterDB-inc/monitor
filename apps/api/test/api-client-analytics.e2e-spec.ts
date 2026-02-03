@@ -55,13 +55,30 @@ describe('Client Analytics API (E2E)', () => {
   });
 
   describe('GET /client-analytics/timeseries', () => {
-    it('should return timeseries data', async () => {
+    it('should return timeseries data with required params', async () => {
+      const now = Date.now();
+      const oneHourAgo = now - 60 * 60 * 1000;
       const response = await request(app.getHttpServer())
-        .get('/client-analytics/timeseries')
+        .get(`/client-analytics/timeseries?startTime=${oneHourAgo}&endTime=${now}`)
         .expect(200);
 
       // Timeseries can be array or object depending on data availability
       expect(response.body).toBeDefined();
+      expect(Array.isArray(response.body)).toBe(true);
+    });
+
+    it('should return 400 when startTime or endTime is missing', async () => {
+      await request(app.getHttpServer())
+        .get('/client-analytics/timeseries')
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .get('/client-analytics/timeseries?startTime=123456')
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .get('/client-analytics/timeseries?endTime=123456')
+        .expect(400);
     });
   });
 
