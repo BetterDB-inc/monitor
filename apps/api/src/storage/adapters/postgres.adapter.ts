@@ -726,6 +726,31 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_acl_captured_at ON acl_audit(captured_at);
       CREATE INDEX IF NOT EXISTS idx_acl_timestamp_created ON acl_audit(timestamp_created);
 
+      -- Add unique constraint if missing (for tables created before this constraint was added)
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'acl_audit_timestamp_created_username_object_reason_source__key'
+        ) THEN
+          -- Remove duplicates first (keep the one with highest id)
+          DELETE FROM acl_audit a USING acl_audit b
+          WHERE a.id < b.id
+            AND a.timestamp_created = b.timestamp_created
+            AND a.username = b.username
+            AND a.object = b.object
+            AND a.reason = b.reason
+            AND a.source_host = b.source_host
+            AND a.source_port = b.source_port;
+
+          ALTER TABLE acl_audit
+          ADD CONSTRAINT acl_audit_timestamp_created_username_object_reason_source__key
+          UNIQUE (timestamp_created, username, object, reason, source_host, source_port);
+        END IF;
+      EXCEPTION WHEN duplicate_table THEN
+        -- Constraint already exists, ignore
+      END $$;
+
       CREATE TABLE IF NOT EXISTS client_snapshots (
         id SERIAL PRIMARY KEY,
         client_id TEXT NOT NULL,
@@ -904,6 +929,28 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_slowlog_client_name ON slow_log_entries(client_name);
       CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
 
+      -- Add unique constraint if missing (for tables created before this constraint was added)
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'slow_log_entries_slowlog_id_source_host_source_port_key'
+        ) THEN
+          -- Remove duplicates first (keep the one with highest pk)
+          DELETE FROM slow_log_entries a USING slow_log_entries b
+          WHERE a.pk < b.pk
+            AND a.slowlog_id = b.slowlog_id
+            AND a.source_host = b.source_host
+            AND a.source_port = b.source_port;
+
+          ALTER TABLE slow_log_entries
+          ADD CONSTRAINT slow_log_entries_slowlog_id_source_host_source_port_key
+          UNIQUE (slowlog_id, source_host, source_port);
+        END IF;
+      EXCEPTION WHEN duplicate_table THEN
+        -- Constraint already exists, ignore
+      END $$;
+
       -- Command Log Entries Table (Valkey-specific)
       CREATE TABLE IF NOT EXISTS command_log_entries (
         pk SERIAL PRIMARY KEY,
@@ -925,6 +972,29 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_commandlog_duration ON command_log_entries(duration DESC);
       CREATE INDEX IF NOT EXISTS idx_commandlog_client_name ON command_log_entries(client_name);
       CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
+
+      -- Add unique constraint if missing (for tables created before this constraint was added)
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'command_log_entries_commandlog_id_log_type_source_host_sour_key'
+        ) THEN
+          -- Remove duplicates first (keep the one with highest pk)
+          DELETE FROM command_log_entries a USING command_log_entries b
+          WHERE a.pk < b.pk
+            AND a.commandlog_id = b.commandlog_id
+            AND a.log_type = b.log_type
+            AND a.source_host = b.source_host
+            AND a.source_port = b.source_port;
+
+          ALTER TABLE command_log_entries
+          ADD CONSTRAINT command_log_entries_commandlog_id_log_type_source_host_sour_key
+          UNIQUE (commandlog_id, log_type, source_host, source_port);
+        END IF;
+      EXCEPTION WHEN duplicate_table THEN
+        -- Constraint already exists, ignore
+      END $$;
     `);
   }
 
