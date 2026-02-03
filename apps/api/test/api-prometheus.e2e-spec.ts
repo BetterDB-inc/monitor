@@ -26,10 +26,10 @@ describe('Prometheus API (E2E)', () => {
       expect(response.text).toContain('# HELP');
       expect(response.text).toContain('# TYPE');
 
-      // Required metrics
-      expect(response.text).toMatch(/betterdb_connected_clients\s+\d+/);
-      expect(response.text).toMatch(/betterdb_memory_used_bytes\s+\d+/);
-      expect(response.text).toMatch(/betterdb_client_connections_current\s+\d+/);
+      // Required metrics (now with connection labels)
+      expect(response.text).toMatch(/betterdb_connected_clients(\{[^}]+\})?\s+\d+/);
+      expect(response.text).toMatch(/betterdb_memory_used_bytes(\{[^}]+\})?\s+\d+/);
+      expect(response.text).toMatch(/betterdb_client_connections_current(\{[^}]+\})?\s+\d+/);
       expect(response.text).toMatch(/betterdb_slowlog/);
 
       // Instance info with labels (version, role, os)

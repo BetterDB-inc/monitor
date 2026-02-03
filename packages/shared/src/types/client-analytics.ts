@@ -19,6 +19,7 @@ export interface StoredClientSnapshot {
   capturedAt: number;
   sourceHost: string;
   sourcePort: number;
+  connectionId?: string;
 }
 
 export interface ClientSnapshotQueryOptions {
@@ -29,6 +30,7 @@ export interface ClientSnapshotQueryOptions {
   endTime?: number;
   limit?: number;
   offset?: number;
+  connectionId?: string;
 }
 
 export interface ClientTimeSeriesPoint {

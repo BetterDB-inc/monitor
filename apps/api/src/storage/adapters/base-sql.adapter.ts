@@ -149,6 +149,7 @@ export class RowMappers {
       capturedAt: row.captured_at,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
+      connectionId: row.connection_id,
     };
   }
 
@@ -177,6 +178,7 @@ export class RowMappers {
       capturedAt: row.captured_at,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
+      connectionId: row.connection_id,
     };
   }
 
@@ -203,6 +205,7 @@ export class RowMappers {
       durationMs: row.duration_ms ? (typeof row.duration_ms === 'string' ? parseInt(row.duration_ms, 10) : row.duration_ms) : undefined,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
+      connectionId: row.connection_id,
     };
   }
 
@@ -221,6 +224,7 @@ export class RowMappers {
       metricTypes: this.dialect.fromArray(row.metric_types),
       sourceHost: row.source_host,
       sourcePort: row.source_port,
+      connectionId: row.connection_id,
     };
   }
 
@@ -247,6 +251,7 @@ export class RowMappers {
       avgTtlSeconds: row.avg_ttl_seconds,
       minTtlSeconds: row.min_ttl_seconds,
       maxTtlSeconds: row.max_ttl_seconds,
+      connectionId: row.connection_id,
     };
   }
 
@@ -282,6 +287,7 @@ export class RowMappers {
       deliveryConfig: this.dialect.fromJson(row.delivery_config),
       alertConfig: this.dialect.fromJson(row.alert_config),
       thresholds: this.dialect.fromJson(row.thresholds),
+      connectionId: row.connection_id,
       createdAt: this.dialect.fromTimestamp(row.created_at) ?? 0,
       updatedAt: this.dialect.fromTimestamp(row.updated_at) ?? 0,
     };
@@ -301,6 +307,7 @@ export class RowMappers {
       responseBody: row.response_body,
       attempts: row.attempts,
       nextRetryAt: this.dialect.fromTimestamp(row.next_retry_at),
+      connectionId: row.connection_id,
       createdAt: this.dialect.fromTimestamp(row.created_at) ?? 0,
       completedAt: this.dialect.fromTimestamp(row.completed_at),
       durationMs: row.duration_ms,
@@ -321,6 +328,7 @@ export class RowMappers {
       capturedAt: typeof row.captured_at === 'string' ? parseInt(row.captured_at, 10) : row.captured_at,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
+      connectionId: row.connection_id,
     };
   }
 
@@ -339,6 +347,7 @@ export class RowMappers {
       capturedAt: typeof row.captured_at === 'string' ? parseInt(row.captured_at, 10) : row.captured_at,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
+      connectionId: row.connection_id,
     };
   }
 }

@@ -12,6 +12,7 @@ export interface StoredAclEntry {
   capturedAt: number;
   sourceHost: string;
   sourcePort: number;
+  connectionId?: string;
 }
 
 export interface AuditQueryOptions {
@@ -21,6 +22,7 @@ export interface AuditQueryOptions {
   endTime?: number;
   limit?: number;
   offset?: number;
+  connectionId?: string;
 }
 
 export interface AuditStats {

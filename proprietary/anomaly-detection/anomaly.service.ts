@@ -1,10 +1,10 @@
 import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
-import { BasePollingService } from '@app/common/services/base-polling.service';
+import { MultiConnectionPoller, ConnectionContext } from '@app/common/services/multi-connection-poller';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
@@ -25,11 +25,12 @@ interface MetricExtractor {
 }
 
 @Injectable()
-export class AnomalyService extends BasePollingService implements OnModuleInit {
+export class AnomalyService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(AnomalyService.name);
 
-  private buffers = new Map<MetricType, MetricBuffer>();
-  private detectors = new Map<MetricType, SpikeDetector>();
+  // Per-connection state: connectionId -> metricType -> buffer/detector
+  private buffers = new Map<string, Map<MetricType, MetricBuffer>>();
+  private detectors = new Map<string, Map<MetricType, SpikeDetector>>();
   private correlator: Correlator;
 
   private recentAnomalies: AnomalyEvent[] = [];
@@ -39,23 +40,23 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
 
   private readonly metricExtractors: Map<MetricType, MetricExtractor>;
   private readonly correlationIntervalMs = 5000;
+  private correlationInterval: NodeJS.Timeout | null = null;
+  private prometheusSummaryInterval: NodeJS.Timeout | null = null;
 
   constructor(
-    @Inject('DATABASE_CLIENT')
-    private readonly dbClient: DatabasePort,
+    connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
     private readonly configService: ConfigService,
     private readonly prometheusService: PrometheusService,
     private readonly settingsService: SettingsService,
   ) {
-    super();
+    super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs);
     this.metricExtractors = this.initializeMetricExtractors();
-    this.initializeBuffersAndDetectors();
   }
 
-  private get pollIntervalMs(): number {
+  protected getIntervalMs(): number {
     return this.settingsService.getCachedSettings().anomalyPollIntervalMs;
   }
 
@@ -70,27 +71,47 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
   onModuleInit() {
     this.logger.log('Starting anomaly detection service...');
 
-    // Start metrics polling loop
-    this.startPollingLoop({
-      name: 'metrics',
-      getIntervalMs: () => this.pollIntervalMs,
-      poll: () => this.pollMetrics(),
-    });
+    // Start multi-connection polling
+    this.start();
 
     // Start correlation loop
-    this.startPollingLoop({
-      name: 'correlation',
-      getIntervalMs: () => this.correlationIntervalMs,
-      poll: () => this.correlateAnomalies(),
-      initialPoll: false,
-    });
+    this.correlationInterval = setInterval(() => {
+      this.correlateAnomalies().catch(err => {
+        this.logger.error('Failed to correlate anomalies:', err);
+      });
+    }, this.correlationIntervalMs);
 
     // Start prometheus summary loop
-    this.startPollingLoop({
-      name: 'prometheus-summary',
-      getIntervalMs: () => this.prometheusSummaryIntervalMs,
-      poll: () => this.updatePrometheusSummary(),
-    });
+    this.prometheusSummaryInterval = setInterval(() => {
+      this.updatePrometheusSummary().catch(err => {
+        this.logger.error('Failed to update prometheus summary:', err);
+      });
+    }, this.prometheusSummaryIntervalMs);
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await super.onModuleDestroy();
+    if (this.correlationInterval) {
+      clearInterval(this.correlationInterval);
+      this.correlationInterval = null;
+    }
+    if (this.prometheusSummaryInterval) {
+      clearInterval(this.prometheusSummaryInterval);
+      this.prometheusSummaryInterval = null;
+    }
+  }
+
+  private getOrCreateBuffersAndDetectors(connectionId: string): {
+    buffers: Map<MetricType, MetricBuffer>;
+    detectors: Map<MetricType, SpikeDetector>;
+  } {
+    if (!this.buffers.has(connectionId)) {
+      this.initializeBuffersAndDetectorsForConnection(connectionId);
+    }
+    return {
+      buffers: this.buffers.get(connectionId)!,
+      detectors: this.detectors.get(connectionId)!,
+    };
   }
 
   private initializeMetricExtractors(): Map<MetricType, MetricExtractor> {
@@ -113,7 +134,7 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
     ]);
   }
 
-  private initializeBuffersAndDetectors(): void {
+  private initializeBuffersAndDetectorsForConnection(connectionId: string): void {
     // Define custom configs for specific metrics
     const configs: Partial<Record<MetricType, SpikeDetectorConfig>> = {
       [MetricType.ACL_DENIED]: {
@@ -153,11 +174,23 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
     };
 
     // Initialize buffers and detectors for all metrics
+    const connectionBuffers = new Map<MetricType, MetricBuffer>();
+    const connectionDetectors = new Map<MetricType, SpikeDetector>();
+
     for (const metricType of Object.values(MetricType)) {
-      this.buffers.set(metricType, new MetricBuffer(metricType));
+      connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
-      this.detectors.set(metricType, new SpikeDetector(metricType, config));
+      connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
     }
+
+    this.buffers.set(connectionId, connectionBuffers);
+    this.detectors.set(connectionId, connectionDetectors);
+  }
+
+  protected onConnectionRemoved(connectionId: string): void {
+    this.buffers.delete(connectionId);
+    this.detectors.delete(connectionId);
+    this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
   private parseNumber(value: string | undefined): number | null {
@@ -166,19 +199,21 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
     return isNaN(parsed) ? null : parsed;
   }
 
-  private async pollMetrics(): Promise<void> {
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
-      const infoResponse = await this.dbClient.getInfoParsed();
+      const infoResponse = await ctx.client.getInfoParsed();
       const info = this.convertInfoToRecord(infoResponse);
       const timestamp = Date.now();
+
+      const { buffers, detectors } = this.getOrCreateBuffersAndDetectors(ctx.connectionId);
 
       // Process each metric
       for (const [metricType, extractor] of this.metricExtractors.entries()) {
         const value = extractor(info);
         if (value === null) continue;
 
-        const buffer = this.buffers.get(metricType);
-        const detector = this.detectors.get(metricType);
+        const buffer = buffers.get(metricType);
+        const detector = detectors.get(metricType);
 
         if (!buffer || !detector) continue;
 
@@ -188,12 +223,15 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
         // Run detection
         const anomaly = detector.detect(buffer, value, timestamp);
         if (anomaly) {
-          this.logger.warn(`Anomaly detected: ${anomaly.message}`);
-          await this.addAnomaly(anomaly);
+          // Enrich anomaly with connection context
+          anomaly.connectionId = ctx.connectionId;
+          this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
+          await this.addAnomaly(anomaly, ctx);
         }
       }
     } catch (error) {
-      this.logger.error('Failed to poll metrics:', error);
+      this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
+      throw error;
     }
   }
 
@@ -217,7 +255,7 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
     return info;
   }
 
-  private toStoredAnomalyEvent(anomaly: AnomalyEvent): StoredAnomalyEvent {
+  private toStoredAnomalyEvent(anomaly: AnomalyEvent, ctx?: ConnectionContext): StoredAnomalyEvent {
     return {
       id: anomaly.id,
       timestamp: anomaly.timestamp,
@@ -235,22 +273,26 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
       resolved: anomaly.resolved || false,
       resolvedAt: undefined,
       durationMs: undefined,
-      sourceHost: this.configService.get('database.host'),
-      sourcePort: this.configService.get('database.port'),
+      sourceHost: ctx?.host || this.configService.get('database.host'),
+      sourcePort: ctx?.port || this.configService.get('database.port'),
+      connectionId: ctx?.connectionId || anomaly.connectionId,
     };
   }
 
-  private async addAnomaly(anomaly: AnomalyEvent): Promise<void> {
+  private async addAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
     this.recentAnomalies.push(anomaly);
 
     if (this.recentAnomalies.length > this.maxRecentEvents) {
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
 
-    this.prometheusService.incrementAnomalyEvent(anomaly.severity, anomaly.metricType, anomaly.anomalyType);
+    this.prometheusService.incrementAnomalyEvent(anomaly.severity, anomaly.metricType, anomaly.anomalyType, ctx?.connectionId);
 
     try {
-      await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly));
+      const connectionId = ctx?.connectionId || anomaly.connectionId;
+      if (connectionId) {
+        await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
+      }
     } catch (err) {
       this.logger.error('Failed to persist anomaly event:', err);
     }
@@ -271,7 +313,9 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
           `Pattern detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`
         );
 
-        this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity);
+        // Get connectionId from first anomaly in group (all should have same connectionId)
+        const groupConnectionId = group.anomalies[0]?.connectionId;
+        this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, groupConnectionId);
 
         const storedGroup: StoredCorrelatedGroup = {
           correlationId: group.correlationId,
@@ -287,9 +331,13 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
         };
 
         try {
-          await this.storage.saveCorrelatedGroup(storedGroup);
-          for (const anomaly of group.anomalies) {
-            await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly));
+          // Get connectionId from first anomaly in group (all should have same connectionId)
+          const connectionId = group.anomalies[0]?.connectionId;
+          if (connectionId) {
+            await this.storage.saveCorrelatedGroup(storedGroup, connectionId);
+            for (const anomaly of group.anomalies) {
+              await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly), connectionId);
+            }
           }
         } catch (err) {
           this.logger.error('Failed to persist correlated group:', err);
@@ -342,11 +390,13 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
     severity?: AnomalySeverity,
     metricType?: MetricType,
     limit = 100,
+    connectionId?: string,
   ): Promise<AnomalyEvent[]> {
     const cacheThreshold = Date.now() - this.cacheTtlMs;
 
     if (!startTime || startTime >= cacheThreshold) {
       let events = [...this.recentAnomalies];
+      if (connectionId) events = events.filter(e => e.connectionId === connectionId);
       if (metricType) events = events.filter(e => e.metricType === metricType);
       if (severity) events = events.filter(e => e.severity === severity);
       if (endTime) events = events.filter(e => e.timestamp <= endTime);
@@ -359,6 +409,7 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
       severity: severity as string,
       metricType: metricType as string,
       limit,
+      connectionId,
     });
 
     return stored.map(s => this.storedToAnomalyEvent(s));
@@ -379,11 +430,13 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
     endTime?: number,
     pattern?: AnomalyPattern,
     limit = 50,
+    connectionId?: string,
   ): Promise<CorrelatedAnomalyGroup[]> {
     const cacheThreshold = Date.now() - this.cacheTtlMs;
 
     if (!startTime || startTime >= cacheThreshold) {
       let groups = [...this.recentGroups];
+      if (connectionId) groups = groups.filter(g => g.anomalies.some(a => a.connectionId === connectionId));
       if (pattern) groups = groups.filter(g => g.pattern === pattern);
       if (endTime) groups = groups.filter(g => g.timestamp <= endTime);
       return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
@@ -394,6 +447,7 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
       endTime,
       pattern: pattern as string,
       limit,
+      connectionId,
     });
 
     const groups: CorrelatedAnomalyGroup[] = [];
@@ -401,6 +455,7 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
       const storedAnomalies = await this.storage.getAnomalyEvents({
         startTime: s.timestamp - this.correlationIntervalMs,
         endTime: s.timestamp + this.correlationIntervalMs,
+        connectionId,
       });
       const anomalies = storedAnomalies
         .filter(a => a.correlationId === s.correlationId)
@@ -420,14 +475,29 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
     return groups;
   }
 
-  getBufferStats(): BufferStats[] {
+  getBufferStats(connectionId?: string): BufferStats[] {
     const stats: BufferStats[] = [];
 
-    for (const [metricType, buffer] of this.buffers.entries()) {
-      stats.push(buffer.getStats());
+    // Iterate over all connections and their buffers
+    for (const [connId, connectionBuffers] of this.buffers.entries()) {
+      // Filter by connectionId if provided
+      if (connectionId && connId !== connectionId) continue;
+
+      for (const [, buffer] of connectionBuffers.entries()) {
+        const bufferStats = buffer.getStats();
+        stats.push({
+          ...bufferStats,
+          connectionId: connId,
+        });
+      }
     }
 
-    return stats.sort((a, b) => a.metricType.localeCompare(b.metricType));
+    // Sort by connectionId then metricType
+    return stats.sort((a, b) => {
+      const connCmp = (a.connectionId || '').localeCompare(b.connectionId || '');
+      if (connCmp !== 0) return connCmp;
+      return a.metricType.localeCompare(b.metricType);
+    });
   }
 
   getWarmupStatus(): { isReady: boolean; buffersReady: number; buffersTotal: number; warmupProgress: number } {
@@ -443,13 +513,18 @@ export class AnomalyService extends BasePollingService implements OnModuleInit {
     };
   }
 
-  async getSummary(startTime?: number, endTime?: number): Promise<AnomalySummary> {
+  async getSummary(startTime?: number, endTime?: number, connectionId?: string): Promise<AnomalySummary> {
     const cacheThreshold = Date.now() - this.cacheTtlMs;
 
     // Use in-memory data if no start time or start time is within cache TTL
     if (!startTime || startTime >= cacheThreshold) {
       let events = [...this.recentAnomalies];
       let groups = [...this.recentGroups];
+
+      if (connectionId) {
+        events = events.filter(e => e.connectionId === connectionId);
+        groups = groups.filter(g => g.anomalies.some(a => a.connectionId === connectionId));
+      }
 
       if (endTime) {
         events = events.filter(e => e.timestamp <= endTime);

@@ -1,7 +1,8 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { SettingsService } from '@app/settings/settings.service';
+import { MultiConnectionPoller, ConnectionContext } from '@app/common/services/multi-connection-poller';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { WebhookEventsEnterpriseService } from './webhook-events-enterprise.service';
 
 /**
@@ -10,74 +11,99 @@ import { WebhookEventsEnterpriseService } from './webhook-events-enterprise.serv
  * Monitors ACL and CONFIG changes and dispatches Enterprise tier webhooks
  */
 @Injectable()
-export class ConfigMonitorService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(ConfigMonitorService.name);
-  private pollInterval: NodeJS.Timeout | null = null;
+export class ConfigMonitorService extends MultiConnectionPoller implements OnModuleInit {
+  protected readonly logger = new Logger(ConfigMonitorService.name);
   private readonly POLL_INTERVAL_MS = 30000; // Check every 30 seconds
 
-  // Cache previous state
-  private previousAclUsers: Set<string> = new Set();
-  private previousAclList: Map<string, string> = new Map();
-  private previousConfig: Map<string, string> = new Map();
-  private initialized = false;
+  // Per-connection cache of previous state
+  private previousAclUsers = new Map<string, Set<string>>();
+  private previousAclList = new Map<string, Map<string, string>>();
+  private previousConfig = new Map<string, Map<string, string>>();
+  private initialized = new Map<string, boolean>();
 
   constructor(
-    @Inject('DATABASE_CLIENT')
-    private readonly dbClient: DatabasePort,
+    connectionRegistry: ConnectionRegistry,
     private readonly configService: ConfigService,
     private readonly settingsService: SettingsService,
     private readonly webhookEventsEnterpriseService: WebhookEventsEnterpriseService,
-  ) {}
+  ) {
+    super(connectionRegistry);
+  }
+
+  protected getIntervalMs(): number {
+    return this.POLL_INTERVAL_MS;
+  }
 
   async onModuleInit() {
-    const capabilities = this.dbClient.getCapabilities();
+    this.logger.log('Configuration monitor service initialized');
+    this.start();
+  }
+
+  protected onConnectionRemoved(connectionId: string): void {
+    this.previousAclUsers.delete(connectionId);
+    this.previousAclList.delete(connectionId);
+    this.previousConfig.delete(connectionId);
+    this.initialized.delete(connectionId);
+  }
+
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    const capabilities = ctx.client.getCapabilities();
     if (!capabilities.hasAclLog) {
-      this.logger.warn('ACL not supported, config monitoring disabled');
+      this.logger.debug(`ACL not supported for ${ctx.connectionName}, skipping config monitoring`);
       return;
     }
 
-    this.logger.log('Configuration monitor service initialized');
-
-    // Initialize baseline state
-    try {
-      await this.captureInitialState();
-      this.initialized = true;
-    } catch (error) {
-      this.logger.error('Failed to capture initial state:', error);
+    // Initialize baseline state for this connection if not already done
+    if (!this.initialized.get(ctx.connectionId)) {
+      try {
+        await this.captureInitialState(ctx);
+        this.initialized.set(ctx.connectionId, true);
+      } catch (error) {
+        this.logger.error(`Failed to capture initial state for ${ctx.connectionName}:`, error);
+        return;
+      }
     }
 
-    this.startPolling();
+    try {
+      await Promise.all([
+        this.checkAclChanges(ctx),
+        this.checkConfigChanges(ctx),
+      ]);
+    } catch (error) {
+      this.logger.error(`Failed to check for changes for ${ctx.connectionName}:`, error);
+    }
   }
 
-  onModuleDestroy() {
-    this.stopPolling();
-  }
-
-  private async captureInitialState(): Promise<void> {
+  private async captureInitialState(ctx: ConnectionContext): Promise<void> {
     try {
       // Capture ACL users
-      const aclUsers = await this.dbClient.getAclUsers();
-      this.previousAclUsers = new Set(aclUsers);
+      const aclUsers = await ctx.client.getAclUsers();
+      this.previousAclUsers.set(ctx.connectionId, new Set(aclUsers));
 
       // Capture ACL list
-      const aclList = await this.dbClient.getAclList();
+      const aclList = await ctx.client.getAclList();
+      const aclMap = new Map<string, string>();
       for (const entry of aclList) {
-        // ACL LIST format: "user <username> <flags...>"
         const username = this.extractUsername(entry);
         if (username) {
-          this.previousAclList.set(username, entry);
+          aclMap.set(username, entry);
         }
       }
+      this.previousAclList.set(ctx.connectionId, aclMap);
 
       // Capture config
-      const config = await this.dbClient.getConfigValues('*');
+      const config = await ctx.client.getConfigValues('*');
+      const configMap = new Map<string, string>();
       for (const [key, value] of Object.entries(config)) {
-        this.previousConfig.set(key, String(value));
+        configMap.set(key, String(value));
       }
+      this.previousConfig.set(ctx.connectionId, configMap);
 
-      this.logger.log(`Initial state captured: ${this.previousAclUsers.size} ACL users, ${this.previousConfig.size} config keys`);
+      this.logger.log(
+        `Initial state captured for ${ctx.connectionName}: ${aclUsers.length} ACL users, ${configMap.size} config keys`
+      );
     } catch (error) {
-      this.logger.error('Failed to capture initial state:', error);
+      this.logger.error(`Failed to capture initial state for ${ctx.connectionName}:`, error);
       throw error;
     }
   }
@@ -88,48 +114,11 @@ export class ConfigMonitorService implements OnModuleInit, OnModuleDestroy {
     return match ? match[1] : null;
   }
 
-  private startPolling(): void {
-    this.pollInterval = setInterval(() => {
-      this.checkForChanges().catch(error => {
-        this.logger.error('Error checking for changes:', error);
-      });
-    }, this.POLL_INTERVAL_MS);
-
-    // Run immediately after a short delay
-    setTimeout(() => {
-      this.checkForChanges().catch(error => {
-        this.logger.error('Error in initial check:', error);
-      });
-    }, 5000);
-  }
-
-  private stopPolling(): void {
-    if (this.pollInterval) {
-      clearInterval(this.pollInterval);
-      this.pollInterval = null;
-    }
-  }
-
-  private async checkForChanges(): Promise<void> {
-    if (!this.initialized) {
-      return;
-    }
-
+  private async checkAclChanges(ctx: ConnectionContext): Promise<void> {
     try {
-      await Promise.all([
-        this.checkAclChanges(),
-        this.checkConfigChanges(),
-      ]);
-    } catch (error) {
-      this.logger.error('Failed to check for changes:', error);
-    }
-  }
-
-  private async checkAclChanges(): Promise<void> {
-    try {
-      const currentAclUsers = await this.dbClient.getAclUsers();
+      const currentAclUsers = await ctx.client.getAclUsers();
       const currentAclUsersSet = new Set(currentAclUsers);
-      const currentAclList = await this.dbClient.getAclList();
+      const currentAclList = await ctx.client.getAclList();
       const currentAclMap = new Map<string, string>();
 
       for (const entry of currentAclList) {
@@ -141,87 +130,100 @@ export class ConfigMonitorService implements OnModuleInit, OnModuleDestroy {
 
       const timestamp = Date.now();
       const instance = {
-        host: this.configService.get<string>('database.host', 'localhost'),
-        port: this.configService.get<number>('database.port', 6379),
+        host: ctx.host,
+        port: ctx.port,
+        connectionId: ctx.connectionId,
       };
+
+      const previousAclUsers = this.previousAclUsers.get(ctx.connectionId) || new Set();
+      const previousAclList = this.previousAclList.get(ctx.connectionId) || new Map();
 
       // Check for added users
       for (const user of currentAclUsersSet) {
-        if (!this.previousAclUsers.has(user)) {
-          this.logger.log(`ACL user added: ${user}`);
+        if (!previousAclUsers.has(user)) {
+          this.logger.log(`ACL user added (${ctx.connectionName}): ${user}`);
           await this.webhookEventsEnterpriseService.dispatchAclModified({
             changeType: 'user_added',
             affectedUser: user,
             timestamp,
             instance,
+            connectionId: ctx.connectionId,
           });
         }
       }
 
       // Check for removed users
-      for (const user of this.previousAclUsers) {
+      for (const user of previousAclUsers) {
         if (!currentAclUsersSet.has(user)) {
-          this.logger.log(`ACL user removed: ${user}`);
+          this.logger.log(`ACL user removed (${ctx.connectionName}): ${user}`);
           await this.webhookEventsEnterpriseService.dispatchAclModified({
             changeType: 'user_removed',
             affectedUser: user,
             timestamp,
             instance,
+            connectionId: ctx.connectionId,
           });
         }
       }
 
       // Check for modified users (permissions changed)
       for (const [user, currentEntry] of currentAclMap) {
-        const previousEntry = this.previousAclList.get(user);
+        const previousEntry = previousAclList.get(user);
         if (previousEntry && previousEntry !== currentEntry) {
-          this.logger.log(`ACL user modified: ${user}`);
+          this.logger.log(`ACL user modified (${ctx.connectionName}): ${user}`);
           await this.webhookEventsEnterpriseService.dispatchAclModified({
             changeType: 'permissions_changed',
             affectedUser: user,
             timestamp,
             instance,
+            connectionId: ctx.connectionId,
           });
         }
       }
 
       // Update cached state
-      this.previousAclUsers = currentAclUsersSet;
-      this.previousAclList = currentAclMap;
+      this.previousAclUsers.set(ctx.connectionId, currentAclUsersSet);
+      this.previousAclList.set(ctx.connectionId, currentAclMap);
 
     } catch (error) {
-      this.logger.error('Failed to check ACL changes:', error);
+      this.logger.error(`Failed to check ACL changes for ${ctx.connectionName}:`, error);
     }
   }
 
-  private async checkConfigChanges(): Promise<void> {
+  private async checkConfigChanges(ctx: ConnectionContext): Promise<void> {
     try {
-      const currentConfig = await this.dbClient.getConfigValues('*');
+      const currentConfig = await ctx.client.getConfigValues('*');
       const timestamp = Date.now();
       const instance = {
-        host: this.configService.get<string>('database.host', 'localhost'),
-        port: this.configService.get<number>('database.port', 6379),
+        host: ctx.host,
+        port: ctx.port,
+        connectionId: ctx.connectionId,
       };
+
+      const previousConfig = this.previousConfig.get(ctx.connectionId) || new Map();
 
       for (const [key, value] of Object.entries(currentConfig)) {
         const currentValue = String(value);
-        const previousValue = this.previousConfig.get(key);
+        const previousValue = previousConfig.get(key);
 
         if (previousValue !== undefined && previousValue !== currentValue) {
-          this.logger.log(`Config changed: ${key} = ${currentValue} (was: ${previousValue})`);
+          this.logger.log(`Config changed (${ctx.connectionName}): ${key} = ${currentValue} (was: ${previousValue})`);
           await this.webhookEventsEnterpriseService.dispatchConfigChanged({
             configKey: key,
             oldValue: previousValue,
             newValue: currentValue,
             timestamp,
             instance,
+            connectionId: ctx.connectionId,
           });
         }
 
-        this.previousConfig.set(key, currentValue);
+        previousConfig.set(key, currentValue);
       }
+
+      this.previousConfig.set(ctx.connectionId, previousConfig);
     } catch (error) {
-      this.logger.error('Failed to check config changes:', error);
+      this.logger.error(`Failed to check config changes for ${ctx.connectionName}:`, error);
     }
   }
 }

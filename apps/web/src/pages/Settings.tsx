@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { settingsApi } from '../api/settings';
+import { useConnection } from '../hooks/useConnection';
 import { AppSettings, SettingsUpdateRequest } from '@betterdb/shared';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
@@ -7,6 +8,7 @@ import { Badge } from '../components/ui/badge';
 type SettingsCategory = 'audit' | 'clientAnalytics' | 'anomaly';
 
 export function Settings() {
+  const { currentConnection } = useConnection();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -18,7 +20,7 @@ export function Settings() {
 
   useEffect(() => {
     loadSettings();
-  }, []);
+  }, [currentConnection?.id]);
 
   const loadSettings = async () => {
     try {

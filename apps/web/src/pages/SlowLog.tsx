@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useCapabilities } from '../hooks/useCapabilities';
+import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { SlowLogTable } from '../components/metrics/SlowLogTable';
 import { CommandLogTable } from '../components/metrics/CommandLogTable';
@@ -32,6 +33,7 @@ function filterByClient<T extends { clientName: string; clientAddress: string }>
 }
 
 export function SlowLog() {
+  const { currentConnection } = useConnection();
   const { hasCommandLog, capabilities } = useCapabilities();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = getTabFromParams(searchParams);
@@ -78,6 +80,7 @@ export function SlowLog() {
     fetcher: () => metricsApi.getSlowLog(100, true),
     interval: 10000,
     enabled: !hasCommandLog && !isTimeFiltered,
+    refetchKey: currentConnection?.id,
   });
 
   // Stored slow log (with time filter)
@@ -112,18 +115,21 @@ export function SlowLog() {
     fetcher: () => metricsApi.getCommandLog(100, 'slow'),
     interval: 10000,
     enabled: hasCommandLog && activeTab === 'slow' && !isTimeFiltered,
+    refetchKey: currentConnection?.id,
   });
 
   const { data: liveCommandLogLargeRequest } = usePolling({
     fetcher: () => metricsApi.getCommandLog(100, 'large-request'),
     interval: 10000,
     enabled: hasCommandLog && activeTab === 'large-request' && !isTimeFiltered,
+    refetchKey: currentConnection?.id,
   });
 
   const { data: liveCommandLogLargeReply } = usePolling({
     fetcher: () => metricsApi.getCommandLog(100, 'large-reply'),
     interval: 10000,
     enabled: hasCommandLog && activeTab === 'large-reply' && !isTimeFiltered,
+    refetchKey: currentConnection?.id,
   });
 
   // Stored command log (with time filter and pagination)
@@ -183,6 +189,7 @@ export function SlowLog() {
     fetcher: () => metricsApi.getSlowLogPatternAnalysis(128),
     interval: 30000,
     enabled: !hasCommandLog && viewMode === 'patterns' && !isTimeFiltered,
+    refetchKey: currentConnection?.id,
   });
 
   const { data: liveCommandLogPatternAnalysis } = usePolling({
@@ -190,6 +197,7 @@ export function SlowLog() {
       metricsApi.getCommandLogPatternAnalysis(128, activeTab),
     interval: 30000,
     enabled: hasCommandLog && viewMode === 'patterns' && !isTimeFiltered,
+    refetchKey: currentConnection?.id,
   });
 
   // Stored pattern analysis (with time filter)

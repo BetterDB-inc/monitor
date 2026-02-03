@@ -34,8 +34,10 @@ export class WebhookProService implements OnModuleInit {
     threshold: number;
     message: string;
     timestamp: number;
+    connectionId?: string;
   }): Promise<void> {
-    await this.dispatcherService.dispatchEvent('anomaly.detected' as WebhookEventType, data);
+    const { connectionId, ...eventData } = data;
+    await this.dispatcherService.dispatchEvent('anomaly.detected' as WebhookEventType, eventData, connectionId);
   }
 
   /**
@@ -45,8 +47,10 @@ export class WebhookProService implements OnModuleInit {
     slowlogCount: number;
     threshold: number;
     timestamp: number;
+    connectionId?: string;
   }): Promise<void> {
-    await this.dispatcherService.dispatchEvent('slowlog.threshold' as WebhookEventType, data);
+    const { connectionId, ...eventData } = data;
+    await this.dispatcherService.dispatchEvent('slowlog.threshold' as WebhookEventType, eventData, connectionId);
   }
 
   /**
@@ -58,8 +62,10 @@ export class WebhookProService implements OnModuleInit {
     threshold: number;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
-    await this.dispatcherService.dispatchEvent('latency.spike' as WebhookEventType, data);
+    const { connectionId, ...eventData } = data;
+    await this.dispatcherService.dispatchEvent('latency.spike' as WebhookEventType, eventData, connectionId);
   }
 
   /**
@@ -71,8 +77,10 @@ export class WebhookProService implements OnModuleInit {
     threshold: number;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
-    await this.dispatcherService.dispatchEvent('connection.spike' as WebhookEventType, data);
+    const { connectionId, ...eventData } = data;
+    await this.dispatcherService.dispatchEvent('connection.spike' as WebhookEventType, eventData, connectionId);
   }
 
   /**
@@ -83,8 +91,10 @@ export class WebhookProService implements OnModuleInit {
     blockedFor: number;
     reason: string;
     timestamp: number;
+    connectionId?: string;
   }): Promise<void> {
-    await this.dispatcherService.dispatchEvent('client.blocked' as WebhookEventType, data);
+    const { connectionId, ...eventData } = data;
+    await this.dispatcherService.dispatchEvent('client.blocked' as WebhookEventType, eventData, connectionId);
   }
 
   /**
@@ -93,9 +103,10 @@ export class WebhookProService implements OnModuleInit {
   async dispatchOperationalEvent(
     eventType: WebhookEventType,
     data: Record<string, any>,
+    connectionId?: string,
   ): Promise<void> {
     try {
-      await this.dispatcherService.dispatchEvent(eventType, data);
+      await this.dispatcherService.dispatchEvent(eventType, data, connectionId);
       this.logger.debug(`Dispatched operational event: ${eventType}`);
     } catch (error) {
       this.logger.error(`Failed to dispatch operational event ${eventType}:`, error);

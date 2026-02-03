@@ -11,7 +11,7 @@ import {
   HttpStatus,
   UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiHeader } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { WebhooksService } from './webhooks.service';
 import { WebhookDispatcherService } from './webhook-dispatcher.service';
@@ -24,6 +24,7 @@ import {
   GetDeliveriesQueryDto,
   TestWebhookResponseDto,
 } from '../common/dto/webhook.dto';
+import { ConnectionId, CONNECTION_ID_HEADER } from '../common/decorators';
 
 // Rate limiting configuration
 const THROTTLE_TTL = 60000; // 60 seconds
@@ -43,19 +44,24 @@ export class WebhooksController {
   @Post()
   @Throttle({ default: { limit: CREATE_WEBHOOK_LIMIT, ttl: THROTTLE_TTL } })
   @ApiOperation({ summary: 'Create a new webhook' })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to associate with webhook. If not provided, webhook will be global (fires for all connections).' })
   @ApiResponse({ status: 201, description: 'Webhook created successfully', type: WebhookDto })
   @ApiResponse({ status: 400, description: 'Invalid webhook data' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
-  async createWebhook(@Body() dto: CreateWebhookDto): Promise<WebhookDto> {
-    const webhook = await this.webhooksService.createWebhook(dto);
+  async createWebhook(
+    @Body() dto: CreateWebhookDto,
+    @ConnectionId() connectionId?: string,
+  ): Promise<WebhookDto> {
+    const webhook = await this.webhooksService.createWebhook({ ...dto, connectionId });
     return this.webhooksService.redactSecret(webhook) as WebhookDto;
   }
 
   @Get()
   @ApiOperation({ summary: 'Get all webhooks' })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   @ApiResponse({ status: 200, description: 'List of webhooks', type: [WebhookDto] })
-  async getAllWebhooks(): Promise<WebhookDto[]> {
-    return this.webhooksService.getAllWebhooksRedacted() as Promise<WebhookDto[]>;
+  async getAllWebhooks(@ConnectionId() connectionId?: string): Promise<WebhookDto[]> {
+    return this.webhooksService.getAllWebhooksRedacted(connectionId) as Promise<WebhookDto[]>;
   }
 
   @Get('allowed-events')

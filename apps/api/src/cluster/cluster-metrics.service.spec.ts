@@ -1,10 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ClusterMetricsService } from './cluster-metrics.service';
 import { ClusterDiscoveryService } from './cluster-discovery.service';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 describe('ClusterMetricsService', () => {
   let service: ClusterMetricsService;
   let mockDiscoveryService: any;
+  let mockConnectionRegistry: any;
 
   const mockNodes = [
     { id: 'node1', address: '192.168.1.10:6379', role: 'master' as const, healthy: true, slots: [[0, 5460]] },
@@ -68,15 +70,21 @@ used_cpu_user:20.3\r
     mockDiscoveryService = {
       discoverNodes: jest.fn().mockResolvedValue(mockNodes),
       getNodeConnection: jest.fn().mockResolvedValue(mockClient),
-      dbClient: {
+    };
+
+    mockConnectionRegistry = {
+      get: jest.fn().mockReturnValue({
         getClient: jest.fn().mockReturnValue(mockClient),
-      },
+      }),
+      getDefaultId: jest.fn().mockReturnValue('test-connection'),
+      list: jest.fn().mockReturnValue([]),
     };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ClusterMetricsService,
         { provide: ClusterDiscoveryService, useValue: mockDiscoveryService },
+        { provide: ConnectionRegistry, useValue: mockConnectionRegistry },
       ],
     }).compile();
 
@@ -294,7 +302,9 @@ used_cpu_user:20.3\r
         status: 'ready',
       };
 
-      mockDiscoveryService.dbClient.getClient.mockReturnValue(mockClientWithMigration);
+      mockConnectionRegistry.get.mockReturnValue({
+        getClient: jest.fn().mockReturnValue(mockClientWithMigration),
+      });
 
       const migrations = await service.getSlotMigrations();
 
@@ -326,7 +336,9 @@ used_cpu_user:20.3\r
         status: 'ready',
       };
 
-      mockDiscoveryService.dbClient.getClient.mockReturnValueOnce(mockClientWithImport);
+      mockConnectionRegistry.get.mockReturnValueOnce({
+        getClient: jest.fn().mockReturnValue(mockClientWithImport),
+      });
 
       const migrations = await service.getSlotMigrations();
 
@@ -335,8 +347,10 @@ used_cpu_user:20.3\r
     });
 
     it('should handle errors gracefully', async () => {
-      mockDiscoveryService.dbClient.getClient.mockReturnValue({
-        call: jest.fn().mockRejectedValue(new Error('Connection failed')),
+      mockConnectionRegistry.get.mockReturnValue({
+        getClient: jest.fn().mockReturnValue({
+          call: jest.fn().mockRejectedValue(new Error('Connection failed')),
+        }),
       });
 
       const migrations = await service.getSlotMigrations();

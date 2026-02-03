@@ -1,25 +1,25 @@
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { MetricsService } from '@app/metrics/metrics.service';
-import type { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import { ClientAnalyticsService } from '@app/client-analytics/client-analytics.service';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 
 export interface ToolDependencies {
   metricsService: MetricsService;
   storageClient: StoragePort;
   clientAnalyticsService: ClientAnalyticsService;
-  dbClient: DatabasePort;
+  connectionRegistry: ConnectionRegistry;
 }
 
 export function createMonitoringTools(deps: ToolDependencies) {
-  const { metricsService, storageClient, clientAnalyticsService, dbClient } = deps;
+  const { metricsService, storageClient, clientAnalyticsService, connectionRegistry } = deps;
 
   const getServerStatus = tool(
     async () => {
       const info = await metricsService.getInfoParsed(['server', 'clients', 'memory', 'stats']);
       const dbSize = await metricsService.getDbSize();
-      const capabilities = dbClient.getCapabilities();
+      const capabilities = connectionRegistry.get().getCapabilities();
 
       return JSON.stringify({
         database: `${capabilities.dbType} ${capabilities.version}`,

@@ -17,6 +17,7 @@ export interface KeyPatternSnapshot {
   avgTtlSeconds?: number;
   minTtlSeconds?: number;
   maxTtlSeconds?: number;
+  connectionId?: string;
 }
 
 export interface KeyPatternQueryOptions {
@@ -25,6 +26,7 @@ export interface KeyPatternQueryOptions {
   pattern?: string;
   limit?: number;
   offset?: number;
+  connectionId?: string;
 }
 
 export interface KeyAnalyticsSummary {

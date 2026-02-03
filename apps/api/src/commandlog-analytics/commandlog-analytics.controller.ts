@@ -1,8 +1,9 @@
 import { Controller, Get, Query } from '@nestjs/common';
-import { ApiTags, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiQuery, ApiHeader } from '@nestjs/swagger';
 import { CommandLogAnalyticsService } from './commandlog-analytics.service';
 import { StoredCommandLogEntry, CommandLogType } from '../common/interfaces/storage-port.interface';
 import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
+import { ConnectionId, CONNECTION_ID_HEADER } from '../common/decorators';
 
 @ApiTags('command-log-analytics')
 @Controller('commandlog-analytics')
@@ -10,6 +11,7 @@ export class CommandLogAnalyticsController {
   constructor(private readonly commandLogAnalyticsService: CommandLogAnalyticsService) {}
 
   @Get('entries')
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   @ApiQuery({ name: 'startTime', required: false, description: 'Start time filter (Unix timestamp in seconds)' })
   @ApiQuery({ name: 'endTime', required: false, description: 'End time filter (Unix timestamp in seconds)' })
   @ApiQuery({ name: 'command', required: false, description: 'Filter by command name' })
@@ -19,6 +21,7 @@ export class CommandLogAnalyticsController {
   @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of entries to return' })
   @ApiQuery({ name: 'offset', required: false, description: 'Offset for pagination' })
   async getStoredCommandLog(
+    @ConnectionId() connectionId?: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
     @Query('command') command?: string,
@@ -37,15 +40,18 @@ export class CommandLogAnalyticsController {
       minDuration: minDuration ? parseInt(minDuration, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : 100,
       offset: offset ? parseInt(offset, 10) : 0,
+      connectionId,
     });
   }
 
   @Get('patterns')
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   @ApiQuery({ name: 'startTime', required: false, description: 'Start time filter (Unix timestamp in seconds)' })
   @ApiQuery({ name: 'endTime', required: false, description: 'End time filter (Unix timestamp in seconds)' })
   @ApiQuery({ name: 'type', required: false, description: 'Filter by log type (slow, large-request, large-reply)' })
   @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of entries to analyze' })
   async getStoredCommandLogPatternAnalysis(
+    @ConnectionId() connectionId?: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
     @Query('type') type?: string,
@@ -56,6 +62,7 @@ export class CommandLogAnalyticsController {
       endTime: endTime ? parseInt(endTime, 10) : undefined,
       type: type as CommandLogType | undefined,
       limit: limit ? parseInt(limit, 10) : 500,
+      connectionId,
     });
   }
 }

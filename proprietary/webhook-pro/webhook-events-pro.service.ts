@@ -52,6 +52,7 @@ export class WebhookEventsProService implements OnModuleInit {
     threshold: number;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Slowlog threshold event skipped - requires PRO license');
@@ -70,7 +71,8 @@ export class WebhookEventsProService implements OnModuleInit {
         message: `Slowlog count (${data.slowlogCount}) exceeds threshold (${data.threshold})`,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 
@@ -84,6 +86,7 @@ export class WebhookEventsProService implements OnModuleInit {
     masterLinkStatus: string;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Replication lag event skipped - requires PRO license');
@@ -103,7 +106,8 @@ export class WebhookEventsProService implements OnModuleInit {
         message: `Replication lag (${data.lagSeconds}s) exceeds threshold (${data.threshold}s)`,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 
@@ -119,6 +123,7 @@ export class WebhookEventsProService implements OnModuleInit {
     knownNodes: number;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Cluster failover event skipped - requires PRO license');
@@ -136,7 +141,8 @@ export class WebhookEventsProService implements OnModuleInit {
         message: `Cluster state changed from ${data.previousState || 'unknown'} to ${data.clusterState}`,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 
@@ -154,6 +160,7 @@ export class WebhookEventsProService implements OnModuleInit {
     message: string;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Anomaly detected event skipped - requires PRO license');
@@ -172,7 +179,8 @@ export class WebhookEventsProService implements OnModuleInit {
         message: data.message,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 
@@ -186,6 +194,7 @@ export class WebhookEventsProService implements OnModuleInit {
     threshold: number;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Latency spike event skipped - requires PRO license');
@@ -205,7 +214,8 @@ export class WebhookEventsProService implements OnModuleInit {
         message: `Latency spike detected: ${data.currentLatency}ms (baseline: ${data.baseline}ms)`,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 
@@ -219,6 +229,7 @@ export class WebhookEventsProService implements OnModuleInit {
     threshold: number;
     timestamp: number;
     instance: { host: string; port: number };
+    connectionId?: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
       this.logger.debug('Connection spike event skipped - requires PRO license');
@@ -238,7 +249,8 @@ export class WebhookEventsProService implements OnModuleInit {
         message: `Connection spike detected: ${data.currentConnections} (baseline: ${data.baseline})`,
         timestamp: data.timestamp,
         instance: data.instance,
-      }
+      },
+      data.connectionId
     );
   }
 }
