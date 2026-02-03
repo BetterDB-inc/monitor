@@ -27,12 +27,18 @@ export interface NodeHealth {
   error?: string;
 }
 
+// Per-connection discovery cache
+interface DiscoveryCache {
+  nodes: DiscoveredNode[];
+  lastDiscoveryTime: number;
+}
+
 @Injectable()
 export class ClusterDiscoveryService implements OnModuleDestroy {
   private readonly logger = new Logger(ClusterDiscoveryService.name);
   private discoveredNodes: Map<string, NodeConnection> = new Map();
-  private lastDiscoveryTime: number = 0;
-  private discoveryCache: DiscoveredNode[] = [];
+  // Per-connection discovery cache to prevent cross-connection cache contamination
+  private discoveryCacheByConnection: Map<string, DiscoveryCache> = new Map();
   private loggedConnectionErrors: Set<string> = new Set();
   private loggedGetConnectionErrors: Set<string> = new Set();
   private readonly MAX_LOGGED_ERRORS = 1000; // Prevent unbounded growth
@@ -50,11 +56,16 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   async discoverNodes(connectionId?: string): Promise<DiscoveredNode[]> {
+    // Use connection-specific cache key (default connection uses 'default')
+    const cacheKey = connectionId || this.connectionRegistry.getDefaultId() || 'default';
+    const cached = this.discoveryCacheByConnection.get(cacheKey);
+
     if (
-      this.discoveryCache.length > 0 &&
-      Date.now() - this.lastDiscoveryTime < this.DISCOVERY_CACHE_TTL
+      cached &&
+      cached.nodes.length > 0 &&
+      Date.now() - cached.lastDiscoveryTime < this.DISCOVERY_CACHE_TTL
     ) {
-      return this.discoveryCache;
+      return cached.nodes;
     }
 
     try {
@@ -84,11 +95,14 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         });
       }
 
-      this.discoveryCache = discovered;
-      this.lastDiscoveryTime = Date.now();
+      // Store in per-connection cache
+      this.discoveryCacheByConnection.set(cacheKey, {
+        nodes: discovered,
+        lastDiscoveryTime: Date.now(),
+      });
 
       this.logger.log(
-        `Discovered ${discovered.length} nodes (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
+        `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
       );
 
       return discovered;
@@ -142,7 +156,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
     }
 
-    const nodes = await this.discoverNodes();
+    const nodes = await this.discoverNodes(connectionId);
     const node = nodes.find((n) => n.id === nodeId);
 
     if (!node) {
@@ -316,6 +330,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
     await Promise.allSettled(disconnectPromises);
     this.discoveredNodes.clear();
+    this.discoveryCacheByConnection.clear();
     this.logger.log('All node connections closed');
   }
 

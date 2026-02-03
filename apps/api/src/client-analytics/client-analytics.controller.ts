@@ -74,6 +74,7 @@ export class ClientAnalyticsController {
   @ApiQuery({ name: 'endTime', required: true, description: 'End timestamp (Unix milliseconds)' })
   @ApiQuery({ name: 'bucketSize', required: false, description: 'Bucket size in milliseconds (default: 60000)' })
   @ApiResponse({ status: 200, description: 'Time series data retrieved successfully', type: [ClientTimeSeriesPointDto] })
+  @ApiResponse({ status: 400, description: 'startTime and endTime are required' })
   @ApiResponse({ status: 500, description: 'Failed to get time series' })
   async getTimeSeries(
     @ConnectionId() connectionId?: string,
@@ -81,9 +82,12 @@ export class ClientAnalyticsController {
     @Query('endTime') endTime?: string,
     @Query('bucketSize') bucketSize?: string,
   ): Promise<ClientTimeSeriesPoint[]> {
+    if (!startTime || !endTime) {
+      throw new HttpException('startTime and endTime are required', HttpStatus.BAD_REQUEST);
+    }
     return this.service.getTimeSeries(
-      parseInt(startTime!, 10),
-      parseInt(endTime!, 10),
+      parseInt(startTime, 10),
+      parseInt(endTime, 10),
       bucketSize ? parseInt(bucketSize, 10) : 60000,
       connectionId,
     );
