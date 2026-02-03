@@ -1,7 +1,8 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import { Tier, Feature, TIER_FEATURES, EntitlementResponse } from './types';
+import { VersionCheckService } from '@app/version-check/version-check.service';
 
 interface CachedEntitlement {
   response: EntitlementResponse;
@@ -23,7 +24,10 @@ export class LicenseService implements OnModuleInit {
   private validationPromise: Promise<EntitlementResponse> | null = null;
   private isValidated = false;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    @Optional() @Inject(VersionCheckService) private readonly versionCheck?: VersionCheckService,
+  ) {
     this.licenseKey = process.env.BETTERDB_LICENSE_KEY || null;
     this.entitlementUrl = process.env.ENTITLEMENT_URL || 'https://betterdb.com/api/v1/entitlements';
     this.cacheTtlMs = parseInt(process.env.LICENSE_CACHE_TTL_MS || '3600000', 10);
@@ -130,7 +134,17 @@ export class LicenseService implements OnModuleInit {
         throw new Error(`Entitlement server returned ${response.status}`);
       }
 
-      return response.json();
+      const data = await response.json();
+
+      // Piggyback: forward latestVersion to version check service
+      if (data.latestVersion && this.versionCheck) {
+        this.versionCheck.setLatestVersionFromEntitlement(
+          data.latestVersion,
+          data.releaseUrl,
+        );
+      }
+
+      return data;
     } finally {
       clearTimeout(timeout);
     }
@@ -175,6 +189,21 @@ export class LicenseService implements OnModuleInit {
           signal: controller.signal,
         });
         this.logger.debug(`Telemetry ping response: ${response.status}`);
+
+        // Piggyback: check for latestVersion in telemetry response
+        if (response.ok && this.versionCheck) {
+          try {
+            const data = await response.json();
+            if (data.latestVersion) {
+              this.versionCheck.setLatestVersionFromEntitlement(
+                data.latestVersion,
+                data.releaseUrl,
+              );
+            }
+          } catch {
+            // Ignore JSON parse errors for telemetry responses
+          }
+        }
       } finally {
         clearTimeout(timeout);
       }

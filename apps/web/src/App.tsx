@@ -6,7 +6,9 @@ import { CapabilitiesContext } from './hooks/useCapabilities';
 import { LicenseContext, useLicenseStatus, useLicense } from './hooks/useLicense';
 import { UpgradePromptContext, useUpgradePromptState } from './hooks/useUpgradePrompt';
 import { ConnectionContext, useConnectionState } from './hooks/useConnection';
+import { VersionCheckContext, useVersionCheckState } from './hooks/useVersionCheck';
 import { UpgradePrompt } from './components/UpgradePrompt';
+import { UpdateBanner } from './components/UpdateBanner';
 import { ConnectionSelector } from './components/ConnectionSelector';
 import { Dashboard } from './pages/Dashboard';
 import { SlowLog } from './pages/SlowLog';
@@ -29,6 +31,7 @@ function App() {
   const { license } = useLicenseStatus();
   const upgradePromptState = useUpgradePromptState();
   const connectionState = useConnectionState();
+  const versionCheckState = useVersionCheckState();
 
   useEffect(() => {
     metricsApi.getHealth()
@@ -46,14 +49,17 @@ function App() {
         <UpgradePromptContext.Provider value={upgradePromptState}>
           <LicenseContext.Provider value={license}>
             <CapabilitiesContext.Provider value={capabilities}>
-              <AppLayout />
-              <Tooltip id="license-tooltip" />
-              {upgradePromptState.error && (
-                <UpgradePrompt
-                  error={upgradePromptState.error}
-                  onDismiss={upgradePromptState.dismissUpgradePrompt}
-                />
-              )}
+              <VersionCheckContext.Provider value={versionCheckState}>
+                <UpdateBanner />
+                <AppLayout />
+                <Tooltip id="license-tooltip" />
+                {upgradePromptState.error && (
+                  <UpgradePrompt
+                    error={upgradePromptState.error}
+                    onDismiss={upgradePromptState.dismissUpgradePrompt}
+                  />
+                )}
+              </VersionCheckContext.Provider>
             </CapabilitiesContext.Provider>
           </LicenseContext.Provider>
         </UpgradePromptContext.Provider>

@@ -47,6 +47,9 @@ export const envSchema = z.object({
   LICENSE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).optional(),
   BETTERDB_TELEMETRY: z.string().transform(v => v !== 'false').optional(),
 
+  // Version check configuration
+  VERSION_CHECK_INTERVAL_MS: z.coerce.number().int().min(60000).default(21600000),
+
   // Webhook configuration
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).optional(),
   WEBHOOK_MAX_RESPONSE_BODY_BYTES: z.coerce.number().int().min(0).optional(),

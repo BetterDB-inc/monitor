@@ -210,6 +210,17 @@ Self-hosted BetterDB has **no artificial data retention limits**. Your data rete
 
 To disable telemetry, set `BETTERDB_TELEMETRY=false` in your environment variables.
 
+### Version Update Checks
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VERSION_CHECK_INTERVAL_MS` | No | `21600000` | Version check interval (milliseconds, default: 6 hours) |
+
+BetterDB Monitor automatically checks for new versions and displays an update banner in the web UI when a newer version is available. Version information is obtained from:
+
+1. **Entitlement server** (piggybacked on license/telemetry requests) - primary source
+2. **GitHub Releases API** - fallback when entitlement data is unavailable
+
 ### Key Analytics (Pro Tier)
 
 | Variable | Required | Default | Description |
@@ -341,6 +352,12 @@ All API endpoints are prefixed with `/api` when accessed through the web server.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health status of API server, Valkey/Redis, and storage backend |
+
+### Version
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/version` | GET | Current and latest version info, update availability |
 
 ### Settings
 

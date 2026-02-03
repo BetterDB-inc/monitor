@@ -3,6 +3,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ConfigModule } from './config/config.module';
 import { ConnectionsModule } from './connections/connections.module';
+import { VersionCheckModule } from './version-check/version-check.module';
 import { HealthModule } from './health/health.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { AuditModule } from './audit/audit.module';
@@ -66,6 +67,7 @@ const baseImports = [
     limit: 10000, // Very high default - endpoint-specific limits provide actual rate limiting
   }]),
   ConnectionsModule, // Must come early - provides ConnectionRegistry globally
+  VersionCheckModule, // Global module for version update checks
   HealthModule,
   MetricsModule,
   AuditModule,
