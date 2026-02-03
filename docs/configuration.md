@@ -9,12 +9,113 @@ This document provides comprehensive configuration information for BetterDB Moni
 
 ## Table of Contents
 
+- [Multi-Connection Support](#multi-connection-support)
 - [Environment Variables](#environment-variables)
   - [Data Retention](#data-retention)
 - [Docker Usage](#docker-usage)
 - [HTTP Endpoints](#http-endpoints)
 - [Runtime Settings](#runtime-settings)
 - [Container Management](#container-management)
+
+## Multi-Connection Support
+
+BetterDB Monitor supports monitoring multiple Valkey/Redis instances from a single deployment. This enables centralized monitoring of development, staging, and production databases.
+
+### How It Works
+
+1. **Connection Registry**: All database connections are managed through a central registry
+2. **Default Connection**: On first startup, a default connection is created from environment variables (`DB_HOST`, `DB_PORT`, etc.)
+3. **Connection Scoping**: All data (metrics, audit logs, webhooks, etc.) is isolated per connection using the `X-Connection-Id` header
+4. **Prometheus Labels**: All metrics include a `connection` label for filtering (e.g., `betterdb_memory_used_bytes{connection="localhost:6379"}`)
+
+### Managing Connections
+
+#### Via API
+
+```bash
+# List all connections
+curl http://localhost:3001/connections
+
+# Add a new connection
+curl -X POST http://localhost:3001/connections \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Production Redis",
+    "host": "prod-redis.example.com",
+    "port": 6379,
+    "password": "secret"
+  }'
+
+# Test a connection before adding
+curl -X POST http://localhost:3001/connections/test \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Test",
+    "host": "staging-redis.example.com",
+    "port": 6379
+  }'
+
+# Set a connection as default
+curl -X POST http://localhost:3001/connections/{id}/default
+
+# Remove a connection
+curl -X DELETE http://localhost:3001/connections/{id}
+```
+
+#### Via Web UI
+
+Use the connection selector in the top navigation bar to:
+- View all registered connections and their status
+- Switch between connections (data displayed is scoped to selected connection)
+- Add new connections with the "+" button
+- Manage connections (set default, reconnect, delete)
+
+### Connection-Scoped Requests
+
+When making API requests, include the `X-Connection-Id` header to target a specific connection:
+
+```bash
+# Get metrics for a specific connection
+curl -H "X-Connection-Id: prod-conn-id" http://localhost:3001/metrics/info
+
+# Get audit logs for a specific connection
+curl -H "X-Connection-Id: staging-conn-id" http://localhost:3001/audit/entries
+```
+
+If no header is provided, the default connection is used.
+
+### Webhooks and Connections
+
+Webhooks can be:
+- **Global**: Fire for events from any connection (created without `X-Connection-Id`)
+- **Connection-scoped**: Fire only for events from a specific connection (created with `X-Connection-Id`)
+
+```bash
+# Create a webhook that fires for ALL connections
+curl -X POST http://localhost:3001/webhooks \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Global Alert", "url": "https://...", "events": ["instance.down"]}'
+
+# Create a webhook only for production
+curl -X POST http://localhost:3001/webhooks \
+  -H "X-Connection-Id: prod-conn-id" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Prod Alert", "url": "https://...", "events": ["instance.down"]}'
+```
+
+### Data Isolation
+
+All stored data is isolated by connection:
+- Audit trail entries
+- Client analytics snapshots
+- Slowlog/Commandlog entries
+- Anomaly events
+- Key analytics snapshots
+
+This means:
+- Querying `/audit/entries` with `X-Connection-Id: A` returns only data from connection A
+- Prometheus metrics are labeled with `connection="host:port"` for filtering
+- Dashboard displays data for the currently selected connection
 
 ## Environment Variables
 

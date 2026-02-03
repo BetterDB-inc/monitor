@@ -1046,7 +1046,8 @@ export class PrometheusService implements OnModuleInit, OnModuleDestroy {
     buffers: Array<{ metricType: string; mean: number; stdDev: number; ready: boolean }>,
     connectionId?: string,
   ): void {
-    const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
+    const effectiveConnectionId = connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
+    const connLabel = this.getConnectionLabel(effectiveConnectionId);
     for (const buf of buffers) {
       this.anomalyDetectionBufferReady.labels(connLabel, buf.metricType).set(buf.ready ? 1 : 0);
       this.anomalyDetectionBufferMean.labels(connLabel, buf.metricType).set(buf.mean);
