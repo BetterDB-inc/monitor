@@ -5,6 +5,7 @@ import type { Webhook, WebhookDelivery, WebhookEventType, DEFAULT_RETRY_POLICY }
 import { Tier, validateEventsForTier, getRequiredTierForEvent, getEventsForTier, getLockedEventsForTier } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CreateWebhookDto, UpdateWebhookDto } from '../common/dto/webhook.dto';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { LicenseService } from '@proprietary/license';
 
 @Injectable()
@@ -25,8 +26,17 @@ export class WebhooksService {
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
+    private readonly connectionRegistry: ConnectionRegistry,
     @Optional() private readonly licenseService?: LicenseService,
   ) {}
+
+  /**
+   * Resolve connectionId to default if not provided.
+   * Falls back to default connection when available, otherwise returns undefined.
+   */
+  private resolveConnectionId(connectionId?: string): string | undefined {
+    return connectionId || this.connectionRegistry.getDefaultId() || undefined;
+  }
 
   /**
    * Check if an IP address is blocked
@@ -192,7 +202,7 @@ export class WebhooksService {
       deliveryConfig: dto.deliveryConfig,
       alertConfig: dto.alertConfig,
       thresholds: dto.thresholds,
-      connectionId: dto.connectionId,
+      connectionId: this.resolveConnectionId(dto.connectionId),
     });
 
     this.logger.log(`Webhook created: ${webhook.id} - ${webhook.name}`);
@@ -220,9 +230,10 @@ export class WebhooksService {
 
   /**
    * Get all webhooks for the current instance
+   * Falls back to default connection if no connectionId provided
    */
   async getAllWebhooks(connectionId?: string): Promise<Webhook[]> {
-    return this.storageClient.getWebhooksByInstance(connectionId);
+    return this.storageClient.getWebhooksByInstance(this.resolveConnectionId(connectionId));
   }
 
   /**
@@ -236,10 +247,10 @@ export class WebhooksService {
   /**
    * Get webhooks subscribed to a specific event
    * @param event The event type to filter by
-   * @param connectionId Optional connection ID to filter webhooks (null = global webhooks only)
+   * @param connectionId Optional connection ID to filter webhooks (falls back to default)
    */
   async getWebhooksByEvent(event: WebhookEventType, connectionId?: string): Promise<Webhook[]> {
-    return this.storageClient.getWebhooksByEvent(event, connectionId);
+    return this.storageClient.getWebhooksByEvent(event, this.resolveConnectionId(connectionId));
   }
 
   /**
