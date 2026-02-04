@@ -1,4 +1,4 @@
-import { Injectable, Inject, Optional, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Inject, Optional, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { HealthResponse, DetailedHealthResponse, WebhookEventType, ANOMALY_SERVICE, IAnomalyService, AllConnectionsHealthResponse } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
@@ -6,12 +6,13 @@ import { LicenseService } from '@proprietary/license';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 
 @Injectable()
-export class HealthService extends MultiConnectionPoller implements OnModuleInit {
+export class HealthService extends MultiConnectionPoller implements OnModuleInit, OnModuleDestroy {
   protected readonly logger = new Logger(HealthService.name);
   // Per-connection health state tracking
   private instanceUpStates = new Map<string, boolean>();
   private readonly startTime = Date.now();
   private readonly HEALTH_POLL_INTERVAL_MS = 10000; // Check every 10 seconds
+  private startupTimeout: NodeJS.Timeout | null = null;
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -43,10 +44,20 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
   onModuleInit() {
     // Delay initial poll to let connections fully initialize
     // This prevents false "down" states on startup
-    setTimeout(() => {
+    this.startupTimeout = setTimeout(() => {
+      this.startupTimeout = null;
       this.start();
       this.logger.log('Health polling started for all connections');
     }, 5000);
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    // Clear startup timeout if module is destroyed before polling starts
+    if (this.startupTimeout) {
+      clearTimeout(this.startupTimeout);
+      this.startupTimeout = null;
+    }
+    await super.onModuleDestroy();
   }
 
   /**
