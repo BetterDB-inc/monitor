@@ -45,10 +45,7 @@ export class LicenseService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    // Always validate entitlements on startup, regardless of license key presence.
-    // This serves as both license validation (for keyed instances) and a startup ping
-    // (for keyless instances). The entitlement check is a functional licensing concern,
-    // not telemetry - it runs even when BETTERDB_TELEMETRY=false.
+    // Always validate entitlements on startup, regardless of license key presence in order to enable beta features for keyless instances.
     if (!this.licenseKey) {
       this.logger.log('No license key provided, checking entitlements for Community tier...');
     } else {
