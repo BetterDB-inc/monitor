@@ -190,7 +190,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
     it('should not dispatch to disabled webhooks', async () => {
       // Disable the webhook
       await request(app.getHttpServer())
-        .put(`/webhooks/${webhookId}`)
+        .patch(`/webhooks/${webhookId}`)
         .send({ enabled: false });
 
       await dispatcher.dispatchEvent(WebhookEventType.INSTANCE_DOWN, {
@@ -205,7 +205,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
 
       // Re-enable for other tests
       await request(app.getHttpServer())
-        .put(`/webhooks/${webhookId}`)
+        .patch(`/webhooks/${webhookId}`)
         .send({ enabled: true });
     });
   });
@@ -497,7 +497,7 @@ describe('Webhook Event Dispatch (e2e)', () => {
 
       // Update thresholds
       await request(app.getHttpServer())
-        .put(`/webhooks/${customWebhookId}`)
+        .patch(`/webhooks/${customWebhookId}`)
         .send({
           thresholds: { memoryCriticalPercent: 75 },
         })

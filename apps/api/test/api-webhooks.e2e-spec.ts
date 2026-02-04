@@ -169,7 +169,7 @@ describe('Webhooks API (e2e)', () => {
     });
   });
 
-  describe('PUT /webhooks/:id', () => {
+  describe('PATCH /webhooks/:id', () => {
     it('should update webhook fields', async () => {
       // Create webhook for this test
       const created = await request(app.getHttpServer())
@@ -181,7 +181,7 @@ describe('Webhooks API (e2e)', () => {
         });
 
       const res = await request(app.getHttpServer())
-        .put(`/webhooks/${created.body.id}`)
+        .patch(`/webhooks/${created.body.id}`)
         .send({
           name: 'Updated Webhook Name',
           enabled: false,
@@ -209,7 +209,7 @@ describe('Webhooks API (e2e)', () => {
         });
 
       const res = await request(app.getHttpServer())
-        .put(`/webhooks/${created.body.id}`)
+        .patch(`/webhooks/${created.body.id}`)
         .send({
           url: 'ftp://invalid.com',
         });
@@ -222,7 +222,7 @@ describe('Webhooks API (e2e)', () => {
 
     it('should return 404 for unknown webhook', async () => {
       await request(app.getHttpServer())
-        .put('/webhooks/non-existent-id')
+        .patch('/webhooks/non-existent-id')
         .send({
           name: 'Updated',
         })
