@@ -1,15 +1,26 @@
 import { Controller, Get, Post, HttpCode } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiOkResponse } from '@nestjs/swagger';
 import { LicenseService } from './license.service';
 import { Feature, TIER_FEATURES } from './types';
+import type { VersionInfo } from '@betterdb/shared';
 
-@Controller('license')
+@Controller()
 export class LicenseController {
   constructor(private readonly license: LicenseService) {}
 
-  @Get('status')
+  @Get('version')
+  @ApiTags('version')
+  @ApiOperation({ summary: 'Get version information and update status' })
+  @ApiOkResponse({ description: 'Version info with update availability' })
+  getVersion(): VersionInfo {
+    return this.license.getVersionInfo();
+  }
+
+  @Get('license/status')
+  @ApiTags('license')
+  @ApiOperation({ summary: 'Get license status and tier' })
   getStatus() {
     const info = this.license.getLicenseInfo();
-    // Derive features from tier using TIER_FEATURES mapping
     const features = TIER_FEATURES[info.tier];
     return {
       tier: info.tier,
@@ -20,11 +31,12 @@ export class LicenseController {
     };
   }
 
-  @Get('features')
+  @Get('license/features')
+  @ApiTags('license')
+  @ApiOperation({ summary: 'Get all features and their status' })
   getFeatures() {
     const info = this.license.getLicenseInfo();
     const allFeatures = Object.values(Feature);
-    // Derive enabled features from tier
     const tierFeatures = TIER_FEATURES[info.tier];
     return {
       tier: info.tier,
@@ -35,7 +47,9 @@ export class LicenseController {
     };
   }
 
-  @Post('refresh')
+  @Post('license/refresh')
+  @ApiTags('license')
+  @ApiOperation({ summary: 'Force refresh license validation' })
   @HttpCode(200)
   async refresh() {
     const info = await this.license.refreshLicense();

@@ -1,7 +1,9 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
+import { compare, valid as validSemver } from 'semver';
 import { Tier, Feature, TIER_FEATURES, EntitlementResponse } from './types';
+import type { VersionInfo } from '@betterdb/shared';
 
 interface CachedEntitlement {
   response: EntitlementResponse;
@@ -23,7 +25,15 @@ export class LicenseService implements OnModuleInit {
   private validationPromise: Promise<EntitlementResponse> | null = null;
   private isValidated = false;
 
+  // Version check state
+  private readonly currentVersion: string;
+  private latestVersion: string | null = null;
+  private releaseUrl: string | null = null;
+  private versionCheckedAt: number | null = null;
+
   constructor(private readonly config: ConfigService) {
+    this.currentVersion =
+      process.env.APP_VERSION || process.env.npm_package_version || 'unknown';
     this.licenseKey = process.env.BETTERDB_LICENSE_KEY || null;
     this.entitlementUrl = process.env.ENTITLEMENT_URL || 'https://betterdb.com/api/v1/entitlements';
     this.cacheTtlMs = parseInt(process.env.LICENSE_CACHE_TTL_MS || '3600000', 10);
@@ -44,6 +54,9 @@ export class LicenseService implements OnModuleInit {
   }
 
   async onModuleInit() {
+    // Always log current version on startup
+    this.logger.log(`BetterDB Monitor v${this.currentVersion}`);
+
     if (!this.licenseKey) {
       // No license key - definitely community tier
       this.isValidated = true;
@@ -130,7 +143,14 @@ export class LicenseService implements OnModuleInit {
         throw new Error(`Entitlement server returned ${response.status}`);
       }
 
-      return response.json();
+      const data = await response.json();
+
+      // Store version info from entitlement response
+      if (data.latestVersion) {
+        this.setLatestVersion(data.latestVersion, data.releaseUrl);
+      }
+
+      return data;
     } finally {
       clearTimeout(timeout);
     }
@@ -175,6 +195,18 @@ export class LicenseService implements OnModuleInit {
           signal: controller.signal,
         });
         this.logger.debug(`Telemetry ping response: ${response.status}`);
+
+        // Store version info from telemetry response
+        if (response.ok) {
+          try {
+            const data = await response.json();
+            if (data.latestVersion) {
+              this.setLatestVersion(data.latestVersion, data.releaseUrl);
+            }
+          } catch {
+            // No JSON in response - ignore
+          }
+        }
       } finally {
         clearTimeout(timeout);
       }
@@ -248,5 +280,78 @@ export class LicenseService implements OnModuleInit {
    */
   isValidationComplete(): boolean {
     return this.isValidated;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Version Check Methods
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Store latest version from entitlement/telemetry response
+   */
+  private setLatestVersion(version: string, url?: string): void {
+    const cleanVersion = version.startsWith('v') ? version.slice(1) : version;
+
+    if (!validSemver(cleanVersion)) {
+      this.logger.debug(`Ignoring invalid version: ${version}`);
+      return;
+    }
+
+    this.latestVersion = cleanVersion;
+    this.releaseUrl =
+      url || `https://github.com/betterdb-inc/monitor/releases/tag/v${cleanVersion}`;
+    this.versionCheckedAt = Date.now();
+
+    this.logUpdateStatus();
+  }
+
+  /**
+   * Get full version info for API endpoint
+   */
+  getVersionInfo(): VersionInfo {
+    return {
+      current: this.currentVersion,
+      latest: this.latestVersion,
+      updateAvailable: this.isUpdateAvailable(),
+      releaseUrl: this.releaseUrl,
+      checkedAt: this.versionCheckedAt,
+    };
+  }
+
+  /**
+   * Check if an update is available
+   */
+  isUpdateAvailable(): boolean {
+    if (!this.latestVersion || this.currentVersion === 'unknown') {
+      return false;
+    }
+
+    const currentValid = validSemver(this.currentVersion);
+    const latestValid = validSemver(this.latestVersion);
+
+    if (!currentValid || !latestValid) {
+      return false;
+    }
+
+    return compare(this.latestVersion, this.currentVersion) > 0;
+  }
+
+  /**
+   * Log update status to console
+   */
+  private logUpdateStatus(): void {
+    if (this.isUpdateAvailable()) {
+      this.logger.warn('─────────────────────────────────────────────────────');
+      this.logger.warn(
+        `UPDATE AVAILABLE: v${this.currentVersion} → v${this.latestVersion}`,
+      );
+      if (this.releaseUrl) {
+        this.logger.warn(`Release notes: ${this.releaseUrl}`);
+      }
+      this.logger.warn('Run: docker pull betterdb/monitor:latest');
+      this.logger.warn('─────────────────────────────────────────────────────');
+    } else if (this.latestVersion) {
+      this.logger.log(`You are running the latest version (v${this.currentVersion})`);
+    }
   }
 }
