@@ -31,6 +31,11 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     return this.HEALTH_POLL_INTERVAL_MS;
   }
 
+  protected shouldPollDisconnected(): boolean {
+    // Health service needs to poll ALL connections to detect down/recovery states
+    return true;
+  }
+
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     // Perform health check for this connection - triggers webhooks on state change
     await this.getHealth(ctx.connectionId);
