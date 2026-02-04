@@ -71,6 +71,10 @@ export interface EntitlementResponse {
     email: string;
   };
   error?: string;
+  
+  // Version info (optional, for update notifications)
+  latestVersion?: string;
+  releaseUrl?: string;
 }
 
 export interface EntitlementRequest {

@@ -117,6 +117,7 @@ describe('ConfigMonitorService', () => {
         expect(webhookEventsEnterpriseService.dispatchAclModified).toHaveBeenCalledWith({
           changeType: 'user_added',
           affectedUser: 'newuser',
+          connectionId: 'test-connection',
           timestamp: expect.any(Number),
           instance: { host: 'localhost', port: 6379, connectionId: 'test-connection' },
         });
@@ -143,6 +144,7 @@ describe('ConfigMonitorService', () => {
         expect(webhookEventsEnterpriseService.dispatchAclModified).toHaveBeenCalledWith({
           changeType: 'user_removed',
           affectedUser: 'olduser',
+          connectionId: 'test-connection',
           timestamp: expect.any(Number),
           instance: { host: 'localhost', port: 6379, connectionId: 'test-connection' },
         });
@@ -172,6 +174,7 @@ describe('ConfigMonitorService', () => {
         expect(webhookEventsEnterpriseService.dispatchAclModified).toHaveBeenCalledWith({
           changeType: 'permissions_changed',
           affectedUser: 'testuser',
+          connectionId: 'test-connection',
           timestamp: expect.any(Number),
           instance: { host: 'localhost', port: 6379, connectionId: 'test-connection' },
         });
@@ -211,6 +214,7 @@ describe('ConfigMonitorService', () => {
           configKey: 'maxmemory',
           oldValue: '100mb',
           newValue: '200mb',
+          connectionId: 'test-connection',
           timestamp: expect.any(Number),
           instance: { host: 'localhost', port: 6379, connectionId: 'test-connection' },
         });

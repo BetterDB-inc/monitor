@@ -50,7 +50,6 @@ function App() {
           <LicenseContext.Provider value={license}>
             <CapabilitiesContext.Provider value={capabilities}>
               <VersionCheckContext.Provider value={versionCheckState}>
-                <UpdateBanner />
                 <AppLayout />
                 <Tooltip id="license-tooltip" />
                 {upgradePromptState.error && (
@@ -155,6 +154,7 @@ function AppLayout() {
       </aside>
 
       <main className="pl-64 min-h-screen flex flex-col">
+        <UpdateBanner />
         <div className="p-8 flex-1 flex flex-col">
           <Routes>
             <Route path="/" element={<Dashboard />} />
