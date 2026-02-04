@@ -87,6 +87,16 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
   }
 
   /**
+   * Whether to poll disconnected connections.
+   * Default is false (only poll connected connections).
+   * Override to return true for services like HealthService that need to
+   * detect when connections go down or recover.
+   */
+  protected shouldPollDisconnected(): boolean {
+    return false;
+  }
+
+  /**
    * Start the multi-connection polling loop.
    * Call this in onModuleInit().
    */
@@ -162,9 +172,10 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
       }
       this.knownConnections = currentConnectionIds;
 
-      // Poll all connected instances in parallel
+      // Poll instances in parallel (by default only connected ones, unless shouldPollDisconnected)
+      const pollDisconnected = this.shouldPollDisconnected();
       const pollPromises = connections
-        .filter((conn) => conn.isConnected)
+        .filter((conn) => conn.isConnected || pollDisconnected)
         .map(async (conn) => {
           try {
             const client = this.connectionRegistry.get(conn.id);

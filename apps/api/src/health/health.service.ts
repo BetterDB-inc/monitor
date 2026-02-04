@@ -3,66 +3,66 @@ import { HealthResponse, DetailedHealthResponse, WebhookEventType, ANOMALY_SERVI
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { LicenseService } from '@proprietary/license';
+import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 
 @Injectable()
-export class HealthService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(HealthService.name);
+export class HealthService extends MultiConnectionPoller implements OnModuleInit, OnModuleDestroy {
+  protected readonly logger = new Logger(HealthService.name);
   // Per-connection health state tracking
   private instanceUpStates = new Map<string, boolean>();
   private readonly startTime = Date.now();
-  private healthPollInterval: NodeJS.Timeout | null = null;
   private readonly HEALTH_POLL_INTERVAL_MS = 10000; // Check every 10 seconds
+  private startupTimeout: NodeJS.Timeout | null = null;
 
   constructor(
-    private readonly connectionRegistry: ConnectionRegistry,
+    connectionRegistry: ConnectionRegistry,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
     @Optional() @Inject(ANOMALY_SERVICE) private readonly anomalyService?: IAnomalyService,
     @Optional() private readonly licenseService?: LicenseService,
   ) {
+    super(connectionRegistry);
     // Initialize all existing connections as up
     for (const conn of connectionRegistry.list()) {
       this.instanceUpStates.set(conn.id, true);
     }
   }
 
+  protected getIntervalMs(): number {
+    return this.HEALTH_POLL_INTERVAL_MS;
+  }
+
+  protected shouldPollDisconnected(): boolean {
+    // Health service needs to poll ALL connections to detect down/recovery states
+    return true;
+  }
+
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    // Perform health check for this connection - triggers webhooks on state change
+    await this.getHealth(ctx.connectionId);
+  }
+
+  protected onConnectionRemoved(connectionId: string): void {
+    this.instanceUpStates.delete(connectionId);
+    this.logger.debug(`Cleaned up health state for removed connection: ${connectionId}`);
+  }
+
   onModuleInit() {
-    // Start periodic health polling for all connections
-    this.healthPollInterval = setInterval(() => {
-      this.pollAllConnectionsHealth().catch(err => {
-        this.logger.error('Error polling connections health:', err);
-      });
-    }, this.HEALTH_POLL_INTERVAL_MS);
-
-    // Run initial check after a short delay to let connections initialize
-    setTimeout(() => {
-      this.pollAllConnectionsHealth().catch(err => {
-        this.logger.error('Error in initial health poll:', err);
-      });
+    // Delay initial poll to let connections fully initialize
+    // This prevents false "down" states on startup
+    this.startupTimeout = setTimeout(() => {
+      this.startupTimeout = null;
+      this.start();
+      this.logger.log('Health polling started for all connections');
     }, 5000);
-
-    this.logger.log('Health polling started for all connections');
   }
 
-  onModuleDestroy() {
-    if (this.healthPollInterval) {
-      clearInterval(this.healthPollInterval);
-      this.healthPollInterval = null;
+  async onModuleDestroy(): Promise<void> {
+    // Clear startup timeout if module is destroyed before polling starts
+    if (this.startupTimeout) {
+      clearTimeout(this.startupTimeout);
+      this.startupTimeout = null;
     }
-  }
-
-  /**
-   * Poll health for all registered connections
-   * This triggers instance.up/down webhooks when state changes
-   */
-  private async pollAllConnectionsHealth(): Promise<void> {
-    const connections = this.connectionRegistry.list();
-    for (const conn of connections) {
-      try {
-        await this.getHealth(conn.id);
-      } catch (err) {
-        this.logger.debug(`Health check failed for ${conn.name}: ${err}`);
-      }
-    }
+    await super.onModuleDestroy();
   }
 
   /**
