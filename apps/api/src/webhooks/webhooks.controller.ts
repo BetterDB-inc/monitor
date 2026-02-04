@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Put,
+  Patch,
   Delete,
   Body,
   Param,
@@ -91,7 +92,7 @@ export class WebhooksController {
     return this.webhooksService.getWebhookRedacted(id) as Promise<WebhookDto>;
   }
 
-  @Put(':id')
+  @Patch(':id')
   @ApiOperation({ summary: 'Update a webhook' })
   @ApiParam({ name: 'id', description: 'Webhook ID' })
   @ApiResponse({ status: 200, description: 'Webhook updated successfully', type: WebhookDto })
