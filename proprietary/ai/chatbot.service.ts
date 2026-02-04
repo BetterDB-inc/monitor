@@ -67,10 +67,8 @@ export class ChatbotService implements OnModuleInit {
   }
 
   private buildSystemPrompt(connectionId?: string): string {
+    // connectionRegistry.get() throws if connection not found - let it propagate
     const connection = this.connectionRegistry.get(connectionId);
-    if (!connection) {
-      throw new Error(`Connection not found: ${connectionId ?? 'default'}`);
-    }
     const capabilities = connection.getCapabilities();
     const dbName = capabilities.dbType === 'valkey' ? 'Valkey' : 'Redis';
 
@@ -198,8 +196,10 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
       return null;
     }
 
-    const connection = this.connectionRegistry.get(connectionId);
-    if (!connection) {
+    let connection;
+    try {
+      connection = this.connectionRegistry.get(connectionId);
+    } catch {
       return null;
     }
     const results = await this.vectorStore.search(message, 3, connection.getCapabilities().dbType);
@@ -216,8 +216,13 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
   }
 
   private getHelpMessage(connectionId?: string): string {
-    const connection = this.connectionRegistry.get(connectionId);
-    const dbType = connection?.getCapabilities().dbType.toUpperCase() ?? 'DATABASE';
+    let dbType = 'DATABASE';
+    try {
+      const connection = this.connectionRegistry.get(connectionId);
+      dbType = connection.getCapabilities().dbType.toUpperCase();
+    } catch {
+      // Use default if connection not found
+    }
     return `I can help you monitor your ${dbType} database. Try asking:
 
 **Server Status:**

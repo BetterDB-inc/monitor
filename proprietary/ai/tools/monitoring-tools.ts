@@ -22,8 +22,10 @@ export function createMonitoringTools(deps: ToolDependencies) {
     async ({ connectionId }: { connectionId?: string }) => {
       const info = await metricsService.getInfoParsed(['server', 'clients', 'memory', 'stats'], connectionId);
       const dbSize = await metricsService.getDbSize(connectionId);
-      const connection = connectionRegistry.get(connectionId);
-      if (!connection) {
+      let connection;
+      try {
+        connection = connectionRegistry.get(connectionId);
+      } catch {
         return JSON.stringify({ error: `Connection not found: ${connectionId ?? 'default'}` });
       }
       const capabilities = connection.getCapabilities();
