@@ -665,6 +665,9 @@ export class MemoryAdapter implements StoragePort {
     let webhooks = Array.from(this.webhooks.values());
     if (connectionId) {
       webhooks = webhooks.filter(w => w.connectionId === connectionId || !w.connectionId);
+    } else {
+      // No connectionId provided - only return global webhooks (not scoped to any connection)
+      webhooks = webhooks.filter(w => !w.connectionId);
     }
     return webhooks
       .sort((a, b) => b.createdAt - a.createdAt)

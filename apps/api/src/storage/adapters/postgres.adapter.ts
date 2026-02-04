@@ -1752,7 +1752,8 @@ export class PostgresAdapter implements StoragePort {
       return result.rows.map((row) => this.mappers.mapWebhookRow(row));
     }
 
-    const result = await this.pool.query('SELECT * FROM webhooks ORDER BY created_at DESC');
+    // No connectionId provided - only return global webhooks (not scoped to any connection)
+    const result = await this.pool.query('SELECT * FROM webhooks WHERE connection_id IS NULL ORDER BY created_at DESC');
     return result.rows.map((row) => this.mappers.mapWebhookRow(row));
   }
 

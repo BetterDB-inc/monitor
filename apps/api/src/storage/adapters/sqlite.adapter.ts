@@ -1685,7 +1685,8 @@ export class SqliteAdapter implements StoragePort {
       return rows.map((row) => this.mappers.mapWebhookRow(row));
     }
 
-    const rows = this.db.prepare('SELECT * FROM webhooks ORDER BY created_at DESC').all() as any[];
+    // No connectionId provided - only return global webhooks (not scoped to any connection)
+    const rows = this.db.prepare('SELECT * FROM webhooks WHERE connection_id IS NULL ORDER BY created_at DESC').all() as any[];
     return rows.map((row) => this.mappers.mapWebhookRow(row));
   }
 
