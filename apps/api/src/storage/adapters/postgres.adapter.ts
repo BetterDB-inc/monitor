@@ -846,7 +846,7 @@ export class PostgresAdapter implements StoragePort {
           ADD CONSTRAINT acl_audit_timestamp_created_username_object_reason_source__key
           UNIQUE (timestamp_created, username, object, reason, source_host, source_port, connection_id);
         END IF;
-      EXCEPTION WHEN duplicate_table THEN
+      EXCEPTION WHEN duplicate_object THEN
         -- Constraint already exists, ignore
       END $$;
 
@@ -1047,8 +1047,14 @@ export class PostgresAdapter implements StoragePort {
       DO $$
       BEGIN
         IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'slow_log_entries_slowlog_id_source_host_source_port_key'
+          SELECT 1 FROM pg_constraint c
+          JOIN pg_class t ON c.conrelid = t.oid
+          WHERE t.relname = 'slow_log_entries'
+            AND c.contype = 'u'
+            AND c.conkey @> ARRAY(
+              SELECT attnum FROM pg_attribute
+              WHERE attrelid = t.oid AND attname IN ('slowlog_id', 'source_host', 'source_port', 'connection_id')
+            )
         ) THEN
           -- Remove duplicates first (keep the one with highest pk)
           DELETE FROM slow_log_entries a USING slow_log_entries b
@@ -1059,10 +1065,10 @@ export class PostgresAdapter implements StoragePort {
             AND a.connection_id = b.connection_id;
 
           ALTER TABLE slow_log_entries
-          ADD CONSTRAINT slow_log_entries_slowlog_id_source_host_source_port_key
+          ADD CONSTRAINT slow_log_entries_slowlog_id_source_host_source_port_conn_key
           UNIQUE (slowlog_id, source_host, source_port, connection_id);
         END IF;
-      EXCEPTION WHEN duplicate_table THEN
+      EXCEPTION WHEN duplicate_object THEN
         -- Constraint already exists, ignore
       END $$;
 
@@ -1094,8 +1100,14 @@ export class PostgresAdapter implements StoragePort {
       DO $$
       BEGIN
         IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'command_log_entries_commandlog_id_log_type_source_host_sour_key'
+          SELECT 1 FROM pg_constraint c
+          JOIN pg_class t ON c.conrelid = t.oid
+          WHERE t.relname = 'command_log_entries'
+            AND c.contype = 'u'
+            AND c.conkey @> ARRAY(
+              SELECT attnum FROM pg_attribute
+              WHERE attrelid = t.oid AND attname IN ('commandlog_id', 'log_type', 'source_host', 'source_port', 'connection_id')
+            )
         ) THEN
           -- Remove duplicates first (keep the one with highest pk)
           DELETE FROM command_log_entries a USING command_log_entries b
@@ -1107,10 +1119,10 @@ export class PostgresAdapter implements StoragePort {
             AND a.connection_id = b.connection_id;
 
           ALTER TABLE command_log_entries
-          ADD CONSTRAINT command_log_entries_commandlog_id_log_type_source_host_sour_key
+          ADD CONSTRAINT command_log_entries_cmdlog_id_type_host_port_conn_key
           UNIQUE (commandlog_id, log_type, source_host, source_port, connection_id);
         END IF;
-      EXCEPTION WHEN duplicate_table THEN
+      EXCEPTION WHEN duplicate_object THEN
         -- Constraint already exists, ignore
       END $$;
 
