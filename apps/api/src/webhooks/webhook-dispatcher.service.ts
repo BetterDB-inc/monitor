@@ -513,13 +513,17 @@ export class WebhookDispatcherService {
       // Use first subscribed event for testing, or instance.down as fallback
       const testEventType = webhook.events.length > 0 ? webhook.events[0] : ('instance.down' as WebhookEventType);
 
+      // Get instance info for the webhook's connection (consistent with real dispatches)
+      const instanceInfo = this.getInstanceInfo(webhook.connectionId);
+
       const testPayload: WebhookPayload = {
         id: crypto.randomUUID(),
         event: testEventType,
         timestamp: Date.now(),
         instance: {
-          host: this.sourceHost,
-          port: this.sourcePort,
+          host: instanceInfo.host,
+          port: instanceInfo.port,
+          connectionId: webhook.connectionId,
         },
         data: {
           test: true,

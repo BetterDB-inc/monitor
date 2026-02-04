@@ -1,12 +1,13 @@
 import { Controller, Get, Post, HttpCode } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiOkResponse } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { LicenseService } from './license.service';
 import { Feature, TIER_FEATURES } from './types';
 import type { VersionInfo } from '@betterdb/shared';
 
 @Controller()
 export class LicenseController {
-  constructor(private readonly license: LicenseService) {}
+  constructor(private readonly license: LicenseService) { }
 
   @Get('version')
   @ApiTags('version')
@@ -48,6 +49,7 @@ export class LicenseController {
   }
 
   @Post('license/refresh')
+  @Throttle({ default: { limit: 5, ttl: 60000 } }) // 5 requests per minute
   @ApiTags('license')
   @ApiOperation({ summary: 'Force refresh license validation' })
   @HttpCode(200)

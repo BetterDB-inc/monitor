@@ -1,4 +1,13 @@
 /**
+ * Credential status for connections
+ */
+export type CredentialStatus =
+  | 'valid'           // Credentials work, connection successful
+  | 'invalid'         // Connection failed due to authentication
+  | 'decryption_failed' // Password could not be decrypted (wrong key or missing key)
+  | 'unknown';        // Not yet validated
+
+/**
  * Connection configuration for storing database connections
  */
 export interface DatabaseConnectionConfig {
@@ -15,6 +24,10 @@ export interface DatabaseConnectionConfig {
   isDefault?: boolean;
   createdAt: number;
   updatedAt?: number;
+  /** Status of credential validation (not persisted, set at runtime) */
+  credentialStatus?: CredentialStatus;
+  /** Error message when credentials are invalid */
+  credentialError?: string;
 }
 
 /**
@@ -43,6 +56,10 @@ export interface ConnectionStatus {
   updatedAt?: number;
   isConnected: boolean;
   capabilities?: ConnectionCapabilities;
+  /** Status of credential validation */
+  credentialStatus?: CredentialStatus;
+  /** Error message when credentials are invalid */
+  credentialError?: string;
 }
 
 /**

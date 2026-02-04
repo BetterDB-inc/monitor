@@ -151,6 +151,7 @@ This means:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ENCRYPTION_KEY` | No | - | Master key for encrypting stored passwords (min 16 characters) |
+| `ENCRYPTION_KEK_SALT` | No | `betterdb-kek-salt-v1` | Salt used for key derivation (customize for additional security) |
 
 **Password Encryption**: When `ENCRYPTION_KEY` is set, all connection passwords are encrypted at rest using envelope encryption (AES-256-GCM). Each password gets a unique encryption key (DEK) that is itself encrypted with a master key (KEK) derived from your `ENCRYPTION_KEY`.
 
@@ -158,6 +159,7 @@ This means:
 - Use a strong, random key (e.g., `openssl rand -base64 32`)
 - Store the key securely (e.g., in a secrets manager)
 - If you lose the key, encrypted passwords cannot be recovered
+- Optionally set `ENCRYPTION_KEK_SALT` to a custom value for defense-in-depth (attackers would need both key and salt)
 
 ### Audit Trail
 
