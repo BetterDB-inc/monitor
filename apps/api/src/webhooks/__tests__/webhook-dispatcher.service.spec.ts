@@ -87,7 +87,7 @@ describe('WebhookDispatcherService', () => {
         { message: 'Memory critical' }
       );
 
-      expect(webhooksService.getWebhooksByEvent).toHaveBeenCalledWith(WebhookEventType.MEMORY_CRITICAL);
+      expect(webhooksService.getWebhooksByEvent).toHaveBeenCalledWith(WebhookEventType.MEMORY_CRITICAL, undefined);
     });
 
     it('should not re-fire alert while threshold still exceeded', async () => {

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
+import { useConnection } from '../hooks/useConnection';
 import { ConnectionCard } from '../components/dashboard/ConnectionCard';
 import { OverviewCards } from '../components/dashboard/OverviewCards';
 import { MemoryChart } from '../components/dashboard/MemoryChart';
@@ -9,20 +10,30 @@ import { CapabilitiesBadges } from '../components/dashboard/CapabilitiesBadges';
 import { DoctorCard } from '../components/DoctorCard';
 
 export function Dashboard() {
+  const { currentConnection } = useConnection();
+
   const { data: health, loading: healthLoading } = usePolling({
     fetcher: metricsApi.getHealth,
     interval: 5000,
+    refetchKey: currentConnection?.id,
   });
 
   const { data: info } = usePolling({
     fetcher: metricsApi.getInfo,
     interval: 5000,
+    refetchKey: currentConnection?.id,
   });
 
   const [memoryHistory, setMemoryHistory] = useState<Array<{ time: string; used: number; peak: number }>>([]);
   const [opsHistory, setOpsHistory] = useState<Array<{ time: string; ops: number }>>([]);
   const [memoryDoctorReport, setMemoryDoctorReport] = useState<string>();
   const [memoryDoctorLoading, setMemoryDoctorLoading] = useState(true);
+
+  // Clear history when connection changes
+  useEffect(() => {
+    setMemoryHistory([]);
+    setOpsHistory([]);
+  }, [currentConnection?.id]);
 
   useEffect(() => {
     if (!info?.memory || !info?.stats) return;
@@ -45,11 +56,12 @@ export function Dashboard() {
   }, [info]);
 
   useEffect(() => {
+    setMemoryDoctorLoading(true);
     metricsApi.getMemoryDoctor()
       .then(data => setMemoryDoctorReport(data.report))
       .catch(console.error)
       .finally(() => setMemoryDoctorLoading(false));
-  }, []);
+  }, [currentConnection?.id]);
 
   return (
     <div className="space-y-6">

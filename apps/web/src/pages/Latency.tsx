@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
+import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
@@ -27,6 +28,7 @@ const Y_AXIS_LABEL = { angle: -90, position: 'insideLeft' as const, dx: -12, dy:
 const COMMAND_X_AXIS = { angle: -45, textAnchor: 'end' as const, height: 100 };
 
 export function Latency() {
+  const { currentConnection } = useConnection();
   const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
   const [selectedCommand, setSelectedCommand] = useState<string | null>(null);
   const [historyData, setHistoryData] = useState<LatencyHistoryEntry[]>([]);
@@ -38,11 +40,13 @@ export function Latency() {
   const { data: latencyEvents } = usePolling({
     fetcher: metricsApi.getLatencyLatest,
     interval: EVENTS_POLL_INTERVAL_MS,
+    refetchKey: currentConnection?.id,
   });
 
   const { data: histogramData } = usePolling({
     fetcher: () => metricsApi.getLatencyHistogram(),
     interval: HISTOGRAM_POLL_INTERVAL_MS,
+    refetchKey: currentConnection?.id,
   });
 
   useEffect(() => {
@@ -57,11 +61,12 @@ export function Latency() {
   }, [selectedEvent]);
 
   useEffect(() => {
+    setDoctorLoading(true);
     metricsApi.getLatencyDoctor()
       .then(data => setDoctorReport(data.report))
       .catch(console.error)
       .finally(() => setDoctorLoading(false));
-  }, []);
+  }, [currentConnection?.id]);
 
   const formatLatency = (latency: number) => {
     if (latency < 1000) return `${latency}µs`;

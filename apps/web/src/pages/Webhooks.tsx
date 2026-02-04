@@ -5,10 +5,12 @@ import { WebhookList } from '../components/webhooks/WebhookList';
 import { WebhookForm } from '../components/webhooks/WebhookForm';
 import { WebhookDeliveries } from '../components/webhooks/WebhookDeliveries';
 import { Card } from '../components/ui/card';
+import { useConnection } from '../hooks/useConnection';
 
 type View = 'list' | 'create' | 'edit' | 'deliveries';
 
 export function Webhooks() {
+  const { currentConnection } = useConnection();
   const [webhooks, setWebhooks] = useState<Webhook[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<View>('list');
@@ -17,7 +19,7 @@ export function Webhooks() {
 
   useEffect(() => {
     loadWebhooks();
-  }, []);
+  }, [currentConnection?.id]);
 
   const loadWebhooks = async () => {
     try {

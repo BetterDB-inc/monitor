@@ -23,6 +23,7 @@ export type {
   WebhookDelivery,
   WebhookEventType,
   DeliveryStatus,
+  DatabaseConnectionConfig,
 } from '@betterdb/shared';
 import type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/shared';
 import type {
@@ -49,6 +50,7 @@ import type {
   WebhookDelivery,
   WebhookEventType,
   DeliveryStatus,
+  DatabaseConnectionConfig,
 } from '@betterdb/shared';
 
 // Anomaly Event Types
@@ -71,6 +73,7 @@ export interface StoredAnomalyEvent {
   durationMs?: number;
   sourceHost?: string;
   sourcePort?: number;
+  connectionId?: string;
 }
 
 export interface StoredCorrelatedGroup {
@@ -84,6 +87,7 @@ export interface StoredCorrelatedGroup {
   metricTypes: string[];
   sourceHost?: string;
   sourcePort?: number;
+  connectionId?: string;
 }
 
 export interface AnomalyQueryOptions {
@@ -95,6 +99,7 @@ export interface AnomalyQueryOptions {
   resolved?: boolean;
   limit?: number;
   offset?: number;
+  connectionId?: string;
 }
 
 export interface AnomalyStats {
@@ -116,6 +121,7 @@ export interface StoredSlowLogEntry {
   capturedAt: number;  // When we captured this entry (ms)
   sourceHost: string;
   sourcePort: number;
+  connectionId?: string;
 }
 
 export interface SlowLogQueryOptions {
@@ -126,6 +132,7 @@ export interface SlowLogQueryOptions {
   minDuration?: number;  // Microseconds
   limit?: number;
   offset?: number;
+  connectionId?: string;
 }
 
 // Command Log Entry Types (Valkey-specific)
@@ -142,6 +149,7 @@ export interface StoredCommandLogEntry {
   capturedAt: number;  // When we captured this entry (ms)
   sourceHost: string;
   sourcePort: number;
+  connectionId?: string;
 }
 
 export interface CommandLogQueryOptions {
@@ -153,6 +161,7 @@ export interface CommandLogQueryOptions {
   minDuration?: number;  // Microseconds
   limit?: number;
   offset?: number;
+  connectionId?: string;
 }
 
 export interface StoragePort {
@@ -160,72 +169,81 @@ export interface StoragePort {
   close(): Promise<void>;
   isReady(): boolean;
 
-  saveAclEntries(entries: StoredAclEntry[]): Promise<number>;
+  // ACL/Audit Methods - connectionId required for writes, optional filter for reads
+  saveAclEntries(entries: StoredAclEntry[], connectionId: string): Promise<number>;
   getAclEntries(options?: AuditQueryOptions): Promise<StoredAclEntry[]>;
-  getAuditStats(startTime?: number, endTime?: number): Promise<AuditStats>;
-  pruneOldEntries(olderThanTimestamp: number): Promise<number>;
+  getAuditStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AuditStats>;
+  pruneOldEntries(olderThanTimestamp: number, connectionId?: string): Promise<number>;
 
-  saveClientSnapshot(clients: StoredClientSnapshot[]): Promise<number>;
+  // Client Analytics Methods - connectionId required for writes, optional filter for reads
+  saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number>;
   getClientSnapshots(options?: ClientSnapshotQueryOptions): Promise<StoredClientSnapshot[]>;
-  getClientTimeSeries(startTime: number, endTime: number, bucketSizeMs?: number): Promise<ClientTimeSeriesPoint[]>;
-  getClientAnalyticsStats(startTime?: number, endTime?: number): Promise<ClientAnalyticsStats>;
-  getClientConnectionHistory(identifier: { name?: string; user?: string; addr?: string }, startTime?: number, endTime?: number): Promise<StoredClientSnapshot[]>;
-  pruneOldClientSnapshots(olderThanTimestamp: number): Promise<number>;
+  getClientTimeSeries(startTime: number, endTime: number, bucketSizeMs?: number, connectionId?: string): Promise<ClientTimeSeriesPoint[]>;
+  getClientAnalyticsStats(startTime?: number, endTime?: number, connectionId?: string): Promise<ClientAnalyticsStats>;
+  getClientConnectionHistory(identifier: { name?: string; user?: string; addr?: string }, startTime?: number, endTime?: number, connectionId?: string): Promise<StoredClientSnapshot[]>;
+  pruneOldClientSnapshots(olderThanTimestamp: number, connectionId?: string): Promise<number>;
 
-  // Anomaly Methods
-  saveAnomalyEvent(event: StoredAnomalyEvent): Promise<string>;
-  saveAnomalyEvents(events: StoredAnomalyEvent[]): Promise<number>;
+  // Anomaly Methods - connectionId required for writes, optional filter for reads
+  saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string>;
+  saveAnomalyEvents(events: StoredAnomalyEvent[], connectionId: string): Promise<number>;
   getAnomalyEvents(options?: AnomalyQueryOptions): Promise<StoredAnomalyEvent[]>;
-  getAnomalyStats(startTime?: number, endTime?: number): Promise<AnomalyStats>;
+  getAnomalyStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AnomalyStats>;
   resolveAnomaly(id: string, resolvedAt: number): Promise<boolean>;
-  pruneOldAnomalyEvents(cutoffTimestamp: number): Promise<number>;
+  pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
-  saveCorrelatedGroup(group: StoredCorrelatedGroup): Promise<string>;
+  saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string>;
   getCorrelatedGroups(options?: AnomalyQueryOptions): Promise<StoredCorrelatedGroup[]>;
-  pruneOldCorrelatedGroups(cutoffTimestamp: number): Promise<number>;
+  pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
-  // Key Analytics Methods
-  saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[]): Promise<number>;
+  // Key Analytics Methods - connectionId required for writes, optional filter for reads
+  saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[], connectionId: string): Promise<number>;
   getKeyPatternSnapshots(options?: KeyPatternQueryOptions): Promise<KeyPatternSnapshot[]>;
-  getKeyAnalyticsSummary(startTime?: number, endTime?: number): Promise<KeyAnalyticsSummary | null>;
-  getKeyPatternTrends(pattern: string, startTime: number, endTime: number): Promise<Array<{
+  getKeyAnalyticsSummary(startTime?: number, endTime?: number, connectionId?: string): Promise<KeyAnalyticsSummary | null>;
+  getKeyPatternTrends(pattern: string, startTime: number, endTime: number, connectionId?: string): Promise<Array<{
     timestamp: number;
     keyCount: number;
     memoryBytes: number;
     staleCount: number;
   }>>;
-  pruneOldKeyPatternSnapshots(cutoffTimestamp: number): Promise<number>;
+  pruneOldKeyPatternSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
-  // Settings Methods
+  // Settings Methods (global, not connection-scoped)
   getSettings(): Promise<AppSettings | null>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
   updateSettings(updates: SettingsUpdateRequest): Promise<AppSettings>;
 
-  // Webhook Methods
+  // Webhook Methods - connectionId optional filter for scoping webhooks to connections
   createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook>;
   getWebhook(id: string): Promise<Webhook | null>;
-  getWebhooksByInstance(): Promise<Webhook[]>;
-  getWebhooksByEvent(event: WebhookEventType): Promise<Webhook[]>;
+  getWebhooksByInstance(connectionId?: string): Promise<Webhook[]>;
+  getWebhooksByEvent(event: WebhookEventType, connectionId?: string): Promise<Webhook[]>;
   updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null>;
   deleteWebhook(id: string): Promise<boolean>;
 
-  // Webhook Delivery Methods
+  // Webhook Delivery Methods - connectionId optional filter
   createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery>;
   getDelivery(id: string): Promise<WebhookDelivery | null>;
   getDeliveriesByWebhook(webhookId: string, limit?: number, offset?: number): Promise<WebhookDelivery[]>;
   updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean>;
-  getRetriableDeliveries(limit?: number): Promise<WebhookDelivery[]>;
-  pruneOldDeliveries(cutoffTimestamp: number): Promise<number>;
+  getRetriableDeliveries(limit?: number, connectionId?: string): Promise<WebhookDelivery[]>;
+  pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
-  // Slow Log Methods
-  saveSlowLogEntries(entries: StoredSlowLogEntry[]): Promise<number>;
+  // Slow Log Methods - connectionId required for writes, optional filter for reads
+  saveSlowLogEntries(entries: StoredSlowLogEntry[], connectionId: string): Promise<number>;
   getSlowLogEntries(options?: SlowLogQueryOptions): Promise<StoredSlowLogEntry[]>;
-  getLatestSlowLogId(): Promise<number | null>;
-  pruneOldSlowLogEntries(cutoffTimestamp: number): Promise<number>;
+  getLatestSlowLogId(connectionId?: string): Promise<number | null>;
+  pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
-  // Command Log Methods (Valkey-specific)
-  saveCommandLogEntries(entries: StoredCommandLogEntry[]): Promise<number>;
+  // Command Log Methods (Valkey-specific) - connectionId required for writes, optional filter for reads
+  saveCommandLogEntries(entries: StoredCommandLogEntry[], connectionId: string): Promise<number>;
   getCommandLogEntries(options?: CommandLogQueryOptions): Promise<StoredCommandLogEntry[]>;
-  getLatestCommandLogId(type: CommandLogType): Promise<number | null>;
-  pruneOldCommandLogEntries(cutoffTimestamp: number): Promise<number>;
+  getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null>;
+  pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Connection Management Methods (not connection-scoped, they manage connections themselves)
+  saveConnection(config: DatabaseConnectionConfig): Promise<void>;
+  getConnections(): Promise<DatabaseConnectionConfig[]>;
+  getConnection(id: string): Promise<DatabaseConnectionConfig | null>;
+  deleteConnection(id: string): Promise<void>;
+  updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void>;
 }

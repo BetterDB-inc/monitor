@@ -1,41 +1,33 @@
 import { Injectable, Inject, OnModuleInit, Logger, Optional } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { WebhookEventType, IWebhookEventsEnterpriseService, WEBHOOK_EVENTS_ENTERPRISE_SERVICE } from '@betterdb/shared';
-import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { StoragePort, StoredAclEntry } from '../common/interfaces/storage-port.interface';
 import { AclLogEntry } from '../common/types/metrics.types';
 import { PrometheusService } from '../prometheus/prometheus.service';
 import { SettingsService } from '../settings/settings.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
-import { BasePollingService } from '../common/services/base-polling.service';
-
-// Note: WebhookEventsEnterpriseService is injected via DI when proprietary module is available
-// The interface IWebhookEventsEnterpriseService provides type safety for the optional injection
+import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 @Injectable()
-export class AuditService extends BasePollingService implements OnModuleInit {
+export class AuditService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(AuditService.name);
-  private lastSeenTimestamp: number = 0;
-  private readonly sourceHost: string;
-  private readonly sourcePort: number;
+
+  // Per-connection state: track last seen timestamp for each connection
+  private lastSeenTimestamps = new Map<string, number>();
 
   constructor(
-    @Inject('DATABASE_CLIENT')
-    private readonly dbClient: DatabasePort,
+    connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT')
     private readonly storageClient: StoragePort,
-    private readonly configService: ConfigService,
     private readonly prometheusService: PrometheusService,
     private readonly settingsService: SettingsService,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
     @Optional() @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE) private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
   ) {
-    super();
-    this.sourceHost = this.configService.get<string>('database.host', 'localhost');
-    this.sourcePort = this.configService.get<number>('database.port', 6379);
+    super(connectionRegistry);
   }
 
-  private get pollIntervalMs(): number {
+  protected getIntervalMs(): number {
     return this.settingsService.getCachedSettings().auditPollIntervalMs;
   }
 
@@ -45,32 +37,31 @@ export class AuditService extends BasePollingService implements OnModuleInit {
       return;
     }
 
-    this.startPollingLoop({
-      name: 'acl-log',
-      getIntervalMs: () => this.pollIntervalMs,
-      poll: () => this.pollAclLog(),
-    });
+    this.start();
   }
 
-  private async pollAclLog(): Promise<void> {
-    const endTimer = this.prometheusService.startPollTimer('audit');
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    const endTimer = this.prometheusService.startPollTimer('audit', ctx.connectionId);
 
     try {
-      const capabilities = this.dbClient.getCapabilities();
+      const capabilities = ctx.client.getCapabilities();
       if (!capabilities.hasAclLog) {
-        this.logger.warn('ACL LOG not supported by database, skipping poll');
+        this.logger.debug(`ACL LOG not supported by ${ctx.connectionName}, skipping poll`);
         return;
       }
 
       // Get ACL log entries
-      const aclEntries = await this.dbClient.getAclLog(100);
+      const aclEntries = await ctx.client.getAclLog(100);
 
       if (aclEntries.length === 0) {
         return;
       }
 
+      // Get last seen timestamp for this connection
+      const lastSeenTimestamp = this.lastSeenTimestamps.get(ctx.connectionId) || 0;
+
       // Filter out entries we've already seen
-      const newEntries = this.deduplicateEntries(aclEntries);
+      const newEntries = this.deduplicateEntries(aclEntries, lastSeenTimestamp);
 
       if (newEntries.length === 0) {
         return;
@@ -90,13 +81,14 @@ export class AuditService extends BasePollingService implements OnModuleInit {
         timestampCreated: entry.timestampCreated,
         timestampLastUpdated: entry.timestampLastUpdated,
         capturedAt,
-        sourceHost: this.sourceHost,
-        sourcePort: this.sourcePort,
+        sourceHost: ctx.host,
+        sourcePort: ctx.port,
+        connectionId: ctx.connectionId,
       }));
 
       // Save to storage
-      const saved = await this.storageClient.saveAclEntries(storedEntries);
-      this.logger.debug(`Saved ${saved} new ACL entries`);
+      const saved = await this.storageClient.saveAclEntries(storedEntries, ctx.connectionId);
+      this.logger.debug(`Saved ${saved} new ACL entries for ${ctx.connectionName}`);
 
       // Dispatch webhooks for ACL violations
       if (this.webhookDispatcher && newEntries.length > 0) {
@@ -109,8 +101,10 @@ export class AuditService extends BasePollingService implements OnModuleInit {
             clientInfo: entry.clientInfo,
             count: entry.count,
             timestamp: entry.timestampLastUpdated,
-            host: this.sourceHost,
-            port: this.sourcePort,
+            host: ctx.host,
+            port: ctx.port,
+            connectionId: ctx.connectionId,
+            connectionName: ctx.connectionName,
           };
 
           try {
@@ -119,7 +113,7 @@ export class AuditService extends BasePollingService implements OnModuleInit {
               await this.webhookDispatcher.dispatchEvent(WebhookEventType.CLIENT_BLOCKED, {
                 ...webhookData,
                 message: `Client blocked: authentication failure by ${entry.username}@${entry.clientInfo} (count: ${entry.count})`,
-              });
+              }, ctx.connectionId);
 
               // Enterprise tier: also dispatch acl.violation for auth denials
               if (this.webhookEventsEnterpriseService) {
@@ -129,7 +123,8 @@ export class AuditService extends BasePollingService implements OnModuleInit {
                   key: entry.object,
                   reason: 'Authentication denied',
                   timestamp: entry.timestampLastUpdated * 1000,
-                  instance: { host: this.sourceHost, port: this.sourcePort },
+                  instance: { host: ctx.host, port: ctx.port },
+                  connectionId: ctx.connectionId,
                 });
               }
             }
@@ -144,7 +139,8 @@ export class AuditService extends BasePollingService implements OnModuleInit {
                 violatedKey: entry.reason === 'key' ? entry.object : undefined,
                 count: entry.count,
                 timestamp: entry.timestampLastUpdated * 1000, // Convert to ms
-                instance: { host: this.sourceHost, port: this.sourcePort },
+                instance: { host: ctx.host, port: ctx.port },
+                connectionId: ctx.connectionId,
               });
 
               // Enterprise tier: also dispatch acl.violation for command/key access denials
@@ -154,7 +150,8 @@ export class AuditService extends BasePollingService implements OnModuleInit {
                 key: entry.reason === 'key' ? entry.object : undefined,
                 reason: entry.reason === 'command' ? 'Command access denied' : 'Key access denied',
                 timestamp: entry.timestampLastUpdated * 1000,
-                instance: { host: this.sourceHost, port: this.sourcePort },
+                instance: { host: ctx.host, port: ctx.port },
+                connectionId: ctx.connectionId,
               });
             }
           } catch (err) {
@@ -163,19 +160,25 @@ export class AuditService extends BasePollingService implements OnModuleInit {
         }
       }
 
+      // Update last seen timestamp for this connection
       const latestTimestamp = Math.max(...newEntries.map((e) => e.timestampLastUpdated));
-      this.lastSeenTimestamp = latestTimestamp;
-      this.prometheusService.incrementPollCounter();
+      this.lastSeenTimestamps.set(ctx.connectionId, latestTimestamp);
+      this.prometheusService.incrementPollCounter(ctx.connectionId);
     } catch (error) {
-      this.logger.error(`Error polling ACL log: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.logger.error(`Error polling ACL log for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;
     } finally {
       endTimer();
     }
   }
 
-  private deduplicateEntries(entries: AclLogEntry[]): AclLogEntry[] {
+  protected onConnectionRemoved(connectionId: string): void {
+    this.lastSeenTimestamps.delete(connectionId);
+    this.logger.debug(`Cleaned up state for removed connection ${connectionId}`);
+  }
+
+  private deduplicateEntries(entries: AclLogEntry[], lastSeenTimestamp: number): AclLogEntry[] {
     // Filter entries that are newer than the last seen timestamp
-    return entries.filter((entry) => entry.timestampLastUpdated > this.lastSeenTimestamp);
+    return entries.filter((entry) => entry.timestampLastUpdated > lastSeenTimestamp);
   }
 }

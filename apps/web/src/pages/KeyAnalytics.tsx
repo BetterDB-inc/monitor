@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { keyAnalyticsApi } from '../api/keyAnalytics';
 import { usePolling } from '../hooks/usePolling';
+import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
 import { BarChart3 } from 'lucide-react';
@@ -33,6 +34,7 @@ function formatTime(seconds?: number): string {
 const COLORS = ['hsl(var(--primary))', 'hsl(var(--secondary))', '#82ca9d', '#ffc658', '#ff8042', '#8884d8'];
 
 export function KeyAnalytics() {
+  const { currentConnection } = useConnection();
   const [sortField, setSortField] = useState<SortField>('keyCount');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [selectedPattern, setSelectedPattern] = useState<string | null>(null);
@@ -50,11 +52,13 @@ export function KeyAnalytics() {
   const { data: summary, loading: _summaryLoading, refresh: refetchSummary } = usePolling({
     fetcher: () => keyAnalyticsApi.getSummary(),
     interval: 60000, // 1 minute
+    refetchKey: currentConnection?.id,
   });
 
   const { data: patterns, loading: patternsLoading } = usePolling({
     fetcher: () => keyAnalyticsApi.getPatterns({ limit: 100 }),
     interval: 60000,
+    refetchKey: currentConnection?.id,
   });
 
   const [isCollecting, setIsCollecting] = useState(false);

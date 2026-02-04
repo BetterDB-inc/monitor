@@ -24,7 +24,7 @@ export class ClientAnalyticsAnalysisService {
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
   ) {}
 
-  async getCommandDistribution(params: CommandDistributionParams): Promise<CommandDistributionResponse> {
+  async getCommandDistribution(params: CommandDistributionParams, connectionId?: string): Promise<CommandDistributionResponse> {
     const startTime = params.startTime || Date.now() - 60 * 60 * 1000; // 1 hour ago
     const endTime = params.endTime || Date.now();
     const groupBy = params.groupBy || 'client_name';
@@ -35,6 +35,7 @@ export class ClientAnalyticsAnalysisService {
         startTime,
         endTime,
         limit: MAX_SNAPSHOT_LIMIT,
+        connectionId,
       });
     } catch (error) {
       this.logger.error('Failed to fetch snapshots for command distribution', error);
@@ -113,7 +114,7 @@ export class ClientAnalyticsAnalysisService {
     };
   }
 
-  async getIdleConnections(params: IdleConnectionsParams): Promise<IdleConnectionsResponse> {
+  async getIdleConnections(params: IdleConnectionsParams, connectionId?: string): Promise<IdleConnectionsResponse> {
     const idleThresholdSeconds = params.idleThresholdSeconds || 300; // 5 minutes
     const minOccurrences = params.minOccurrences || 10;
 
@@ -121,6 +122,7 @@ export class ClientAnalyticsAnalysisService {
     try {
       snapshots = await this.storage.getClientSnapshots({
         limit: MAX_SNAPSHOT_LIMIT,
+        connectionId,
       });
     } catch (error) {
       this.logger.error('Failed to fetch snapshots for idle connections', error);
@@ -193,7 +195,7 @@ export class ClientAnalyticsAnalysisService {
     };
   }
 
-  async getBufferAnomalies(params: BufferAnomaliesParams): Promise<BufferAnomaliesResponse> {
+  async getBufferAnomalies(params: BufferAnomaliesParams, connectionId?: string): Promise<BufferAnomaliesResponse> {
     const startTime = params.startTime || Date.now() - 60 * 60 * 1000; // 1 hour ago
     const endTime = params.endTime || Date.now();
     const qbufThreshold = params.qbufThreshold || 1000000; // 1MB
@@ -205,6 +207,7 @@ export class ClientAnalyticsAnalysisService {
         startTime,
         endTime,
         limit: MAX_SNAPSHOT_LIMIT,
+        connectionId,
       });
     } catch (error) {
       this.logger.error('Failed to fetch snapshots for buffer anomalies', error);
@@ -270,7 +273,7 @@ export class ClientAnalyticsAnalysisService {
     };
   }
 
-  async getActivityTimeline(params: ActivityTimelineParams): Promise<ActivityTimelineResponse> {
+  async getActivityTimeline(params: ActivityTimelineParams, connectionId?: string): Promise<ActivityTimelineResponse> {
     const startTime = params.startTime || Date.now() - 60 * 60 * 1000; // 1 hour ago
     const endTime = params.endTime || Date.now();
     const bucketSizeMinutes = params.bucketSizeMinutes || 5;
@@ -283,6 +286,7 @@ export class ClientAnalyticsAnalysisService {
         endTime,
         limit: MAX_SNAPSHOT_LIMIT,
         clientName: params.client,
+        connectionId,
       });
     } catch (error) {
       this.logger.error('Failed to fetch snapshots for activity timeline', error);
@@ -354,7 +358,7 @@ export class ClientAnalyticsAnalysisService {
     return { buckets };
   }
 
-  async detectSpikes(params: SpikeDetectionParams): Promise<SpikeDetectionResponse> {
+  async detectSpikes(params: SpikeDetectionParams, connectionId?: string): Promise<SpikeDetectionResponse> {
     const startTime = params.startTime || Date.now() - 24 * 60 * 60 * 1000; // 24 hours ago
     const endTime = params.endTime || Date.now();
     const sensitivityMultiplier = params.sensitivityMultiplier || 2;
@@ -368,6 +372,7 @@ export class ClientAnalyticsAnalysisService {
         startTime,
         endTime,
         limit: MAX_SNAPSHOT_LIMIT,
+        connectionId,
       });
     } catch (error) {
       this.logger.error('Failed to fetch snapshots for spike detection', error);
@@ -391,7 +396,7 @@ export class ClientAnalyticsAnalysisService {
       startTime,
       endTime,
       bucketSizeMinutes,
-    });
+    }, connectionId);
 
     const buckets = timelineResponse.buckets;
 

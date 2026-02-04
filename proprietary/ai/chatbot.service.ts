@@ -7,9 +7,9 @@ import { OllamaService } from './ollama.service';
 import { createMonitoringTools } from './tools/monitoring-tools';
 
 import { MetricsService } from '@app/metrics/metrics.service';
-import type { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import { ClientAnalyticsService } from '@app/client-analytics/client-analytics.service';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import type { ChatMessage } from '@betterdb/shared';
 
 @Injectable()
@@ -26,7 +26,7 @@ export class ChatbotService implements OnModuleInit {
     private vectorStore: VectorStoreService,
     private ollamaService: OllamaService,
     private metricsService: MetricsService,
-    @Inject('DATABASE_CLIENT') private dbClient: DatabasePort,
+    private connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storageClient: StoragePort,
     private clientAnalyticsService: ClientAnalyticsService,
   ) {
@@ -45,7 +45,7 @@ export class ChatbotService implements OnModuleInit {
       metricsService,
       storageClient,
       clientAnalyticsService,
-      dbClient,
+      connectionRegistry,
     });
 
     // Bind tools to LLM
@@ -69,7 +69,7 @@ export class ChatbotService implements OnModuleInit {
   }
 
   private async buildSystemPrompt(): Promise<string> {
-    const capabilities = this.dbClient.getCapabilities();
+    const capabilities = this.connectionRegistry.get().getCapabilities();
     const dbName = capabilities.dbType === 'valkey' ? 'Valkey' : 'Redis';
 
     return `You are BetterDB Assistant, a helpful AI for monitoring ${dbName} databases.
@@ -193,7 +193,7 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
       return null;
     }
 
-    const results = await this.vectorStore.search(message, 3, this.dbClient.getCapabilities().dbType);
+    const results = await this.vectorStore.search(message, 3, this.connectionRegistry.get().getCapabilities().dbType);
     if (results.length === 0) {
       return null;
     }
@@ -207,7 +207,7 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
   }
 
   private getHelpMessage(): string {
-    const dbType = this.dbClient.getCapabilities().dbType.toUpperCase();
+    const dbType = this.connectionRegistry.get().getCapabilities().dbType.toUpperCase();
     return `I can help you monitor your ${dbType} database. Try asking:
 
 **Server Status:**

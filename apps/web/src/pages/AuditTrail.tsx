@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
+import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 
 function formatTimestamp(timestamp: number): string {
@@ -16,6 +17,7 @@ function formatRelativeTime(seconds: number): string {
 }
 
 export function AuditTrail() {
+  const { currentConnection } = useConnection();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedUser, setSelectedUser] = useState<string>('');
   const ipFilter = searchParams.get('ip');
@@ -35,16 +37,19 @@ export function AuditTrail() {
   const { data: stats } = usePolling({
     fetcher: () => metricsApi.getAuditStats(),
     interval: 30000, // 30 seconds
+    refetchKey: currentConnection?.id,
   });
 
   const { data: entries } = usePolling({
     fetcher: () => metricsApi.getAuditEntries({ limit: 100 }),
     interval: 10000, // 10 seconds
+    refetchKey: currentConnection?.id,
   });
 
   const { data: failedAuth } = usePolling({
     fetcher: () => metricsApi.getAuditFailedAuth(undefined, undefined, 50),
     interval: 10000,
+    refetchKey: currentConnection?.id,
   });
 
   const filteredEntries = useMemo(() => {

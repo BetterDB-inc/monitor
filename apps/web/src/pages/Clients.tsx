@@ -1,12 +1,15 @@
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
+import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { ClientsTable } from '../components/metrics/ClientsTable';
 
 export function Clients() {
+  const { currentConnection } = useConnection();
   const { data: clients } = usePolling({
     fetcher: metricsApi.getClients,
     interval: 10000,
+    refetchKey: currentConnection?.id,
   });
 
   return (

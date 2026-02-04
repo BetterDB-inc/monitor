@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
+import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
@@ -51,6 +52,7 @@ function formatBytes(bytes: number): string {
 const CHART_COLORS = ['hsl(var(--primary))', '#8884d8', '#82ca9d', '#ffc658', '#ff8042', '#a4de6c', '#d0ed57', '#ffa07a'];
 
 export function ClientAnalyticsDeepDive() {
+  const { currentConnection } = useConnection();
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [activeTab, setActiveTab] = useState<string>('commands');
   const { hasFeature } = useLicense();
@@ -87,11 +89,13 @@ export function ClientAnalyticsDeepDive() {
   const { data: activityTimeline, loading: timelineLoading } = usePolling<ActivityTimelineResponse>({
     fetcher: fetchActivityTimeline,
     interval: 30000,
+    refetchKey: currentConnection?.id,
   });
 
   const { data: spikes } = usePolling<SpikeDetectionResponse>({
     fetcher: fetchSpikes,
     interval: 60000,
+    refetchKey: currentConnection?.id,
   });
 
   // Fetch anomaly summary (only if user has the feature)
@@ -99,6 +103,7 @@ export function ClientAnalyticsDeepDive() {
     fetcher: () => metricsApi.getAnomalySummary(),
     interval: 5000,
     enabled: hasAnomalyDetection,
+    refetchKey: currentConnection?.id,
   });
 
   // Conditionally fetch based on active tab
@@ -106,18 +111,21 @@ export function ClientAnalyticsDeepDive() {
     fetcher: fetchCommandDist,
     interval: 30000,
     enabled: activeTab === 'commands',
+    refetchKey: currentConnection?.id,
   });
 
   const { data: idleConns, loading: idleLoading } = usePolling<IdleConnectionsResponse>({
     fetcher: fetchIdleConns,
     interval: 30000,
     enabled: activeTab === 'idle',
+    refetchKey: currentConnection?.id,
   });
 
   const { data: bufferAnomalies, loading: bufferLoading } = usePolling<BufferAnomaliesResponse>({
     fetcher: fetchBufferAnomalies,
     interval: 30000,
     enabled: activeTab === 'anomalies',
+    refetchKey: currentConnection?.id,
   });
 
   // Summary cards data

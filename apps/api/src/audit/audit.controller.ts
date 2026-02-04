@@ -1,7 +1,8 @@
 import { Controller, Get, Query, HttpException, HttpStatus, Inject } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiHeader } from '@nestjs/swagger';
 import { StoragePort, StoredAclEntry, AuditStats } from '../common/interfaces/storage-port.interface';
 import { StoredAclEntryDto, AuditStatsDto } from '../common/dto/audit.dto';
+import { ConnectionId, CONNECTION_ID_HEADER } from '../common/decorators';
 
 @ApiTags('audit')
 @Controller('audit')
@@ -13,6 +14,7 @@ export class AuditController {
 
   @Get('entries')
   @ApiOperation({ summary: 'Get audit entries', description: 'Retrieve persisted ACL audit log entries with optional filters' })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   @ApiQuery({ name: 'username', required: false, description: 'Filter by username' })
   @ApiQuery({ name: 'reason', required: false, description: 'Filter by failure reason (auth, command, key, channel)' })
   @ApiQuery({ name: 'startTime', required: false, description: 'Filter by start timestamp (Unix seconds)' })
@@ -22,6 +24,7 @@ export class AuditController {
   @ApiResponse({ status: 200, description: 'Audit entries retrieved successfully', type: [StoredAclEntryDto] })
   @ApiResponse({ status: 500, description: 'Failed to get audit entries' })
   async getEntries(
+    @ConnectionId() connectionId?: string,
     @Query('username') username?: string,
     @Query('reason') reason?: string,
     @Query('startTime') startTime?: string,
@@ -37,6 +40,7 @@ export class AuditController {
         endTime: endTime ? parseInt(endTime, 10) : undefined,
         limit: limit ? parseInt(limit, 10) : undefined,
         offset: offset ? parseInt(offset, 10) : undefined,
+        connectionId,
       };
 
       return await this.storageClient.getAclEntries(options);
@@ -50,15 +54,21 @@ export class AuditController {
 
   @Get('stats')
   @ApiOperation({ summary: 'Get audit statistics', description: 'Retrieve aggregated statistics about audit log entries' })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   @ApiQuery({ name: 'startTime', required: false, description: 'Filter by start timestamp (Unix seconds)' })
   @ApiQuery({ name: 'endTime', required: false, description: 'Filter by end timestamp (Unix seconds)' })
   @ApiResponse({ status: 200, description: 'Audit statistics retrieved successfully', type: AuditStatsDto })
   @ApiResponse({ status: 500, description: 'Failed to get audit statistics' })
-  async getStats(@Query('startTime') startTime?: string, @Query('endTime') endTime?: string): Promise<AuditStats> {
+  async getStats(
+    @ConnectionId() connectionId?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+  ): Promise<AuditStats> {
     try {
       return await this.storageClient.getAuditStats(
         startTime ? parseInt(startTime, 10) : undefined,
         endTime ? parseInt(endTime, 10) : undefined,
+        connectionId,
       );
     } catch (error) {
       throw new HttpException(
@@ -70,6 +80,7 @@ export class AuditController {
 
   @Get('failed-auth')
   @ApiOperation({ summary: 'Get failed authentication attempts', description: 'Retrieve audit entries for failed authentication attempts' })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   @ApiQuery({ name: 'startTime', required: false, description: 'Filter by start timestamp (Unix seconds)' })
   @ApiQuery({ name: 'endTime', required: false, description: 'Filter by end timestamp (Unix seconds)' })
   @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of entries to return' })
@@ -77,6 +88,7 @@ export class AuditController {
   @ApiResponse({ status: 200, description: 'Failed auth attempts retrieved successfully', type: [StoredAclEntryDto] })
   @ApiResponse({ status: 500, description: 'Failed to get failed auth entries' })
   async getFailedAuth(
+    @ConnectionId() connectionId?: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
     @Query('limit') limit?: string,
@@ -89,6 +101,7 @@ export class AuditController {
         endTime: endTime ? parseInt(endTime, 10) : undefined,
         limit: limit ? parseInt(limit, 10) : undefined,
         offset: offset ? parseInt(offset, 10) : undefined,
+        connectionId,
       };
 
       return await this.storageClient.getAclEntries(options);
@@ -102,6 +115,7 @@ export class AuditController {
 
   @Get('by-user')
   @ApiOperation({ summary: 'Get audit entries by username', description: 'Retrieve audit entries for a specific username' })
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   @ApiQuery({ name: 'username', required: true, description: 'Username to filter by' })
   @ApiQuery({ name: 'startTime', required: false, description: 'Filter by start timestamp (Unix seconds)' })
   @ApiQuery({ name: 'endTime', required: false, description: 'Filter by end timestamp (Unix seconds)' })
@@ -111,7 +125,8 @@ export class AuditController {
   @ApiResponse({ status: 400, description: 'Username query parameter is required' })
   @ApiResponse({ status: 500, description: 'Failed to get entries by user' })
   async getByUser(
-    @Query('username') username: string,
+    @ConnectionId() connectionId?: string,
+    @Query('username') username?: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
     @Query('limit') limit?: string,
@@ -128,6 +143,7 @@ export class AuditController {
         endTime: endTime ? parseInt(endTime, 10) : undefined,
         limit: limit ? parseInt(limit, 10) : undefined,
         offset: offset ? parseInt(offset, 10) : undefined,
+        connectionId,
       };
 
       return await this.storageClient.getAclEntries(options);

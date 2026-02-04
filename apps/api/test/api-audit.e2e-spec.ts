@@ -23,7 +23,8 @@ describe('Audit API (E2E)', () => {
       // Verify entries have expected structure if any exist
       if (response.body.length > 0) {
         const entry = response.body[0];
-        expect(entry).toHaveProperty('timestamp');
+        // ACL entries have timestampCreated/timestampLastUpdated, not generic timestamp
+        expect(entry).toHaveProperty('timestampCreated');
         expect(entry).toHaveProperty('reason');
       }
     });

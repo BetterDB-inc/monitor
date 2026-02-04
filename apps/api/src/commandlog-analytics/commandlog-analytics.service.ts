@@ -1,6 +1,5 @@
-import { Injectable, Inject, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { DatabasePort, CommandLogEntry } from '../common/interfaces/database-port.interface';
+import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
+import { CommandLogEntry } from '../common/interfaces/database-port.interface';
 import {
   StoragePort,
   StoredCommandLogEntry,
@@ -9,122 +8,111 @@ import {
 } from '../common/interfaces/storage-port.interface';
 import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
+import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 @Injectable()
-export class CommandLogAnalyticsService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(CommandLogAnalyticsService.name);
-  private pollInterval: NodeJS.Timeout | null = null;
-  private isPolling = false;
-  private lastSeenIds: Map<CommandLogType, number | null> = new Map([
-    ['slow', null],
-    ['large-request', null],
-    ['large-reply', null],
-  ]);
-
-  // Cache of last fetched entries per type for Prometheus metrics (avoids duplicate Valkey calls)
-  private cachedEntries: Map<CommandLogType, CommandLogEntry[]> = new Map([
-    ['slow', []],
-    ['large-request', []],
-    ['large-reply', []],
-  ]);
-  private cachedAnalysis: Map<CommandLogType, SlowLogPatternAnalysis | null> = new Map([
-    ['slow', null],
-    ['large-request', null],
-    ['large-reply', null],
-  ]);
-  private lastCacheUpdate: number = 0;
+export class CommandLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
+  protected readonly logger = new Logger(CommandLogAnalyticsService.name);
 
   private readonly DEFAULT_POLL_INTERVAL_MS = 30000;
   private readonly LOG_TYPES: CommandLogType[] = ['slow', 'large-request', 'large-reply'];
 
-  constructor(
-    @Inject('DATABASE_CLIENT') private dbClient: DatabasePort,
-    @Inject('STORAGE_CLIENT') private storage: StoragePort,
-    private configService: ConfigService,
-  ) {}
+  // Nested Maps: connectionId -> (type -> lastSeenId)
+  private lastSeenIds = new Map<string, Map<CommandLogType, number | null>>();
 
-  private get pollIntervalMs(): number {
+  // Nested Maps: connectionId -> (type -> entries)
+  private cachedEntries = new Map<string, Map<CommandLogType, CommandLogEntry[]>>();
+  private cachedAnalysis = new Map<string, Map<CommandLogType, SlowLogPatternAnalysis | null>>();
+  private lastCacheUpdate = new Map<string, number>();
+
+  constructor(
+    connectionRegistry: ConnectionRegistry,
+    @Inject('STORAGE_CLIENT') private storage: StoragePort,
+  ) {
+    super(connectionRegistry);
+  }
+
+  protected getIntervalMs(): number {
     return this.DEFAULT_POLL_INTERVAL_MS;
   }
 
   async onModuleInit(): Promise<void> {
+    this.logger.log(`Starting command log analytics polling (interval: ${this.getIntervalMs()}ms)`);
+    this.start();
+  }
+
+  private initConnectionState(connectionId: string): void {
+    if (!this.lastSeenIds.has(connectionId)) {
+      this.lastSeenIds.set(connectionId, new Map([
+        ['slow', null],
+        ['large-request', null],
+        ['large-reply', null],
+      ]));
+    }
+    if (!this.cachedEntries.has(connectionId)) {
+      this.cachedEntries.set(connectionId, new Map([
+        ['slow', []],
+        ['large-request', []],
+        ['large-reply', []],
+      ]));
+    }
+    if (!this.cachedAnalysis.has(connectionId)) {
+      this.cachedAnalysis.set(connectionId, new Map([
+        ['slow', null],
+        ['large-request', null],
+        ['large-reply', null],
+      ]));
+    }
+  }
+
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     // Check if the database supports command log
-    const capabilities = this.dbClient.getCapabilities();
+    const capabilities = ctx.client.getCapabilities();
     if (!capabilities.hasCommandLog) {
-      this.logger.log('Command log not supported by this database, skipping analytics polling');
+      this.logger.debug(`Command log not supported by ${ctx.connectionName}, skipping poll`);
       return;
     }
 
-    // Get the latest stored command log IDs to avoid re-saving old entries
+    // Initialize per-connection state if needed
+    this.initConnectionState(ctx.connectionId);
+
+    // Load lastSeenIds from storage on first poll for this connection
+    const connectionLastSeenIds = this.lastSeenIds.get(ctx.connectionId)!;
     for (const type of this.LOG_TYPES) {
-      const lastId = await this.storage.getLatestCommandLogId(type);
-      this.lastSeenIds.set(type, lastId);
+      if (connectionLastSeenIds.get(type) === null) {
+        const lastId = await this.storage.getLatestCommandLogId(type, ctx.connectionId);
+        connectionLastSeenIds.set(type, lastId);
+      }
     }
 
-    this.logger.log(`Starting command log analytics polling (interval: ${this.pollIntervalMs}ms)`);
-    await this.startPolling();
-  }
+    const now = Date.now();
+    const connectionCachedEntries = this.cachedEntries.get(ctx.connectionId)!;
+    const connectionCachedAnalysis = this.cachedAnalysis.get(ctx.connectionId)!;
 
-  onModuleDestroy(): void {
-    this.stopPolling();
-  }
+    for (const type of this.LOG_TYPES) {
+      try {
+        const entries = await ctx.client.getCommandLog(128, type);
+        const lastSeenId = connectionLastSeenIds.get(type) ?? null;
 
-  private async startPolling(): Promise<void> {
-    await this.captureCommandLog();
-
-    const scheduleNextPoll = () => {
-      this.pollInterval = setTimeout(async () => {
-        if (!this.isPolling) {
-          try {
-            await this.captureCommandLog();
-          } catch (err) {
-            this.logger.error('Command log capture failed:', err);
-          }
-        }
-        scheduleNextPoll();
-      }, this.pollIntervalMs);
-    };
-    scheduleNextPoll();
-  }
-
-  private stopPolling(): void {
-    if (this.pollInterval) {
-      clearTimeout(this.pollInterval);
-      this.pollInterval = null;
-    }
-  }
-
-  private async captureCommandLog(): Promise<void> {
-    this.isPolling = true;
-
-    try {
-      const now = Date.now();
-      const dbConfig = this.configService.get('database');
-
-      for (const type of this.LOG_TYPES) {
-        const entries = await this.dbClient.getCommandLog(128, type);
-        const lastSeenId = this.lastSeenIds.get(type) ?? null;
-
-        // Update cache for Prometheus metrics (single source of truth)
-        this.cachedEntries.set(type, entries);
-        this.cachedAnalysis.set(type, analyzeSlowLogPatterns(entries as any));
-        this.lastCacheUpdate = now;
+        // Update cache for Prometheus metrics
+        connectionCachedEntries.set(type, entries);
+        connectionCachedAnalysis.set(type, analyzeSlowLogPatterns(entries as any));
+        this.lastCacheUpdate.set(ctx.connectionId, now);
 
         // Detect ID wraparound (e.g., after COMMANDLOG RESET)
-        // If the max ID in the current batch is less than our lastSeenId,
-        // the log was likely reset, so we should save all entries
         if (entries.length > 0 && lastSeenId !== null) {
           const maxIdInBatch = Math.max(...entries.map(e => e.id));
           if (maxIdInBatch < lastSeenId) {
             this.logger.warn(
-              `Commandlog ${type} ID wraparound detected (lastSeenId: ${lastSeenId}, maxIdInBatch: ${maxIdInBatch}). Resetting tracker.`
+              `Commandlog ${type} ID wraparound detected for ${ctx.connectionName} (lastSeenId: ${lastSeenId}, maxIdInBatch: ${maxIdInBatch}). Resetting tracker.`
             );
-            this.lastSeenIds.set(type, null);
+            connectionLastSeenIds.set(type, null);
           }
         }
 
         // Re-fetch lastSeenId after potential reset
-        const currentLastSeenId = this.lastSeenIds.get(type) ?? null;
+        const currentLastSeenId = connectionLastSeenIds.get(type) ?? null;
 
         // Filter out entries we've already seen
         const newEntries = currentLastSeenId !== null
@@ -145,23 +133,32 @@ export class CommandLogAnalyticsService implements OnModuleInit, OnModuleDestroy
           clientName: e.clientName || '',
           type: type,
           capturedAt: now,
-          sourceHost: dbConfig.host,
-          sourcePort: dbConfig.port,
+          sourceHost: ctx.host,
+          sourcePort: ctx.port,
+          connectionId: ctx.connectionId,
         }));
 
-        const saved = await this.storage.saveCommandLogEntries(storedEntries);
+        const saved = await this.storage.saveCommandLogEntries(storedEntries, ctx.connectionId);
 
         // Update lastSeenId to the highest ID we've seen
         const maxId = Math.max(...newEntries.map(e => e.id));
         if (currentLastSeenId === null || maxId > currentLastSeenId) {
-          this.lastSeenIds.set(type, maxId);
+          connectionLastSeenIds.set(type, maxId);
         }
 
-        this.logger.debug(`Saved ${saved} new ${type} command log entries`);
+        this.logger.debug(`Saved ${saved} new ${type} command log entries for ${ctx.connectionName}`);
+      } catch (error) {
+        this.logger.error(`Error capturing ${type} command log for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
-    } finally {
-      this.isPolling = false;
     }
+  }
+
+  protected onConnectionRemoved(connectionId: string): void {
+    this.lastSeenIds.delete(connectionId);
+    this.cachedEntries.delete(connectionId);
+    this.cachedAnalysis.delete(connectionId);
+    this.lastCacheUpdate.delete(connectionId);
+    this.logger.debug(`Cleaned up state for removed connection ${connectionId}`);
   }
 
   // Public methods for querying stored command log
@@ -190,26 +187,37 @@ export class CommandLogAnalyticsService implements OnModuleInit, OnModuleDestroy
     return analyzeSlowLogPatterns(slowLogEntries);
   }
 
-  async pruneOldEntries(retentionDays: number = 7): Promise<number> {
+  async pruneOldEntries(retentionDays: number = 7, connectionId?: string): Promise<number> {
     const cutoffTimestamp = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
-    return this.storage.pruneOldCommandLogEntries(cutoffTimestamp);
+    return this.storage.pruneOldCommandLogEntries(cutoffTimestamp, connectionId);
   }
 
   // Methods for Prometheus metrics (uses cached data from polling)
 
-  getCachedEntries(type: CommandLogType): CommandLogEntry[] {
-    return this.cachedEntries.get(type) || [];
+  getCachedEntries(type: CommandLogType, connectionId?: string): CommandLogEntry[] {
+    const targetId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!targetId) return [];
+    return this.cachedEntries.get(targetId)?.get(type) || [];
   }
 
-  getCachedAnalysis(type: CommandLogType): SlowLogPatternAnalysis | null {
-    return this.cachedAnalysis.get(type) || null;
+  getCachedAnalysis(type: CommandLogType, connectionId?: string): SlowLogPatternAnalysis | null {
+    const targetId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!targetId) return null;
+    return this.cachedAnalysis.get(targetId)?.get(type) || null;
   }
 
-  getLastCacheUpdate(): number {
-    return this.lastCacheUpdate;
+  getLastCacheUpdate(connectionId?: string): number {
+    const targetId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!targetId) return 0;
+    return this.lastCacheUpdate.get(targetId) || 0;
   }
 
-  hasCommandLogSupport(): boolean {
-    return this.dbClient.getCapabilities().hasCommandLog;
+  hasCommandLogSupport(connectionId?: string): boolean {
+    try {
+      const client = this.connectionRegistry.get(connectionId);
+      return client.getCapabilities().hasCommandLog;
+    } catch {
+      return false;
+    }
   }
 }

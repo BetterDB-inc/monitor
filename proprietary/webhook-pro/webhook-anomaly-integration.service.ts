@@ -107,6 +107,7 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
         timestamp: anomaly.timestamp,
         sourceHost: anomaly.sourceHost,
         sourcePort: anomaly.sourcePort,
+        connectionId: anomaly.connectionId,
       };
 
       // Always dispatch the generic anomaly.detected event
@@ -120,6 +121,7 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
           threshold: anomaly.threshold,
           timestamp: anomaly.timestamp,
           instance: { host: anomaly.sourceHost || 'unknown', port: anomaly.sourcePort || 0 },
+          connectionId: anomaly.connectionId,
         });
         this.logger.debug(`Dispatched connection.spike for anomaly ${anomaly.id}`);
       }
@@ -132,6 +134,7 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
           threshold: anomaly.threshold,
           timestamp: anomaly.timestamp,
           instance: { host: anomaly.sourceHost || 'unknown', port: anomaly.sourcePort || 0 },
+          connectionId: anomaly.connectionId,
         });
         this.logger.debug(`Dispatched latency.spike for anomaly ${anomaly.id}`);
       }

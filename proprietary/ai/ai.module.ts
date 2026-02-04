@@ -9,10 +9,9 @@ import { ChatbotController } from './chatbot.controller';
 import { MetricsModule } from '@app/metrics/metrics.module';
 import { StorageModule } from '@app/storage/storage.module';
 import { ClientAnalyticsModule } from '@app/client-analytics/client-analytics.module';
-import { DatabaseModule } from '@app/database/database.module';
 
 @Module({
-  imports: [ConfigModule, MetricsModule, StorageModule, ClientAnalyticsModule, DatabaseModule],
+  imports: [ConfigModule, MetricsModule, StorageModule, ClientAnalyticsModule],
   providers: [OllamaService, VectorStoreService, ChatbotService],
   controllers: [ChatbotController],
   exports: [ChatbotService],

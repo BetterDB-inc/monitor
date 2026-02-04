@@ -1,21 +1,13 @@
 import { Module } from '@nestjs/common';
-import { DatabaseClientFactory } from './factory/database-client.factory';
-import { StorageModule } from '../storage/storage.module';
 
+/**
+ * DatabaseModule is now minimal.
+ * Connection management has been moved to ConnectionsModule which provides ConnectionRegistry globally.
+ * Services should inject ConnectionRegistry instead of DATABASE_CLIENT.
+ */
 @Module({
-  imports: [StorageModule],
-  providers: [
-    DatabaseClientFactory,
-    {
-      provide: 'DATABASE_CLIENT',
-      useFactory: async (factory: DatabaseClientFactory) => {
-        const client = await factory.create();
-        await client.connect();
-        return client;
-      },
-      inject: [DatabaseClientFactory],
-    },
-  ],
-  exports: ['DATABASE_CLIENT'],
+  imports: [],
+  providers: [],
+  exports: [],
 })
 export class DatabaseModule {}

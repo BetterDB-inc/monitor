@@ -1,6 +1,5 @@
-import { Injectable, Inject, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { DatabasePort, SlowLogEntry } from '../common/interfaces/database-port.interface';
+import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
+import { SlowLogEntry } from '../common/interfaces/database-port.interface';
 import {
   StoragePort,
   StoredSlowLogEntry,
@@ -9,105 +8,79 @@ import {
 import { SettingsService } from '../settings/settings.service';
 import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
+import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 @Injectable()
-export class SlowLogAnalyticsService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(SlowLogAnalyticsService.name);
-  private pollInterval: NodeJS.Timeout | null = null;
-  private isPolling = false;
-  private lastSeenId: number | null = null;
+export class SlowLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
+  protected readonly logger = new Logger(SlowLogAnalyticsService.name);
 
-  // Cache of last fetched entries for Prometheus metrics (avoids duplicate Valkey calls)
-  private cachedEntries: SlowLogEntry[] = [];
-  private cachedAnalysis: SlowLogPatternAnalysis | null = null;
-  private lastCacheUpdate: number = 0;
+  // Per-connection state tracking
+  private lastSeenIds = new Map<string, number | null>();
+
+  // Per-connection cache for Prometheus metrics
+  private cachedEntries = new Map<string, SlowLogEntry[]>();
+  private cachedAnalysis = new Map<string, SlowLogPatternAnalysis | null>();
+  private lastCacheUpdate = new Map<string, number>();
 
   // Poll every 30 seconds by default
   private readonly DEFAULT_POLL_INTERVAL_MS = 30000;
 
   constructor(
-    @Inject('DATABASE_CLIENT') private dbClient: DatabasePort,
+    connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
-    private configService: ConfigService,
     private settingsService: SettingsService,
-  ) {}
+  ) {
+    super(connectionRegistry);
+  }
 
-  private get pollIntervalMs(): number {
-    // Could add a setting for this, for now use default
+  protected getIntervalMs(): number {
     return this.DEFAULT_POLL_INTERVAL_MS;
   }
 
   async onModuleInit(): Promise<void> {
-    // Get the latest stored slow log ID to avoid re-saving old entries
-    this.lastSeenId = await this.storage.getLatestSlowLogId();
-    this.logger.log(`Starting slow log analytics polling (interval: ${this.pollIntervalMs}ms, lastSeenId: ${this.lastSeenId})`);
-    await this.startPolling();
+    this.logger.log(`Starting slow log analytics polling (interval: ${this.getIntervalMs()}ms)`);
+    this.start();
   }
 
-  onModuleDestroy(): void {
-    this.stopPolling();
-  }
-
-  private async startPolling(): Promise<void> {
-    await this.captureSlowLog();
-
-    const scheduleNextPoll = () => {
-      this.pollInterval = setTimeout(async () => {
-        if (!this.isPolling) {
-          try {
-            await this.captureSlowLog();
-          } catch (err) {
-            this.logger.error('Slow log capture failed:', err);
-          }
-        }
-        scheduleNextPoll();
-      }, this.pollIntervalMs);
-    };
-    scheduleNextPoll();
-  }
-
-  private stopPolling(): void {
-    if (this.pollInterval) {
-      clearTimeout(this.pollInterval);
-      this.pollInterval = null;
-    }
-  }
-
-  private async captureSlowLog(): Promise<void> {
-    this.isPolling = true;
-
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
-      // Fetch slow log from Valkey/Redis (up to 128 entries)
-      const entries = await this.dbClient.getSlowLog(128);
-      const now = Date.now();
-      const dbConfig = this.configService.get('database');
+      // Initialize lastSeenId from storage if not already set
+      if (!this.lastSeenIds.has(ctx.connectionId)) {
+        const lastId = await this.storage.getLatestSlowLogId(ctx.connectionId);
+        this.lastSeenIds.set(ctx.connectionId, lastId);
+        this.logger.debug(`Initialized lastSeenId for ${ctx.connectionName}: ${lastId}`);
+      }
 
-      // Update cache for Prometheus metrics (single source of truth)
-      this.cachedEntries = entries;
-      this.cachedAnalysis = analyzeSlowLogPatterns(entries);
-      this.lastCacheUpdate = now;
+      // Fetch slow log from Valkey/Redis (up to 128 entries)
+      const entries = await ctx.client.getSlowLog(128);
+      const now = Date.now();
+      const lastSeenId = this.lastSeenIds.get(ctx.connectionId) ?? null;
+
+      // Update cache for Prometheus metrics
+      this.cachedEntries.set(ctx.connectionId, entries);
+      this.cachedAnalysis.set(ctx.connectionId, analyzeSlowLogPatterns(entries));
+      this.lastCacheUpdate.set(ctx.connectionId, now);
 
       // Detect ID wraparound (e.g., after SLOWLOG RESET)
-      // If the max ID in the current batch is less than our lastSeenId,
-      // the log was likely reset, so we should save all entries
-      if (entries.length > 0 && this.lastSeenId !== null) {
+      if (entries.length > 0 && lastSeenId !== null) {
         const maxIdInBatch = Math.max(...entries.map(e => e.id));
-        if (maxIdInBatch < this.lastSeenId) {
+        if (maxIdInBatch < lastSeenId) {
           this.logger.warn(
-            `Slowlog ID wraparound detected (lastSeenId: ${this.lastSeenId}, maxIdInBatch: ${maxIdInBatch}). Resetting tracker.`
+            `Slowlog ID wraparound detected for ${ctx.connectionName} (lastSeenId: ${lastSeenId}, maxIdInBatch: ${maxIdInBatch}). Resetting tracker.`
           );
-          this.lastSeenId = null;
+          this.lastSeenIds.set(ctx.connectionId, null);
         }
       }
 
       // Filter out entries we've already seen
-      const newEntries = this.lastSeenId !== null
-        ? entries.filter(e => e.id > this.lastSeenId!)
+      const currentLastSeenId = this.lastSeenIds.get(ctx.connectionId);
+      const newEntries = currentLastSeenId !== null
+        ? entries.filter(e => e.id > currentLastSeenId!)
         : entries;
 
       if (newEntries.length === 0) {
-        this.logger.debug('No new slow log entries to save');
-        this.isPolling = false;
+        this.logger.debug(`No new slow log entries to save for ${ctx.connectionName}`);
         return;
       }
 
@@ -116,26 +89,37 @@ export class SlowLogAnalyticsService implements OnModuleInit, OnModuleDestroy {
         id: e.id,
         timestamp: e.timestamp,
         duration: e.duration,
-        command: e.command,  // string[] with command name + args
+        command: e.command,
         clientAddress: e.clientAddress || '',
         clientName: e.clientName || '',
         capturedAt: now,
-        sourceHost: dbConfig.host,
-        sourcePort: dbConfig.port,
+        sourceHost: ctx.host,
+        sourcePort: ctx.port,
+        connectionId: ctx.connectionId,
       }));
 
-      const saved = await this.storage.saveSlowLogEntries(storedEntries);
+      const saved = await this.storage.saveSlowLogEntries(storedEntries, ctx.connectionId);
 
       // Update lastSeenId to the highest ID we've seen
       const maxId = Math.max(...newEntries.map(e => e.id));
-      if (this.lastSeenId === null || maxId > this.lastSeenId) {
-        this.lastSeenId = maxId;
+      const storedLastSeenId = this.lastSeenIds.get(ctx.connectionId);
+      if (storedLastSeenId === null || storedLastSeenId === undefined || maxId > storedLastSeenId) {
+        this.lastSeenIds.set(ctx.connectionId, maxId);
       }
 
-      this.logger.debug(`Saved ${saved} new slow log entries (lastSeenId: ${this.lastSeenId})`);
-    } finally {
-      this.isPolling = false;
+      this.logger.debug(`Saved ${saved} new slow log entries for ${ctx.connectionName} (lastSeenId: ${this.lastSeenIds.get(ctx.connectionId)})`);
+    } catch (error) {
+      this.logger.error(`Error capturing slow log for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw error;
     }
+  }
+
+  protected onConnectionRemoved(connectionId: string): void {
+    this.lastSeenIds.delete(connectionId);
+    this.cachedEntries.delete(connectionId);
+    this.cachedAnalysis.delete(connectionId);
+    this.lastCacheUpdate.delete(connectionId);
+    this.logger.debug(`Cleaned up state for removed connection ${connectionId}`);
   }
 
   // Public methods for querying stored slow log
@@ -144,30 +128,63 @@ export class SlowLogAnalyticsService implements OnModuleInit, OnModuleDestroy {
     return this.storage.getSlowLogEntries(options);
   }
 
-  async pruneOldEntries(retentionDays: number = 7): Promise<number> {
+  async pruneOldEntries(retentionDays: number = 7, connectionId?: string): Promise<number> {
     const cutoffTimestamp = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
-    return this.storage.pruneOldSlowLogEntries(cutoffTimestamp);
+    return this.storage.pruneOldSlowLogEntries(cutoffTimestamp, connectionId);
   }
 
   // Methods for Prometheus metrics (uses cached data from polling)
 
-  getCachedEntries(): SlowLogEntry[] {
-    return this.cachedEntries;
+  getCachedEntries(connectionId?: string): SlowLogEntry[] {
+    if (connectionId) {
+      return this.cachedEntries.get(connectionId) || [];
+    }
+    // Return all cached entries combined if no connectionId
+    const all: SlowLogEntry[] = [];
+    for (const entries of this.cachedEntries.values()) {
+      all.push(...entries);
+    }
+    return all;
   }
 
-  getCachedAnalysis(): SlowLogPatternAnalysis | null {
-    return this.cachedAnalysis;
+  getCachedAnalysis(connectionId?: string): SlowLogPatternAnalysis | null {
+    if (connectionId) {
+      return this.cachedAnalysis.get(connectionId) || null;
+    }
+    // If no connectionId, return analysis for the default connection
+    const defaultId = this.connectionRegistry.getDefaultId();
+    if (defaultId) {
+      return this.cachedAnalysis.get(defaultId) || null;
+    }
+    return null;
   }
 
-  getLastCacheUpdate(): number {
-    return this.lastCacheUpdate;
+  getLastCacheUpdate(connectionId?: string): number {
+    if (connectionId) {
+      return this.lastCacheUpdate.get(connectionId) || 0;
+    }
+    // Return most recent update time if no connectionId
+    let mostRecent = 0;
+    for (const ts of this.lastCacheUpdate.values()) {
+      if (ts > mostRecent) mostRecent = ts;
+    }
+    return mostRecent;
   }
 
-  async getSlowLogLength(): Promise<number> {
-    return this.dbClient.getSlowLogLength();
+  async getSlowLogLength(connectionId?: string): Promise<number> {
+    const client = this.connectionRegistry.get(connectionId);
+    return client.getSlowLogLength();
   }
 
-  getLastSeenId(): number | null {
-    return this.lastSeenId;
+  getLastSeenId(connectionId?: string): number | null {
+    if (connectionId) {
+      return this.lastSeenIds.get(connectionId) ?? null;
+    }
+    // Return lastSeenId for default connection
+    const defaultId = this.connectionRegistry.getDefaultId();
+    if (defaultId) {
+      return this.lastSeenIds.get(defaultId) ?? null;
+    }
+    return null;
   }
 }

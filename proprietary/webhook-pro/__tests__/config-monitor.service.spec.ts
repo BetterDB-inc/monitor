@@ -4,13 +4,17 @@ import { ConfigMonitorService } from '../config-monitor.service';
 import { WebhookEventsEnterpriseService } from '../webhook-events-enterprise.service';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { SettingsService } from '@app/settings/settings.service';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
+import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 
 describe('ConfigMonitorService', () => {
   let service: ConfigMonitorService;
   let webhookEventsEnterpriseService: jest.Mocked<WebhookEventsEnterpriseService>;
   let dbClient: jest.Mocked<DatabasePort>;
+  let connectionRegistry: jest.Mocked<ConnectionRegistry>;
   let configService: jest.Mocked<ConfigService>;
   let settingsService: jest.Mocked<SettingsService>;
+  let mockContext: ConnectionContext;
 
   beforeEach(async () => {
     webhookEventsEnterpriseService = {
@@ -34,6 +38,26 @@ describe('ConfigMonitorService', () => {
       getConfigValues: jest.fn().mockResolvedValue({}),
     } as any;
 
+    mockContext = {
+      connectionId: 'test-connection',
+      connectionName: 'Test Connection',
+      client: dbClient,
+      host: 'localhost',
+      port: 6379,
+    };
+
+    connectionRegistry = {
+      get: jest.fn().mockReturnValue(dbClient),
+      getDefaultId: jest.fn().mockReturnValue('test-connection'),
+      list: jest.fn().mockReturnValue([{
+        id: 'test-connection',
+        name: 'Test Connection',
+        host: 'localhost',
+        port: 6379,
+        isConnected: true,
+      }]),
+    } as any;
+
     configService = {
       get: jest.fn((key: string, defaultValue: any) => {
         if (key === 'database.host') return 'localhost';
@@ -48,8 +72,8 @@ describe('ConfigMonitorService', () => {
       providers: [
         ConfigMonitorService,
         {
-          provide: 'DATABASE_CLIENT',
-          useValue: dbClient,
+          provide: ConnectionRegistry,
+          useValue: connectionRegistry,
         },
         {
           provide: ConfigService,
@@ -85,16 +109,16 @@ describe('ConfigMonitorService', () => {
           ]);
 
         // Capture initial state
-        await (service as any).captureInitialState();
+        await (service as any).captureInitialState(mockContext);
 
         // Check for changes
-        await (service as any).checkAclChanges();
+        await (service as any).checkAclChanges(mockContext);
 
         expect(webhookEventsEnterpriseService.dispatchAclModified).toHaveBeenCalledWith({
           changeType: 'user_added',
           affectedUser: 'newuser',
           timestamp: expect.any(Number),
-          instance: { host: 'localhost', port: 6379 },
+          instance: { host: 'localhost', port: 6379, connectionId: 'test-connection' },
         });
       });
     });
@@ -113,14 +137,14 @@ describe('ConfigMonitorService', () => {
           ])
           .mockResolvedValueOnce(['user default on >password ~*']);
 
-        await (service as any).captureInitialState();
-        await (service as any).checkAclChanges();
+        await (service as any).captureInitialState(mockContext);
+        await (service as any).checkAclChanges(mockContext);
 
         expect(webhookEventsEnterpriseService.dispatchAclModified).toHaveBeenCalledWith({
           changeType: 'user_removed',
           affectedUser: 'olduser',
           timestamp: expect.any(Number),
-          instance: { host: 'localhost', port: 6379 },
+          instance: { host: 'localhost', port: 6379, connectionId: 'test-connection' },
         });
       });
     });
@@ -142,14 +166,14 @@ describe('ConfigMonitorService', () => {
             'user testuser on >newpassword ~*', // Permissions changed
           ]);
 
-        await (service as any).captureInitialState();
-        await (service as any).checkAclChanges();
+        await (service as any).captureInitialState(mockContext);
+        await (service as any).checkAclChanges(mockContext);
 
         expect(webhookEventsEnterpriseService.dispatchAclModified).toHaveBeenCalledWith({
           changeType: 'permissions_changed',
           affectedUser: 'testuser',
           timestamp: expect.any(Number),
-          instance: { host: 'localhost', port: 6379 },
+          instance: { host: 'localhost', port: 6379, connectionId: 'test-connection' },
         });
       });
 
@@ -165,8 +189,8 @@ describe('ConfigMonitorService', () => {
           .mockResolvedValueOnce(aclList)
           .mockResolvedValueOnce(aclList);
 
-        await (service as any).captureInitialState();
-        await (service as any).checkAclChanges();
+        await (service as any).captureInitialState(mockContext);
+        await (service as any).checkAclChanges(mockContext);
 
         expect(webhookEventsEnterpriseService.dispatchAclModified).not.toHaveBeenCalled();
       });
@@ -180,15 +204,15 @@ describe('ConfigMonitorService', () => {
           .mockResolvedValueOnce({ maxmemory: '100mb', timeout: '0' })
           .mockResolvedValueOnce({ maxmemory: '200mb', timeout: '0' });
 
-        await (service as any).captureInitialState();
-        await (service as any).checkConfigChanges();
+        await (service as any).captureInitialState(mockContext);
+        await (service as any).checkConfigChanges(mockContext);
 
         expect(webhookEventsEnterpriseService.dispatchConfigChanged).toHaveBeenCalledWith({
           configKey: 'maxmemory',
           oldValue: '100mb',
           newValue: '200mb',
           timestamp: expect.any(Number),
-          instance: { host: 'localhost', port: 6379 },
+          instance: { host: 'localhost', port: 6379, connectionId: 'test-connection' },
         });
       });
 
@@ -205,8 +229,8 @@ describe('ConfigMonitorService', () => {
             'maxmemory-policy': 'allkeys-lru',
           });
 
-        await (service as any).captureInitialState();
-        await (service as any).checkConfigChanges();
+        await (service as any).captureInitialState(mockContext);
+        await (service as any).checkConfigChanges(mockContext);
 
         expect(webhookEventsEnterpriseService.dispatchConfigChanged).toHaveBeenCalledTimes(3);
         expect(webhookEventsEnterpriseService.dispatchConfigChanged).toHaveBeenCalledWith(
@@ -239,8 +263,8 @@ describe('ConfigMonitorService', () => {
           .mockResolvedValueOnce(config)
           .mockResolvedValueOnce(config);
 
-        await (service as any).captureInitialState();
-        await (service as any).checkConfigChanges();
+        await (service as any).captureInitialState(mockContext);
+        await (service as any).checkConfigChanges(mockContext);
 
         expect(webhookEventsEnterpriseService.dispatchConfigChanged).not.toHaveBeenCalled();
       });
@@ -250,8 +274,8 @@ describe('ConfigMonitorService', () => {
           .mockResolvedValueOnce({ maxmemory: '100mb' })
           .mockResolvedValueOnce({ maxmemory: '100mb', timeout: '300' });
 
-        await (service as any).captureInitialState();
-        await (service as any).checkConfigChanges();
+        await (service as any).captureInitialState(mockContext);
+        await (service as any).checkConfigChanges(mockContext);
 
         // Should not dispatch for new keys (only for changed existing keys)
         expect(webhookEventsEnterpriseService.dispatchConfigChanged).not.toHaveBeenCalled();
@@ -266,12 +290,12 @@ describe('ConfigMonitorService', () => {
       dbClient.getAclList.mockResolvedValueOnce(['user default on >password ~*']);
       dbClient.getConfigValues.mockResolvedValueOnce({ maxmemory: '100mb' });
 
-      await (service as any).captureInitialState();
+      await (service as any).captureInitialState(mockContext);
 
       // Now make the check fail
       dbClient.getAclUsers.mockRejectedValue(new Error('ACL error'));
 
-      await (service as any).checkAclChanges();
+      await (service as any).checkAclChanges(mockContext);
 
       expect(webhookEventsEnterpriseService.dispatchAclModified).not.toHaveBeenCalled();
     });
@@ -281,8 +305,8 @@ describe('ConfigMonitorService', () => {
         .mockResolvedValueOnce({ maxmemory: '100mb' })
         .mockRejectedValueOnce(new Error('Config error'));
 
-      await (service as any).captureInitialState();
-      await (service as any).checkConfigChanges();
+      await (service as any).captureInitialState(mockContext);
+      await (service as any).checkConfigChanges(mockContext);
 
       expect(webhookEventsEnterpriseService.dispatchConfigChanged).not.toHaveBeenCalled();
     });
