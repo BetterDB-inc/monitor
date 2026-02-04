@@ -135,7 +135,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.logger.log('Created and connected to default connection from env vars');
     } catch (error) {
       // Storage failed - disconnect the adapter to prevent leaks
-      await adapter.disconnect().catch(() => {});
+      await adapter.disconnect().catch(() => { });
       this.logger.error(`Failed to persist default connection: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
@@ -274,7 +274,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       return id;
     } catch (error) {
       // Storage failed - disconnect the adapter to prevent leaks
-      await adapter.disconnect().catch(() => {});
+      await adapter.disconnect().catch(() => { });
       this.logger.error(`Failed to persist connection ${config.name}: ${error instanceof Error ? error.message : error}`);
       throw error;
     }

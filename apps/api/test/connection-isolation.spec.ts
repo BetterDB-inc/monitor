@@ -98,18 +98,35 @@ describe('Connection Isolation (E2E)', () => {
     });
 
     it('should list webhooks filtered by connection', async () => {
-      // Get all webhooks (no filter) - should see both
-      const responseAll = await request(app.getHttpServer())
+      // Without connection header, falls back to default connection
+      // which should NOT include webhooks created for specific connections
+      const responseDefault = await request(app.getHttpServer())
         .get('/webhooks')
         .expect(200);
 
-      const allNames = responseAll.body.map((w: { name: string }) => w.name);
+      const defaultNames = responseDefault.body.map((w: { name: string }) => w.name);
+      expect(defaultNames).not.toContain('Webhook for Connection A');
+      expect(defaultNames).not.toContain('Webhook for Connection B');
 
-      // With proper connection filtering (when implemented in controller),
-      // each connection would only see its own webhooks
-      // For now, we verify both webhooks exist
-      expect(allNames).toContain('Webhook for Connection A');
-      expect(allNames).toContain('Webhook for Connection B');
+      // Connection A should see its webhook
+      const responseA = await request(app.getHttpServer())
+        .get('/webhooks')
+        .set(CONNECTION_HEADER, CONNECTION_A)
+        .expect(200);
+
+      const namesA = responseA.body.map((w: { name: string }) => w.name);
+      expect(namesA).toContain('Webhook for Connection A');
+      expect(namesA).not.toContain('Webhook for Connection B');
+
+      // Connection B should see its webhook
+      const responseB = await request(app.getHttpServer())
+        .get('/webhooks')
+        .set(CONNECTION_HEADER, CONNECTION_B)
+        .expect(200);
+
+      const namesB = responseB.body.map((w: { name: string }) => w.name);
+      expect(namesB).toContain('Webhook for Connection B');
+      expect(namesB).not.toContain('Webhook for Connection A');
     });
   });
 

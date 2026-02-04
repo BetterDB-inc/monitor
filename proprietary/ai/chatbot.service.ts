@@ -19,7 +19,6 @@ export class ChatbotService implements OnModuleInit {
   private llmWithTools: ReturnType<ChatOllama['bindTools']>;
   private tools: ReturnType<typeof createMonitoringTools>;
   private toolMap: Map<string, (args: Record<string, unknown>) => Promise<string>>;
-  private systemPrompt: string;
 
   constructor(
     private configService: ConfigService,
@@ -64,12 +63,13 @@ export class ChatbotService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    this.systemPrompt = await this.buildSystemPrompt();
     this.logger.log(`Chatbot initialized with ${this.tools.length} tools`);
   }
 
-  private async buildSystemPrompt(): Promise<string> {
-    const capabilities = this.connectionRegistry.get().getCapabilities();
+  private buildSystemPrompt(connectionId?: string): string {
+    // connectionRegistry.get() throws if connection not found - let it propagate
+    const connection = this.connectionRegistry.get(connectionId);
+    const capabilities = connection.getCapabilities();
     const dbName = capabilities.dbType === 'valkey' ? 'Valkey' : 'Redis';
 
     return `You are BetterDB Assistant, a helpful AI for monitoring ${dbName} databases.
@@ -97,7 +97,7 @@ Available tools:
 When users ask operational questions, call the relevant tool(s) to get fresh data.`;
   }
 
-  async chat(message: string, history?: ChatMessage[]): Promise<string> {
+  async chat(message: string, history?: ChatMessage[], connectionId?: string): Promise<string> {
     const startTime = Date.now();
 
     const aiEnabled = this.configService.get<boolean>('ai.enabled');
@@ -112,12 +112,13 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
 
     // Handle help command
     if (this.isHelpCommand(message)) {
-      return this.getHelpMessage();
+      return this.getHelpMessage(connectionId);
     }
 
     try {
-      // Build messages array
-      const messages: BaseMessage[] = [new SystemMessage(this.systemPrompt)];
+      // Build messages array with connection-specific system prompt
+      const systemPrompt = this.buildSystemPrompt(connectionId);
+      const messages: BaseMessage[] = [new SystemMessage(systemPrompt)];
 
       // Add conversation history
       if (history?.length) {
@@ -127,7 +128,7 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
       }
 
       // Check if we should add documentation context
-      const docContext = await this.getDocumentationContext(message);
+      const docContext = await this.getDocumentationContext(message, connectionId);
       const userMessage = docContext
         ? `${message}\n\n<documentation>\n${docContext}\n</documentation>`
         : message;
@@ -143,13 +144,15 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
         iterations++;
         this.logger.log(`Tool calls (iteration ${iterations}): ${response.tool_calls.map((tc) => tc.name).join(', ')}`);
 
-        // Execute tool calls
+        // Execute tool calls with connectionId injected
         const toolResults: ToolMessage[] = [];
         for (const toolCall of response.tool_calls) {
           const toolFn = this.toolMap.get(toolCall.name);
           if (toolFn) {
             try {
-              const result = await toolFn(toolCall.args);
+              // Inject connectionId into tool args for proper multi-database scoping
+              const argsWithConnection = { ...toolCall.args, connectionId };
+              const result = await toolFn(argsWithConnection);
               this.logger.debug(`Tool ${toolCall.name} result: ${result.substring(0, 200)}...`);
               toolResults.push(new ToolMessage({ content: result, tool_call_id: toolCall.id! }));
             } catch (error) {
@@ -180,7 +183,7 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
     }
   }
 
-  private async getDocumentationContext(message: string): Promise<string | null> {
+  private async getDocumentationContext(message: string, connectionId?: string): Promise<string | null> {
     if (!this.vectorStore.isInitialized()) {
       return null;
     }
@@ -193,7 +196,13 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
       return null;
     }
 
-    const results = await this.vectorStore.search(message, 3, this.connectionRegistry.get().getCapabilities().dbType);
+    let connection;
+    try {
+      connection = this.connectionRegistry.get(connectionId);
+    } catch {
+      return null;
+    }
+    const results = await this.vectorStore.search(message, 3, connection.getCapabilities().dbType);
     if (results.length === 0) {
       return null;
     }
@@ -206,8 +215,14 @@ When users ask operational questions, call the relevant tool(s) to get fresh dat
     return ['help', '?', 'commands', 'what can you do'].includes(normalized);
   }
 
-  private getHelpMessage(): string {
-    const dbType = this.connectionRegistry.get().getCapabilities().dbType.toUpperCase();
+  private getHelpMessage(connectionId?: string): string {
+    let dbType = 'DATABASE';
+    try {
+      const connection = this.connectionRegistry.get(connectionId);
+      dbType = connection.getCapabilities().dbType.toUpperCase();
+    } catch {
+      // Use default if connection not found
+    }
     return `I can help you monitor your ${dbType} database. Try asking:
 
 **Server Status:**

@@ -2,12 +2,14 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { WebhooksService } from '../webhooks.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { LicenseService } from '@proprietary/license';
 import { WebhookEventType, Tier } from '@betterdb/shared';
 
 describe('WebhooksService', () => {
   let service: WebhooksService;
   let storageClient: jest.Mocked<StoragePort>;
+  let connectionRegistry: jest.Mocked<ConnectionRegistry>;
   let licenseService: jest.Mocked<LicenseService>;
 
   beforeEach(async () => {
@@ -23,6 +25,10 @@ describe('WebhooksService', () => {
       pruneOldDeliveries: jest.fn(),
     } as any;
 
+    connectionRegistry = {
+      getDefaultId: jest.fn().mockReturnValue('default-connection-id'),
+    } as any;
+
     licenseService = {
       getLicenseTier: jest.fn().mockReturnValue(Tier.community),
     } as any;
@@ -33,6 +39,10 @@ describe('WebhooksService', () => {
         {
           provide: 'STORAGE_CLIENT',
           useValue: storageClient,
+        },
+        {
+          provide: ConnectionRegistry,
+          useValue: connectionRegistry,
         },
         {
           provide: LicenseService,
@@ -711,13 +721,115 @@ describe('WebhooksService', () => {
 
       it('should default to community tier if no license service', () => {
         // Create service without license service
-        const serviceWithoutLicense = new WebhooksService(storageClient, undefined);
+        const serviceWithoutLicense = new WebhooksService(storageClient, connectionRegistry, undefined);
 
         const result = serviceWithoutLicense.getAllowedEvents();
 
         expect(result.tier).toBe(Tier.community);
         expect(result.allowedEvents).toContain(WebhookEventType.INSTANCE_DOWN);
         expect(result.lockedEvents).toContain(WebhookEventType.SLOWLOG_THRESHOLD);
+      });
+    });
+
+    describe('Connection ID Resolution', () => {
+      beforeEach(() => {
+        process.env.NODE_ENV = 'test';
+        licenseService.getLicenseTier.mockReturnValue(Tier.community);
+        storageClient.getWebhooksByInstance.mockResolvedValue([]);
+        storageClient.getWebhooksByEvent.mockResolvedValue([]);
+      });
+
+      it('should use provided connectionId when available', async () => {
+        await service.getAllWebhooks('custom-connection-id');
+
+        expect(storageClient.getWebhooksByInstance).toHaveBeenCalledWith('custom-connection-id');
+      });
+
+      it('should fall back to default connectionId when not provided', async () => {
+        connectionRegistry.getDefaultId.mockReturnValue('default-connection-id');
+
+        await service.getAllWebhooks();
+
+        expect(connectionRegistry.getDefaultId).toHaveBeenCalled();
+        expect(storageClient.getWebhooksByInstance).toHaveBeenCalledWith('default-connection-id');
+      });
+
+      it('should pass undefined when no connectionId and no default', async () => {
+        connectionRegistry.getDefaultId.mockReturnValue(null);
+
+        await service.getAllWebhooks();
+
+        expect(storageClient.getWebhooksByInstance).toHaveBeenCalledWith(undefined);
+      });
+
+      it('should resolve connectionId for getWebhooksByEvent', async () => {
+        connectionRegistry.getDefaultId.mockReturnValue('default-connection-id');
+
+        await service.getWebhooksByEvent(WebhookEventType.INSTANCE_DOWN);
+
+        expect(connectionRegistry.getDefaultId).toHaveBeenCalled();
+        expect(storageClient.getWebhooksByEvent).toHaveBeenCalledWith(
+          WebhookEventType.INSTANCE_DOWN,
+          'default-connection-id'
+        );
+      });
+
+      it('should resolve connectionId when creating webhook', async () => {
+        connectionRegistry.getDefaultId.mockReturnValue('default-connection-id');
+        storageClient.createWebhook.mockResolvedValue({
+          id: '123',
+          name: 'Test',
+          url: 'https://example.com/webhook',
+          secret: 'whsec_test',
+          enabled: true,
+          events: [WebhookEventType.INSTANCE_DOWN],
+          headers: {},
+          retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+          connectionId: 'default-connection-id',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+
+        await service.createWebhook({
+          name: 'Test',
+          url: 'https://example.com/webhook',
+          events: [WebhookEventType.INSTANCE_DOWN],
+        });
+
+        expect(storageClient.createWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            connectionId: 'default-connection-id',
+          })
+        );
+      });
+
+      it('should use explicit connectionId when creating webhook', async () => {
+        storageClient.createWebhook.mockResolvedValue({
+          id: '123',
+          name: 'Test',
+          url: 'https://example.com/webhook',
+          secret: 'whsec_test',
+          enabled: true,
+          events: [WebhookEventType.INSTANCE_DOWN],
+          headers: {},
+          retryPolicy: { maxRetries: 3, backoffMultiplier: 2, initialDelayMs: 1000, maxDelayMs: 60000 },
+          connectionId: 'explicit-connection-id',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+
+        await service.createWebhook({
+          name: 'Test',
+          url: 'https://example.com/webhook',
+          events: [WebhookEventType.INSTANCE_DOWN],
+          connectionId: 'explicit-connection-id',
+        });
+
+        expect(storageClient.createWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            connectionId: 'explicit-connection-id',
+          })
+        );
       });
     });
   });

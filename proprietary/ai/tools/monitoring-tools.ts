@@ -15,11 +15,20 @@ export interface ToolDependencies {
 export function createMonitoringTools(deps: ToolDependencies) {
   const { metricsService, storageClient, clientAnalyticsService, connectionRegistry } = deps;
 
+  // Note: connectionId is injected by chatbot service at runtime for multi-database scoping
+  // It's intentionally not exposed in tool schemas to prevent LLM from providing incorrect values
+
   const getServerStatus = tool(
-    async () => {
-      const info = await metricsService.getInfoParsed(['server', 'clients', 'memory', 'stats']);
-      const dbSize = await metricsService.getDbSize();
-      const capabilities = connectionRegistry.get().getCapabilities();
+    async ({ connectionId }: { connectionId?: string }) => {
+      const info = await metricsService.getInfoParsed(['server', 'clients', 'memory', 'stats'], connectionId);
+      const dbSize = await metricsService.getDbSize(connectionId);
+      let connection;
+      try {
+        connection = connectionRegistry.get(connectionId);
+      } catch {
+        return JSON.stringify({ error: `Connection not found: ${connectionId ?? 'default'}` });
+      }
+      const capabilities = connection.getCapabilities();
 
       return JSON.stringify({
         database: `${capabilities.dbType} ${capabilities.version}`,
@@ -35,13 +44,13 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'get_server_status',
       description: 'Get current server status: connected clients, memory usage, ops/sec, total keys, uptime',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
   const getConnectedClients = tool(
-    async () => {
-      const info = await metricsService.getInfoParsed(['clients']);
+    async ({ connectionId }: { connectionId?: string }) => {
+      const info = await metricsService.getInfoParsed(['clients'], connectionId);
       return JSON.stringify({
         connected: info.clients?.connected_clients ?? 0,
         blocked: info.clients?.blocked_clients ?? 0,
@@ -50,13 +59,13 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'get_connected_clients',
       description: 'Get number of connected and blocked clients',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
   const getMemoryUsage = tool(
-    async () => {
-      const info = await metricsService.getInfoParsed(['memory']);
+    async ({ connectionId }: { connectionId?: string }) => {
+      const info = await metricsService.getInfoParsed(['memory'], connectionId);
       return JSON.stringify({
         used: info.memory?.used_memory_human ?? 'unknown',
         peak: info.memory?.used_memory_peak_human ?? 'unknown',
@@ -66,25 +75,26 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'get_memory_usage',
       description: 'Get memory usage statistics',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
   const getKeyCount = tool(
-    async () => {
-      const dbSize = await metricsService.getDbSize();
+    async ({ connectionId }: { connectionId?: string }) => {
+      const dbSize = await metricsService.getDbSize(connectionId);
       return JSON.stringify({ total_keys: dbSize });
     },
     {
       name: 'get_key_count',
       description: 'Get total number of keys in the database',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
   const getSlowlog = tool(
-    async ({ count }) => {
-      const entries = await metricsService.getSlowLog(count);
+    async ({ count, connectionId }: { count: number; connectionId?: string }) => {
+      // Parameters: count, excludeClientName, startTime, endTime, connectionId
+      const entries = await metricsService.getSlowLog(count, undefined, undefined, undefined, connectionId);
       return JSON.stringify(
         entries.slice(0, count).map((e) => ({
           command: e.command.slice(0, 5).join(' '),
@@ -99,13 +109,13 @@ export function createMonitoringTools(deps: ToolDependencies) {
       description: 'Get slow command log entries',
       schema: z.object({
         count: z.number().default(10).describe('Number of entries to return'),
-      }),
+      }).passthrough(),
     }
   );
 
   const getSlowlogPatterns = tool(
-    async () => {
-      const analysis = await metricsService.getSlowLogPatternAnalysis();
+    async ({ connectionId }: { connectionId?: string }) => {
+      const analysis = await metricsService.getSlowLogPatternAnalysis(undefined, connectionId);
       return JSON.stringify({
         total_entries: analysis.totalEntries,
         patterns: analysis.patterns.slice(0, 5).map((p) => ({
@@ -119,13 +129,13 @@ export function createMonitoringTools(deps: ToolDependencies) {
     {
       name: 'get_slowlog_patterns',
       description: 'Analyze slow command patterns to identify common slow queries',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
   const getClientList = tool(
-    async ({ limit }) => {
-      const clients = await metricsService.getClients();
+    async ({ limit, connectionId }: { limit: number; connectionId?: string }) => {
+      const clients = await metricsService.getClients(undefined, connectionId);
       const byName: Record<string, number> = {};
       clients.forEach((c) => {
         const name = c.name || 'unnamed';
@@ -145,12 +155,12 @@ export function createMonitoringTools(deps: ToolDependencies) {
       description: 'Get list of connected clients grouped by name',
       schema: z.object({
         limit: z.number().default(10).describe('Max number of client groups to return'),
-      }),
+      }).passthrough(),
     }
   );
 
   const getAclFailures = tool(
-    async ({ hours }) => {
+    async ({ hours, connectionId }: { hours: number; connectionId?: string }) => {
       const endTime = Date.now();
       const startTime = endTime - hours * 60 * 60 * 1000;
 
@@ -158,6 +168,7 @@ export function createMonitoringTools(deps: ToolDependencies) {
         startTime,
         endTime,
         limit: 20,
+        connectionId,
       });
 
       return JSON.stringify({
@@ -176,15 +187,15 @@ export function createMonitoringTools(deps: ToolDependencies) {
       description: 'Get ACL/authentication failures from audit log',
       schema: z.object({
         hours: z.number().default(24).describe('Look back period in hours'),
-      }),
+      }).passthrough(),
     }
   );
 
   const getClientAnalytics = tool(
-    async ({ hours }) => {
+    async ({ hours, connectionId }: { hours: number; connectionId?: string }) => {
       const endTime = Date.now();
       const startTime = endTime - hours * 60 * 60 * 1000;
-      const stats = await clientAnalyticsService.getStats(startTime, endTime);
+      const stats = await clientAnalyticsService.getStats(startTime, endTime, connectionId);
 
       return JSON.stringify({
         period_hours: hours,
@@ -200,31 +211,31 @@ export function createMonitoringTools(deps: ToolDependencies) {
       description: 'Get client connection analytics and trends',
       schema: z.object({
         hours: z.number().default(24).describe('Look back period in hours'),
-      }),
+      }).passthrough(),
     }
   );
 
   const runLatencyDiagnosis = tool(
-    async () => {
-      const report = await metricsService.getLatencyDoctor();
+    async ({ connectionId }: { connectionId?: string }) => {
+      const report = await metricsService.getLatencyDoctor(connectionId);
       return report;
     },
     {
       name: 'run_latency_diagnosis',
       description: 'Run latency diagnostic analysis',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
   const runMemoryDiagnosis = tool(
-    async () => {
-      const report = await metricsService.getMemoryDoctor();
+    async ({ connectionId }: { connectionId?: string }) => {
+      const report = await metricsService.getMemoryDoctor(connectionId);
       return report;
     },
     {
       name: 'run_memory_diagnosis',
       description: 'Run memory diagnostic analysis',
-      schema: z.object({}),
+      schema: z.object({}).passthrough(),
     }
   );
 
