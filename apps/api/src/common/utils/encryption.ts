@@ -8,7 +8,16 @@ import {
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
-const KEK_SALT = 'betterdb-kek-salt-v1';
+const DEFAULT_KEK_SALT = 'betterdb-kek-salt-v1';
+
+/**
+ * Get KEK salt from environment or use default fallback.
+ * Customizing the salt adds an extra layer of security as attackers
+ * would need both the encryption key AND the salt to decrypt data.
+ */
+function getKekSalt(): string {
+  return process.env.ENCRYPTION_KEK_SALT || DEFAULT_KEK_SALT;
+}
 
 /**
  * Envelope encryption format.
@@ -45,7 +54,7 @@ export class EnvelopeEncryptionService {
       throw new Error('ENCRYPTION_KEY must be at least 16 characters');
     }
     // Derive KEK from master key using scrypt
-    this.kek = scryptSync(masterKey, KEK_SALT, 32);
+    this.kek = scryptSync(masterKey, getKekSalt(), 32);
   }
 
   /**

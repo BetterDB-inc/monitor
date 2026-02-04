@@ -65,21 +65,55 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       for (const config of savedConnections) {
         // Decrypt password if encrypted
         const decryptedConfig = this.decryptConfig(config);
-        this.configs.set(config.id, decryptedConfig);
+
+        // If decryption already failed, skip connection attempt
+        if (decryptedConfig.credentialStatus === 'decryption_failed') {
+          this.configs.set(config.id, decryptedConfig);
+          // Create adapter anyway for reconnection attempts after key is fixed
+          const adapter = this.createAdapter(decryptedConfig);
+          this.connections.set(config.id, adapter);
+          this.logger.warn(
+            `Skipping connection to ${config.name}: password decryption failed. ` +
+            'Fix ENCRYPTION_KEY and restart, or use POST /connections/{id}/reconnect after fixing.'
+          );
+          if (config.isDefault) {
+            this.defaultId = config.id;
+          }
+          continue;
+        }
+
         try {
           const adapter = this.createAdapter(decryptedConfig);
           await adapter.connect();
           this.connections.set(config.id, adapter);
+          // Mark credentials as valid after successful connection
+          this.configs.set(config.id, { ...decryptedConfig, credentialStatus: 'valid' });
           this.logger.log(`Connected to ${config.name} (${config.host}:${config.port})`);
 
           if (config.isDefault) {
             this.defaultId = config.id;
           }
         } catch (error) {
-          this.logger.warn(`Failed to connect to ${config.name}: ${error instanceof Error ? error.message : error}`);
+          const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+          this.logger.warn(`Failed to connect to ${config.name}: ${errorMsg}`);
+
+          // Check if this is an authentication error
+          const isAuthError = this.isAuthenticationError(errorMsg);
+          const credentialStatus = isAuthError ? 'invalid' : 'unknown';
+
+          this.configs.set(config.id, {
+            ...decryptedConfig,
+            credentialStatus,
+            credentialError: isAuthError ? errorMsg : undefined,
+          });
+
           // Still store the adapter even if connection failed - allows reconnection
           const adapter = this.createAdapter(decryptedConfig);
           this.connections.set(config.id, adapter);
+
+          if (config.isDefault) {
+            this.defaultId = config.id;
+          }
         }
       }
 
@@ -91,6 +125,22 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
 
     this.logger.log(`Loaded ${this.configs.size} connection(s), default: ${this.defaultId}`);
+  }
+
+  /**
+   * Check if an error message indicates an authentication failure
+   */
+  private isAuthenticationError(errorMsg: string): boolean {
+    const authErrorPatterns = [
+      /WRONGPASS/i,
+      /NOAUTH/i,
+      /invalid password/i,
+      /authentication failed/i,
+      /ERR AUTH/i,
+      /invalid username-password/i,
+      /NOPERM/i,
+    ];
+    return authErrorPatterns.some(pattern => pattern.test(errorMsg));
   }
 
   private async createEnvDefaultConnection(): Promise<void> {
@@ -129,7 +179,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     try {
       // Store encrypted config in DB, decrypted config in memory
       await this.storage.saveConnection(this.encryptConfig(config));
-      this.configs.set(config.id, config);
+      // Mark credentials as valid since connection succeeded
+      this.configs.set(config.id, { ...config, credentialStatus: 'valid' });
       this.connections.set(config.id, adapter);
       this.defaultId = config.id;
       this.logger.log('Created and connected to default connection from env vars');
@@ -169,19 +220,25 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   /**
    * Decrypt password in config for use.
    * Returns a new config object with decrypted password.
+   * Sets credentialStatus to 'decryption_failed' if decryption fails.
    */
   private decryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
     if (!config.passwordEncrypted || !config.password) {
-      return config;
+      return { ...config, credentialStatus: 'unknown' };
     }
 
     if (!this.encryption) {
+      const errorMsg = 'ENCRYPTION_KEY not set but password is encrypted';
       this.logger.error(
-        `Cannot decrypt password for ${config.name}: ENCRYPTION_KEY not set. ` +
+        `Cannot decrypt password for ${config.name}: ${errorMsg}. ` +
         'The password was encrypted but the key is not available.'
       );
-      // Return config without password - connection will fail but won't crash
-      return { ...config, password: undefined };
+      return {
+        ...config,
+        password: undefined,
+        credentialStatus: 'decryption_failed',
+        credentialError: errorMsg,
+      };
     }
 
     try {
@@ -189,12 +246,19 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         ...config,
         password: this.encryption.decrypt(config.password),
         passwordEncrypted: false, // Mark as decrypted in memory
+        credentialStatus: 'unknown', // Will be validated on connection attempt
       };
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Decryption failed';
       this.logger.error(
-        `Failed to decrypt password for ${config.name}: ${error instanceof Error ? error.message : error}`
+        `Failed to decrypt password for ${config.name}: ${errorMsg}`
       );
-      return { ...config, password: undefined };
+      return {
+        ...config,
+        password: undefined,
+        credentialStatus: 'decryption_failed',
+        credentialError: errorMsg,
+      };
     }
   }
 
@@ -262,7 +326,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     try {
       // Store encrypted config in DB, decrypted config in memory
       await this.storage.saveConnection(this.encryptConfig(config));
-      this.configs.set(id, config);
+      // Mark credentials as valid since connection succeeded
+      this.configs.set(id, { ...config, credentialStatus: 'valid' });
       this.connections.set(id, adapter);
 
       // Handle setAsDefault parameter
@@ -313,18 +378,18 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    // Unmark old default
+    // Unmark old default (create new object instead of mutating)
     if (this.defaultId && this.defaultId !== id) {
       const oldConfig = this.configs.get(this.defaultId);
       if (oldConfig) {
-        oldConfig.isDefault = false;
+        this.configs.set(this.defaultId, { ...oldConfig, isDefault: false });
         await this.storage.updateConnection(this.defaultId, { isDefault: false });
       }
     }
 
-    // Mark new default
+    // Mark new default (create new object instead of mutating)
     const newConfig = this.configs.get(id)!;
-    newConfig.isDefault = true;
+    this.configs.set(id, { ...newConfig, isDefault: true });
     await this.storage.updateConnection(id, { isDefault: true });
     this.defaultId = id;
 
@@ -396,6 +461,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         updatedAt: config.updatedAt,
         isConnected,
         capabilities,
+        credentialStatus: config.credentialStatus,
+        credentialError: config.credentialError,
       });
     }
 
@@ -403,23 +470,70 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   async reconnect(id: string): Promise<void> {
-    const config = this.configs.get(id);
+    let config = this.configs.get(id);
     if (!config) {
       throw new NotFoundException(
         `Connection '${id}' not found. Use GET /connections to list available connections.`
       );
     }
 
-    const oldAdapter = this.connections.get(id);
-    if (oldAdapter && oldAdapter.isConnected()) {
-      await oldAdapter.disconnect();
+    // If previous decryption failed, re-fetch from storage and try again
+    // This allows recovery after fixing ENCRYPTION_KEY
+    if (config.credentialStatus === 'decryption_failed') {
+      this.logger.log(`Re-attempting decryption for ${config.name} after previous failure...`);
+      const storedConfigs = await this.storage.getConnections();
+      const storedConfig = storedConfigs.find(c => c.id === id);
+
+      if (storedConfig) {
+        config = this.decryptConfig(storedConfig);
+        if (config.credentialStatus === 'decryption_failed') {
+          // Still failing - update in-memory config with latest error and bail
+          this.configs.set(id, config);
+          throw new Error(`Password decryption still failing: ${config.credentialError}`);
+        }
+        // Decryption succeeded this time - continue with connection attempt
+        this.logger.log(`Decryption succeeded for ${config.name}`);
+      }
     }
 
-    const adapter = this.createAdapter(config);
-    await adapter.connect();
-    this.connections.set(id, adapter);
+    // Create and connect new adapter BEFORE disconnecting old one
+    // This prevents leaving connection in broken state if new connection fails
+    const newAdapter = this.createAdapter(config);
 
-    this.logger.log(`Reconnected: ${config.name} (${config.host}:${config.port})`);
+    try {
+      await newAdapter.connect();
+
+      // Only disconnect old adapter after new one successfully connects
+      const oldAdapter = this.connections.get(id);
+      if (oldAdapter && oldAdapter.isConnected()) {
+        await oldAdapter.disconnect().catch((err) => {
+          this.logger.warn(`Failed to disconnect old adapter for ${id}: ${err instanceof Error ? err.message : err}`);
+        });
+      }
+
+      this.connections.set(id, newAdapter);
+
+      // Update credential status to valid after successful reconnection
+      this.configs.set(id, {
+        ...config,
+        credentialStatus: 'valid',
+        credentialError: undefined,
+      });
+
+      this.logger.log(`Reconnected: ${config.name} (${config.host}:${config.port})`);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      const isAuthError = this.isAuthenticationError(errorMsg);
+
+      // Update credential status on failure
+      this.configs.set(id, {
+        ...config,
+        credentialStatus: isAuthError ? 'invalid' : config.credentialStatus,
+        credentialError: isAuthError ? errorMsg : config.credentialError,
+      });
+
+      throw error;
+    }
   }
 
   isEnvDefault(id: string): boolean {
