@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
+import { NotFoundException } from '@nestjs/common';
 import { ConnectionRegistry } from '../connection-registry.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
@@ -188,11 +189,12 @@ describe('ConnectionRegistry', () => {
       expect(conn).toBeDefined();
     });
 
-    it('should throw when connection not found', () => {
-      expect(() => registry.get('non-existent')).toThrow('Connection non-existent not found');
+    it('should throw NotFoundException when connection not found', () => {
+      expect(() => registry.get('non-existent')).toThrow(NotFoundException);
+      expect(() => registry.get('non-existent')).toThrow(/Connection 'non-existent' not found/);
     });
 
-    it('should throw when no default and no id provided', async () => {
+    it('should throw NotFoundException when no default and no id provided', async () => {
       // Create registry without initializing
       const module: TestingModule = await Test.createTestingModule({
         providers: [
@@ -203,6 +205,7 @@ describe('ConnectionRegistry', () => {
       }).compile();
       const emptyRegistry = module.get<ConnectionRegistry>(ConnectionRegistry);
 
+      expect(() => emptyRegistry.get()).toThrow(NotFoundException);
       expect(() => emptyRegistry.get()).toThrow('No connection available');
     });
   });
@@ -297,7 +300,7 @@ describe('ConnectionRegistry', () => {
       await registry.removeConnection(id);
 
       expect(mockStorage.deleteConnection).toHaveBeenCalledWith(id);
-      expect(() => registry.get(id)).toThrow(`Connection ${id} not found`);
+      expect(() => registry.get(id)).toThrow(NotFoundException);
     });
 
     it('should update default when removing default connection', async () => {
@@ -358,8 +361,9 @@ describe('ConnectionRegistry', () => {
       expect(mockStorage.updateConnection).toHaveBeenCalledWith(oldDefault, { isDefault: false });
     });
 
-    it('should throw when connection not found', async () => {
-      await expect(registry.setDefault('non-existent')).rejects.toThrow('Connection non-existent not found');
+    it('should throw NotFoundException when connection not found', async () => {
+      await expect(registry.setDefault('non-existent')).rejects.toThrow(NotFoundException);
+      await expect(registry.setDefault('non-existent')).rejects.toThrow(/Connection 'non-existent' not found/);
     });
   });
 
@@ -437,8 +441,9 @@ describe('ConnectionRegistry', () => {
       expect(conn.isConnected()).toBe(true);
     });
 
-    it('should throw when connection not found', async () => {
-      await expect(registry.reconnect('non-existent')).rejects.toThrow('Connection non-existent not found');
+    it('should throw NotFoundException when connection not found', async () => {
+      await expect(registry.reconnect('non-existent')).rejects.toThrow(NotFoundException);
+      await expect(registry.reconnect('non-existent')).rejects.toThrow(/Connection 'non-existent' not found/);
     });
   });
 

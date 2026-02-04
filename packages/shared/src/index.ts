@@ -7,5 +7,6 @@ export * from './types/key-analytics';
 export * from './types/settings.types';
 export * from './types/anomaly';
 export * from './types/connections';
+export * from './types/version.types';
 export * from './license/index';
 export * from './webhooks/index';
