@@ -3,15 +3,32 @@ import { PrismaService } from '../prisma/prisma.service';
 import { Tier, parseTier } from '@betterdb/shared';
 import type { EntitlementResponse, EntitlementRequest } from '@betterdb/shared';
 
-type ValidateRequest = EntitlementRequest;
-
 @Injectable()
 export class EntitlementService {
   private readonly logger = new Logger(EntitlementService.name);
 
   constructor(private readonly prisma: PrismaService) { }
 
-  async validateLicense(req: ValidateRequest): Promise<EntitlementResponse> {
+  /**
+   * Handle keyless instance requests - returns Community tier entitlements.
+   */
+  async handleKeylessInstance(req: EntitlementRequest): Promise<EntitlementResponse> {
+    const { instanceId, stats = {} } = req;
+
+    this.logger.log(`Keyless instance ping: ${instanceId}`, {
+      version: stats.version ?? 'unknown',
+      platform: stats.platform ?? 'unknown',
+      arch: stats.arch ?? 'unknown',
+    });
+
+    return {
+      valid: true,
+      tier: Tier.community,
+      expiresAt: null,
+    };
+  }
+
+  async validateLicense(req: EntitlementRequest): Promise<EntitlementResponse> {
     const { licenseKey } = req;
 
     if (!licenseKey) {

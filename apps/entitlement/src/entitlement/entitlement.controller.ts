@@ -1,18 +1,23 @@
 import { Controller, Post, Body, BadRequestException } from '@nestjs/common';
 import { EntitlementService } from './entitlement.service';
-import type { EntitlementRequest } from '@betterdb/shared';
+import type { EntitlementRequest, EntitlementResponse } from '@betterdb/shared';
+
+const LICENSE_KEY_MIN_LENGTH = 10;
+const LICENSE_KEY_MAX_LENGTH = 100;
 
 @Controller('v1/entitlements')
 export class EntitlementController {
   constructor(private readonly entitlement: EntitlementService) {}
 
   @Post()
-  async validate(@Body() body: EntitlementRequest) {
-    if (!body.licenseKey || typeof body.licenseKey !== 'string') {
-      throw new BadRequestException('licenseKey is required');
+  async validate(@Body() body: EntitlementRequest): Promise<EntitlementResponse> {
+    // If no license key provided, handle as keyless instance
+    if (!body.licenseKey || body.licenseKey === '') {
+      return this.entitlement.handleKeylessInstance(body);
     }
 
-    if (body.licenseKey.length < 10 || body.licenseKey.length > 100) {
+    // Validate license key format only when a key IS provided
+    if (body.licenseKey.length < LICENSE_KEY_MIN_LENGTH || body.licenseKey.length > LICENSE_KEY_MAX_LENGTH) {
       throw new BadRequestException('Invalid license key format');
     }
 

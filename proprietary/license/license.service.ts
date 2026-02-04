@@ -18,8 +18,8 @@ export class LicenseService implements OnModuleInit {
   private readonly cacheTtlMs: number;
   private readonly maxStaleCacheMs: number;
   private readonly timeoutMs: number;
-  private readonly telemetryEnabled: boolean;
   private readonly instanceId: string;
+  private readonly telemetryEnabled: boolean;
 
   private cache: CachedEntitlement | null = null;
   private validationPromise: Promise<EntitlementResponse> | null = null;
@@ -39,17 +39,18 @@ export class LicenseService implements OnModuleInit {
     this.cacheTtlMs = parseInt(process.env.LICENSE_CACHE_TTL_MS || '3600000', 10);
     this.maxStaleCacheMs = parseInt(process.env.LICENSE_MAX_STALE_MS || '604800000', 10);
     this.timeoutMs = parseInt(process.env.LICENSE_TIMEOUT_MS || '10000', 10);
-    this.telemetryEnabled = process.env.BETTERDB_TELEMETRY !== 'false';
     this.instanceId = this.generateInstanceId();
+    this.telemetryEnabled = process.env.BETTERDB_TELEMETRY !== 'false';
   }
 
   private generateInstanceId(): string {
+    // Use infrastructure identifiers only - avoid including license key to prevent fingerprinting
     const dbHost = process.env.DB_HOST || '';
     const dbPort = process.env.DB_PORT || '';
     const storageUrl = process.env.STORAGE_URL || '';
-    const licenseKey = process.env.BETTERDB_LICENSE_KEY || '';
+    const hostname = process.env.HOSTNAME || '';
 
-    const input = `${dbHost}|${dbPort}|${storageUrl}|${licenseKey}`;
+    const input = `${dbHost}|${dbPort}|${storageUrl}|${hostname}`;
     return createHash('sha256').update(input).digest('hex').slice(0, 32);
   }
 
@@ -57,22 +58,13 @@ export class LicenseService implements OnModuleInit {
     // Always log current version on startup
     this.logger.log(`BetterDB Monitor v${this.currentVersion}`);
 
+    // Always validate entitlements on startup, regardless of license key presence
+    // in order to enable beta features for keyless instances.
     if (!this.licenseKey) {
-      // No license key - definitely community tier
-      this.isValidated = true;
-      this.logger.log('No license key provided, running in Community tier');
-
-      if (this.telemetryEnabled) {
-        // Send telemetry ping in background (don't await)
-        this.pingTelemetry().catch(err => {
-          this.logger.debug(`Telemetry ping failed: ${err.message}`);
-        });
-      }
-      return;
+      this.logger.log('No license key provided, checking entitlements for Community tier...');
+    } else {
+      this.logger.log('Starting license validation in background...');
     }
-
-    // Start validation in background (don't block startup)
-    this.logger.log('Starting license validation in background...');
     this.validationPromise = this.validateLicenseBackground();
   }
 
@@ -93,11 +85,6 @@ export class LicenseService implements OnModuleInit {
   }
 
   async validateLicense(): Promise<EntitlementResponse> {
-    if (!this.licenseKey) {
-      this.logger.log('No license key provided, running in Community tier');
-      return this.getCommunityEntitlement();
-    }
-
     if (this.cache && Date.now() - this.cache.cachedAt < this.cacheTtlMs) {
       this.logger.debug('Using cached entitlement');
       return this.cache.response;
@@ -106,10 +93,10 @@ export class LicenseService implements OnModuleInit {
     try {
       const response = await this.checkOnline();
       this.cache = { response, cachedAt: Date.now() };
-      this.logger.log(`License validated: ${response.tier}`);
+      this.logger.log(`Entitlement validated: ${response.tier}`);
       return response;
     } catch (error) {
-      this.logger.error(`License validation failed: ${(error as Error).message}`);
+      this.logger.error(`Entitlement validation failed: ${(error as Error).message}`);
 
       if (this.cache && Date.now() - this.cache.cachedAt < this.maxStaleCacheMs) {
         this.logger.warn('Using stale cache');
@@ -122,7 +109,7 @@ export class LicenseService implements OnModuleInit {
 
   private async checkOnline(): Promise<EntitlementResponse> {
     const payload = {
-      licenseKey: this.licenseKey,
+      licenseKey: this.licenseKey || '', // Empty string for keyless instances
       instanceId: this.instanceId,
       eventType: 'license_check',
       stats: await this.collectStats(),
@@ -166,52 +153,44 @@ export class LicenseService implements OnModuleInit {
     };
   }
 
-  private async pingTelemetry(): Promise<void> {
+  async sendTelemetry(eventType: string, data: Record<string, unknown> = {}): Promise<void> {
     if (!this.telemetryEnabled) {
       return;
     }
 
+    const payload = {
+      instanceId: this.instanceId,
+      eventType,
+      tier: this.getLicenseTier(),
+      ...data,
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
     try {
-      const payload = {
-        instanceId: this.instanceId,
-        eventType: 'telemetry_ping',
-        version: process.env.APP_VERSION || process.env.npm_package_version || 'unknown',
-        platform: process.platform,
-        arch: process.arch,
-        nodeVersion: process.version,
-        tier: 'community',
-      };
+      const response = await fetch(this.entitlementUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
 
-      this.logger.debug(`Sending telemetry ping: ${JSON.stringify(payload)}`);
-
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-
-      try {
-        const response = await fetch(this.entitlementUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
-        this.logger.debug(`Telemetry ping response: ${response.status}`);
-
-        // Store version info from telemetry response
-        if (response.ok) {
-          try {
-            const data = await response.json();
-            if (data.latestVersion) {
-              this.setLatestVersion(data.latestVersion, data.releaseUrl);
-            }
-          } catch {
-            // No JSON in response - ignore
+      // Store version info from telemetry response
+      if (response.ok) {
+        try {
+          const data = await response.json();
+          if (data.latestVersion) {
+            this.setLatestVersion(data.latestVersion, data.releaseUrl);
           }
+        } catch {
+          // No JSON in response - ignore
         }
-      } finally {
-        clearTimeout(timeout);
       }
-    } catch (error) {
-      this.logger.debug(`Telemetry ping failed: ${(error as Error).message}`);
+    } catch {
+      // Telemetry is best-effort, don't log failures
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

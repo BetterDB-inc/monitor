@@ -824,6 +824,32 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_acl_timestamp_created ON acl_audit(timestamp_created);
       CREATE INDEX IF NOT EXISTS idx_acl_connection_id ON acl_audit(connection_id);
 
+      -- Add unique constraint if missing (for tables created before this constraint was added)
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'acl_audit_timestamp_created_username_object_reason_source__key'
+        ) THEN
+          -- Remove duplicates first (keep the one with highest id)
+          DELETE FROM acl_audit a USING acl_audit b
+          WHERE a.id < b.id
+            AND a.timestamp_created = b.timestamp_created
+            AND a.username = b.username
+            AND a.object = b.object
+            AND a.reason = b.reason
+            AND a.source_host = b.source_host
+            AND a.source_port = b.source_port
+            AND a.connection_id = b.connection_id;
+
+          ALTER TABLE acl_audit
+          ADD CONSTRAINT acl_audit_timestamp_created_username_object_reason_source__key
+          UNIQUE (timestamp_created, username, object, reason, source_host, source_port, connection_id);
+        END IF;
+      EXCEPTION WHEN duplicate_object THEN
+        -- Constraint already exists, ignore
+      END $$;
+
       CREATE TABLE IF NOT EXISTS client_snapshots (
         id SERIAL PRIMARY KEY,
         client_id TEXT NOT NULL,
@@ -1017,6 +1043,35 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
       CREATE INDEX IF NOT EXISTS idx_slowlog_connection_id ON slow_log_entries(connection_id);
 
+      -- Add unique constraint if missing (for tables created before this constraint was added)
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint c
+          JOIN pg_class t ON c.conrelid = t.oid
+          WHERE t.relname = 'slow_log_entries'
+            AND c.contype = 'u'
+            AND c.conkey @> ARRAY(
+              SELECT attnum FROM pg_attribute
+              WHERE attrelid = t.oid AND attname IN ('slowlog_id', 'source_host', 'source_port', 'connection_id')
+            )
+        ) THEN
+          -- Remove duplicates first (keep the one with highest pk)
+          DELETE FROM slow_log_entries a USING slow_log_entries b
+          WHERE a.pk < b.pk
+            AND a.slowlog_id = b.slowlog_id
+            AND a.source_host = b.source_host
+            AND a.source_port = b.source_port
+            AND a.connection_id = b.connection_id;
+
+          ALTER TABLE slow_log_entries
+          ADD CONSTRAINT slow_log_entries_slowlog_id_source_host_source_port_conn_key
+          UNIQUE (slowlog_id, source_host, source_port, connection_id);
+        END IF;
+      EXCEPTION WHEN duplicate_object THEN
+        -- Constraint already exists, ignore
+      END $$;
+
       -- Command Log Entries Table (Valkey-specific)
       CREATE TABLE IF NOT EXISTS command_log_entries (
         pk SERIAL PRIMARY KEY,
@@ -1040,6 +1095,36 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_commandlog_client_name ON command_log_entries(client_name);
       CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
       CREATE INDEX IF NOT EXISTS idx_commandlog_connection_id ON command_log_entries(connection_id);
+
+      -- Add unique constraint if missing (for tables created before this constraint was added)
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint c
+          JOIN pg_class t ON c.conrelid = t.oid
+          WHERE t.relname = 'command_log_entries'
+            AND c.contype = 'u'
+            AND c.conkey @> ARRAY(
+              SELECT attnum FROM pg_attribute
+              WHERE attrelid = t.oid AND attname IN ('commandlog_id', 'log_type', 'source_host', 'source_port', 'connection_id')
+            )
+        ) THEN
+          -- Remove duplicates first (keep the one with highest pk)
+          DELETE FROM command_log_entries a USING command_log_entries b
+          WHERE a.pk < b.pk
+            AND a.commandlog_id = b.commandlog_id
+            AND a.log_type = b.log_type
+            AND a.source_host = b.source_host
+            AND a.source_port = b.source_port
+            AND a.connection_id = b.connection_id;
+
+          ALTER TABLE command_log_entries
+          ADD CONSTRAINT command_log_entries_cmdlog_id_type_host_port_conn_key
+          UNIQUE (commandlog_id, log_type, source_host, source_port, connection_id);
+        END IF;
+      EXCEPTION WHEN duplicate_object THEN
+        -- Constraint already exists, ignore
+      END $$;
 
       -- Database Connections Table (stores multi-database connection configs)
       CREATE TABLE IF NOT EXISTS connections (
