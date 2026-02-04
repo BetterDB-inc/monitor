@@ -470,11 +470,30 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   async reconnect(id: string): Promise<void> {
-    const config = this.configs.get(id);
+    let config = this.configs.get(id);
     if (!config) {
       throw new NotFoundException(
         `Connection '${id}' not found. Use GET /connections to list available connections.`
       );
+    }
+
+    // If previous decryption failed, re-fetch from storage and try again
+    // This allows recovery after fixing ENCRYPTION_KEY
+    if (config.credentialStatus === 'decryption_failed') {
+      this.logger.log(`Re-attempting decryption for ${config.name} after previous failure...`);
+      const storedConfigs = await this.storage.getConnections();
+      const storedConfig = storedConfigs.find(c => c.id === id);
+
+      if (storedConfig) {
+        config = this.decryptConfig(storedConfig);
+        if (config.credentialStatus === 'decryption_failed') {
+          // Still failing - update in-memory config with latest error and bail
+          this.configs.set(id, config);
+          throw new Error(`Password decryption still failing: ${config.credentialError}`);
+        }
+        // Decryption succeeded this time - continue with connection attempt
+        this.logger.log(`Decryption succeeded for ${config.name}`);
+      }
     }
 
     // Create and connect new adapter BEFORE disconnecting old one
