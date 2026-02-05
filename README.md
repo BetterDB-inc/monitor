@@ -12,6 +12,7 @@ betterdb-monitor/
 │   ├── api/                 # NestJS backend (Fastify)
 │   └── web/                 # React frontend (Vite)
 ├── packages/
+│   ├── cli/                 # CLI package (npx betterdb)
 │   └── shared/              # Shared TypeScript types
 ├── docker-compose.yml       # Local Valkey (port 6380) and Redis (port 6382) for testing
 └── package.json             # Workspace root
@@ -95,6 +96,52 @@ Build for production:
 ```bash
 pnpm build
 ```
+
+## CLI Installation (npx)
+
+The easiest way to run BetterDB Monitor without Docker:
+
+```bash
+npx betterdb
+```
+
+On first run, an interactive setup wizard will guide you through configuration:
+- Database connection (host, port, credentials)
+- Storage backend (SQLite, PostgreSQL, or in-memory)
+- Server port and other settings
+
+Configuration is saved to `~/.betterdb/config.json`.
+
+### Global Installation
+
+```bash
+npm install -g betterdb
+betterdb
+```
+
+### CLI Options
+
+```bash
+betterdb --setup           # Re-run setup wizard, then start server
+betterdb --port 8080       # Override server port
+betterdb --db-host 1.2.3.4 # Override database host
+betterdb --help            # Show all options
+```
+
+### SQLite Storage (Optional)
+
+To use SQLite storage with the CLI, install `better-sqlite3`:
+
+```bash
+npm install -g better-sqlite3
+```
+
+### Requirements
+
+- Node.js >= 20.0.0
+- A Valkey or Redis instance to monitor
+
+---
 
 ## Docker Production Deployment
 

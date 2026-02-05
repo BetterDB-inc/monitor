@@ -1,0 +1,54 @@
+{
+  "name": "betterdb",
+  "version": "0.4.0",
+  "description": "Monitor and observe your Valkey/Redis databases",
+  "bin": {
+    "betterdb": "./bin/betterdb.js"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "assets/"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepublishOnly": "pnpm run build"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.0.0",
+    "commander": "^12.0.0",
+    "picocolors": "^1.0.0"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.0",
+    "typescript": "^5.7.0",
+    "esbuild": "^0.24.0",
+    "@types/node": "^22.0.0"
+  },
+  "peerDependencies": {
+    "better-sqlite3": ">=11.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "valkey",
+    "redis",
+    "monitor",
+    "database",
+    "cli",
+    "observability"
+  ],
+  "author": "BetterDB",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/betterdb/monitor.git"
+  },
+  "homepage": "https://betterdb.dev"
+}
