@@ -1,0 +1,12 @@
+# Source files (not needed in published package)
+src/
+scripts/
+tsconfig.json
+.tmp-node-modules/
+
+# Development files
+*.log
+.idea/
+.vscode/
+
+# Note: dist/ and assets/ are NOT ignored - they must be published
