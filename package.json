@@ -41,7 +41,7 @@
     "test:integration:valkey": "TEST_DB_PORT=6380 pnpm --filter api test:integration:valkey",
     "lint": "turbo lint",
     "clean": "turbo clean && rm -rf node_modules",
-    "cli:build": "pnpm --filter betterdb build",
+    "cli:build": "pnpm --filter @betterdb/monitor build",
     "cli:dev": "node packages/cli/bin/betterdb.js"
   },
   "devDependencies": {
