@@ -10,7 +10,7 @@ export class LicenseGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly license: LicenseService,
-  ) {}
+  ) { }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const requiredFeature = this.reflector.get<Feature | string>('requiredFeature', context.getHandler());
@@ -35,7 +35,7 @@ export class LicenseGuard implements CanActivate {
           feature: requiredFeature,
           currentTier: this.license.getLicenseTier(),
           requiredTier,
-          upgradeUrl: 'https://betterdb.dev/pricing',
+          upgradeUrl: 'https://betterdb.com/pricing',
         },
         HttpStatus.PAYMENT_REQUIRED,
       );

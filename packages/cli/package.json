@@ -52,7 +52,7 @@
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
-    "url": "https://github.com/betterdb/monitor.git"
+    "url": "https://github.com/BetterDB-inc/monitor.git"
   },
-  "homepage": "https://betterdb.dev"
+  "homepage": "https://betterdb.com"
 }
