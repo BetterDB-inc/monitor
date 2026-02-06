@@ -32,8 +32,8 @@ export function printStartupInfo(config: BetterDBConfig): void {
   } else if (storage.type === 'postgres' && storage.postgresUrl) {
     // Mask the password in the URL
     const maskedUrl = storage.postgresUrl.replace(
-      /:([^:@]+)@/,
-      ':****@'
+      /^([^:]+:\/\/[^:@]+):([^@]+)@/,
+      '$1:****@'
     );
     console.log(`    ${pc.cyan('URL:')} ${maskedUrl}`);
   }

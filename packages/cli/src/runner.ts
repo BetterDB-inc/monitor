@@ -5,6 +5,7 @@ import { expandPath } from './config';
 import { printError, printInfo } from './banner';
 
 let serverProcess: ChildProcess | null = null;
+let isShuttingDown = false;
 
 /**
  * Map configuration to environment variables
@@ -102,6 +103,9 @@ export function startServer(config: BetterDBConfig): Promise<void> {
 
       if (code !== null) {
         if (code !== 0) {
+          if (isShuttingDown) {
+            return;
+          }
           printError(`Server exited with code ${code}`);
           if (!started) {
             reject(new Error(`Server exited with code ${code}`));
@@ -118,6 +122,10 @@ export function startServer(config: BetterDBConfig): Promise<void> {
           reject(new Error(`Server killed by signal ${signal}`));
           return;
         }
+        if (isShuttingDown) {
+          process.exit(0);
+          return;
+        }
         process.exit(1);
       }
     });
@@ -131,6 +139,7 @@ export function setupSignalHandlers(): void {
   const shutdown = (signal: string) => {
     console.log();
     printInfo(`Received ${signal}, shutting down...`);
+    isShuttingDown = true;
 
     if (serverProcess) {
       serverProcess.kill('SIGTERM');

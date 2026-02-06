@@ -1,11 +1,10 @@
 import { Command } from 'commander';
 import { existsSync } from 'fs';
 import { configExists, loadConfig, getConfigPath } from './config';
-import { printBanner, printStartupInfo, printError, printInfo, printSuccess } from './banner';
+import { printBanner, printStartupInfo, printError, printInfo } from './banner';
 import { runSetupWizard } from './setup';
 import { startServer, setupSignalHandlers, getServerPath } from './runner';
 import { BetterDBConfig, CLIOptions } from './types';
-import { join } from 'path';
 
 // Read version from package.json
 const packageJson = require('../package.json');
