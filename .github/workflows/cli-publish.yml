@@ -105,12 +105,12 @@ jobs:
 
       - name: Publish to npm
         if: ${{ github.event_name == 'push' || inputs.publish_npm }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd packages/cli
-          pnpm publish --provenance --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: true
+          npm publish ./betterdb-$VERSION.tgz --provenance --access public
 
       - name: Create GitHub Release
         if: ${{ github.event_name == 'push' || inputs.create_release }}
