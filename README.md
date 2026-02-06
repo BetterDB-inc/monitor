@@ -102,7 +102,7 @@ pnpm build
 The easiest way to run BetterDB Monitor without Docker:
 
 ```bash
-npx betterdb
+npx @betterdb/monitor
 ```
 
 On first run, an interactive setup wizard will guide you through configuration:
@@ -115,7 +115,7 @@ Configuration is saved to `~/.betterdb/config.json`.
 ### Global Installation
 
 ```bash
-npm install -g betterdb
+npm install -g @betterdb/monitor
 betterdb
 ```
 

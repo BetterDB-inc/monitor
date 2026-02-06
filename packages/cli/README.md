@@ -7,23 +7,23 @@ Monitor and observe your Valkey/Redis databases from the command line.
 ### Quick Start (npx)
 
 ```bash
-npx betterdb
+npx @betterdb/monitor
 ```
 
 ### Global Installation
 
 ```bash
-npm install -g betterdb
+npm install -g @betterdb/monitor
 ```
 
 ### Package Manager
 
 ```bash
 # pnpm
-pnpm dlx betterdb
+pnpm dlx @betterdb/monitor
 
 # yarn
-yarn dlx betterdb
+yarn dlx @betterdb/monitor
 ```
 
 ## Usage

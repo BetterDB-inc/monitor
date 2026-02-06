@@ -1,9 +1,12 @@
 {
-  "name": "betterdb",
+  "name": "@betterdb/monitor",
   "version": "0.4.1",
   "description": "Monitor and observe your Valkey/Redis databases",
   "bin": {
     "betterdb": "./bin/betterdb.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "bin/",

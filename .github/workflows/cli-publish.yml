@@ -107,13 +107,13 @@ jobs:
           # Use npm pack (not pnpm) to avoid workspace protocol issues
           npm pack
 
-          echo "tarball=packages/cli/betterdb-$VERSION.tgz" >> $GITHUB_OUTPUT
+          echo "tarball=packages/cli/betterdb-monitor-$VERSION.tgz" >> $GITHUB_OUTPUT
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
         with:
           name: cli-tarball
-          path: packages/cli/betterdb-${{ steps.version.outputs.version }}.tgz
+          path: packages/cli/betterdb-monitor-${{ steps.version.outputs.version }}.tgz
 
       - name: Publish to npm
         if: ${{ github.event_name == 'push' || inputs.publish_npm }}
@@ -122,7 +122,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd packages/cli
-          npm publish ./betterdb-$VERSION.tgz --provenance --access public
+          npm publish ./betterdb-monitor-$VERSION.tgz --provenance --access public
 
       - name: Create GitHub Release
         if: ${{ github.event_name == 'push' || inputs.create_release }}
@@ -134,7 +134,7 @@ jobs:
           prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           generate_release_notes: true
           files: |
-            packages/cli/betterdb-${{ steps.version.outputs.version }}.tgz
+            packages/cli/betterdb-monitor-${{ steps.version.outputs.version }}.tgz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -156,8 +156,8 @@ jobs:
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          npm view betterdb@$VERSION || echo "Package not yet available"
+          npm view @betterdb/monitor@$VERSION || echo "Package not yet available"
 
       - name: Test npx installation
         run: |
-          npx betterdb@${{ needs.build.outputs.version }} --version || echo "npx test skipped (package may not be available yet)"
+          npx @betterdb/monitor@${{ needs.build.outputs.version }} --version || echo "npx test skipped (package may not be available yet)"
