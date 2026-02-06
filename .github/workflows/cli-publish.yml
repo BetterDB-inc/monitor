@@ -63,30 +63,41 @@ jobs:
 
       - name: Determine version
         id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ -z "${{ inputs.version }}" ]; then
+            if [ -z "$INPUT_VERSION" ]; then
               echo "workflow_dispatch requires inputs.version (e.g., 0.4.0)" >&2
               exit 1
             fi
-            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+            # Validate version format (semver)
+            if ! echo "$INPUT_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$'; then
+              echo "Invalid version format: $INPUT_VERSION. Expected semver format (e.g., 0.4.0 or 1.0.0-beta.1)" >&2
+              exit 1
+            fi
+            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
           else
             echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
           fi
 
       - name: Update CLI package version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           cd packages/cli
-          npm version ${{ steps.version.outputs.version }} --no-git-tag-version --allow-same-version
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Build CLI package
         run: pnpm cli:build
 
       - name: Create tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           cd packages/cli
           pnpm pack
-          mv betterdb-*.tgz betterdb-${{ steps.version.outputs.version }}.tgz
+          mv betterdb-*.tgz betterdb-$VERSION.tgz
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
@@ -131,8 +142,10 @@ jobs:
         run: sleep 30
 
       - name: Verify npm package
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          npm view betterdb@${{ needs.build.outputs.version }} || echo "Package not yet available"
+          npm view betterdb@$VERSION || echo "Package not yet available"
 
       - name: Test npx installation
         run: |
