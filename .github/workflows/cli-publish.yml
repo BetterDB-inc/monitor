@@ -106,7 +106,6 @@ jobs:
 
           # Use npm pack (not pnpm) to avoid workspace protocol issues
           npm pack
-          mv betterdb-*.tgz betterdb-$VERSION.tgz
 
           echo "tarball=packages/cli/betterdb-$VERSION.tgz" >> $GITHUB_OUTPUT
 
