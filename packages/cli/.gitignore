@@ -1,0 +1,14 @@
+# Build output
+dist/
+assets/
+.tmp-node-modules/
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/

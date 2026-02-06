@@ -1,0 +1,152 @@
+name: Publish CLI Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., 0.4.0)'
+        required: false
+        type: string
+      publish_npm:
+        description: 'Publish to npm'
+        required: false
+        type: boolean
+        default: true
+      create_release:
+        description: 'Create GitHub Release'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Determine version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -z "$INPUT_VERSION" ]; then
+              echo "workflow_dispatch requires inputs.version (e.g., 0.4.0)" >&2
+              exit 1
+            fi
+            # Validate version format (semver)
+            if ! echo "$INPUT_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$'; then
+              echo "Invalid version format: $INPUT_VERSION. Expected semver format (e.g., 0.4.0 or 1.0.0-beta.1)" >&2
+              exit 1
+            fi
+            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update CLI package version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd packages/cli
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Build CLI package
+        run: pnpm cli:build
+
+      - name: Create tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd packages/cli
+          pnpm pack
+          mv betterdb-*.tgz betterdb-$VERSION.tgz
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-tarball
+          path: packages/cli/betterdb-${{ steps.version.outputs.version }}.tgz
+
+      - name: Publish to npm
+        if: ${{ github.event_name == 'push' || inputs.publish_npm }}
+        run: |
+          cd packages/cli
+          npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true
+          files: |
+            packages/cli/betterdb-${{ steps.version.outputs.version }}.tgz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' || inputs.publish_npm }}
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Wait for npm propagation
+        run: sleep 30
+
+      - name: Verify npm package
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          npm view betterdb@$VERSION || echo "Package not yet available"
+
+      - name: Test npx installation
+        run: |
+          npx betterdb --version || echo "npx test skipped (package may not be available yet)"

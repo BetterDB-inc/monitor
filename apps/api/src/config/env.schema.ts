@@ -21,6 +21,9 @@ export const envSchema = z.object({
   STORAGE_URL: z.string().url().optional(),
   STORAGE_SQLITE_FILEPATH: z.string().default('./data/audit.db'),
 
+  // CLI static directory override
+  BETTERDB_STATIC_DIR: z.string().optional(),
+
   // Polling intervals
   AUDIT_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
   CLIENT_ANALYTICS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),

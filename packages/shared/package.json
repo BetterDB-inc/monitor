@@ -10,6 +10,11 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./encryption": {
+      "require": "./dist/encryption.js",
+      "import": "./dist/encryption.js",
+      "default": "./dist/encryption.js"
+    },
     "./license": {
       "require": "./dist/license/index.js",
       "import": "./dist/license/index.js",
@@ -22,6 +27,7 @@
     "clean": "rm -rf dist"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "^5.7.2"
   }
 }

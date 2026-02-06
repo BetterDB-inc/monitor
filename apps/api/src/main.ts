@@ -31,7 +31,9 @@ async function bootstrap(): Promise<void> {
     app.setGlobalPrefix('api');
 
     // Serve static files in production (path adjusted for Docker dist structure)
-    const publicPath = join(__dirname, '..', '..', '..', '..', 'public');
+    // BETTERDB_STATIC_DIR allows CLI to override the static file location
+    const publicPath = process.env.BETTERDB_STATIC_DIR
+      || join(__dirname, '..', '..', '..', '..', 'public');
     const indexPath = join(publicPath, 'index.html');
 
     // Read index.html once at startup
