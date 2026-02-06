@@ -22,6 +22,8 @@ module.exports = {
     '^@app/(.*)$': '<rootDir>/src/$1',
     '^@proprietary/ai/(.*)$': '<rootDir>/test/__mocks__/@proprietary/ai/$1',
     '^@proprietary/(.*)$': '<rootDir>/../../proprietary/$1',
+    '^@betterdb/shared/encryption$': '<rootDir>/../../packages/shared/src/encryption',
+    '^@betterdb/shared/license$': '<rootDir>/../../packages/shared/src/license/index',
     '^@betterdb/shared$': '<rootDir>/../../packages/shared/src/index',
     // Handle .js extensions in ESM imports
     '^(\\.{1,2}/.*)\\.js$': '$1',
