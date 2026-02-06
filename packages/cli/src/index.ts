@@ -122,4 +122,4 @@ function applyCliOverrides(config: BetterDBConfig, options: CLIOptions): BetterD
   return result;
 }
 
-program.parse();
+program.parseAsync();
