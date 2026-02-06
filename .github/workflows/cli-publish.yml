@@ -105,7 +105,8 @@ jobs:
           echo "===================="
 
           # Use npm pack (not pnpm) to avoid workspace protocol issues
-          npm pack
+          # --ignore-scripts skips prepublishOnly since we already built
+          npm pack --ignore-scripts
 
           echo "tarball=packages/cli/betterdb-monitor-$VERSION.tgz" >> $GITHUB_OUTPUT
 
