@@ -69,7 +69,6 @@ jobs:
               echo "workflow_dispatch requires inputs.version (e.g., 0.4.0)" >&2
               exit 1
             fi
-            # Validate version format (semver)
             if ! echo "$INPUT_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$'; then
               echo "Invalid version format: $INPUT_VERSION. Expected semver format (e.g., 0.4.0 or 1.0.0-beta.1)" >&2
               exit 1
@@ -79,33 +78,37 @@ jobs:
             echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Update CLI package version
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          cd packages/cli
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-
       - name: Build CLI package
         run: pnpm cli:build
 
-      - name: Prepare package for publishing
-        run: |
-          cd packages/cli
-          # Remove workspace dependency - it's already bundled by esbuild
-          node -e "
-            const pkg = require('./package.json');
-            delete pkg.devDependencies['@betterdb/shared'];
-            require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2));
-          "
-
-      - name: Create tarball
+      - name: Prepare and pack for publishing
+        id: pack
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           cd packages/cli
-          pnpm pack
+
+          # Create a clean package.json for publishing (no workspace references)
+          node -e "
+            const pkg = require('./package.json');
+            pkg.version = '$VERSION';
+            // Remove workspace devDependencies (already bundled)
+            if (pkg.devDependencies) {
+              delete pkg.devDependencies['@betterdb/shared'];
+            }
+            require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+          # Show what we're publishing
+          echo "=== package.json ==="
+          cat package.json
+          echo "===================="
+
+          # Use npm pack (not pnpm) to avoid workspace protocol issues
+          npm pack
           mv betterdb-*.tgz betterdb-$VERSION.tgz
+
+          echo "tarball=packages/cli/betterdb-$VERSION.tgz" >> $GITHUB_OUTPUT
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
@@ -158,4 +161,4 @@ jobs:
 
       - name: Test npx installation
         run: |
-          npx betterdb --version || echo "npx test skipped (package may not be available yet)"
+          npx betterdb@${{ needs.build.outputs.version }} --version || echo "npx test skipped (package may not be available yet)"
