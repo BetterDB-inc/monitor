@@ -334,9 +334,6 @@ importers:
 
   packages/cli:
     dependencies:
-      '@betterdb/shared':
-        specifier: workspace:*
-        version: link:../shared
       '@inquirer/prompts':
         specifier: ^7.0.0
         version: 7.10.1(@types/node@22.19.1)
@@ -350,6 +347,9 @@ importers:
         specifier: ^1.0.0
         version: 1.1.1
     devDependencies:
+      '@betterdb/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.1
