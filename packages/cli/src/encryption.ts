@@ -1,1 +1,1 @@
-export { EnvelopeEncryptionService } from '@betterdb/shared';
+export { EnvelopeEncryptionService } from '@betterdb/shared/encryption';

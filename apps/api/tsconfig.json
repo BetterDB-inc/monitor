@@ -21,12 +21,29 @@
     "resolveJsonModule": true,
     "moduleResolution": "node",
     "paths": {
-      "@app/*": ["apps/api/src/*"],
-      "@proprietary/*": ["proprietary/*"],
-      "@betterdb/shared": ["packages/shared/src/index.ts"],
-      "@betterdb/shared/license": ["packages/shared/src/license/index.ts"]
+      "@app/*": [
+        "apps/api/src/*"
+      ],
+      "@proprietary/*": [
+        "proprietary/*"
+      ],
+      "@betterdb/shared": [
+        "packages/shared/src/index.ts"
+      ],
+      "@betterdb/shared/encryption": [
+        "packages/shared/src/encryption.ts"
+      ],
+      "@betterdb/shared/license": [
+        "packages/shared/src/license/index.ts"
+      ]
     }
   },
-  "include": ["src/**/*", "../../proprietary/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "src/**/*",
+    "../../proprietary/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

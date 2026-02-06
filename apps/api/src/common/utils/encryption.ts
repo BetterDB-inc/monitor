@@ -1,4 +1,4 @@
-import { EnvelopeEncryptionService } from '@betterdb/shared';
+import { EnvelopeEncryptionService } from '@betterdb/shared/encryption';
 
 export { EnvelopeEncryptionService };
 

@@ -10,4 +10,3 @@ export * from './types/connections';
 export * from './types/version.types';
 export * from './license/index';
 export * from './webhooks/index';
-export * from './encryption';

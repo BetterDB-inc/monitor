@@ -17,6 +17,9 @@
       "@betterdb/shared": [
         "../shared/src/index.ts"
       ],
+      "@betterdb/shared/encryption": [
+        "../shared/src/encryption.ts"
+      ],
       "@betterdb/shared/license": [
         "../shared/src/license/index.ts"
       ]
