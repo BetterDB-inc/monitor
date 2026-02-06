@@ -89,6 +89,16 @@ jobs:
       - name: Build CLI package
         run: pnpm cli:build
 
+      - name: Prepare package for publishing
+        run: |
+          cd packages/cli
+          # Remove workspace dependency - it's already bundled by esbuild
+          node -e "
+            const pkg = require('./package.json');
+            delete pkg.devDependencies['@betterdb/shared'];
+            require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2));
+          "
+
       - name: Create tarball
         env:
           VERSION: ${{ steps.version.outputs.version }}
