@@ -107,9 +107,10 @@ jobs:
         if: ${{ github.event_name == 'push' || inputs.publish_npm }}
         run: |
           cd packages/cli
-          npm publish --provenance --access public
+          pnpm publish --provenance --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
 
       - name: Create GitHub Release
         if: ${{ github.event_name == 'push' || inputs.create_release }}
