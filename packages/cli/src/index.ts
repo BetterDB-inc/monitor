@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { existsSync } from 'fs';
 import { configExists, loadConfig, getConfigPath } from './config';
-import { printBanner, printStartupInfo, printError, printInfo } from './banner';
+import { printBanner, printStartupInfo, printError, printInfo, printGitHubInfo } from './banner';
 import { runSetupWizard } from './setup';
 import { startServer, setupSignalHandlers, getServerPath } from './runner';
 import { BetterDBConfig, CLIOptions } from './types';
@@ -81,6 +81,7 @@ async function runCli(options: CLIOptions): Promise<void> {
 
   // Print startup info
   printStartupInfo(config);
+  printGitHubInfo();
 
   // Setup graceful shutdown
   setupSignalHandlers();
