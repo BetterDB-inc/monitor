@@ -4,6 +4,10 @@ import { BetterDBConfig } from './types';
 import { expandPath } from './config';
 import { printError, printInfo } from './banner';
 
+// Read version from package.json
+const packageJson = require('../package.json');
+const VERSION = packageJson.version;
+
 let serverProcess: ChildProcess | null = null;
 let isShuttingDown = false;
 
@@ -18,6 +22,7 @@ export function mapConfigToEnv(
     // Always set these for CLI mode
     NODE_ENV: 'production',
     AI_ENABLED: 'false',
+    APP_VERSION: VERSION,
 
     // Static directory for bundled web assets
     BETTERDB_STATIC_DIR: staticDir,

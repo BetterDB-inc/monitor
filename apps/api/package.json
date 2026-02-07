@@ -1,6 +1,6 @@
 {
   "name": "api",
-  "version": "0.4.1",
+  "version": "0.4.5",
   "private": true,
   "scripts": {
     "dev": "ts-node -r tsconfig-paths/register src/main.ts",

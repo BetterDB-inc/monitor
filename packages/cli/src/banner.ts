@@ -47,6 +47,19 @@ export function printStartupInfo(config: BetterDBConfig): void {
 }
 
 /**
+ * Print GitHub star request
+ */
+export function printGitHubInfo(): void {
+  console.log(pc.dim('  ─────────────────────────────────────────────────'));
+  console.log();
+  console.log(`  ${pc.yellow('★')} If you find BetterDB Monitor useful, please consider`);
+  console.log(`    giving us a star on GitHub:`);
+  console.log();
+  console.log(`    ${pc.cyan(pc.underline('https://github.com/BetterDB-Inc/monitor'))}`);
+  console.log();
+}
+
+/**
  * Print a success message
  */
 export function printSuccess(message: string): void {

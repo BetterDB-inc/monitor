@@ -104,6 +104,16 @@ async function bootstrap(): Promise<void> {
   } else {
     console.log(`API documentation available at http://localhost:${port}/docs`);
   }
+
+  // Show GitHub star request
+  console.log('');
+  console.log('─────────────────────────────────────────────────');
+  console.log('');
+  console.log('★ If you find BetterDB Monitor useful, please consider');
+  console.log('  giving us a star on GitHub:');
+  console.log('');
+  console.log('  https://github.com/BetterDB-Inc/monitor');
+  console.log('');
 }
 
 bootstrap();
