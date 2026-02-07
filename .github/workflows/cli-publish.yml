@@ -83,7 +83,11 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           cd packages/cli
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          node -e "
+            const pkg = require('./package.json');
+            pkg.version = '$VERSION';
+            require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
 
       - name: Build CLI package
         run: pnpm cli:build
