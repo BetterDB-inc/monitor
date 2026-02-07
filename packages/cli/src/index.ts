@@ -6,9 +6,9 @@ import { runSetupWizard } from './setup';
 import { startServer, setupSignalHandlers, getServerPath } from './runner';
 import { BetterDBConfig, CLIOptions } from './types';
 
-// Read version from package.json
-const packageJson = require('../package.json');
-const VERSION = packageJson.version;
+// Version is injected at build time by esbuild
+declare const __CLI_VERSION__: string;
+const VERSION = typeof __CLI_VERSION__ !== 'undefined' ? __CLI_VERSION__ : require('../package.json').version;
 
 const program = new Command();
 

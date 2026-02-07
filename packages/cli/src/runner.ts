@@ -4,9 +4,9 @@ import { BetterDBConfig } from './types';
 import { expandPath } from './config';
 import { printError, printInfo } from './banner';
 
-// Read version from package.json
-const packageJson = require('../package.json');
-const VERSION = packageJson.version;
+// Version is injected at build time by esbuild
+declare const __CLI_VERSION__: string;
+const VERSION = typeof __CLI_VERSION__ !== 'undefined' ? __CLI_VERSION__ : require('../package.json').version;
 
 let serverProcess: ChildProcess | null = null;
 let isShuttingDown = false;

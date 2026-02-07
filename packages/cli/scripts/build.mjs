@@ -91,13 +91,17 @@ async function build() {
 
   cpSync(webDistDir, webDir, { recursive: true });
 
-  // Step 6: Compile CLI TypeScript
-  log('Compiling CLI TypeScript...');
-  exec('npx esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --external:@inquirer/prompts --external:commander --external:picocolors', { cwd: cliRoot });
-
-  // Step 7: Generate build info
-  log('Generating build info...');
+  // Step 6: Read package.json for version
   const packageJson = JSON.parse(readFileSync(join(cliRoot, 'package.json'), 'utf-8'));
+  const cliVersion = packageJson.version;
+
+  // Step 7: Compile CLI TypeScript
+  log('Compiling CLI TypeScript...');
+  log(`Injecting version: ${cliVersion}`);
+  exec(`npx esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --external:@inquirer/prompts --external:commander --external:picocolors --define:__CLI_VERSION__='"${cliVersion}"'`, { cwd: cliRoot });
+
+  // Step 8: Generate build info
+  log('Generating build info...');
   const buildInfo = {
     version: packageJson.version,
     buildDate: new Date().toISOString(),
