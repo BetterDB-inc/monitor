@@ -42,7 +42,7 @@ export function printStartupInfo(config: BetterDBConfig): void {
   console.log(pc.dim('  Server:'));
   console.log(`    ${pc.cyan('URL:')} ${pc.underline(`http://localhost:${app.port}`)}`);
   console.log(`    ${pc.cyan('API:')} ${pc.underline(`http://localhost:${app.port}/api`)}`);
-  console.log(`    ${pc.cyan('Docs:')} ${pc.underline(`http://localhost:${app.port}/api/docs`)}`);
+  console.log(`    ${pc.cyan('Docs:')} ${pc.underline(`http://localhost:${app.port}/docs`)}`);
   console.log();
 }
 
