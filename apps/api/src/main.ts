@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
 import { join } from 'path';
+import { readFileSync } from 'fs';
 import fastifyStatic from '@fastify/static';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
@@ -33,9 +34,10 @@ async function bootstrap(): Promise<void> {
     app.setGlobalPrefix('api');
 
     // Serve static files from public directory
-    // SPA fallback is handled by SpaFallbackController (registered in AppModule)
     const publicPath = process.env.BETTERDB_STATIC_DIR
       || join(__dirname, '..', '..', '..', '..', 'public');
+    const indexPath = join(publicPath, 'index.html');
+    const indexHtml = readFileSync(indexPath, 'utf-8');
 
     const fastifyInstance = app.getHttpAdapter().getInstance();
     await fastifyInstance.register(fastifyStatic, {
@@ -43,6 +45,22 @@ async function bootstrap(): Promise<void> {
       prefix: '/',
       wildcard: false,
       decorateReply: false,
+    });
+
+    // SPA fallback - handle at Fastify level to avoid global prefix issue
+    // This runs after NestJS routing, so /api/* routes are handled first
+    const STATIC_EXTENSIONS = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|json|xml|txt)$/i;
+
+    fastifyInstance.setNotFoundHandler((request, reply) => {
+      // Check if it's a static file request - return 404
+      const urlPath = request.url.split('?')[0];
+      if (STATIC_EXTENSIONS.test(urlPath)) {
+        reply.code(404).send({ statusCode: 404, error: 'Not Found' });
+        return;
+      }
+
+      // SPA fallback - serve index.html for all other routes
+      reply.type('text/html').send(indexHtml);
     });
   } else {
     // Development mode - enable CORS for any localhost port
