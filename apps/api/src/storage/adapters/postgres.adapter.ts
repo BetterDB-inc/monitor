@@ -54,7 +54,15 @@ export class PostgresAdapter implements StoragePort {
         let ca: string;
 
         // Issue #3: Add security validation for SSL CA URLs
-        if (sslCa.startsWith('http://') || sslCa.startsWith('https://')) {
+        // Only allow HTTPS to prevent man-in-the-middle attacks on CA certificate fetching
+        if (sslCa.startsWith('http://')) {
+          throw new Error(
+            'Fetching SSL CA certificate over insecure HTTP is not allowed. ' +
+            'Use HTTPS or provide a local file path instead.'
+          );
+        }
+
+        if (sslCa.startsWith('https://')) {
           // Whitelist of trusted domains for SSL certificates
           const trustedDomains = [
             'truststore.pki.rds.amazonaws.com',
@@ -64,7 +72,12 @@ export class PostgresAdapter implements StoragePort {
           ];
 
           const url = new URL(sslCa);
-          const isTrustedDomain = trustedDomains.some(domain => url.hostname.endsWith(domain));
+
+          // Check domain with proper boundary to prevent subdomain spoofing
+          // e.g., evil-s3.amazonaws.com should NOT match s3.amazonaws.com
+          const isTrustedDomain = trustedDomains.some(domain => {
+            return url.hostname === domain || url.hostname.endsWith('.' + domain);
+          });
 
           if (!isTrustedDomain) {
             console.warn(
