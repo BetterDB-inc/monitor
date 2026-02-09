@@ -10,7 +10,7 @@ export interface DatabaseCapabilities {
 }
 
 export interface HealthResponse {
-  status: 'connected' | 'disconnected' | 'error';
+  status: 'connected' | 'disconnected' | 'error' | 'waiting';
   database: {
     type: 'valkey' | 'redis' | 'unknown';
     version: string | null;
@@ -19,6 +19,7 @@ export interface HealthResponse {
   };
   capabilities: DatabaseCapabilities | null;
   error?: string;
+  message?: string;
 }
 
 export interface AnomalyWarmupStatus {

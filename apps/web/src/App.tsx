@@ -10,6 +10,8 @@ import { VersionCheckContext, useVersionCheckState } from './hooks/useVersionChe
 import { UpgradePrompt } from './components/UpgradePrompt';
 import { UpdateBanner } from './components/UpdateBanner';
 import { ConnectionSelector } from './components/ConnectionSelector';
+import { NoConnectionsGuard } from './components/NoConnectionsGuard';
+import { ServerStartupGuard } from './components/ServerStartupGuard';
 import { Dashboard } from './pages/Dashboard';
 import { SlowLog } from './pages/SlowLog';
 import { Latency } from './pages/Latency';
@@ -27,6 +29,19 @@ import type { DatabaseCapabilities } from './types/metrics';
 import { Feature } from '@betterdb/shared';
 
 function App() {
+  return (
+    <ServerStartupGuard>
+      <AppContent />
+    </ServerStartupGuard>
+  );
+}
+
+/**
+ * AppContent contains all hooks and providers.
+ * It only mounts AFTER ServerStartupGuard confirms the server is ready,
+ * ensuring all data fetching happens when the backend is fully initialized.
+ */
+function AppContent() {
   const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(null);
   const { license } = useLicenseStatus();
   const upgradePromptState = useUpgradePromptState();
@@ -157,18 +172,18 @@ function AppLayout() {
         <UpdateBanner />
         <div className="p-8 flex-1 flex flex-col">
           <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/slowlog" element={<SlowLog />} />
-            <Route path="/latency" element={<Latency />} />
-            <Route path="/clients" element={<Clients />} />
-            <Route path="/client-analytics" element={<ClientAnalytics />} />
-            <Route path="/client-analytics/deep-dive" element={<ClientAnalyticsDeepDive />} />
-            <Route path="/anomalies" element={<AnomalyDashboard />} />
-            <Route path="/key-analytics" element={<KeyAnalytics />} />
-            <Route path="/cluster" element={<ClusterDashboard />} />
-            <Route path="/audit" element={<AuditTrail />} />
-            <Route path="/helper" element={<AiAssistant />} />
-            <Route path="/webhooks" element={<Webhooks />} />
+            <Route path="/" element={<NoConnectionsGuard><Dashboard /></NoConnectionsGuard>} />
+            <Route path="/slowlog" element={<NoConnectionsGuard><SlowLog /></NoConnectionsGuard>} />
+            <Route path="/latency" element={<NoConnectionsGuard><Latency /></NoConnectionsGuard>} />
+            <Route path="/clients" element={<NoConnectionsGuard><Clients /></NoConnectionsGuard>} />
+            <Route path="/client-analytics" element={<NoConnectionsGuard><ClientAnalytics /></NoConnectionsGuard>} />
+            <Route path="/client-analytics/deep-dive" element={<NoConnectionsGuard><ClientAnalyticsDeepDive /></NoConnectionsGuard>} />
+            <Route path="/anomalies" element={<NoConnectionsGuard><AnomalyDashboard /></NoConnectionsGuard>} />
+            <Route path="/key-analytics" element={<NoConnectionsGuard><KeyAnalytics /></NoConnectionsGuard>} />
+            <Route path="/cluster" element={<NoConnectionsGuard><ClusterDashboard /></NoConnectionsGuard>} />
+            <Route path="/audit" element={<NoConnectionsGuard><AuditTrail /></NoConnectionsGuard>} />
+            <Route path="/helper" element={<NoConnectionsGuard><AiAssistant /></NoConnectionsGuard>} />
+            <Route path="/webhooks" element={<NoConnectionsGuard><Webhooks /></NoConnectionsGuard>} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </div>

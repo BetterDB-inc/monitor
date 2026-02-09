@@ -22,6 +22,8 @@ export interface ConnectionContextValue {
   setConnection: (connectionId: string) => void;
   /** Refresh connections list */
   refreshConnections: () => Promise<void>;
+  /** Whether there are no connections configured */
+  hasNoConnections: boolean;
 }
 
 export const ConnectionContext = createContext<ConnectionContextValue | null>(null);
@@ -96,5 +98,6 @@ export function useConnectionState(): ConnectionContextValue {
     error,
     setConnection,
     refreshConnections: fetchConnections,
+    hasNoConnections: !loading && connections.length === 0,
   };
 }
