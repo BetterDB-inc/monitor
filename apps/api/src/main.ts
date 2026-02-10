@@ -48,18 +48,24 @@ async function bootstrap(): Promise<void> {
     });
 
     // SPA fallback - handle at Fastify level to avoid global prefix issue
-    // This runs after NestJS routing, so /api/* routes are handled first
     const STATIC_EXTENSIONS = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|json|xml|txt)$/i;
 
     fastifyInstance.setNotFoundHandler((request, reply) => {
-      // Check if it's a static file request - return 404
       const urlPath = request.url.split('?')[0];
+
+      // API routes that don't exist should return JSON 404, not HTML
+      if (urlPath.startsWith('/api/')) {
+        reply.code(404).send({ statusCode: 404, error: 'Not Found' });
+        return;
+      }
+
+      // Static files that don't exist should return 404
       if (STATIC_EXTENSIONS.test(urlPath)) {
         reply.code(404).send({ statusCode: 404, error: 'Not Found' });
         return;
       }
 
-      // SPA fallback - serve index.html for all other routes
+      // All other routes (client-side routes) - serve index.html for SPA
       reply.type('text/html').send(indexHtml);
     });
   } else {
