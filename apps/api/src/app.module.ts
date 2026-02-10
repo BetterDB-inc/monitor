@@ -12,6 +12,7 @@ import { CommandLogAnalyticsModule } from './commandlog-analytics/commandlog-ana
 import { PrometheusModule } from './prometheus/prometheus.module';
 import { SettingsModule } from './settings/settings.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
+import { SpaFallbackModule } from './spa-fallback/spa-fallback.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -85,8 +86,11 @@ const proprietaryImports = [
   AiModule,
 ].filter(Boolean);
 
+// SPA fallback must be LAST so its catch-all route has lowest priority
+const spaFallbackImport = process.env.NODE_ENV === 'production' ? [SpaFallbackModule] : [];
+
 @Module({
-  imports: [...baseImports, ...proprietaryImports],
+  imports: [...baseImports, ...proprietaryImports, ...spaFallbackImport],
   providers: [
     {
       provide: APP_GUARD,

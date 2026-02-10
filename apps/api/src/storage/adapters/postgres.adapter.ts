@@ -80,9 +80,10 @@ export class PostgresAdapter implements StoragePort {
           });
 
           if (!isTrustedDomain) {
-            console.warn(
-              `Warning: Fetching SSL certificate from untrusted domain: ${url.hostname}. ` +
-              `Trusted domains: ${trustedDomains.join(', ')}`
+            throw new Error(
+              `SSL certificate fetching blocked: ${url.hostname} is not in the trusted domains list. ` +
+              `Trusted domains: ${trustedDomains.join(', ')}. ` +
+              `Use a local file path or a trusted cloud provider URL.`
             );
           }
 

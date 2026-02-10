@@ -1,9 +1,8 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, ValidationPipe, RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
 import { join } from 'path';
-import { readFileSync } from 'fs';
 import fastifyStatic from '@fastify/static';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
@@ -30,14 +29,15 @@ async function bootstrap(): Promise<void> {
   }));
 
   if (isProduction) {
-    // Set global prefix for API routes
-    app.setGlobalPrefix('api');
+    // Set global prefix for API routes, but exclude SPA fallback catch-all
+    // The catch-all needs to be at root level to handle client-side routes
+    app.setGlobalPrefix('api', {
+      exclude: [{ path: '*', method: RequestMethod.ALL }],
+    });
 
     // Serve static files from public directory
     const publicPath = process.env.BETTERDB_STATIC_DIR
       || join(__dirname, '..', '..', '..', '..', 'public');
-    const indexPath = join(publicPath, 'index.html');
-    const indexHtml = readFileSync(indexPath, 'utf-8');
 
     const fastifyInstance = app.getHttpAdapter().getInstance();
     await fastifyInstance.register(fastifyStatic, {
@@ -45,28 +45,6 @@ async function bootstrap(): Promise<void> {
       prefix: '/',
       wildcard: false,
       decorateReply: false,
-    });
-
-    // SPA fallback - handle at Fastify level to avoid global prefix issue
-    const STATIC_EXTENSIONS = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|json|xml|txt)$/i;
-
-    fastifyInstance.setNotFoundHandler((request, reply) => {
-      const urlPath = request.url.split('?')[0];
-
-      // API routes that don't exist should return JSON 404, not HTML
-      if (urlPath.startsWith('/api/')) {
-        reply.code(404).send({ statusCode: 404, error: 'Not Found' });
-        return;
-      }
-
-      // Static files that don't exist should return 404
-      if (STATIC_EXTENSIONS.test(urlPath)) {
-        reply.code(404).send({ statusCode: 404, error: 'Not Found' });
-        return;
-      }
-
-      // All other routes (client-side routes) - serve index.html for SPA
-      reply.type('text/html').send(indexHtml);
     });
   } else {
     // Development mode - enable CORS for any localhost port
