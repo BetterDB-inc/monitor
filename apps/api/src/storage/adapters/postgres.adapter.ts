@@ -63,20 +63,37 @@ export class PostgresAdapter implements StoragePort {
         }
 
         if (sslCa.startsWith('https://')) {
-          // Whitelist of trusted domains for SSL certificates
+          // Whitelist of trusted domains for official SSL certificate authorities
+          // Only specific official certificate distribution endpoints, not general cloud storage
           const trustedDomains = [
-            'truststore.pki.rds.amazonaws.com',
-            's3.amazonaws.com',
-            'storage.googleapis.com',
-            'azure.microsoft.com',
+            'truststore.pki.rds.amazonaws.com',        // AWS RDS official CA bundle
+            'storage.googleapis.com/cloud-sql-ca',     // GCP Cloud SQL official path (must check full path)
+            'dl.cacerts.digicert.com',                 // DigiCert CA certificates (used by Azure)
+            'cacerts.digicert.com',                    // DigiCert CA certificates alternate
           ];
 
           const url = new URL(sslCa);
 
           // Check domain with proper boundary to prevent subdomain spoofing
-          // e.g., evil-s3.amazonaws.com should NOT match s3.amazonaws.com
+          // For path-specific validation (like GCS), also check the path
           const isTrustedDomain = trustedDomains.some(domain => {
-            return url.hostname === domain || url.hostname.endsWith('.' + domain);
+            // Exact hostname match
+            if (url.hostname === domain) {
+              return true;
+            }
+
+            // Subdomain match (e.g., subdomain.trusted.com matches trusted.com)
+            if (url.hostname.endsWith('.' + domain)) {
+              return true;
+            }
+
+            // Special case for GCS: must have specific path prefix
+            if (domain === 'storage.googleapis.com/cloud-sql-ca') {
+              return url.hostname === 'storage.googleapis.com' &&
+                url.pathname.startsWith('/cloud-sql-ca');
+            }
+
+            return false;
           });
 
           if (!isTrustedDomain) {

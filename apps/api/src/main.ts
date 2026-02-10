@@ -28,8 +28,9 @@ async function bootstrap(): Promise<void> {
     const fastifyInstance = fastifyAdapter.getInstance();
 
     // Register catch-all route with wildcard - has lowest priority
+    // Don't register HEAD - let Fastify auto-handle it for healthchecks
     fastifyInstance.route({
-      method: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'],
+      method: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
       url: '/*',
       handler: (request, reply) => {
         const urlPath = request.url.split('?')[0];
