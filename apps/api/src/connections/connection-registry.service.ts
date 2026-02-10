@@ -567,10 +567,6 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return id === ENV_DEFAULT_ID;
   }
 
-  hasConnections(): boolean {
-    return this.configs.size > 0;
-  }
-
   findIdByHostPort(host: string, port: number): string | null {
     for (const [id, config] of this.configs.entries()) {
       if (config.host === host && config.port === port) {

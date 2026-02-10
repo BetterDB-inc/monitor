@@ -176,8 +176,12 @@ export class ConnectionHealthDto {
   @ApiProperty({ description: 'Connection name', example: 'Production Redis' })
   connectionName: string;
 
-  @ApiProperty({ description: 'Connection status', enum: ['connected', 'disconnected', 'error'], example: 'connected' })
-  status: 'connected' | 'disconnected' | 'error';
+  @ApiProperty({
+    description: 'Connection status',
+    enum: ['connected', 'disconnected', 'error', 'waiting'],
+    example: 'connected'
+  })
+  status: 'connected' | 'disconnected' | 'error' | 'waiting';
 
   @ApiProperty({
     description: 'Database connection details',
@@ -195,6 +199,9 @@ export class ConnectionHealthDto {
 
   @ApiPropertyOptional({ description: 'Error message if status is error', example: 'Connection refused' })
   error?: string;
+
+  @ApiPropertyOptional({ description: 'Informational message for waiting or other states', example: 'Waiting for database connection to be configured' })
+  message?: string;
 }
 
 /**
@@ -203,14 +210,17 @@ export class ConnectionHealthDto {
 export class AllConnectionsHealthResponseDto implements AllConnectionsHealthResponse {
   @ApiProperty({
     description: 'Overall health status across all connections',
-    enum: ['healthy', 'degraded', 'unhealthy'],
+    enum: ['healthy', 'degraded', 'unhealthy', 'waiting'],
     example: 'healthy',
   })
-  overallStatus: 'healthy' | 'degraded' | 'unhealthy';
+  overallStatus: 'healthy' | 'degraded' | 'unhealthy' | 'waiting';
 
   @ApiProperty({ description: 'Health status for each connection', type: [ConnectionHealthDto] })
   connections: ConnectionHealthDto[];
 
   @ApiProperty({ description: 'Timestamp when health was checked (Unix ms)', example: 1704067200000 })
   timestamp: number;
+
+  @ApiPropertyOptional({ description: 'Informational message when waiting or in special states', example: 'Waiting for database connection to be configured' })
+  message?: string;
 }

@@ -34,8 +34,12 @@ export class DatabaseCapabilitiesDto implements DatabaseCapabilities {
  * DTO for HealthResponse - mirrors the shared interface for Swagger documentation
  */
 export class HealthResponseDto implements HealthResponse {
-  @ApiProperty({ description: 'Connection status', enum: ['connected', 'disconnected', 'error'], example: 'connected' })
-  status: 'connected' | 'disconnected' | 'error';
+  @ApiProperty({
+    description: 'Connection status',
+    enum: ['connected', 'disconnected', 'error', 'waiting'],
+    example: 'connected'
+  })
+  status: 'connected' | 'disconnected' | 'error' | 'waiting';
 
   @ApiProperty({
     description: 'Database connection details',
@@ -57,4 +61,7 @@ export class HealthResponseDto implements HealthResponse {
 
   @ApiProperty({ description: 'Error message if status is error', required: false, example: 'Connection refused' })
   error?: string;
+
+  @ApiProperty({ description: 'Informational message for waiting or other states', required: false, example: 'Waiting for database connection to be configured' })
+  message?: string;
 }
