@@ -60,7 +60,32 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     const savedConnections = await this.storage.getConnections();
 
     if (savedConnections.length === 0) {
-      await this.createEnvDefaultConnection();
+      // Check if DB_HOST was explicitly set in environment
+      const isHostExplicitlySet = !!process.env.DB_HOST;
+
+      if (!isHostExplicitlySet) {
+        this.logger.log(
+          'Waiting for database connection to be configured via the UI'
+        );
+        return;
+      }
+
+      // DB_HOST explicitly set - attempt connection but provide helpful guidance on failure
+      const dbConfig = this.configService.get('database');
+      try {
+        this.logger.log(`Attempting to connect to configured database: ${dbConfig?.host}:${dbConfig?.port}`);
+        await this.createEnvDefaultConnection();
+        this.logger.log('Successfully connected to database from environment configuration');
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : error;
+        this.logger.error(
+          `Failed to connect to configured database (${dbConfig?.host}:${dbConfig?.port}): ${errorMsg}`
+        );
+        this.logger.warn(
+          'App started without connections. Please verify your DB_HOST, DB_PORT, and other database ' +
+          'environment variables are correct, or add a connection via the UI in Settings.'
+        );
+      }
     } else {
       for (const config of savedConnections) {
         // Decrypt password if encrypted

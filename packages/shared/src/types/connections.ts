@@ -104,11 +104,11 @@ export interface CurrentConnectionResponse {
  * Health response for all connections
  */
 export interface AllConnectionsHealthResponse {
-  overallStatus: 'healthy' | 'degraded' | 'unhealthy';
+  overallStatus: 'healthy' | 'degraded' | 'unhealthy' | 'waiting';
   connections: Array<{
     connectionId: string;
     connectionName: string;
-    status: 'connected' | 'disconnected' | 'error';
+    status: 'connected' | 'disconnected' | 'error' | 'waiting';
     database: {
       type: string;
       version: string | null;
@@ -117,6 +117,8 @@ export interface AllConnectionsHealthResponse {
     };
     capabilities: unknown;
     error?: string;
+    message?: string;
   }>;
   timestamp: number;
+  message?: string;
 }

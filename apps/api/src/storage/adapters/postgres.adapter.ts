@@ -1,4 +1,4 @@
-import { Pool, PoolClient } from 'pg';
+import { Pool, PoolClient, PoolConfig } from 'pg';
 import {
   StoragePort,
   StoredAclEntry,
@@ -42,19 +42,124 @@ export class PostgresAdapter implements StoragePort {
 
   async initialize(): Promise<void> {
     try {
-      this.pool = new Pool({
+      // Issue #11: Properly type poolConfig instead of using 'any'
+      const poolConfig: PoolConfig = {
         connectionString: this.config.connectionString,
-      });
+      };
+
+      // Enable SSL if STORAGE_SSL_CA is set (URL or file path)
+      const sslCa = process.env.STORAGE_SSL_CA;
+
+      if (sslCa) {
+        let ca: string;
+
+        // Issue #3: Add security validation for SSL CA URLs
+        // Only allow HTTPS to prevent man-in-the-middle attacks on CA certificate fetching
+        if (sslCa.startsWith('http://')) {
+          throw new Error(
+            'Fetching SSL CA certificate over insecure HTTP is not allowed. ' +
+            'Use HTTPS or provide a local file path instead.'
+          );
+        }
+
+        if (sslCa.startsWith('https://')) {
+          // Whitelist of trusted domains for official SSL certificate authorities
+          // Only specific official certificate distribution endpoints, not general cloud storage
+          const trustedDomains = [
+            'truststore.pki.rds.amazonaws.com',        // AWS RDS official CA bundle
+            'storage.googleapis.com/cloud-sql-ca',     // GCP Cloud SQL official path (must check full path)
+            'dl.cacerts.digicert.com',                 // DigiCert CA certificates (used by Azure)
+            'cacerts.digicert.com',                    // DigiCert CA certificates alternate
+          ];
+
+          const url = new URL(sslCa);
+
+          // Check domain with proper boundary to prevent subdomain spoofing
+          // For path-specific validation (like GCS), also check the path
+          const isTrustedDomain = trustedDomains.some(domain => {
+            // Exact hostname match
+            if (url.hostname === domain) {
+              return true;
+            }
+
+            // Subdomain match (e.g., subdomain.trusted.com matches trusted.com)
+            if (url.hostname.endsWith('.' + domain)) {
+              return true;
+            }
+
+            // Special case for GCS: must have specific path prefix with trailing slash
+            // This prevents /cloud-sql-ca-evil/ from matching
+            if (domain === 'storage.googleapis.com/cloud-sql-ca') {
+              return url.hostname === 'storage.googleapis.com' &&
+                url.pathname.startsWith('/cloud-sql-ca/');
+            }
+
+            return false;
+          });
+
+          if (!isTrustedDomain) {
+            throw new Error(
+              `SSL certificate fetching blocked: ${url.hostname} is not in the trusted domains list. ` +
+              `Trusted domains: ${trustedDomains.join(', ')}. ` +
+              `Use a local file path or a trusted cloud provider URL.`
+            );
+          }
+
+          // Issue #8: Add telemetry/logging for SSL operations
+          console.log(`Fetching SSL CA bundle from: ${sslCa}`);
+
+          try {
+            // Add timeout to fetch and prevent redirect bypass
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
+            const response = await fetch(sslCa, {
+              signal: controller.signal,
+              redirect: 'error' // Prevent redirect bypass of domain whitelist
+            });
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+              throw new Error(`Failed to fetch CA bundle from ${sslCa}: ${response.status}`);
+            }
+            ca = await response.text();
+            console.log('Successfully fetched SSL CA bundle');
+          } catch (fetchError) {
+            // Issue #8: Log SSL errors for debugging
+            const errorMsg = fetchError instanceof Error ? fetchError.message : 'Unknown error';
+            console.error(`Failed to fetch SSL CA bundle: ${errorMsg}`);
+            throw new Error(`Failed to fetch SSL CA bundle from ${sslCa}: ${errorMsg}`);
+          }
+        } else {
+          // Read from file path
+          console.log(`Reading SSL CA bundle from file: ${sslCa}`);
+          const fs = await import('fs');
+          try {
+            ca = fs.readFileSync(sslCa, 'utf8');
+            console.log('Successfully loaded SSL CA bundle from file');
+          } catch (fileError) {
+            const errorMsg = fileError instanceof Error ? fileError.message : 'Unknown error';
+            console.error(`Failed to read SSL CA file: ${errorMsg}`);
+            throw new Error(`Failed to read SSL CA file ${sslCa}: ${errorMsg}`);
+          }
+        }
+
+        poolConfig.ssl = {
+          rejectUnauthorized: true,
+          ca,
+        };
+      }
+
+      this.pool = new Pool(poolConfig);
 
       // Test connection
       const client = await this.pool.connect();
       client.release();
 
-      // Run migrations FIRST to add connection_id to existing tables
-      // This must happen before createSchema() which creates indexes on connection_id
+      // Issue #9: Restore explanatory comments for migration order
+      // Run migrations FIRST to add connection_id to existing tables.
+      // This must happen before createSchema() which creates indexes on connection_id.
       await this.migrateConnectionId();
-
-      // Create schema (will create tables if they don't exist, or skip if they do)
       await this.createSchema();
 
       this.ready = true;

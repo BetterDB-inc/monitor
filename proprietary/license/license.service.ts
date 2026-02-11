@@ -72,6 +72,7 @@ export class LicenseService implements OnModuleInit {
     try {
       const result = await this.validateLicense();
       this.isValidated = true;
+      this.logger.log('License validation complete, isValidated=true');
 
       if (result.tier !== Tier.community) {
         this.logger.log(`License validated: upgraded to ${result.tier} tier`);
@@ -80,6 +81,7 @@ export class LicenseService implements OnModuleInit {
     } catch (error) {
       this.logger.warn(`License validation failed: ${(error as Error).message}, remaining in Community tier`);
       this.isValidated = true;
+      this.logger.log('License validation complete (fallback), isValidated=true');
       return this.getCommunityEntitlement('Validation failed');
     }
   }

@@ -71,16 +71,17 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
   async getHealth(connectionId?: string): Promise<HealthResponse> {
     const targetId = connectionId || this.connectionRegistry.getDefaultId();
     if (!targetId) {
+      // Issue #1: Return empty string for host instead of 'none' to avoid confusion
       return {
-        status: 'disconnected',
+        status: 'waiting',
         database: {
           type: 'unknown',
           version: null,
-          host: 'unknown',
+          host: '',
           port: 0,
         },
         capabilities: null,
-        error: 'No connection available',
+        message: 'Waiting for database connection to be configured',
       };
     }
 
@@ -172,6 +173,17 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
    */
   async getAllConnectionsHealth(): Promise<AllConnectionsHealthResponse> {
     const connections = this.connectionRegistry.list();
+
+    if (connections.length === 0) {
+      // Issue #7: Use consistent error messaging across the app
+      return {
+        overallStatus: 'waiting',
+        connections: [],
+        timestamp: Date.now(),
+        message: 'Waiting for database connection to be configured',
+      };
+    }
+
     const results: AllConnectionsHealthResponse['connections'] = [];
 
     for (const conn of connections) {

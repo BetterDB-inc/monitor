@@ -3,18 +3,69 @@ import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
 import { join } from 'path';
-import fastifyStatic from '@fastify/static';
 import { readFileSync } from 'fs';
+import fastifyStatic from '@fastify/static';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
   validateEnv();
+
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  const fastifyAdapter = new FastifyAdapter();
+
+  // Compute publicPath once to avoid divergence between SPA fallback and static file serving
+  const publicPath = isProduction
+    ? (process.env.BETTERDB_STATIC_DIR || join(__dirname, '..', '..', '..', '..', 'public'))
+    : null;
+
+  // In production, register SPA fallback at Fastify level BEFORE NestJS routes
+  // This gives it lowest priority - NestJS routes (including /api/*) will match first
+  if (isProduction && publicPath) {
+    const indexPath = join(publicPath, 'index.html');
+    const indexHtml = readFileSync(indexPath, 'utf-8');
+    const STATIC_EXTENSIONS = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|json|xml|txt)$/i;
+
+    const fastifyInstance = fastifyAdapter.getInstance();
+
+    // Register catch-all route with wildcard - has lowest priority
+    // Don't register HEAD - let Fastify auto-handle it for healthchecks
+    fastifyInstance.route({
+      method: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+      url: '/*',
+      handler: (request, reply) => {
+        const urlPath = request.url.split('?')[0];
+
+        // API routes return JSON 404 (though they should match NestJS routes first)
+        if (urlPath.startsWith('/api/')) {
+          reply.code(404).send({ statusCode: 404, error: 'Not Found' });
+          return;
+        }
+
+        // Static files return 404
+        if (STATIC_EXTENSIONS.test(urlPath)) {
+          reply.code(404).send({ statusCode: 404, error: 'Not Found' });
+          return;
+        }
+
+        // Only serve SPA HTML for GET requests
+        if (request.method !== 'GET') {
+          reply.code(404).send({ statusCode: 404, error: 'Not Found' });
+          return;
+        }
+
+        // Serve index.html for SPA client-side routes
+        reply.type('text/html').send(indexHtml);
+      }
+    });
+  }
+
   // Type assertion required due to NestJS/Fastify adapter version mismatch during transition
   const app = await (NestFactory.create as Function)(
     AppModule,
-    new FastifyAdapter(),
+    fastifyAdapter,
   ) as NestFastifyApplication;
 
   // Enable validation pipes globally
@@ -24,44 +75,18 @@ async function bootstrap(): Promise<void> {
     transform: true,
   }));
 
-  const isProduction = process.env.NODE_ENV === 'production';
-
-  if (isProduction) {
-    // Set global prefix for API routes FIRST
+  if (isProduction && publicPath) {
+    // Set global prefix for API routes
+    // SPA fallback is registered at Fastify level before NestJS, so no exclusion needed
     app.setGlobalPrefix('api');
 
-    // Serve static files in production (path adjusted for Docker dist structure)
-    // BETTERDB_STATIC_DIR allows CLI to override the static file location
-    const publicPath = process.env.BETTERDB_STATIC_DIR
-      || join(__dirname, '..', '..', '..', '..', 'public');
-    const indexPath = join(publicPath, 'index.html');
-
-    // Read index.html once at startup
-    const indexHtml = readFileSync(indexPath, 'utf-8');
-
-    await app.register(fastifyStatic, {
+    // Serve static files from public directory (publicPath computed above)
+    const fastifyInstance = app.getHttpAdapter().getInstance();
+    await fastifyInstance.register(fastifyStatic, {
       root: publicPath,
       prefix: '/',
-      wildcard: false, // Disable wildcard matching to avoid conflict
-    });
-
-    // SPA fallback - manually handle non-API, non-static file routes
-    const fastifyInstance = app.getHttpAdapter().getInstance();
-    fastifyInstance.get('/*', async (request, reply) => {
-      // Don't handle API routes
-      if (request.url.startsWith('/api')) {
-        return;
-      }
-
-      // Check if it's a static asset request (has file extension)
-      const urlPath = request.url.split('?')[0];
-      if (urlPath.match(/\.[a-z0-9]+$/i)) {
-        // Let fastify-static handle it
-        return;
-      }
-
-      // Serve index.html for all other routes (SPA fallback)
-      reply.type('text/html').send(indexHtml);
+      wildcard: false,
+      decorateReply: false,
     });
   } else {
     // Development mode - enable CORS for any localhost port
@@ -100,10 +125,8 @@ async function bootstrap(): Promise<void> {
   console.log(`API server running on http://localhost:${port}`);
   if (isProduction) {
     console.log('Serving frontend from /public');
-    console.log(`API documentation available at http://localhost:${port}/api/docs`);
-  } else {
-    console.log(`API documentation available at http://localhost:${port}/docs`);
   }
+  console.log(`API documentation available at http://localhost:${port}/docs`);
 
   // Show GitHub star request
   console.log('');
