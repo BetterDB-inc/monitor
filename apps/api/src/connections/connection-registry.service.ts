@@ -60,18 +60,16 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     const savedConnections = await this.storage.getConnections();
 
     if (savedConnections.length === 0) {
-      // Check if DB_HOST was explicitly set in environment (not using default)
+      // Check if DB_HOST was explicitly set in environment
       const isHostExplicitlySet = !!process.env.DB_HOST;
 
       if (!isHostExplicitlySet) {
-        // Issue #7: Use consistent messaging
         this.logger.log(
           'Waiting for database connection to be configured via the UI'
         );
         return;
       }
 
-      // Issue #4: Improve migration path for users with explicit DB_HOST
       // DB_HOST explicitly set - attempt connection but provide helpful guidance on failure
       const dbConfig = this.configService.get('database');
       try {

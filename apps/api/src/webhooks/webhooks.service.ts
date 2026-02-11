@@ -28,7 +28,7 @@ export class WebhooksService {
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
     private readonly connectionRegistry: ConnectionRegistry,
     @Optional() private readonly licenseService?: LicenseService,
-  ) {}
+  ) { }
 
   /**
    * Resolve connectionId to default if not provided.
@@ -70,9 +70,9 @@ export class WebhooksService {
       // Allow localhost in development/non-production environments
       const isProduction = process.env.NODE_ENV === 'production';
       const isLocalhost = parsed.hostname === 'localhost' ||
-                          parsed.hostname === '0.0.0.0' ||
-                          parsed.hostname === '127.0.0.1' ||
-                          parsed.hostname.startsWith('127.');
+        parsed.hostname === '0.0.0.0' ||
+        parsed.hostname === '127.0.0.1' ||
+        parsed.hostname.startsWith('127.');
 
       if (isLocalhost && !isProduction) {
         // Allow localhost in development
