@@ -71,13 +71,9 @@ COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 RUN mkdir -p /app/node_modules/@proprietary && \
     ln -s /app/apps/api/dist/proprietary/* /app/node_modules/@proprietary/
 
-# Set environment defaults
+# Set environment defaults (only non-database config)
 ENV NODE_ENV=production
 ENV PORT=3001
-ENV DB_HOST=localhost
-ENV DB_PORT=6379
-ENV DB_TYPE=auto
-ENV DB_USERNAME=default
 ENV STORAGE_TYPE=memory
 
 # Create non-root user for security (Docker Scout compliance)
