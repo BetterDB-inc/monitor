@@ -109,11 +109,14 @@ export class PostgresAdapter implements StoragePort {
           console.log(`Fetching SSL CA bundle from: ${sslCa}`);
 
           try {
-            // Add timeout to fetch
+            // Add timeout to fetch and prevent redirect bypass
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
 
-            const response = await fetch(sslCa, { signal: controller.signal });
+            const response = await fetch(sslCa, {
+              signal: controller.signal,
+              redirect: 'error' // Prevent redirect bypass of domain whitelist
+            });
             clearTimeout(timeoutId);
 
             if (!response.ok) {
