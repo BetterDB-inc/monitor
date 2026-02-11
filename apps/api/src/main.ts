@@ -16,11 +16,14 @@ async function bootstrap(): Promise<void> {
 
   const fastifyAdapter = new FastifyAdapter();
 
+  // Compute publicPath once to avoid divergence between SPA fallback and static file serving
+  const publicPath = isProduction
+    ? (process.env.BETTERDB_STATIC_DIR || join(__dirname, '..', '..', '..', '..', 'public'))
+    : null;
+
   // In production, register SPA fallback at Fastify level BEFORE NestJS routes
   // This gives it lowest priority - NestJS routes (including /api/*) will match first
-  if (isProduction) {
-    const publicPath = process.env.BETTERDB_STATIC_DIR
-      || join(__dirname, '..', '..', '..', '..', 'public');
+  if (isProduction && publicPath) {
     const indexPath = join(publicPath, 'index.html');
     const indexHtml = readFileSync(indexPath, 'utf-8');
     const STATIC_EXTENSIONS = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|json|xml|txt)$/i;
@@ -72,15 +75,12 @@ async function bootstrap(): Promise<void> {
     transform: true,
   }));
 
-  if (isProduction) {
+  if (isProduction && publicPath) {
     // Set global prefix for API routes
     // SPA fallback is registered at Fastify level before NestJS, so no exclusion needed
     app.setGlobalPrefix('api');
 
-    // Serve static files from public directory
-    const publicPath = process.env.BETTERDB_STATIC_DIR
-      || join(__dirname, '..', '..', '..', '..', 'public');
-
+    // Serve static files from public directory (publicPath computed above)
     const fastifyInstance = app.getHttpAdapter().getInstance();
     await fastifyInstance.register(fastifyStatic, {
       root: publicPath,
