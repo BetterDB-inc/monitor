@@ -87,10 +87,11 @@ export class PostgresAdapter implements StoragePort {
               return true;
             }
 
-            // Special case for GCS: must have specific path prefix
+            // Special case for GCS: must have specific path prefix with trailing slash
+            // This prevents /cloud-sql-ca-evil/ from matching
             if (domain === 'storage.googleapis.com/cloud-sql-ca') {
               return url.hostname === 'storage.googleapis.com' &&
-                url.pathname.startsWith('/cloud-sql-ca');
+                url.pathname.startsWith('/cloud-sql-ca/');
             }
 
             return false;
