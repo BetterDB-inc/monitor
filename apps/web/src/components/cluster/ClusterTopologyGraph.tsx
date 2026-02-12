@@ -98,8 +98,8 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
     const masterIndexMap = new Map<string, number>();
     masters.forEach((m, i) => masterIndexMap.set(m.id, i));
 
-    const masterRadius = Math.min(width, height) * 0.3;
-    const replicaOffset = LINK_DISTANCE * 0.6;
+    const masterRadius = Math.min(width, height) * 0.2;
+    const replicaOffset = LINK_DISTANCE * 0.5;
 
     function getInitialPosition(node: ClusterNode): { x: number; y: number } {
       const saved = nodePositionsRef.current.get(node.id);
@@ -178,8 +178,8 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
     zoomBehaviorRef.current = zoomBehavior;
     svg.call(zoomBehavior);
 
-    // Only run simulation for new nodes (without saved positions)
-    const needsSimulation = graphNodes.some((n) => n.x === undefined || n.y === undefined);
+    // Run simulation for nodes that don't have user-saved positions (from drag)
+    const needsSimulation = graphNodes.some((n) => !nodePositionsRef.current.has(n.id));
 
     const simulation = forceSimulation<GraphNode>(graphNodes)
       .force(
