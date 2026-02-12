@@ -7,12 +7,14 @@ import { EntitlementModule } from './entitlement/entitlement.module';
 import { StripeModule } from './stripe/stripe.module';
 import { AdminModule } from './admin/admin.module';
 import { HealthModule } from './health/health.module';
+import { TenantModule } from './tenant/tenant.module';
+import { ProvisioningModule } from './provisioning/provisioning.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: '../../.env',
+      envFilePath: '../../../.env',
     }),
     ThrottlerModule.forRoot([{
       ttl: 60000,
@@ -23,6 +25,8 @@ import { HealthModule } from './health/health.module';
     EntitlementModule,
     StripeModule,
     AdminModule,
+    TenantModule,
+    ProvisioningModule,
   ],
   providers: [
     {

@@ -34,8 +34,39 @@ model Customer {
 
   licenses       License[]
   subscriptions  Subscription[]
+  tenants        Tenant[]
 
   @@map("customers")
+}
+
+enum TenantStatus {
+  pending
+  provisioning
+  ready
+  error
+  suspended
+  deleting
+}
+
+model Tenant {
+  id            String       @id @default(cuid())
+  name          String
+  subdomain     String       @unique
+  email         String
+  status        TenantStatus @default(pending)
+  statusMessage String?      @map("status_message")
+  customerId    String?      @map("customer_id")
+  dbSchema      String       @map("db_schema")
+  imageTag      String       @default("latest") @map("image_tag")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  customer      Customer?    @relation(fields: [customerId], references: [id])
+
+  @@index([subdomain])
+  @@index([status])
+  @@index([customerId])
+  @@map("tenants")
 }
 
 model License {

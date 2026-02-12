@@ -1,0 +1,116 @@
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: quota
+  namespace: tenant-test
+spec:
+  hard:
+    requests.cpu: "250m"
+    requests.memory: "256Mi"
+    limits.cpu: "500m"
+    limits.memory: "512Mi"
+    pods: "1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: betterdb
+  namespace: tenant-test
+  labels:
+    app: betterdb
+    tenant: test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: betterdb
+      tenant: test
+  template:
+    metadata:
+      labels:
+        app: betterdb
+        tenant: test
+    spec:
+      containers:
+        - name: betterdb
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb:v0.5.1
+          # image: betterdb/monitor:latest
+          ports:
+            - containerPort: 3001
+          env:
+            - name: DB_SCHEMA
+              value: "tenant_test"
+            - name: BETTERDB_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: license
+                  key: key
+            - name: STORAGE_TYPE
+              value: "postgres"
+            - name: STORAGE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: url
+            - name: STORAGE_SSL_CA
+              value: "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: betterdb
+  namespace: tenant-test
+spec:
+  selector:
+    app: betterdb
+    tenant: test
+  ports:
+    - port: 80
+      targetPort: 3001
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: betterdb
+  namespace: tenant-test
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:811740411689:certificate/5124962a-e39c-4629-93d0-04275ba4167e"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/group.name: betterdb-tenants
+spec:
+  ingressClassName: alb
+  rules:
+    - host: test.app.betterdb.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: betterdb
+                port:
+                  number: 80

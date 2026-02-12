@@ -31,6 +31,7 @@ import { PostgresDialect, RowMappers } from './base-sql.adapter';
 
 export interface PostgresAdapterConfig {
   connectionString: string;
+  schema?: string;  // PostgreSQL schema for tenant isolation
 }
 
 export class PostgresAdapter implements StoragePort {
@@ -152,9 +153,30 @@ export class PostgresAdapter implements StoragePort {
 
       this.pool = new Pool(poolConfig);
 
-      // Test connection
-      const client = await this.pool.connect();
-      client.release();
+      const schemaName = this.config.schema;
+
+      if (schemaName) {
+        // Validate schema name to prevent SQL injection (defense in depth)
+        if (!/^[a-z_][a-z0-9_]*$/.test(schemaName)) {
+          throw new Error(`Invalid schema name: ${schemaName}`);
+        }
+
+        // Create schema using initial pool (runs in public/default search_path)
+        const bootstrapClient = await this.pool.connect();
+        await bootstrapClient.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+        bootstrapClient.release();
+
+        // Recreate pool with search_path set on every connection
+        await this.pool.end();
+        this.pool = new Pool(poolConfig);
+        this.pool.on('connect', (client) => {
+          client.query(`SET search_path TO ${schemaName}, public`);
+        });
+      }
+
+      // Test connection (will have correct search_path if schema is set)
+      const testClient = await this.pool.connect();
+      testClient.release();
 
       // Issue #9: Restore explanatory comments for migration order
       // Run migrations FIRST to add connection_id to existing tables.
@@ -163,6 +185,10 @@ export class PostgresAdapter implements StoragePort {
       await this.createSchema();
 
       this.ready = true;
+
+      if (schemaName) {
+        console.log(`PostgreSQL initialized with schema: ${schemaName}`);
+      }
     } catch (error) {
       this.ready = false;
       throw new Error(

@@ -20,6 +20,7 @@ export const envSchema = z.object({
   STORAGE_TYPE: z.enum(['sqlite', 'postgres', 'postgresql', 'memory']).default('sqlite'),
   STORAGE_URL: z.string().url().optional(),
   STORAGE_SQLITE_FILEPATH: z.string().default('./data/audit.db'),
+  DB_SCHEMA: z.string().regex(/^[a-z_][a-z0-9_]*$/).max(63).optional(),
 
   // CLI static directory override
   BETTERDB_STATIC_DIR: z.string().optional(),
