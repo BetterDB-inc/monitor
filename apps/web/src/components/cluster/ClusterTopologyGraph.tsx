@@ -85,8 +85,52 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
       return { graphNodes: [], graphLinks: [] };
     }
 
+    const width = containerWidth;
+    const height = CONTAINER_HEIGHT;
+    const centerX = width / 2;
+    const centerY = height / 2;
+
+    // Separate masters and replicas for circular layout
+    const masters = nodes.filter((n) => n.flags.includes('master'));
+    const replicas = nodes.filter((n) => !n.flags.includes('master'));
+
+    // Map masterId -> index for circular placement
+    const masterIndexMap = new Map<string, number>();
+    masters.forEach((m, i) => masterIndexMap.set(m.id, i));
+
+    const masterRadius = Math.min(width, height) * 0.3;
+    const replicaOffset = LINK_DISTANCE * 0.6;
+
+    function getInitialPosition(node: ClusterNode): { x: number; y: number } {
+      const saved = nodePositionsRef.current.get(node.id);
+      if (saved) return saved;
+
+      if (node.flags.includes('master')) {
+        const idx = masterIndexMap.get(node.id) ?? 0;
+        const angle = (2 * Math.PI * idx) / Math.max(masters.length, 1) - Math.PI / 2;
+        return {
+          x: centerX + masterRadius * Math.cos(angle),
+          y: centerY + masterRadius * Math.sin(angle),
+        };
+      }
+
+      // Replica: offset outward from its master
+      const masterId = node.master && node.master !== '-' ? node.master : undefined;
+      const masterIdx = masterId ? masterIndexMap.get(masterId) ?? 0 : 0;
+      const masterAngle = (2 * Math.PI * masterIdx) / Math.max(masters.length, 1) - Math.PI / 2;
+      const siblingsOfMaster = replicas.filter((r) => r.master === masterId);
+      const replicaIdx = siblingsOfMaster.indexOf(node);
+      const spread = (replicaIdx + 1) * 0.4;
+      const replicaAngle = masterAngle + spread;
+
+      return {
+        x: centerX + (masterRadius + replicaOffset) * Math.cos(replicaAngle),
+        y: centerY + (masterRadius + replicaOffset) * Math.sin(replicaAngle),
+      };
+    }
+
     const graphNodes: GraphNode[] = nodes.map((node) => {
-      const savedPos = nodePositionsRef.current.get(node.id);
+      const pos = getInitialPosition(node);
       return {
         id: node.id,
         address: node.address,
@@ -95,8 +139,8 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
         slots: node.slots,
         stats: nodeStats?.find((s) => s.nodeId === node.id),
         healthy: node.linkState === 'connected' && !node.flags.includes('fail'),
-        x: savedPos?.x,
-        y: savedPos?.y,
+        x: pos.x,
+        y: pos.y,
       };
     });
 
@@ -112,7 +156,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
     }
 
     return { graphNodes, graphLinks };
-  }, [nodes, nodeStats]);
+  }, [nodes, nodeStats, containerWidth]);
 
   useEffect(() => {
     if (!svgRef.current || graphNodes.length === 0) return;
@@ -148,7 +192,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
       .force('center', forceCenter(width / 2, height / 2))
       .force('collision', forceCollide().radius(NODE_RADIUS + NODE_PADDING))
       .alpha(needsSimulation ? 1 : 0)
-      .alphaDecay(needsSimulation ? 0.0228 : 1);
+      .alphaDecay(needsSimulation ? 0.05 : 1);
 
     const link = g
       .append('g')
@@ -176,7 +220,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
 
     const dragBehavior = drag<SVGGElement, GraphNode>()
       .on('start', function (event, d) {
-        if (!event.active) simulation.alphaTarget(0.3).restart();
+        if (!event.active) simulation.alphaTarget(0.01).restart();
         d.fx = d.x;
         d.fy = d.y;
       })
