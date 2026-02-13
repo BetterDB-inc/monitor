@@ -26,6 +26,21 @@ variable "db_password" {
   sensitive   = true
 }
 
+variable "service_layer_admin_key" {
+  description = "Service layer admin key"
+  sensitive   = true
+}
+
+variable "nlb_ip_address" {
+  description = "Internal NLB hostname for the entitlement service"
+  sensitive   = true
+}
+
+variable "gateway_api_key" {
+  description = "API key for the API gateway"
+  sensitive   = true
+}
+
 variable "vpc_cidr" {
   default = "10.0.0.0/16"
 }

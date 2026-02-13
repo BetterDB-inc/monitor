@@ -45,3 +45,7 @@ output "acm_certificate_arn" {
 output "ecr_repository_url" {
   value = aws_ecr_repository.betterdb.repository_url
 }
+
+output "entitlement_ecr_url" {
+  value = aws_ecr_repository.entitlement.repository_url
+}
