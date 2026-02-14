@@ -136,9 +136,9 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
       }
 
       // Replica: offset outward from its master
-      const masterId = node.master && node.master !== '-' ? node.master : undefined;
+      const masterId = node.master && node.master !== '-' ? node.master : '';
       const masterAngle = getMasterAngle(masterId ? masterIndexMap.get(masterId) ?? 0 : 0);
-      const siblingsOfMaster = replicasByMaster.get(masterId ?? '') ?? [];
+      const siblingsOfMaster = replicasByMaster.get(masterId) ?? [];
       const replicaIdx = siblingsOfMaster.indexOf(node);
       const spread = (replicaIdx + 1) * 0.4;
       const replicaAngle = masterAngle + spread;
