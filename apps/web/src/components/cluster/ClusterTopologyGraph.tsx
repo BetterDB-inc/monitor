@@ -91,8 +91,15 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
     const centerY = height / 2;
 
     // Separate masters and replicas for circular layout
-    const masters = nodes.filter((n) => n.flags.includes('master'));
-    const replicas = nodes.filter((n) => !n.flags.includes('master'));
+    const masters: ClusterNode[] = [];
+    const replicas: ClusterNode[] = [];
+    nodes.forEach((n) => {
+      if (n.flags.includes('master')) {
+        masters.push(n);
+      } else {
+        replicas.push(n);
+      }
+    });
 
     // Map masterId -> index for circular placement
     const masterIndexMap = new Map<string, number>();
@@ -101,13 +108,27 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
     const masterRadius = Math.min(width, height) * 0.2;
     const replicaOffset = LINK_DISTANCE * 0.5;
 
-    function getInitialPosition(node: ClusterNode): { x: number; y: number } {
+    // Pre-group replicas by master for O(1) lookup
+    const replicasByMaster = new Map<string, ClusterNode[]>();
+    replicas.forEach((r) => {
+      const mid = r.master && r.master !== '-' ? r.master : '';
+      const group = replicasByMaster.get(mid);
+      if (group) {
+        group.push(r);
+      } else {
+        replicasByMaster.set(mid, [r]);
+      }
+    });
+
+    const getMasterAngle = (idx: number): number =>
+      (2 * Math.PI * idx) / Math.max(masters.length, 1) - Math.PI / 2;
+
+    const getInitialPosition = (node: ClusterNode): { x: number; y: number } => {
       const saved = nodePositionsRef.current.get(node.id);
       if (saved) return saved;
 
       if (node.flags.includes('master')) {
-        const idx = masterIndexMap.get(node.id) ?? 0;
-        const angle = (2 * Math.PI * idx) / Math.max(masters.length, 1) - Math.PI / 2;
+        const angle = getMasterAngle(masterIndexMap.get(node.id) ?? 0);
         return {
           x: centerX + masterRadius * Math.cos(angle),
           y: centerY + masterRadius * Math.sin(angle),
@@ -116,9 +137,8 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
 
       // Replica: offset outward from its master
       const masterId = node.master && node.master !== '-' ? node.master : undefined;
-      const masterIdx = masterId ? masterIndexMap.get(masterId) ?? 0 : 0;
-      const masterAngle = (2 * Math.PI * masterIdx) / Math.max(masters.length, 1) - Math.PI / 2;
-      const siblingsOfMaster = replicas.filter((r) => r.master === masterId);
+      const masterAngle = getMasterAngle(masterId ? masterIndexMap.get(masterId) ?? 0 : 0);
+      const siblingsOfMaster = replicasByMaster.get(masterId ?? '') ?? [];
       const replicaIdx = siblingsOfMaster.indexOf(node);
       const spread = (replicaIdx + 1) * 0.4;
       const replicaAngle = masterAngle + spread;
@@ -127,7 +147,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
         x: centerX + (masterRadius + replicaOffset) * Math.cos(replicaAngle),
         y: centerY + (masterRadius + replicaOffset) * Math.sin(replicaAngle),
       };
-    }
+    };
 
     const graphNodes: GraphNode[] = nodes.map((node) => {
       const pos = getInitialPosition(node);
