@@ -20,7 +20,8 @@ spec:
       serviceAccountName: entitlement
       containers:
         - name: entitlement
-          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v0.1.4
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v0.2.2
+          imagePullPolicy: Always
           ports:
             - containerPort: 3002
               protocol: TCP

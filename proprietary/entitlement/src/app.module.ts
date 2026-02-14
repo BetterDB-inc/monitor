@@ -9,6 +9,7 @@ import { AdminModule } from './admin/admin.module';
 import { HealthModule } from './health/health.module';
 import { TenantModule } from './tenant/tenant.module';
 import { ProvisioningModule } from './provisioning/provisioning.module';
+import { UserModule } from './user/user.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { ProvisioningModule } from './provisioning/provisioning.module';
     AdminModule,
     TenantModule,
     ProvisioningModule,
+    UserModule,
   ],
   providers: [
     {

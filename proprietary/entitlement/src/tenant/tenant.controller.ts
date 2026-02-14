@@ -9,6 +9,7 @@ import {
   Query,
   UseGuards,
   ValidationPipe,
+  NotFoundException,
 } from '@nestjs/common';
 import { TenantService } from './tenant.service';
 import { AdminGuard } from '../admin/admin.guard';
@@ -34,6 +35,15 @@ export class TenantController {
   @Get('by-subdomain/:subdomain')
   getTenantBySubdomain(@Param('subdomain') subdomain: string) {
     return this.tenantService.getTenantBySubdomain(subdomain);
+  }
+
+  @Get('by-domain/:domain')
+  async getTenantByDomain(@Param('domain') domain: string) {
+    const tenant = await this.tenantService.getTenantByDomain(domain);
+    if (!tenant) {
+      throw new NotFoundException(`No tenant found for domain ${domain}`);
+    }
+    return tenant;
   }
 
   @Get(':id')

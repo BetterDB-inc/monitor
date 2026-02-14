@@ -20,4 +20,9 @@ export class CreateTenantDto {
   @IsString()
   @IsOptional()
   imageTag?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(253)
+  domain?: string;
 }

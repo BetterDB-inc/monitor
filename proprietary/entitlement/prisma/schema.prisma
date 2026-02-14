@@ -59,10 +59,12 @@ model Tenant {
   customerId    String?      @map("customer_id")
   dbSchema      String       @map("db_schema")
   imageTag      String       @default("latest") @map("image_tag")
+  domain        String?      @unique
   createdAt     DateTime     @default(now()) @map("created_at")
   updatedAt     DateTime     @updatedAt @map("updated_at")
 
   customer      Customer?    @relation(fields: [customerId], references: [id])
+  users         User[]
 
   @@index([subdomain])
   @@index([status])
@@ -126,4 +128,33 @@ model LicenseValidation {
   @@index([instanceId])
   @@index([validatedAt])
   @@map("license_validations")
+}
+
+enum AuthProvider {
+  google
+  github
+}
+
+enum UserRole {
+  admin
+  member
+}
+
+model User {
+  id          String       @id @default(cuid())
+  email       String       @unique
+  name        String?
+  avatarUrl   String?      @map("avatar_url")
+  provider    AuthProvider
+  providerId  String       @map("provider_id")
+  tenantId    String       @map("tenant_id")
+  role        UserRole     @default(member)
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@index([email])
+  @@map("users")
 }

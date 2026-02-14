@@ -14,7 +14,7 @@ export class TenantService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async createTenant(data: { name: string; subdomain: string; email: string; imageTag?: string }) {
+  async createTenant(data: { name: string; subdomain: string; email: string; imageTag?: string; domain?: string }) {
     const subdomain = data.subdomain.toLowerCase();
 
     // Validate subdomain format
@@ -35,6 +35,15 @@ export class TenantService {
       throw new ConflictException(`Subdomain '${subdomain}' is already taken`);
     }
 
+    // Handle domain (lowercase and check uniqueness)
+    const domain = data.domain?.toLowerCase() || null;
+    if (domain) {
+      const existingDomain = await this.getTenantByDomain(domain);
+      if (existingDomain) {
+        throw new ConflictException(`Domain '${domain}' is already associated with a tenant`);
+      }
+    }
+
     // Derive dbSchema from subdomain (replace hyphens with underscores for valid PG identifier)
     const dbSchema = `tenant_${subdomain.replace(/-/g, '_')}`;
 
@@ -48,6 +57,7 @@ export class TenantService {
         email: data.email,
         dbSchema,
         imageTag,
+        domain,
         status: 'pending',
       },
     });
@@ -86,6 +96,15 @@ export class TenantService {
   async getTenantBySubdomain(subdomain: string) {
     return this.prisma.tenant.findUnique({
       where: { subdomain: subdomain.toLowerCase() },
+      include: {
+        customer: true,
+      },
+    });
+  }
+
+  async getTenantByDomain(domain: string) {
+    return this.prisma.tenant.findUnique({
+      where: { domain: domain.toLowerCase() },
       include: {
         customer: true,
       },
