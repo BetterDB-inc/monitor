@@ -23,7 +23,7 @@ jobs:
         with:
           path-to-signatures: "signatures/cla.json"
           path-to-document: "https://github.com/BetterDB-inc/monitor/blob/master/CLA.md"
-          branch: "master"
+          branch: "cla-signatures"
           allowlist: "dependabot[bot],renovate[bot]"
           custom-notsigned-prcomment: |
             Thank you for your contribution! Before we can merge this PR, you need to sign our [Contributor License Agreement](https://github.com/BetterDB-inc/monitor/blob/master/CLA.md).
