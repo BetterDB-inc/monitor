@@ -1,4 +1,4 @@
-import { Injectable, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import {
   InfoResponse,
@@ -171,8 +171,11 @@ export class MetricsService {
   }
 
   async getSlowLogPatternAnalysis(count?: number, connectionId?: string): Promise<SlowLogPatternAnalysis> {
-    // Pull from PostgreSQL storage (includes both live-captured and historical data)
-    const resolvedConnectionId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const resolvedConnectionId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!resolvedConnectionId) {
+      throw new NotFoundException('No connection available');
+    }
+
     const storedEntries = await this.storage.getSlowLogEntries({
       limit: count || 128,
       connectionId: resolvedConnectionId,
@@ -184,12 +187,15 @@ export class MetricsService {
   }
 
   async getCommandLogPatternAnalysis(count?: number, type?: CommandLogType, connectionId?: string): Promise<SlowLogPatternAnalysis> {
-    // Pull from PostgreSQL storage (includes both live-captured and historical data)
-    const resolvedConnectionId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const resolvedConnectionId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!resolvedConnectionId) {
+      throw new NotFoundException('No connection available');
+    }
+
     const storedEntries = await this.storage.getCommandLogEntries({
       limit: count || 128,
       connectionId: resolvedConnectionId,
-      type: type || 'slow',
+      type,
     });
 
     const entries: SlowLogEntry[] = storedEntries.map(toSlowLogEntry);

@@ -2031,22 +2031,120 @@ export class SqliteAdapter implements StoragePort {
     return result.changes;
   }
 
-  // Command Log Methods (stub implementations for SQLite)
+  // Command Log Methods
   async saveCommandLogEntries(entries: StoredCommandLogEntry[], connectionId: string): Promise<number> {
-    // SQLite not used for command log persistence in this implementation
-    return 0;
+    if (!this.db || entries.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO command_log_entries (
+        commandlog_id, timestamp, duration, command,
+        client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    let count = 0;
+    const transaction = this.db.transaction((connId: string) => {
+      for (const entry of entries) {
+        const result = stmt.run(
+          entry.id,
+          entry.timestamp,
+          entry.duration,
+          JSON.stringify(entry.command),
+          entry.clientAddress || '',
+          entry.clientName || '',
+          entry.type,
+          entry.capturedAt,
+          entry.sourceHost,
+          entry.sourcePort,
+          connId,
+        );
+        if (result.changes > 0) count++;
+      }
+    });
+
+    transaction(connectionId);
+    return count;
   }
 
   async getCommandLogEntries(options: CommandLogQueryOptions = {}): Promise<StoredCommandLogEntry[]> {
-    return [];
+    if (!this.db) throw new Error('Database not initialized');
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (options.connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
+    if (options.startTime) {
+      conditions.push('timestamp >= ?');
+      params.push(options.startTime);
+    }
+    if (options.endTime) {
+      conditions.push('timestamp <= ?');
+      params.push(options.endTime);
+    }
+    if (options.command) {
+      conditions.push('command LIKE ?');
+      params.push(`%${options.command}%`);
+    }
+    if (options.clientName) {
+      conditions.push('client_name LIKE ?');
+      params.push(`%${options.clientName}%`);
+    }
+    if (options.type) {
+      conditions.push('log_type = ?');
+      params.push(options.type);
+    }
+    if (options.minDuration) {
+      conditions.push('duration >= ?');
+      params.push(options.minDuration);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+
+    const rows = this.db.prepare(
+      `SELECT commandlog_id, timestamp, duration, command,
+              client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
+       FROM command_log_entries
+       ${whereClause}
+       ORDER BY timestamp DESC
+       LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset) as any[];
+
+    return rows.map((row) => this.mappers.mapCommandLogEntryRow(row));
   }
 
   async getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null> {
-    return null;
+    if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const row = this.db.prepare(
+        'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ? AND connection_id = ?'
+      ).get(type, connectionId) as any;
+      return row?.max_id ?? null;
+    }
+
+    const row = this.db.prepare(
+      'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ?'
+    ).get(type) as any;
+    return row?.max_id ?? null;
   }
 
   async pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
-    return 0;
+    if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db.prepare(
+        'DELETE FROM command_log_entries WHERE captured_at < ? AND connection_id = ?'
+      ).run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
+
+    const result = this.db.prepare('DELETE FROM command_log_entries WHERE captured_at < ?').run(cutoffTimestamp);
+    return result.changes;
   }
 
   // Connection Management Methods
