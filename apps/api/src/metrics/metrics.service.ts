@@ -19,7 +19,7 @@ import {
   SlowLogPatternAnalysis,
 } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from './slowlog-analyzer';
-import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { StoragePort, toSlowLogEntry } from '../common/interfaces/storage-port.interface';
 
 @Injectable()
 export class MetricsService {
@@ -178,15 +178,7 @@ export class MetricsService {
       connectionId: resolvedConnectionId,
     });
 
-    // Transform StoredSlowLogEntry to SlowLogEntry format for analyzer
-    const entries: SlowLogEntry[] = storedEntries.map(e => ({
-      id: e.id,
-      timestamp: e.timestamp,
-      duration: e.duration,
-      command: e.command,
-      clientAddress: e.clientAddress,
-      clientName: e.clientName,
-    }));
+    const entries: SlowLogEntry[] = storedEntries.map(toSlowLogEntry);
 
     return analyzeSlowLogPatterns(entries);
   }
@@ -200,15 +192,7 @@ export class MetricsService {
       type: type || 'slow',
     });
 
-    // Transform StoredCommandLogEntry to SlowLogEntry format for analyzer
-    const entries: SlowLogEntry[] = storedEntries.map(e => ({
-      id: e.id,
-      timestamp: e.timestamp,
-      duration: e.duration,
-      command: e.command,
-      clientAddress: e.clientAddress,
-      clientName: e.clientName,
-    }));
+    const entries: SlowLogEntry[] = storedEntries.map(toSlowLogEntry);
 
     return analyzeSlowLogPatterns(entries);
   }

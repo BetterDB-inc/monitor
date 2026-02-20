@@ -575,7 +575,6 @@ export class WebhookDispatcherService {
       const durationMs = Date.now() - startTime;
       return {
         success: false,
-        statusCode: -1,
         error: error.message || 'Unknown error',
         durationMs,
       };

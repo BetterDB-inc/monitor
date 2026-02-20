@@ -245,11 +245,19 @@ describe('Webhooks API (e2e)', () => {
         .post(`/webhooks/${created.body.id}/test`)
         .expect(200);
 
+      // Always present fields
       expect(res.body).toMatchObject({
         success: expect.any(Boolean),
-        statusCode: expect.any(Number),
         durationMs: expect.any(Number),
       });
+
+      // statusCode is only present when HTTP request completes (not on network errors)
+      // error is only present on network failures
+      if (res.body.success || res.body.statusCode !== undefined) {
+        expect(typeof res.body.statusCode).toBe('number');
+      } else {
+        expect(typeof res.body.error).toBe('string');
+      }
 
       // Cleanup
       await request(app.getHttpServer()).delete(`/webhooks/${created.body.id}`);
