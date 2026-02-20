@@ -164,6 +164,41 @@ export interface CommandLogQueryOptions {
   connectionId?: string;
 }
 
+/**
+ * Common fields shared between StoredSlowLogEntry and StoredCommandLogEntry
+ * that can be mapped to SlowLogEntry for pattern analysis.
+ */
+interface StoredLogEntryBase {
+  id: number;
+  timestamp: number;
+  duration: number;
+  command: string[];
+  clientAddress: string;
+  clientName: string;
+}
+
+/**
+ * Converts a stored log entry (slowlog or commandlog) to SlowLogEntry format
+ * for use with the pattern analyzer.
+ */
+export function toSlowLogEntry(entry: StoredLogEntryBase): {
+  id: number;
+  timestamp: number;
+  duration: number;
+  command: string[];
+  clientAddress: string;
+  clientName: string;
+} {
+  return {
+    id: entry.id,
+    timestamp: entry.timestamp,
+    duration: entry.duration,
+    command: entry.command,
+    clientAddress: entry.clientAddress,
+    clientName: entry.clientName,
+  };
+}
+
 export interface StoragePort {
   initialize(): Promise<void>;
   close(): Promise<void>;

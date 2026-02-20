@@ -5,6 +5,7 @@ import {
   StoredCommandLogEntry,
   CommandLogQueryOptions,
   CommandLogType,
+  toSlowLogEntry,
 } from '../common/interfaces/storage-port.interface';
 import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
@@ -174,17 +175,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
       limit: options?.limit || 500, // Higher limit for pattern analysis
     });
 
-    // Convert StoredCommandLogEntry to SlowLogEntry format for the analyzer
-    const slowLogEntries = entries.map(e => ({
-      id: e.id,
-      timestamp: e.timestamp,
-      duration: e.duration,
-      command: e.command,
-      clientAddress: e.clientAddress,
-      clientName: e.clientName,
-    }));
-
-    return analyzeSlowLogPatterns(slowLogEntries);
+    return analyzeSlowLogPatterns(entries.map(toSlowLogEntry));
   }
 
   async pruneOldEntries(retentionDays: number = 7, connectionId?: string): Promise<number> {
