@@ -55,6 +55,7 @@ export interface ConnectionStatus {
   createdAt?: number;
   updatedAt?: number;
   isConnected: boolean;
+  connectionType?: 'direct' | 'agent';
   capabilities?: ConnectionCapabilities;
   /** Status of credential validation */
   credentialStatus?: CredentialStatus;

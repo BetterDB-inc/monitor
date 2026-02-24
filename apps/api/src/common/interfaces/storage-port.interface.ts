@@ -246,4 +246,11 @@ export interface StoragePort {
   getConnection(id: string): Promise<DatabaseConnectionConfig | null>;
   deleteConnection(id: string): Promise<void>;
   updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void>;
+
+  // Agent Token Methods (cloud-only, optional — implementations may no-op)
+  saveAgentToken(token: { id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }): Promise<void>;
+  getAgentTokens(): Promise<Array<{ id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>>;
+  getAgentTokenByHash(hash: string): Promise<{ id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null } | null>;
+  revokeAgentToken(id: string): Promise<void>;
+  updateAgentTokenLastUsed(id: string): Promise<void>;
 }

@@ -22,13 +22,15 @@ export class CloudAuthGuardImpl implements CanActivate {
     const reply = context.switchToHttp().getResponse<FastifyReply>();
     const path = request.url;
 
-    // Skip auth for callback route, logout route, health checks, and static assets
+    // Skip auth for callback route, logout route, health checks, agent WebSocket, and static assets
     if (path.startsWith('/auth/callback') ||
       path.startsWith('/api/auth/callback') ||
       path.startsWith('/auth/logout') ||
       path.startsWith('/api/auth/logout') ||
       path.startsWith('/api/health') ||
       path.startsWith('/health') ||
+      path.startsWith('/agent/ws') ||
+      path.startsWith('/api/agent/ws') ||
       path.startsWith('/assets/') ||
       path.startsWith('/favicon')) {
       return true;

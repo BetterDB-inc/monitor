@@ -133,6 +133,29 @@ async function bootstrap(): Promise<void> {
   const document = SwaggerModule.createDocument(app as unknown as INestApplication, config);
   SwaggerModule.setup('docs', app as unknown as INestApplication, document);
 
+  // Register WebSocket upgrade handler for agent connections (cloud mode only)
+  if (process.env.CLOUD_MODE) {
+    try {
+      const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
+      const agentGateway = app.get(AgentGateway);
+      const httpServer = app.getHttpServer();
+
+      httpServer.on('upgrade', (request: any, socket: any, head: any) => {
+        const url = new URL(request.url || '', `http://${request.headers.host}`);
+        if (url.pathname === '/agent/ws' || url.pathname === '/api/agent/ws') {
+          agentGateway.handleUpgrade(request, socket, head);
+        } else {
+          // Not an agent WebSocket — destroy to prevent hanging
+          socket.destroy();
+        }
+      });
+
+      console.log('[Agent] WebSocket upgrade handler registered');
+    } catch {
+      console.warn('[Agent] Failed to register WebSocket handler — module not available');
+    }
+  }
+
   const port = process.env.PORT || 3001;
   await app.listen(port, '0.0.0.0');
   console.log(`API server running on http://localhost:${port}`);

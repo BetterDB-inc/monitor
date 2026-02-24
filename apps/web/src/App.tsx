@@ -99,7 +99,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
           <h2 className="text-lg font-semibold">BetterDB Monitor</h2>
         </div>
         <div className="border-b pb-2 mb-2">
-          <ConnectionSelector />
+          <ConnectionSelector isCloudMode={!!cloudUser} />
         </div>
         <nav className="space-y-1 px-3 flex-1">
           <NavItem to="/" active={location.pathname === '/'}>

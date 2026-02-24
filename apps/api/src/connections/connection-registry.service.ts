@@ -488,6 +488,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         capabilities,
         credentialStatus: config.credentialStatus,
         credentialError: config.credentialError,
+        connectionType: config.host === 'agent' ? 'agent' : 'direct',
       });
     }
 
@@ -559,6 +560,42 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       throw error;
     }
+  }
+
+  async registerAgentConnection(id: string, name: string, adapter: DatabasePort): Promise<void> {
+    const now = Date.now();
+    const config: DatabaseConnectionConfig = {
+      id,
+      name,
+      host: 'agent',
+      port: 0,
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+      credentialStatus: 'valid',
+    };
+
+    this.connections.set(id, adapter);
+    this.configs.set(id, config);
+
+    // If no default connection, make this the default
+    if (!this.defaultId) {
+      this.defaultId = id;
+    }
+
+    this.logger.log(`Registered agent connection: ${name} (${id})`);
+  }
+
+  removeAgentConnection(id: string): void {
+    this.connections.delete(id);
+    this.configs.delete(id);
+
+    if (this.defaultId === id) {
+      const remaining = Array.from(this.configs.keys());
+      this.defaultId = remaining.length > 0 ? remaining[0] : null;
+    }
+
+    this.logger.log(`Removed agent connection: ${id}`);
   }
 
   isEnvDefault(id: string): boolean {

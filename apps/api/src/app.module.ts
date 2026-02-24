@@ -19,6 +19,7 @@ let LicenseModule: any = null;
 let KeyAnalyticsModule: any = null;
 let AnomalyModule: any = null;
 let WebhookProModule: any = null;
+let AgentModule: any = null;
 
 try {
   // Use relative path for runtime resolution (tsconfig paths only work at compile time)
@@ -61,6 +62,16 @@ try {
   // Proprietary module not available
 }
 
+if (process.env.CLOUD_MODE) {
+  try {
+    const agentModule = require('../../../proprietary/agent/agent.module');
+    AgentModule = agentModule.AgentModule;
+    console.log('[Agent] Proprietary module loaded');
+  } catch {
+    // Proprietary module not available
+  }
+}
+
 // Cloud auth module - uses proprietary implementation in cloud mode
 let CloudAuthModuleToUse: any = CloudAuthModule;
 if (process.env.CLOUD_MODE) {
@@ -98,6 +109,7 @@ const proprietaryImports = [
   AnomalyModule,
   WebhookProModule,
   AiModule,
+  AgentModule,
 ].filter(Boolean);
 
 @Module({
