@@ -20,7 +20,7 @@ spec:
       serviceAccountName: entitlement
       containers:
         - name: entitlement
-          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v0.2.5
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v0.2.7
           imagePullPolicy: Always
           trategy.type: Recreate
           ports:
@@ -45,7 +45,7 @@ spec:
             - name: APP_DOMAIN
               value: "app.betterdb.com"
             - name: DEFAULT_IMAGE_TAG
-              value: "v0.5.12"
+              value: "v0.5.13"
             # Secrets from ConfigMap
             - name: ENTITLEMENT_DATABASE_URL
               valueFrom:

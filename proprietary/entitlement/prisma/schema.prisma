@@ -65,6 +65,7 @@ model Tenant {
 
   customer      Customer?    @relation(fields: [customerId], references: [id])
   users         User[]
+  invitations   Invitation[]
 
   @@index([subdomain])
   @@index([status])
@@ -149,6 +150,7 @@ model User {
   providerId  String       @map("provider_id")
   tenantId    String       @map("tenant_id")
   role        UserRole     @default(member)
+  isOwner     Boolean      @default(false) @map("is_owner")
   createdAt   DateTime     @default(now()) @map("created_at")
   updatedAt   DateTime     @updatedAt @map("updated_at")
 
@@ -157,4 +159,28 @@ model User {
   @@index([tenantId])
   @@index([email])
   @@map("users")
+}
+
+enum InvitationStatus {
+  pending
+  accepted
+  revoked
+}
+
+model Invitation {
+  id         String           @id @default(cuid())
+  email      String
+  tenantId   String           @map("tenant_id")
+  invitedBy  String           @map("invited_by")
+  role       UserRole         @default(member)
+  status     InvitationStatus @default(pending)
+  createdAt  DateTime         @default(now()) @map("created_at")
+  expiresAt  DateTime         @map("expires_at")
+
+  tenant     Tenant           @relation(fields: [tenantId], references: [id])
+
+  @@unique([email, tenantId])
+  @@index([tenantId])
+  @@index([email])
+  @@map("invitations")
 }

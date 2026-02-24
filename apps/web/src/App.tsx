@@ -25,6 +25,8 @@ import { KeyAnalytics } from './pages/KeyAnalytics';
 import { ClusterDashboard } from './pages/ClusterDashboard';
 import { Settings } from './pages/Settings';
 import { Webhooks } from './pages/Webhooks';
+import { Members } from './pages/Members';
+import { workspaceApi, CloudUser } from './api/workspace';
 import type { DatabaseCapabilities } from './types/metrics';
 import { Feature } from '@betterdb/shared';
 
@@ -43,6 +45,7 @@ function App() {
  */
 function AppContent() {
   const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(null);
+  const [cloudUser, setCloudUser] = useState<CloudUser | null>(null);
   const { license } = useLicenseStatus();
   const upgradePromptState = useUpgradePromptState();
   const connectionState = useConnectionState();
@@ -56,6 +59,10 @@ function AppContent() {
         }
       })
       .catch(console.error);
+
+    workspaceApi.getMe()
+      .then(setCloudUser)
+      .catch(() => { /* Not in cloud mode */ });
   }, []);
 
   return (
@@ -65,7 +72,7 @@ function AppContent() {
           <LicenseContext.Provider value={license}>
             <CapabilitiesContext.Provider value={capabilities}>
               <VersionCheckContext.Provider value={versionCheckState}>
-                <AppLayout />
+                <AppLayout cloudUser={cloudUser} />
                 <Tooltip id="license-tooltip" />
                 {upgradePromptState.error && (
                   <UpgradePrompt
@@ -82,7 +89,7 @@ function AppContent() {
   );
 }
 
-function AppLayout() {
+function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
   const location = useLocation();
 
   return (
@@ -162,6 +169,11 @@ function AppLayout() {
           >
             Report a Problem
           </a>
+          {cloudUser && (
+            <NavItem to="/workspace/members" active={location.pathname === '/workspace/members'}>
+              Team
+            </NavItem>
+          )}
           <NavItem to="/settings" active={location.pathname === '/settings'}>
             Settings
           </NavItem>
@@ -184,6 +196,9 @@ function AppLayout() {
             <Route path="/audit" element={<NoConnectionsGuard><AuditTrail /></NoConnectionsGuard>} />
             <Route path="/helper" element={<NoConnectionsGuard><AiAssistant /></NoConnectionsGuard>} />
             <Route path="/webhooks" element={<NoConnectionsGuard><Webhooks /></NoConnectionsGuard>} />
+            {cloudUser && (
+              <Route path="/workspace/members" element={<Members cloudUser={cloudUser} />} />
+            )}
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </div>

@@ -11,6 +11,7 @@ import { TenantModule } from './tenant/tenant.module';
 import { ProvisioningModule } from './provisioning/provisioning.module';
 import { UserModule } from './user/user.module';
 import { AuthModule } from './auth/auth.module';
+import { InvitationModule } from './invitation/invitation.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { AuthModule } from './auth/auth.module';
     ProvisioningModule,
     UserModule,
     AuthModule,
+    InvitationModule,
   ],
   providers: [
     {

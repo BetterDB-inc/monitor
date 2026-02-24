@@ -31,6 +31,10 @@ export class ProvisioningService {
   // Auth public key (passed to tenant pods for JWT verification)
   private readonly authPublicKey: string;
 
+  // Entitlement API config (passed to tenant pods for workspace management)
+  private readonly entitlementApiUrl: string;
+  private readonly entitlementApiKey: string;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
@@ -59,6 +63,13 @@ export class ProvisioningService {
     this.authPublicKey = this.config.get<string>('AUTH_PUBLIC_KEY', '');
     if (!this.authPublicKey) {
       this.logger.warn('AUTH_PUBLIC_KEY not set - tenant pods will not be able to verify auth tokens');
+    }
+
+    // Load entitlement API config (passed to tenant pods for workspace management)
+    this.entitlementApiUrl = this.config.get<string>('ENTITLEMENT_API_URL', 'http://entitlement.system.svc.cluster.local:3002');
+    this.entitlementApiKey = this.config.get<string>('ENTITLEMENT_API_KEY', '');
+    if (!this.entitlementApiKey) {
+      this.logger.warn('ENTITLEMENT_API_KEY not set - tenant pods will not be able to call entitlement API');
     }
   }
 
@@ -441,6 +452,9 @@ export class ProvisioningService {
             CLOUD_MODE: 'true',
             AUTH_PUBLIC_KEY: this.authPublicKey,
             SESSION_SECRET: sessionSecret,
+            // Entitlement API config (for workspace management)
+            ENTITLEMENT_API_URL: this.entitlementApiUrl,
+            ENTITLEMENT_API_KEY: this.entitlementApiKey,
           },
         },
       });
@@ -558,6 +572,25 @@ export class ProvisioningService {
                           secretKeyRef: {
                             name: 'db-credentials',
                             key: 'SESSION_SECRET',
+                          },
+                        },
+                      },
+                      // Entitlement API env vars (for workspace management)
+                      {
+                        name: 'ENTITLEMENT_API_URL',
+                        valueFrom: {
+                          secretKeyRef: {
+                            name: 'db-credentials',
+                            key: 'ENTITLEMENT_API_URL',
+                          },
+                        },
+                      },
+                      {
+                        name: 'ENTITLEMENT_API_KEY',
+                        valueFrom: {
+                          secretKeyRef: {
+                            name: 'db-credentials',
+                            key: 'ENTITLEMENT_API_KEY',
                           },
                         },
                       },
