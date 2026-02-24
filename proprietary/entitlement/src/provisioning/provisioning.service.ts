@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TenantStatus } from '@prisma/client';
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 
 @Injectable()
 export class ProvisioningService {
@@ -26,6 +27,9 @@ export class ProvisioningService {
   private readonly rdsUser: string;
   private readonly rdsPassword: string;
   private readonly rdsDatabase: string;
+
+  // Auth public key (passed to tenant pods for JWT verification)
+  private readonly authPublicKey: string;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -50,6 +54,12 @@ export class ProvisioningService {
     this.rdsUser = this.config.getOrThrow<string>('RDS_USER');
     this.rdsPassword = this.config.getOrThrow<string>('RDS_PASSWORD');
     this.rdsDatabase = this.config.get<string>('RDS_DATABASE', 'betterdb');
+
+    // Load auth public key (passed to tenant pods for JWT verification)
+    this.authPublicKey = this.config.get<string>('AUTH_PUBLIC_KEY', '');
+    if (!this.authPublicKey) {
+      this.logger.warn('AUTH_PUBLIC_KEY not set - tenant pods will not be able to verify auth tokens');
+    }
   }
 
   private getK8sClient(): k8s.KubeConfig {
@@ -123,7 +133,7 @@ export class ProvisioningService {
 
       // Step 9: Wait for deployment readiness
       this.logger.log(`[${tenant.subdomain}] Waiting for deployment readiness...`);
-      await this.waitForDeploymentReady(namespace, 120000);
+      await this.waitForDeploymentReady(namespace, 240000);
 
       // Step 10: Update status to ready
       await this.updateTenantStatus(tenantId, 'ready');
@@ -414,6 +424,9 @@ export class ProvisioningService {
   }
 
   private async createDbSecret(namespace: string, storageUrl: string): Promise<void> {
+    // Generate a unique per-tenant session secret for cookie signing
+    const sessionSecret = crypto.randomBytes(32).toString('hex');
+
     try {
       await this.coreApi.createNamespacedSecret({
         namespace,
@@ -424,6 +437,10 @@ export class ProvisioningService {
           type: 'Opaque',
           stringData: {
             STORAGE_URL: storageUrl,
+            // Cloud auth secrets
+            CLOUD_MODE: 'true',
+            AUTH_PUBLIC_KEY: this.authPublicKey,
+            SESSION_SECRET: sessionSecret,
           },
         },
       });
@@ -480,6 +497,9 @@ export class ProvisioningService {
           },
           spec: {
             replicas: 1,
+            strategy: {
+              type: 'Recreate',
+            },
             selector: {
               matchLabels: {
                 app: 'betterdb',
@@ -498,6 +518,7 @@ export class ProvisioningService {
                   {
                     name: 'betterdb',
                     image,
+                    imagePullPolicy: 'Always',
                     ports: [{ containerPort: 3001 }],
                     env: [
                       { name: 'STORAGE_TYPE', value: 'postgres' },
@@ -509,6 +530,34 @@ export class ProvisioningService {
                           secretKeyRef: {
                             name: 'db-credentials',
                             key: 'STORAGE_URL',
+                          },
+                        },
+                      },
+                      // Cloud auth env vars
+                      {
+                        name: 'CLOUD_MODE',
+                        valueFrom: {
+                          secretKeyRef: {
+                            name: 'db-credentials',
+                            key: 'CLOUD_MODE',
+                          },
+                        },
+                      },
+                      {
+                        name: 'AUTH_PUBLIC_KEY',
+                        valueFrom: {
+                          secretKeyRef: {
+                            name: 'db-credentials',
+                            key: 'AUTH_PUBLIC_KEY',
+                          },
+                        },
+                      },
+                      {
+                        name: 'SESSION_SECRET',
+                        valueFrom: {
+                          secretKeyRef: {
+                            name: 'db-credentials',
+                            key: 'SESSION_SECRET',
                           },
                         },
                       },

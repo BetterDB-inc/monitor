@@ -22,6 +22,8 @@ metadata:
     tenant: test
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: betterdb
@@ -34,7 +36,8 @@ spec:
     spec:
       containers:
         - name: betterdb
-          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb:v0.5.1
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb:v0.5.12
+          imagePullPolicy: Always
           # image: betterdb/monitor:latest
           ports:
             - containerPort: 3001

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, forwardRef } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import {
   InfoResponse,
@@ -19,11 +19,13 @@ import {
   SlowLogPatternAnalysis,
 } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from './slowlog-analyzer';
+import { StoragePort } from '../common/interfaces/storage-port.interface';
 
 @Injectable()
 export class MetricsService {
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
+    @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
   ) {}
 
   private getClient(connectionId?: string) {
@@ -169,17 +171,45 @@ export class MetricsService {
   }
 
   async getSlowLogPatternAnalysis(count?: number, connectionId?: string): Promise<SlowLogPatternAnalysis> {
-    const entries = await this.getClient(connectionId).getSlowLog(count || 128);
+    // Pull from PostgreSQL storage (includes both live-captured and historical data)
+    const resolvedConnectionId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const storedEntries = await this.storage.getSlowLogEntries({
+      limit: count || 128,
+      connectionId: resolvedConnectionId,
+    });
+
+    // Transform StoredSlowLogEntry to SlowLogEntry format for analyzer
+    const entries: SlowLogEntry[] = storedEntries.map(e => ({
+      id: e.id,
+      timestamp: e.timestamp,
+      duration: e.duration,
+      command: e.command,
+      clientAddress: e.clientAddress,
+      clientName: e.clientName,
+    }));
+
     return analyzeSlowLogPatterns(entries);
   }
 
   async getCommandLogPatternAnalysis(count?: number, type?: CommandLogType, connectionId?: string): Promise<SlowLogPatternAnalysis> {
-    const client = this.getClient(connectionId);
-    const capabilities = client.getCapabilities();
-    if (!capabilities.hasCommandLog) {
-      throw new Error('COMMANDLOG not supported on this database version');
-    }
-    const entries = await client.getCommandLog(count || 128, type);
-    return analyzeSlowLogPatterns(entries as SlowLogEntry[]);
+    // Pull from PostgreSQL storage (includes both live-captured and historical data)
+    const resolvedConnectionId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const storedEntries = await this.storage.getCommandLogEntries({
+      limit: count || 128,
+      connectionId: resolvedConnectionId,
+      type: type || 'slow',
+    });
+
+    // Transform StoredCommandLogEntry to SlowLogEntry format for analyzer
+    const entries: SlowLogEntry[] = storedEntries.map(e => ({
+      id: e.id,
+      timestamp: e.timestamp,
+      duration: e.duration,
+      command: e.command,
+      clientAddress: e.clientAddress,
+      clientName: e.clientName,
+    }));
+
+    return analyzeSlowLogPatterns(entries);
   }
 }

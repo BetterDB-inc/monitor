@@ -41,6 +41,16 @@ variable "gateway_api_key" {
   sensitive   = true
 }
 
+variable "auth_private_key" {
+  description = "RS256 private key for signing workspace auth tokens (PEM format)"
+  sensitive   = true
+}
+
+variable "auth_public_key" {
+  description = "RS256 public key for verifying workspace auth tokens (PEM format)"
+  sensitive   = true
+}
+
 variable "vpc_cidr" {
   default = "10.0.0.0/16"
 }

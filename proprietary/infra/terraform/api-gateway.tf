@@ -252,6 +252,14 @@ resource "aws_apigatewayv2_route" "get_user_by_email" {
   authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
 }
 
+resource "aws_apigatewayv2_route" "workspace_token" {
+  api_id             = aws_apigatewayv2_api.entitlement.id
+  route_key          = "POST /auth/workspace-token"
+  target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
+}
+
 # ============================================
 # Outputs
 # ============================================

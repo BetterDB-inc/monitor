@@ -10,6 +10,7 @@ import { HealthModule } from './health/health.module';
 import { TenantModule } from './tenant/tenant.module';
 import { ProvisioningModule } from './provisioning/provisioning.module';
 import { UserModule } from './user/user.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { UserModule } from './user/user.module';
     TenantModule,
     ProvisioningModule,
     UserModule,
+    AuthModule,
   ],
   providers: [
     {

@@ -18,5 +18,8 @@ resource "kubernetes_secret" "entitlement_config" {
     RDS_USER                 = var.db_username
     RDS_PASSWORD             = var.db_password
     RDS_DATABASE             = "betterdb"
+    # Auth keys for workspace token signing/verification
+    AUTH_PRIVATE_KEY         = var.auth_private_key
+    AUTH_PUBLIC_KEY          = var.auth_public_key
   }
 }
