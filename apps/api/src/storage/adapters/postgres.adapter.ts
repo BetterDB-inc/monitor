@@ -170,7 +170,9 @@ export class PostgresAdapter implements StoragePort {
         await this.pool.end();
         this.pool = new Pool(poolConfig);
         this.pool.on('connect', (client) => {
-          client.query(`SET search_path TO ${schemaName}, public`);
+          client.query(`SET search_path TO ${schemaName}, public`).catch((err: unknown) => {
+            console.error(`Failed to set search_path for schema ${schemaName}:`, err);
+          });
         });
       }
 

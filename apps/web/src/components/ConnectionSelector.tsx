@@ -635,14 +635,14 @@ function AgentTab({
   --name betterdb-agent \\
   -e VALKEY_HOST=your-valkey-host \\
   -e VALKEY_PORT=6379 \\
-  -e CLOUD_URL=wss://${cloudHost}/agent/ws \\
-  -e AGENT_TOKEN=${generatedToken.token} \\
+  -e BETTERDB_CLOUD_URL=wss://${cloudHost}/agent/ws \\
+  -e BETTERDB_TOKEN=${generatedToken.token} \\
   betterdb/agent:latest`}
           </pre>
 
           <h4 className="text-xs font-medium mt-3 mb-1">Or run with npx:</h4>
           <pre className="text-xs bg-background p-2 rounded border overflow-x-auto">
-{`npx @betterdb/agent \\
+{`npx betterdb-agent \\
   --valkey-host your-valkey-host \\
   --valkey-port 6379 \\
   --cloud-url wss://${cloudHost}/agent/ws \\

@@ -721,27 +721,32 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
       const capabilities = client.getCapabilities();
       if (capabilities.hasClusterSlotStats && this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')) {
-        const newSlotLabels = new Set<string>();
-        const slotStats = await client.getClusterSlotStats('key-count', 100);
+        try {
+          const newSlotLabels = new Set<string>();
+          const slotStats = await client.getClusterSlotStats('key-count', 100);
 
-        for (const [slot, stats] of Object.entries(slotStats)) {
-          newSlotLabels.add(slot);
-          this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
-          this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
-          this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
-          this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
-        }
-
-        for (const staleSlot of state.currentClusterSlotLabels) {
-          if (!newSlotLabels.has(staleSlot)) {
-            this.clusterSlotKeys.labels(connLabel, staleSlot).set(0);
-            this.clusterSlotExpires.labels(connLabel, staleSlot).set(0);
-            this.clusterSlotReadsTotal.labels(connLabel, staleSlot).set(0);
-            this.clusterSlotWritesTotal.labels(connLabel, staleSlot).set(0);
+          for (const [slot, stats] of Object.entries(slotStats)) {
+            newSlotLabels.add(slot);
+            this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
+            this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
+            this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
+            this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
           }
-        }
 
-        state.currentClusterSlotLabels = newSlotLabels;
+          for (const staleSlot of state.currentClusterSlotLabels) {
+            if (!newSlotLabels.has(staleSlot)) {
+              this.clusterSlotKeys.labels(connLabel, staleSlot).set(0);
+              this.clusterSlotExpires.labels(connLabel, staleSlot).set(0);
+              this.clusterSlotReadsTotal.labels(connLabel, staleSlot).set(0);
+              this.clusterSlotWritesTotal.labels(connLabel, staleSlot).set(0);
+            }
+          }
+
+          state.currentClusterSlotLabels = newSlotLabels;
+        } catch (slotStatsError) {
+          this.runtimeCapabilityTracker.recordFailure(connectionId, 'canClusterSlotStats', slotStatsError instanceof Error ? slotStatsError : String(slotStatsError));
+          this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
+        }
       }
     } catch (error) {
       this.runtimeCapabilityTracker.recordFailure(connectionId, 'canClusterInfo', error instanceof Error ? error : String(error));

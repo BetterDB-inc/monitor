@@ -37,7 +37,10 @@ export class CommandExecutor {
     }
 
     const allowedSubs = ALLOWED_SUBCOMMANDS[upperCmd];
-    if (allowedSubs && args && args.length > 0) {
+    if (allowedSubs) {
+      if (!args || args.length === 0) {
+        return false;
+      }
       const subCmd = args[0].toUpperCase();
       return allowedSubs.has(subCmd);
     }
