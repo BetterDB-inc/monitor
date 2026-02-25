@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import {
   InfoResponse,
@@ -19,11 +19,13 @@ import {
   SlowLogPatternAnalysis,
 } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from './slowlog-analyzer';
+import { StoragePort, toSlowLogEntry } from '../common/interfaces/storage-port.interface';
 
 @Injectable()
 export class MetricsService {
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
+    @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
   ) {}
 
   private getClient(connectionId?: string) {
@@ -169,17 +171,35 @@ export class MetricsService {
   }
 
   async getSlowLogPatternAnalysis(count?: number, connectionId?: string): Promise<SlowLogPatternAnalysis> {
-    const entries = await this.getClient(connectionId).getSlowLog(count || 128);
+    const resolvedConnectionId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!resolvedConnectionId) {
+      throw new NotFoundException('No connection available');
+    }
+
+    const storedEntries = await this.storage.getSlowLogEntries({
+      limit: count || 128,
+      connectionId: resolvedConnectionId,
+    });
+
+    const entries: SlowLogEntry[] = storedEntries.map(toSlowLogEntry);
+
     return analyzeSlowLogPatterns(entries);
   }
 
   async getCommandLogPatternAnalysis(count?: number, type?: CommandLogType, connectionId?: string): Promise<SlowLogPatternAnalysis> {
-    const client = this.getClient(connectionId);
-    const capabilities = client.getCapabilities();
-    if (!capabilities.hasCommandLog) {
-      throw new Error('COMMANDLOG not supported on this database version');
+    const resolvedConnectionId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!resolvedConnectionId) {
+      throw new NotFoundException('No connection available');
     }
-    const entries = await client.getCommandLog(count || 128, type);
-    return analyzeSlowLogPatterns(entries as SlowLogEntry[]);
+
+    const storedEntries = await this.storage.getCommandLogEntries({
+      limit: count || 128,
+      connectionId: resolvedConnectionId,
+      type,
+    });
+
+    const entries: SlowLogEntry[] = storedEntries.map(toSlowLogEntry);
+
+    return analyzeSlowLogPatterns(entries);
   }
 }
