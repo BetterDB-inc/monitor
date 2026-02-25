@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { NotFoundException } from '@nestjs/common';
 import { ConnectionRegistry } from '../connection-registry.service';
+import { RuntimeCapabilityTracker } from '../runtime-capability-tracker.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
 import { DatabaseConnectionConfig } from '@betterdb/shared';
@@ -110,6 +111,7 @@ describe('ConnectionRegistry', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConnectionRegistry,
+        RuntimeCapabilityTracker,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],
@@ -199,6 +201,7 @@ describe('ConnectionRegistry', () => {
       const module: TestingModule = await Test.createTestingModule({
         providers: [
           ConnectionRegistry,
+          RuntimeCapabilityTracker,
           { provide: 'STORAGE_CLIENT', useValue: mockStorage },
           { provide: ConfigService, useValue: mockConfigService },
         ],
@@ -662,6 +665,7 @@ describe('ConnectionRegistry with encryption', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConnectionRegistry,
+        RuntimeCapabilityTracker,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],
