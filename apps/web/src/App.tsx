@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { Tooltip } from 'react-tooltip';
 import { metricsApi } from './api/metrics';
-import { CapabilitiesContext } from './hooks/useCapabilities';
+import { CapabilitiesContext, CapabilitiesState } from './hooks/useCapabilities';
 import { LicenseContext, useLicenseStatus, useLicense } from './hooks/useLicense';
 import { UpgradePromptContext, useUpgradePromptState } from './hooks/useUpgradePrompt';
 import { ConnectionContext, useConnectionState } from './hooks/useConnection';
@@ -27,7 +27,6 @@ import { Settings } from './pages/Settings';
 import { Webhooks } from './pages/Webhooks';
 import { Members } from './pages/Members';
 import { workspaceApi, CloudUser } from './api/workspace';
-import type { DatabaseCapabilities } from './types/metrics';
 import { Feature } from '@betterdb/shared';
 
 function App() {
@@ -44,7 +43,7 @@ function App() {
  * ensuring all data fetching happens when the backend is fully initialized.
  */
 function AppContent() {
-  const [capabilities, setCapabilities] = useState<DatabaseCapabilities | null>(null);
+  const [capabilitiesState, setCapabilitiesState] = useState<CapabilitiesState>({ static: null, runtime: null });
   const [cloudUser, setCloudUser] = useState<CloudUser | null>(null);
   const { license } = useLicenseStatus();
   const upgradePromptState = useUpgradePromptState();
@@ -54,23 +53,24 @@ function AppContent() {
   useEffect(() => {
     metricsApi.getHealth()
       .then(health => {
-        if (health.capabilities) {
-          setCapabilities(health.capabilities);
-        }
+        setCapabilitiesState({
+          static: health.capabilities ?? null,
+          runtime: health.runtimeCapabilities ?? null,
+        });
       })
       .catch(console.error);
 
     workspaceApi.getMe()
       .then(setCloudUser)
       .catch(() => { /* Not in cloud mode */ });
-  }, []);
+  }, [connectionState.currentConnection?.id]);
 
   return (
     <BrowserRouter>
       <ConnectionContext.Provider value={connectionState}>
         <UpgradePromptContext.Provider value={upgradePromptState}>
           <LicenseContext.Provider value={license}>
-            <CapabilitiesContext.Provider value={capabilities}>
+            <CapabilitiesContext.Provider value={capabilitiesState}>
               <VersionCheckContext.Provider value={versionCheckState}>
                 <AppLayout cloudUser={cloudUser} />
                 <Tooltip id="license-tooltip" />
@@ -99,7 +99,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
           <h2 className="text-lg font-semibold">BetterDB Monitor</h2>
         </div>
         <div className="border-b pb-2 mb-2">
-          <ConnectionSelector isCloudMode={!!cloudUser} />
+          <ConnectionSelector isCloudMode={!!cloudUser || true} />
         </div>
         <nav className="space-y-1 px-3 flex-1">
           <NavItem to="/" active={location.pathname === '/'}>

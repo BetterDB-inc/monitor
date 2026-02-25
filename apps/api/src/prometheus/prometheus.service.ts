@@ -10,6 +10,7 @@ import {
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.service';
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
@@ -149,6 +150,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     connectionRegistry: ConnectionRegistry,
     private readonly configService: ConfigService,
+    private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
     private readonly slowLogAnalytics: SlowLogAnalyticsService,
     private readonly commandLogAnalytics: CommandLogAnalyticsService,
     @Inject(forwardRef(() => HealthService)) private readonly healthService: HealthService,
@@ -662,6 +664,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     if (!clusterEnabled) return;
 
+    if (!this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterInfo')) {
+      return;
+    }
+
     try {
       const clusterInfo = await client.getClusterInfo();
 
@@ -714,7 +720,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
 
       const capabilities = client.getCapabilities();
-      if (capabilities.hasClusterSlotStats) {
+      if (capabilities.hasClusterSlotStats && this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')) {
         const newSlotLabels = new Set<string>();
         const slotStats = await client.getClusterSlotStats('key-count', 100);
 
@@ -738,6 +744,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         state.currentClusterSlotLabels = newSlotLabels;
       }
     } catch (error) {
+      this.runtimeCapabilityTracker.recordFailure(connectionId, 'canClusterInfo', error instanceof Error ? error : String(error));
       this.logger.error(`Failed to update cluster metrics for ${connLabel}`, error);
     }
   }
@@ -921,6 +928,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     config: { host: string; port: number } | null,
   ): Promise<void> {
+    if (!this.runtimeCapabilityTracker.isAvailable(connectionId, 'canSlowLog')) {
+      return;
+    }
+
     try {
       const length = await this.slowLogAnalytics.getSlowLogLength(connectionId);
       this.slowlogLength.labels(connLabel).set(length);
@@ -943,6 +954,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         });
       }
     } catch (error) {
+      this.runtimeCapabilityTracker.recordFailure(connectionId, 'canSlowLog', error instanceof Error ? error : String(error));
       this.logger.error(`Failed to update slowlog raw metrics for ${connLabel}`, error);
     }
   }

@@ -15,7 +15,7 @@ import { AdminGuard } from '../admin/admin.guard';
 export class ProvisioningController {
   private readonly logger = new Logger(ProvisioningController.name);
 
-  constructor(private readonly provisioningService: ProvisioningService) {}
+  constructor(private readonly provisioningService: ProvisioningService) { }
 
   @Post(':id/provision')
   @HttpCode(HttpStatus.ACCEPTED)

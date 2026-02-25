@@ -10,6 +10,7 @@ import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 
 @Injectable()
 export class CommandLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -29,6 +30,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
   constructor(
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
+    private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
   ) {
     super(connectionRegistry);
   }
@@ -71,6 +73,10 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
     const capabilities = ctx.client.getCapabilities();
     if (!capabilities.hasCommandLog) {
       this.logger.debug(`Command log not supported by ${ctx.connectionName}, skipping poll`);
+      return;
+    }
+
+    if (!this.runtimeCapabilityTracker.isAvailable(ctx.connectionId, 'canCommandLog')) {
       return;
     }
 
@@ -148,6 +154,10 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
 
         this.logger.debug(`Saved ${saved} new ${type} command log entries for ${ctx.connectionName}`);
       } catch (error) {
+        if (this.runtimeCapabilityTracker.recordFailure(ctx.connectionId, 'canCommandLog', error instanceof Error ? error : String(error))) {
+          this.logger.warn(`Command log disabled for ${ctx.connectionName} due to blocked command`);
+          return;
+        }
         this.logger.error(`Error capturing ${type} command log for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     }

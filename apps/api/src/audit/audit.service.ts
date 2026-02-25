@@ -7,6 +7,7 @@ import { SettingsService } from '../settings/settings.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 
 @Injectable()
 export class AuditService extends MultiConnectionPoller implements OnModuleInit {
@@ -23,6 +24,7 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
     private readonly settingsService: SettingsService,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
     @Optional() @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE) private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
+    private readonly runtimeCapabilityTracker?: RuntimeCapabilityTracker,
   ) {
     super(connectionRegistry);
   }
@@ -47,6 +49,10 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
       const capabilities = ctx.client.getCapabilities();
       if (!capabilities.hasAclLog) {
         this.logger.debug(`ACL LOG not supported by ${ctx.connectionName}, skipping poll`);
+        return;
+      }
+
+      if (this.runtimeCapabilityTracker && !this.runtimeCapabilityTracker.isAvailable(ctx.connectionId, 'canAclLog')) {
         return;
       }
 
@@ -165,6 +171,10 @@ export class AuditService extends MultiConnectionPoller implements OnModuleInit 
       this.lastSeenTimestamps.set(ctx.connectionId, latestTimestamp);
       this.prometheusService.incrementPollCounter(ctx.connectionId);
     } catch (error) {
+      if (this.runtimeCapabilityTracker?.recordFailure(ctx.connectionId, 'canAclLog', error instanceof Error ? error : String(error))) {
+        this.logger.warn(`ACL log disabled for ${ctx.connectionName} due to blocked command`);
+        return;
+      }
       this.logger.error(`Error polling ACL log for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;
     } finally {

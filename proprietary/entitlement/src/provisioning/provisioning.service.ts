@@ -126,27 +126,31 @@ export class ProvisioningService {
       this.logger.log(`[${tenant.subdomain}] Creating PostgreSQL schema via K8s Job: ${schemaName}`);
       await this.createSchemaViaJob(namespace, schemaName);
 
-      // Step 5: Create K8s ResourceQuota
+      // Step 5: Create K8s NetworkPolicy (tenant isolation)
+      this.logger.log(`[${tenant.subdomain}] Creating K8s network policy`);
+      await this.createNetworkPolicy(namespace);
+
+      // Step 6: Create K8s ResourceQuota
       this.logger.log(`[${tenant.subdomain}] Creating K8s resource quota`);
       await this.createResourceQuota(namespace);
 
-      // Step 6: Create K8s Deployment
+      // Step 7: Create K8s Deployment
       this.logger.log(`[${tenant.subdomain}] Creating K8s deployment`);
       await this.createDeployment(namespace, tenant.subdomain, imageTag, schemaName);
 
-      // Step 7: Create K8s Service
+      // Step 8: Create K8s Service
       this.logger.log(`[${tenant.subdomain}] Creating K8s service`);
       await this.createService(namespace, tenant.subdomain);
 
-      // Step 8: Create K8s Ingress
+      // Step 9: Create K8s Ingress
       this.logger.log(`[${tenant.subdomain}] Creating K8s ingress for ${hostname}`);
       await this.createIngress(namespace, tenant.subdomain, hostname);
 
-      // Step 9: Wait for deployment readiness
+      // Step 10: Wait for deployment readiness
       this.logger.log(`[${tenant.subdomain}] Waiting for deployment readiness...`);
       await this.waitForDeploymentReady(namespace, 240000);
 
-      // Step 10: Update status to ready
+      // Step 11: Update status to ready
       await this.updateTenantStatus(tenantId, 'ready');
       this.logger.log(`[${tenant.subdomain}] Provisioning complete! Tenant is ready at https://${hostname}`);
 
@@ -528,12 +532,25 @@ export class ProvisioningService {
                 },
               },
               spec: {
+                securityContext: {
+                  runAsNonRoot: true,
+                  runAsUser: 1001,
+                  runAsGroup: 1001,
+                  fsGroup: 1001,
+                },
                 containers: [
                   {
                     name: 'betterdb',
                     image,
                     imagePullPolicy: 'Always',
                     ports: [{ containerPort: 3001 }],
+                    securityContext: {
+                      allowPrivilegeEscalation: false,
+                      readOnlyRootFilesystem: false,
+                      capabilities: {
+                        drop: ['ALL'],
+                      },
+                    },
                     env: [
                       { name: 'STORAGE_TYPE', value: 'postgres' },
                       { name: 'DB_SCHEMA', value: dbSchema },
@@ -611,7 +628,9 @@ export class ProvisioningService {
                         port: 3001 as any,
                       },
                       initialDelaySeconds: 10,
-                      periodSeconds: 5,
+                      periodSeconds: 10,
+                      timeoutSeconds: 5,
+                      failureThreshold: 3,
                     },
                     livenessProbe: {
                       httpGet: {
@@ -619,7 +638,9 @@ export class ProvisioningService {
                         port: 3001 as any,
                       },
                       initialDelaySeconds: 30,
-                      periodSeconds: 10,
+                      periodSeconds: 30,
+                      timeoutSeconds: 5,
+                      failureThreshold: 3,
                     },
                   },
                 ],
@@ -737,6 +758,106 @@ export class ProvisioningService {
       await this.sleep(5000);
     }
     throw new Error(`Deployment readiness timeout after ${timeoutMs / 1000}s`);
+  }
+
+  // ============================================
+  // Network Policy (Tenant Isolation)
+  // ============================================
+
+  private async createNetworkPolicy(namespace: string): Promise<void> {
+    try {
+      await this.networkingApi.createNamespacedNetworkPolicy({
+        namespace,
+        body: {
+          metadata: {
+            name: 'tenant-isolation',
+          },
+          spec: {
+            podSelector: {}, // Applies to ALL pods in the namespace
+            policyTypes: ['Ingress', 'Egress'],
+            ingress: [
+              {
+                _from: [
+                  {
+                    // Allow traffic from ALB ingress controller in kube-system
+                    namespaceSelector: {
+                      matchLabels: {
+                        'kubernetes.io/metadata.name': 'kube-system',
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+            egress: [
+              {
+                // DNS resolution
+                to: [
+                  {
+                    namespaceSelector: {
+                      matchLabels: {
+                        'kubernetes.io/metadata.name': 'kube-system',
+                      },
+                    },
+                  },
+                ],
+                ports: [
+                  { protocol: 'UDP', port: 53 },
+                  { protocol: 'TCP', port: 53 },
+                ],
+              },
+              {
+                // RDS access within VPC (10.0.0.0/16)
+                to: [
+                  {
+                    ipBlock: {
+                      cidr: '10.0.0.0/16',
+                    },
+                  },
+                ],
+                ports: [
+                  { protocol: 'TCP', port: 5432 },
+                ],
+              },
+              {
+                // HTTPS outbound (agent WSS connections, ECR image pulls)
+                to: [
+                  {
+                    ipBlock: {
+                      cidr: '0.0.0.0/0',
+                    },
+                  },
+                ],
+                ports: [
+                  { protocol: 'TCP', port: 443 },
+                ],
+              },
+              {
+                // Entitlement service in system namespace
+                to: [
+                  {
+                    namespaceSelector: {
+                      matchLabels: {
+                        'kubernetes.io/metadata.name': 'system',
+                      },
+                    },
+                  },
+                ],
+                ports: [
+                  { protocol: 'TCP', port: 3002 },
+                ],
+              },
+            ],
+          },
+        },
+      });
+    } catch (error: any) {
+      if (error.response?.statusCode === 409) {
+        this.logger.warn(`NetworkPolicy already exists in ${namespace}, continuing...`);
+      } else {
+        throw error;
+      }
+    }
   }
 
   private sleep(ms: number): Promise<void> {

@@ -9,6 +9,17 @@ export interface DatabaseCapabilities {
   hasMemoryDoctor: boolean;
 }
 
+export interface RuntimeCapabilities {
+  canSlowLog: boolean;
+  canClientList: boolean;
+  canAclLog: boolean;
+  canClusterInfo: boolean;
+  canClusterSlotStats: boolean;
+  canCommandLog: boolean;
+  canLatency: boolean;
+  canMemory: boolean;
+}
+
 export interface HealthResponse {
   status: 'connected' | 'disconnected' | 'error' | 'waiting';
   database: {
@@ -18,6 +29,7 @@ export interface HealthResponse {
     port: number;
   };
   capabilities: DatabaseCapabilities | null;
+  runtimeCapabilities?: RuntimeCapabilities | null;
   error?: string;
   message?: string;
 }

@@ -10,6 +10,7 @@ import { PrometheusService } from '../prometheus/prometheus.service';
 import { SettingsService } from '../settings/settings.service';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 
 @Injectable()
 export class ClientAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -20,6 +21,7 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     private prometheusService: PrometheusService,
     private settingsService: SettingsService,
+    private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
   ) {
     super(connectionRegistry);
   }
@@ -33,6 +35,10 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    if (!this.runtimeCapabilityTracker.isAvailable(ctx.connectionId, 'canClientList')) {
+      return;
+    }
+
     const endTimer = this.prometheusService.startPollTimer('client-analytics', ctx.connectionId);
 
     try {
@@ -66,6 +72,12 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
       const saved = await this.storage.saveClientSnapshot(snapshots, ctx.connectionId);
       this.logger.debug(`Saved ${saved} client snapshots for ${ctx.connectionName}`);
       this.prometheusService.incrementPollCounter(ctx.connectionId);
+    } catch (error) {
+      if (this.runtimeCapabilityTracker.recordFailure(ctx.connectionId, 'canClientList', error instanceof Error ? error : String(error))) {
+        this.logger.warn(`Client list disabled for ${ctx.connectionName} due to blocked command`);
+        return;
+      }
+      throw error;
     } finally {
       endTimer();
     }

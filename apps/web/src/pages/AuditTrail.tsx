@@ -3,7 +3,9 @@ import { useSearchParams } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
+import { useCapabilities } from '../hooks/useCapabilities';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { UnavailableOverlay } from '../components/UnavailableOverlay';
 
 function formatTimestamp(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString();
@@ -18,6 +20,7 @@ function formatRelativeTime(seconds: number): string {
 
 export function AuditTrail() {
   const { currentConnection } = useConnection();
+  const { hasAclLog } = useCapabilities();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedUser, setSelectedUser] = useState<string>('');
   const ipFilter = searchParams.get('ip');
@@ -78,7 +81,7 @@ export function AuditTrail() {
     }));
   }, [stats?.entriesByUser, entries]);
 
-  return (
+  const content = (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Audit Trail</h1>
@@ -274,4 +277,14 @@ export function AuditTrail() {
       </Card>
     </div>
   );
+
+  if (!hasAclLog) {
+    return (
+      <UnavailableOverlay featureName="Audit Trail" command="ACL LOG">
+        {content}
+      </UnavailableOverlay>
+    );
+  }
+
+  return content;
 }
