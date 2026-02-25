@@ -575,6 +575,7 @@ describe('ConnectionRegistry with encryption', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConnectionRegistry,
+        RuntimeCapabilityTracker,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],
