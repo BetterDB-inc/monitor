@@ -1,24 +1,24 @@
 # BetterDB Proprietary Features
 
-This directory contains source-available features that require a commercial license for production use.
+This directory contains source-available features licensed under the [Open Core Ventures Source Available License (OCVSAL) v1.0](./LICENSE).
 
-## License Terms
-
-The code in this directory is licensed under the [Open Core Ventures Source Available License (OCVSAL) v1.0](./LICENSE).
+## License Summary
 
 **You ARE permitted to:**
 - Read and study the source code
-- Run the software locally for testing and evaluation
-- Modify the software and contribute improvements back
-- Use in development and staging environments
+- Modify the software and test your modifications
+- Share modifications for non-production use
+- Use in development, testing, and evaluation environments
 
-**You are NOT permitted to (without a commercial license):**
-- Use in production environments
-- Offer as a hosted service to third parties
+**Production use requires a valid commercial agreement with BetterDB Inc.**
+
+This includes running the software in production environments, offering it as a hosted service, or any other production deployment. See [License Terms](#getting-a-license) below.
+
+> **Note:** You must retain the OCVSAL license on any copies of the software you share with others. Any suggestions, contributions, or feedback you provide are licensed back to BetterDB Inc. under an irrevocable, royalty-free, unlimited license.
 
 ## Getting a License
 
-Contact sales@betterdb.com for commercial licensing options.
+Contact sales@betterdb.com for commercial licensing options, or visit [betterdb.com/pricing](https://betterdb.com/pricing) for available tiers.
 
 ## Features in This Directory
 
@@ -44,3 +44,7 @@ Standalone NestJS service for BetterDB Cloud control plane.
 - Admin APIs for customer/license management
 - Tenant management for multi-tenant cloud deployments
 - Runs as separate container (not imported by monitor)
+
+## Third-Party Components
+
+Any third-party components incorporated into this software retain their original licenses as provided by their respective authors.
