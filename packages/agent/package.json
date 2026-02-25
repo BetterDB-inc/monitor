@@ -1,11 +1,14 @@
 {
-  "name": "@betterdb/agent",
+  "name": "betterdb-agent",
   "version": "0.1.0",
   "description": "BetterDB remote monitoring agent for Valkey/Redis",
   "main": "dist/index.js",
   "bin": {
     "betterdb-agent": "dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
