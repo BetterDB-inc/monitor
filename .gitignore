@@ -61,6 +61,9 @@ pnpm-debug.log*
 Thumbs.db
 
 # Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
 terraform.tfvars
 *.tfvars
 !*.tfvars.example
