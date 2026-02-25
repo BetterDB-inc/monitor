@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useConnection } from '../hooks/useConnection';
 import { fetchApi } from '../api/client';
 import { agentTokensApi, GeneratedToken, TokenListItem } from '../api/agent-tokens';
@@ -483,6 +483,7 @@ function AgentTab({
   const [loadingTokens, setLoadingTokens] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const prevAgentCount = useRef(0);
 
   useEffect(() => {
     loadData();
@@ -499,6 +500,7 @@ function AgentTab({
       ]);
       setTokens(tokenList);
       setAgents(agentList);
+      prevAgentCount.current = agentList.length;
     } catch {
       setError('Failed to load agent tokens');
     } finally {
@@ -510,9 +512,10 @@ function AgentTab({
     try {
       const agentList = await agentTokensApi.getConnections();
       setAgents(agentList);
-      if (agentList.length > 0) {
+      if (agentList.length > 0 && agentList.length !== prevAgentCount.current) {
         await onAgentConnected();
       }
+      prevAgentCount.current = agentList.length;
     } catch {
       // Silently fail polling
     }
