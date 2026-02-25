@@ -52,7 +52,7 @@ export const envSchema = z.object({
   BETTERDB_TELEMETRY: z.string().transform(v => v !== 'false').optional(),
 
   // Version check configuration
-  VERSION_CHECK_INTERVAL_MS: z.coerce.number().int().min(60000).default(21600000),
+  VERSION_CHECK_INTERVAL_MS: z.coerce.number().int().min(60000).default(3600000),
 
   // Webhook configuration
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).optional(),

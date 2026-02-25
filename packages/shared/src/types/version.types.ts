@@ -4,4 +4,5 @@ export interface VersionInfo {
   updateAvailable: boolean;
   releaseUrl: string | null;
   checkedAt: number | null;
+  versionCheckIntervalMs?: number;
 }
