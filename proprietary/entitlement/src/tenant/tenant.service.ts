@@ -12,7 +12,7 @@ const RESERVED_SUBDOMAINS = [
 export class TenantService {
   private readonly logger = new Logger(TenantService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   async createTenant(data: { name: string; subdomain: string; email: string; imageTag?: string; domain?: string }) {
     const subdomain = data.subdomain.toLowerCase();
@@ -48,7 +48,7 @@ export class TenantService {
     const dbSchema = `tenant_${subdomain.replace(/-/g, '_')}`;
 
     // Use provided imageTag, fall back to env var, or use hardcoded default
-    const imageTag = data.imageTag || process.env.DEFAULT_IMAGE_TAG || 'v0.5.1';
+    const imageTag = data.imageTag || process.env.DEFAULT_IMAGE_TAG || 'v0.6.0';
 
     const tenant = await this.prisma.tenant.create({
       data: {
