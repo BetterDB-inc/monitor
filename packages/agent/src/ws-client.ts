@@ -22,8 +22,9 @@ export class WsClient {
   connect(): void {
     if (this.closed) return;
 
-    const url = `${this.options.url}?token=${encodeURIComponent(this.options.token)}`;
-    this.ws = new WebSocket(url);
+    this.ws = new WebSocket(this.options.url, {
+      headers: { Authorization: `Bearer ${this.options.token}` },
+    });
 
     this.ws.on('open', () => {
       this.reconnectAttempt = 0;

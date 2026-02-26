@@ -34,8 +34,10 @@ export class AgentGateway {
   }
 
   async handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): Promise<void> {
-    const url = new URL(request.url || '', `http://${request.headers.host}`);
-    const token = url.searchParams.get('token');
+    const authHeader = request.headers['authorization'];
+    const token = authHeader?.startsWith('Bearer ')
+      ? authHeader.slice(7)
+      : new URL(request.url || '', `http://${request.headers.host}`).searchParams.get('token');
 
     if (!token) {
       this.logger.warn('Agent connection rejected: no token');

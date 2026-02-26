@@ -380,7 +380,7 @@ export function SlowLog() {
 
   if (slowLogUnavailable) {
     return (
-      <UnavailableOverlay featureName="Slow Log" command={hasCommandLog ? 'COMMANDLOG' : 'SLOWLOG'}>
+      <UnavailableOverlay featureName="Slow Log" command="SLOWLOG/COMMANDLOG">
         {content}
       </UnavailableOverlay>
     );
