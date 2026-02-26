@@ -165,7 +165,7 @@ Expected response:
   "email": "test@example.com",
   "status": "pending",
   "dbSchema": "tenant_test99",
-  "imageTag": "v0.5.1",
+  "imageTag": "v0.6.0",
   "createdAt": "2026-02-12T16:42:31.741Z",
   "updatedAt": "2026-02-12T16:42:31.741Z"
 }

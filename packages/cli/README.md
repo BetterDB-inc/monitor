@@ -155,8 +155,8 @@ The CLI is published automatically via GitHub Actions when a version tag is push
 ```bash
 # Update version in root package.json and packages/cli/package.json
 # Then tag and push
-git tag v0.5.0
-git push origin v0.5.0
+git tag v0.6.0
+git push origin v0.6.0
 ```
 
 This will:

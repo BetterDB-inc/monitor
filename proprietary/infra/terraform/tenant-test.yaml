@@ -36,7 +36,7 @@ spec:
     spec:
       containers:
         - name: betterdb
-          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb:v0.5.14
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb:v0.6.0
           imagePullPolicy: Always
           # image: betterdb/monitor:latest
           ports:
