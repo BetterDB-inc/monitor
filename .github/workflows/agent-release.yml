@@ -1,0 +1,132 @@
+# Publish BetterDB Agent — Docker image + npm package
+#
+# Required secrets:
+#   DOCKERHUB_USERNAME — Docker Hub username
+#   DOCKERHUB_TOKEN   — Docker Hub access token
+#   NPM_TOKEN          — npmjs.com automation token
+
+name: Publish Agent
+
+on:
+  push:
+    tags:
+      - 'agent-v*'
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          # agent-v0.1.0 → 0.1.0
+          echo "version=${GITHUB_REF_NAME#agent-v}" >> $GITHUB_OUTPUT
+
+      - name: Update package.json version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd packages/agent
+          node -e "
+            const pkg = require('./package.json');
+            pkg.version = process.env.VERSION;
+            require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Build agent
+        run: cd packages/agent && pnpm build
+
+      - name: Verify build
+        run: node packages/agent/dist/index.js --help 2>&1 || true
+
+      - name: Prepare for publishing
+        run: |
+          cd packages/agent
+          # Remove workspace dependencies before npm publish
+          node -e "
+            const pkg = require('./package.json');
+            if (pkg.dependencies && pkg.dependencies['@betterdb/shared']) {
+              delete pkg.dependencies['@betterdb/shared'];
+            }
+            if (pkg.devDependencies) {
+              delete pkg.devDependencies;
+            }
+            require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: cd packages/agent && npm publish --access public
+
+  publish-docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          # agent-v0.1.0 → 0.1.0
+          echo "version=${GITHUB_REF_NAME#agent-v}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./packages/agent/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            betterdb/agent:${{ steps.version.outputs.version }}
+            betterdb/agent:latest
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent

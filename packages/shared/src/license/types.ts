@@ -88,4 +88,5 @@ export interface EntitlementRequest {
   arch?: string;
   nodeVersion?: string;
   tier?: string;
+  deploymentMode?: 'cloud' | 'self-hosted';
 }

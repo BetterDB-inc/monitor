@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -34,8 +35,42 @@ model Customer {
 
   licenses       License[]
   subscriptions  Subscription[]
+  tenants        Tenant[]
 
   @@map("customers")
+}
+
+enum TenantStatus {
+  pending
+  provisioning
+  ready
+  error
+  suspended
+  deleting
+}
+
+model Tenant {
+  id            String       @id @default(cuid())
+  name          String
+  subdomain     String       @unique
+  email         String
+  status        TenantStatus @default(pending)
+  statusMessage String?      @map("status_message")
+  customerId    String?      @map("customer_id")
+  dbSchema      String       @map("db_schema")
+  imageTag      String       @default("latest") @map("image_tag")
+  domain        String?      @unique
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  customer      Customer?    @relation(fields: [customerId], references: [id])
+  users         User[]
+  invitations   Invitation[]
+
+  @@index([subdomain])
+  @@index([status])
+  @@index([customerId])
+  @@map("tenants")
 }
 
 model License {
@@ -94,4 +129,58 @@ model LicenseValidation {
   @@index([instanceId])
   @@index([validatedAt])
   @@map("license_validations")
+}
+
+enum AuthProvider {
+  google
+  github
+}
+
+enum UserRole {
+  admin
+  member
+}
+
+model User {
+  id          String       @id @default(cuid())
+  email       String       @unique
+  name        String?
+  avatarUrl   String?      @map("avatar_url")
+  provider    AuthProvider
+  providerId  String       @map("provider_id")
+  tenantId    String       @map("tenant_id")
+  role        UserRole     @default(member)
+  isOwner     Boolean      @default(false) @map("is_owner")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@index([email])
+  @@map("users")
+}
+
+enum InvitationStatus {
+  pending
+  accepted
+  revoked
+}
+
+model Invitation {
+  id         String           @id @default(cuid())
+  email      String
+  tenantId   String           @map("tenant_id")
+  invitedBy  String           @map("invited_by")
+  role       UserRole         @default(member)
+  status     InvitationStatus @default(pending)
+  createdAt  DateTime         @default(now()) @map("created_at")
+  expiresAt  DateTime         @map("expires_at")
+
+  tenant     Tenant           @relation(fields: [tenantId], references: [id])
+
+  @@unique([email, tenantId])
+  @@index([tenantId])
+  @@index([email])
+  @@map("invitations")
 }

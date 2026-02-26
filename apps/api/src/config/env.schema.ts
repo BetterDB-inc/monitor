@@ -20,6 +20,7 @@ export const envSchema = z.object({
   STORAGE_TYPE: z.enum(['sqlite', 'postgres', 'postgresql', 'memory']).default('sqlite'),
   STORAGE_URL: z.string().url().optional(),
   STORAGE_SQLITE_FILEPATH: z.string().default('./data/audit.db'),
+  DB_SCHEMA: z.string().regex(/^[a-z_][a-z0-9_]*$/).max(63).optional(),
 
   // CLI static directory override
   BETTERDB_STATIC_DIR: z.string().optional(),
@@ -51,7 +52,7 @@ export const envSchema = z.object({
   BETTERDB_TELEMETRY: z.string().transform(v => v !== 'false').optional(),
 
   // Version check configuration
-  VERSION_CHECK_INTERVAL_MS: z.coerce.number().int().min(60000).default(21600000),
+  VERSION_CHECK_INTERVAL_MS: z.coerce.number().int().min(60000).default(3600000),
 
   // Webhook configuration
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).optional(),

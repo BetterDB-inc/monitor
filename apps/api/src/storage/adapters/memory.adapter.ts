@@ -945,4 +945,37 @@ export class MemoryAdapter implements StoragePort {
       this.connections.set(id, { ...config, ...updates, updatedAt: Date.now() });
     }
   }
+
+  // Agent Token Methods (no-op for non-cloud deployments)
+
+  private agentTokens = new Map<string, { id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>();
+
+  async saveAgentToken(token: { id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }): Promise<void> {
+    this.agentTokens.set(token.id, token);
+  }
+
+  async getAgentTokens(): Promise<Array<{ id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>> {
+    return Array.from(this.agentTokens.values()).sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  async getAgentTokenByHash(hash: string): Promise<{ id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null } | null> {
+    for (const token of this.agentTokens.values()) {
+      if (token.tokenHash === hash) return token;
+    }
+    return null;
+  }
+
+  async revokeAgentToken(id: string): Promise<void> {
+    const token = this.agentTokens.get(id);
+    if (token) {
+      token.revokedAt = Date.now();
+    }
+  }
+
+  async updateAgentTokenLastUsed(id: string): Promise<void> {
+    const token = this.agentTokens.get(id);
+    if (token) {
+      token.lastUsedAt = Date.now();
+    }
+  }
 }

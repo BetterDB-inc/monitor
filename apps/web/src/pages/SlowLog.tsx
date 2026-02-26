@@ -9,6 +9,7 @@ import { SlowLogTable } from '../components/metrics/SlowLogTable';
 import { CommandLogTable } from '../components/metrics/CommandLogTable';
 import { SlowLogPatternAnalysisView } from '../components/metrics/SlowLogPatternAnalysis';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
+import { UnavailableOverlay } from '../components/UnavailableOverlay';
 import type { CommandLogType, SlowLogEntry, CommandLogEntry } from '../types/metrics';
 
 function getTabFromParams(params: URLSearchParams): CommandLogType {
@@ -34,7 +35,7 @@ function filterByClient<T extends { clientName: string; clientAddress: string }>
 
 export function SlowLog() {
   const { currentConnection } = useConnection();
-  const { hasCommandLog, capabilities } = useCapabilities();
+  const { hasCommandLog, hasSlowLog, capabilities } = useCapabilities();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = getTabFromParams(searchParams);
   const clientFilter = searchParams.get('client');
@@ -252,7 +253,8 @@ export function SlowLog() {
     setSearchParams(searchParams);
   };
 
-  return (
+  const slowLogUnavailable = !hasSlowLog && !hasCommandLog;
+  const content = (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Slow Log</h1>
@@ -375,4 +377,14 @@ export function SlowLog() {
       )}
     </div>
   );
+
+  if (slowLogUnavailable) {
+    return (
+      <UnavailableOverlay featureName="Slow Log" command="SLOWLOG/COMMANDLOG">
+        {content}
+      </UnavailableOverlay>
+    );
+  }
+
+  return content;
 }

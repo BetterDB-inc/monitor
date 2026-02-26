@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import { compare, valid as validSemver } from 'semver';
@@ -11,7 +11,7 @@ interface CachedEntitlement {
 }
 
 @Injectable()
-export class LicenseService implements OnModuleInit {
+export class LicenseService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(LicenseService.name);
   private readonly licenseKey: string | null;
   private readonly entitlementUrl: string;
@@ -20,8 +20,10 @@ export class LicenseService implements OnModuleInit {
   private readonly timeoutMs: number;
   private readonly instanceId: string;
   private readonly telemetryEnabled: boolean;
+  private readonly versionCheckIntervalMs: number;
 
   private cache: CachedEntitlement | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private validationPromise: Promise<EntitlementResponse> | null = null;
   private isValidated = false;
 
@@ -41,6 +43,7 @@ export class LicenseService implements OnModuleInit {
     this.timeoutMs = parseInt(process.env.LICENSE_TIMEOUT_MS || '10000', 10);
     this.instanceId = this.generateInstanceId();
     this.telemetryEnabled = process.env.BETTERDB_TELEMETRY !== 'false';
+    this.versionCheckIntervalMs = this.config.get<number>('VERSION_CHECK_INTERVAL_MS') || 3600000;
   }
 
   private generateInstanceId(): string {
@@ -66,6 +69,22 @@ export class LicenseService implements OnModuleInit {
       this.logger.log('Starting license validation in background...');
     }
     this.validationPromise = this.validateLicenseBackground();
+
+    if (this.telemetryEnabled) {
+      this.heartbeatTimer = setInterval(() => {
+        this.collectStats().then(stats => {
+          this.sendTelemetry('telemetry_ping', stats);
+        });
+      }, this.versionCheckIntervalMs);
+      this.logger.log(`Telemetry heartbeat scheduled every ${this.versionCheckIntervalMs}ms`);
+    }
+  }
+
+  onModuleDestroy() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 
   private async validateLicenseBackground(): Promise<EntitlementResponse> {
@@ -114,6 +133,7 @@ export class LicenseService implements OnModuleInit {
       licenseKey: this.licenseKey || '', // Empty string for keyless instances
       instanceId: this.instanceId,
       eventType: 'license_check',
+      deploymentMode: process.env.CLOUD_MODE === 'true' ? 'cloud' as const : 'self-hosted' as const,
       stats: await this.collectStats(),
     };
 
@@ -164,6 +184,7 @@ export class LicenseService implements OnModuleInit {
       instanceId: this.instanceId,
       eventType,
       tier: this.getLicenseTier(),
+      deploymentMode: process.env.CLOUD_MODE === 'true' ? 'cloud' as const : 'self-hosted' as const,
       ...data,
     };
 
@@ -296,6 +317,7 @@ export class LicenseService implements OnModuleInit {
       updateAvailable: this.isUpdateAvailable(),
       releaseUrl: this.releaseUrl,
       checkedAt: this.versionCheckedAt,
+      versionCheckIntervalMs: this.versionCheckIntervalMs,
     };
   }
 

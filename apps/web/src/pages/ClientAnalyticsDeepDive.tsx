@@ -3,10 +3,12 @@ import { Link } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
+import { useCapabilities } from '../hooks/useCapabilities';
 import { useLicense } from '../hooks/useLicense';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Badge } from '../components/ui/badge';
+import { UnavailableOverlay } from '../components/UnavailableOverlay';
 import { Feature } from '@betterdb/shared';
 import {
   AreaChart,
@@ -53,6 +55,7 @@ const CHART_COLORS = ['hsl(var(--primary))', '#8884d8', '#82ca9d', '#ffc658', '#
 
 export function ClientAnalyticsDeepDive() {
   const { currentConnection } = useConnection();
+  const { hasClientList } = useCapabilities();
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [activeTab, setActiveTab] = useState<string>('commands');
   const { hasFeature } = useLicense();
@@ -177,7 +180,7 @@ export function ClientAnalyticsDeepDive() {
   }, [spikes]);
 
 
-  return (
+  const content = (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex justify-between items-center">
@@ -586,4 +589,14 @@ export function ClientAnalyticsDeepDive() {
       </Tabs>
     </div>
   );
+
+  if (!hasClientList) {
+    return (
+      <UnavailableOverlay featureName="Client Analytics Deep Dive" command="CLIENT LIST">
+        {content}
+      </UnavailableOverlay>
+    );
+  }
+
+  return content;
 }

@@ -68,6 +68,19 @@ async function bootstrap(): Promise<void> {
     fastifyAdapter,
   ) as NestFastifyApplication;
 
+  // Register cloud auth middleware at Fastify level BEFORE any other middleware
+  // This ensures it runs before static file serving
+  if (process.env.CLOUD_MODE) {
+    try {
+      const { CloudAuthMiddleware } = require('../../../proprietary/cloud-auth/cloud-auth.middleware');
+      const middleware = new CloudAuthMiddleware();
+      app.use((req: any, res: any, next: () => void) => middleware.use(req, res, next));
+      console.log('[CloudAuth] Middleware registered at Fastify level');
+    } catch {
+      console.warn('[CloudAuth] Failed to register middleware — proprietary module not found');
+    }
+  }
+
   // Enable validation pipes globally
   app.useGlobalPipes(new ValidationPipe({
     whitelist: true,
@@ -119,6 +132,29 @@ async function bootstrap(): Promise<void> {
 
   const document = SwaggerModule.createDocument(app as unknown as INestApplication, config);
   SwaggerModule.setup('docs', app as unknown as INestApplication, document);
+
+  // Register WebSocket upgrade handler for agent connections (cloud mode only)
+  if (process.env.CLOUD_MODE) {
+    try {
+      const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
+      const agentGateway = app.get(AgentGateway);
+      const httpServer = app.getHttpServer();
+
+      httpServer.on('upgrade', (request: any, socket: any, head: any) => {
+        const url = new URL(request.url || '', `http://${request.headers.host}`);
+        if (url.pathname === '/agent/ws' || url.pathname === '/api/agent/ws') {
+          agentGateway.handleUpgrade(request, socket, head);
+        } else {
+          // Not an agent WebSocket — destroy to prevent hanging
+          socket.destroy();
+        }
+      });
+
+      console.log('[Agent] WebSocket upgrade handler registered');
+    } catch {
+      console.warn('[Agent] Failed to register WebSocket handler — module not available');
+    }
+  }
 
   const port = process.env.PORT || 3001;
   await app.listen(port, '0.0.0.0');

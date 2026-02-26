@@ -36,6 +36,10 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Generate Prisma client
+        working-directory: proprietary/entitlement
+        run: pnpm prisma:generate
+
       - name: Run API tests
         working-directory: apps/api
         run: pnpm test

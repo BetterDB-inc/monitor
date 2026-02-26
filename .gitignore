@@ -59,3 +59,11 @@ pnpm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+terraform.tfvars
+*.tfvars
+!*.tfvars.example

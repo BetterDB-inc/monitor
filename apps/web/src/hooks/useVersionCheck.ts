@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, createContext, useContext } from 'react';
+import { useState, useEffect, useCallback, useRef, createContext, useContext } from 'react';
 import { versionApi } from '../api/version';
 import type { VersionInfo } from '@betterdb/shared';
 
@@ -42,10 +42,17 @@ export function useVersionCheckState(): VersionCheckContextValue {
     };
   });
 
+  const intervalRef = useRef<ReturnType<typeof setInterval>>();
+  const intervalMsRef = useRef(3600000);
+
   const fetchVersion = useCallback(async () => {
     setState((prev) => ({ ...prev, loading: true, error: null }));
     try {
       const info = await versionApi.getVersion();
+
+      if (info.versionCheckIntervalMs) {
+        intervalMsRef.current = info.versionCheckIntervalMs;
+      }
 
       // Check if this specific version was dismissed
       const dismissedVersion = localStorage.getItem(DISMISS_KEY);
@@ -80,11 +87,12 @@ export function useVersionCheckState(): VersionCheckContextValue {
   }, [fetchVersion]);
 
   useEffect(() => {
-    fetchVersion();
-
-    // Re-check every 6 hours
-    const interval = setInterval(fetchVersion, 6 * 60 * 60 * 1000);
-    return () => clearInterval(interval);
+    fetchVersion().then(() => {
+      intervalRef.current = setInterval(fetchVersion, intervalMsRef.current);
+    });
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
   }, [fetchVersion]);
 
   return {

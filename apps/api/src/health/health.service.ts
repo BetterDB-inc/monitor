@@ -1,6 +1,7 @@
 import { Injectable, Inject, Optional, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { HealthResponse, DetailedHealthResponse, WebhookEventType, ANOMALY_SERVICE, IAnomalyService, AllConnectionsHealthResponse } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { LicenseService } from '@proprietary/license';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
@@ -16,6 +17,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
 
   constructor(
     connectionRegistry: ConnectionRegistry,
+    private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
     @Optional() @Inject(ANOMALY_SERVICE) private readonly anomalyService?: IAnomalyService,
     @Optional() private readonly licenseService?: LicenseService,
@@ -81,6 +83,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
           port: 0,
         },
         capabilities: null,
+        runtimeCapabilities: null,
         message: 'Waiting for database connection to be configured',
       };
     }
@@ -96,6 +99,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
           port: 0,
         },
         capabilities: null,
+        runtimeCapabilities: null,
         error: `Connection ${targetId} not found`,
       };
     }
@@ -115,6 +119,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
             port: config.port,
           },
           capabilities: null,
+          runtimeCapabilities: null,
           error: 'Not connected to database',
         };
       }
@@ -132,6 +137,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
             port: config.port,
           },
           capabilities: null,
+          runtimeCapabilities: null,
           error: 'Database ping failed',
         };
       }
@@ -150,6 +156,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
           port: config.port,
         },
         capabilities,
+        runtimeCapabilities: this.runtimeCapabilityTracker.getCapabilities(targetId),
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -163,6 +170,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
           port: config.port,
         },
         capabilities: null,
+        runtimeCapabilities: null,
         error: errorMessage,
       };
     }

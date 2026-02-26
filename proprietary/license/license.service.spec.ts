@@ -19,7 +19,10 @@ describe('LicenseService', () => {
         {
           provide: ConfigService,
           useValue: {
-            get: jest.fn(),
+            get: jest.fn((key: string) => {
+              if (key === 'VERSION_CHECK_INTERVAL_MS') return 3600000;
+              return undefined;
+            }),
           },
         },
       ],
@@ -29,6 +32,8 @@ describe('LicenseService', () => {
   });
 
   afterEach(() => {
+    // Clean up heartbeat timer to prevent leaks
+    service.onModuleDestroy();
     // Restore original env
     process.env = originalEnv;
   });
@@ -101,6 +106,7 @@ describe('LicenseService', () => {
           updateAvailable: true,
           releaseUrl: 'https://example.com/release',
           checkedAt: expect.any(Number),
+          versionCheckIntervalMs: 3600000,
         });
       });
 
@@ -113,6 +119,7 @@ describe('LicenseService', () => {
           updateAvailable: false,
           releaseUrl: null,
           checkedAt: null,
+          versionCheckIntervalMs: 3600000,
         });
       });
 

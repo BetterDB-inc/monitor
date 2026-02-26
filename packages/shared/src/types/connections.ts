@@ -55,7 +55,9 @@ export interface ConnectionStatus {
   createdAt?: number;
   updatedAt?: number;
   isConnected: boolean;
+  connectionType?: 'direct' | 'agent';
   capabilities?: ConnectionCapabilities;
+  runtimeCapabilities?: import('./health').RuntimeCapabilities;
   /** Status of credential validation */
   credentialStatus?: CredentialStatus;
   /** Error message when credentials are invalid */

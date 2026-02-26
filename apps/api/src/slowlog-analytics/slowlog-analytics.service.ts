@@ -10,6 +10,7 @@ import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 
 @Injectable()
 export class SlowLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -30,6 +31,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     private settingsService: SettingsService,
+    private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
   ) {
     super(connectionRegistry);
   }
@@ -44,6 +46,10 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    if (!this.runtimeCapabilityTracker.isAvailable(ctx.connectionId, 'canSlowLog')) {
+      return;
+    }
+
     try {
       // Initialize lastSeenId from storage if not already set
       if (!this.lastSeenIds.has(ctx.connectionId)) {
@@ -109,6 +115,10 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
       this.logger.debug(`Saved ${saved} new slow log entries for ${ctx.connectionName} (lastSeenId: ${this.lastSeenIds.get(ctx.connectionId)})`);
     } catch (error) {
+      if (this.runtimeCapabilityTracker.recordFailure(ctx.connectionId, 'canSlowLog', error instanceof Error ? error : String(error))) {
+        this.logger.warn(`Slow log disabled for ${ctx.connectionName} due to blocked command`);
+        return;
+      }
       this.logger.error(`Error capturing slow log for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;
     }
@@ -172,6 +182,10 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   }
 
   async getSlowLogLength(connectionId?: string): Promise<number> {
+    const targetId = connectionId || this.connectionRegistry.getDefaultId() || '';
+    if (!this.runtimeCapabilityTracker.isAvailable(targetId, 'canSlowLog')) {
+      return 0;
+    }
     const client = this.connectionRegistry.get(connectionId);
     return client.getSlowLogLength();
   }

@@ -13,20 +13,25 @@
   },
   "dependencies": {
     "@betterdb/shared": "workspace:*",
+    "@kubernetes/client-node": "^1.4.0",
     "@nestjs/common": "^11.0.0",
-    "@nestjs/core": "^11.0.0",
     "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.0.0",
     "@nestjs/platform-fastify": "^11.1.10",
     "@nestjs/throttler": "^5.0.0",
     "@prisma/client": "^5.0.0",
-    "stripe": "^14.0.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.3",
+    "jsonwebtoken": "^9.0.3",
     "reflect-metadata": "^0.1.13",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "stripe": "^14.0.0"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.0.0",
     "@nestjs/testing": "^11.0.0",
     "@types/jest": "^29.5.0",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^20.0.0",
     "jest": "^29.7.0",
     "prisma": "^5.0.0",
