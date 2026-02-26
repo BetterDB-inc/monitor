@@ -10,6 +10,7 @@ import {
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.service';
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
@@ -149,6 +150,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     connectionRegistry: ConnectionRegistry,
     private readonly configService: ConfigService,
+    private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
     private readonly slowLogAnalytics: SlowLogAnalyticsService,
     private readonly commandLogAnalytics: CommandLogAnalyticsService,
     @Inject(forwardRef(() => HealthService)) private readonly healthService: HealthService,
@@ -662,6 +664,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     if (!clusterEnabled) return;
 
+    if (!this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterInfo')) {
+      return;
+    }
+
     try {
       const clusterInfo = await client.getClusterInfo();
 
@@ -714,30 +720,36 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
 
       const capabilities = client.getCapabilities();
-      if (capabilities.hasClusterSlotStats) {
-        const newSlotLabels = new Set<string>();
-        const slotStats = await client.getClusterSlotStats('key-count', 100);
+      if (capabilities.hasClusterSlotStats && this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')) {
+        try {
+          const newSlotLabels = new Set<string>();
+          const slotStats = await client.getClusterSlotStats('key-count', 100);
 
-        for (const [slot, stats] of Object.entries(slotStats)) {
-          newSlotLabels.add(slot);
-          this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
-          this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
-          this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
-          this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
-        }
-
-        for (const staleSlot of state.currentClusterSlotLabels) {
-          if (!newSlotLabels.has(staleSlot)) {
-            this.clusterSlotKeys.labels(connLabel, staleSlot).set(0);
-            this.clusterSlotExpires.labels(connLabel, staleSlot).set(0);
-            this.clusterSlotReadsTotal.labels(connLabel, staleSlot).set(0);
-            this.clusterSlotWritesTotal.labels(connLabel, staleSlot).set(0);
+          for (const [slot, stats] of Object.entries(slotStats)) {
+            newSlotLabels.add(slot);
+            this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
+            this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
+            this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
+            this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
           }
-        }
 
-        state.currentClusterSlotLabels = newSlotLabels;
+          for (const staleSlot of state.currentClusterSlotLabels) {
+            if (!newSlotLabels.has(staleSlot)) {
+              this.clusterSlotKeys.labels(connLabel, staleSlot).set(0);
+              this.clusterSlotExpires.labels(connLabel, staleSlot).set(0);
+              this.clusterSlotReadsTotal.labels(connLabel, staleSlot).set(0);
+              this.clusterSlotWritesTotal.labels(connLabel, staleSlot).set(0);
+            }
+          }
+
+          state.currentClusterSlotLabels = newSlotLabels;
+        } catch (slotStatsError) {
+          this.runtimeCapabilityTracker.recordFailure(connectionId, 'canClusterSlotStats', slotStatsError instanceof Error ? slotStatsError : String(slotStatsError));
+          this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
+        }
       }
     } catch (error) {
+      this.runtimeCapabilityTracker.recordFailure(connectionId, 'canClusterInfo', error instanceof Error ? error : String(error));
       this.logger.error(`Failed to update cluster metrics for ${connLabel}`, error);
     }
   }
@@ -921,6 +933,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     connectionId: string,
     config: { host: string; port: number } | null,
   ): Promise<void> {
+    if (!this.runtimeCapabilityTracker.isAvailable(connectionId, 'canSlowLog')) {
+      return;
+    }
+
     try {
       const length = await this.slowLogAnalytics.getSlowLogLength(connectionId);
       this.slowlogLength.labels(connLabel).set(length);
@@ -943,6 +959,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         });
       }
     } catch (error) {
+      this.runtimeCapabilityTracker.recordFailure(connectionId, 'canSlowLog', error instanceof Error ? error : String(error));
       this.logger.error(`Failed to update slowlog raw metrics for ${connLabel}`, error);
     }
   }

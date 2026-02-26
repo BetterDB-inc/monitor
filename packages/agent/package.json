@@ -1,0 +1,28 @@
+{
+  "name": "betterdb-agent",
+  "version": "1.0.0",
+  "description": "BetterDB remote monitoring agent for Valkey/Redis",
+  "main": "dist/index.js",
+  "bin": {
+    "betterdb-agent": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "@betterdb/shared": "workspace:*",
+    "iovalkey": "^0.3.3",
+    "ws": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.0.0"
+  }
+}

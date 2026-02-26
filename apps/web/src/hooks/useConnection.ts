@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
 
 export interface Connection {
@@ -45,10 +45,13 @@ export function useConnectionState(): ConnectionContextValue {
   const [currentConnection, setCurrentConnection] = useState<Connection | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const initialLoadDone = useRef(false);
 
   const fetchConnections = useCallback(async () => {
     try {
-      setLoading(true);
+      if (!initialLoadDone.current) {
+        setLoading(true);
+      }
       setError(null);
 
       // Fetch connections from API using centralized client
@@ -70,6 +73,7 @@ export function useConnectionState(): ConnectionContextValue {
       console.error('Failed to fetch connections:', err);
     } finally {
       setLoading(false);
+      initialLoadDone.current = true;
     }
   }, [currentConnection]);
 

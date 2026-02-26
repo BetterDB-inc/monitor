@@ -6,6 +6,7 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
 import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils/encryption';
+import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
 
 const ENV_DEFAULT_ID = 'env-default';
 
@@ -20,6 +21,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly configService: ConfigService,
+    private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
   ) {
     this.encryption = getEncryptionService();
     if (this.encryption) {
@@ -382,6 +384,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     this.connections.delete(id);
     this.configs.delete(id);
+    this.runtimeCapabilityTracker.removeConnection(id);
     await this.storage.deleteConnection(id);
 
     if (this.defaultId === id) {
@@ -486,8 +489,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         updatedAt: config.updatedAt,
         isConnected,
         capabilities,
+        runtimeCapabilities: this.runtimeCapabilityTracker.getCapabilities(config.id),
         credentialStatus: config.credentialStatus,
         credentialError: config.credentialError,
+        connectionType: config.host === 'agent' ? 'agent' : 'direct',
       });
     }
 
@@ -537,6 +542,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       }
 
       this.connections.set(id, newAdapter);
+      this.runtimeCapabilityTracker.resetConnection(id);
 
       // Update credential status to valid after successful reconnection
       this.configs.set(id, {
@@ -559,6 +565,43 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       throw error;
     }
+  }
+
+  async registerAgentConnection(id: string, name: string, adapter: DatabasePort): Promise<void> {
+    const now = Date.now();
+    const config: DatabaseConnectionConfig = {
+      id,
+      name,
+      host: 'agent',
+      port: 0,
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+      credentialStatus: 'valid',
+    };
+
+    this.connections.set(id, adapter);
+    this.configs.set(id, config);
+
+    // If no default connection, make this the default
+    if (!this.defaultId) {
+      this.defaultId = id;
+    }
+
+    this.logger.log(`Registered agent connection: ${name} (${id})`);
+  }
+
+  removeAgentConnection(id: string): void {
+    this.connections.delete(id);
+    this.configs.delete(id);
+    this.runtimeCapabilityTracker.removeConnection(id);
+
+    if (this.defaultId === id) {
+      const remaining = Array.from(this.configs.keys());
+      this.defaultId = remaining.length > 0 ? remaining[0] : null;
+    }
+
+    this.logger.log(`Removed agent connection: ${id}`);
   }
 
   isEnvDefault(id: string): boolean {

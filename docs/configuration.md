@@ -216,7 +216,7 @@ To disable telemetry, set `BETTERDB_TELEMETRY=false` in your environment variabl
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VERSION_CHECK_INTERVAL_MS` | No | `21600000` | Version check interval (milliseconds, default: 6 hours) |
+| `VERSION_CHECK_INTERVAL_MS` | No | `3600000` | Version check interval (milliseconds, default: 1 hour) |
 
 BetterDB Monitor automatically checks for new versions and displays an update banner in the web UI when a newer version is available. Version information is obtained from:
 

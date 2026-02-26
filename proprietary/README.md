@@ -38,6 +38,13 @@ Natural language interface for querying monitoring data and Valkey documentation
 - Requires: Ollama with Qwen 2.5 7B + nomic-embed-text
 - Tier: Enterprise
 
+### Entitlement Service (`/entitlement`)
+Standalone NestJS service for BetterDB Cloud control plane.
+- License validation and Stripe integration
+- Admin APIs for customer/license management
+- Tenant management for multi-tenant cloud deployments
+- Runs as separate container (not imported by monitor)
+
 ## Third-Party Components
 
 Any third-party components incorporated into this software retain their original licenses as provided by their respective authors.

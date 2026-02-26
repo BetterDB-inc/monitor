@@ -9,10 +9,6 @@ async function bootstrap() {
 
   const fastifyAdapter = new FastifyAdapter();
 
-  fastifyAdapter.getInstance().addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => {
-    done(null, body);
-  });
-
   // Type assertion required due to NestJS/Fastify adapter version mismatch during transition
   const app = await (NestFactory.create as Function)(
     AppModule,

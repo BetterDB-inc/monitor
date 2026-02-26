@@ -26,7 +26,7 @@ export class MetricsService {
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
-  ) {}
+  ) { }
 
   private getClient(connectionId?: string) {
     return this.connectionRegistry.get(connectionId);

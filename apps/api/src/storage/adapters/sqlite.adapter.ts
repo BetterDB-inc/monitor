@@ -2175,6 +2175,19 @@ export class SqliteAdapter implements StoragePort {
       this.db.exec('ALTER TABLE connections ADD COLUMN password_encrypted INTEGER DEFAULT 0');
     }
 
+    // Agent Tokens Table (cloud-only, but created in all environments for interface compliance)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_tokens (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked_at INTEGER,
+        last_used_at INTEGER
+      )
+    `);
+
     const stmt = this.db.prepare(`
       INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, is_default, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2309,5 +2322,54 @@ export class SqliteAdapter implements StoragePort {
     params.push(id);
 
     this.db.prepare(`UPDATE connections SET ${setClauses.join(', ')} WHERE id = ?`).run(...params);
+  }
+
+  // Agent Token Methods
+
+  async saveAgentToken(token: { id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare(
+      `INSERT OR REPLACE INTO agent_tokens (id, name, token_hash, created_at, expires_at, revoked_at, last_used_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(token.id, token.name, token.tokenHash, token.createdAt, token.expiresAt, token.revokedAt, token.lastUsedAt);
+  }
+
+  async getAgentTokens(): Promise<Array<{ id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.prepare('SELECT * FROM agent_tokens ORDER BY created_at DESC').all() as any[];
+    return rows.map((row: any) => ({
+      id: row.id,
+      name: row.name,
+      tokenHash: row.token_hash,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at,
+      lastUsedAt: row.last_used_at,
+    }));
+  }
+
+  async getAgentTokenByHash(hash: string): Promise<{ id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null } | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token_hash = ?').get(hash) as any;
+    if (!row) return null;
+    return {
+      id: row.id,
+      name: row.name,
+      tokenHash: row.token_hash,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at,
+      lastUsedAt: row.last_used_at,
+    };
+  }
+
+  async revokeAgentToken(id: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare('UPDATE agent_tokens SET revoked_at = ? WHERE id = ?').run(Date.now(), id);
+  }
+
+  async updateAgentTokenLastUsed(id: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare('UPDATE agent_tokens SET last_used_at = ? WHERE id = ?').run(Date.now(), id);
   }
 }

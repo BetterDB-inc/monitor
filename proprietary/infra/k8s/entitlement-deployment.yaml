@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: entitlement
+  namespace: system
+  labels:
+    app: entitlement
+    app.kubernetes.io/name: entitlement
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: entitlement
+  template:
+    metadata:
+      labels:
+        app: entitlement
+    spec:
+      serviceAccountName: entitlement
+      containers:
+        - name: entitlement
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v0.2.7
+          imagePullPolicy: Always
+          trategy.type: Recreate
+          ports:
+            - containerPort: 3002
+              protocol: TCP
+          env:
+            # Application config
+            - name: PORT
+              value: "3002"
+            - name: NODE_ENV
+              value: "production"
+            # TLS config (RDS uses self-signed certs in some regions)
+            - name: NODE_TLS_REJECT_UNAUTHORIZED
+              value: "0"
+            # Infrastructure config for tenant provisioning
+            - name: ECR_IMAGE
+              value: "811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb"
+            - name: ACM_CERT_ARN
+              value: "arn:aws:acm:us-east-1:811740411689:certificate/5124962a-e39c-4629-93d0-04275ba4167e"
+            - name: ALB_GROUP_NAME
+              value: "betterdb-tenants"
+            - name: APP_DOMAIN
+              value: "app.betterdb.com"
+            - name: DEFAULT_IMAGE_TAG
+              value: "v0.6.0"
+            # Secrets from ConfigMap
+            - name: ENTITLEMENT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: ENTITLEMENT_DATABASE_URL
+            - name: ADMIN_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: ADMIN_API_TOKEN
+            - name: RDS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: RDS_HOST
+            - name: RDS_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: RDS_PORT
+            - name: RDS_USER
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: RDS_USER
+            - name: RDS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: RDS_PASSWORD
+            - name: RDS_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: RDS_DATABASE
+            # Auth keys for workspace token signing
+            - name: AUTH_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: AUTH_PRIVATE_KEY
+            - name: AUTH_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: AUTH_PUBLIC_KEY
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3002
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3002
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: entitlement
+  namespace: system
+  labels:
+    app: entitlement
+spec:
+  type: ClusterIP
+  selector:
+    app: entitlement
+  ports:
+    - name: http
+      port: 3002
+      targetPort: 3002
+      protocol: TCP

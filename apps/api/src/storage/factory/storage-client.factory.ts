@@ -38,7 +38,8 @@ export class StorageClientFactory {
         if (!connectionString) {
           throw new Error('STORAGE_URL is required for PostgreSQL storage');
         }
-        client = new PostgresAdapter({ connectionString });
+        const schema = this.configService.get<string>('DB_SCHEMA');
+        client = new PostgresAdapter({ connectionString, schema });
         break;
       }
       case 'memory':

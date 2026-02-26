@@ -31,6 +31,7 @@ import { PostgresDialect, RowMappers } from './base-sql.adapter';
 
 export interface PostgresAdapterConfig {
   connectionString: string;
+  schema?: string;  // PostgreSQL schema for tenant isolation
 }
 
 export class PostgresAdapter implements StoragePort {
@@ -152,9 +153,32 @@ export class PostgresAdapter implements StoragePort {
 
       this.pool = new Pool(poolConfig);
 
-      // Test connection
-      const client = await this.pool.connect();
-      client.release();
+      const schemaName = this.config.schema;
+
+      if (schemaName) {
+        // Validate schema name to prevent SQL injection (defense in depth)
+        if (!/^[a-z_][a-z0-9_]*$/.test(schemaName)) {
+          throw new Error(`Invalid schema name: ${schemaName}`);
+        }
+
+        // Create schema using initial pool (runs in public/default search_path)
+        const bootstrapClient = await this.pool.connect();
+        await bootstrapClient.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+        bootstrapClient.release();
+
+        // Recreate pool with search_path set on every connection
+        await this.pool.end();
+        this.pool = new Pool(poolConfig);
+        this.pool.on('connect', (client) => {
+          client.query(`SET search_path TO ${schemaName}, public`).catch((err: unknown) => {
+            console.error(`Failed to set search_path for schema ${schemaName}:`, err);
+          });
+        });
+      }
+
+      // Test connection (will have correct search_path if schema is set)
+      const testClient = await this.pool.connect();
+      testClient.release();
 
       // Issue #9: Restore explanatory comments for migration order
       // Run migrations FIRST to add connection_id to existing tables.
@@ -163,6 +187,10 @@ export class PostgresAdapter implements StoragePort {
       await this.createSchema();
 
       this.ready = true;
+
+      if (schemaName) {
+        console.log(`PostgreSQL initialized with schema: ${schemaName}`);
+      }
     } catch (error) {
       this.ready = false;
       throw new Error(
@@ -1251,6 +1279,19 @@ export class PostgresAdapter implements StoragePort {
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS password_encrypted BOOLEAN NOT NULL DEFAULT false;
 
       CREATE INDEX IF NOT EXISTS idx_connections_is_default ON connections(is_default);
+
+      -- Agent Tokens Table (cloud-only)
+      CREATE TABLE IF NOT EXISTS agent_tokens (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL,
+        revoked_at BIGINT,
+        last_used_at BIGINT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_agent_tokens_hash ON agent_tokens(token_hash);
     `);
   }
 
@@ -2585,6 +2626,76 @@ export class PostgresAdapter implements StoragePort {
     await this.pool.query(
       `UPDATE connections SET ${setClauses.join(', ')} WHERE id = $${paramIndex}`,
       params
+    );
+  }
+
+  // Agent Token Methods
+
+  async saveAgentToken(token: { id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO agent_tokens (id, name, token_hash, created_at, expires_at, revoked_at, last_used_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         token_hash = EXCLUDED.token_hash,
+         expires_at = EXCLUDED.expires_at,
+         revoked_at = EXCLUDED.revoked_at,
+         last_used_at = EXCLUDED.last_used_at`,
+      [token.id, token.name, token.tokenHash, token.createdAt, token.expiresAt, token.revokedAt, token.lastUsedAt]
+    );
+  }
+
+  async getAgentTokens(): Promise<Array<{ id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT id, name, token_hash, created_at, expires_at, revoked_at, last_used_at
+       FROM agent_tokens ORDER BY created_at DESC`
+    );
+    return result.rows.map((row: any) => ({
+      id: row.id,
+      name: row.name,
+      tokenHash: row.token_hash,
+      createdAt: Number(row.created_at),
+      expiresAt: Number(row.expires_at),
+      revokedAt: row.revoked_at ? Number(row.revoked_at) : null,
+      lastUsedAt: row.last_used_at ? Number(row.last_used_at) : null,
+    }));
+  }
+
+  async getAgentTokenByHash(hash: string): Promise<{ id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null } | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT id, name, token_hash, created_at, expires_at, revoked_at, last_used_at
+       FROM agent_tokens WHERE token_hash = $1`,
+      [hash]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+      id: row.id,
+      name: row.name,
+      tokenHash: row.token_hash,
+      createdAt: Number(row.created_at),
+      expiresAt: Number(row.expires_at),
+      revokedAt: row.revoked_at ? Number(row.revoked_at) : null,
+      lastUsedAt: row.last_used_at ? Number(row.last_used_at) : null,
+    };
+  }
+
+  async revokeAgentToken(id: string): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `UPDATE agent_tokens SET revoked_at = $1 WHERE id = $2`,
+      [Date.now(), id]
+    );
+  }
+
+  async updateAgentTokenLastUsed(id: string): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `UPDATE agent_tokens SET last_used_at = $1 WHERE id = $2`,
+      [Date.now(), id]
     );
   }
 }

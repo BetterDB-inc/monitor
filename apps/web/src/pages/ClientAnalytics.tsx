@@ -4,7 +4,9 @@ import { metricsApi } from '../api/metrics';
 import { settingsApi } from '../api/settings';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
+import { useCapabilities } from '../hooks/useCapabilities';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { UnavailableOverlay } from '../components/UnavailableOverlay';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 type TimeRange = '1h' | '6h' | '24h' | '7d' | 'custom';
@@ -35,6 +37,7 @@ function getTimeRangeMs(range: TimeRange): { start: number; end: number; bucket:
 
 export function ClientAnalytics() {
   const { currentConnection } = useConnection();
+  const { hasClientList } = useCapabilities();
   const [searchParams] = useSearchParams();
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [selectedClient, setSelectedClient] = useState<{ name?: string; user?: string; addr?: string } | null>(null);
@@ -107,7 +110,7 @@ export function ClientAnalytics() {
       .slice(0, 20);
   }, [stats?.connectionsByUserAndName]);
 
-  return (
+  const content = (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-3xl font-bold">Client Analytics</h1>
@@ -405,4 +408,14 @@ export function ClientAnalytics() {
       )}
     </div>
   );
+
+  if (!hasClientList) {
+    return (
+      <UnavailableOverlay featureName="Client Analytics" command="CLIENT LIST">
+        {content}
+      </UnavailableOverlay>
+    );
+  }
+
+  return content;
 }
