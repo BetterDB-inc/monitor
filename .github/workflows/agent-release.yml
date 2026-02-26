@@ -65,8 +65,11 @@ jobs:
             require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
+      - name: Build shared package
+        run: pnpm --filter @betterdb/shared build
+
       - name: Build agent
-        run: cd packages/agent && pnpm build
+        run: pnpm --filter betterdb-agent build
 
       - name: Verify build
         run: node packages/agent/dist/index.js --help 2>&1 || true
