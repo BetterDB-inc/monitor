@@ -181,7 +181,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
       </aside>
 
       <main className="pl-64 min-h-screen flex flex-col">
-        <UpdateBanner />
+        {!cloudUser && <UpdateBanner />}
         <div className="p-8 flex-1 flex flex-col">
           <Routes>
             <Route path="/" element={<NoConnectionsGuard><Dashboard /></NoConnectionsGuard>} />
