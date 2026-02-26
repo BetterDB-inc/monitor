@@ -133,6 +133,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       licenseKey: this.licenseKey || '', // Empty string for keyless instances
       instanceId: this.instanceId,
       eventType: 'license_check',
+      deploymentMode: process.env.CLOUD_MODE === 'true' ? 'cloud' as const : 'self-hosted' as const,
       stats: await this.collectStats(),
     };
 
