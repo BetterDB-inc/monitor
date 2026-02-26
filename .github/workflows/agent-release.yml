@@ -61,7 +61,7 @@ jobs:
           cd packages/agent
           node -e "
             const pkg = require('./package.json');
-            pkg.version = '$VERSION';
+            pkg.version = process.env.VERSION;
             require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
