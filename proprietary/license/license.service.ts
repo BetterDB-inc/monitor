@@ -183,6 +183,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       instanceId: this.instanceId,
       eventType,
       tier: this.getLicenseTier(),
+      deploymentMode: process.env.CLOUD_MODE === 'true' ? 'cloud' as const : 'self-hosted' as const,
       ...data,
     };
 
