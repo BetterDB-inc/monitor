@@ -11,9 +11,24 @@ on:
   push:
     tags:
       - 'agent-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 1.0.1)'
+        required: true
+        type: string
+      skip_docker:
+        description: 'Skip Docker publish'
+        type: boolean
+        default: false
+      skip_npm:
+        description: 'Skip npm publish'
+        type: boolean
+        default: false
 
 jobs:
   publish-npm:
+    if: ${{ !inputs.skip_npm }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,11 +63,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Extract version from tag
+      - name: Resolve version
         id: version
         run: |
-          # agent-v0.1.0 → 0.1.0
-          echo "version=${GITHUB_REF_NAME#agent-v}" >> $GITHUB_OUTPUT
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            # agent-v0.1.0 → 0.1.0
+            echo "version=${GITHUB_REF_NAME#agent-v}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Update package.json version
         env:
@@ -95,6 +114,7 @@ jobs:
         run: cd packages/agent && npm publish --access public
 
   publish-docker:
+    if: ${{ !inputs.skip_docker }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -115,11 +135,15 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract version from tag
+      - name: Resolve version
         id: version
         run: |
-          # agent-v0.1.0 → 0.1.0
-          echo "version=${GITHUB_REF_NAME#agent-v}" >> $GITHUB_OUTPUT
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            # agent-v0.1.0 → 0.1.0
+            echo "version=${GITHUB_REF_NAME#agent-v}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build and push
         uses: docker/build-push-action@v6
