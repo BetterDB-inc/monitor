@@ -92,7 +92,7 @@ docker run -d --name betterdb-agent \
 Requires Node.js 20+.
 
 ```bash
-npx betterdb-agent \
+npx @betterdb/agent \
   --token "<your-token>" \
   --cloud-url "wss://<your-workspace>.app.betterdb.com/agent/ws" \
   --valkey-host "<your-valkey-host>" \
@@ -102,7 +102,7 @@ npx betterdb-agent \
 With all options:
 
 ```bash
-npx betterdb-agent \
+npx @betterdb/agent \
   --token "<your-token>" \
   --cloud-url "wss://<your-workspace>.app.betterdb.com/agent/ws" \
   --valkey-host "<your-valkey-host>" \
@@ -212,5 +212,5 @@ docker rm -f betterdb-agent
 
 ```bash
 # npm
-npx betterdb-agent@latest --version
+npx @betterdb/agent@latest --version
 ```

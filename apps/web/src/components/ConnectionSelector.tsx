@@ -228,21 +228,19 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               <div className="flex border-b">
                 <button
                   onClick={() => setAddTab('direct')}
-                  className={`flex-1 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                    addTab === 'direct'
-                      ? 'border-primary text-primary'
-                      : 'border-transparent text-muted-foreground hover:text-foreground'
-                  }`}
+                  className={`flex-1 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${addTab === 'direct'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                    }`}
                 >
                   Direct Connection
                 </button>
                 <button
                   onClick={() => setAddTab('agent')}
-                  className={`flex-1 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                    addTab === 'agent'
-                      ? 'border-primary text-primary'
-                      : 'border-transparent text-muted-foreground hover:text-foreground'
-                  }`}
+                  className={`flex-1 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${addTab === 'agent'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                    }`}
                 >
                   Via Agent
                 </button>
@@ -399,9 +397,8 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               {connections.map((conn) => (
                 <div
                   key={conn.id}
-                  className={`flex items-center justify-between p-3 border rounded-md ${
-                    currentConnection?.id === conn.id ? 'border-primary bg-primary/5' : ''
-                  }`}
+                  className={`flex items-center justify-between p-3 border rounded-md ${currentConnection?.id === conn.id ? 'border-primary bg-primary/5' : ''
+                    }`}
                 >
                   <div className="flex items-center gap-3 min-w-0">
                     <span
@@ -631,7 +628,7 @@ function AgentTab({
 
           <h4 className="text-xs font-medium mb-1">Run the agent with Docker:</h4>
           <pre className="text-xs bg-background p-2 rounded border overflow-x-auto">
-{`docker run -d \\
+            {`docker run -d \\
   --name betterdb-agent \\
   -e VALKEY_HOST=your-valkey-host \\
   -e VALKEY_PORT=6379 \\
@@ -642,7 +639,7 @@ function AgentTab({
 
           <h4 className="text-xs font-medium mt-3 mb-1">Or run with npx:</h4>
           <pre className="text-xs bg-background p-2 rounded border overflow-x-auto">
-{`npx betterdb-agent \\
+            {`npx @betterdb/agent \\
   --valkey-host your-valkey-host \\
   --valkey-port 6379 \\
   --cloud-url wss://${cloudHost}/agent/ws \\
