@@ -55,11 +55,22 @@ export function KeyAnalytics() {
     refetchKey: currentConnection?.id,
   });
 
-  const { data: patterns, loading: patternsLoading } = usePolling({
+  const { data: rawPatterns, loading: patternsLoading } = usePolling({
     fetcher: () => keyAnalyticsApi.getPatterns({ limit: 100 }),
     interval: 60000,
     refetchKey: currentConnection?.id,
   });
+
+  // Deduplicate: keep only the latest snapshot per pattern (results are ordered by timestamp DESC)
+  const patterns = useMemo(() => {
+    if (!rawPatterns) return null;
+    const seen = new Set<string>();
+    return rawPatterns.filter((p) => {
+      if (seen.has(p.pattern)) return false;
+      seen.add(p.pattern);
+      return true;
+    });
+  }, [rawPatterns]);
 
   const [isCollecting, setIsCollecting] = useState(false);
 
