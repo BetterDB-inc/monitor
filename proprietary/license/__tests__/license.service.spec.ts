@@ -122,6 +122,70 @@ describe('LicenseService', () => {
     });
   });
 
+  describe('sendStartupError', () => {
+    it('should send correct payload shape with eventType startup_error', async () => {
+      mockFetch.mockResolvedValue({ ok: true });
+
+      await service.sendStartupError('connect ECONNREFUSED 127.0.0.1:6379', 'connection_refused');
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, options] = mockFetch.mock.calls[0];
+      const body = JSON.parse(options.body);
+
+      expect(body).toMatchObject({
+        licenseKey: expect.any(String),
+        eventType: 'startup_error',
+        errorMessage: 'connect ECONNREFUSED 127.0.0.1:6379',
+        errorCategory: 'connection_refused',
+        instanceId: expect.any(String),
+        version: expect.any(String),
+        nodeVersion: expect.any(String),
+        platform: expect.any(String),
+        arch: expect.any(String),
+        uptime: expect.any(Number),
+      });
+    });
+
+    it('should truncate messages longer than 500 chars', async () => {
+      mockFetch.mockResolvedValue({ ok: true });
+      const longMessage = 'x'.repeat(1000);
+
+      await service.sendStartupError(longMessage, 'unknown');
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.errorMessage).toHaveLength(500);
+    });
+
+    it('should not throw when fetch fails', async () => {
+      mockFetch.mockRejectedValue(new Error('Network unreachable'));
+
+      await expect(
+        service.sendStartupError('some error', 'unknown'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('should send even when BETTERDB_TELEMETRY=false', async () => {
+      process.env.BETTERDB_TELEMETRY = 'false';
+
+      // Recreate service with telemetry disabled
+      const module = await Test.createTestingModule({
+        providers: [
+          LicenseService,
+          { provide: ConfigService, useValue: { get: jest.fn() } },
+        ],
+      }).compile();
+      const telemetryOffService = module.get<LicenseService>(LicenseService);
+
+      mockFetch.mockResolvedValue({ ok: true });
+
+      await telemetryOffService.sendStartupError('crash', 'unknown');
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.eventType).toBe('startup_error');
+    });
+  });
+
   describe('keyed validation', () => {
     let keyedService: LicenseService;
 
