@@ -15,6 +15,7 @@ import {
   SlotStats,
   ConfigGetResponse,
 } from '../types/metrics.types';
+import type { KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 
 // Re-export types that are commonly needed alongside DatabasePort
 export { SlowLogEntry, CommandLogEntry, CommandLogType };
@@ -68,5 +69,6 @@ export interface DatabasePort {
   getConfigValues(pattern: string): Promise<ConfigGetResponse>;
   getDbSize(): Promise<number>;
   getLastSaveTime(): Promise<number>;
+  collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult>;
   getClient(): Valkey;
 }

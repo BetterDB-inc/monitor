@@ -22,6 +22,8 @@ import {
   SlotStats,
   ConfigGetResponse,
 } from '../../common/types/metrics.types';
+import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyPatternData } from '@betterdb/shared';
+import { extractPattern } from '@betterdb/shared';
 
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
@@ -459,6 +461,87 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   async getLastSaveTime(): Promise<number> {
     return await this.client.lastsave();
+  }
+
+  async collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult> {
+    const dbSize = await this.client.dbsize();
+    if (dbSize === 0) {
+      return { dbSize: 0, scanned: 0, patterns: [] };
+    }
+
+    const patternsMap = new Map<string, KeyPatternData>();
+    let cursor = '0';
+    let scanned = 0;
+
+    do {
+      const [newCursor, keys] = await this.client.scan(cursor, 'COUNT', options.scanBatchSize);
+      cursor = newCursor;
+
+      for (const key of keys) {
+        if (scanned >= options.sampleSize) break;
+        scanned++;
+
+        const pattern = extractPattern(key);
+        const stats = patternsMap.get(pattern) || {
+          pattern,
+          count: 0,
+          totalMemory: 0,
+          maxMemory: 0,
+          totalIdleTime: 0,
+          withTtl: 0,
+          withoutTtl: 0,
+          ttlValues: [],
+          accessFrequencies: [],
+        };
+
+        try {
+          const pipeline = this.client.pipeline();
+          pipeline.memory('USAGE', key);
+          pipeline.object('IDLETIME', key);
+          pipeline.object('FREQ', key);
+          pipeline.ttl(key);
+
+          const results = (await pipeline.exec()) || [];
+          const [memResult, idleResult, freqResult, ttlResult] = results;
+
+          stats.count++;
+
+          if (memResult && memResult[1] !== null) {
+            const mem = memResult[1] as number;
+            stats.totalMemory += mem;
+            if (mem > stats.maxMemory) stats.maxMemory = mem;
+          }
+
+          if (idleResult && idleResult[1] !== null) {
+            stats.totalIdleTime += idleResult[1] as number;
+          }
+
+          if (freqResult && freqResult[1] !== null) {
+            stats.accessFrequencies.push(freqResult[1] as number);
+          }
+
+          const ttl = ttlResult?.[1] as number;
+          if (ttl > 0) {
+            stats.withTtl++;
+            stats.ttlValues.push(ttl);
+          } else {
+            stats.withoutTtl++;
+          }
+
+          patternsMap.set(pattern, stats);
+        } catch (err) {
+          this.logger.debug(`Failed to inspect key ${key}: ${err}`);
+        }
+      }
+
+      if (scanned >= options.sampleSize) break;
+    } while (cursor !== '0');
+
+    return {
+      dbSize,
+      scanned,
+      patterns: Array.from(patternsMap.values()),
+    };
   }
 
   getClient(): Valkey {

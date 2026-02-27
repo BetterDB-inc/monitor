@@ -57,3 +57,26 @@ export interface PatternTrend {
   memoryBytes: number;
   staleCount: number;
 }
+
+export interface KeyAnalyticsOptions {
+  sampleSize: number;
+  scanBatchSize: number;
+}
+
+export interface KeyPatternData {
+  pattern: string;
+  count: number;
+  totalMemory: number;
+  maxMemory: number;
+  totalIdleTime: number;
+  withTtl: number;
+  withoutTtl: number;
+  ttlValues: number[];
+  accessFrequencies: number[];
+}
+
+export interface KeyAnalyticsResult {
+  dbSize: number;
+  scanned: number;
+  patterns: KeyPatternData[];
+}

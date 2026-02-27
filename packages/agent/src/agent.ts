@@ -104,7 +104,7 @@ export class Agent {
 
     // Build capabilities list
     this.capabilities = ['PING', 'INFO', 'DBSIZE', 'SLOWLOG', 'CLIENT', 'ACL',
-      'CONFIG', 'MEMORY', 'LATENCY', 'ROLE', 'LASTSAVE', 'COMMAND'];
+      'CONFIG', 'MEMORY', 'LATENCY', 'ROLE', 'LASTSAVE', 'COMMAND', 'KEY_ANALYTICS'];
 
     if (isValkey) {
       const major = parseInt(this.valkeyVersion.split('.')[0] || '0', 10);

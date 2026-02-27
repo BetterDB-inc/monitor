@@ -56,98 +56,21 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     const startTime = Date.now();
 
     try {
-      const client = ctx.client.getClient();
-      const dbSize = await client.dbsize();
+      const result = await ctx.client.collectKeyAnalytics({
+        sampleSize: this.sampleSize,
+        scanBatchSize: this.scanBatchSize,
+      });
 
-      if (dbSize === 0) {
+      if (result.dbSize === 0) {
         this.logger.log('No keys found in database, skipping analytics');
         return;
       }
 
-      const patterns = new Map<
-        string,
-        {
-          count: number;
-          totalMemory: number;
-          maxMemory: number;
-          totalIdleTime: number;
-          withTtl: number;
-          withoutTtl: number;
-          ttlValues: number[];
-          accessFrequencies: number[];
-        }
-      >();
-
-      let cursor = '0';
-      let scanned = 0;
-
-      do {
-        const [newCursor, keys] = await client.scan(cursor, 'COUNT', this.scanBatchSize);
-        cursor = newCursor;
-
-        for (const key of keys) {
-          if (scanned >= this.sampleSize) break;
-          scanned++;
-
-          const pattern = this.extractPattern(key);
-          const stats = patterns.get(pattern) || {
-            count: 0,
-            totalMemory: 0,
-            maxMemory: 0,
-            totalIdleTime: 0,
-            withTtl: 0,
-            withoutTtl: 0,
-            ttlValues: [],
-            accessFrequencies: [],
-          };
-
-          try {
-            const pipeline = client.pipeline();
-            pipeline.memory('USAGE', key);
-            pipeline.object('IDLETIME', key);
-            pipeline.object('FREQ', key);
-            pipeline.ttl(key);
-
-            const results = (await pipeline.exec()) || [];
-            const [memResult, idleResult, freqResult, ttlResult] = results;
-
-            stats.count++;
-
-            if (memResult && memResult[1] !== null) {
-              const mem = memResult[1] as number;
-              stats.totalMemory += mem;
-              if (mem > stats.maxMemory) stats.maxMemory = mem;
-            }
-
-            if (idleResult && idleResult[1] !== null) {
-              stats.totalIdleTime += idleResult[1] as number;
-            }
-
-            if (freqResult && freqResult[1] !== null) {
-              stats.accessFrequencies.push(freqResult[1] as number);
-            }
-
-            const ttl = ttlResult?.[1] as number;
-            if (ttl > 0) {
-              stats.withTtl++;
-              stats.ttlValues.push(ttl);
-            } else {
-              stats.withoutTtl++;
-            }
-
-            patterns.set(pattern, stats);
-          } catch (err) {
-            this.logger.debug(`Failed to inspect key ${key}: ${err}`);
-          }
-        }
-
-        if (scanned >= this.sampleSize) break;
-      } while (cursor !== '0');
-
-      const samplingRatio = scanned / dbSize;
+      const samplingRatio = result.scanned / result.dbSize;
       const snapshots: KeyPatternSnapshot[] = [];
 
-      for (const [pattern, stats] of patterns.entries()) {
+      for (const stats of result.patterns) {
+        const pattern = stats.pattern;
         const avgMemory = stats.count > 0 ? Math.round(stats.totalMemory / stats.count) : 0;
         const avgIdleTime = stats.count > 0 ? Math.round(stats.totalIdleTime / stats.count) : 0;
         const avgFreq =
@@ -204,8 +127,8 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
 
       const duration = Date.now() - startTime;
       this.logger.log(
-        `Key Analytics (${ctx.connectionName}): sampled ${scanned}/${dbSize} keys (${(samplingRatio * 100).toFixed(1)}%), ` +
-        `found ${patterns.size} patterns in ${duration}ms`,
+        `Key Analytics (${ctx.connectionName}): sampled ${result.scanned}/${result.dbSize} keys (${(samplingRatio * 100).toFixed(1)}%), ` +
+        `found ${result.patterns.length} patterns in ${duration}ms`,
       );
     } catch (error) {
       this.logger.error(`Error collecting key analytics for ${ctx.connectionName}:`, error);
@@ -213,18 +136,6 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     } finally {
       this.isRunning.set(ctx.connectionId, false);
     }
-  }
-
-  private extractPattern(key: string): string {
-    const parts = key.split(/[:._-]/);
-    const patternParts = parts.map((part) => {
-      if (/^\d+$/.test(part)) return '*';
-      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(part)) return '*';
-      if (/^[0-9a-f]{24}$/i.test(part)) return '*';
-      if (/^[0-9a-f]{32,}$/i.test(part)) return '*';
-      return part;
-    });
-    return patternParts.join(':');
   }
 
   async getSummary(startTime?: number, endTime?: number, connectionId?: string) {
