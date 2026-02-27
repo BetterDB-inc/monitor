@@ -17,6 +17,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private configs = new Map<string, DatabaseConnectionConfig>();
   private defaultId: string | null = null;
   private readonly encryption: EnvelopeEncryptionService | null;
+  private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -79,7 +80,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         await this.createEnvDefaultConnection();
         this.logger.log('Successfully connected to database from environment configuration');
       } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : error;
+        const errorMsg = error instanceof Error ? error.message : String(error);
         this.logger.error(
           `Failed to connect to configured database (${dbConfig?.host}:${dbConfig?.port}): ${errorMsg}`
         );
@@ -87,6 +88,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           'App started without connections. Please verify your DB_HOST, DB_PORT, and other database ' +
           'environment variables are correct, or add a connection via the UI in Settings.'
         );
+        this.startupConnectionErrors.push({
+          name: 'Default',
+          host: dbConfig?.host || 'unknown',
+          port: dbConfig?.port || 0,
+          error: errorMsg,
+        });
       }
     } else {
       for (const config of savedConnections) {
@@ -141,6 +148,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           if (config.isDefault) {
             this.defaultId = config.id;
           }
+
+          this.startupConnectionErrors.push({
+            name: config.name,
+            host: config.host,
+            port: config.port,
+            error: errorMsg,
+          });
         }
       }
 
@@ -602,6 +616,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
 
     this.logger.log(`Removed agent connection: ${id}`);
+  }
+
+  getStartupConnectionErrors(): Array<{ name: string; host: string; port: number; error: string }> {
+    return this.startupConnectionErrors;
   }
 
   isEnvDefault(id: string): boolean {

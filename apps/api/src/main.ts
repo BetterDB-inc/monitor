@@ -7,6 +7,7 @@ import { readFileSync } from 'fs';
 import fastifyStatic from '@fastify/static';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
+import { categorizeError } from './common/utils/error-categorizer';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
@@ -80,6 +81,37 @@ async function bootstrap(): Promise<void> {
       console.warn('[CloudAuth] Failed to register middleware — proprietary module not found');
     }
   }
+
+  // Register startup error handlers — report fatal errors within the first 60s
+  let licenseService: { sendStartupError(msg: string, cat: string): Promise<void> } | null = null;
+  try {
+    const { LicenseService } = require('../../../proprietary/license/license.service');
+    licenseService = app.get(LicenseService);
+  } catch {
+    // LicenseService not available — skip startup error reporting
+  }
+
+  const reportStartupErrorAndExit = async (error: Error) => {
+    console.error(error);
+    if (process.uptime() <= 60 && licenseService) {
+      const category = categorizeError(error);
+      try {
+        await licenseService.sendStartupError(error.message, category);
+      } catch {
+        // Best-effort
+      }
+    }
+    process.exit(1);
+  };
+
+  process.on('uncaughtException', (error: Error) => {
+    reportStartupErrorAndExit(error);
+  });
+
+  process.on('unhandledRejection', (reason: unknown) => {
+    const error = reason instanceof Error ? reason : new Error(String(reason));
+    reportStartupErrorAndExit(error);
+  });
 
   // Enable validation pipes globally
   app.useGlobalPipes(new ValidationPipe({
@@ -163,6 +195,25 @@ async function bootstrap(): Promise<void> {
     console.log('Serving frontend from /public');
   }
   console.log(`API documentation available at http://localhost:${port}/docs`);
+
+  // Report startup connection errors to telemetry (best-effort, non-blocking)
+  if (licenseService) {
+    try {
+      const { ConnectionRegistry } = require('./connections/connection-registry.service');
+      const registry = app.get(ConnectionRegistry);
+      const connectionErrors = registry.getStartupConnectionErrors();
+      for (const connErr of connectionErrors) {
+        const category = categorizeError(new Error(connErr.error));
+        console.error(`[Startup Error] ${category}: ${connErr.name} (${connErr.host}:${connErr.port}) — ${connErr.error}`);
+        licenseService.sendStartupError(
+          `${connErr.name} (${connErr.host}:${connErr.port}): ${connErr.error}`,
+          category,
+        ).catch(() => { /* best-effort */ });
+      }
+    } catch {
+      // ConnectionRegistry not available — skip
+    }
+  }
 
   // Show GitHub star request
   console.log('');

@@ -340,6 +340,44 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Report a startup error to the entitlement server.
+   * Bypasses the telemetryEnabled check — startup errors are always sent
+   * because users who hit fatal errors and bail are the ones we most need
+   * visibility into, and they never get a chance to opt in.
+   */
+  async sendStartupError(errorMessage: string, errorCategory: string): Promise<void> {
+    const payload = {
+      licenseKey: this.licenseKey || '',
+      instanceId: this.instanceId,
+      eventType: 'startup_error',
+      errorMessage: errorMessage.slice(0, 500),
+      errorCategory,
+      deploymentMode: process.env.CLOUD_MODE === 'true' ? 'cloud' as const : 'self-hosted' as const,
+      version: process.env.APP_VERSION || process.env.npm_package_version || 'unknown',
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      uptime: process.uptime(),
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    try {
+      await fetch(this.entitlementUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch {
+      // Best-effort — process is about to exit anyway
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /**
    * Log update status to console
    */
   private logUpdateStatus(): void {
