@@ -22,7 +22,7 @@ import type {
   SlotStats,
   ConfigGetResponse,
 } from '../../apps/api/src/common/types/metrics.types';
-import type { AgentHelloMessage } from '@betterdb/shared';
+import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 
 const COMMAND_TIMEOUT_MS = 15000;
 
@@ -418,6 +418,11 @@ export class AgentDatabaseAdapter implements DatabasePort {
 
   async getLastSaveTime(): Promise<number> {
     return (await this.sendCommand('LASTSAVE')) as number;
+  }
+
+  async collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult> {
+    const response = await this.sendCommand('COLLECT_KEY_ANALYTICS', [JSON.stringify(options)]);
+    return JSON.parse(response as string);
   }
 
   getClient(): never {

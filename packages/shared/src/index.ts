@@ -9,5 +9,6 @@ export * from './types/anomaly';
 export * from './types/connections';
 export * from './types/version.types';
 export * from './types/agent-protocol';
+export * from './utils/key-patterns';
 export * from './license/index';
 export * from './webhooks/index';
