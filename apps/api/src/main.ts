@@ -92,15 +92,13 @@ async function bootstrap(): Promise<void> {
   }
 
   const reportStartupErrorAndExit = async (error: Error) => {
-    if (process.uptime() <= 60) {
+    console.error(error);
+    if (process.uptime() <= 60 && licenseService) {
       const category = categorizeError(error);
-      console.error(`[Startup Error] ${category}: ${error.message}`);
-      if (licenseService) {
-        try {
-          await licenseService.sendStartupError(error.message, category);
-        } catch {
-          // Best-effort
-        }
+      try {
+        await licenseService.sendStartupError(error.message, category);
+      } catch {
+        // Best-effort
       }
     }
     process.exit(1);
