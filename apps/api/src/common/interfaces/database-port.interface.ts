@@ -29,6 +29,7 @@ export interface DatabaseCapabilities {
   hasLatencyMonitor: boolean;
   hasAclLog: boolean;
   hasMemoryDoctor: boolean;
+  hasConfig: boolean;
 }
 
 export interface DatabasePort {

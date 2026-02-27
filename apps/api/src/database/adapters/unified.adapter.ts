@@ -124,6 +124,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
     const redisSupportsSlotStats = !isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 2));
 
+    // Probe whether CONFIG is available (disabled on managed services like AWS ElastiCache)
+    let hasConfig = true;
+    try {
+      await this.client.config('GET', 'maxmemory');
+    } catch {
+      hasConfig = false;
+      this.logger.warn('CONFIG command is not available (common on managed Redis services like AWS ElastiCache). Config monitoring will be disabled.');
+    }
+
     this.capabilities = {
       dbType: isValkey ? 'valkey' : 'redis',
       version,
@@ -133,6 +142,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       hasLatencyMonitor: true,
       hasAclLog: majorVersion >= 6,
       hasMemoryDoctor: true,
+      hasConfig,
     };
   }
 

@@ -23,6 +23,7 @@ jest.mock('../../database/adapters/unified.adapter', () => ({
       hasLatencyMonitor: true,
       hasAclLog: true,
       hasMemoryDoctor: true,
+      hasConfig: true,
     }),
     _config: config,
   })),
