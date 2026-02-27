@@ -32,6 +32,7 @@ describe('ConfigMonitorService', () => {
         hasLatencyMonitor: true,
         hasAclLog: true,
         hasMemoryDoctor: true,
+        hasConfig: true,
       }),
       getAclUsers: jest.fn().mockResolvedValue([]),
       getAclList: jest.fn().mockResolvedValue([]),
@@ -325,10 +326,46 @@ describe('ConfigMonitorService', () => {
         hasLatencyMonitor: true,
         hasAclLog: false,
         hasMemoryDoctor: true,
+        hasConfig: true,
       });
 
       // onModuleInit should not throw
       await expect(service.onModuleInit()).resolves.not.toThrow();
+    });
+
+    it('should skip config monitoring when CONFIG is not available', async () => {
+      dbClient.getCapabilities.mockReturnValue({
+        dbType: 'valkey',
+        version: '8.0.0',
+        hasCommandLog: true,
+        hasSlotStats: true,
+        hasClusterSlotStats: true,
+        hasLatencyMonitor: true,
+        hasAclLog: true,
+        hasMemoryDoctor: true,
+        hasConfig: false,
+      });
+
+      // ACL works fine
+      dbClient.getAclUsers
+        .mockResolvedValueOnce(['default'])
+        .mockResolvedValueOnce(['default', 'newuser']);
+      dbClient.getAclList
+        .mockResolvedValueOnce(['user default on >password ~*'])
+        .mockResolvedValueOnce([
+          'user default on >password ~*',
+          'user newuser on >password ~*',
+        ]);
+
+      // captureInitialState should succeed without calling getConfigValues
+      await (service as any).captureInitialState(mockContext);
+      expect(dbClient.getConfigValues).not.toHaveBeenCalled();
+
+      // ACL changes should still be detected
+      await (service as any).checkAclChanges(mockContext);
+      expect(webhookEventsEnterpriseService.dispatchAclModified).toHaveBeenCalledWith(
+        expect.objectContaining({ changeType: 'user_added', affectedUser: 'newuser' }),
+      );
     });
   });
 

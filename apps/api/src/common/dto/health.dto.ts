@@ -28,6 +28,9 @@ export class DatabaseCapabilitiesDto implements DatabaseCapabilities {
 
   @ApiProperty({ description: 'Whether MEMORY DOCTOR is supported', example: true })
   hasMemoryDoctor: boolean;
+
+  @ApiProperty({ description: 'Whether CONFIG command is available (disabled on some managed services like AWS ElastiCache)', example: true })
+  hasConfig: boolean;
 }
 
 /**

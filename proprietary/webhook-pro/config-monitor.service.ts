@@ -65,10 +65,11 @@ export class ConfigMonitorService extends MultiConnectionPoller implements OnMod
     }
 
     try {
-      await Promise.all([
-        this.checkAclChanges(ctx),
-        this.checkConfigChanges(ctx),
-      ]);
+      const checks: Promise<void>[] = [this.checkAclChanges(ctx)];
+      if (capabilities.hasConfig) {
+        checks.push(this.checkConfigChanges(ctx));
+      }
+      await Promise.all(checks);
     } catch (error) {
       this.logger.error(`Failed to check for changes for ${ctx.connectionName}:`, error);
     }
@@ -91,16 +92,25 @@ export class ConfigMonitorService extends MultiConnectionPoller implements OnMod
       }
       this.previousAclList.set(ctx.connectionId, aclMap);
 
-      // Capture config
-      const config = await ctx.client.getConfigValues('*');
-      const configMap = new Map<string, string>();
-      for (const [key, value] of Object.entries(config)) {
-        configMap.set(key, String(value));
+      // Capture config (skip if CONFIG command is not available)
+      const capabilities = ctx.client.getCapabilities();
+      let configSize = 0;
+      if (capabilities.hasConfig) {
+        const config = await ctx.client.getConfigValues('*');
+        const configMap = new Map<string, string>();
+        for (const [key, value] of Object.entries(config)) {
+          configMap.set(key, String(value));
+        }
+        this.previousConfig.set(ctx.connectionId, configMap);
+        configSize = configMap.size;
+      } else {
+        this.logger.warn(
+          `CONFIG command not available for ${ctx.connectionName}, config change monitoring will be skipped`
+        );
       }
-      this.previousConfig.set(ctx.connectionId, configMap);
 
       this.logger.log(
-        `Initial state captured for ${ctx.connectionName}: ${aclUsers.length} ACL users, ${configMap.size} config keys`
+        `Initial state captured for ${ctx.connectionName}: ${aclUsers.length} ACL users, ${configSize} config keys`
       );
     } catch (error) {
       this.logger.error(`Failed to capture initial state for ${ctx.connectionName}:`, error);

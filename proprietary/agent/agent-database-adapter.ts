@@ -50,6 +50,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
       hasLatencyMonitor: agentHello.capabilities.includes('LATENCY'),
       hasAclLog: agentHello.capabilities.includes('ACL'),
       hasMemoryDoctor: agentHello.capabilities.includes('MEMORY'),
+      hasConfig: agentHello.capabilities.includes('CONFIG'),
     };
 
     ws.on('message', (data) => {
