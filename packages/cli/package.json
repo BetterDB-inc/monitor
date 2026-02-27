@@ -1,6 +1,6 @@
 {
   "name": "@betterdb/monitor",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Monitor and observe your Valkey/Redis databases",
   "bin": {
     "betterdb": "./bin/betterdb.js"
