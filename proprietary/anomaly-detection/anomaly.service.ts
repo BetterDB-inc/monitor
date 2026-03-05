@@ -134,7 +134,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       [MetricType.BLOCKED_CLIENTS, (info) => this.parseNumber(info.blocked_clients)],
       [MetricType.KEYSPACE_MISSES, (info) => this.parseNumber(info.keyspace_misses)],
       [MetricType.FRAGMENTATION_RATIO, (info) => {
-        return this.parseNumber(info['allocator_frag_ratio']) ?? this.parseNumber(info['mem_fragmentation_ratio']);
+        return this.parseNumber(info['allocator_frag_ratio']) || this.parseNumber(info['mem_fragmentation_ratio']);
       }],
     ]);
   }

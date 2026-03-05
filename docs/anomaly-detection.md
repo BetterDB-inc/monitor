@@ -371,7 +371,7 @@ Some metrics have custom thresholds beyond Z-score:
 | Metric | Warning Threshold | Critical Threshold | Consecutive Required | Cooldown |
 |--------|-------------------|-------------------|---------------------|----------|
 | `acl_denied` | 10 events | 50 events | 2 | 30s |
-| `slowlog_last_id` | - | - | 2 | 30s |
+| `slowlog_last_id` | - | - | 1 | 30s |
 | `memory_used` | - | - | 3 | 60s |
 | `evicted_keys` | - | - | 2 | 30s |
 | `fragmentation_ratio` | 1.5 | 2.0 | 5 | 120s |
