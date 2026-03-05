@@ -225,7 +225,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         let feedValue = value;
         if (metricType === MetricType.SLOWLOG_LAST_ID) {
           const lastId = this.lastSlowlogId.get(ctx.connectionId);
-          const delta = value - (lastId ?? value);
+          const delta = Math.max(0, value - (lastId ?? value));
           this.lastSlowlogId.set(ctx.connectionId, value);
           feedValue = delta;
         }
