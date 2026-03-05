@@ -170,6 +170,32 @@ describe('AnomalyService', () => {
       expect(fragBuffer.getLatest()).toBe(1.5);
     });
 
+    it('falls back to mem_fragmentation_ratio when allocator_frag_ratio is non-numeric', async () => {
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: {
+          used_memory: '1000000',
+          allocator_frag_ratio: 'nan',
+          mem_fragmentation_ratio: '1.8',
+        },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+      });
+
+      await poll();
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      const fragBuffer = buffers.get(MetricType.FRAGMENTATION_RATIO);
+      expect(fragBuffer.getLatest()).toBe(1.8);
+    });
+
     it('skips NaN/non-numeric values via parseNumber', async () => {
       dbClient.getInfoParsed = jest.fn().mockResolvedValue({
         server: { role: 'master' },
