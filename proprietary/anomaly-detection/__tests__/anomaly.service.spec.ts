@@ -216,6 +216,22 @@ describe('AnomalyService', () => {
       const buf = buffers.get(MetricType.SLOWLOG_LAST_ID);
       expect(buf.getLatest()).toBe(0); // clamped via Math.max(0, ...)
     });
+
+    it('uses a low-threshold spike detector config for SLOWLOG_LAST_ID', async () => {
+      slowLogAnalytics.getLastSeenId.mockReturnValue(100);
+      await poll();
+      const config = (service as any).detectors
+        .get('conn-1')
+        .get(MetricType.SLOWLOG_LAST_ID)
+        .getConfig();
+      expect(config.consecutiveRequired).toBe(2);
+      expect(config.cooldownMs).toBeLessThanOrEqual(30000);
+    });
+
+    it('calls getLastSeenId with the correct connectionId', async () => {
+      await poll();
+      expect(slowLogAnalytics.getLastSeenId).toHaveBeenCalledWith('conn-1');
+    });
   });
 
   // ─── Replication Role State-Change Detection ────────────────────────────
@@ -408,7 +424,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.SLOWLOG_LAST_ID,
+        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);

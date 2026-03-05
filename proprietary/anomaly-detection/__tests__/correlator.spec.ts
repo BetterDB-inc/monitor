@@ -86,6 +86,19 @@ describe('Correlator', () => {
       expect(groups[0].pattern).toBe(AnomalyPattern.SLOW_QUERIES);
     });
 
+    it('does NOT match on legacy SLOWLOG_COUNT metric', () => {
+      const anomaly = makeAnomaly({
+        metricType: MetricType.SLOWLOG_COUNT,
+        anomalyType: AnomalyType.SPIKE,
+      });
+
+      const groups = correlator.correlate([anomaly]);
+      const slowQueryGroups = groups.filter(
+        (g) => g.pattern === AnomalyPattern.SLOW_QUERIES,
+      );
+      expect(slowQueryGroups).toHaveLength(0);
+    });
+
     it('has updated diagnosis text about rate spike', () => {
       const anomaly = makeAnomaly({
         metricType: MetricType.SLOWLOG_LAST_ID,

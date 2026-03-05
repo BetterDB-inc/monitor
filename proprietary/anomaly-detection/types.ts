@@ -11,6 +11,8 @@ export enum MetricType {
   KEYSPACE_MISSES = 'keyspace_misses',
   FRAGMENTATION_RATIO = 'fragmentation_ratio',
   REPLICATION_ROLE = 'replication_role',
+  /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
+  SLOWLOG_COUNT = 'slowlog_count',
 }
 
 export enum AnomalySeverity {
