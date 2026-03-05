@@ -134,7 +134,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       [MetricType.BLOCKED_CLIENTS, (info) => this.parseNumber(info.blocked_clients)],
       [MetricType.KEYSPACE_MISSES, (info) => this.parseNumber(info.keyspace_misses)],
       [MetricType.FRAGMENTATION_RATIO, (info) => {
-        const v = info['allocator_frag_ratio'] ?? info['mem_fragmentation_ratio'];
+        const v = info['allocator_frag_ratio'] || info['mem_fragmentation_ratio'];
         return this.parseNumber(v);
       }],
     ]);
@@ -244,7 +244,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           detectors.set(MetricType.SLOWLOG_LAST_ID, new SpikeDetector(MetricType.SLOWLOG_LAST_ID, {
             warningZScore: 1.5,
             criticalZScore: 2.5,
-            consecutiveRequired: 2,
+            consecutiveRequired: 1,
             cooldownMs: 30000,
           }));
         }
