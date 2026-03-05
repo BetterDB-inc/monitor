@@ -201,7 +201,7 @@ Real-time anomaly detection system metrics.
 
 **Label Values**:
 - `severity`: `info`, `warning`, `critical`
-- `metric_type`: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_count`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`
+- `metric_type`: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`, `replication_role`
 - `anomaly_type`: `spike`, `drop`
 
 #### Correlation Metrics
@@ -212,7 +212,7 @@ Real-time anomaly detection system metrics.
 | `betterdb_correlated_groups_by_severity` | gauge | `severity` | Groups in last hour by severity | `8` |
 | `betterdb_correlated_groups_by_pattern` | gauge | `pattern` | Groups in last hour by pattern | `5` |
 
-**Pattern Values**: `traffic_burst`, `batch_job`, `memory_pressure`, `slow_queries`, `auth_attack`, `connection_leak`, `cache_thrashing`, `unknown`
+**Pattern Values**: `traffic_burst`, `batch_job`, `memory_pressure`, `slow_queries`, `auth_attack`, `connection_leak`, `cache_thrashing`, `node_failover`, `unknown`
 
 #### Buffer Stats Metrics
 

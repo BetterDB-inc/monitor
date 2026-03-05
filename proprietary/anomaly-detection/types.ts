@@ -4,12 +4,13 @@ export enum MetricType {
   MEMORY_USED = 'memory_used',
   INPUT_KBPS = 'input_kbps',
   OUTPUT_KBPS = 'output_kbps',
-  SLOWLOG_COUNT = 'slowlog_count',
+  SLOWLOG_LAST_ID = 'slowlog_last_id',
   ACL_DENIED = 'acl_denied',
   EVICTED_KEYS = 'evicted_keys',
   BLOCKED_CLIENTS = 'blocked_clients',
   KEYSPACE_MISSES = 'keyspace_misses',
   FRAGMENTATION_RATIO = 'fragmentation_ratio',
+  REPLICATION_ROLE = 'replication_role',
 }
 
 export enum AnomalySeverity {
@@ -31,6 +32,7 @@ export enum AnomalyPattern {
   AUTH_ATTACK = 'auth_attack',
   CONNECTION_LEAK = 'connection_leak',
   CACHE_THRASHING = 'cache_thrashing',
+  NODE_FAILOVER = 'node_failover',
   UNKNOWN = 'unknown',
 }
 

@@ -40,9 +40,21 @@ export class Correlator {
         ],
       },
       {
+        pattern: AnomalyPattern.NODE_FAILOVER,
+        requiredMetrics: [MetricType.REPLICATION_ROLE],
+        diagnosis: 'Node failover detected — this instance transitioned from master to replica',
+        recommendations: [
+          'Verify the new primary is healthy and accepting writes',
+          'Check replication lag on the new primary',
+          'Review application connection strings for failover handling',
+          'Inspect cluster logs for the cause of the failover',
+          'Confirm no split-brain scenario exists',
+        ],
+      },
+      {
         pattern: AnomalyPattern.SLOW_QUERIES,
-        requiredMetrics: [MetricType.SLOWLOG_COUNT],
-        diagnosis: 'Slow query spike detected',
+        requiredMetrics: [MetricType.SLOWLOG_LAST_ID],
+        diagnosis: 'Slow query rate spike detected — elevated rate of new slow queries per interval',
         recommendations: [
           'Review slow log entries to identify problematic commands',
           'Check for operations on large data structures',

@@ -155,13 +155,15 @@ Each pattern includes:
 
 ### SLOW_QUERIES
 
-**Triggers**: Spike in `slowlog_count` or `blocked_clients` metrics
+**Triggers**: Spike in `slowlog_last_id` (rate of new slow queries per interval) or `blocked_clients` metrics
 
-**What it means**: Unusual number of slow queries, indicating:
+**What it means**: Elevated rate of new slow queries, indicating:
 - Operations on large data structures
 - Blocking operations (BLPOP, BRPOP)
 - Inefficient command patterns
 - Potential deadlocks
+
+**Note**: Previous versions used `SLOWLOG LEN` (`slowlog_count`), which is capped at `slowlog-max-len` (default 128). Once the buffer is full, the count saturates and the detector goes blind. The current implementation uses `slowlog_last_id` — a monotonically increasing counter — and computes the delta per poll interval to determine how many new slow queries occurred.
 
 **Recommended actions**:
 - Review slow log entries to identify problematic commands
@@ -169,7 +171,7 @@ Each pattern includes:
 - Consider optimizing data access patterns
 - Monitor blocked clients for potential deadlocks
 
-**Example scenario**: Application starts scanning large hash keys, causing slowlog to grow from 10 to 100 entries in 30 seconds.
+**Example scenario**: Application starts scanning large hash keys, causing 50+ new slow queries per second (detected via `slowlog_last_id` delta).
 
 ---
 
@@ -277,6 +279,29 @@ Each pattern includes:
 
 ---
 
+### NODE_FAILOVER
+
+**Triggers**: Replication role state change from `master` to `replica`
+
+**What it means**: A primary failover or demotion has occurred — one of the most operationally significant events possible:
+- Sentinel or cluster-initiated failover
+- Manual FAILOVER command executed
+- Potential split-brain scenario
+- Network partition causing role change
+
+**Detection method**: This is a *state-change* detector, not a z-score spike. The system tracks the replication role (`INFO replication.role`) across successive polls and emits a CRITICAL anomaly when a node transitions from master to replica.
+
+**Recommended actions**:
+- Verify the new primary is healthy and accepting writes
+- Check replication lag on the new primary
+- Review application connection strings for failover handling
+- Inspect cluster logs for the cause of the failover
+- Confirm no split-brain scenario exists
+
+**Example scenario**: Sentinel detects the primary is unreachable and promotes a replica. The original primary comes back as a replica, triggering a NODE_FAILOVER anomaly.
+
+---
+
 ### UNKNOWN
 
 **Triggers**: Anomalies that don't match any defined pattern
@@ -346,7 +371,7 @@ Some metrics have custom thresholds beyond Z-score:
 | Metric | Warning Threshold | Critical Threshold | Consecutive Required | Cooldown |
 |--------|-------------------|-------------------|---------------------|----------|
 | `acl_denied` | 10 events | 50 events | 2 | 30s |
-| `slowlog_count` | - | - | 2 | 30s |
+| `slowlog_last_id` | - | - | 2 | 30s |
 | `memory_used` | - | - | 3 | 60s |
 | `evicted_keys` | - | - | 2 | 30s |
 | `fragmentation_ratio` | 1.5 | 2.0 | 5 | 120s |
@@ -384,12 +409,13 @@ Some metrics have custom thresholds beyond Z-score:
 **Typical baseline**: Varies by read load (1-10000 kbps)
 **Source**: `INFO stats.instantaneous_output_kbps`
 
-### slowlog_count
-**What it measures**: Current length of SLOWLOG
+### slowlog_last_id
+**What it measures**: Rate of new slow queries per poll interval (delta of `slowlog_last_id`)
 **Why anomalies matter**: Indicates query performance degradation
-**Typical baseline**: 0-50 (depends on threshold configuration)
-**Source**: `SLOWLOG LEN`
+**Typical baseline**: 0-5 new slow queries per interval
+**Source**: `INFO stats → slowlog_last_id` (delta per interval)
 **Config**: Custom thresholds (2 consecutive, 30s cooldown)
+**Note**: Previous versions used `SLOWLOG LEN` (`slowlog_count`), which saturates at `slowlog-max-len` (default 128). Using `slowlog_last_id` delta avoids this blind spot.
 
 ### acl_denied
 **What it measures**: Sum of rejected connections and ACL auth denials
@@ -418,11 +444,19 @@ Some metrics have custom thresholds beyond Z-score:
 **Source**: `INFO stats.keyspace_misses`
 
 ### fragmentation_ratio
-**What it measures**: mem_fragmentation_ratio from INFO
+**What it measures**: Allocator fragmentation ratio, preferring `allocator_frag_ratio` with fallback to `mem_fragmentation_ratio`
 **Why anomalies matter**: High fragmentation wastes memory and impacts performance
 **Typical baseline**: 1.0-1.3 (ideal)
-**Source**: `INFO memory.mem_fragmentation_ratio`
+**Source**: `INFO memory.allocator_frag_ratio` (fallback: `INFO memory.mem_fragmentation_ratio`)
 **Config**: Custom thresholds (WARNING: 1.5, CRITICAL: 2.0, 5 consecutive, 120s cooldown)
+**Note**: `allocator_frag_ratio` isolates true allocator fragmentation, whereas `mem_fragmentation_ratio` (RSS / used_memory) is skewed by swap and OS-level memory management, leading to false positives. Older Redis versions that don't expose `allocator_frag_ratio` fall back to `mem_fragmentation_ratio` automatically.
+
+### replication_role
+**What it measures**: Replication role of the node (master=1, replica=0)
+**Why anomalies matter**: A role transition from master to replica indicates a failover event
+**Typical baseline**: Stable (should not change)
+**Source**: `INFO replication.role`
+**Detection method**: State-diff detector (not z-score based). Emits a CRITICAL anomaly when role transitions from master to replica.
 
 ## Configuration
 

@@ -35,6 +35,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
   private recentAnomalies: AnomalyEvent[] = [];
   private recentGroups: CorrelatedAnomalyGroup[] = [];
+  private lastSlowlogId = new Map<string, number>();
+  private lastReplicationRole = new Map<string, number>();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
 
@@ -121,7 +123,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       [MetricType.MEMORY_USED, (info) => this.parseNumber(info.used_memory)],
       [MetricType.INPUT_KBPS, (info) => this.parseNumber(info.instantaneous_input_kbps)],
       [MetricType.OUTPUT_KBPS, (info) => this.parseNumber(info.instantaneous_output_kbps)],
-      [MetricType.SLOWLOG_COUNT, (info) => this.parseNumber(info.slowlog_len)],
+      [MetricType.SLOWLOG_LAST_ID, (info) => this.parseNumber(info.slowlog_last_id)],
       [MetricType.ACL_DENIED, (info) => {
         const rejected = this.parseNumber(info.rejected_connections);
         const aclDenied = this.parseNumber(info.acl_access_denied_auth);
@@ -130,7 +132,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       [MetricType.EVICTED_KEYS, (info) => this.parseNumber(info.evicted_keys)],
       [MetricType.BLOCKED_CLIENTS, (info) => this.parseNumber(info.blocked_clients)],
       [MetricType.KEYSPACE_MISSES, (info) => this.parseNumber(info.keyspace_misses)],
-      [MetricType.FRAGMENTATION_RATIO, (info) => this.parseNumber(info.mem_fragmentation_ratio)],
+      [MetricType.FRAGMENTATION_RATIO, (info) => {
+        const v = info['allocator_frag_ratio'] ?? info['mem_fragmentation_ratio'];
+        return v ? parseFloat(v) : null;
+      }],
     ]);
   }
 
@@ -145,7 +150,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         consecutiveRequired: 2,
         cooldownMs: 30000,
       },
-      [MetricType.SLOWLOG_COUNT]: {
+      [MetricType.SLOWLOG_LAST_ID]: {
         warningZScore: 1.5,
         criticalZScore: 2.5,
         consecutiveRequired: 2,
@@ -178,6 +183,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
+      // REPLICATION_ROLE is a state-diff detector, not a z-score metric
+      if (metricType === MetricType.REPLICATION_ROLE) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -190,6 +197,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   protected onConnectionRemoved(connectionId: string): void {
     this.buffers.delete(connectionId);
     this.detectors.delete(connectionId);
+    this.lastSlowlogId.delete(connectionId);
+    this.lastReplicationRole.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -212,21 +221,59 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         const value = extractor(info);
         if (value === null) continue;
 
+        // For slowlog_last_id, compute delta (rate-of-change) instead of absolute value
+        let feedValue = value;
+        if (metricType === MetricType.SLOWLOG_LAST_ID) {
+          const lastId = this.lastSlowlogId.get(ctx.connectionId);
+          const delta = value - (lastId ?? value);
+          this.lastSlowlogId.set(ctx.connectionId, value);
+          feedValue = delta;
+        }
+
         const buffer = buffers.get(metricType);
         const detector = detectors.get(metricType);
 
         if (!buffer || !detector) continue;
 
         // Add sample to buffer
-        buffer.addSample(value, timestamp);
+        buffer.addSample(feedValue, timestamp);
 
         // Run detection
-        const anomaly = detector.detect(buffer, value, timestamp);
+        const anomaly = detector.detect(buffer, feedValue, timestamp);
         if (anomaly) {
           // Enrich anomaly with connection context
           anomaly.connectionId = ctx.connectionId;
           this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
           await this.addAnomaly(anomaly, ctx);
+        }
+      }
+
+      // Replication role state-change detection (not z-score based)
+      const roleStr = info['role'];
+      if (roleStr) {
+        const currentRole = roleStr === 'master' ? 1 : (roleStr === 'slave' || roleStr === 'replica') ? 0 : -1;
+        if (currentRole !== -1) {
+          const lastRole = this.lastReplicationRole.get(ctx.connectionId);
+          if (lastRole !== undefined && currentRole !== lastRole && currentRole === 0) {
+            const failoverEvent: AnomalyEvent = {
+              id: `${ctx.connectionId}-failover-${timestamp}`,
+              timestamp,
+              metricType: MetricType.REPLICATION_ROLE,
+              anomalyType: AnomalyType.DROP,
+              severity: AnomalySeverity.CRITICAL,
+              value: 0,
+              baseline: 1,
+              zScore: 0,
+              stdDev: 0,
+              threshold: 0,
+              message: 'CRITICAL: Node role changed from master to replica — possible failover or split-brain detected',
+              resolved: false,
+              connectionId: ctx.connectionId,
+            };
+            this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${failoverEvent.message}`);
+            await this.addAnomaly(failoverEvent, ctx);
+          }
+          this.lastReplicationRole.set(ctx.connectionId, currentRole);
         }
       }
     } catch (error) {

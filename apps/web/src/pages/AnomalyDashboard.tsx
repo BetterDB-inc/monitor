@@ -89,12 +89,13 @@ const METRIC_LABELS: Record<string, string> = {
   memory_used: 'Memory',
   input_kbps: 'Input KB/s',
   output_kbps: 'Output KB/s',
-  slowlog_count: 'Slow Queries',
+  slowlog_last_id: 'Slow Queries',
   acl_denied: 'ACL Denied',
   evicted_keys: 'Evictions',
   blocked_clients: 'Blocked',
   keyspace_misses: 'Cache Misses',
   fragmentation_ratio: 'Fragmentation',
+  replication_role: 'Replication Role',
 };
 
 function formatTime(ts: number): string {
