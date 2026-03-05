@@ -18,6 +18,7 @@ import {
   Users,
   Shield,
   HardDrive,
+  AlertOctagon,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -80,6 +81,7 @@ const PATTERN_CONFIG: Record<string, { icon: typeof Activity; label: string; col
   auth_attack: { icon: Shield, label: 'Auth Anomaly', color: '#dc2626' },
   connection_leak: { icon: Users, label: 'Connection Leak', color: '#f97316' },
   cache_thrashing: { icon: Zap, label: 'Cache Thrashing', color: '#eab308' },
+  node_failover: { icon: AlertOctagon, label: 'Node Failover', color: '#dc2626' },
   unknown: { icon: Activity, label: 'Unknown', color: '#6b7280' },
 };
 
