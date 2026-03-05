@@ -151,12 +151,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         consecutiveRequired: 2,
         cooldownMs: 30000,
       },
-      [MetricType.SLOWLOG_LAST_ID]: {
-        warningZScore: 1.5,
-        criticalZScore: 2.5,
-        consecutiveRequired: 2,
-        cooldownMs: 30000,
-      },
       [MetricType.MEMORY_USED]: {
         warningZScore: 2.5,
         criticalZScore: 3.5,
@@ -184,8 +178,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
-      // REPLICATION_ROLE is a state-diff detector, not a z-score metric
-      if (metricType === MetricType.REPLICATION_ROLE) continue;
+      // REPLICATION_ROLE and SLOWLOG_LAST_ID are handled outside the normal extractor loop
+      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.SLOWLOG_LAST_ID) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -244,16 +238,25 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         const delta = Math.max(0, currentSlowlogId - (lastId ?? currentSlowlogId));
         this.lastSlowlogId.set(ctx.connectionId, currentSlowlogId);
 
-        const slowlogBuffer = buffers.get(MetricType.SLOWLOG_LAST_ID);
-        const slowlogDetector = detectors.get(MetricType.SLOWLOG_LAST_ID);
-        if (slowlogBuffer && slowlogDetector) {
-          slowlogBuffer.addSample(delta, timestamp);
-          const anomaly = slowlogDetector.detect(slowlogBuffer, delta, timestamp);
-          if (anomaly) {
-            anomaly.connectionId = ctx.connectionId;
-            this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
-            await this.addAnomaly(anomaly, ctx);
-          }
+        // Lazily create buffer/detector on first available data
+        if (!buffers.has(MetricType.SLOWLOG_LAST_ID)) {
+          buffers.set(MetricType.SLOWLOG_LAST_ID, new MetricBuffer(MetricType.SLOWLOG_LAST_ID));
+          detectors.set(MetricType.SLOWLOG_LAST_ID, new SpikeDetector(MetricType.SLOWLOG_LAST_ID, {
+            warningZScore: 1.5,
+            criticalZScore: 2.5,
+            consecutiveRequired: 2,
+            cooldownMs: 30000,
+          }));
+        }
+
+        const slowlogBuffer = buffers.get(MetricType.SLOWLOG_LAST_ID)!;
+        const slowlogDetector = detectors.get(MetricType.SLOWLOG_LAST_ID)!;
+        slowlogBuffer.addSample(delta, timestamp);
+        const anomaly = slowlogDetector.detect(slowlogBuffer, delta, timestamp);
+        if (anomaly) {
+          anomaly.connectionId = ctx.connectionId;
+          this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
+          await this.addAnomaly(anomaly, ctx);
         }
       }
 
