@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
+import { SlowLogAnalyticsService } from '@app/slowlog-analytics/slowlog-analytics.service';
 import { MultiConnectionPoller, ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
@@ -52,6 +53,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     private readonly configService: ConfigService,
     private readonly prometheusService: PrometheusService,
     private readonly settingsService: SettingsService,
+    private readonly slowLogAnalytics: SlowLogAnalyticsService,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs);
@@ -123,7 +125,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       [MetricType.MEMORY_USED, (info) => this.parseNumber(info.used_memory)],
       [MetricType.INPUT_KBPS, (info) => this.parseNumber(info.instantaneous_input_kbps)],
       [MetricType.OUTPUT_KBPS, (info) => this.parseNumber(info.instantaneous_output_kbps)],
-      [MetricType.SLOWLOG_LAST_ID, (info) => this.parseNumber(info.slowlog_last_id)],
       [MetricType.ACL_DENIED, (info) => {
         const rejected = this.parseNumber(info.rejected_connections);
         const aclDenied = this.parseNumber(info.acl_access_denied_auth);
@@ -216,35 +217,43 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
       const { buffers, detectors } = this.getOrCreateBuffersAndDetectors(ctx.connectionId);
 
-      // Process each metric
+      // Process each metric from INFO
       for (const [metricType, extractor] of this.metricExtractors.entries()) {
         const value = extractor(info);
         if (value === null) continue;
-
-        // For slowlog_last_id, compute delta (rate-of-change) instead of absolute value
-        let feedValue = value;
-        if (metricType === MetricType.SLOWLOG_LAST_ID) {
-          const lastId = this.lastSlowlogId.get(ctx.connectionId);
-          const delta = Math.max(0, value - (lastId ?? value));
-          this.lastSlowlogId.set(ctx.connectionId, value);
-          feedValue = delta;
-        }
 
         const buffer = buffers.get(metricType);
         const detector = detectors.get(metricType);
 
         if (!buffer || !detector) continue;
 
-        // Add sample to buffer
-        buffer.addSample(feedValue, timestamp);
+        buffer.addSample(value, timestamp);
 
-        // Run detection
-        const anomaly = detector.detect(buffer, feedValue, timestamp);
+        const anomaly = detector.detect(buffer, value, timestamp);
         if (anomaly) {
-          // Enrich anomaly with connection context
           anomaly.connectionId = ctx.connectionId;
           this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
           await this.addAnomaly(anomaly, ctx);
+        }
+      }
+
+      // Slowlog rate-of-change detection (sourced from SlowLogAnalyticsService, not INFO)
+      const currentSlowlogId = this.slowLogAnalytics.getLastSeenId(ctx.connectionId);
+      if (currentSlowlogId !== null) {
+        const lastId = this.lastSlowlogId.get(ctx.connectionId);
+        const delta = Math.max(0, currentSlowlogId - (lastId ?? currentSlowlogId));
+        this.lastSlowlogId.set(ctx.connectionId, currentSlowlogId);
+
+        const slowlogBuffer = buffers.get(MetricType.SLOWLOG_LAST_ID);
+        const slowlogDetector = detectors.get(MetricType.SLOWLOG_LAST_ID);
+        if (slowlogBuffer && slowlogDetector) {
+          slowlogBuffer.addSample(delta, timestamp);
+          const anomaly = slowlogDetector.detect(slowlogBuffer, delta, timestamp);
+          if (anomaly) {
+            anomaly.connectionId = ctx.connectionId;
+            this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
+            await this.addAnomaly(anomaly, ctx);
+          }
         }
       }
 
