@@ -17,9 +17,17 @@ export class TelemetryController {
     }
 
     if (body.eventType === 'interaction_after_idle') {
-      await this.usageTelemetry.trackInteractionAfterIdle(body.payload?.idleDurationMs as number);
+      const idleDurationMs = body.payload?.idleDurationMs;
+      if (typeof idleDurationMs !== 'number') {
+        throw new BadRequestException('payload.idleDurationMs must be a number');
+      }
+      await this.usageTelemetry.trackInteractionAfterIdle(idleDurationMs);
     } else if (body.eventType === 'page_view') {
-      await this.usageTelemetry.trackPageView(body.payload?.path as string);
+      const path = body.payload?.path;
+      if (typeof path !== 'string') {
+        throw new BadRequestException('payload.path must be a string');
+      }
+      await this.usageTelemetry.trackPageView(path);
     }
 
     return { ok: true };

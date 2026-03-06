@@ -10,7 +10,9 @@ export class UsageTelemetryService implements OnModuleInit {
     @Optional() private readonly licenseService?: LicenseService,
   ) {
     const entitlementUrl = process.env.ENTITLEMENT_URL || 'https://betterdb.com/api/v1/entitlements';
-    this.telemetryUrl = entitlementUrl.replace('/entitlements', '/telemetry');
+    const url = new URL(entitlementUrl);
+    url.pathname = url.pathname.replace(/\/entitlements$/, '/telemetry');
+    this.telemetryUrl = url.toString();
     this.workspaceName = process.env.TENANT_ID || null;
   }
 
