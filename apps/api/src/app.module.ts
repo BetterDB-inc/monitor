@@ -102,7 +102,6 @@ const baseImports = [
   PrometheusModule,
   SettingsModule,
   WebhooksModule,
-  TelemetryModule,
 ];
 
 const proprietaryImports = [
@@ -115,7 +114,7 @@ const proprietaryImports = [
 ].filter(Boolean);
 
 @Module({
-  imports: [...baseImports, ...proprietaryImports],
+  imports: [...baseImports, ...proprietaryImports, TelemetryModule],
   providers: [
     {
       provide: APP_GUARD,
