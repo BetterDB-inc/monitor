@@ -7,6 +7,8 @@ import { LicenseContext, useLicenseStatus, useLicense } from './hooks/useLicense
 import { UpgradePromptContext, useUpgradePromptState } from './hooks/useUpgradePrompt';
 import { ConnectionContext, useConnectionState } from './hooks/useConnection';
 import { VersionCheckContext, useVersionCheckState } from './hooks/useVersionCheck';
+import { useIdleTracker } from './hooks/useIdleTracker';
+import { useNavigationTracker } from './hooks/useNavigationTracker';
 import { UpgradePrompt } from './components/UpgradePrompt';
 import { UpdateBanner } from './components/UpdateBanner';
 import { ConnectionSelector } from './components/ConnectionSelector';
@@ -91,6 +93,8 @@ function AppContent() {
 
 function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
   const location = useLocation();
+  useIdleTracker();
+  useNavigationTracker();
 
   return (
     <div className="min-h-screen bg-background">
