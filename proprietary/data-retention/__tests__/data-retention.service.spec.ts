@@ -113,6 +113,25 @@ describe('DataRetentionService', () => {
     }
   });
 
+  describe('handleRetentionCron', () => {
+    it('delegates to runRetention when CLOUD_MODE is true', async () => {
+      const spy = jest.spyOn(service, 'runRetention').mockResolvedValue();
+
+      await service.handleRetentionCron();
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips runRetention when CLOUD_MODE is not true', async () => {
+      process.env.CLOUD_MODE = 'false';
+      const spy = jest.spyOn(service, 'runRetention');
+
+      await service.handleRetentionCron();
+
+      expect(spy).not.toHaveBeenCalled();
+    });
+  });
+
   it('skips all prune methods when CLOUD_MODE is not true', async () => {
     process.env.CLOUD_MODE = 'false';
 
