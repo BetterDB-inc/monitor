@@ -62,6 +62,7 @@ export function Dashboard() {
     if (info.cpu) {
       const sys = parseFloat(info.cpu.used_cpu_sys);
       const user = parseFloat(info.cpu.used_cpu_user);
+      if (isNaN(sys) || isNaN(user)) return;
       const ts = Date.now();
 
       const prevCpu = prevCpuRef.current;
@@ -72,6 +73,7 @@ export function Dashboard() {
         if (dtSec > 0) {
           const deltaSys = parseFloat(((sys - prevCpu.sys) / dtSec).toFixed(3));
           const deltaUser = parseFloat(((user - prevCpu.user) / dtSec).toFixed(3));
+          if (deltaSys < 0 || deltaUser < 0) return;
           setCpuHistory((prev) => {
             const next = [...prev, { time, sys: deltaSys, user: deltaUser }];
             return next.slice(-60);
