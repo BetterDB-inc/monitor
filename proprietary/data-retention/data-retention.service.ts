@@ -15,6 +15,7 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 export class DataRetentionService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DataRetentionService.name);
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private destroyed = false;
 
   constructor(
     private readonly licenseService: LicenseService,
@@ -31,6 +32,7 @@ export class DataRetentionService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleDestroy() {
+    this.destroyed = true;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -38,6 +40,7 @@ export class DataRetentionService implements OnModuleInit, OnModuleDestroy {
   }
 
   private scheduleNext() {
+    if (this.destroyed) return;
     const now = new Date();
     const next3am = new Date(now);
     next3am.setHours(3, 0, 0, 0);
