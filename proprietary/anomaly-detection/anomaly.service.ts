@@ -38,6 +38,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private recentGroups: CorrelatedAnomalyGroup[] = [];
   private lastSlowlogId = new Map<string, number>();
   private lastReplicationRole = new Map<string, number>();
+  private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
 
@@ -177,8 +178,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
-      // REPLICATION_ROLE, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
+      // REPLICATION_ROLE, SLOWLOG_LAST_ID, CPU_UTILIZATION, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
+      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.CPU_UTILIZATION || metricType === MetricType.SLOWLOG_COUNT) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -193,6 +194,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.detectors.delete(connectionId);
     this.lastSlowlogId.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
+    this.prevCpuByConnection.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -228,6 +230,44 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
           await this.addAnomaly(anomaly, ctx);
         }
+      }
+
+      // CPU utilization delta computation (cumulative counters → rate)
+      const cpuSys = this.parseNumber(info.used_cpu_sys);
+      const cpuUser = this.parseNumber(info.used_cpu_user);
+      if (cpuSys !== null && cpuUser !== null) {
+        const prev = this.prevCpuByConnection.get(ctx.connectionId);
+        const cpuTotal = cpuSys + cpuUser;
+
+        if (prev) {
+          const dtSec = (timestamp - prev.ts) / 1000;
+          if (dtSec > 0) {
+            const prevTotal = prev.sys + prev.user;
+            const utilization = ((cpuTotal - prevTotal) / dtSec) * 100;
+
+            if (!buffers.has(MetricType.CPU_UTILIZATION)) {
+              buffers.set(MetricType.CPU_UTILIZATION, new MetricBuffer(MetricType.CPU_UTILIZATION));
+              detectors.set(MetricType.CPU_UTILIZATION, new SpikeDetector(MetricType.CPU_UTILIZATION, {
+                warningZScore: 2.0,
+                criticalZScore: 3.0,
+                consecutiveRequired: 3,
+                cooldownMs: 60000,
+              }));
+            }
+
+            const cpuBuffer = buffers.get(MetricType.CPU_UTILIZATION)!;
+            const cpuDetector = detectors.get(MetricType.CPU_UTILIZATION)!;
+            cpuBuffer.addSample(utilization, timestamp);
+            const anomaly = cpuDetector.detect(cpuBuffer, utilization, timestamp);
+            if (anomaly) {
+              anomaly.connectionId = ctx.connectionId;
+              this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
+              await this.addAnomaly(anomaly, ctx);
+            }
+          }
+        }
+
+        this.prevCpuByConnection.set(ctx.connectionId, { sys: cpuSys, user: cpuUser, ts: timestamp });
       }
 
       // Slowlog rate-of-change detection (sourced from SlowLogAnalyticsService, not INFO)

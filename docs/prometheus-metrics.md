@@ -18,6 +18,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/promethe
   - [Server Info Metrics](#server-info-metrics)
   - [Memory Metrics](#memory-metrics)
   - [Stats Metrics](#stats-metrics)
+  - [CPU Metrics](#cpu-metrics)
   - [Replication Metrics](#replication-metrics)
   - [Keyspace Metrics](#keyspace-metrics)
   - [Cluster Metrics](#cluster-metrics)
@@ -138,6 +139,17 @@ Operational statistics and throughput.
 | `betterdb_pubsub_channels` | gauge | - | Number of pub/sub channels | `12` |
 | `betterdb_pubsub_patterns` | gauge | - | Number of pub/sub patterns | `3` |
 
+### CPU Metrics
+
+Server CPU consumption from the Valkey/Redis INFO CPU section.
+
+| Metric | Type | Labels | Description | Example |
+|--------|------|--------|-------------|---------|
+| `betterdb_cpu_sys_seconds_total` | gauge | - | System CPU consumed by the server | `123.45` |
+| `betterdb_cpu_user_seconds_total` | gauge | - | User CPU consumed by the server | `456.78` |
+
+**Note**: These are cumulative counters exposed as gauges. Use `rate()` in PromQL to compute per-second CPU usage.
+
 ### Replication Metrics
 
 Replication status and offset tracking.
@@ -201,7 +213,7 @@ Real-time anomaly detection system metrics.
 
 **Label Values**:
 - `severity`: `info`, `warning`, `critical`
-- `metric_type`: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`, `replication_role`
+- `metric_type`: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`, `cpu_utilization`, `replication_role`
 - `anomaly_type`: `spike`, `drop`
 
 #### Correlation Metrics
@@ -351,6 +363,17 @@ topk(5, betterdb_anomaly_by_metric)
 
 # Unresolved critical anomalies
 betterdb_anomaly_events_current{severity="critical"}
+```
+
+### CPU Utilization
+
+```promql
+# Per-second CPU usage (system + user combined)
+rate(betterdb_cpu_sys_seconds_total[5m]) + rate(betterdb_cpu_user_seconds_total[5m])
+
+# System vs user CPU breakdown
+rate(betterdb_cpu_sys_seconds_total[5m])
+rate(betterdb_cpu_user_seconds_total[5m])
 ```
 
 ### Memory & Performance

@@ -6,6 +6,7 @@ import { ConnectionCard } from '../components/dashboard/ConnectionCard';
 import { OverviewCards } from '../components/dashboard/OverviewCards';
 import { MemoryChart } from '../components/dashboard/MemoryChart';
 import { OpsChart } from '../components/dashboard/OpsChart';
+import { CpuChart } from '../components/dashboard/CpuChart';
 import { CapabilitiesBadges } from '../components/dashboard/CapabilitiesBadges';
 import { DoctorCard } from '../components/DoctorCard';
 
@@ -26,6 +27,7 @@ export function Dashboard() {
 
   const [memoryHistory, setMemoryHistory] = useState<Array<{ time: string; used: number; peak: number }>>([]);
   const [opsHistory, setOpsHistory] = useState<Array<{ time: string; ops: number }>>([]);
+  const [cpuHistory, setCpuHistory] = useState<Array<{ time: string; sys: number; user: number }>>([]);
   const [memoryDoctorReport, setMemoryDoctorReport] = useState<string>();
   const [memoryDoctorLoading, setMemoryDoctorLoading] = useState(true);
 
@@ -33,6 +35,7 @@ export function Dashboard() {
   useEffect(() => {
     setMemoryHistory([]);
     setOpsHistory([]);
+    setCpuHistory([]);
   }, [currentConnection?.id]);
 
   useEffect(() => {
@@ -53,6 +56,17 @@ export function Dashboard() {
       const next = [...prev, { time, ops: parseInt(info.stats!.instantaneous_ops_per_sec, 10) }];
       return next.slice(-60);
     });
+
+    if (info.cpu) {
+      setCpuHistory((prev) => {
+        const next = [...prev, {
+          time,
+          sys: parseFloat(info.cpu!.used_cpu_sys),
+          user: parseFloat(info.cpu!.used_cpu_user),
+        }];
+        return next.slice(-60);
+      });
+    }
   }, [info]);
 
   useEffect(() => {
@@ -84,6 +98,7 @@ export function Dashboard() {
       <div className="grid gap-4 md:grid-cols-2">
         <MemoryChart data={memoryHistory} />
         <OpsChart data={opsHistory} />
+        <CpuChart data={cpuHistory} />
       </div>
     </div>
   );
