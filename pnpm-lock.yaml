@@ -49,7 +49,7 @@ importers:
         version: 0.23.0(apache-arrow@21.1.0)
       '@langchain/community':
         specifier: ^1.1.3
-        version: 1.1.3(@browserbasehq/sdk@2.6.0)(@browserbasehq/stagehand@1.14.0(@playwright/test@1.57.0)(deepmerge@4.3.1)(dotenv@16.6.1)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))(zod@4.3.5))(@ibm-cloud/watsonx-ai@1.7.6)(@lancedb/lancedb@0.23.0(apache-arrow@21.1.0))(@langchain/core@1.1.12(@opentelemetry/api@1.9.0)(openai@6.16.0(ws@8.19.0)(zod@4.3.5)))(@opentelemetry/api@1.9.0)(better-sqlite3@12.5.0)(hnswlib-node@3.0.0)(ibm-cloud-sdk-core@5.4.5)(ignore@5.3.2)(jsonwebtoken@9.0.3)(lodash@4.17.23)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))(pg@8.16.3)(playwright@1.57.0)(ws@8.19.0)
+        version: 1.1.3(@browserbasehq/sdk@2.7.0)(@browserbasehq/stagehand@1.14.0(@playwright/test@1.57.0)(deepmerge@4.3.1)(dotenv@16.6.1)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))(zod@4.3.5))(@ibm-cloud/watsonx-ai@1.7.6)(@lancedb/lancedb@0.23.0(apache-arrow@21.1.0))(@langchain/core@1.1.12(@opentelemetry/api@1.9.0)(openai@6.16.0(ws@8.19.0)(zod@4.3.5)))(@opentelemetry/api@1.9.0)(better-sqlite3@12.5.0)(hnswlib-node@3.0.0)(ibm-cloud-sdk-core@5.4.5)(ignore@5.3.2)(jsonwebtoken@9.0.3)(lodash@4.17.23)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))(pg@8.16.3)(playwright@1.57.0)(ws@8.19.0)
       '@langchain/core':
         specifier: ^1.1.12
         version: 1.1.12(@opentelemetry/api@1.9.0)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))
@@ -69,8 +69,8 @@ importers:
         specifier: ^11.0.0
         version: 11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/platform-fastify':
-        specifier: ^11.1.10
-        version: 11.1.10(@fastify/static@8.3.0)(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))
+        specifier: ^11.1.14
+        version: 11.1.14(@fastify/static@8.3.0)(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))
       '@nestjs/swagger':
         specifier: ^11.2.4
         version: 11.2.4(@fastify/static@8.3.0)(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)
@@ -373,8 +373,8 @@ importers:
         specifier: ^11.0.0
         version: 11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(reflect-metadata@0.1.14)(rxjs@7.8.2)
       '@nestjs/platform-fastify':
-        specifier: ^11.1.10
-        version: 11.1.10(@fastify/static@8.3.0)(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(@nestjs/core@11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(reflect-metadata@0.1.14)(rxjs@7.8.2))
+        specifier: ^11.1.14
+        version: 11.1.14(@fastify/static@9.0.0)(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(@nestjs/core@11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(reflect-metadata@0.1.14)(rxjs@7.8.2))
       '@nestjs/throttler':
         specifier: ^5.0.0
         version: 5.2.0(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(@nestjs/core@11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(reflect-metadata@0.1.14)(rxjs@7.8.2))(reflect-metadata@0.1.14)
@@ -670,8 +670,8 @@ packages:
   '@borewit/text-codec@0.1.1':
     resolution: {integrity: sha512-5L/uBxmjaCIX5h8Z+uu+kA9BQLkc/Wl06UGR5ajNRxu+/XjonB5i8JpgFMrPj3LXTCPA0pv8yxUvbUi+QthGGA==}
 
-  '@browserbasehq/sdk@2.6.0':
-    resolution: {integrity: sha512-83iXP5D7xMm8Wyn66TUaUrgoByCmAJuoMoZQI3sGg3JAiMlTfnCIMqyVBoNSaItaPIkaCnrsj6LiusmXV2X9YA==}
+  '@browserbasehq/sdk@2.7.0':
+    resolution: {integrity: sha512-1iwuj3fChplMq+S66M9tGb9ZXA4e7Vi8MjqQQ6/T6rzoAWLGfDnEAPbgTOU479o+Mi3of5/6YXk1oIHKTw0NBw==}
 
   '@browserbasehq/stagehand@1.14.0':
     resolution: {integrity: sha512-Hi/EzgMFWz+FKyepxHTrqfTPjpsuBS4zRy3e9sbMpBgLPv+9c0R+YZEvS7Bw4mTS66QtvvURRT6zgDGFotthVQ==}
@@ -922,9 +922,6 @@ packages:
 
   '@fastify/merge-json-schemas@0.2.1':
     resolution: {integrity: sha512-OA3KGBCy6KtIvLf8DINC5880o5iBlDX4SxzLQS8HorJAbqluzLRn80UXU0bxZn7UOFhFgpRJDasfwn9nG4FG4A==}
-
-  '@fastify/middie@9.1.0':
-    resolution: {integrity: sha512-cObruXSFB5CCqn2m9sF5ktf6pNQX+QQth2N39FGXXV+8M4O+dWzkvqjqzwpIWvwvIffP9+O7KaLN+5xVgFFdWw==}
 
   '@fastify/proxy-addr@5.1.0':
     resolution: {integrity: sha512-INS+6gh91cLUjB+PVHfu1UqcB76Sqtpyp7bnL+FYojhjygvOPA9ctiD/JDKsyD9Xgu4hUhCSJBPig/w7duNajw==}
@@ -1891,10 +1888,10 @@ packages:
       class-validator:
         optional: true
 
-  '@nestjs/platform-fastify@11.1.10':
-    resolution: {integrity: sha512-9k26jaDZkq42SaH5/cCsPShd6XeCAuGFF8U63n2lQJwOA8nBmIIGjWy1RDFy+8qFVW0C0DaDdbUPQR5aL274fw==}
+  '@nestjs/platform-fastify@11.1.14':
+    resolution: {integrity: sha512-/hnKvPpeH+CTWus7L+F+qXkdbTRXudSQU3Z8tcs5kfvluoBLsxSDTTvjjySr7zrPs5bebaFbGIyG2fKMAWl++g==}
     peerDependencies:
-      '@fastify/static': ^8.0.0
+      '@fastify/static': ^8.0.0 || ^9.0.0
       '@fastify/view': ^10.0.0 || ^11.0.0
       '@nestjs/common': ^11.0.0
       '@nestjs/core': ^11.0.0
@@ -2962,8 +2959,8 @@ packages:
   avvio@9.1.0:
     resolution: {integrity: sha512-fYASnYi600CsH/j9EQov7lECAniYiBFiiAtBNuZYLA2leLe9qOvZzqYHFjtIj6gD2VMoMLP14834LFWvr4IfDw==}
 
-  axios@1.13.5:
-    resolution: {integrity: sha512-cz4ur7Vb0xS4/KUN0tPWe44eqxrIu31me+fbang3ijiNscE129POzipJJA6zniq2C/Z6sJCjMimjS8Lc/GAs8Q==}
+  axios@1.13.6:
+    resolution: {integrity: sha512-ChTCHMouEe2kn713WHbQGcuYrr6fXTBiu460OTwWrWob16g1bXn4vtz07Ope7ewMozJAnEquLk5lWQWtBig9DQ==}
 
   b4a@1.7.3:
     resolution: {integrity: sha512-5Q2mfq2WfGuFp3uS//0s6baOJLMoVduPYVeNmDYxu5OUA1/cBfvr2RIS7vi62LdNj/urk1hfmj867I3qt6uZ7Q==}
@@ -5208,6 +5205,7 @@ packages:
   prebuild-install@7.1.3:
     resolution: {integrity: sha512-8Mf2cbV7x1cXPUILADGI3wuhfqWvtiLA1iclTDbFRZkgRQS0NqsPZphna9V+HyTEadheuPmjaJMsbzKQFOzLug==}
     engines: {node: '>=10'}
+    deprecated: No longer maintained. Please contact the author of the relevant native addon; alternatives are available.
     hasBin: true
 
   prelude-ls@1.2.1:
@@ -6582,7 +6580,7 @@ snapshots:
 
   '@borewit/text-codec@0.1.1': {}
 
-  '@browserbasehq/sdk@2.6.0':
+  '@browserbasehq/sdk@2.7.0':
     dependencies:
       '@types/node': 18.19.130
       '@types/node-fetch': 2.6.13
@@ -6597,7 +6595,7 @@ snapshots:
   '@browserbasehq/stagehand@1.14.0(@playwright/test@1.57.0)(deepmerge@4.3.1)(dotenv@16.6.1)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))(zod@4.3.5)':
     dependencies:
       '@anthropic-ai/sdk': 0.27.3
-      '@browserbasehq/sdk': 2.6.0
+      '@browserbasehq/sdk': 2.7.0
       '@playwright/test': 1.57.0
       deepmerge: 4.3.1
       dotenv: 16.6.1
@@ -6790,14 +6788,6 @@ snapshots:
   '@fastify/merge-json-schemas@0.2.1':
     dependencies:
       dequal: 2.0.3
-
-  '@fastify/middie@9.1.0':
-    dependencies:
-      '@fastify/error': 4.2.0
-      fastify-plugin: 5.1.0
-      find-my-way: 9.4.0
-      path-to-regexp: 8.3.0
-      reusify: 1.1.0
 
   '@fastify/proxy-addr@5.1.0':
     dependencies:
@@ -7500,7 +7490,7 @@ snapshots:
       - openai
       - ws
 
-  '@langchain/community@1.1.3(@browserbasehq/sdk@2.6.0)(@browserbasehq/stagehand@1.14.0(@playwright/test@1.57.0)(deepmerge@4.3.1)(dotenv@16.6.1)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))(zod@4.3.5))(@ibm-cloud/watsonx-ai@1.7.6)(@lancedb/lancedb@0.23.0(apache-arrow@21.1.0))(@langchain/core@1.1.12(@opentelemetry/api@1.9.0)(openai@6.16.0(ws@8.19.0)(zod@4.3.5)))(@opentelemetry/api@1.9.0)(better-sqlite3@12.5.0)(hnswlib-node@3.0.0)(ibm-cloud-sdk-core@5.4.5)(ignore@5.3.2)(jsonwebtoken@9.0.3)(lodash@4.17.23)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))(pg@8.16.3)(playwright@1.57.0)(ws@8.19.0)':
+  '@langchain/community@1.1.3(@browserbasehq/sdk@2.7.0)(@browserbasehq/stagehand@1.14.0(@playwright/test@1.57.0)(deepmerge@4.3.1)(dotenv@16.6.1)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))(zod@4.3.5))(@ibm-cloud/watsonx-ai@1.7.6)(@lancedb/lancedb@0.23.0(apache-arrow@21.1.0))(@langchain/core@1.1.12(@opentelemetry/api@1.9.0)(openai@6.16.0(ws@8.19.0)(zod@4.3.5)))(@opentelemetry/api@1.9.0)(better-sqlite3@12.5.0)(hnswlib-node@3.0.0)(ibm-cloud-sdk-core@5.4.5)(ignore@5.3.2)(jsonwebtoken@9.0.3)(lodash@4.17.23)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))(pg@8.16.3)(playwright@1.57.0)(ws@8.19.0)':
     dependencies:
       '@browserbasehq/stagehand': 1.14.0(@playwright/test@1.57.0)(deepmerge@4.3.1)(dotenv@16.6.1)(openai@6.16.0(ws@8.19.0)(zod@4.3.5))(zod@4.3.5)
       '@ibm-cloud/watsonx-ai': 1.7.6
@@ -7516,7 +7506,7 @@ snapshots:
       uuid: 10.0.0
       zod: 4.3.5
     optionalDependencies:
-      '@browserbasehq/sdk': 2.6.0
+      '@browserbasehq/sdk': 2.7.0
       '@lancedb/lancedb': 0.23.0(apache-arrow@21.1.0)
       better-sqlite3: 12.5.0
       hnswlib-node: 3.0.0
@@ -7745,35 +7735,39 @@ snapshots:
       class-transformer: 0.5.1
       class-validator: 0.14.3
 
-  '@nestjs/platform-fastify@11.1.10(@fastify/static@8.3.0)(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(@nestjs/core@11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(reflect-metadata@0.1.14)(rxjs@7.8.2))':
+  '@nestjs/platform-fastify@11.1.14(@fastify/static@8.3.0)(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))':
     dependencies:
       '@fastify/cors': 11.2.0
       '@fastify/formbody': 8.0.2
-      '@fastify/middie': 9.1.0
-      '@nestjs/common': 11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2)
-      '@nestjs/core': 11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(reflect-metadata@0.1.14)(rxjs@7.8.2)
-      fast-querystring: 1.1.2
-      fastify: 5.7.4
-      light-my-request: 6.6.0
-      path-to-regexp: 8.3.0
-      tslib: 2.8.1
-    optionalDependencies:
-      '@fastify/static': 8.3.0
-
-  '@nestjs/platform-fastify@11.1.10(@fastify/static@8.3.0)(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))':
-    dependencies:
-      '@fastify/cors': 11.2.0
-      '@fastify/formbody': 8.0.2
-      '@fastify/middie': 9.1.0
       '@nestjs/common': 11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/core': 11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
       fast-querystring: 1.1.2
       fastify: 5.7.4
+      fastify-plugin: 5.1.0
+      find-my-way: 9.4.0
       light-my-request: 6.6.0
       path-to-regexp: 8.3.0
+      reusify: 1.1.0
       tslib: 2.8.1
     optionalDependencies:
       '@fastify/static': 8.3.0
+
+  '@nestjs/platform-fastify@11.1.14(@fastify/static@9.0.0)(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(@nestjs/core@11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(reflect-metadata@0.1.14)(rxjs@7.8.2))':
+    dependencies:
+      '@fastify/cors': 11.2.0
+      '@fastify/formbody': 8.0.2
+      '@nestjs/common': 11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2)
+      '@nestjs/core': 11.1.11(@nestjs/common@11.1.11(class-transformer@0.5.1)(class-validator@0.14.3)(reflect-metadata@0.1.14)(rxjs@7.8.2))(reflect-metadata@0.1.14)(rxjs@7.8.2)
+      fast-querystring: 1.1.2
+      fastify: 5.7.4
+      fastify-plugin: 5.1.0
+      find-my-way: 9.4.0
+      light-my-request: 6.6.0
+      path-to-regexp: 8.3.0
+      reusify: 1.1.0
+      tslib: 2.8.1
+    optionalDependencies:
+      '@fastify/static': 9.0.0
 
   '@nestjs/schematics@10.2.3(chokidar@3.6.0)(typescript@5.7.2)':
     dependencies:
@@ -8843,7 +8837,7 @@ snapshots:
       '@fastify/error': 4.2.0
       fastq: 1.20.1
 
-  axios@1.13.5(debug@4.4.3):
+  axios@1.13.6(debug@4.4.3):
     dependencies:
       follow-redirects: 1.15.11(debug@4.4.3)
       form-data: 4.0.5
@@ -10073,7 +10067,7 @@ snapshots:
       '@types/debug': 4.1.12
       '@types/node': 18.19.130
       '@types/tough-cookie': 4.0.5
-      axios: 1.13.5(debug@4.4.3)
+      axios: 1.13.6(debug@4.4.3)
       camelcase: 6.3.0
       debug: 4.4.3(supports-color@5.5.0)
       dotenv: 16.6.1
@@ -10083,7 +10077,7 @@ snapshots:
       isstream: 0.1.2
       jsonwebtoken: 9.0.3
       mime-types: 2.1.35
-      retry-axios: 2.6.0(axios@1.13.5)
+      retry-axios: 2.6.0(axios@1.13.6(debug@4.4.3))
       tough-cookie: 4.1.4
     transitivePeerDependencies:
       - supports-color
@@ -11780,9 +11774,9 @@ snapshots:
 
   ret@0.5.0: {}
 
-  retry-axios@2.6.0(axios@1.13.5):
+  retry-axios@2.6.0(axios@1.13.6(debug@4.4.3)):
     dependencies:
-      axios: 1.13.5(debug@4.4.3)
+      axios: 1.13.6(debug@4.4.3)
 
   reusify@1.1.0: {}
 

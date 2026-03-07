@@ -49,7 +49,7 @@
     "@nestjs/common": "^11.0.0",
     "@nestjs/config": "^4.0.0",
     "@nestjs/core": "^11.0.0",
-    "@nestjs/platform-fastify": "^11.1.10",
+    "@nestjs/platform-fastify": "^11.1.14",
     "@nestjs/swagger": "^11.2.4",
     "@nestjs/throttler": "^5.2.0",
     "@types/better-sqlite3": "^7.6.13",
