@@ -251,15 +251,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           if (dtSec > 0) {
             const prevTotal = prev.sys + prev.user;
             const utilization = ((cpuTotal - prevTotal) / dtSec) * 100;
-
-            const cpuBuffer = buffers.get(MetricType.CPU_UTILIZATION)!;
-            const cpuDetector = detectors.get(MetricType.CPU_UTILIZATION)!;
-            cpuBuffer.addSample(utilization, timestamp);
-            const anomaly = cpuDetector.detect(cpuBuffer, utilization, timestamp);
-            if (anomaly) {
-              anomaly.connectionId = ctx.connectionId;
-              this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
-              await this.addAnomaly(anomaly, ctx);
+            if (utilization < 0) {
+              // counter reset (server restart) - skip this sample, new baseline set below
+            } else {
+              const cpuBuffer = buffers.get(MetricType.CPU_UTILIZATION)!;
+              const cpuDetector = detectors.get(MetricType.CPU_UTILIZATION)!;
+              cpuBuffer.addSample(utilization, timestamp);
+              const anomaly = cpuDetector.detect(cpuBuffer, utilization, timestamp);
+              if (anomaly) {
+                anomaly.connectionId = ctx.connectionId;
+                this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
+                await this.addAnomaly(anomaly, ctx);
+              }
             }
           }
         }
