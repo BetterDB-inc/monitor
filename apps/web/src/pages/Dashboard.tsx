@@ -71,8 +71,8 @@ export function Dashboard() {
       if (prevCpu) {
         const dtSec = (ts - prevCpu.ts) / 1000;
         if (dtSec > 0) {
-          const deltaSys = parseFloat(((sys - prevCpu.sys) / dtSec).toFixed(3));
-          const deltaUser = parseFloat(((user - prevCpu.user) / dtSec).toFixed(3));
+          const deltaSys = parseFloat((((sys - prevCpu.sys) / dtSec) * 100).toFixed(3));
+          const deltaUser = parseFloat((((user - prevCpu.user) / dtSec) * 100).toFixed(3));
           if (deltaSys < 0 || deltaUser < 0) return;
           setCpuHistory((prev) => {
             const next = [...prev, { time, sys: deltaSys, user: deltaUser }];

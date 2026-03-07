@@ -17,7 +17,7 @@ export function CpuChart({ data }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>CPU Usage (cores)</CardTitle>
+        <CardTitle>Server CPU Utilization (%)</CardTitle>
       </CardHeader>
       <CardContent>
         <ResponsiveContainer width="100%" height={300}>
@@ -30,8 +30,14 @@ export function CpuChart({ data }: Props) {
             <YAxis
               tick={{ fontSize: 12 }}
               tickLine={false}
+              tickFormatter={(value) => `${value.toFixed(1)}%`}
             />
-            <Tooltip />
+            <Tooltip
+              formatter={(value) => {
+                const num = typeof value === 'number' ? value : 0;
+                return [`${num.toFixed(1)}%`];
+              }}
+            />
             <Legend />
             <Line
               type="monotone"
