@@ -10,7 +10,6 @@ const RETENTION_DAYS: Record<Tier, number> = {
 };
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const CRON_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 @Injectable()
 export class DataRetentionService implements OnModuleInit, OnModuleDestroy {
@@ -52,10 +51,7 @@ export class DataRetentionService implements OnModuleInit, OnModuleDestroy {
     this.timer = setTimeout(() => {
       this.runRetention()
         .catch(err => this.logger.error('Retention run failed:', err))
-        .finally(() => {
-          // Schedule the next run 24h from now
-          this.timer = setTimeout(() => this.scheduleNext(), CRON_INTERVAL_MS);
-        });
+        .finally(() => this.scheduleNext());
     }, delayMs);
   }
 
