@@ -64,21 +64,20 @@ export function Dashboard() {
       const user = parseFloat(info.cpu.used_cpu_user);
       const ts = Date.now();
 
-      if (prevCpuRef.current) {
-        const dtSec = (ts - prevCpuRef.current.ts) / 1000;
+      const prevCpu = prevCpuRef.current;
+      prevCpuRef.current = { sys, user, ts };
+
+      if (prevCpu) {
+        const dtSec = (ts - prevCpu.ts) / 1000;
         if (dtSec > 0) {
+          const deltaSys = parseFloat(((sys - prevCpu.sys) / dtSec).toFixed(3));
+          const deltaUser = parseFloat(((user - prevCpu.user) / dtSec).toFixed(3));
           setCpuHistory((prev) => {
-            const next = [...prev, {
-              time,
-              sys: parseFloat(((sys - prevCpuRef.current!.sys) / dtSec).toFixed(3)),
-              user: parseFloat(((user - prevCpuRef.current!.user) / dtSec).toFixed(3)),
-            }];
+            const next = [...prev, { time, sys: deltaSys, user: deltaUser }];
             return next.slice(-60);
           });
         }
       }
-
-      prevCpuRef.current = { sys, user, ts };
     }
   }, [info]);
 
