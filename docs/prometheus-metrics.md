@@ -148,6 +148,12 @@ Server CPU consumption from the Valkey/Redis INFO CPU section.
 | `betterdb_cpu_sys_seconds_total` | gauge | `connection` | Cumulative system CPU time consumed by the server in seconds | `123.45` |
 | `betterdb_cpu_user_seconds_total` | gauge | `connection` | Cumulative user CPU time consumed by the server in seconds | `456.78` |
 
+**System vs User CPU**
+
+`cpu_sys_seconds_total` tracks time the CPU spent in kernel space on behalf of the Valkey process - network I/O syscalls, memory allocation, and other OS-level operations. `cpu_user_seconds_total` tracks time spent executing Valkey's own code in userspace - command processing, data structure operations, Lua scripts, and so on.
+
+For a lightly loaded instance, system CPU is typically higher than user because most work is network I/O. A spike in user CPU points to CPU-intensive commands (large `SORT` operations, complex Lua scripts, big key scans). A spike in system CPU points to network or memory pressure.
+
 **Note**: These are cumulative counters exposed as gauges. Use `rate()` in PromQL to compute per-second CPU usage.
 
 ### Replication Metrics
