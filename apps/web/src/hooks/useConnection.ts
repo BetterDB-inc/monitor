@@ -7,6 +7,10 @@ export interface Connection {
   host: string;
   port: number;
   isConnected: boolean;
+  capabilities?: {
+    dbType: 'valkey' | 'redis';
+    version: string;
+  };
 }
 
 export interface ConnectionContextValue {
@@ -82,6 +86,17 @@ export function useConnectionState(): ConnectionContextValue {
     if (connection) {
       setCurrentConnection(connection);
       setCurrentConnectionId(connection.id);
+      fetchApi('/telemetry/event', {
+        method: 'POST',
+        body: JSON.stringify({
+          eventType: 'connection_switch',
+          payload: {
+            totalConnections: connections.length,
+            dbType: connection.capabilities?.dbType ?? 'unknown',
+            dbVersion: connection.capabilities?.version ?? 'unknown',
+          },
+        }),
+      }).catch(() => {});
     }
   }, [connections]);
 

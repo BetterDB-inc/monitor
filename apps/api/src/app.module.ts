@@ -12,6 +12,7 @@ import { CommandLogAnalyticsModule } from './commandlog-analytics/commandlog-ana
 import { PrometheusModule } from './prometheus/prometheus.module';
 import { SettingsModule } from './settings/settings.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
+import { TelemetryModule } from './telemetry/telemetry.module';
 import { CloudAuthModule } from './auth/cloud-auth.module';
 
 let AiModule: any = null;
@@ -113,7 +114,7 @@ const proprietaryImports = [
 ].filter(Boolean);
 
 @Module({
-  imports: [...baseImports, ...proprietaryImports],
+  imports: [...baseImports, ...proprietaryImports, TelemetryModule],
   providers: [
     {
       provide: APP_GUARD,

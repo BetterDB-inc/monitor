@@ -24,7 +24,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
 
   private cache: CachedEntitlement | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  private validationPromise: Promise<EntitlementResponse> | null = null;
+  public validationPromise: Promise<EntitlementResponse> | null = null;
   private isValidated = false;
 
   // Version check state
@@ -231,6 +231,14 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     // Derive features from tier using TIER_FEATURES mapping
     const tierFeatures = TIER_FEATURES[entitlement.tier];
     return tierFeatures.includes(feature as Feature);
+  }
+
+  getInstanceId(): string {
+    return this.instanceId;
+  }
+
+  get isTelemetryEnabled(): boolean {
+    return this.telemetryEnabled;
   }
 
   getLicenseTier(): Tier {

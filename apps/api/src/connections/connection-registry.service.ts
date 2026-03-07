@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, DatabaseConnectionConfig } from '@betterdb/shared';
@@ -7,6 +7,7 @@ import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
 import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils/encryption';
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
+import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 
 const ENV_DEFAULT_ID = 'env-default';
 
@@ -23,6 +24,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly configService: ConfigService,
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
+    @Optional() private readonly usageTelemetry?: UsageTelemetryService,
   ) {
     this.encryption = getEncryptionService();
     if (this.encryption) {
@@ -224,6 +226,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.configs.set(config.id, { ...config, credentialStatus: 'valid' });
       this.connections.set(config.id, adapter);
       this.defaultId = config.id;
+      this.usageTelemetry?.trackDbConnect({
+        connectionType: 'standalone',
+        success: true,
+        isFirstConnection: true,
+      });
       this.logger.log('Created and connected to default connection from env vars');
     } catch (error) {
       // Storage failed - disconnect the adapter to prevent leaks
@@ -376,6 +383,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         await this.setDefault(id);
       }
 
+      this.usageTelemetry?.trackDbConnect({
+        connectionType: 'standalone',
+        success: true,
+        isFirstConnection: this.configs.size === 1,
+      });
+
       this.logger.log(`Added connection: ${config.name} (${config.host}:${config.port})`);
       return id;
     } catch (error) {
@@ -435,6 +448,15 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     await this.storage.updateConnection(id, { isDefault: true });
     this.defaultId = id;
 
+    const connection = this.connections.get(id);
+    let dbType = 'unknown';
+    let dbVersion = 'unknown';
+    try {
+      const caps = connection?.getCapabilities();
+      dbType = caps?.dbType ?? 'unknown';
+      dbVersion = caps?.version ?? 'unknown';
+    } catch { /* capabilities unavailable */ }
+    this.usageTelemetry?.trackDbSwitch(this.configs.size, dbType, dbVersion);
     this.logger.log(`Set default connection: ${id}`);
   }
 
