@@ -448,7 +448,15 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     await this.storage.updateConnection(id, { isDefault: true });
     this.defaultId = id;
 
-    this.usageTelemetry?.trackDbSwitch(this.configs.size);
+    const connection = this.connections.get(id);
+    let dbType = 'unknown';
+    let dbVersion = 'unknown';
+    try {
+      const caps = connection?.getCapabilities();
+      dbType = caps?.dbType ?? 'unknown';
+      dbVersion = caps?.version ?? 'unknown';
+    } catch { /* capabilities unavailable */ }
+    this.usageTelemetry?.trackDbSwitch(this.configs.size, dbType, dbVersion, newConfig.host);
     this.logger.log(`Set default connection: ${id}`);
   }
 

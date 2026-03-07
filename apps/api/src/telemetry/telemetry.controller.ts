@@ -1,7 +1,7 @@
 import { Controller, Post, Body, BadRequestException } from '@nestjs/common';
 import { UsageTelemetryService } from './usage-telemetry.service';
 
-const ALLOWED_EVENT_TYPES = ['interaction_after_idle', 'page_view'] as const;
+const ALLOWED_EVENT_TYPES = ['interaction_after_idle', 'page_view', 'connection_switch'] as const;
 type AllowedEventType = typeof ALLOWED_EVENT_TYPES[number];
 
 @Controller('telemetry')
@@ -28,6 +28,15 @@ export class TelemetryController {
         throw new BadRequestException('payload.path must be a string');
       }
       await this.usageTelemetry.trackPageView(path);
+    } else if (body.eventType === 'connection_switch') {
+      const totalConnections = body.payload?.totalConnections;
+      if (typeof totalConnections !== 'number') {
+        throw new BadRequestException('payload.totalConnections must be a number');
+      }
+      const dbType = typeof body.payload?.dbType === 'string' ? body.payload.dbType : 'unknown';
+      const dbVersion = typeof body.payload?.dbVersion === 'string' ? body.payload.dbVersion : 'unknown';
+      const host = typeof body.payload?.host === 'string' ? body.payload.host : 'unknown';
+      await this.usageTelemetry.trackDbSwitch(totalConnections, dbType, dbVersion, host);
     }
 
     return { ok: true };

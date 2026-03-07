@@ -60,8 +60,8 @@ export class UsageTelemetryService implements OnModuleInit {
     await this.sendEvent('db_connect', opts);
   }
 
-  async trackDbSwitch(totalConnections: number): Promise<void> {
-    await this.sendEvent('db_switch', { totalConnections });
+  async trackDbSwitch(totalConnections: number, dbType: string, dbVersion: string, host: string): Promise<void> {
+    await this.sendEvent('db_switch', { totalConnections, dbType, dbVersion, host });
   }
 
   async trackPageView(path: string): Promise<void> {

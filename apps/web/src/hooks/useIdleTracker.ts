@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { fetchApi } from '../api/client';
 
 const IDLE_THRESHOLD_MS = 5 * 60 * 1000;
 const THROTTLE_MS = 30_000;
@@ -15,9 +16,8 @@ export function useIdleTracker() {
       if (idleDuration >= IDLE_THRESHOLD_MS) {
         lastInteractionTime.current = now;
         lastThrottleUpdate.current = now;
-        fetch('/api/telemetry/event', {
+        fetchApi('/telemetry/event', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             eventType: 'interaction_after_idle',
             payload: { idleDurationMs: idleDuration },
