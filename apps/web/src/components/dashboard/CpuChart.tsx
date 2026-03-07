@@ -17,7 +17,7 @@ export function CpuChart({ data }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>CPU Usage (seconds)</CardTitle>
+        <CardTitle>Server CPU Utilization (sec/sec)</CardTitle>
       </CardHeader>
       <CardContent>
         <ResponsiveContainer width="100%" height={300}>

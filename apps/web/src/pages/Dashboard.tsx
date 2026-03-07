@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
@@ -28,6 +28,7 @@ export function Dashboard() {
   const [memoryHistory, setMemoryHistory] = useState<Array<{ time: string; used: number; peak: number }>>([]);
   const [opsHistory, setOpsHistory] = useState<Array<{ time: string; ops: number }>>([]);
   const [cpuHistory, setCpuHistory] = useState<Array<{ time: string; sys: number; user: number }>>([]);
+  const prevCpuRef = useRef<{ sys: number; user: number; ts: number } | null>(null);
   const [memoryDoctorReport, setMemoryDoctorReport] = useState<string>();
   const [memoryDoctorLoading, setMemoryDoctorLoading] = useState(true);
 
@@ -36,6 +37,7 @@ export function Dashboard() {
     setMemoryHistory([]);
     setOpsHistory([]);
     setCpuHistory([]);
+    prevCpuRef.current = null;
   }, [currentConnection?.id]);
 
   useEffect(() => {
@@ -58,14 +60,25 @@ export function Dashboard() {
     });
 
     if (info.cpu) {
-      setCpuHistory((prev) => {
-        const next = [...prev, {
-          time,
-          sys: parseFloat(info.cpu!.used_cpu_sys),
-          user: parseFloat(info.cpu!.used_cpu_user),
-        }];
-        return next.slice(-60);
-      });
+      const sys = parseFloat(info.cpu.used_cpu_sys);
+      const user = parseFloat(info.cpu.used_cpu_user);
+      const ts = Date.now();
+
+      if (prevCpuRef.current) {
+        const dtSec = (ts - prevCpuRef.current.ts) / 1000;
+        if (dtSec > 0) {
+          setCpuHistory((prev) => {
+            const next = [...prev, {
+              time,
+              sys: parseFloat(((sys - prevCpuRef.current!.sys) / dtSec).toFixed(3)),
+              user: parseFloat(((user - prevCpuRef.current!.user) / dtSec).toFixed(3)),
+            }];
+            return next.slice(-60);
+          });
+        }
+      }
+
+      prevCpuRef.current = { sys, user, ts };
     }
   }, [info]);
 

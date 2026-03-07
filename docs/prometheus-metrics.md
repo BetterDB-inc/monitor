@@ -145,8 +145,8 @@ Server CPU consumption from the Valkey/Redis INFO CPU section.
 
 | Metric | Type | Labels | Description | Example |
 |--------|------|--------|-------------|---------|
-| `betterdb_cpu_sys_seconds_total` | gauge | - | System CPU consumed by the server | `123.45` |
-| `betterdb_cpu_user_seconds_total` | gauge | - | User CPU consumed by the server | `456.78` |
+| `betterdb_cpu_sys_seconds_total` | gauge | `connection` | Cumulative system CPU time consumed by the server in seconds | `123.45` |
+| `betterdb_cpu_user_seconds_total` | gauge | `connection` | Cumulative user CPU time consumed by the server in seconds | `456.78` |
 
 **Note**: These are cumulative counters exposed as gauges. Use `rate()` in PromQL to compute per-second CPU usage.
 

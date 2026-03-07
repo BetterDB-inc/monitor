@@ -171,6 +171,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         consecutiveRequired: 5,
         cooldownMs: 120000,
       },
+      [MetricType.CPU_UTILIZATION]: {
+        warningZScore: 2.0,
+        criticalZScore: 3.0,
+        consecutiveRequired: 3,
+        cooldownMs: 60000,
+        detectDrops: true,
+      },
     };
 
     // Initialize buffers and detectors for all metrics
@@ -178,8 +185,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
-      // REPLICATION_ROLE, SLOWLOG_LAST_ID, CPU_UTILIZATION, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.CPU_UTILIZATION || metricType === MetricType.SLOWLOG_COUNT) continue;
+      // REPLICATION_ROLE, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
+      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -244,16 +251,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           if (dtSec > 0) {
             const prevTotal = prev.sys + prev.user;
             const utilization = ((cpuTotal - prevTotal) / dtSec) * 100;
-
-            if (!buffers.has(MetricType.CPU_UTILIZATION)) {
-              buffers.set(MetricType.CPU_UTILIZATION, new MetricBuffer(MetricType.CPU_UTILIZATION));
-              detectors.set(MetricType.CPU_UTILIZATION, new SpikeDetector(MetricType.CPU_UTILIZATION, {
-                warningZScore: 2.0,
-                criticalZScore: 3.0,
-                consecutiveRequired: 3,
-                cooldownMs: 60000,
-              }));
-            }
 
             const cpuBuffer = buffers.get(MetricType.CPU_UTILIZATION)!;
             const cpuDetector = detectors.get(MetricType.CPU_UTILIZATION)!;
