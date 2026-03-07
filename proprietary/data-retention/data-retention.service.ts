@@ -1,4 +1,5 @@
-import { Injectable, Logger, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { LicenseService } from '@proprietary/license/license.service';
 import { Tier } from '@proprietary/license/types';
 import { StoragePort } from '@app/common/interfaces/storage-port.interface';
@@ -12,50 +13,22 @@ const RETENTION_DAYS: Record<Tier, number> = {
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 @Injectable()
-export class DataRetentionService implements OnModuleInit, OnModuleDestroy {
+export class DataRetentionService {
   private readonly logger = new Logger(DataRetentionService.name);
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private destroyed = false;
 
   constructor(
     private readonly licenseService: LicenseService,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
   ) {}
 
-  onModuleInit() {
+  @Cron('0 3 * * *')
+  async handleRetentionCron(): Promise<void> {
     if (process.env.CLOUD_MODE !== 'true') {
-      this.logger.log('Data retention disabled (not in CLOUD_MODE)');
+      this.logger.debug('Data retention skipped (not in CLOUD_MODE)');
       return;
     }
 
-    this.scheduleNext();
-  }
-
-  onModuleDestroy() {
-    this.destroyed = true;
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-  }
-
-  private scheduleNext() {
-    if (this.destroyed) return;
-    const now = new Date();
-    const next3am = new Date(now);
-    next3am.setHours(3, 0, 0, 0);
-    if (next3am.getTime() <= now.getTime()) {
-      next3am.setDate(next3am.getDate() + 1);
-    }
-    const delayMs = next3am.getTime() - now.getTime();
-
-    this.logger.log(`Next retention run scheduled in ${Math.round(delayMs / 60000)} minutes`);
-
-    this.timer = setTimeout(() => {
-      this.runRetention()
-        .catch(err => this.logger.error('Retention run failed:', err))
-        .finally(() => this.scheduleNext());
-    }, delayMs);
+    await this.runRetention();
   }
 
   async runRetention(): Promise<void> {

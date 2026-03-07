@@ -84,11 +84,11 @@ describe('SlowLogAnalyticsService', () => {
     });
 
     it('should pass connectionId through to storage', async () => {
-      await service.pruneOldEntries(7, 'my-connection');
+      await service.pruneOldEntries(7, 'myconnection');
 
       expect(storageClient.pruneOldSlowLogEntries).toHaveBeenCalledWith(
         expect.any(Number),
-        'my-connection',
+        'myconnection',
       );
     });
 
