@@ -21,6 +21,7 @@ let KeyAnalyticsModule: any = null;
 let AnomalyModule: any = null;
 let WebhookProModule: any = null;
 let AgentModule: any = null;
+let DataRetentionModule: any = null;
 
 try {
   // Use relative path for runtime resolution (tsconfig paths only work at compile time)
@@ -71,6 +72,14 @@ if (process.env.CLOUD_MODE) {
   } catch {
     // Proprietary module not available
   }
+
+  try {
+    const dataRetentionModule = require('../../../proprietary/data-retention/data-retention.module');
+    DataRetentionModule = dataRetentionModule.DataRetentionModule;
+    console.log('[DataRetention] Proprietary module loaded');
+  } catch {
+    // Proprietary module not available
+  }
 }
 
 // Cloud auth module - uses proprietary implementation in cloud mode
@@ -111,6 +120,7 @@ const proprietaryImports = [
   WebhookProModule,
   AiModule,
   AgentModule,
+  DataRetentionModule,
 ].filter(Boolean);
 
 @Module({

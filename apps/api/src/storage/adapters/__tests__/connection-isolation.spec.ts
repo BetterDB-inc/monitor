@@ -264,6 +264,98 @@ describe('Multi-Database Connection Isolation', () => {
     });
   });
 
+  describe('Prune Isolation', () => {
+    const NOW = Date.now();
+    const OLD = NOW - 100_000;
+    const CUTOFF = NOW - 50_000;
+
+    it('pruneOldSlowLogEntries(cutoff, connectionId) removes only that connection\'s old entries', async () => {
+      const makeEntry = (id: number, capturedAt: number) => ({
+        id, timestamp: Math.floor(capturedAt / 1000), duration: 1000,
+        command: ['GET', 'key'], clientAddress: '127.0.0.1:1', clientName: 'app',
+        capturedAt, sourceHost: 'localhost', sourcePort: 6379,
+      });
+
+      await storage.saveSlowLogEntries([makeEntry(1, OLD), makeEntry(2, NOW)], CONN_A);
+      await storage.saveSlowLogEntries([makeEntry(3, OLD), makeEntry(4, NOW)], CONN_B);
+
+      const pruned = await storage.pruneOldSlowLogEntries(CUTOFF, CONN_A);
+      expect(pruned).toBe(1);
+
+      const fromA = await storage.getSlowLogEntries({ connectionId: CONN_A });
+      expect(fromA).toHaveLength(1);
+      expect(fromA[0].id).toBe(2);
+
+      // CONN_B old entry must be untouched
+      const fromB = await storage.getSlowLogEntries({ connectionId: CONN_B });
+      expect(fromB).toHaveLength(2);
+    });
+
+    it('pruneOldSlowLogEntries(cutoff) without connectionId removes old entries across all connections', async () => {
+      const makeEntry = (id: number, capturedAt: number) => ({
+        id, timestamp: Math.floor(capturedAt / 1000), duration: 1000,
+        command: ['GET', 'key'], clientAddress: '127.0.0.1:1', clientName: 'app',
+        capturedAt, sourceHost: 'localhost', sourcePort: 6379,
+      });
+
+      await storage.saveSlowLogEntries([makeEntry(1, OLD), makeEntry(2, NOW)], CONN_A);
+      await storage.saveSlowLogEntries([makeEntry(3, OLD), makeEntry(4, NOW)], CONN_B);
+
+      const pruned = await storage.pruneOldSlowLogEntries(CUTOFF);
+      expect(pruned).toBe(2);
+
+      const fromA = await storage.getSlowLogEntries({ connectionId: CONN_A });
+      expect(fromA).toHaveLength(1);
+      const fromB = await storage.getSlowLogEntries({ connectionId: CONN_B });
+      expect(fromB).toHaveLength(1);
+    });
+
+    it('pruneOldClientSnapshots(cutoff, connectionId) removes only that connection\'s old entries', async () => {
+      const makeSnapshot = (clientId: string, capturedAt: number) => ({
+        id: 0, clientId, addr: '127.0.0.1:1', name: 'app', user: 'default',
+        db: 0, cmd: 'GET', age: 100, idle: 5, flags: 'N', sub: 0, psub: 0,
+        qbuf: 0, qbufFree: 32768, obl: 0, oll: 0, omem: 0,
+        capturedAt, sourceHost: 'localhost', sourcePort: 6379,
+      });
+
+      await storage.saveClientSnapshot([makeSnapshot('c1', OLD), makeSnapshot('c2', NOW)], CONN_A);
+      await storage.saveClientSnapshot([makeSnapshot('c3', OLD), makeSnapshot('c4', NOW)], CONN_B);
+
+      const pruned = await storage.pruneOldClientSnapshots(CUTOFF, CONN_A);
+      expect(pruned).toBe(1);
+
+      const fromA = await storage.getClientSnapshots({ connectionId: CONN_A });
+      expect(fromA).toHaveLength(1);
+      expect(fromA[0].clientId).toBe('c2');
+
+      const fromB = await storage.getClientSnapshots({ connectionId: CONN_B });
+      expect(fromB).toHaveLength(2);
+    });
+
+    it('pruneOldEntries(cutoff, connectionId) (ACL) removes only that connection\'s old entries', async () => {
+      const makeAcl = (username: string, capturedAt: number) => ({
+        id: 0, count: 1, reason: 'auth', context: 'GET', object: 'key',
+        username, ageSeconds: 10, clientInfo: '127.0.0.1:1',
+        timestampCreated: Math.floor(capturedAt / 1000),
+        timestampLastUpdated: Math.floor(capturedAt / 1000),
+        capturedAt, sourceHost: 'localhost', sourcePort: 6379,
+      });
+
+      await storage.saveAclEntries([makeAcl('userA-old', OLD), makeAcl('userA-new', NOW)], CONN_A);
+      await storage.saveAclEntries([makeAcl('userB-old', OLD), makeAcl('userB-new', NOW)], CONN_B);
+
+      const pruned = await storage.pruneOldEntries(CUTOFF, CONN_A);
+      expect(pruned).toBe(1);
+
+      const fromA = await storage.getAclEntries({ connectionId: CONN_A });
+      expect(fromA).toHaveLength(1);
+      expect(fromA[0].username).toBe('userA-new');
+
+      const fromB = await storage.getAclEntries({ connectionId: CONN_B });
+      expect(fromB).toHaveLength(2);
+    });
+  });
+
   describe('Anomaly Event Isolation', () => {
     it('anomaly events must be scoped per connection', async () => {
       const event = {
