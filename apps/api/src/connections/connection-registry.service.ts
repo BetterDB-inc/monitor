@@ -456,7 +456,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       dbType = caps?.dbType ?? 'unknown';
       dbVersion = caps?.version ?? 'unknown';
     } catch { /* capabilities unavailable */ }
-    this.usageTelemetry?.trackDbSwitch(this.configs.size, dbType, dbVersion, newConfig.host);
+    this.usageTelemetry?.trackDbSwitch(this.configs.size, dbType, dbVersion);
     this.logger.log(`Set default connection: ${id}`);
   }
 

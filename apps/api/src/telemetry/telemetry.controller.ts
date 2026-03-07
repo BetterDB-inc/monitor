@@ -35,8 +35,7 @@ export class TelemetryController {
       }
       const dbType = typeof body.payload?.dbType === 'string' ? body.payload.dbType : 'unknown';
       const dbVersion = typeof body.payload?.dbVersion === 'string' ? body.payload.dbVersion : 'unknown';
-      const host = typeof body.payload?.host === 'string' ? body.payload.host : 'unknown';
-      await this.usageTelemetry.trackDbSwitch(totalConnections, dbType, dbVersion, host);
+      await this.usageTelemetry.trackDbSwitch(totalConnections, dbType, dbVersion);
     }
 
     return { ok: true };

@@ -94,7 +94,6 @@ export function useConnectionState(): ConnectionContextValue {
             totalConnections: connections.length,
             dbType: connection.capabilities?.dbType ?? 'unknown',
             dbVersion: connection.capabilities?.version ?? 'unknown',
-            host: connection.host,
           },
         }),
       }).catch(() => {});
