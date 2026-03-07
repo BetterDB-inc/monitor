@@ -124,6 +124,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private clusterSlotReadsTotal: Gauge;
   private clusterSlotWritesTotal: Gauge;
 
+  // CPU Metrics
+  private cpuSysSecondsTotal: Gauge;
+  private cpuUserSecondsTotal: Gauge;
+
   // Slowlog Raw Metrics
   private slowlogLength: Gauge;
   private slowlogLastId: Gauge;
@@ -328,6 +332,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.clusterSlotReadsTotal = this.createGauge('cluster_slot_reads_total', 'Total reads for cluster slot', ['slot']);
     this.clusterSlotWritesTotal = this.createGauge('cluster_slot_writes_total', 'Total writes for cluster slot', ['slot']);
 
+    // CPU Metrics (per connection)
+    this.cpuSysSecondsTotal = this.createGauge('cpu_sys_seconds_total', 'System CPU consumed by the server');
+    this.cpuUserSecondsTotal = this.createGauge('cpu_user_seconds_total', 'User CPU consumed by the server');
+
     // Slowlog Raw Metrics (per connection)
     this.slowlogLength = this.createGauge('slowlog_length', 'Current slowlog length');
     this.slowlogLastId = this.createGauge('slowlog_last_id', 'ID of last slowlog entry');
@@ -426,6 +434,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.updateClientInfoMetrics(info, connLabel, connectionId, config);
       this.updateMemoryMetrics(info, connLabel, connectionId, config);
       this.updateStatsMetrics(info, connLabel);
+      this.updateCpuMetrics(info, connLabel);
       this.updateReplicationMetrics(info, connLabel, connectionId, config);
       this.updateKeyspaceMetricsFromInfo(info, connLabel, state);
       await this.updateClusterMetricsFromInfo(client, info, connLabel, connectionId, state, config);
@@ -558,6 +567,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.expiredKeysTotal.labels(connLabel).set(parseInt(info.stats.expired_keys) || 0);
     this.pubsubChannels.labels(connLabel).set(parseInt(info.stats.pubsub_channels) || 0);
     this.pubsubPatterns.labels(connLabel).set(parseInt(info.stats.pubsub_patterns) || 0);
+  }
+
+  private updateCpuMetrics(info: Record<string, any>, connLabel: string): void {
+    if (!info.cpu) return;
+
+    this.cpuSysSecondsTotal.labels(connLabel).set(parseFloat(info.cpu.used_cpu_sys) || 0);
+    this.cpuUserSecondsTotal.labels(connLabel).set(parseFloat(info.cpu.used_cpu_user) || 0);
   }
 
   private updateReplicationMetrics(

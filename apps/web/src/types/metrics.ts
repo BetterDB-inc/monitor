@@ -78,6 +78,10 @@ export interface InfoResponse {
   cluster?: {
     cluster_enabled?: string;
   };
+  cpu?: {
+    used_cpu_sys: string;
+    used_cpu_user: string;
+  };
   keyspace?: Record<string, string>;
 }
 

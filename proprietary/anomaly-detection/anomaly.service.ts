@@ -38,6 +38,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private recentGroups: CorrelatedAnomalyGroup[] = [];
   private lastSlowlogId = new Map<string, number>();
   private lastReplicationRole = new Map<string, number>();
+  private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
 
@@ -170,6 +171,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         consecutiveRequired: 5,
         cooldownMs: 120000,
       },
+      [MetricType.CPU_UTILIZATION]: {
+        warningZScore: 2.0,
+        criticalZScore: 3.0,
+        consecutiveRequired: 3,
+        cooldownMs: 60000,
+        detectDrops: true,
+      },
     };
 
     // Initialize buffers and detectors for all metrics
@@ -193,6 +201,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.detectors.delete(connectionId);
     this.lastSlowlogId.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
+    this.prevCpuByConnection.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -228,6 +237,37 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
           await this.addAnomaly(anomaly, ctx);
         }
+      }
+
+      // CPU utilization delta computation (cumulative counters → rate)
+      const cpuSys = this.parseNumber(info.used_cpu_sys);
+      const cpuUser = this.parseNumber(info.used_cpu_user);
+      if (cpuSys !== null && cpuUser !== null) {
+        const prev = this.prevCpuByConnection.get(ctx.connectionId);
+        const cpuTotal = cpuSys + cpuUser;
+
+        if (prev) {
+          const dtSec = (timestamp - prev.ts) / 1000;
+          if (dtSec > 0) {
+            const prevTotal = prev.sys + prev.user;
+            const utilization = ((cpuTotal - prevTotal) / dtSec) * 100;
+            if (utilization < 0) {
+              // counter reset (server restart) - skip this sample, new baseline set below
+            } else {
+              const cpuBuffer = buffers.get(MetricType.CPU_UTILIZATION)!;
+              const cpuDetector = detectors.get(MetricType.CPU_UTILIZATION)!;
+              cpuBuffer.addSample(utilization, timestamp);
+              const anomaly = cpuDetector.detect(cpuBuffer, utilization, timestamp);
+              if (anomaly) {
+                anomaly.connectionId = ctx.connectionId;
+                this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
+                await this.addAnomaly(anomaly, ctx);
+              }
+            }
+          }
+        }
+
+        this.prevCpuByConnection.set(ctx.connectionId, { sys: cpuSys, user: cpuUser, ts: timestamp });
       }
 
       // Slowlog rate-of-change detection (sourced from SlowLogAnalyticsService, not INFO)

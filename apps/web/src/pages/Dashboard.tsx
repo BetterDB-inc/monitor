@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
@@ -6,6 +6,7 @@ import { ConnectionCard } from '../components/dashboard/ConnectionCard';
 import { OverviewCards } from '../components/dashboard/OverviewCards';
 import { MemoryChart } from '../components/dashboard/MemoryChart';
 import { OpsChart } from '../components/dashboard/OpsChart';
+import { CpuChart } from '../components/dashboard/CpuChart';
 import { CapabilitiesBadges } from '../components/dashboard/CapabilitiesBadges';
 import { DoctorCard } from '../components/DoctorCard';
 
@@ -26,6 +27,8 @@ export function Dashboard() {
 
   const [memoryHistory, setMemoryHistory] = useState<Array<{ time: string; used: number; peak: number }>>([]);
   const [opsHistory, setOpsHistory] = useState<Array<{ time: string; ops: number }>>([]);
+  const [cpuHistory, setCpuHistory] = useState<Array<{ time: string; sys: number; user: number }>>([]);
+  const prevCpuRef = useRef<{ sys: number; user: number; ts: number } | null>(null);
   const [memoryDoctorReport, setMemoryDoctorReport] = useState<string>();
   const [memoryDoctorLoading, setMemoryDoctorLoading] = useState(true);
 
@@ -33,6 +36,8 @@ export function Dashboard() {
   useEffect(() => {
     setMemoryHistory([]);
     setOpsHistory([]);
+    setCpuHistory([]);
+    prevCpuRef.current = null;
   }, [currentConnection?.id]);
 
   useEffect(() => {
@@ -53,6 +58,29 @@ export function Dashboard() {
       const next = [...prev, { time, ops: parseInt(info.stats!.instantaneous_ops_per_sec, 10) }];
       return next.slice(-60);
     });
+
+    if (info.cpu) {
+      const sys = parseFloat(info.cpu.used_cpu_sys);
+      const user = parseFloat(info.cpu.used_cpu_user);
+      if (isNaN(sys) || isNaN(user)) return;
+      const ts = Date.now();
+
+      const prevCpu = prevCpuRef.current;
+      prevCpuRef.current = { sys, user, ts };
+
+      if (prevCpu) {
+        const dtSec = (ts - prevCpu.ts) / 1000;
+        if (dtSec > 0) {
+          const deltaSys = parseFloat((((sys - prevCpu.sys) / dtSec) * 100).toFixed(3));
+          const deltaUser = parseFloat((((user - prevCpu.user) / dtSec) * 100).toFixed(3));
+          if (deltaSys < 0 || deltaUser < 0) return;
+          setCpuHistory((prev) => {
+            const next = [...prev, { time, sys: deltaSys, user: deltaUser }];
+            return next.slice(-60);
+          });
+        }
+      }
+    }
   }, [info]);
 
   useEffect(() => {
@@ -84,6 +112,7 @@ export function Dashboard() {
       <div className="grid gap-4 md:grid-cols-2">
         <MemoryChart data={memoryHistory} />
         <OpsChart data={opsHistory} />
+        <CpuChart data={cpuHistory} />
       </div>
     </div>
   );

@@ -10,6 +10,7 @@ export enum MetricType {
   BLOCKED_CLIENTS = 'blocked_clients',
   KEYSPACE_MISSES = 'keyspace_misses',
   FRAGMENTATION_RATIO = 'fragmentation_ratio',
+  CPU_UTILIZATION = 'cpu_utilization',
   REPLICATION_ROLE = 'replication_role',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',

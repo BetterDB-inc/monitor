@@ -455,6 +455,100 @@ describe('AnomalyService', () => {
     });
   });
 
+  // ─── CPU Utilization Delta Detection ─────────────────────────────────────
+
+  describe('CPU utilization delta detection', () => {
+    function mockInfoWithCpu(cpuSys: string, cpuUser: string) {
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+        cpu: { used_cpu_sys: cpuSys, used_cpu_user: cpuUser },
+      });
+    }
+
+    it('does not record a sample on the first poll (no previous baseline)', async () => {
+      mockInfoWithCpu('10.0', '20.0');
+      await poll();
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      const cpuBuffer = buffers.get(MetricType.CPU_UTILIZATION);
+      expect(cpuBuffer.getSampleCount()).toBe(0);
+    });
+
+    it('records utilization delta on second poll', async () => {
+      jest.spyOn(Date, 'now')
+        .mockReturnValueOnce(1000)
+        .mockReturnValueOnce(2000);
+
+      mockInfoWithCpu('10.0', '20.0');
+      await poll();
+      mockInfoWithCpu('10.5', '20.5');
+      await poll();
+
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      const cpuBuffer = buffers.get(MetricType.CPU_UTILIZATION);
+      expect(cpuBuffer.getSampleCount()).toBe(1);
+      // (10.5 + 20.5 - 10.0 - 20.0) / (1s) * 100 = 100
+      expect(cpuBuffer.getLatest()).toBe(100);
+    });
+
+    it('skips sample when utilization is negative (counter reset)', async () => {
+      jest.spyOn(Date, 'now')
+        .mockReturnValueOnce(1000)
+        .mockReturnValueOnce(2000);
+
+      mockInfoWithCpu('50.0', '50.0');
+      await poll();
+      mockInfoWithCpu('1.0', '1.0'); // server restarted, counters reset
+      await poll();
+
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      const cpuBuffer = buffers.get(MetricType.CPU_UTILIZATION);
+      expect(cpuBuffer.getSampleCount()).toBe(0);
+    });
+
+    it('skips when cpu fields are missing from INFO', async () => {
+      // Default mock has no cpu section
+      await poll();
+      await poll();
+      const prevCpu = (service as any).prevCpuByConnection.get('conn-1');
+      expect(prevCpu).toBeUndefined();
+    });
+
+    it('cleans up prevCpuByConnection on connection removal', async () => {
+      mockInfoWithCpu('10.0', '20.0');
+      await poll();
+      expect((service as any).prevCpuByConnection.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).prevCpuByConnection.has('conn-1')).toBe(false);
+    });
+
+    it('initializes CPU buffer and detector during buffer init', async () => {
+      await poll(); // triggers buffer initialization
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      const detectors: Map<MetricType, any> = (service as any).detectors.get('conn-1');
+      expect(buffers.has(MetricType.CPU_UTILIZATION)).toBe(true);
+      expect(detectors.has(MetricType.CPU_UTILIZATION)).toBe(true);
+    });
+
+    it('CPU detector has detectDrops enabled', async () => {
+      await poll();
+      const detectors: Map<MetricType, any> = (service as any).detectors.get('conn-1');
+      const config = detectors.get(MetricType.CPU_UTILIZATION).getConfig();
+      expect(config.detectDrops).toBe(true);
+    });
+  });
+
   // ─── Buffer Initialization ──────────────────────────────────────────────
 
   describe('buffer initialization', () => {

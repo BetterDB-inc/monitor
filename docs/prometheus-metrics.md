@@ -18,6 +18,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/promethe
   - [Server Info Metrics](#server-info-metrics)
   - [Memory Metrics](#memory-metrics)
   - [Stats Metrics](#stats-metrics)
+  - [CPU Metrics](#cpu-metrics)
   - [Replication Metrics](#replication-metrics)
   - [Keyspace Metrics](#keyspace-metrics)
   - [Cluster Metrics](#cluster-metrics)
@@ -138,6 +139,23 @@ Operational statistics and throughput.
 | `betterdb_pubsub_channels` | gauge | - | Number of pub/sub channels | `12` |
 | `betterdb_pubsub_patterns` | gauge | - | Number of pub/sub patterns | `3` |
 
+### CPU Metrics
+
+Server CPU consumption from the Valkey/Redis INFO CPU section.
+
+| Metric | Type | Labels | Description | Example |
+|--------|------|--------|-------------|---------|
+| `betterdb_cpu_sys_seconds_total` | gauge | `connection` | Cumulative system CPU time consumed by the server in seconds | `123.45` |
+| `betterdb_cpu_user_seconds_total` | gauge | `connection` | Cumulative user CPU time consumed by the server in seconds | `456.78` |
+
+**System vs User CPU**
+
+`cpu_sys_seconds_total` tracks time the CPU spent in kernel space on behalf of the Valkey process - network I/O syscalls, memory allocation, and other OS-level operations. `cpu_user_seconds_total` tracks time spent executing Valkey's own code in userspace - command processing, data structure operations, Lua scripts, and so on.
+
+For a lightly loaded instance, system CPU is typically higher than user because most work is network I/O. A spike in user CPU points to CPU-intensive commands (large `SORT` operations, complex Lua scripts, big key scans). A spike in system CPU points to network or memory pressure.
+
+**Note**: These are cumulative counters exposed as gauges. Use `rate()` in PromQL to compute per-second CPU usage.
+
 ### Replication Metrics
 
 Replication status and offset tracking.
@@ -201,7 +219,7 @@ Real-time anomaly detection system metrics.
 
 **Label Values**:
 - `severity`: `info`, `warning`, `critical`
-- `metric_type`: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`, `replication_role`
+- `metric_type`: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`, `cpu_utilization`, `replication_role`
 - `anomaly_type`: `spike`, `drop`
 
 #### Correlation Metrics
@@ -351,6 +369,17 @@ topk(5, betterdb_anomaly_by_metric)
 
 # Unresolved critical anomalies
 betterdb_anomaly_events_current{severity="critical"}
+```
+
+### CPU Utilization
+
+```promql
+# Per-second CPU usage (system + user combined)
+rate(betterdb_cpu_sys_seconds_total[5m]) + rate(betterdb_cpu_user_seconds_total[5m])
+
+# System vs user CPU breakdown
+rate(betterdb_cpu_sys_seconds_total[5m])
+rate(betterdb_cpu_user_seconds_total[5m])
 ```
 
 ### Memory & Performance
