@@ -132,6 +132,27 @@ export interface MemoryStats {
   fragmentationBytes: number;
 }
 
+export interface StoredLatencySnapshot {
+  id: string;
+  timestamp: number;
+  eventName: string;
+  latestEventTimestamp: number;
+  maxLatency: number;
+  connectionId?: string;
+}
+
+export interface StoredMemorySnapshot {
+  id: string;
+  timestamp: number;
+  usedMemory: number;
+  usedMemoryRss: number;
+  usedMemoryPeak: number;
+  memFragmentationRatio: number;
+  maxmemory: number;
+  allocatorFragRatio: number;
+  connectionId?: string;
+}
+
 export interface ClientInfo {
   id: string;
   addr: string;

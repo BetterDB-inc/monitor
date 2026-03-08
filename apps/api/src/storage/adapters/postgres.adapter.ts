@@ -26,6 +26,10 @@ import {
   StoredCommandLogEntry,
   CommandLogQueryOptions,
   CommandLogType,
+  StoredLatencySnapshot,
+  LatencySnapshotQueryOptions,
+  StoredMemorySnapshot,
+  MemorySnapshotQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 
@@ -1259,6 +1263,36 @@ export class PostgresAdapter implements StoragePort {
         -- Constraint already exists, ignore
       END $$;
 
+      -- Latency Snapshots Table
+      CREATE TABLE IF NOT EXISTS latency_snapshots (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        timestamp BIGINT NOT NULL,
+        event_name VARCHAR NOT NULL,
+        latest_event_timestamp BIGINT NOT NULL,
+        max_latency INTEGER NOT NULL,
+        connection_id TEXT NOT NULL DEFAULT 'env-default'
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_latency_snap_timestamp ON latency_snapshots(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_latency_snap_event_name ON latency_snapshots(event_name);
+      CREATE INDEX IF NOT EXISTS idx_latency_snap_connection_id ON latency_snapshots(connection_id);
+
+      -- Memory Snapshots Table
+      CREATE TABLE IF NOT EXISTS memory_snapshots (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        timestamp BIGINT NOT NULL,
+        used_memory BIGINT NOT NULL,
+        used_memory_rss BIGINT NOT NULL,
+        used_memory_peak BIGINT NOT NULL,
+        mem_fragmentation_ratio DOUBLE PRECISION NOT NULL,
+        maxmemory BIGINT NOT NULL DEFAULT 0,
+        allocator_frag_ratio DOUBLE PRECISION NOT NULL DEFAULT 0,
+        connection_id TEXT NOT NULL DEFAULT 'env-default'
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
+
       -- Database Connections Table (stores multi-database connection configs)
       CREATE TABLE IF NOT EXISTS connections (
         id TEXT PRIMARY KEY,
@@ -2491,6 +2525,201 @@ export class PostgresAdapter implements StoragePort {
       [cutoffTimestamp]
     );
 
+    return result.rowCount ?? 0;
+  }
+
+  // Latency Snapshot Methods
+  async saveLatencySnapshots(snapshots: StoredLatencySnapshot[], connectionId: string): Promise<number> {
+    if (!this.pool || snapshots.length === 0) return 0;
+
+    const values: any[] = [];
+    const placeholders: string[] = [];
+    let paramIndex = 1;
+
+    for (const snapshot of snapshots) {
+      placeholders.push(`(
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+      )`);
+      values.push(
+        snapshot.timestamp,
+        snapshot.eventName,
+        snapshot.latestEventTimestamp,
+        snapshot.maxLatency,
+        connectionId,
+      );
+    }
+
+    const query = `
+      INSERT INTO latency_snapshots (
+        timestamp, event_name, latest_event_timestamp, max_latency, connection_id
+      ) VALUES ${placeholders.join(', ')}
+    `;
+
+    const result = await this.pool.query(query, values);
+    return result.rowCount ?? 0;
+  }
+
+  async getLatencySnapshots(options: LatencySnapshotQueryOptions = {}): Promise<StoredLatencySnapshot[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (options.connectionId) {
+      conditions.push(`connection_id = $${paramIndex++}`);
+      params.push(options.connectionId);
+    }
+    if (options.startTime) {
+      conditions.push(`timestamp >= $${paramIndex++}`);
+      params.push(options.startTime);
+    }
+    if (options.endTime) {
+      conditions.push(`timestamp <= $${paramIndex++}`);
+      params.push(options.endTime);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+
+    const query = `
+      SELECT id, timestamp, event_name, latest_event_timestamp, max_latency, connection_id
+      FROM latency_snapshots
+      ${whereClause}
+      ORDER BY timestamp DESC
+      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+    `;
+    params.push(limit, offset);
+
+    const result = await this.pool.query(query, params);
+    return result.rows.map((row: any) => ({
+      id: row.id,
+      timestamp: Number(row.timestamp),
+      eventName: row.event_name,
+      latestEventTimestamp: Number(row.latest_event_timestamp),
+      maxLatency: Number(row.max_latency),
+      connectionId: row.connection_id,
+    }));
+  }
+
+  async pruneOldLatencySnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = await this.pool.query(
+        'DELETE FROM latency_snapshots WHERE timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId]
+      );
+      return result.rowCount ?? 0;
+    }
+
+    const result = await this.pool.query(
+      'DELETE FROM latency_snapshots WHERE timestamp < $1',
+      [cutoffTimestamp]
+    );
+    return result.rowCount ?? 0;
+  }
+
+  // Memory Snapshot Methods
+  async saveMemorySnapshots(snapshots: StoredMemorySnapshot[], connectionId: string): Promise<number> {
+    if (!this.pool || snapshots.length === 0) return 0;
+
+    const values: any[] = [];
+    const placeholders: string[] = [];
+    let paramIndex = 1;
+
+    for (const snapshot of snapshots) {
+      placeholders.push(`(
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+      )`);
+      values.push(
+        snapshot.timestamp,
+        snapshot.usedMemory,
+        snapshot.usedMemoryRss,
+        snapshot.usedMemoryPeak,
+        snapshot.memFragmentationRatio,
+        snapshot.maxmemory,
+        snapshot.allocatorFragRatio,
+        connectionId,
+      );
+    }
+
+    const query = `
+      INSERT INTO memory_snapshots (
+        timestamp, used_memory, used_memory_rss, used_memory_peak,
+        mem_fragmentation_ratio, maxmemory, allocator_frag_ratio, connection_id
+      ) VALUES ${placeholders.join(', ')}
+    `;
+
+    const result = await this.pool.query(query, values);
+    return result.rowCount ?? 0;
+  }
+
+  async getMemorySnapshots(options: MemorySnapshotQueryOptions = {}): Promise<StoredMemorySnapshot[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (options.connectionId) {
+      conditions.push(`connection_id = $${paramIndex++}`);
+      params.push(options.connectionId);
+    }
+    if (options.startTime) {
+      conditions.push(`timestamp >= $${paramIndex++}`);
+      params.push(options.startTime);
+    }
+    if (options.endTime) {
+      conditions.push(`timestamp <= $${paramIndex++}`);
+      params.push(options.endTime);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+
+    const query = `
+      SELECT id, timestamp, used_memory, used_memory_rss, used_memory_peak,
+             mem_fragmentation_ratio, maxmemory, allocator_frag_ratio, connection_id
+      FROM memory_snapshots
+      ${whereClause}
+      ORDER BY timestamp DESC
+      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+    `;
+    params.push(limit, offset);
+
+    const result = await this.pool.query(query, params);
+    return result.rows.map((row: any) => ({
+      id: row.id,
+      timestamp: Number(row.timestamp),
+      usedMemory: Number(row.used_memory),
+      usedMemoryRss: Number(row.used_memory_rss),
+      usedMemoryPeak: Number(row.used_memory_peak),
+      memFragmentationRatio: Number(row.mem_fragmentation_ratio),
+      maxmemory: Number(row.maxmemory),
+      allocatorFragRatio: Number(row.allocator_frag_ratio),
+      connectionId: row.connection_id,
+    }));
+  }
+
+  async pruneOldMemorySnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = await this.pool.query(
+        'DELETE FROM memory_snapshots WHERE timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId]
+      );
+      return result.rowCount ?? 0;
+    }
+
+    const result = await this.pool.query(
+      'DELETE FROM memory_snapshots WHERE timestamp < $1',
+      [cutoffTimestamp]
+    );
     return result.rowCount ?? 0;
   }
 

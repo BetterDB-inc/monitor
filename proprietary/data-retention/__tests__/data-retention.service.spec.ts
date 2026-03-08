@@ -26,6 +26,8 @@ describe('DataRetentionService', () => {
       pruneOldKeyPatternSnapshots: jest.fn().mockResolvedValue(6),
       pruneOldEntries: jest.fn().mockResolvedValue(7),
       pruneOldDeliveries: jest.fn().mockResolvedValue(8),
+      pruneOldLatencySnapshots: jest.fn().mockResolvedValue(9),
+      pruneOldMemorySnapshots: jest.fn().mockResolvedValue(10),
     } as any;
 
     licenseService = {
@@ -63,9 +65,11 @@ describe('DataRetentionService', () => {
     'pruneOldKeyPatternSnapshots',
     'pruneOldEntries',
     'pruneOldDeliveries',
+    'pruneOldLatencySnapshots',
+    'pruneOldMemorySnapshots',
   ] as const;
 
-  it('community tier uses 7-day cutoff and calls all 8 prune methods', async () => {
+  it('community tier uses 7-day cutoff and calls all 10 prune methods', async () => {
     licenseService.getLicenseTier.mockReturnValue(Tier.community);
     const expectedCutoff = NOW - 7 * MS_PER_DAY;
 

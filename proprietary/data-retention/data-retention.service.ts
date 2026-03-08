@@ -54,6 +54,8 @@ export class DataRetentionService {
       { name: 'key_patterns', fn: () => this.storage.pruneOldKeyPatternSnapshots(cutoff) },
       { name: 'acl_entries', fn: () => this.storage.pruneOldEntries(cutoff) },
       { name: 'webhook_deliveries', fn: () => this.storage.pruneOldDeliveries(cutoff) },
+      { name: 'latency_snapshots', fn: () => this.storage.pruneOldLatencySnapshots(cutoff) },
+      { name: 'memory_snapshots', fn: () => this.storage.pruneOldMemorySnapshots(cutoff) },
     ];
 
     for (const op of pruneOps) {

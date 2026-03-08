@@ -9,6 +9,8 @@ import { OpsChart } from '../components/dashboard/OpsChart';
 import { CpuChart } from '../components/dashboard/CpuChart';
 import { CapabilitiesBadges } from '../components/dashboard/CapabilitiesBadges';
 import { DoctorCard } from '../components/DoctorCard';
+import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
+import type { StoredMemorySnapshot } from '../types/metrics';
 
 export function Dashboard() {
   const { currentConnection } = useConnection();
@@ -31,6 +33,39 @@ export function Dashboard() {
   const prevCpuRef = useRef<{ sys: number; user: number; ts: number } | null>(null);
   const [memoryDoctorReport, setMemoryDoctorReport] = useState<string>();
   const [memoryDoctorLoading, setMemoryDoctorLoading] = useState(true);
+
+  // Time filter state for memory snapshots
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
+
+  const startTime = dateRange?.from ? dateRange.from.getTime() : undefined;
+  const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
+  const isTimeFiltered = startTime !== undefined && endTime !== undefined;
+
+  const [storedMemorySnapshots, setStoredMemorySnapshots] = useState<StoredMemorySnapshot[] | null>(null);
+
+  useEffect(() => {
+    if (!isTimeFiltered) {
+      setStoredMemorySnapshots(null);
+      return;
+    }
+
+    let cancelled = false;
+    metricsApi.getStoredMemorySnapshots({ startTime, endTime, limit: 500 })
+      .then(data => { if (!cancelled) setStoredMemorySnapshots(data); })
+      .catch(err => { console.error('Failed to fetch stored memory snapshots:', err); });
+
+    return () => { cancelled = true; };
+  }, [startTime, endTime, isTimeFiltered]);
+
+  const storedMemoryHistory: Array<{ time: string; used: number; peak: number }> | null = storedMemorySnapshots
+    ? [...storedMemorySnapshots]
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .map(s => ({
+          time: new Date(s.timestamp).toLocaleTimeString(),
+          used: s.usedMemory,
+          peak: s.usedMemoryPeak,
+        }))
+    : null;
 
   // Clear history when connection changes
   useEffect(() => {
@@ -95,7 +130,10 @@ export function Dashboard() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Dashboard</h1>
-        <CapabilitiesBadges />
+        <div className="flex items-center gap-4">
+          <DateRangePicker value={dateRange} onChange={setDateRange} />
+          <CapabilitiesBadges />
+        </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
@@ -110,7 +148,7 @@ export function Dashboard() {
       />
 
       <div className="grid gap-4 md:grid-cols-2">
-        <MemoryChart data={memoryHistory} />
+        <MemoryChart data={isTimeFiltered ? (storedMemoryHistory ?? []) : memoryHistory} />
         <OpsChart data={opsHistory} />
         <CpuChart data={cpuHistory} />
       </div>

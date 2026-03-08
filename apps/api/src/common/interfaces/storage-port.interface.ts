@@ -164,6 +164,45 @@ export interface CommandLogQueryOptions {
   connectionId?: string;
 }
 
+// Latency Snapshot Types
+export interface StoredLatencySnapshot {
+  id: string;  // UUID
+  timestamp: number;  // When we captured this snapshot (ms)
+  eventName: string;
+  latestEventTimestamp: number;  // Unix timestamp from LATENCY LATEST
+  maxLatency: number;  // Microseconds
+  connectionId?: string;
+}
+
+export interface LatencySnapshotQueryOptions {
+  connectionId?: string;
+  startTime?: number;
+  endTime?: number;
+  limit?: number;
+  offset?: number;
+}
+
+// Memory Snapshot Types
+export interface StoredMemorySnapshot {
+  id: string;  // UUID
+  timestamp: number;  // When we captured this snapshot (ms)
+  usedMemory: number;
+  usedMemoryRss: number;
+  usedMemoryPeak: number;
+  memFragmentationRatio: number;
+  maxmemory: number;
+  allocatorFragRatio: number;
+  connectionId?: string;
+}
+
+export interface MemorySnapshotQueryOptions {
+  connectionId?: string;
+  startTime?: number;
+  endTime?: number;
+  limit?: number;
+  offset?: number;
+}
+
 /**
  * Common fields shared between StoredSlowLogEntry and StoredCommandLogEntry
  * that can be mapped to SlowLogEntry for pattern analysis.
@@ -274,6 +313,16 @@ export interface StoragePort {
   getCommandLogEntries(options?: CommandLogQueryOptions): Promise<StoredCommandLogEntry[]>;
   getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null>;
   pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Latency Snapshot Methods - connectionId required for writes, optional filter for reads
+  saveLatencySnapshots(snapshots: StoredLatencySnapshot[], connectionId: string): Promise<number>;
+  getLatencySnapshots(options?: LatencySnapshotQueryOptions): Promise<StoredLatencySnapshot[]>;
+  pruneOldLatencySnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Memory Snapshot Methods - connectionId required for writes, optional filter for reads
+  saveMemorySnapshots(snapshots: StoredMemorySnapshot[], connectionId: string): Promise<number>;
+  getMemorySnapshots(options?: MemorySnapshotQueryOptions): Promise<StoredMemorySnapshot[]>;
+  pruneOldMemorySnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Connection Management Methods (not connection-scoped, they manage connections themselves)
   saveConnection(config: DatabaseConnectionConfig): Promise<void>;

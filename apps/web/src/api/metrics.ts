@@ -29,6 +29,8 @@ import type {
   ActivityTimelineResponse,
   SpikeDetectionParams,
   SpikeDetectionResponse,
+  StoredLatencySnapshot,
+  StoredMemorySnapshot,
 } from '../types/metrics';
 import type {
   DiscoveredNode,
@@ -137,6 +139,34 @@ export const metricsApi = {
     return fetchApi<Record<string, LatencyHistogram>>(`/metrics/latency/histogram${query}`);
   },
   getMemoryStats: () => fetchApi<MemoryStats>('/metrics/memory/stats'),
+  getStoredLatencySnapshots: (options?: {
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (options?.startTime) params.set('startTime', options.startTime.toString());
+    if (options?.endTime) params.set('endTime', options.endTime.toString());
+    if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.offset) params.set('offset', options.offset.toString());
+    const queryString = params.toString();
+    return fetchApi<StoredLatencySnapshot[]>(`/latency-analytics/snapshots${queryString ? `?${queryString}` : ''}`);
+  },
+  getStoredMemorySnapshots: (options?: {
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (options?.startTime) params.set('startTime', options.startTime.toString());
+    if (options?.endTime) params.set('endTime', options.endTime.toString());
+    if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.offset) params.set('offset', options.offset.toString());
+    const queryString = params.toString();
+    return fetchApi<StoredMemorySnapshot[]>(`/memory-analytics/snapshots${queryString ? `?${queryString}` : ''}`);
+  },
   getClients: () => fetchApi<ClientInfo[]>('/metrics/clients'),
   getAclLog: (count = 50) => fetchApi<AclLogEntry[]>(`/metrics/acl/log?count=${count}`),
 
