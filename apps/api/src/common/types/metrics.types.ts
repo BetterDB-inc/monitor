@@ -336,6 +336,10 @@ export interface MemoryStats {
   aofBuffer: number;
   dbDict: number;
   dbExpires: number;
+  usedMemoryRss?: number;
+  memFragmentationRatio?: number;
+  maxmemory?: number;
+  allocatorFragRatio?: number;
   [key: string]: unknown;
 }
 

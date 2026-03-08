@@ -40,11 +40,11 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
         id: randomUUID(),
         timestamp: now,
         usedMemory: stats.totalAllocated,
-        usedMemoryRss: Number((stats as any).usedMemoryRss ?? 0),
+        usedMemoryRss: Number(stats.usedMemoryRss ?? 0),
         usedMemoryPeak: stats.peakAllocated,
-        memFragmentationRatio: Number((stats as any).memFragmentationRatio ?? 0),
-        maxmemory: Number((stats as any).maxmemory ?? 0),
-        allocatorFragRatio: Number((stats as any).allocatorFragRatio ?? 0),
+        memFragmentationRatio: Number(stats.memFragmentationRatio ?? 0),
+        maxmemory: Number(stats.maxmemory ?? 0),
+        allocatorFragRatio: Number(stats.allocatorFragRatio ?? 0),
         connectionId: ctx.connectionId,
       };
 

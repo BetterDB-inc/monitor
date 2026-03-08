@@ -29,8 +29,32 @@ export class LatencyAnalyticsService extends MultiConnectionPoller implements On
   }
 
   async onModuleInit(): Promise<void> {
+    await this.hydrateLastSeenTimestamps();
     this.logger.log(`Starting latency analytics polling (interval: ${this.getIntervalMs()}ms)`);
     this.start();
+  }
+
+  private async hydrateLastSeenTimestamps(): Promise<void> {
+    try {
+      const snapshots = await this.storage.getLatencySnapshots({ limit: 10000 });
+      for (const snapshot of snapshots) {
+        const connId = snapshot.connectionId;
+        if (!connId) continue;
+        if (!this.lastSeenTimestamps.has(connId)) {
+          this.lastSeenTimestamps.set(connId, new Map());
+        }
+        const connTimestamps = this.lastSeenTimestamps.get(connId)!;
+        const current = connTimestamps.get(snapshot.eventName) ?? -1;
+        if (snapshot.latestEventTimestamp > current) {
+          connTimestamps.set(snapshot.eventName, snapshot.latestEventTimestamp);
+        }
+      }
+      if (this.lastSeenTimestamps.size > 0) {
+        this.logger.log(`Hydrated dedup state for ${this.lastSeenTimestamps.size} connection(s)`);
+      }
+    } catch (error) {
+      this.logger.warn(`Failed to hydrate dedup state, starting fresh: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {

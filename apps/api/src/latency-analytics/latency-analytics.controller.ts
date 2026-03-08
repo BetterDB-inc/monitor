@@ -1,8 +1,15 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Query, BadRequestException } from '@nestjs/common';
 import { ApiTags, ApiQuery, ApiHeader } from '@nestjs/swagger';
 import { LatencyAnalyticsService } from './latency-analytics.service';
 import { StoredLatencySnapshot } from '../common/interfaces/storage-port.interface';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../common/decorators';
+
+function parseOptionalInt(value: string | undefined, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = parseInt(value, 10);
+  if (isNaN(parsed)) throw new BadRequestException(`${name} must be a valid integer`);
+  return parsed;
+}
 
 @ApiTags('latency-analytics')
 @Controller('latency-analytics')
@@ -23,10 +30,10 @@ export class LatencyAnalyticsController {
     @Query('offset') offset?: string,
   ): Promise<StoredLatencySnapshot[]> {
     return this.latencyAnalyticsService.getStoredSnapshots({
-      startTime: startTime ? parseInt(startTime, 10) : undefined,
-      endTime: endTime ? parseInt(endTime, 10) : undefined,
-      limit: limit ? parseInt(limit, 10) : 100,
-      offset: offset ? parseInt(offset, 10) : 0,
+      startTime: parseOptionalInt(startTime, 'startTime'),
+      endTime: parseOptionalInt(endTime, 'endTime'),
+      limit: parseOptionalInt(limit, 'limit') ?? 100,
+      offset: parseOptionalInt(offset, 'offset') ?? 0,
       connectionId,
     });
   }
