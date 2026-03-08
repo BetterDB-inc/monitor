@@ -7,7 +7,6 @@ import {
 } from '../common/interfaces/storage-port.interface';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
-import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 
 @Injectable()
 export class LatencyAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -15,10 +14,12 @@ export class LatencyAnalyticsService extends MultiConnectionPoller implements On
 
   private readonly DEFAULT_POLL_INTERVAL_MS = 60000;
 
+  // outer key: connectionId, inner key: eventName, value: latestEventTimestamp
+  private lastSeenTimestamps = new Map<string, Map<string, number>>();
+
   constructor(
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
-    private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
   ) {
     super(connectionRegistry);
   }
@@ -42,7 +43,23 @@ export class LatencyAnalyticsService extends MultiConnectionPoller implements On
         return;
       }
 
-      const snapshots: StoredLatencySnapshot[] = events.map(event => ({
+      // Lazily initialize the inner map for this connection
+      if (!this.lastSeenTimestamps.has(ctx.connectionId)) {
+        this.lastSeenTimestamps.set(ctx.connectionId, new Map());
+      }
+      const connTimestamps = this.lastSeenTimestamps.get(ctx.connectionId)!;
+
+      // Filter to only events whose timestamp has changed since last poll
+      const newEvents = events.filter(event =>
+        event.timestamp > (connTimestamps.get(event.eventName) ?? -1)
+      );
+
+      if (newEvents.length === 0) {
+        this.logger.debug(`No new latency events for ${ctx.connectionName}`);
+        return;
+      }
+
+      const snapshots: StoredLatencySnapshot[] = newEvents.map(event => ({
         id: randomUUID(),
         timestamp: now,
         eventName: event.eventName,
@@ -52,11 +69,21 @@ export class LatencyAnalyticsService extends MultiConnectionPoller implements On
       }));
 
       const saved = await this.storage.saveLatencySnapshots(snapshots, ctx.connectionId);
+
+      // Update last-seen timestamps after successful save
+      for (const event of newEvents) {
+        connTimestamps.set(event.eventName, event.timestamp);
+      }
+
       this.logger.debug(`Saved ${saved} latency snapshots for ${ctx.connectionName}`);
     } catch (error) {
       this.logger.error(`Error capturing latency for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      throw error;
     }
+  }
+
+  protected onConnectionRemoved(connectionId: string): void {
+    this.lastSeenTimestamps.delete(connectionId);
+    this.logger.debug(`Cleaned up state for removed connection ${connectionId}`);
   }
 
   async getStoredSnapshots(options?: LatencySnapshotQueryOptions): Promise<StoredLatencySnapshot[]> {

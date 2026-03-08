@@ -5,6 +5,7 @@ import {
   StoredMemorySnapshot,
   MemorySnapshotQueryOptions,
 } from '../common/interfaces/storage-port.interface';
+import { MemoryStats } from '../common/types/metrics.types';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 
@@ -32,18 +33,18 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
-      const stats = await ctx.client.getMemoryStats() as Record<string, unknown>;
+      const stats: MemoryStats = await ctx.client.getMemoryStats();
       const now = Date.now();
 
       const snapshot: StoredMemorySnapshot = {
         id: randomUUID(),
         timestamp: now,
-        usedMemory: Number(stats['total.allocated'] ?? 0),
-        usedMemoryRss: Number(stats['allocator.resident'] ?? 0),
-        usedMemoryPeak: Number(stats['peak.allocated'] ?? 0),
-        memFragmentationRatio: Number(stats['fragmentation'] ?? 0),
-        maxmemory: Number(stats['maxmemory'] ?? 0),
-        allocatorFragRatio: Number(stats['allocator-frag-ratio'] ?? 0),
+        usedMemory: stats.totalAllocated,
+        usedMemoryRss: Number((stats as any).usedMemoryRss ?? 0),
+        usedMemoryPeak: stats.peakAllocated,
+        memFragmentationRatio: Number((stats as any).memFragmentationRatio ?? 0),
+        maxmemory: Number((stats as any).maxmemory ?? 0),
+        allocatorFragRatio: Number((stats as any).allocatorFragRatio ?? 0),
         connectionId: ctx.connectionId,
       };
 
@@ -51,7 +52,6 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
       this.logger.debug(`Saved ${saved} memory snapshot for ${ctx.connectionName}`);
     } catch (error) {
       this.logger.error(`Error capturing memory stats for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      throw error;
     }
   }
 
