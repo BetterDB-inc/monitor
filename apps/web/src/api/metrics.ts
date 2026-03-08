@@ -30,6 +30,7 @@ import type {
   SpikeDetectionParams,
   SpikeDetectionResponse,
   StoredLatencySnapshot,
+  StoredLatencyHistogram,
   StoredMemorySnapshot,
 } from '../types/metrics';
 import type {
@@ -152,6 +153,18 @@ export const metricsApi = {
     if (options?.offset) params.set('offset', options.offset.toString());
     const queryString = params.toString();
     return fetchApi<StoredLatencySnapshot[]>(`/latency-analytics/snapshots${queryString ? `?${queryString}` : ''}`);
+  },
+  getStoredLatencyHistograms: (options?: {
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (options?.startTime) params.set('startTime', options.startTime.toString());
+    if (options?.endTime) params.set('endTime', options.endTime.toString());
+    if (options?.limit) params.set('limit', options.limit.toString());
+    const queryString = params.toString();
+    return fetchApi<StoredLatencyHistogram[]>(`/latency-analytics/histograms${queryString ? `?${queryString}` : ''}`);
   },
   getStoredMemorySnapshots: (options?: {
     startTime?: number;

@@ -7,7 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 import { DoctorCard } from '../components/DoctorCard';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
-import type { LatencyHistoryEntry, LatencyEvent, StoredLatencySnapshot } from '../types/metrics';
+import type { LatencyHistoryEntry, LatencyEvent, LatencyHistogram, StoredLatencySnapshot } from '../types/metrics';
 
 const EVENTS_POLL_INTERVAL_MS = 10_000;
 const HISTOGRAM_POLL_INTERVAL_MS = 30_000;
@@ -50,7 +50,7 @@ export function Latency() {
 
   const isTimeFiltered = startTime !== undefined && endTime !== undefined;
 
-  // Live polling (no time filter)
+  // Live polling (disabled when filtering)
   const { data: liveLatencyEvents } = usePolling({
     fetcher: metricsApi.getLatencyLatest,
     interval: EVENTS_POLL_INTERVAL_MS,
@@ -58,22 +58,39 @@ export function Latency() {
     refetchKey: currentConnection?.id,
   });
 
-  // Stored latency snapshots (with time filter)
+  const { data: liveHistogramData } = usePolling({
+    fetcher: () => metricsApi.getLatencyHistogram(),
+    interval: HISTOGRAM_POLL_INTERVAL_MS,
+    enabled: !isTimeFiltered,
+    refetchKey: currentConnection?.id,
+  });
+
+  // Stored data (with time filter)
   const [storedSnapshots, setStoredSnapshots] = useState<StoredLatencySnapshot[] | null>(null);
+  const [storedHistogramData, setStoredHistogramData] = useState<Record<string, LatencyHistogram> | null>(null);
 
   useEffect(() => {
     if (!isTimeFiltered) {
       setStoredSnapshots(null);
+      setStoredHistogramData(null);
       return;
     }
 
     let cancelled = false;
-    metricsApi.getStoredLatencySnapshots({ startTime, endTime, limit: 500 })
-      .then(data => { if (!cancelled) setStoredSnapshots(data); })
-      .catch(err => { console.error('Failed to fetch stored latency snapshots:', err); });
+
+    Promise.all([
+      metricsApi.getStoredLatencySnapshots({ startTime, endTime, limit: 500 }),
+      metricsApi.getStoredLatencyHistograms({ startTime, endTime, limit: 1 }),
+    ]).then(([snapshots, histograms]) => {
+      if (cancelled) return;
+      setStoredSnapshots(snapshots);
+      setStoredHistogramData(histograms.length > 0 ? histograms[0].data : null);
+    }).catch(err => {
+      console.error('Failed to fetch stored latency data:', err);
+    });
 
     return () => { cancelled = true; };
-  }, [startTime, endTime, isTimeFiltered]);
+  }, [startTime, endTime, isTimeFiltered, currentConnection?.id]);
 
   // Convert stored snapshots to LatencyEvent[] shape for the table
   const storedAsEvents: LatencyEvent[] | null = storedSnapshots
@@ -85,12 +102,7 @@ export function Latency() {
     : null;
 
   const latencyEvents = isTimeFiltered ? storedAsEvents : liveLatencyEvents;
-
-  const { data: histogramData } = usePolling({
-    fetcher: () => metricsApi.getLatencyHistogram(),
-    interval: HISTOGRAM_POLL_INTERVAL_MS,
-    refetchKey: currentConnection?.id,
-  });
+  const histogramData = isTimeFiltered ? storedHistogramData : liveHistogramData;
 
   useEffect(() => {
     if (selectedEvent) {

@@ -40,6 +40,7 @@ export class MemoryAdapter implements StoragePort {
   private slowLogEntries: StoredSlowLogEntry[] = [];
   private commandLogEntries: StoredCommandLogEntry[] = [];
   private latencySnapshots: StoredLatencySnapshot[] = [];
+  private latencyHistograms: import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram[] = [];
   private memorySnapshots: StoredMemorySnapshot[] = [];
   private settings: AppSettings | null = null;
   private webhooks: Map<string, Webhook> = new Map();
@@ -960,6 +961,30 @@ export class MemoryAdapter implements StoragePort {
       this.latencySnapshots = this.latencySnapshots.filter(e => e.timestamp >= cutoffTimestamp);
     }
     return before - this.latencySnapshots.length;
+  }
+
+  // Latency Histogram Methods
+  async saveLatencyHistogram(histogram: import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram, connectionId: string): Promise<number> {
+    this.latencyHistograms.push({ ...histogram, connectionId });
+    return 1;
+  }
+
+  async getLatencyHistograms(options: { connectionId?: string; startTime?: number; endTime?: number; limit?: number } = {}): Promise<import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram[]> {
+    let filtered = [...this.latencyHistograms];
+    if (options.connectionId) filtered = filtered.filter(e => e.connectionId === options.connectionId);
+    if (options.startTime) filtered = filtered.filter(e => e.timestamp >= options.startTime!);
+    if (options.endTime) filtered = filtered.filter(e => e.timestamp <= options.endTime!);
+    return filtered.sort((a, b) => b.timestamp - a.timestamp).slice(0, options.limit ?? 1);
+  }
+
+  async pruneOldLatencyHistograms(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    const before = this.latencyHistograms.length;
+    if (connectionId) {
+      this.latencyHistograms = this.latencyHistograms.filter(e => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId);
+    } else {
+      this.latencyHistograms = this.latencyHistograms.filter(e => e.timestamp >= cutoffTimestamp);
+    }
+    return before - this.latencyHistograms.length;
   }
 
   // Memory Snapshot Methods

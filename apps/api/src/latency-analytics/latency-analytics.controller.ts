@@ -1,7 +1,7 @@
 import { Controller, Get, Query, BadRequestException } from '@nestjs/common';
 import { ApiTags, ApiQuery, ApiHeader } from '@nestjs/swagger';
 import { LatencyAnalyticsService } from './latency-analytics.service';
-import { StoredLatencySnapshot } from '../common/interfaces/storage-port.interface';
+import { StoredLatencySnapshot, StoredLatencyHistogram } from '../common/interfaces/storage-port.interface';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../common/decorators';
 
 function parseOptionalInt(value: string | undefined, name: string): number | undefined {
@@ -34,6 +34,25 @@ export class LatencyAnalyticsController {
       endTime: parseOptionalInt(endTime, 'endTime'),
       limit: parseOptionalInt(limit, 'limit') ?? 100,
       offset: parseOptionalInt(offset, 'offset') ?? 0,
+      connectionId,
+    });
+  }
+
+  @Get('histograms')
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  @ApiQuery({ name: 'startTime', required: false, description: 'Start time filter (ms since epoch)' })
+  @ApiQuery({ name: 'endTime', required: false, description: 'End time filter (ms since epoch)' })
+  @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of entries to return (default 1)' })
+  async getHistograms(
+    @ConnectionId() connectionId?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+    @Query('limit') limit?: string,
+  ): Promise<StoredLatencyHistogram[]> {
+    return this.latencyAnalyticsService.getStoredHistograms({
+      startTime: parseOptionalInt(startTime, 'startTime'),
+      endTime: parseOptionalInt(endTime, 'endTime'),
+      limit: parseOptionalInt(limit, 'limit') ?? 1,
       connectionId,
     });
   }

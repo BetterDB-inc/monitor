@@ -99,7 +99,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   async getInfo(sections?: string[]): Promise<Record<string, unknown>> {
     const infoString =
       sections && sections.length > 0
-        ? await this.client.info(sections.join(' '))
+        ? await this.client.info(...sections)
         : await this.client.info();
     return InfoParser.parse(infoString);
   }

@@ -16,6 +16,9 @@ describe('LatencyAnalyticsService', () => {
       getLatencySnapshots: jest.fn().mockResolvedValue([]),
       saveLatencySnapshots: jest.fn().mockResolvedValue(1),
       pruneOldLatencySnapshots: jest.fn().mockResolvedValue(5),
+      saveLatencyHistogram: jest.fn().mockResolvedValue(1),
+      getLatencyHistograms: jest.fn().mockResolvedValue([]),
+      pruneOldLatencyHistograms: jest.fn().mockResolvedValue(0),
     } as any;
 
     const connectionRegistry = {
@@ -52,6 +55,7 @@ describe('LatencyAnalyticsService', () => {
 
     it('should save new latency events', async () => {
       const client = {
+        getLatencyHistogram: jest.fn().mockResolvedValue({}),
         getLatestLatencyEvents: jest.fn().mockResolvedValue([
           { eventName: 'command', latency: 100, timestamp: 1000 },
           { eventName: 'fast-command', latency: 50, timestamp: 2000 },
@@ -69,6 +73,7 @@ describe('LatencyAnalyticsService', () => {
 
     it('should skip when no events are returned', async () => {
       const client = {
+        getLatencyHistogram: jest.fn().mockResolvedValue({}),
         getLatestLatencyEvents: jest.fn().mockResolvedValue([]),
       };
 
@@ -79,6 +84,7 @@ describe('LatencyAnalyticsService', () => {
 
     it('should deduplicate events with unchanged timestamps', async () => {
       const client = {
+        getLatencyHistogram: jest.fn().mockResolvedValue({}),
         getLatestLatencyEvents: jest.fn().mockResolvedValue([
           { eventName: 'command', latency: 100, timestamp: 1000 },
         ]),
@@ -97,6 +103,7 @@ describe('LatencyAnalyticsService', () => {
 
     it('should save event again when timestamp changes', async () => {
       const client = {
+        getLatencyHistogram: jest.fn().mockResolvedValue({}),
         getLatestLatencyEvents: jest.fn(),
       };
       const ctx = makeCtx(client);
@@ -119,6 +126,7 @@ describe('LatencyAnalyticsService', () => {
 
     it('should not throw when client errors', async () => {
       const client = {
+        getLatencyHistogram: jest.fn().mockRejectedValue(new Error('connection lost')),
         getLatestLatencyEvents: jest.fn().mockRejectedValue(new Error('connection lost')),
       };
 
@@ -133,6 +141,7 @@ describe('LatencyAnalyticsService', () => {
   describe('onConnectionRemoved', () => {
     it('should clean up dedup state for the removed connection', async () => {
       const client = {
+        getLatencyHistogram: jest.fn().mockResolvedValue({}),
         getLatestLatencyEvents: jest.fn().mockResolvedValue([
           { eventName: 'command', latency: 100, timestamp: 1000 },
         ]),
@@ -175,6 +184,7 @@ describe('LatencyAnalyticsService', () => {
 
       // Now poll with a timestamp <= 5000 should be skipped
       const client = {
+        getLatencyHistogram: jest.fn().mockResolvedValue({}),
         getLatestLatencyEvents: jest.fn().mockResolvedValue([
           { eventName: 'command', latency: 100, timestamp: 5000 },
         ]),

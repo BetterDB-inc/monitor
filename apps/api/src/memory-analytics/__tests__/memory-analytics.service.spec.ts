@@ -50,22 +50,24 @@ describe('MemoryAnalyticsService', () => {
       port: 6379,
     });
 
-    it('should save a memory snapshot', async () => {
+    it('should save a snapshot with all INFO fields including ops and CPU', async () => {
       const client = {
-        getMemoryStats: jest.fn().mockResolvedValue({
-          peakAllocated: 2000000,
-          totalAllocated: 1000000,
-          startupAllocated: 500000,
-          replicationBacklog: 0,
-          clientsNormal: 1000,
-          clientsReplicas: 0,
-          aofBuffer: 0,
-          dbDict: 100,
-          dbExpires: 50,
-          usedMemoryRss: 1500000,
-          memFragmentationRatio: 1.5,
-          maxmemory: 4000000,
-          allocatorFragRatio: 1.1,
+        getInfoParsed: jest.fn().mockResolvedValue({
+          memory: {
+            used_memory: '1000000',
+            used_memory_rss: '1500000',
+            used_memory_peak: '2000000',
+            mem_fragmentation_ratio: '1.50',
+            maxmemory: '4000000',
+            allocator_frag_ratio: '1.10',
+          },
+          stats: {
+            instantaneous_ops_per_sec: '1234',
+          },
+          cpu: {
+            used_cpu_sys: '10.5',
+            used_cpu_user: '20.3',
+          },
         }),
       };
 
@@ -81,39 +83,66 @@ describe('MemoryAnalyticsService', () => {
         memFragmentationRatio: 1.5,
         maxmemory: 4000000,
         allocatorFragRatio: 1.1,
+        opsPerSec: 1234,
+        cpuSys: 0, // First poll has no previous reference
+        cpuUser: 0,
         connectionId: 'conn-1',
       });
     });
 
-    it('should default optional fields to 0 when not present', async () => {
+    it('should compute CPU delta rate on second poll', async () => {
       const client = {
-        getMemoryStats: jest.fn().mockResolvedValue({
-          peakAllocated: 2000000,
-          totalAllocated: 1000000,
-          startupAllocated: 500000,
-          replicationBacklog: 0,
-          clientsNormal: 0,
-          clientsReplicas: 0,
-          aofBuffer: 0,
-          dbDict: 0,
-          dbExpires: 0,
-        }),
+        getInfoParsed: jest.fn()
+          .mockResolvedValueOnce({
+            memory: { used_memory: '100', used_memory_rss: '100', used_memory_peak: '100' },
+            stats: { instantaneous_ops_per_sec: '0' },
+            cpu: { used_cpu_sys: '10.0', used_cpu_user: '20.0' },
+          })
+          .mockResolvedValueOnce({
+            memory: { used_memory: '100', used_memory_rss: '100', used_memory_peak: '100' },
+            stats: { instantaneous_ops_per_sec: '0' },
+            cpu: { used_cpu_sys: '11.0', used_cpu_user: '21.0' },
+          }),
+      };
+
+      // First poll - seeds the prevCpu ref
+      jest.spyOn(Date, 'now').mockReturnValue(NOW);
+      await (service as any).pollConnection(makeCtx(client));
+
+      // Second poll - 60 seconds later
+      jest.spyOn(Date, 'now').mockReturnValue(NOW + 60000);
+      await (service as any).pollConnection(makeCtx(client));
+
+      const secondSnapshot = storage.saveMemorySnapshots.mock.calls[1][0][0];
+      // 1.0 CPU-sec / 60 sec * 100 = 1.667%
+      expect(secondSnapshot.cpuSys).toBeCloseTo(1.667, 2);
+      expect(secondSnapshot.cpuUser).toBeCloseTo(1.667, 2);
+    });
+
+    it('should default to 0 when INFO sections are missing', async () => {
+      const client = {
+        getInfoParsed: jest.fn().mockResolvedValue({}),
       };
 
       await (service as any).pollConnection(makeCtx(client));
 
       const savedSnapshots = storage.saveMemorySnapshots.mock.calls[0][0];
       expect(savedSnapshots[0]).toMatchObject({
+        usedMemory: 0,
         usedMemoryRss: 0,
+        usedMemoryPeak: 0,
         memFragmentationRatio: 0,
         maxmemory: 0,
         allocatorFragRatio: 0,
+        opsPerSec: 0,
+        cpuSys: 0,
+        cpuUser: 0,
       });
     });
 
     it('should not throw when client errors', async () => {
       const client = {
-        getMemoryStats: jest.fn().mockRejectedValue(new Error('connection lost')),
+        getInfoParsed: jest.fn().mockRejectedValue(new Error('connection lost')),
       };
 
       await expect(
@@ -121,6 +150,33 @@ describe('MemoryAnalyticsService', () => {
       ).resolves.toBeUndefined();
 
       expect(storage.saveMemorySnapshots).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('onConnectionRemoved', () => {
+    it('should clear prevCpu state for the connection', async () => {
+      const client = {
+        getInfoParsed: jest.fn().mockResolvedValue({
+          memory: { used_memory: '100', used_memory_rss: '100', used_memory_peak: '100' },
+          cpu: { used_cpu_sys: '10.0', used_cpu_user: '20.0' },
+        }),
+      };
+
+      const ctx: ConnectionContext = {
+        connectionId: 'conn-1',
+        connectionName: 'test-conn',
+        client: client as any,
+        host: 'localhost',
+        port: 6379,
+      };
+
+      // Seed prevCpu
+      await (service as any).pollConnection(ctx);
+      expect((service as any).prevCpu.has('conn-1')).toBe(true);
+
+      // Remove connection
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).prevCpu.has('conn-1')).toBe(false);
     });
   });
 

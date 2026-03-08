@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import {
   StoragePort,
   StoredLatencySnapshot,
+  StoredLatencyHistogram,
   LatencySnapshotQueryOptions,
 } from '../common/interfaces/storage-port.interface';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
@@ -58,9 +59,28 @@ export class LatencyAnalyticsService extends MultiConnectionPoller implements On
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    const now = Date.now();
+
+    // Store histogram data (command-level latency distributions)
+    try {
+      const histogramData = await ctx.client.getLatencyHistogram();
+      if (Object.keys(histogramData).length > 0) {
+        const histogram: StoredLatencyHistogram = {
+          id: randomUUID(),
+          timestamp: now,
+          data: histogramData,
+          connectionId: ctx.connectionId,
+        };
+        await this.storage.saveLatencyHistogram(histogram, ctx.connectionId);
+        this.logger.debug(`Saved latency histogram for ${ctx.connectionName}`);
+      }
+    } catch (error) {
+      this.logger.error(`Error capturing latency histogram for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+
+    // Store system-level latency events
     try {
       const events = await ctx.client.getLatestLatencyEvents();
-      const now = Date.now();
 
       if (events.length === 0) {
         this.logger.debug(`No latency events for ${ctx.connectionName}`);
@@ -114,8 +134,16 @@ export class LatencyAnalyticsService extends MultiConnectionPoller implements On
     return this.storage.getLatencySnapshots(options);
   }
 
+  async getStoredHistograms(options?: { connectionId?: string; startTime?: number; endTime?: number; limit?: number }): Promise<StoredLatencyHistogram[]> {
+    return this.storage.getLatencyHistograms(options);
+  }
+
   async pruneOldEntries(retentionDays: number = 7, connectionId?: string): Promise<number> {
     const cutoffTimestamp = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
-    return this.storage.pruneOldLatencySnapshots(cutoffTimestamp, connectionId);
+    const [snapshots, histograms] = await Promise.all([
+      this.storage.pruneOldLatencySnapshots(cutoffTimestamp, connectionId),
+      this.storage.pruneOldLatencyHistograms(cutoffTimestamp, connectionId),
+    ]);
+    return snapshots + histograms;
   }
 }

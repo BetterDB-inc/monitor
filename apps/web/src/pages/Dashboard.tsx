@@ -55,15 +55,32 @@ export function Dashboard() {
       .catch(err => { console.error('Failed to fetch stored memory snapshots:', err); });
 
     return () => { cancelled = true; };
-  }, [startTime, endTime, isTimeFiltered]);
+  }, [startTime, endTime, isTimeFiltered, currentConnection?.id]);
 
-  const storedMemoryHistory: Array<{ time: string; used: number; peak: number }> | null = storedMemorySnapshots
-    ? [...storedMemorySnapshots]
-        .sort((a, b) => a.timestamp - b.timestamp)
-        .map(s => ({
+  const sortedStoredSnapshots = storedMemorySnapshots
+    ? [...storedMemorySnapshots].sort((a, b) => a.timestamp - b.timestamp)
+    : null;
+
+  const storedMemoryHistory: Array<{ time: string; used: number; peak: number }> | null = sortedStoredSnapshots
+    ? sortedStoredSnapshots.map(s => ({
           time: new Date(s.timestamp).toLocaleTimeString(),
           used: s.usedMemory,
           peak: s.usedMemoryPeak,
+        }))
+    : null;
+
+  const storedOpsHistory: Array<{ time: string; ops: number }> | null = sortedStoredSnapshots
+    ? sortedStoredSnapshots.map(s => ({
+          time: new Date(s.timestamp).toLocaleTimeString(),
+          ops: s.opsPerSec ?? 0,
+        }))
+    : null;
+
+  const storedCpuHistory: Array<{ time: string; sys: number; user: number }> | null = sortedStoredSnapshots
+    ? sortedStoredSnapshots.map(s => ({
+          time: new Date(s.timestamp).toLocaleTimeString(),
+          sys: s.cpuSys ?? 0,
+          user: s.cpuUser ?? 0,
         }))
     : null;
 
@@ -149,8 +166,8 @@ export function Dashboard() {
 
       <div className="grid gap-4 md:grid-cols-2">
         <MemoryChart data={isTimeFiltered ? (storedMemoryHistory ?? []) : memoryHistory} />
-        <OpsChart data={opsHistory} />
-        <CpuChart data={cpuHistory} />
+        <OpsChart data={isTimeFiltered ? (storedOpsHistory ?? []) : opsHistory} />
+        <CpuChart data={isTimeFiltered ? (storedCpuHistory ?? []) : cpuHistory} />
       </div>
     </div>
   );

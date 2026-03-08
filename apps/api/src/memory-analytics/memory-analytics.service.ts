@@ -5,7 +5,6 @@ import {
   StoredMemorySnapshot,
   MemorySnapshotQueryOptions,
 } from '../common/interfaces/storage-port.interface';
-import { MemoryStats } from '../common/types/metrics.types';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 
@@ -14,6 +13,9 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
   protected readonly logger = new Logger(MemoryAnalyticsService.name);
 
   private readonly DEFAULT_POLL_INTERVAL_MS = 60000;
+
+  /** Previous CPU counters per connection, for computing delta rates */
+  private prevCpu = new Map<string, { sys: number; user: number; ts: number }>();
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -31,20 +33,51 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
     this.start();
   }
 
+  protected onConnectionRemoved(connectionId: string): void {
+    this.prevCpu.delete(connectionId);
+  }
+
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
-      const stats: MemoryStats = await ctx.client.getMemoryStats();
+      const info = await ctx.client.getInfoParsed();
+      const mem = info.memory;
       const now = Date.now();
+
+      // Compute CPU delta rate
+      let cpuSys = 0;
+      let cpuUser = 0;
+      if (info.cpu) {
+        const sys = parseFloat(info.cpu.used_cpu_sys);
+        const user = parseFloat(info.cpu.used_cpu_user);
+        if (!isNaN(sys) && !isNaN(user)) {
+          const prev = this.prevCpu.get(ctx.connectionId);
+          this.prevCpu.set(ctx.connectionId, { sys, user, ts: now });
+          if (prev) {
+            const dtSec = (now - prev.ts) / 1000;
+            if (dtSec > 0) {
+              const dSys = ((sys - prev.sys) / dtSec) * 100;
+              const dUser = ((user - prev.user) / dtSec) * 100;
+              if (dSys >= 0 && dUser >= 0) {
+                cpuSys = parseFloat(dSys.toFixed(3));
+                cpuUser = parseFloat(dUser.toFixed(3));
+              }
+            }
+          }
+        }
+      }
 
       const snapshot: StoredMemorySnapshot = {
         id: randomUUID(),
         timestamp: now,
-        usedMemory: stats.totalAllocated,
-        usedMemoryRss: Number(stats.usedMemoryRss ?? 0),
-        usedMemoryPeak: stats.peakAllocated,
-        memFragmentationRatio: Number(stats.memFragmentationRatio ?? 0),
-        maxmemory: Number(stats.maxmemory ?? 0),
-        allocatorFragRatio: Number(stats.allocatorFragRatio ?? 0),
+        usedMemory: parseInt(mem?.used_memory ?? '0', 10),
+        usedMemoryRss: parseInt(mem?.used_memory_rss ?? '0', 10),
+        usedMemoryPeak: parseInt(mem?.used_memory_peak ?? '0', 10),
+        memFragmentationRatio: parseFloat(mem?.mem_fragmentation_ratio ?? '0'),
+        maxmemory: parseInt(mem?.maxmemory ?? '0', 10),
+        allocatorFragRatio: parseFloat(mem?.allocator_frag_ratio ?? '0'),
+        opsPerSec: parseInt(info.stats?.instantaneous_ops_per_sec ?? '0', 10),
+        cpuSys,
+        cpuUser,
         connectionId: ctx.connectionId,
       };
 

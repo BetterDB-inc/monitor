@@ -105,7 +105,7 @@ export function SlowLog() {
       });
 
     return () => { cancelled = true; };
-  }, [startTime, endTime, isTimeFiltered, hasCommandLog]);
+  }, [startTime, endTime, isTimeFiltered, hasCommandLog, currentConnection?.id]);
 
   // Use stored data when filtered, live data otherwise
   const slowLog = isTimeFiltered ? storedSlowLog : liveSlowLog;
@@ -177,7 +177,7 @@ export function SlowLog() {
     });
 
     return () => { cancelled = true; };
-  }, [startTime, endTime, isTimeFiltered, hasCommandLog, activeTab, page]);
+  }, [startTime, endTime, isTimeFiltered, hasCommandLog, activeTab, page, currentConnection?.id]);
 
   // Use stored data when filtered, live data otherwise
   const commandLogSlow = isTimeFiltered ? storedCommandLog.slow : liveCommandLogSlow;
@@ -222,7 +222,7 @@ export function SlowLog() {
       });
 
     return () => { cancelled = true; };
-  }, [startTime, endTime, isTimeFiltered, hasCommandLog, viewMode, activeTab]);
+  }, [startTime, endTime, isTimeFiltered, hasCommandLog, viewMode, activeTab, currentConnection?.id]);
 
   // Use stored data when filtered, live data otherwise
   const slowLogPatternAnalysis = liveSlowLogPatternAnalysis;

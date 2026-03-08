@@ -182,6 +182,13 @@ export interface LatencySnapshotQueryOptions {
   offset?: number;
 }
 
+export interface StoredLatencyHistogram {
+  id: string;
+  timestamp: number;
+  data: Record<string, { calls: number; histogram: Record<string, number> }>;
+  connectionId?: string;
+}
+
 // Memory Snapshot Types
 export interface StoredMemorySnapshot {
   id: string;  // UUID
@@ -192,6 +199,9 @@ export interface StoredMemorySnapshot {
   memFragmentationRatio: number;
   maxmemory: number;
   allocatorFragRatio: number;
+  opsPerSec: number;
+  cpuSys: number;
+  cpuUser: number;
   connectionId?: string;
 }
 
@@ -318,6 +328,11 @@ export interface StoragePort {
   saveLatencySnapshots(snapshots: StoredLatencySnapshot[], connectionId: string): Promise<number>;
   getLatencySnapshots(options?: LatencySnapshotQueryOptions): Promise<StoredLatencySnapshot[]>;
   pruneOldLatencySnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Latency Histogram Methods
+  saveLatencyHistogram(histogram: StoredLatencyHistogram, connectionId: string): Promise<number>;
+  getLatencyHistograms(options?: { connectionId?: string; startTime?: number; endTime?: number; limit?: number }): Promise<StoredLatencyHistogram[]>;
+  pruneOldLatencyHistograms(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Memory Snapshot Methods - connectionId required for writes, optional filter for reads
   saveMemorySnapshots(snapshots: StoredMemorySnapshot[], connectionId: string): Promise<number>;
