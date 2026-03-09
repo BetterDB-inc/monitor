@@ -245,10 +245,11 @@ describe('LatencyAnalyticsService', () => {
       );
     });
 
-    it('should return the count from storage', async () => {
+    it('should return the combined count from snapshots and histograms', async () => {
       storage.pruneOldLatencySnapshots.mockResolvedValue(42);
+      storage.pruneOldLatencyHistograms.mockResolvedValue(10);
       const result = await service.pruneOldEntries(7);
-      expect(result).toBe(42);
+      expect(result).toBe(52);
     });
   });
 

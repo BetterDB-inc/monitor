@@ -147,10 +147,10 @@ export const metricsApi = {
     offset?: number;
   }) => {
     const params = new URLSearchParams();
-    if (options?.startTime) params.set('startTime', options.startTime.toString());
-    if (options?.endTime) params.set('endTime', options.endTime.toString());
-    if (options?.limit) params.set('limit', options.limit.toString());
-    if (options?.offset) params.set('offset', options.offset.toString());
+    if (options?.startTime !== undefined) params.set('startTime', options.startTime.toString());
+    if (options?.endTime !== undefined) params.set('endTime', options.endTime.toString());
+    if (options?.limit !== undefined) params.set('limit', options.limit.toString());
+    if (options?.offset !== undefined) params.set('offset', options.offset.toString());
     const queryString = params.toString();
     return fetchApi<StoredLatencySnapshot[]>(`/latency-analytics/snapshots${queryString ? `?${queryString}` : ''}`);
   },
@@ -160,9 +160,9 @@ export const metricsApi = {
     limit?: number;
   }) => {
     const params = new URLSearchParams();
-    if (options?.startTime) params.set('startTime', options.startTime.toString());
-    if (options?.endTime) params.set('endTime', options.endTime.toString());
-    if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.startTime !== undefined) params.set('startTime', options.startTime.toString());
+    if (options?.endTime !== undefined) params.set('endTime', options.endTime.toString());
+    if (options?.limit !== undefined) params.set('limit', options.limit.toString());
     const queryString = params.toString();
     return fetchApi<StoredLatencyHistogram[]>(`/latency-analytics/histograms${queryString ? `?${queryString}` : ''}`);
   },
@@ -173,10 +173,10 @@ export const metricsApi = {
     offset?: number;
   }) => {
     const params = new URLSearchParams();
-    if (options?.startTime) params.set('startTime', options.startTime.toString());
-    if (options?.endTime) params.set('endTime', options.endTime.toString());
-    if (options?.limit) params.set('limit', options.limit.toString());
-    if (options?.offset) params.set('offset', options.offset.toString());
+    if (options?.startTime !== undefined) params.set('startTime', options.startTime.toString());
+    if (options?.endTime !== undefined) params.set('endTime', options.endTime.toString());
+    if (options?.limit !== undefined) params.set('limit', options.limit.toString());
+    if (options?.offset !== undefined) params.set('offset', options.offset.toString());
     const queryString = params.toString();
     return fetchApi<StoredMemorySnapshot[]>(`/memory-analytics/snapshots${queryString ? `?${queryString}` : ''}`);
   },
