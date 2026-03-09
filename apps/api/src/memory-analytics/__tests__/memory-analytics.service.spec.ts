@@ -86,6 +86,8 @@ describe('MemoryAnalyticsService', () => {
         opsPerSec: 1234,
         cpuSys: 0, // First poll has no previous reference
         cpuUser: 0,
+        ioThreadedReads: 0,
+        ioThreadedWrites: 0,
         connectionId: 'conn-1',
       });
     });
@@ -137,6 +139,8 @@ describe('MemoryAnalyticsService', () => {
         opsPerSec: 0,
         cpuSys: 0,
         cpuUser: 0,
+        ioThreadedReads: 0,
+        ioThreadedWrites: 0,
       });
     });
 

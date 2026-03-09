@@ -44,6 +44,7 @@ export interface InfoResponse {
     process_id: string;
     tcp_port: string;
     os: string;
+    io_threads_active?: string;
   };
   clients?: {
     connected_clients: string;
@@ -70,6 +71,10 @@ export interface InfoResponse {
     keyspace_misses: string;
     evicted_keys: string;
     expired_keys: string;
+    io_threaded_reads_processed?: string;
+    io_threaded_writes_processed?: string;
+    total_reads_processed?: string;
+    total_writes_processed?: string;
   };
   replication?: {
     role: string;
@@ -160,6 +165,8 @@ export interface StoredMemorySnapshot {
   opsPerSec: number;
   cpuSys: number;
   cpuUser: number;
+  ioThreadedReads: number;
+  ioThreadedWrites: number;
   connectionId?: string;
 }
 

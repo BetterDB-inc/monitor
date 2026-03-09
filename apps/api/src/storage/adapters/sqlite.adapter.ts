@@ -1044,6 +1044,8 @@ export class SqliteAdapter implements StoragePort {
         ops_per_sec INTEGER NOT NULL DEFAULT 0,
         cpu_sys REAL NOT NULL DEFAULT 0,
         cpu_user REAL NOT NULL DEFAULT 0,
+        io_threaded_reads INTEGER NOT NULL DEFAULT 0,
+        io_threaded_writes INTEGER NOT NULL DEFAULT 0,
         connection_id TEXT NOT NULL DEFAULT 'env-default'
       );
 
@@ -1062,6 +1064,8 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('memory_snapshots', 'ops_per_sec', 'INTEGER', '0');
     addColumnIfMissing('memory_snapshots', 'cpu_sys', 'REAL', '0');
     addColumnIfMissing('memory_snapshots', 'cpu_user', 'REAL', '0');
+    addColumnIfMissing('memory_snapshots', 'io_threaded_reads', 'INTEGER', '0');
+    addColumnIfMissing('memory_snapshots', 'io_threaded_writes', 'INTEGER', '0');
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
@@ -2358,8 +2362,8 @@ export class SqliteAdapter implements StoragePort {
       INSERT INTO memory_snapshots (
         id, timestamp, used_memory, used_memory_rss, used_memory_peak,
         mem_fragmentation_ratio, maxmemory, allocator_frag_ratio,
-        ops_per_sec, cpu_sys, cpu_user, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
@@ -2377,6 +2381,8 @@ export class SqliteAdapter implements StoragePort {
           snapshot.opsPerSec ?? 0,
           snapshot.cpuSys ?? 0,
           snapshot.cpuUser ?? 0,
+          snapshot.ioThreadedReads ?? 0,
+          snapshot.ioThreadedWrites ?? 0,
           connId,
         );
         count += result.changes;
@@ -2413,7 +2419,7 @@ export class SqliteAdapter implements StoragePort {
     const query = `
       SELECT id, timestamp, used_memory, used_memory_rss, used_memory_peak,
              mem_fragmentation_ratio, maxmemory, allocator_frag_ratio,
-             ops_per_sec, cpu_sys, cpu_user, connection_id
+             ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes, connection_id
       FROM memory_snapshots
       ${whereClause}
       ORDER BY timestamp DESC
@@ -2434,6 +2440,8 @@ export class SqliteAdapter implements StoragePort {
       opsPerSec: row.ops_per_sec ?? 0,
       cpuSys: row.cpu_sys ?? 0,
       cpuUser: row.cpu_user ?? 0,
+      ioThreadedReads: row.io_threaded_reads ?? 0,
+      ioThreadedWrites: row.io_threaded_writes ?? 0,
       connectionId: row.connection_id,
     }));
   }
