@@ -1050,6 +1050,18 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
     `);
+
+    // Idempotent migration for existing deployments without ops/CPU columns
+    const addColumnIfMissing = (table: string, column: string, type: string, defaultVal: string) => {
+      try {
+        this.db!.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type} NOT NULL DEFAULT ${defaultVal}`);
+      } catch {
+        // Column already exists — ignore
+      }
+    };
+    addColumnIfMissing('memory_snapshots', 'ops_per_sec', 'INTEGER', '0');
+    addColumnIfMissing('memory_snapshots', 'cpu_sys', 'REAL', '0');
+    addColumnIfMissing('memory_snapshots', 'cpu_user', 'REAL', '0');
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
