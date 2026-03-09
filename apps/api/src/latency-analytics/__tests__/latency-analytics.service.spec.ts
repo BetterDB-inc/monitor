@@ -252,6 +252,73 @@ describe('LatencyAnalyticsService', () => {
     });
   });
 
+  describe('histogram save/retrieve', () => {
+    const makeCtx = (client: any, connectionId = 'conn-1'): ConnectionContext => ({
+      connectionId,
+      connectionName: 'test-conn',
+      client,
+      host: 'localhost',
+      port: 6379,
+    });
+
+    it('should save histogram when data is returned', async () => {
+      const histogramData = {
+        get: { calls: 100, histogram: { '1': 50, '2': 30, '4': 20 } },
+        set: { calls: 200, histogram: { '1': 100, '2': 80, '4': 20 } },
+      };
+      const client = {
+        getLatencyHistogram: jest.fn().mockResolvedValue(histogramData),
+        getLatestLatencyEvents: jest.fn().mockResolvedValue([]),
+      };
+
+      await (service as any).pollConnection(makeCtx(client));
+
+      expect(storage.saveLatencyHistogram).toHaveBeenCalledTimes(1);
+      const saved = storage.saveLatencyHistogram.mock.calls[0][0];
+      expect(saved.data).toEqual(histogramData);
+      expect(saved.connectionId).toBe('conn-1');
+      expect(saved.id).toBeDefined();
+      expect(saved.timestamp).toBeGreaterThan(0);
+    });
+
+    it('should skip histogram save when data is empty', async () => {
+      const client = {
+        getLatencyHistogram: jest.fn().mockResolvedValue({}),
+        getLatestLatencyEvents: jest.fn().mockResolvedValue([]),
+      };
+
+      await (service as any).pollConnection(makeCtx(client));
+
+      expect(storage.saveLatencyHistogram).not.toHaveBeenCalled();
+    });
+
+    it('should pass connectionId to saveLatencyHistogram', async () => {
+      const client = {
+        getLatencyHistogram: jest.fn().mockResolvedValue({ ping: { calls: 1, histogram: { '1': 1 } } }),
+        getLatestLatencyEvents: jest.fn().mockResolvedValue([]),
+      };
+
+      await (service as any).pollConnection(makeCtx(client, 'my-conn'));
+
+      expect(storage.saveLatencyHistogram).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionId: 'my-conn' }),
+        'my-conn',
+      );
+    });
+  });
+
+  describe('getStoredHistograms', () => {
+    it('should delegate to storage', async () => {
+      const mockHistograms = [{ id: '1', timestamp: NOW, data: { get: { calls: 10, histogram: {} } }, connectionId: 'c1' }];
+      storage.getLatencyHistograms.mockResolvedValue(mockHistograms as any);
+
+      const result = await service.getStoredHistograms({ limit: 5 });
+
+      expect(storage.getLatencyHistograms).toHaveBeenCalledWith({ limit: 5 });
+      expect(result).toEqual(mockHistograms);
+    });
+  });
+
   describe('getStoredSnapshots', () => {
     it('should delegate to storage', async () => {
       const mockSnapshots = [{ id: '1', timestamp: NOW, eventName: 'cmd', latestEventTimestamp: 100, maxLatency: 10 }];

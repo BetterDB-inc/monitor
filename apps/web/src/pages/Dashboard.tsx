@@ -49,6 +49,7 @@ export function Dashboard() {
       return;
     }
 
+    setStoredMemorySnapshots(null);
     let cancelled = false;
     metricsApi.getStoredMemorySnapshots({ startTime, endTime, limit: 500 })
       .then(data => { if (!cancelled) setStoredMemorySnapshots(data); })

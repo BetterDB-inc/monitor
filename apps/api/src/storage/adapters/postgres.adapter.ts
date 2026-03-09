@@ -1316,13 +1316,16 @@ export class PostgresAdapter implements StoragePort {
         mem_fragmentation_ratio DOUBLE PRECISION NOT NULL,
         maxmemory BIGINT NOT NULL DEFAULT 0,
         allocator_frag_ratio DOUBLE PRECISION NOT NULL DEFAULT 0,
+        ops_per_sec BIGINT NOT NULL DEFAULT 0,
+        cpu_sys DOUBLE PRECISION NOT NULL DEFAULT 0,
+        cpu_user DOUBLE PRECISION NOT NULL DEFAULT 0,
         connection_id TEXT NOT NULL DEFAULT 'env-default'
       );
 
       CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
 
-      -- Add ops/CPU columns (idempotent migration)
+      -- Idempotent migration for existing deployments without ops/CPU columns
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS ops_per_sec BIGINT NOT NULL DEFAULT 0;
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS cpu_sys DOUBLE PRECISION NOT NULL DEFAULT 0;
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS cpu_user DOUBLE PRECISION NOT NULL DEFAULT 0;

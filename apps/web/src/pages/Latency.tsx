@@ -76,6 +76,8 @@ export function Latency() {
       return;
     }
 
+    setStoredSnapshots(null);
+    setStoredHistogramData(null);
     let cancelled = false;
 
     Promise.all([
