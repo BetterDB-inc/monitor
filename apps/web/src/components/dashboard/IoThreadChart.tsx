@@ -16,7 +16,8 @@ interface Props {
 }
 
 export function IoThreadChart({ data, isMultiThreaded, hasEverSeenActivity }: Props) {
-  const showChart = isMultiThreaded || hasEverSeenActivity;
+  const dataHasActivity = data.some(d => d.reads > 0 || d.writes > 0);
+  const showChart = isMultiThreaded || hasEverSeenActivity || dataHasActivity;
 
   if (!showChart) {
     return (

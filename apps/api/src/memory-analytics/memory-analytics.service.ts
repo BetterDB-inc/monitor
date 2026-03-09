@@ -78,6 +78,8 @@ export class MemoryAnalyticsService extends MultiConnectionPoller implements OnM
         opsPerSec: parseInt(info.stats?.instantaneous_ops_per_sec ?? '0', 10),
         cpuSys,
         cpuUser,
+        ioThreadedReads: parseInt(info.stats?.io_threaded_reads_processed ?? '0', 10),
+        ioThreadedWrites: parseInt(info.stats?.io_threaded_writes_processed ?? '0', 10),
         connectionId: ctx.connectionId,
       };
 

@@ -1319,16 +1319,20 @@ export class PostgresAdapter implements StoragePort {
         ops_per_sec BIGINT NOT NULL DEFAULT 0,
         cpu_sys DOUBLE PRECISION NOT NULL DEFAULT 0,
         cpu_user DOUBLE PRECISION NOT NULL DEFAULT 0,
+        io_threaded_reads BIGINT NOT NULL DEFAULT 0,
+        io_threaded_writes BIGINT NOT NULL DEFAULT 0,
         connection_id TEXT NOT NULL DEFAULT 'env-default'
       );
 
       CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
 
-      -- Idempotent migration for existing deployments without ops/CPU columns
+      -- Idempotent migration for existing deployments without ops/CPU/IO columns
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS ops_per_sec BIGINT NOT NULL DEFAULT 0;
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS cpu_sys DOUBLE PRECISION NOT NULL DEFAULT 0;
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS cpu_user DOUBLE PRECISION NOT NULL DEFAULT 0;
+      ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS io_threaded_reads BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS io_threaded_writes BIGINT NOT NULL DEFAULT 0;
 
       -- Database Connections Table (stores multi-database connection configs)
       CREATE TABLE IF NOT EXISTS connections (
@@ -2742,7 +2746,8 @@ export class PostgresAdapter implements StoragePort {
       placeholders.push(`(
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
+        $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         snapshot.id,
@@ -2756,6 +2761,8 @@ export class PostgresAdapter implements StoragePort {
         snapshot.opsPerSec ?? 0,
         snapshot.cpuSys ?? 0,
         snapshot.cpuUser ?? 0,
+        snapshot.ioThreadedReads ?? 0,
+        snapshot.ioThreadedWrites ?? 0,
         connectionId,
       );
     }
@@ -2764,7 +2771,7 @@ export class PostgresAdapter implements StoragePort {
       INSERT INTO memory_snapshots (
         id, timestamp, used_memory, used_memory_rss, used_memory_peak,
         mem_fragmentation_ratio, maxmemory, allocator_frag_ratio,
-        ops_per_sec, cpu_sys, cpu_user, connection_id
+        ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes, connection_id
       ) VALUES ${placeholders.join(', ')}
     `;
 
@@ -2799,7 +2806,7 @@ export class PostgresAdapter implements StoragePort {
     const query = `
       SELECT id, timestamp, used_memory, used_memory_rss, used_memory_peak,
              mem_fragmentation_ratio, maxmemory, allocator_frag_ratio,
-             ops_per_sec, cpu_sys, cpu_user, connection_id
+             ops_per_sec, cpu_sys, cpu_user, io_threaded_reads, io_threaded_writes, connection_id
       FROM memory_snapshots
       ${whereClause}
       ORDER BY timestamp DESC
@@ -2820,6 +2827,8 @@ export class PostgresAdapter implements StoragePort {
       opsPerSec: Number(row.ops_per_sec ?? 0),
       cpuSys: Number(row.cpu_sys ?? 0),
       cpuUser: Number(row.cpu_user ?? 0),
+      ioThreadedReads: Number(row.io_threaded_reads ?? 0),
+      ioThreadedWrites: Number(row.io_threaded_writes ?? 0),
       connectionId: row.connection_id,
     }));
   }

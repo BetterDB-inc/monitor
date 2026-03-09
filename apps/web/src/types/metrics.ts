@@ -165,6 +165,8 @@ export interface StoredMemorySnapshot {
   opsPerSec: number;
   cpuSys: number;
   cpuUser: number;
+  ioThreadedReads: number;
+  ioThreadedWrites: number;
   connectionId?: string;
 }
 

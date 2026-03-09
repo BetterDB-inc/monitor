@@ -94,6 +94,18 @@ export function Dashboard() {
         }))
     : null;
 
+  const storedIoThreadHistory: Array<{ time: string; reads: number; writes: number }> | null = sortedStoredSnapshots
+    ? sortedStoredSnapshots.map((s, i) => {
+          if (i === 0) return { time: formatStoredTime(s.timestamp), reads: 0, writes: 0 };
+          const prev = sortedStoredSnapshots[i - 1];
+          return {
+            time: formatStoredTime(s.timestamp),
+            reads: Math.max(0, (s.ioThreadedReads ?? 0) - (prev.ioThreadedReads ?? 0)),
+            writes: Math.max(0, (s.ioThreadedWrites ?? 0) - (prev.ioThreadedWrites ?? 0)),
+          };
+        }).slice(1)
+    : null;
+
   // Clear history when connection changes
   useEffect(() => {
     setMemoryHistory([]);
@@ -194,7 +206,7 @@ export function Dashboard() {
         <MemoryChart data={isTimeFiltered ? (storedMemoryHistory ?? []) : memoryHistory} />
         <OpsChart data={isTimeFiltered ? (storedOpsHistory ?? []) : opsHistory} />
         <CpuChart data={isTimeFiltered ? (storedCpuHistory ?? []) : cpuHistory} />
-        <IoThreadChart data={ioThreadHistory} isMultiThreaded={info?.server?.io_threads_active === '1'} hasEverSeenActivity={hasEverSeenIoActivity} />
+        <IoThreadChart data={isTimeFiltered ? (storedIoThreadHistory ?? []) : ioThreadHistory} isMultiThreaded={info?.server?.io_threads_active === '1'} hasEverSeenActivity={hasEverSeenIoActivity} />
       </div>
     </div>
   );
