@@ -94,13 +94,16 @@ export function Latency() {
     return () => { cancelled = true; };
   }, [startTime, endTime, isTimeFiltered, currentConnection?.id]);
 
-  // Convert stored snapshots to LatencyEvent[] shape for the table
+  // Convert stored snapshots to LatencyEvent[] shape, keeping only the latest per eventName
   const storedAsEvents: LatencyEvent[] | null = storedSnapshots
-    ? storedSnapshots.map(s => ({
-        eventName: s.eventName,
-        latency: s.maxLatency,
-        timestamp: s.latestEventTimestamp,
-      }))
+    ? Object.values(
+        storedSnapshots.reduce<Record<string, LatencyEvent>>((acc, s) => {
+          if (!acc[s.eventName] || s.latestEventTimestamp > acc[s.eventName].timestamp) {
+            acc[s.eventName] = { eventName: s.eventName, latency: s.maxLatency, timestamp: s.latestEventTimestamp };
+          }
+          return acc;
+        }, {}),
+      )
     : null;
 
   const latencyEvents = isTimeFiltered ? storedAsEvents : liveLatencyEvents;
