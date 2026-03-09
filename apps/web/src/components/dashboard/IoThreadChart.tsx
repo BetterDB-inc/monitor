@@ -8,6 +8,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { Cpu } from 'lucide-react';
+import { shouldShowIoChart } from './io-threads.utils';
 
 interface Props {
   data: Array<{ time: string; reads: number; writes: number }>;
@@ -16,8 +17,7 @@ interface Props {
 }
 
 export function IoThreadChart({ data, isMultiThreaded, hasEverSeenActivity }: Props) {
-  const dataHasActivity = data.some(d => d.reads > 0 || d.writes > 0);
-  const showChart = isMultiThreaded || hasEverSeenActivity || dataHasActivity;
+  const showChart = shouldShowIoChart(isMultiThreaded, hasEverSeenActivity, data);
 
   if (!showChart) {
     return (

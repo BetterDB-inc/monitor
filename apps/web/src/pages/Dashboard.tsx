@@ -8,6 +8,7 @@ import { MemoryChart } from '../components/dashboard/MemoryChart';
 import { OpsChart } from '../components/dashboard/OpsChart';
 import { CpuChart } from '../components/dashboard/CpuChart';
 import { IoThreadChart } from '../components/dashboard/IoThreadChart';
+import { deriveStoredIoDeltas } from '../components/dashboard/io-threads.utils';
 import { CapabilitiesBadges } from '../components/dashboard/CapabilitiesBadges';
 import { DoctorCard } from '../components/DoctorCard';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
@@ -34,7 +35,7 @@ export function Dashboard() {
   const [ioThreadHistory, setIoThreadHistory] = useState<Array<{ time: string; reads: number; writes: number }>>([]);
   const [hasEverSeenIoActivity, setHasEverSeenIoActivity] = useState(false);
   const prevCpuRef = useRef<{ sys: number; user: number; ts: number } | null>(null);
-  const prevIoCounters = useRef<{ reads: number; writes: number } | null>(null);
+  const prevIoCounters = useRef<{ reads: number; writes: number; ts: number } | null>(null);
   const [memoryDoctorReport, setMemoryDoctorReport] = useState<string>();
   const [memoryDoctorLoading, setMemoryDoctorLoading] = useState(true);
 
@@ -94,16 +95,8 @@ export function Dashboard() {
         }))
     : null;
 
-  const storedIoThreadHistory: Array<{ time: string; reads: number; writes: number }> | null = sortedStoredSnapshots
-    ? sortedStoredSnapshots.map((s, i) => {
-          if (i === 0) return { time: formatStoredTime(s.timestamp), reads: 0, writes: 0 };
-          const prev = sortedStoredSnapshots[i - 1];
-          return {
-            time: formatStoredTime(s.timestamp),
-            reads: Math.max(0, (s.ioThreadedReads ?? 0) - (prev.ioThreadedReads ?? 0)),
-            writes: Math.max(0, (s.ioThreadedWrites ?? 0) - (prev.ioThreadedWrites ?? 0)),
-          };
-        }).slice(1)
+  const storedIoThreadHistory = sortedStoredSnapshots
+    ? deriveStoredIoDeltas(sortedStoredSnapshots, formatStoredTime)
     : null;
 
   // Clear history when connection changes
@@ -139,15 +132,23 @@ export function Dashboard() {
     const rawReads = parseInt(info.stats?.io_threaded_reads_processed ?? '0', 10);
     const rawWrites = parseInt(info.stats?.io_threaded_writes_processed ?? '0', 10);
 
+    const ioTs = Date.now();
     if (prevIoCounters.current !== null) {
-      const readsDelta = Math.max(0, rawReads - prevIoCounters.current.reads);
-      const writesDelta = Math.max(0, rawWrites - prevIoCounters.current.writes);
-      if (readsDelta > 0 || writesDelta > 0) {
-        setHasEverSeenIoActivity(true);
+      const dtSec = (ioTs - prevIoCounters.current.ts) / 1000;
+      if (dtSec > 0) {
+        const readsPerSec = Math.max(0, (rawReads - prevIoCounters.current.reads) / dtSec);
+        const writesPerSec = Math.max(0, (rawWrites - prevIoCounters.current.writes) / dtSec);
+        if (readsPerSec > 0 || writesPerSec > 0) {
+          setHasEverSeenIoActivity(true);
+        }
+        setIoThreadHistory(prev => [...prev, {
+          time,
+          reads: parseFloat(readsPerSec.toFixed(1)),
+          writes: parseFloat(writesPerSec.toFixed(1)),
+        }].slice(-60));
       }
-      setIoThreadHistory(prev => [...prev, { time, reads: readsDelta, writes: writesDelta }].slice(-60));
     }
-    prevIoCounters.current = { reads: rawReads, writes: rawWrites };
+    prevIoCounters.current = { reads: rawReads, writes: rawWrites, ts: ioTs };
 
     if (info.cpu) {
       const sys = parseFloat(info.cpu.used_cpu_sys);

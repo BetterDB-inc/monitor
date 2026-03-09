@@ -44,7 +44,7 @@ export interface InfoResponse {
     process_id: string;
     tcp_port: string;
     os: string;
-    io_threads_active: string;
+    io_threads_active?: string;
   };
   clients?: {
     connected_clients: string;
@@ -73,8 +73,8 @@ export interface InfoResponse {
     expired_keys: string;
     io_threaded_reads_processed?: string;
     io_threaded_writes_processed?: string;
-    total_reads_processed: string;
-    total_writes_processed: string;
+    total_reads_processed?: string;
+    total_writes_processed?: string;
   };
   replication?: {
     role: string;
