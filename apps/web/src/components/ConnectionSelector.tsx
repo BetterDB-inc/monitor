@@ -156,7 +156,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           <div className="flex gap-1">
             <button
               onClick={() => setShowAddDialog(true)}
-              className="text-xs text-primary hover:underline"
+              className="w-7 h-7 flex items-center justify-center rounded-md text-base font-medium text-primary hover:bg-primary/10 transition-colors"
               title="Add connection"
             >
               +
@@ -164,7 +164,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             {connections.length > 0 && (
               <button
                 onClick={() => setShowManageDialog(true)}
-                className="text-xs text-muted-foreground hover:text-foreground"
+                className="w-7 h-7 flex items-center justify-center rounded-md text-base text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
                 title="Manage connections"
               >
                 ⚙

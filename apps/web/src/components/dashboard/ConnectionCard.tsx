@@ -11,7 +11,7 @@ interface Props {
 export function ConnectionCard({ health, loading }: Props) {
   if (loading) {
     return (
-      <Card>
+      <Card className="min-w-[180px] flex-1">
         <CardHeader>
           <CardTitle>Connection</CardTitle>
         </CardHeader>
@@ -25,7 +25,7 @@ export function ConnectionCard({ health, loading }: Props) {
   const statusVariant = health?.status === 'connected' ? 'default' : 'destructive';
 
   return (
-    <Card>
+    <Card className="min-w-[180px] flex-1">
       <CardHeader className="flex flex-row items-center justify-between pb-2">
         <CardTitle className="text-sm font-medium">Connection</CardTitle>
         <Badge variant={statusVariant}>
