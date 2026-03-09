@@ -61,9 +61,14 @@ export function Dashboard() {
     ? [...storedMemorySnapshots].sort((a, b) => a.timestamp - b.timestamp)
     : null;
 
+  const formatStoredTime = (ts: number): string => {
+    const d = new Date(ts);
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString();
+  };
+
   const storedMemoryHistory: Array<{ time: string; used: number; peak: number }> | null = sortedStoredSnapshots
     ? sortedStoredSnapshots.map(s => ({
-          time: new Date(s.timestamp).toLocaleTimeString(),
+          time: formatStoredTime(s.timestamp),
           used: s.usedMemory,
           peak: s.usedMemoryPeak,
         }))
@@ -71,14 +76,14 @@ export function Dashboard() {
 
   const storedOpsHistory: Array<{ time: string; ops: number }> | null = sortedStoredSnapshots
     ? sortedStoredSnapshots.map(s => ({
-          time: new Date(s.timestamp).toLocaleTimeString(),
+          time: formatStoredTime(s.timestamp),
           ops: s.opsPerSec ?? 0,
         }))
     : null;
 
   const storedCpuHistory: Array<{ time: string; sys: number; user: number }> | null = sortedStoredSnapshots
     ? sortedStoredSnapshots.map(s => ({
-          time: new Date(s.timestamp).toLocaleTimeString(),
+          time: formatStoredTime(s.timestamp),
           sys: s.cpuSys ?? 0,
           user: s.cpuUser ?? 0,
         }))
