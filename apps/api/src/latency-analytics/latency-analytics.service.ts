@@ -8,6 +8,7 @@ import {
 } from '../common/interfaces/storage-port.interface';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 
 @Injectable()
 export class LatencyAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -21,6 +22,7 @@ export class LatencyAnalyticsService extends MultiConnectionPoller implements On
   constructor(
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
+    private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
   ) {
     super(connectionRegistry);
   }
@@ -59,6 +61,10 @@ export class LatencyAnalyticsService extends MultiConnectionPoller implements On
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    if (!this.runtimeCapabilityTracker.isAvailable(ctx.connectionId, 'canLatency')) {
+      return;
+    }
+
     const now = Date.now();
 
     // Store histogram data (command-level latency distributions)
@@ -121,7 +127,9 @@ export class LatencyAnalyticsService extends MultiConnectionPoller implements On
 
       this.logger.debug(`Saved ${saved} latency snapshots for ${ctx.connectionName}`);
     } catch (error) {
-      this.logger.error(`Error capturing latency for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (this.runtimeCapabilityTracker.recordFailure(ctx.connectionId, 'canLatency', error instanceof Error ? error : String(error))) {
+        this.logger.warn(`Disabled latency polling for ${ctx.connectionName} after repeated failures`);
+      }
     }
   }
 

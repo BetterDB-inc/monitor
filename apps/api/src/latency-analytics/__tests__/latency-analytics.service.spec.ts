@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { LatencyAnalyticsService } from '../latency-analytics.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
+import { RuntimeCapabilityTracker } from '../../connections/runtime-capability-tracker.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -29,11 +30,17 @@ describe('LatencyAnalyticsService', () => {
       removeListener: jest.fn(),
     } as any;
 
+    const runtimeCapabilityTracker = {
+      isAvailable: jest.fn().mockReturnValue(true),
+      recordFailure: jest.fn().mockReturnValue(false),
+    } as any;
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         LatencyAnalyticsService,
         { provide: 'STORAGE_CLIENT', useValue: storage },
         { provide: ConnectionRegistry, useValue: connectionRegistry },
+        { provide: RuntimeCapabilityTracker, useValue: runtimeCapabilityTracker },
       ],
     }).compile();
 

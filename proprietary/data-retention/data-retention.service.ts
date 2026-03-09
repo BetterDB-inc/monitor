@@ -55,6 +55,7 @@ export class DataRetentionService {
       { name: 'acl_entries', fn: () => this.storage.pruneOldEntries(cutoff) },
       { name: 'webhook_deliveries', fn: () => this.storage.pruneOldDeliveries(cutoff) },
       { name: 'latency_snapshots', fn: () => this.storage.pruneOldLatencySnapshots(cutoff) },
+      { name: 'latency_histograms', fn: () => this.storage.pruneOldLatencyHistograms(cutoff) },
       { name: 'memory_snapshots', fn: () => this.storage.pruneOldMemorySnapshots(cutoff) },
     ];
 
