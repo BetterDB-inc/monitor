@@ -2575,9 +2575,10 @@ export class PostgresAdapter implements StoragePort {
 
     for (const snapshot of snapshots) {
       placeholders.push(`(
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
+        snapshot.id,
         snapshot.timestamp,
         snapshot.eventName,
         snapshot.latestEventTimestamp,
@@ -2588,7 +2589,7 @@ export class PostgresAdapter implements StoragePort {
 
     const query = `
       INSERT INTO latency_snapshots (
-        timestamp, event_name, latest_event_timestamp, max_latency, connection_id
+        id, timestamp, event_name, latest_event_timestamp, max_latency, connection_id
       ) VALUES ${placeholders.join(', ')}
     `;
 
@@ -2663,9 +2664,9 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) return 0;
 
     const result = await this.pool.query(
-      `INSERT INTO latency_histograms (timestamp, histogram_data, connection_id)
-       VALUES ($1, $2, $3)`,
-      [histogram.timestamp, JSON.stringify(histogram.data), connectionId],
+      `INSERT INTO latency_histograms (id, timestamp, histogram_data, connection_id)
+       VALUES ($1, $2, $3, $4)`,
+      [histogram.id, histogram.timestamp, JSON.stringify(histogram.data), connectionId],
     );
     return result.rowCount ?? 0;
   }
@@ -2741,9 +2742,10 @@ export class PostgresAdapter implements StoragePort {
       placeholders.push(`(
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
+        snapshot.id,
         snapshot.timestamp,
         snapshot.usedMemory,
         snapshot.usedMemoryRss,
@@ -2760,7 +2762,7 @@ export class PostgresAdapter implements StoragePort {
 
     const query = `
       INSERT INTO memory_snapshots (
-        timestamp, used_memory, used_memory_rss, used_memory_peak,
+        id, timestamp, used_memory, used_memory_rss, used_memory_peak,
         mem_fragmentation_ratio, maxmemory, allocator_frag_ratio,
         ops_per_sec, cpu_sys, cpu_user, connection_id
       ) VALUES ${placeholders.join(', ')}
