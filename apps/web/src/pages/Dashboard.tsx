@@ -7,6 +7,7 @@ import { OverviewCards } from '../components/dashboard/OverviewCards';
 import { MemoryChart } from '../components/dashboard/MemoryChart';
 import { OpsChart } from '../components/dashboard/OpsChart';
 import { CpuChart } from '../components/dashboard/CpuChart';
+import { IoThreadChart } from '../components/dashboard/IoThreadChart';
 import { CapabilitiesBadges } from '../components/dashboard/CapabilitiesBadges';
 import { DoctorCard } from '../components/DoctorCard';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
@@ -30,7 +31,10 @@ export function Dashboard() {
   const [memoryHistory, setMemoryHistory] = useState<Array<{ time: string; used: number; peak: number }>>([]);
   const [opsHistory, setOpsHistory] = useState<Array<{ time: string; ops: number }>>([]);
   const [cpuHistory, setCpuHistory] = useState<Array<{ time: string; sys: number; user: number }>>([]);
+  const [ioThreadHistory, setIoThreadHistory] = useState<Array<{ time: string; reads: number; writes: number }>>([]);
+  const [hasEverSeenIoActivity, setHasEverSeenIoActivity] = useState(false);
   const prevCpuRef = useRef<{ sys: number; user: number; ts: number } | null>(null);
+  const prevIoCounters = useRef<{ reads: number; writes: number } | null>(null);
   const [memoryDoctorReport, setMemoryDoctorReport] = useState<string>();
   const [memoryDoctorLoading, setMemoryDoctorLoading] = useState(true);
 
@@ -95,7 +99,10 @@ export function Dashboard() {
     setMemoryHistory([]);
     setOpsHistory([]);
     setCpuHistory([]);
+    setIoThreadHistory([]);
+    setHasEverSeenIoActivity(false);
     prevCpuRef.current = null;
+    prevIoCounters.current = null;
   }, [currentConnection?.id]);
 
   useEffect(() => {
@@ -116,6 +123,19 @@ export function Dashboard() {
       const next = [...prev, { time, ops: parseInt(info.stats!.instantaneous_ops_per_sec, 10) }];
       return next.slice(-60);
     });
+
+    const rawReads = parseInt(info.stats?.io_threaded_reads_processed ?? '0', 10);
+    const rawWrites = parseInt(info.stats?.io_threaded_writes_processed ?? '0', 10);
+
+    if (prevIoCounters.current !== null) {
+      const readsDelta = Math.max(0, rawReads - prevIoCounters.current.reads);
+      const writesDelta = Math.max(0, rawWrites - prevIoCounters.current.writes);
+      if (readsDelta > 0 || writesDelta > 0) {
+        setHasEverSeenIoActivity(true);
+      }
+      setIoThreadHistory(prev => [...prev, { time, reads: readsDelta, writes: writesDelta }].slice(-60));
+    }
+    prevIoCounters.current = { reads: rawReads, writes: rawWrites };
 
     if (info.cpu) {
       const sys = parseFloat(info.cpu.used_cpu_sys);
@@ -174,6 +194,7 @@ export function Dashboard() {
         <MemoryChart data={isTimeFiltered ? (storedMemoryHistory ?? []) : memoryHistory} />
         <OpsChart data={isTimeFiltered ? (storedOpsHistory ?? []) : opsHistory} />
         <CpuChart data={isTimeFiltered ? (storedCpuHistory ?? []) : cpuHistory} />
+        <IoThreadChart data={ioThreadHistory} isMultiThreaded={info?.server?.io_threads_active === '1'} hasEverSeenActivity={hasEverSeenIoActivity} />
       </div>
     </div>
   );
