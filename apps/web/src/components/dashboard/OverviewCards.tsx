@@ -46,7 +46,7 @@ export function OverviewCards({ info }: Props) {
   return (
     <>
       {cards.map((card) => (
-        <Card key={card.title}>
+        <Card key={card.title} className="min-w-[180px] flex-1">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
               {card.title}

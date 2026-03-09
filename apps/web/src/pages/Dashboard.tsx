@@ -192,7 +192,7 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+      <div className="flex flex-wrap gap-4">
         <ConnectionCard health={health} loading={healthLoading} />
         <OverviewCards info={info} />
       </div>
@@ -203,7 +203,7 @@ export function Dashboard() {
         isLoading={memoryDoctorLoading}
       />
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-2">
         <MemoryChart data={isTimeFiltered ? (storedMemoryHistory ?? []) : memoryHistory} />
         <OpsChart data={isTimeFiltered ? (storedOpsHistory ?? []) : opsHistory} />
         <CpuChart data={isTimeFiltered ? (storedCpuHistory ?? []) : cpuHistory} />
