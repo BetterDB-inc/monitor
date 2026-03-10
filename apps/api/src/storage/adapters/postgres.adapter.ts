@@ -1115,9 +1115,6 @@ export class PostgresAdapter implements StoragePort {
         rank INTEGER NOT NULL
       );
 
-      -- Migration: widen memory_bytes for existing deployments
-      ALTER TABLE hot_key_stats ALTER COLUMN memory_bytes TYPE BIGINT;
-
       CREATE INDEX IF NOT EXISTS idx_hks_connection_captured
         ON hot_key_stats(connection_id, captured_at DESC);
 
