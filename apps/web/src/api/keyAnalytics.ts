@@ -31,12 +31,13 @@ export const keyAnalyticsApi = {
     return fetchApi<{ message: string; status: string }>('/key-analytics/collect', { method: 'POST' });
   },
 
-  getHotKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean }) => {
+  getHotKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean }) => {
     const params = new URLSearchParams();
     if (options?.limit) params.append('limit', options.limit.toString());
     if (options?.startTime) params.append('startTime', options.startTime.toString());
     if (options?.endTime) params.append('endTime', options.endTime.toString());
     if (options?.latest) params.append('latest', 'true');
+    if (options?.oldest) params.append('oldest', 'true');
     const query = params.toString();
     return fetchApi<HotKeyEntry[]>(query ? `/key-analytics/hot-keys?${query}` : '/key-analytics/hot-keys');
   },

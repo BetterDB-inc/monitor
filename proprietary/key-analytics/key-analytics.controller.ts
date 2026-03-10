@@ -5,6 +5,15 @@ import { LicenseGuard } from '@proprietary/license/license.guard';
 import { RequiresFeature } from '@proprietary/license/requires-feature.decorator';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
 
+const MAX_LIMIT = 500;
+
+function safeInt(value: string | undefined, fallback?: number, max?: number): number | undefined {
+  if (!value) return fallback;
+  const n = parseInt(value, 10);
+  if (isNaN(n)) return fallback;
+  return max ? Math.min(n, max) : n;
+}
+
 @Controller('key-analytics')
 export class KeyAnalyticsController {
   constructor(private readonly keyAnalytics: KeyAnalyticsService) { }
@@ -53,13 +62,15 @@ export class KeyAnalyticsController {
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
     @Query('latest') latest?: string,
+    @Query('oldest') oldest?: string,
   ) {
     return this.keyAnalytics.getHotKeys({
       connectionId,
-      limit: limit ? parseInt(limit, 10) : 50,
-      startTime: startTime ? parseInt(startTime, 10) : undefined,
-      endTime: endTime ? parseInt(endTime, 10) : undefined,
+      limit: safeInt(limit, 50, MAX_LIMIT),
+      startTime: safeInt(startTime),
+      endTime: safeInt(endTime),
       latest: latest === 'true',
+      oldest: oldest === 'true',
     });
   }
 

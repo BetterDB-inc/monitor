@@ -108,4 +108,5 @@ export interface HotKeyQueryOptions {
   limit?: number;
   offset?: number;
   latest?: boolean;
+  oldest?: boolean;
 }

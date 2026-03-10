@@ -116,17 +116,13 @@ export function KeyAnalytics() {
     }
     let cancelled = false;
     keyAnalyticsApi.getHotKeys({
-      limit: 200,
+      limit: 50,
       startTime: hotKeyStartTime,
       endTime: hotKeyEndTime,
-    }).then(history => {
-      if (cancelled || history.length === 0) {
-        setBaselineHotKeys(null);
-        return;
-      }
-      // Find the earliest snapshot in the range (the baseline)
-      const earliestCapturedAt = Math.min(...history.map(k => k.capturedAt));
-      setBaselineHotKeys(history.filter(k => k.capturedAt === earliestCapturedAt));
+      oldest: true,
+    }).then(entries => {
+      if (cancelled) return;
+      setBaselineHotKeys(entries.length > 0 ? entries : null);
     }).catch(() => setBaselineHotKeys(null));
     return () => { cancelled = true; };
   }, [hotKeyStartTime, hotKeyEndTime, isHotKeyTimeFiltered]);

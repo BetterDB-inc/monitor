@@ -1103,17 +1103,20 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_kps_connection_id ON key_pattern_snapshots(connection_id);
 
       CREATE TABLE IF NOT EXISTS hot_key_stats (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        id UUID PRIMARY KEY,
         key_name TEXT NOT NULL,
         connection_id TEXT NOT NULL DEFAULT 'env-default',
         captured_at BIGINT NOT NULL,
         signal_type TEXT NOT NULL,
         freq_score INTEGER,
         idle_seconds INTEGER,
-        memory_bytes INTEGER,
+        memory_bytes BIGINT,
         ttl INTEGER,
         rank INTEGER NOT NULL
       );
+
+      -- Migration: widen memory_bytes for existing deployments
+      ALTER TABLE hot_key_stats ALTER COLUMN memory_bytes TYPE BIGINT;
 
       CREATE INDEX IF NOT EXISTS idx_hks_connection_captured
         ON hot_key_stats(connection_id, captured_at DESC);
@@ -1973,8 +1976,9 @@ export class PostgresAdapter implements StoragePort {
     let paramIndex = 1;
 
     for (const entry of entries) {
-      values.push(`($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`);
+      values.push(`($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`);
       params.push(
+        entry.id,
         entry.keyName,
         connectionId,
         entry.capturedAt,
@@ -1989,7 +1993,7 @@ export class PostgresAdapter implements StoragePort {
 
     await this.pool.query(`
       INSERT INTO hot_key_stats (
-        key_name, connection_id, captured_at, signal_type,
+        id, key_name, connection_id, captured_at, signal_type,
         freq_score, idle_seconds, memory_bytes, ttl, rank
       ) VALUES ${values.join(', ')}
     `, params);
@@ -2008,20 +2012,31 @@ export class PostgresAdapter implements StoragePort {
       conditions.push(`connection_id = $${paramIndex++}`);
       params.push(options.connectionId);
     }
-    if (options.latest) {
-      const connFilter = options.connectionId
-        ? `WHERE connection_id = $${paramIndex - 1}`
-        : '';
-      conditions.push(`captured_at = (SELECT MAX(captured_at) FROM hot_key_stats ${connFilter})`);
-    } else {
+    if (options.startTime) {
+      conditions.push(`captured_at >= $${paramIndex++}`);
+      params.push(options.startTime);
+    }
+    if (options.endTime) {
+      conditions.push(`captured_at <= $${paramIndex++}`);
+      params.push(options.endTime);
+    }
+    if (options.latest || options.oldest) {
+      const agg = options.latest ? 'MAX' : 'MIN';
+      const subConditions: string[] = [];
+      if (options.connectionId) {
+        subConditions.push(`connection_id = $${paramIndex++}`);
+        params.push(options.connectionId);
+      }
       if (options.startTime) {
-        conditions.push(`captured_at >= $${paramIndex++}`);
+        subConditions.push(`captured_at >= $${paramIndex++}`);
         params.push(options.startTime);
       }
       if (options.endTime) {
-        conditions.push(`captured_at <= $${paramIndex++}`);
+        subConditions.push(`captured_at <= $${paramIndex++}`);
         params.push(options.endTime);
       }
+      const subWhere = subConditions.length > 0 ? `WHERE ${subConditions.join(' AND ')}` : '';
+      conditions.push(`captured_at = (SELECT ${agg}(captured_at) FROM hot_key_stats ${subWhere})`);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';

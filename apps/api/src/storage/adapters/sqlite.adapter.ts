@@ -1676,25 +1676,33 @@ export class SqliteAdapter implements StoragePort {
       conditions.push('connection_id = ?');
       params.push(options.connectionId);
     }
-    if (options.latest) {
-      const connFilter = options.connectionId
-        ? `WHERE connection_id = ?`
-        : '';
+    if (options.startTime) {
+      conditions.push('captured_at >= ?');
+      params.push(options.startTime);
+    }
+    if (options.endTime) {
+      conditions.push('captured_at <= ?');
+      params.push(options.endTime);
+    }
+    if (options.latest || options.oldest) {
+      const agg = options.latest ? 'MAX' : 'MIN';
+      const subConditions: string[] = [];
+      const subParams: any[] = [];
       if (options.connectionId) {
-        conditions.push(`captured_at = (SELECT MAX(captured_at) FROM hot_key_stats ${connFilter})`);
-        params.push(options.connectionId);
-      } else {
-        conditions.push(`captured_at = (SELECT MAX(captured_at) FROM hot_key_stats)`);
+        subConditions.push('connection_id = ?');
+        subParams.push(options.connectionId);
       }
-    } else {
       if (options.startTime) {
-        conditions.push('captured_at >= ?');
-        params.push(options.startTime);
+        subConditions.push('captured_at >= ?');
+        subParams.push(options.startTime);
       }
       if (options.endTime) {
-        conditions.push('captured_at <= ?');
-        params.push(options.endTime);
+        subConditions.push('captured_at <= ?');
+        subParams.push(options.endTime);
       }
+      const subWhere = subConditions.length > 0 ? `WHERE ${subConditions.join(' AND ')}` : '';
+      conditions.push(`captured_at = (SELECT ${agg}(captured_at) FROM hot_key_stats ${subWhere})`);
+      params.push(...subParams);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';

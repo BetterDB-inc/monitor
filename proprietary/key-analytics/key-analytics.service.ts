@@ -19,7 +19,7 @@ const TIER_RETENTION_DAYS: Record<Tier, number | null> = {
 export class KeyAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(KeyAnalyticsService.name);
   private isRunning = new Map<string, boolean>();
-  private pruneHandle: NodeJS.Timeout | null = null;
+  private pollingHandles = new Map<string, NodeJS.Timeout>();
 
   private readonly sampleSize: number;
   private readonly scanBatchSize: number;
@@ -52,32 +52,28 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
 
     this.start();
 
-    const retentionDays = TIER_RETENTION_DAYS[this.license.getLicenseTier()];
+    const pruneIntervalMs = 24 * 60 * 60 * 1000;
 
-    if (retentionDays !== null) {
-      const retentionMs = retentionDays * 24 * 60 * 60 * 1000;
-      const pruneIntervalMs = 24 * 60 * 60 * 1000;
-
-      this.startPollingLoop({
-        name: 'key-analytics-prune',
-        getIntervalMs: () => pruneIntervalMs,
-        poll: async () => {
-          const cutoff = Date.now() - retentionMs;
-          const [deletedSnapshots, deletedHotKeys] = await Promise.all([
-            this.storage.pruneOldKeyPatternSnapshots(cutoff),
-            this.storage.pruneOldHotKeys(cutoff),
-          ]);
-          this.logger.log(
-            `Key Analytics prune: removed ${deletedSnapshots} pattern snapshots, ${deletedHotKeys} hot key entries older than ${new Date(cutoff).toISOString()}`,
-          );
-        },
-        initialPoll: false,
-      });
-
-      this.logger.log(`Key Analytics auto-prune enabled: ${retentionDays}-day retention (${this.license.getLicenseTier()} tier)`);
-    } else {
-      this.logger.log('Key Analytics data retained indefinitely (enterprise tier)');
-    }
+    this.startPollingLoop({
+      name: 'key-analytics-prune',
+      getIntervalMs: () => pruneIntervalMs,
+      poll: async () => {
+        const retentionDays = TIER_RETENTION_DAYS[this.license.getLicenseTier()];
+        if (retentionDays === null) {
+          this.logger.debug('Key Analytics prune skipped: unlimited retention (enterprise tier)');
+          return;
+        }
+        const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+        const [deletedSnapshots, deletedHotKeys] = await Promise.all([
+          this.storage.pruneOldKeyPatternSnapshots(cutoff),
+          this.storage.pruneOldHotKeys(cutoff),
+        ]);
+        this.logger.log(
+          `Key Analytics prune (${this.license.getLicenseTier()} tier, ${retentionDays}d retention): removed ${deletedSnapshots} pattern snapshots, ${deletedHotKeys} hot key entries older than ${new Date(cutoff).toISOString()}`,
+        );
+      },
+      initialPoll: false,
+    });
   }
 
   private startPollingLoop(opts: {
@@ -87,16 +83,17 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     initialPoll?: boolean;
   }): void {
     const schedule = () => {
-      this.pruneHandle = setTimeout(async () => {
+      const handle = setTimeout(async () => {
         try {
           await opts.poll();
         } catch (err) {
           this.logger.error(`${opts.name} failed: ${err instanceof Error ? err.message : err}`);
         }
-        if (this.pruneHandle) {
+        if (this.pollingHandles.has(opts.name)) {
           schedule();
         }
       }, opts.getIntervalMs());
+      this.pollingHandles.set(opts.name, handle);
     };
 
     if (opts.initialPoll !== false) {
@@ -113,10 +110,11 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   }
 
   async onModuleDestroy(): Promise<void> {
-    if (this.pruneHandle) {
-      clearTimeout(this.pruneHandle);
-      this.pruneHandle = null;
+    for (const [name, handle] of this.pollingHandles) {
+      clearTimeout(handle);
+      this.logger.debug(`Stopped polling loop: ${name}`);
     }
+    this.pollingHandles.clear();
     await super.onModuleDestroy();
   }
 
