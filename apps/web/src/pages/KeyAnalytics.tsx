@@ -110,7 +110,7 @@ export function KeyAnalytics() {
   const [baselineHotKeys, setBaselineHotKeys] = useState<HotKeyEntry[] | null>(null);
 
   useEffect(() => {
-    if (!isHotKeyTimeFiltered) {
+    if (activeTab !== 'hot-keys' || !isHotKeyTimeFiltered) {
       setBaselineHotKeys(null);
       return;
     }
@@ -125,7 +125,7 @@ export function KeyAnalytics() {
       setBaselineHotKeys(entries.length > 0 ? entries : null);
     }).catch(() => setBaselineHotKeys(null));
     return () => { cancelled = true; };
-  }, [hotKeyStartTime, hotKeyEndTime, isHotKeyTimeFiltered]);
+  }, [activeTab, hotKeyStartTime, hotKeyEndTime, isHotKeyTimeFiltered]);
 
   // Deduplicate: keep only the latest snapshot per pattern (results are ordered by timestamp DESC)
   const patterns = useMemo(() => {
