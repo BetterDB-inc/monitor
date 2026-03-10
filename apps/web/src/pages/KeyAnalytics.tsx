@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { keyAnalyticsApi } from '../api/keyAnalytics';
 import type { HotKeyEntry } from '../api/keyAnalytics';
+import { extractPattern } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
@@ -20,13 +21,6 @@ function getRankDelta(currentRank: number, keyName: string, prevKeys: HotKeyEntr
   if (delta > 0) return { label: `\u2191${delta}`, className: 'text-emerald-600' };
   if (delta < 0) return { label: `\u2193${Math.abs(delta)}`, className: 'text-red-500' };
   return { label: '\u2014', className: 'text-muted-foreground' };
-}
-
-function extractPattern(keyName: string): string {
-  // Replace numeric segments and UUIDs with '*'
-  return keyName
-    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '*')
-    .replace(/\d+/g, '*');
 }
 
 type SortField = 'pattern' | 'keyCount' | 'memoryBytes' | 'staleKeyCount';
