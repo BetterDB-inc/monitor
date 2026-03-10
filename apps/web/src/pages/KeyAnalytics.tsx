@@ -92,11 +92,16 @@ export function KeyAnalytics() {
   const hotKeyEndTime = hotKeyDateRange?.to ? hotKeyDateRange.to.getTime() : undefined;
   const isHotKeyTimeFiltered = hotKeyStartTime !== undefined && hotKeyEndTime !== undefined;
 
-  // Fetch only the latest snapshot (deduplicates rows)
+  // Fetch the latest snapshot within the selected date range (or overall if no range)
   const { data: hotKeys, loading: hotKeysLoading } = usePolling({
-    fetcher: () => keyAnalyticsApi.getHotKeys({ limit: 50, latest: true }),
+    fetcher: () => keyAnalyticsApi.getHotKeys({
+      limit: 50,
+      latest: true,
+      startTime: hotKeyStartTime,
+      endTime: hotKeyEndTime,
+    }),
     interval: 60000,
-    refetchKey: currentConnection?.id,
+    refetchKey: `${currentConnection?.id}-${hotKeyStartTime}-${hotKeyEndTime}`,
     enabled: activeTab === 'hot-keys',
   });
 
