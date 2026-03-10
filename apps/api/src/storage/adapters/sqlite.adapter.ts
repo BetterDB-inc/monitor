@@ -913,6 +913,22 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_kps_pattern_timestamp ON key_pattern_snapshots(pattern, timestamp);
       CREATE INDEX IF NOT EXISTS idx_kps_connection_id ON key_pattern_snapshots(connection_id);
 
+      CREATE TABLE IF NOT EXISTS hot_key_stats (
+        id TEXT PRIMARY KEY,
+        key_name TEXT NOT NULL,
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
+        captured_at INTEGER NOT NULL,
+        signal_type TEXT NOT NULL,
+        freq_score INTEGER,
+        idle_seconds INTEGER,
+        memory_bytes INTEGER,
+        ttl INTEGER,
+        rank INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_hks_connection_captured
+        ON hot_key_stats(connection_id, captured_at DESC);
+
       CREATE TABLE IF NOT EXISTS app_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         audit_poll_interval_ms INTEGER NOT NULL DEFAULT 60000,
@@ -1616,6 +1632,108 @@ export class SqliteAdapter implements StoragePort {
     }
 
     const result = this.db.prepare('DELETE FROM key_pattern_snapshots WHERE timestamp < ?').run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  async saveHotKeys(entries: import('../../common/interfaces/storage-port.interface').HotKeyEntry[], connectionId: string): Promise<number> {
+    if (!this.db || entries.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO hot_key_stats (
+        id, key_name, connection_id, captured_at, signal_type,
+        freq_score, idle_seconds, memory_bytes, ttl, rank
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertMany = this.db.transaction((entries: import('../../common/interfaces/storage-port.interface').HotKeyEntry[], connId: string) => {
+      for (const entry of entries) {
+        stmt.run(
+          entry.id,
+          entry.keyName,
+          connId,
+          entry.capturedAt,
+          entry.signalType,
+          entry.freqScore ?? null,
+          entry.idleSeconds ?? null,
+          entry.memoryBytes ?? null,
+          entry.ttl ?? null,
+          entry.rank,
+        );
+      }
+    });
+
+    insertMany(entries, connectionId);
+    return entries.length;
+  }
+
+  async getHotKeys(options: import('../../common/interfaces/storage-port.interface').HotKeyQueryOptions = {}): Promise<import('../../common/interfaces/storage-port.interface').HotKeyEntry[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (options.connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
+    if (options.latest) {
+      const connFilter = options.connectionId
+        ? `WHERE connection_id = ?`
+        : '';
+      if (options.connectionId) {
+        conditions.push(`captured_at = (SELECT MAX(captured_at) FROM hot_key_stats ${connFilter})`);
+        params.push(options.connectionId);
+      } else {
+        conditions.push(`captured_at = (SELECT MAX(captured_at) FROM hot_key_stats)`);
+      }
+    } else {
+      if (options.startTime) {
+        conditions.push('captured_at >= ?');
+        params.push(options.startTime);
+      }
+      if (options.endTime) {
+        conditions.push('captured_at <= ?');
+        params.push(options.endTime);
+      }
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = options.limit ?? 50;
+    const offset = options.offset ?? 0;
+    params.push(limit, offset);
+
+    const rows = this.db.prepare(`
+      SELECT id, key_name, connection_id, captured_at, signal_type,
+             freq_score, idle_seconds, memory_bytes, ttl, rank
+      FROM hot_key_stats
+      ${whereClause}
+      ORDER BY captured_at DESC, rank ASC
+      LIMIT ? OFFSET ?
+    `).all(...params) as any[];
+
+    return rows.map((row: any) => ({
+      id: row.id,
+      keyName: row.key_name,
+      connectionId: row.connection_id,
+      capturedAt: row.captured_at,
+      signalType: row.signal_type,
+      freqScore: row.freq_score ?? undefined,
+      idleSeconds: row.idle_seconds ?? undefined,
+      memoryBytes: row.memory_bytes ?? undefined,
+      ttl: row.ttl ?? undefined,
+      rank: row.rank,
+    }));
+  }
+
+  async pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db.prepare('DELETE FROM hot_key_stats WHERE captured_at < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
+
+    const result = this.db.prepare('DELETE FROM hot_key_stats WHERE captured_at < ?').run(cutoffTimestamp);
     return result.changes;
   }
 

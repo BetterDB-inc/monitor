@@ -470,6 +470,13 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
 
     const patternsMap = new Map<string, KeyPatternData>();
+    const keyDetails: Array<{
+      keyName: string;
+      freqScore: number | null;
+      idleSeconds: number | null;
+      memoryBytes: number | null;
+      ttl: number | null;
+    }> = [];
     let cursor = '0';
     let scanned = 0;
 
@@ -506,18 +513,20 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
           stats.count++;
 
-          if (memResult && memResult[1] !== null) {
-            const mem = memResult[1] as number;
+          const mem = (memResult && !memResult[0] && memResult[1] != null) ? memResult[1] as number : null;
+          if (mem !== null) {
             stats.totalMemory += mem;
             if (mem > stats.maxMemory) stats.maxMemory = mem;
           }
 
-          if (idleResult && idleResult[1] !== null) {
-            stats.totalIdleTime += idleResult[1] as number;
+          const idle = (idleResult && !idleResult[0] && idleResult[1] != null) ? idleResult[1] as number : null;
+          if (idle !== null) {
+            stats.totalIdleTime += idle;
           }
 
-          if (freqResult && freqResult[1] !== null) {
-            stats.accessFrequencies.push(freqResult[1] as number);
+          const freq = (freqResult && !freqResult[0] && freqResult[1] != null) ? freqResult[1] as number : null;
+          if (freq !== null) {
+            stats.accessFrequencies.push(freq);
           }
 
           const ttl = ttlResult?.[1] as number;
@@ -529,6 +538,14 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
           }
 
           patternsMap.set(pattern, stats);
+
+          keyDetails.push({
+            keyName: key,
+            freqScore: freq,
+            idleSeconds: idle,
+            memoryBytes: mem,
+            ttl: ttl ?? null,
+          });
         } catch (err) {
           this.logger.debug(`Failed to inspect key ${key}: ${err}`);
         }
@@ -541,6 +558,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       dbSize,
       scanned,
       patterns: Array.from(patternsMap.values()),
+      keyDetails,
     };
   }
 

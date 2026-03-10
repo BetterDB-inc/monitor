@@ -19,6 +19,8 @@ export type {
   KeyPatternSnapshot,
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
+  HotKeyEntry,
+  HotKeyQueryOptions,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
@@ -46,6 +48,8 @@ import type {
   KeyPatternSnapshot,
   KeyPatternQueryOptions,
   KeyAnalyticsSummary,
+  HotKeyEntry,
+  HotKeyQueryOptions,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
@@ -292,6 +296,11 @@ export interface StoragePort {
     staleCount: number;
   }>>;
   pruneOldKeyPatternSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Hot Key Stats Methods - connectionId required for writes, optional filter for reads
+  saveHotKeys(entries: HotKeyEntry[], connectionId: string): Promise<number>;
+  getHotKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]>;
+  pruneOldHotKeys(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Settings Methods (global, not connection-scoped)
   getSettings(): Promise<AppSettings | null>;

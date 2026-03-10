@@ -28,6 +28,7 @@ function parseLocalDate(dateStr: string): Date {
 
 export function DateRangePicker({ value, onChange, className }: DateRangePickerProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [alignRight, setAlignRight] = useState(false);
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
@@ -42,6 +43,15 @@ export function DateRangePicker({ value, onChange, className }: DateRangePickerP
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Determine if dropdown should align right to avoid overflow
+  useEffect(() => {
+    if (isOpen && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      const dropdownWidth = 280;
+      setAlignRight(rect.left + dropdownWidth > window.innerWidth);
+    }
+  }, [isOpen]);
 
   const handlePresetClick = (days: number) => {
     const to = endOfDay(new Date());
@@ -116,7 +126,7 @@ export function DateRangePicker({ value, onChange, className }: DateRangePickerP
 
       {/* Dropdown */}
       {isOpen && (
-        <div className="absolute top-full left-0 mt-1 z-50 bg-popover border rounded-lg shadow-lg min-w-[280px]">
+        <div className={`absolute top-full mt-1 z-50 bg-popover border rounded-lg shadow-lg min-w-[280px] ${alignRight ? 'right-0' : 'left-0'}`}>
           {/* Presets */}
           <div className="p-2 border-b">
             <div className="text-xs font-medium text-muted-foreground mb-2 px-2">Quick select</div>

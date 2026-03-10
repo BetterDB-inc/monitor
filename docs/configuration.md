@@ -231,6 +231,8 @@ BetterDB Monitor automatically checks for new versions and displays an update ba
 | `KEY_ANALYTICS_SCAN_BATCH_SIZE` | No | `1000` | Batch size for key scanning operations |
 | `KEY_ANALYTICS_INTERVAL_MS` | No | `300000` | Key analytics collection interval (milliseconds) |
 
+Data retention is determined by your license tier: Community keeps 7 days, Pro keeps 30 days, Enterprise keeps data indefinitely.
+
 **Note**: Key analytics features require a Pro tier license.
 
 ### AI Features (Experimental)

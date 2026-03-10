@@ -1,7 +1,7 @@
 import { fetchApi } from './client';
-import type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend } from '@betterdb/shared';
+import type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend, HotKeyEntry } from '@betterdb/shared';
 
-export type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend };
+export type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend, HotKeyEntry };
 
 export const keyAnalyticsApi = {
   getSummary: (startTime?: number, endTime?: number) => {
@@ -29,6 +29,16 @@ export const keyAnalyticsApi = {
 
   triggerCollection: () => {
     return fetchApi<{ message: string; status: string }>('/key-analytics/collect', { method: 'POST' });
+  },
+
+  getHotKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean }) => {
+    const params = new URLSearchParams();
+    if (options?.limit) params.append('limit', options.limit.toString());
+    if (options?.startTime) params.append('startTime', options.startTime.toString());
+    if (options?.endTime) params.append('endTime', options.endTime.toString());
+    if (options?.latest) params.append('latest', 'true');
+    const query = params.toString();
+    return fetchApi<HotKeyEntry[]>(query ? `/key-analytics/hot-keys?${query}` : '/key-analytics/hot-keys');
   },
 
   clearOldSnapshots: (olderThan?: number) => {

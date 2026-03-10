@@ -79,4 +79,33 @@ export interface KeyAnalyticsResult {
   dbSize: number;
   scanned: number;
   patterns: KeyPatternData[];
+  keyDetails?: Array<{
+    keyName: string;
+    freqScore: number | null;
+    idleSeconds: number | null;
+    memoryBytes: number | null;
+    ttl: number | null;
+  }>;
+}
+
+export interface HotKeyEntry {
+  id: string;
+  keyName: string;
+  connectionId: string;
+  capturedAt: number;
+  signalType: 'lfu' | 'idletime';
+  freqScore?: number;
+  idleSeconds?: number;
+  memoryBytes?: number;
+  ttl?: number;
+  rank: number;
+}
+
+export interface HotKeyQueryOptions {
+  connectionId?: string;
+  startTime?: number;
+  endTime?: number;
+  limit?: number;
+  offset?: number;
+  latest?: boolean;
 }

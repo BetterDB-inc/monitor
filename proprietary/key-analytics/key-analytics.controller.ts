@@ -43,6 +43,26 @@ export class KeyAnalyticsController {
     });
   }
 
+  @Get('hot-keys')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature('keyAnalytics')
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getHotKeys(
+    @ConnectionId() connectionId?: string,
+    @Query('limit') limit?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+    @Query('latest') latest?: string,
+  ) {
+    return this.keyAnalytics.getHotKeys({
+      connectionId,
+      limit: limit ? parseInt(limit, 10) : 50,
+      startTime: startTime ? parseInt(startTime, 10) : undefined,
+      endTime: endTime ? parseInt(endTime, 10) : undefined,
+      latest: latest === 'true',
+    });
+  }
+
   @Get('trends')
   @UseGuards(LicenseGuard)
   @RequiresFeature('keyAnalytics')

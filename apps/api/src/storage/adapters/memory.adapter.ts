@@ -604,6 +604,18 @@ export class MemoryAdapter implements StoragePort {
     throw new Error('Key analytics not supported in memory adapter');
   }
 
+  async saveHotKeys(_entries: import('../../common/interfaces/storage-port.interface').HotKeyEntry[], _connectionId: string): Promise<number> {
+    throw new Error('Hot key stats not supported in memory adapter');
+  }
+
+  async getHotKeys(_options?: import('../../common/interfaces/storage-port.interface').HotKeyQueryOptions): Promise<import('../../common/interfaces/storage-port.interface').HotKeyEntry[]> {
+    throw new Error('Hot key stats not supported in memory adapter');
+  }
+
+  async pruneOldHotKeys(_cutoffTimestamp: number, _connectionId?: string): Promise<number> {
+    throw new Error('Hot key stats not supported in memory adapter');
+  }
+
   async getSettings(): Promise<AppSettings | null> {
     return this.settings ? { ...this.settings } : null;
   }

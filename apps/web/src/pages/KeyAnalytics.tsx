@@ -1,10 +1,33 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { keyAnalyticsApi } from '../api/keyAnalytics';
+import type { HotKeyEntry } from '../api/keyAnalytics';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
+import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '../components/ui/table';
+import { Badge } from '../components/ui/badge';
+import { Skeleton } from '../components/ui/skeleton';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
 import { BarChart3 } from 'lucide-react';
+import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
+
+function getRankDelta(currentRank: number, keyName: string, prevKeys: HotKeyEntry[] | null): { label: string; className: string } {
+  if (!prevKeys || prevKeys.length === 0) return { label: '', className: '' };
+  const prev = prevKeys.find(k => k.keyName === keyName);
+  if (!prev) return { label: 'NEW', className: 'text-emerald-600 font-semibold' };
+  const delta = prev.rank - currentRank;
+  if (delta > 0) return { label: `\u2191${delta}`, className: 'text-emerald-600' };
+  if (delta < 0) return { label: `\u2193${Math.abs(delta)}`, className: 'text-red-500' };
+  return { label: '\u2014', className: 'text-muted-foreground' };
+}
+
+function extractPattern(keyName: string): string {
+  // Replace numeric segments and UUIDs with '*'
+  return keyName
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '*')
+    .replace(/\d+/g, '*');
+}
 
 type SortField = 'pattern' | 'keyCount' | 'memoryBytes' | 'staleKeyCount';
 type SortDirection = 'asc' | 'desc';
@@ -24,17 +47,25 @@ function formatNumber(num: number): string {
 }
 
 function formatTime(seconds?: number): string {
-  if (!seconds) return 'N/A';
+  if (seconds === undefined || seconds === null) return 'N/A';
   if (seconds < 60) return `${Math.round(seconds)}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
   return `${Math.round(seconds / 86400)}d`;
 }
 
+function formatTtl(ttl?: number): string {
+  if (ttl === undefined || ttl === null) return '\u2014';
+  if (ttl === -1) return 'No expiry';
+  if (ttl === -2) return 'Gone';
+  return formatTime(ttl);
+}
+
 const COLORS = ['hsl(var(--primary))', 'hsl(var(--secondary))', '#82ca9d', '#ffc658', '#ff8042', '#8884d8'];
 
 export function KeyAnalytics() {
   const { currentConnection } = useConnection();
+  const [activeTab, setActiveTab] = useState<'patterns' | 'hot-keys'>('patterns');
   const [sortField, setSortField] = useState<SortField>('keyCount');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [selectedPattern, setSelectedPattern] = useState<string | null>(null);
@@ -60,6 +91,45 @@ export function KeyAnalytics() {
     interval: 60000,
     refetchKey: currentConnection?.id,
   });
+
+  const [hotKeyDateRange, setHotKeyDateRange] = useState<DateRange | undefined>(undefined);
+
+  const hotKeyStartTime = hotKeyDateRange?.from ? hotKeyDateRange.from.getTime() : undefined;
+  const hotKeyEndTime = hotKeyDateRange?.to ? hotKeyDateRange.to.getTime() : undefined;
+  const isHotKeyTimeFiltered = hotKeyStartTime !== undefined && hotKeyEndTime !== undefined;
+
+  // Fetch only the latest snapshot (deduplicates rows)
+  const { data: hotKeys, loading: hotKeysLoading } = usePolling({
+    fetcher: () => keyAnalyticsApi.getHotKeys({ limit: 50, latest: true }),
+    interval: 60000,
+    refetchKey: currentConnection?.id,
+    enabled: activeTab === 'hot-keys',
+  });
+
+  // Fetch history within the selected date range for rank delta
+  const [baselineHotKeys, setBaselineHotKeys] = useState<HotKeyEntry[] | null>(null);
+
+  useEffect(() => {
+    if (!isHotKeyTimeFiltered) {
+      setBaselineHotKeys(null);
+      return;
+    }
+    let cancelled = false;
+    keyAnalyticsApi.getHotKeys({
+      limit: 200,
+      startTime: hotKeyStartTime,
+      endTime: hotKeyEndTime,
+    }).then(history => {
+      if (cancelled || history.length === 0) {
+        setBaselineHotKeys(null);
+        return;
+      }
+      // Find the earliest snapshot in the range (the baseline)
+      const earliestCapturedAt = Math.min(...history.map(k => k.capturedAt));
+      setBaselineHotKeys(history.filter(k => k.capturedAt === earliestCapturedAt));
+    }).catch(() => setBaselineHotKeys(null));
+    return () => { cancelled = true; };
+  }, [hotKeyStartTime, hotKeyEndTime, isHotKeyTimeFiltered]);
 
   // Deduplicate: keep only the latest snapshot per pattern (results are ordered by timestamp DESC)
   const patterns = useMemo(() => {
@@ -157,306 +227,475 @@ export function KeyAnalytics() {
     return sortDirection === 'asc' ? '↑' : '↓';
   };
 
+  const hotKeySignalType = hotKeys && hotKeys.length > 0 ? hotKeys[0].signalType : null;
+
+  // Pattern summary chips: group hot keys by pattern
+  const patternSummary = useMemo(() => {
+    if (!hotKeys || hotKeys.length === 0) return [];
+    const counts = new Map<string, number>();
+    for (const k of hotKeys) {
+      const pat = extractPattern(k.keyName);
+      counts.set(pat, (counts.get(pat) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([pattern, count]) => ({ pattern, count }));
+  }, [hotKeys]);
+
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold">Key Analytics</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Analyze key patterns, memory usage, and identify optimization opportunities
-          </p>
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'patterns' | 'hot-keys')}>
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <h1 className="text-3xl font-bold">Key Analytics</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Analyze key patterns, memory usage, and identify optimization opportunities
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <TabsList>
+              <TabsTrigger value="patterns">Patterns</TabsTrigger>
+              <TabsTrigger value="hot-keys">Hot Keys</TabsTrigger>
+            </TabsList>
+            <button
+              onClick={handleTriggerCollection}
+              disabled={isCollecting}
+              className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 text-sm"
+            >
+              {isCollecting ? 'Collecting...' : 'Trigger Collection'}
+            </button>
+          </div>
         </div>
-        <button
-          onClick={handleTriggerCollection}
-          disabled={isCollecting}
-          className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 text-sm"
-        >
-          {isCollecting ? 'Collecting...' : 'Trigger Collection'}
-        </button>
-      </div>
 
-      {/* Summary Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Total Keys</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{summary ? formatNumber(summary.totalKeys) : '0'}</div>
-            <div className="text-xs text-muted-foreground mt-1">
-              across {summary?.totalPatterns || 0} patterns
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Total Memory</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{summary ? formatBytes(summary.totalMemoryBytes) : '0 B'}</div>
-            <div className="text-xs text-muted-foreground mt-1">
-              avg {summary ? formatBytes(Math.round(summary.totalMemoryBytes / (summary.totalKeys || 1))) : '0 B'}/key
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Stale Keys</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-amber-600">{summary ? formatNumber(summary.staleKeyCount) : '0'}</div>
-            <div className="text-xs text-muted-foreground mt-1">
-              idle &gt; 24 hours
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Expiring Soon</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-red-600">{summary ? formatNumber(summary.keysExpiringSoon) : '0'}</div>
-            <div className="text-xs text-muted-foreground mt-1">
-              TTL &lt; 1 hour
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Top Patterns by Key Count */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Top Patterns by Key Count</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {topPatternsByKeys.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={topPatternsByKeys}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
-                  <YAxis />
-                  <Tooltip
-                    formatter={(value: number | undefined, _name: string | undefined, props: any) => [formatNumber(value || 0), props.payload.fullName]}
-                  />
-                  <Bar dataKey="value" fill="hsl(var(--primary))" />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="text-center py-12 text-muted-foreground">No pattern data available</div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Top Patterns by Memory */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Top Patterns by Memory Usage</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {topPatternsByMemory.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <PieChart>
-                  <Pie
-                    data={topPatternsByMemory}
-                    dataKey="value"
-                    nameKey="name"
-                    cx="50%"
-                    cy="50%"
-                    outerRadius={80}
-                    label={(entry) => `${entry.name}: ${formatBytes(entry.value)}`}
-                  >
-                    {topPatternsByMemory.map((_entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(value: number | undefined) => formatBytes(value || 0)} />
-                  <Legend />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="text-center py-12 text-muted-foreground">No pattern data available</div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Pattern Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Key Patterns</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {patternsLoading ? (
-            <div className="text-center py-12">
-              <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-current border-r-transparent align-[-0.125em] motion-reduce:animate-[spin_1.5s_linear_infinite]" role="status">
-                <span className="!absolute !-m-px !h-px !w-px !overflow-hidden !whitespace-nowrap !border-0 !p-0 ![clip:rect(0,0,0,0)]">Loading...</span>
-              </div>
-            </div>
-          ) : sortedPatterns.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b">
-                    <th
-                      className="text-left p-2 cursor-pointer hover:bg-muted"
-                      onClick={() => handleSort('pattern')}
-                    >
-                      Pattern {getSortIcon('pattern')}
-                    </th>
-                    <th
-                      className="text-left p-2 cursor-pointer hover:bg-muted"
-                      onClick={() => handleSort('keyCount')}
-                    >
-                      Key Count {getSortIcon('keyCount')}
-                    </th>
-                    <th className="text-left p-2">Sampled</th>
-                    <th
-                      className="text-left p-2 cursor-pointer hover:bg-muted"
-                      onClick={() => handleSort('memoryBytes')}
-                    >
-                      Total Memory {getSortIcon('memoryBytes')}
-                    </th>
-                    <th className="text-left p-2">Avg Memory</th>
-                    <th className="text-left p-2">w/ TTL</th>
-                    <th className="text-left p-2">Avg Idle</th>
-                    <th
-                      className="text-left p-2 cursor-pointer hover:bg-muted"
-                      onClick={() => handleSort('staleKeyCount')}
-                    >
-                      Stale {getSortIcon('staleKeyCount')}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedPatterns.map((pattern) => (
-                    <tr
-                      key={pattern.id}
-                      className={`border-b hover:bg-muted cursor-pointer transition-colors ${selectedPattern === pattern.pattern ? 'bg-primary/10 border-l-4 border-l-primary' : ''
-                        }`}
-                      onClick={() => setSelectedPattern(pattern.pattern)}
-                    >
-                      <td className="p-2 font-mono text-xs">{pattern.pattern}</td>
-                      <td className="p-2 font-bold">{formatNumber(pattern.keyCount)}</td>
-                      <td className="p-2 text-muted-foreground">{formatNumber(pattern.sampledKeyCount)}</td>
-                      <td className="p-2">{formatBytes(pattern.totalMemoryBytes)}</td>
-                      <td className="p-2">{formatBytes(pattern.avgMemoryBytes)}</td>
-                      <td className="p-2">{formatNumber(pattern.keysWithTtl)}</td>
-                      <td className="p-2">{formatTime(pattern.avgIdleTimeSeconds)}</td>
-                      <td className={`p-2 ${(pattern.staleKeyCount || 0) > 0 ? 'text-amber-600 font-semibold' : ''}`}>
-                        {formatNumber(pattern.staleKeyCount || 0)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="text-center py-8 text-muted-foreground">
-              No pattern data available. Click "Trigger Collection" to analyze keys.
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Pattern Detail (if selected) */}
-      {selectedPattern && (
-        <Card ref={detailRef} className="animate-in slide-in-from-top-2 duration-300">
-          <CardHeader className="bg-primary/5">
-            <div className="flex justify-between items-center">
-              <CardTitle className="flex items-center gap-2">
-                <BarChart3 className="h-5 w-5 text-primary" />
-                Pattern Detail: <span className="font-mono text-sm">{selectedPattern}</span>
-              </CardTitle>
-              <button
-                onClick={() => setSelectedPattern(null)}
-                className="text-xs px-3 py-1.5 bg-muted rounded hover:bg-muted/80 transition-colors"
-              >
-                Close
-              </button>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {(() => {
-              const pattern = sortedPatterns.find(p => p.pattern === selectedPattern);
-              if (!pattern) return null;
-
-              return (
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div>
-                    <div className="text-xs text-muted-foreground">Key Count</div>
-                    <div className="text-lg font-bold">{formatNumber(pattern.keyCount)}</div>
+        <TabsContent value="patterns">
+          <div className="space-y-6">
+            {/* Summary Stats */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Total Keys</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold">{summary ? formatNumber(summary.totalKeys) : '0'}</div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    across {summary?.totalPatterns || 0} patterns
                   </div>
-                  <div>
-                    <div className="text-xs text-muted-foreground">Total Memory</div>
-                    <div className="text-lg font-bold">{formatBytes(pattern.totalMemoryBytes)}</div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Total Memory</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold">{summary ? formatBytes(summary.totalMemoryBytes) : '0 B'}</div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    avg {summary ? formatBytes(Math.round(summary.totalMemoryBytes / (summary.totalKeys || 1))) : '0 B'}/key
                   </div>
-                  <div>
-                    <div className="text-xs text-muted-foreground">Avg Memory/Key</div>
-                    <div className="text-lg font-bold">{formatBytes(pattern.avgMemoryBytes)}</div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Stale Keys</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold text-amber-600">{summary ? formatNumber(summary.staleKeyCount) : '0'}</div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    idle &gt; 24 hours
                   </div>
-                  <div>
-                    <div className="text-xs text-muted-foreground">Max Memory</div>
-                    <div className="text-lg font-bold">{formatBytes(pattern.maxMemoryBytes)}</div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Expiring Soon</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold text-red-600">{summary ? formatNumber(summary.keysExpiringSoon) : '0'}</div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    TTL &lt; 1 hour
                   </div>
-                  <div>
-                    <div className="text-xs text-muted-foreground">Keys with TTL</div>
-                    <div className="text-lg font-bold">{formatNumber(pattern.keysWithTtl)}</div>
-                  </div>
-                  <div>
-                    <div className="text-xs text-muted-foreground">Expiring Soon</div>
-                    <div className="text-lg font-bold text-red-600">{formatNumber(pattern.keysExpiringSoon)}</div>
-                  </div>
-                  <div>
-                    <div className="text-xs text-muted-foreground">Avg Idle Time</div>
-                    <div className="text-lg font-bold">{formatTime(pattern.avgIdleTimeSeconds)}</div>
-                  </div>
-                  <div>
-                    <div className="text-xs text-muted-foreground">Stale Keys</div>
-                    <div className="text-lg font-bold text-amber-600">{formatNumber(pattern.staleKeyCount || 0)}</div>
-                  </div>
-                  {pattern.avgAccessFrequency !== undefined && pattern.avgAccessFrequency !== null && (
-                    <>
-                      <div>
-                        <div className="text-xs text-muted-foreground">Avg Access Freq</div>
-                        <div className="text-lg font-bold">{pattern.avgAccessFrequency.toFixed(2)}</div>
-                      </div>
-                      <div>
-                        <div className="text-xs text-muted-foreground">Hot Keys</div>
-                        <div className="text-lg font-bold text-red-600">{formatNumber(pattern.hotKeyCount || 0)}</div>
-                      </div>
-                      <div>
-                        <div className="text-xs text-muted-foreground">Cold Keys</div>
-                        <div className="text-lg font-bold text-blue-600">{formatNumber(pattern.coldKeyCount || 0)}</div>
-                      </div>
-                    </>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Charts */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Top Patterns by Key Count */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Top Patterns by Key Count</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {topPatternsByKeys.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart data={topPatternsByKeys}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
+                        <YAxis />
+                        <Tooltip
+                          formatter={(value: number | undefined, _name: string | undefined, props: any) => [formatNumber(value || 0), props.payload.fullName]}
+                        />
+                        <Bar dataKey="value" fill="hsl(var(--primary))" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="text-center py-12 text-muted-foreground">No pattern data available</div>
                   )}
-                  {pattern.avgTtlSeconds !== undefined && pattern.avgTtlSeconds !== null && (
-                    <>
-                      <div>
-                        <div className="text-xs text-muted-foreground">Avg TTL</div>
-                        <div className="text-lg font-bold">{formatTime(pattern.avgTtlSeconds)}</div>
-                      </div>
-                      <div>
-                        <div className="text-xs text-muted-foreground">Min TTL</div>
-                        <div className="text-lg font-bold">{formatTime(pattern.minTtlSeconds)}</div>
-                      </div>
-                      <div>
-                        <div className="text-xs text-muted-foreground">Max TTL</div>
-                        <div className="text-lg font-bold">{formatTime(pattern.maxTtlSeconds)}</div>
-                      </div>
-                    </>
+                </CardContent>
+              </Card>
+
+              {/* Top Patterns by Memory */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Top Patterns by Memory Usage</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {topPatternsByMemory.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={300}>
+                      <PieChart>
+                        <Pie
+                          data={topPatternsByMemory}
+                          dataKey="value"
+                          nameKey="name"
+                          cx="50%"
+                          cy="50%"
+                          outerRadius={80}
+                          label={(entry) => `${entry.name}: ${formatBytes(entry.value)}`}
+                        >
+                          {topPatternsByMemory.map((_entry, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip formatter={(value: number | undefined) => formatBytes(value || 0)} />
+                        <Legend />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="text-center py-12 text-muted-foreground">No pattern data available</div>
                   )}
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Pattern Table */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Key Patterns</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {patternsLoading ? (
+                  <div className="text-center py-12">
+                    <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-current border-r-transparent align-[-0.125em] motion-reduce:animate-[spin_1.5s_linear_infinite]" role="status">
+                      <span className="!absolute !-m-px !h-px !w-px !overflow-hidden !whitespace-nowrap !border-0 !p-0 ![clip:rect(0,0,0,0)]">Loading...</span>
+                    </div>
+                  </div>
+                ) : sortedPatterns.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b">
+                          <th
+                            className="text-left p-2 cursor-pointer hover:bg-muted"
+                            onClick={() => handleSort('pattern')}
+                          >
+                            Pattern {getSortIcon('pattern')}
+                          </th>
+                          <th
+                            className="text-left p-2 cursor-pointer hover:bg-muted"
+                            onClick={() => handleSort('keyCount')}
+                          >
+                            Key Count {getSortIcon('keyCount')}
+                          </th>
+                          <th className="text-left p-2">Sampled</th>
+                          <th
+                            className="text-left p-2 cursor-pointer hover:bg-muted"
+                            onClick={() => handleSort('memoryBytes')}
+                          >
+                            Total Memory {getSortIcon('memoryBytes')}
+                          </th>
+                          <th className="text-left p-2">Avg Memory</th>
+                          <th className="text-left p-2">w/ TTL</th>
+                          <th className="text-left p-2">Avg Idle</th>
+                          <th
+                            className="text-left p-2 cursor-pointer hover:bg-muted"
+                            onClick={() => handleSort('staleKeyCount')}
+                          >
+                            Stale {getSortIcon('staleKeyCount')}
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedPatterns.map((pattern) => (
+                          <tr
+                            key={pattern.id}
+                            className={`border-b hover:bg-muted cursor-pointer transition-colors ${selectedPattern === pattern.pattern ? 'bg-primary/10 border-l-4 border-l-primary' : ''
+                              }`}
+                            onClick={() => setSelectedPattern(pattern.pattern)}
+                          >
+                            <td className="p-2 font-mono text-xs">{pattern.pattern}</td>
+                            <td className="p-2 font-bold">{formatNumber(pattern.keyCount)}</td>
+                            <td className="p-2 text-muted-foreground">{formatNumber(pattern.sampledKeyCount)}</td>
+                            <td className="p-2">{formatBytes(pattern.totalMemoryBytes)}</td>
+                            <td className="p-2">{formatBytes(pattern.avgMemoryBytes)}</td>
+                            <td className="p-2">{formatNumber(pattern.keysWithTtl)}</td>
+                            <td className="p-2">{formatTime(pattern.avgIdleTimeSeconds)}</td>
+                            <td className={`p-2 ${(pattern.staleKeyCount || 0) > 0 ? 'text-amber-600 font-semibold' : ''}`}>
+                              {formatNumber(pattern.staleKeyCount || 0)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="text-center py-8 text-muted-foreground">
+                    No pattern data available. Click "Trigger Collection" to analyze keys.
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Pattern Detail (if selected) */}
+            {selectedPattern && (
+              <Card ref={detailRef} className="animate-in slide-in-from-top-2 duration-300">
+                <CardHeader className="bg-primary/5">
+                  <div className="flex justify-between items-center">
+                    <CardTitle className="flex items-center gap-2">
+                      <BarChart3 className="h-5 w-5 text-primary" />
+                      Pattern Detail: <span className="font-mono text-sm">{selectedPattern}</span>
+                    </CardTitle>
+                    <button
+                      onClick={() => setSelectedPattern(null)}
+                      className="text-xs px-3 py-1.5 bg-muted rounded hover:bg-muted/80 transition-colors"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {(() => {
+                    const pattern = sortedPatterns.find(p => p.pattern === selectedPattern);
+                    if (!pattern) return null;
+
+                    return (
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div>
+                          <div className="text-xs text-muted-foreground">Key Count</div>
+                          <div className="text-lg font-bold">{formatNumber(pattern.keyCount)}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-muted-foreground">Total Memory</div>
+                          <div className="text-lg font-bold">{formatBytes(pattern.totalMemoryBytes)}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-muted-foreground">Avg Memory/Key</div>
+                          <div className="text-lg font-bold">{formatBytes(pattern.avgMemoryBytes)}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-muted-foreground">Max Memory</div>
+                          <div className="text-lg font-bold">{formatBytes(pattern.maxMemoryBytes)}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-muted-foreground">Keys with TTL</div>
+                          <div className="text-lg font-bold">{formatNumber(pattern.keysWithTtl)}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-muted-foreground">Expiring Soon</div>
+                          <div className="text-lg font-bold text-red-600">{formatNumber(pattern.keysExpiringSoon)}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-muted-foreground">Avg Idle Time</div>
+                          <div className="text-lg font-bold">{formatTime(pattern.avgIdleTimeSeconds)}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-muted-foreground">Stale Keys</div>
+                          <div className="text-lg font-bold text-amber-600">{formatNumber(pattern.staleKeyCount || 0)}</div>
+                        </div>
+                        {pattern.avgAccessFrequency !== undefined && pattern.avgAccessFrequency !== null && (
+                          <>
+                            <div>
+                              <div className="text-xs text-muted-foreground">Avg Access Freq</div>
+                              <div className="text-lg font-bold">{pattern.avgAccessFrequency.toFixed(2)}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted-foreground">Hot Keys</div>
+                              <div className="text-lg font-bold text-red-600">{formatNumber(pattern.hotKeyCount || 0)}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted-foreground">Cold Keys</div>
+                              <div className="text-lg font-bold text-blue-600">{formatNumber(pattern.coldKeyCount || 0)}</div>
+                            </div>
+                          </>
+                        )}
+                        {pattern.avgTtlSeconds !== undefined && pattern.avgTtlSeconds !== null && (
+                          <>
+                            <div>
+                              <div className="text-xs text-muted-foreground">Avg TTL</div>
+                              <div className="text-lg font-bold">{formatTime(pattern.avgTtlSeconds)}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted-foreground">Min TTL</div>
+                              <div className="text-lg font-bold">{formatTime(pattern.minTtlSeconds)}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted-foreground">Max TTL</div>
+                              <div className="text-lg font-bold">{formatTime(pattern.maxTtlSeconds)}</div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="hot-keys">
+          <div className="space-y-4">
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div className="flex items-center gap-3">
+                    <CardTitle>Hot Keys</CardTitle>
+                    {hotKeySignalType === 'lfu' && (
+                      <Badge variant="default">LFU signal</Badge>
+                    )}
+                    {hotKeySignalType === 'idletime' && (
+                      <Badge variant="secondary">Idle time signal</Badge>
+                    )}
+                  </div>
+                  <DateRangePicker value={hotKeyDateRange} onChange={setHotKeyDateRange} />
                 </div>
-              );
-            })()}
-          </CardContent>
-        </Card>
-      )}
+                <p className="text-sm text-muted-foreground">
+                  Top 50 keys by access frequency{isHotKeyTimeFiltered ? ' — showing rank movement vs. earliest snapshot in range' : ''}
+                </p>
+              </CardHeader>
+              <CardContent>
+                {/* Pattern summary chips */}
+                {patternSummary.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mb-4">
+                    {patternSummary.map(({ pattern, count }) => (
+                      <span
+                        key={pattern}
+                        className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/50 px-2.5 py-0.5 text-xs text-muted-foreground"
+                      >
+                        <span className="font-mono">{pattern}</span>
+                        <span className="font-semibold text-foreground">{count}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {hotKeysLoading && !hotKeys ? (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-12">#</TableHead>
+                        <TableHead className="w-16"></TableHead>
+                        <TableHead>Key Name</TableHead>
+                        <TableHead>{hotKeySignalType === 'lfu' ? 'Access Frequency' : 'Idle Time'}</TableHead>
+                        <TableHead>Memory</TableHead>
+                        <TableHead>TTL</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {Array.from({ length: 5 }).map((_, i) => (
+                        <TableRow key={i}>
+                          <TableCell><Skeleton className="h-4 w-6" /></TableCell>
+                          <TableCell><Skeleton className="h-4 w-10" /></TableCell>
+                          <TableCell><Skeleton className="h-4 w-48" /></TableCell>
+                          <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                          <TableCell><Skeleton className="h-4 w-16" /></TableCell>
+                          <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : !hotKeysLoading && (!hotKeys || hotKeys.length === 0) ? (
+                  <div className="text-center py-12 text-muted-foreground">
+                    No hot key data yet. Collection runs every 5 minutes.
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-12">#</TableHead>
+                        <TableHead className="w-16">Move</TableHead>
+                        <TableHead>Key Name</TableHead>
+                        <TableHead>{hotKeySignalType === 'lfu' ? 'Access Frequency' : 'Idle Time'}</TableHead>
+                        <TableHead>Memory</TableHead>
+                        <TableHead>TTL</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {hotKeys?.map((entry: HotKeyEntry) => {
+                        const delta = getRankDelta(entry.rank, entry.keyName, baselineHotKeys);
+                        const isTop10 = entry.rank <= 10;
+                        return (
+                          <TableRow
+                            key={entry.id}
+                            className={isTop10 ? 'border-l-2 border-l-primary' : ''}
+                          >
+                            <TableCell className="text-muted-foreground font-medium">{entry.rank}</TableCell>
+                            <TableCell className={`text-xs ${delta.className}`}>{delta.label}</TableCell>
+                            <TableCell className="font-mono text-sm">{entry.keyName}</TableCell>
+                            <TableCell>
+                              {entry.signalType === 'lfu' ? (
+                                <div className="flex items-center gap-2">
+                                  <div className="w-16 h-2 rounded-full bg-muted overflow-hidden">
+                                    <div
+                                      className="h-full rounded-full bg-primary"
+                                      style={{ width: `${((entry.freqScore ?? 0) / 255) * 100}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-xs text-muted-foreground">{entry.freqScore} / 255</span>
+                                </div>
+                              ) : (
+                                <span className={`font-medium ${
+                                  (entry.idleSeconds ?? 0) < 60
+                                    ? 'text-red-500'
+                                    : (entry.idleSeconds ?? 0) < 3600
+                                      ? 'text-amber-500'
+                                      : 'text-muted-foreground'
+                                }`}>
+                                  {formatTime(entry.idleSeconds)}
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {entry.memoryBytes != null ? formatBytes(entry.memoryBytes) : '\u2014'}
+                            </TableCell>
+                            <TableCell>{formatTtl(entry.ttl)}</TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+
+            {hotKeySignalType === 'idletime' && (
+              <div className="flex items-start gap-3 rounded-md border border-border bg-muted/50 px-4 py-3 text-sm text-muted-foreground">
+                <span className="shrink-0 mt-0.5">i</span>
+                <div>
+                  <p>
+                    For more accurate hot key detection, enable LFU eviction on your Valkey instance:
+                  </p>
+                  <code className="mt-1.5 block w-fit rounded bg-muted px-2 py-1 font-mono text-xs text-foreground">
+                    CONFIG SET maxmemory-policy allkeys-lfu
+                  </code>
+                </div>
+              </div>
+            )}
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
