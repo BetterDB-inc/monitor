@@ -76,8 +76,8 @@ export class ClusterMetricsService {
     this.loggedErrors.delete(`${operation}-${nodeId}`);
   }
 
-  async getClusterSlowlog(limit: number = 100): Promise<ClusterSlowlogEntry[]> {
-    const nodes = await this.discoveryService.discoverNodes();
+  async getClusterSlowlog(limit: number = 100, connectionId?: string): Promise<ClusterSlowlogEntry[]> {
+    const nodes = await this.discoveryService.discoverNodes(connectionId);
     const slowlogPromises = nodes.map((node) => this.getNodeSlowlog(node, limit));
 
     const results = await Promise.allSettled(slowlogPromises);
@@ -207,8 +207,8 @@ export class ClusterMetricsService {
     }
   }
 
-  async getClusterNodeStats(): Promise<NodeStats[]> {
-    const nodes = await this.discoveryService.discoverNodes();
+  async getClusterNodeStats(connectionId?: string): Promise<NodeStats[]> {
+    const nodes = await this.discoveryService.discoverNodes(connectionId);
     const statsPromises = nodes.map((node) => this.getNodeStats(node));
 
     const results = await Promise.allSettled(statsPromises);

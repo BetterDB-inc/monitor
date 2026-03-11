@@ -1,12 +1,24 @@
-import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from '@nestjs/common';
-import { AgentTokensService } from '../../../../../proprietary/agent/agent-tokens.service';
+import { Injectable, CanActivate, ExecutionContext, UnauthorizedException, Optional, Inject } from '@nestjs/common';
 import { FastifyRequest } from 'fastify';
+
+export const MCP_TOKEN_SERVICE = 'MCP_TOKEN_SERVICE';
 
 @Injectable()
 export class AgentTokenGuard implements CanActivate {
-  constructor(private readonly tokenService: AgentTokensService) {}
+  constructor(
+    @Optional() @Inject(MCP_TOKEN_SERVICE) private readonly tokenService?: any,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    // In cloud mode, auth is mandatory — a missing token service means broken config, not community edition
+    if (!this.tokenService) {
+      if (process.env.CLOUD_MODE) {
+        throw new UnauthorizedException('Authentication service unavailable');
+      }
+      // Community/self-hosted edition: no token service, allow all requests
+      return true;
+    }
+
     const req = context.switchToHttp().getRequest<FastifyRequest>();
     const auth = req.headers['authorization'];
     const raw = auth?.startsWith('Bearer ') ? auth.slice(7) : undefined;

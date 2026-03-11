@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, HttpException, HttpStatus, UseGuards, Optional, Inject } from '@nestjs/common';
+import { Controller, Get, Param, Query, HttpException, HttpStatus, UseGuards, Optional, Inject, BadRequestException } from '@nestjs/common';
 import { ANOMALY_SERVICE } from '@betterdb/shared';
 import { RequiresFeature, Feature } from '@proprietary/license';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -10,6 +10,18 @@ import { ClientAnalyticsAnalysisService } from '../client-analytics/client-analy
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+
+const EVENT_NAME_RE = /^[a-zA-Z0-9_.-]+$/;
+const VALID_ORDER_BY = new Set(['key-count', 'cpu-usec']);
+
+function safeParseInt(value: string | undefined, defaultValue: number): number;
+function safeParseInt(value: string | undefined, defaultValue?: undefined): number | undefined;
+function safeParseInt(value: string | undefined, defaultValue?: number): number | undefined {
+  if (value === undefined) return defaultValue;
+  const parsed = parseInt(value, 10);
+  if (isNaN(parsed)) return defaultValue;
+  return parsed;
+}
 
 @Controller('mcp')
 @UseGuards(AgentTokenGuard)
@@ -51,11 +63,8 @@ export class McpController {
       const client = this.registry.get(id);
       const info = await client.getInfoParsed();
       return info;
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get info: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get info', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -63,13 +72,10 @@ export class McpController {
   async getSlowlog(@Param('id') id: string, @Query('count') count?: string) {
     try {
       const client = this.registry.get(id);
-      const parsedCount = count ? parseInt(count, 10) : 25;
+      const parsedCount = safeParseInt(count, 25);
       return await client.getSlowLog(parsedCount);
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get slowlog: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get slowlog', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -78,11 +84,8 @@ export class McpController {
     try {
       const client = this.registry.get(id);
       return await client.getLatestLatencyEvents();
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get latency: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get latency', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -95,11 +98,8 @@ export class McpController {
         client.getMemoryStats(),
       ]);
       return { doctor, stats };
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get memory diagnostics: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get memory diagnostics', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -111,10 +111,10 @@ export class McpController {
       if (!capabilities.hasCommandLog) {
         return { entries: [], note: 'COMMANDLOG not supported on this database version' };
       }
-      const parsedCount = count ? parseInt(count, 10) : 25;
+      const parsedCount = safeParseInt(count, 25);
       return await client.getCommandLog(parsedCount);
-    } catch (error) {
-      return { entries: [], note: `COMMANDLOG unavailable: ${error instanceof Error ? error.message : 'Unknown error'}` };
+    } catch {
+      return { entries: [], note: 'COMMANDLOG unavailable' };
     }
   }
 
@@ -123,11 +123,8 @@ export class McpController {
     try {
       const client = this.registry.get(id);
       return await client.getClients();
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get clients: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get clients', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -137,13 +134,10 @@ export class McpController {
     @Query('limit') limit?: string,
   ) {
     try {
-      const parsedLimit = limit ? parseInt(limit, 10) : undefined;
+      const parsedLimit = safeParseInt(limit);
       return await this.metricsService.getSlowLogPatternAnalysis(parsedLimit, id);
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get slowlog patterns: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get slowlog patterns', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -158,11 +152,11 @@ export class McpController {
   ) {
     try {
       return await this.commandLogAnalyticsService.getStoredCommandLog({
-        startTime: startTime ? parseInt(startTime, 10) : undefined,
-        endTime: endTime ? parseInt(endTime, 10) : undefined,
+        startTime: safeParseInt(startTime),
+        endTime: safeParseInt(endTime),
         command,
-        minDuration: minDuration ? parseInt(minDuration, 10) : undefined,
-        limit: limit ? parseInt(limit, 10) : 100,
+        minDuration: safeParseInt(minDuration),
+        limit: safeParseInt(limit, 100),
         offset: 0,
         connectionId: id,
       });
@@ -180,9 +174,9 @@ export class McpController {
   ) {
     try {
       return await this.commandLogAnalyticsService.getStoredCommandLogPatternAnalysis({
-        startTime: startTime ? parseInt(startTime, 10) : undefined,
-        endTime: endTime ? parseInt(endTime, 10) : undefined,
-        limit: limit ? parseInt(limit, 10) : 500,
+        startTime: safeParseInt(startTime),
+        endTime: safeParseInt(endTime),
+        limit: safeParseInt(limit, 500),
         connectionId: id,
       });
     } catch {
@@ -202,8 +196,8 @@ export class McpController {
       return { events: [], note: 'Anomaly detection is not available (requires BetterDB Pro)' };
     }
     try {
-      const parsedLimit = limit ? parseInt(limit, 10) : 100;
-      const parsedStartTime = startTime ? parseInt(startTime, 10) : (Date.now() - 24 * 60 * 60 * 1000);
+      const parsedLimit = safeParseInt(limit, 100);
+      const parsedStartTime = safeParseInt(startTime, Date.now() - 24 * 60 * 60 * 1000);
       return await this.anomalyService.getRecentAnomalies(
         parsedStartTime,
         undefined,
@@ -212,11 +206,8 @@ export class McpController {
         parsedLimit,
         id,
       );
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get anomalies: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get anomalies', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -230,17 +221,14 @@ export class McpController {
     try {
       return await this.clientAnalyticsAnalysisService.getActivityTimeline(
         {
-          startTime: startTime ? parseInt(startTime, 10) : undefined,
-          endTime: endTime ? parseInt(endTime, 10) : undefined,
-          bucketSizeMinutes: bucketSizeMinutes ? parseInt(bucketSizeMinutes, 10) : undefined,
+          startTime: safeParseInt(startTime),
+          endTime: safeParseInt(endTime),
+          bucketSizeMinutes: safeParseInt(bucketSizeMinutes),
         },
         id,
       );
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get client activity: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get client activity', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -256,7 +244,7 @@ export class McpController {
   @Get('instance/:id/cluster/node-stats')
   async getClusterNodeStats(@Param('id') id: string) {
     try {
-      return await this.clusterMetricsService.getClusterNodeStats();
+      return await this.clusterMetricsService.getClusterNodeStats(id);
     } catch {
       return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
     }
@@ -268,8 +256,8 @@ export class McpController {
     @Query('limit') limit?: string,
   ) {
     try {
-      const parsedLimit = limit ? parseInt(limit, 10) : 100;
-      return await this.clusterMetricsService.getClusterSlowlog(parsedLimit);
+      const parsedLimit = safeParseInt(limit, 100);
+      return await this.clusterMetricsService.getClusterSlowlog(parsedLimit, id);
     } catch {
       return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
     }
@@ -282,11 +270,13 @@ export class McpController {
     @Query('limit') limit?: string,
   ) {
     try {
-      const parsedOrderBy = (orderBy as 'key-count' | 'cpu-usec') || 'key-count';
-      const parsedLimit = limit ? parseInt(limit, 10) : 20;
+      const parsedOrderBy = (orderBy && VALID_ORDER_BY.has(orderBy))
+        ? (orderBy as 'key-count' | 'cpu-usec')
+        : 'key-count';
+      const parsedLimit = safeParseInt(limit, 20);
       return await this.metricsService.getClusterSlotStats(parsedOrderBy, parsedLimit, id);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
+      const msg = error instanceof Error ? error.message : '';
       if (msg.includes('not supported')) {
         return { error: 'not_supported', message: 'CLUSTER SLOT-STATS requires Valkey 8.0+.' };
       }
@@ -299,13 +289,13 @@ export class McpController {
     @Param('id') id: string,
     @Param('eventName') eventName: string,
   ) {
+    if (!EVENT_NAME_RE.test(eventName)) {
+      throw new BadRequestException('Invalid event name');
+    }
     try {
       return await this.metricsService.getLatencyHistory(eventName, id);
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get latency history: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get latency history', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -322,16 +312,13 @@ export class McpController {
       return await this.storageClient.getAclEntries({
         username,
         reason,
-        startTime: startTime ? parseInt(startTime, 10) : undefined,
-        endTime: endTime ? parseInt(endTime, 10) : undefined,
-        limit: limit ? parseInt(limit, 10) : undefined,
+        startTime: safeParseInt(startTime),
+        endTime: safeParseInt(endTime),
+        limit: safeParseInt(limit),
         connectionId: id,
       });
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get audit entries: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get audit entries', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -381,11 +368,8 @@ export class McpController {
         keyspaceSize,
         role,
       };
-    } catch (error) {
-      throw new HttpException(
-        `Failed to get health: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    } catch {
+      throw new HttpException('Failed to get health', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 }

@@ -51,10 +51,15 @@ function licenseErrorResult(data: { requiredTier: string; currentTier: string; u
   return `This feature requires a ${data.requiredTier} license (current tier: ${data.currentTier}). Upgrade at ${data.upgradeUrl}`;
 }
 
+const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
 function resolveInstanceId(overrideId?: string): string {
   const id = overrideId || activeInstanceId;
   if (!id) {
     throw new Error('No instance selected. Call list_instances then select_instance first.');
+  }
+  if (!INSTANCE_ID_RE.test(id)) {
+    throw new Error(`Invalid instance ID: ${id}`);
   }
   return id;
 }
@@ -222,14 +227,12 @@ server.tool(
   'get_slowlog_patterns',
   'Get analyzed slowlog patterns from persisted storage. Groups slow commands by normalized pattern, showing frequency, average duration, and example commands. Survives slowlog buffer rotation — data goes back as far as BetterDB has been running.',
   {
-    startTime: z.number().optional().describe('Start time (Unix timestamp seconds)'),
-    endTime: z.number().optional().describe('End time (Unix timestamp seconds)'),
     limit: z.number().optional().describe('Max entries to analyze'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ startTime, endTime, limit, instanceId }) => {
+  async ({ limit, instanceId }) => {
     const id = resolveInstanceId(instanceId);
-    const qs = buildQuery({ startTime, endTime, limit });
+    const qs = buildQuery({ limit });
     const data = await apiFetch(`/mcp/instance/${id}/history/slowlog-patterns${qs}`);
     if (isLicenseError(data)) {
       return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
@@ -244,8 +247,8 @@ server.tool(
   'get_commandlog_history',
   'Get persisted COMMANDLOG entries from storage (Valkey 8+ only). Supports time range filtering to investigate specific incidents. Returns empty with a note if COMMANDLOG is not supported on this instance.',
   {
-    startTime: z.number().optional().describe('Start time (Unix timestamp seconds)'),
-    endTime: z.number().optional().describe('End time (Unix timestamp seconds)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp in seconds)'),
+    endTime: z.number().optional().describe('End time (Unix timestamp in seconds)'),
     command: z.string().optional().describe('Filter by command name'),
     minDuration: z.number().optional().describe('Min duration in microseconds'),
     limit: z.number().optional().describe('Max entries to return'),
@@ -268,8 +271,8 @@ server.tool(
   'get_commandlog_patterns',
   'Get analyzed COMMANDLOG patterns from persisted storage (Valkey 8+ only). Like get_slowlog_patterns but includes large-request and large-reply patterns in addition to slow commands.',
   {
-    startTime: z.number().optional().describe('Start time (Unix timestamp seconds)'),
-    endTime: z.number().optional().describe('End time (Unix timestamp seconds)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp in seconds)'),
+    endTime: z.number().optional().describe('End time (Unix timestamp in seconds)'),
     limit: z.number().optional().describe('Max entries to analyze'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
@@ -379,7 +382,7 @@ server.tool(
   'get_slot_stats',
   "Get per-slot key counts and CPU usage (Valkey 8.0+ only). Use orderBy='cpu-usec' to find hot slots, or 'key-count' to find the most populated slots. Returns an error message if not supported.",
   {
-    orderBy: z.string().optional().describe("Sort order: 'key-count' or 'cpu-usec' (default 'key-count')"),
+    orderBy: z.enum(['key-count', 'cpu-usec']).optional().describe("Sort order: 'key-count' or 'cpu-usec' (default 'key-count')"),
     limit: z.number().optional().describe('Max slots to return (default 20)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
@@ -399,7 +402,7 @@ server.tool(
   'get_latency_history',
   "Get the full latency history for a named event (e.g. 'command', 'fast-command'). Call get_latency first to see which event names are available, then use this to investigate a specific event's trend over time.",
   {
-    eventName: z.string().describe('Latency event name to query'),
+    eventName: z.string().regex(/^[a-zA-Z0-9_.-]+$/, 'Invalid event name').describe('Latency event name to query'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
   async ({ eventName, instanceId }) => {
@@ -415,12 +418,12 @@ server.tool(
 
 server.tool(
   'get_acl_audit',
-  'Get persisted ACL audit log entries from storage. Filter by username, reason (auth, command, key, channel), or time range. Use this to investigate why a connection is failing or audit access patterns. Note: timestamps are Unix seconds, not milliseconds.',
+  'Get persisted ACL audit log entries from storage. Filter by username, reason (auth, command, key, channel), or time range. Use this to investigate why a connection is failing or audit access patterns.',
   {
     username: z.string().optional().describe('Filter by username'),
     reason: z.string().optional().describe('Filter by reason (auth, command, key, channel)'),
-    startTime: z.number().optional().describe('Start time (Unix timestamp seconds)'),
-    endTime: z.number().optional().describe('End time (Unix timestamp seconds)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp ms)'),
+    endTime: z.number().optional().describe('End time (Unix timestamp ms)'),
     limit: z.number().optional().describe('Max entries to return'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
