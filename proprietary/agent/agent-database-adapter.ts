@@ -428,6 +428,10 @@ export class AgentDatabaseAdapter implements DatabasePort {
     return JSON.parse(response as string);
   }
 
+  async getHashFieldBuffer(_key: string, _field: string): Promise<Buffer | null> {
+    throw new Error('getHashFieldBuffer is not supported through agent connections');
+  }
+
   async getVectorIndexList(): Promise<string[]> {
     if (!this.capabilities.hasVectorSearch) {
       throw new Error('Vector search is not available on this connection (Search module not loaded)');

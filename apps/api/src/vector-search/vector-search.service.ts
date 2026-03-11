@@ -20,8 +20,8 @@ export class VectorSearchService {
     return this.getCheckedClient(connectionId).getVectorIndexList();
   }
 
-  async getIndexInfo(connectionId?: string, indexName?: string): Promise<VectorIndexInfo> {
-    return this.getCheckedClient(connectionId).getVectorIndexInfo(indexName!);
+  async getIndexInfo(connectionId: string | undefined, indexName: string): Promise<VectorIndexInfo> {
+    return this.getCheckedClient(connectionId).getVectorIndexInfo(indexName);
   }
 
   async search(
@@ -35,8 +35,7 @@ export class VectorSearchService {
     const client = this.getCheckedClient(connectionId);
     const clampedK = Math.min(Math.max(k, 1), 50);
 
-    const rawClient = client.getClient();
-    const vectorBytes = await rawClient.hgetBuffer(sourceKey, vectorField);
+    const vectorBytes = await client.getHashFieldBuffer(sourceKey, vectorField);
     if (vectorBytes === null) {
       throw new Error(`Key '${sourceKey}' or field '${vectorField}' not found`);
     }
@@ -54,9 +53,6 @@ export class VectorSearchService {
     const client = this.getCheckedClient(connectionId);
     const indexInfo = await client.getVectorIndexInfo(indexName);
     const prefix = indexInfo.indexDefinition?.prefixes?.[0];
-    if (!prefix) {
-      return { keys: [], cursor: '0' };
-    }
 
     const vectorFieldNames = new Set(
       indexInfo.fields.filter(f => f.type === 'VECTOR').map(f => f.name),
@@ -64,9 +60,9 @@ export class VectorSearchService {
 
     const rawClient = client.getClient();
     const cappedLimit = Math.min(Math.max(limit, 1), 200);
-    const [nextCursor, scannedKeys] = await rawClient.scan(
-      cursor, 'MATCH', `${prefix}*`, 'COUNT', cappedLimit,
-    );
+    const [nextCursor, scannedKeys] = prefix
+      ? await rawClient.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', cappedLimit)
+      : await rawClient.scan(cursor, 'COUNT', cappedLimit);
     const limitedKeys = (scannedKeys as string[]).slice(0, cappedLimit);
 
     if (limitedKeys.length === 0) {
@@ -95,44 +91,4 @@ export class VectorSearchService {
     return { keys, cursor: String(nextCursor) };
   }
 
-  async browseIndex(
-    connectionId: string | undefined,
-    indexName: string,
-    filter: string | undefined,
-    limit: number,
-  ): Promise<{ results: Array<{ key: string; fields: Record<string, string> }>; total: number }> {
-    const client = this.getCheckedClient(connectionId);
-    const indexInfo = await client.getVectorIndexInfo(indexName);
-    const vectorFieldNames = new Set(
-      indexInfo.fields.filter(f => f.type === 'VECTOR').map(f => f.name),
-    );
-
-    const rawClient = client.getClient();
-    const cappedLimit = Math.min(Math.max(limit, 1), 50);
-    const query = filter?.trim() || '*';
-
-    const result = (await rawClient.call(
-      'FT.SEARCH', indexName, query,
-      'LIMIT', '0', String(cappedLimit),
-      'DIALECT', '1',
-    )) as unknown[];
-
-    const results: Array<{ key: string; fields: Record<string, string> }> = [];
-    for (let i = 1; i < result.length; i += 2) {
-      const key = String(result[i]);
-      const fieldsArr = result[i + 1] as unknown[];
-      if (!Array.isArray(fieldsArr)) continue;
-      const fields: Record<string, string> = {};
-      for (let j = 0; j < fieldsArr.length; j += 2) {
-        const fieldName = String(fieldsArr[j]);
-        const fieldValue = fieldsArr[j + 1];
-        if (!vectorFieldNames.has(fieldName) && fieldValue != null && String(fieldValue).length < 2000) {
-          fields[fieldName] = String(fieldValue);
-        }
-      }
-      results.push({ key, fields });
-    }
-
-    return { results, total: Number(result[0] ?? 0) };
-  }
 }

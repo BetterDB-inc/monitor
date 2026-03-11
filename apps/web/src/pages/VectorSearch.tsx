@@ -415,8 +415,9 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
 
   const [tab, setTab] = useState<SearchTab>('similar');
 
-  // --- Shared ---
-  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+  // --- Expanded rows (key-based, separate per tab) ---
+  const [simExpanded, setSimExpanded] = useState<Set<string>>(new Set());
+  const [browseExpanded, setBrowseExpanded] = useState<Set<string>>(new Set());
 
   // --- Find Similar state ---
   const [sourceKey, setSourceKey] = useState('');
@@ -455,6 +456,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
 
   // --- Key picker ---
   const loadPickerKeys = async (cursor: string) => {
+    if (pickerLoading) return;
     setPickerLoading(true);
     try {
       const { keys, cursor: nextCursor } = await metricsApi.sampleIndexKeys(info.name, { cursor, limit: 50 });
@@ -503,7 +505,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
     setSimLoading(true);
     setSimError(null);
     setSimResults(null);
-    setExpandedRows(new Set());
+    setSimExpanded(new Set());
     try {
       const { results: res } = await metricsApi.vectorSearch(info.name, {
         sourceKey: key,
@@ -537,6 +539,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
 
   // --- Browse ---
   const loadBrowseKeys = async (cursor: string) => {
+    if (browseLoading) return;
     setBrowseLoading(true);
     try {
       const { keys, cursor: nextCursor } = await metricsApi.sampleIndexKeys(info.name, { cursor, limit: 100 });
@@ -712,15 +715,15 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
                 </thead>
                 <tbody>
                   {simResults.map((result, idx) => (
-                    <Fragment key={idx}>
+                    <Fragment key={result.key}>
                       <tr
-                        onClick={() => setExpandedRows(prev => toggleInSet(prev, idx))}
+                        onClick={() => setSimExpanded(prev => toggleInSet(prev, result.key))}
                         className="border-b last:border-0 cursor-pointer hover:bg-muted/30 transition-colors"
                       >
                         <td className="px-3 py-1.5 text-muted-foreground">{idx + 1}</td>
                         <td className="px-3 py-1.5 font-mono text-xs">
                           <span className="flex items-center gap-1">
-                            <ChevronRight className={`w-3 h-3 shrink-0 transition-transform ${expandedRows.has(idx) ? 'rotate-90' : ''}`} />
+                            <ChevronRight className={`w-3 h-3 shrink-0 transition-transform ${simExpanded.has(result.key) ? 'rotate-90' : ''}`} />
                             {result.key}
                           </span>
                         </td>
@@ -735,7 +738,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
                           </button>
                         </td>
                       </tr>
-                      {expandedRows.has(idx) && (
+                      {simExpanded.has(result.key) && (
                         <tr className="border-b last:border-0 bg-muted/20">
                           <td colSpan={4} className="px-3 py-2">
                             <FieldGrid fields={result.fields} />
@@ -815,13 +818,13 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
                       return (
                         <Fragment key={row.key}>
                           <tr
-                            onClick={() => setExpandedRows(prev => toggleInSet(prev, idx))}
+                            onClick={() => setBrowseExpanded(prev => toggleInSet(prev, row.key))}
                             className="border-b last:border-0 cursor-pointer hover:bg-muted/30 transition-colors"
                           >
                             <td className="px-3 py-1.5 text-muted-foreground">{idx + 1}</td>
                             <td className="px-3 py-1.5">
                               <span className="flex items-center gap-1">
-                                <ChevronRight className={`w-3 h-3 shrink-0 transition-transform ${expandedRows.has(idx) ? 'rotate-90' : ''}`} />
+                                <ChevronRight className={`w-3 h-3 shrink-0 transition-transform ${browseExpanded.has(row.key) ? 'rotate-90' : ''}`} />
                                 <span className="font-mono text-xs truncate">{row.key}</span>
                               </span>
                               {label && <span className="text-[11px] text-muted-foreground block ml-4 truncate">{label}</span>}
@@ -836,7 +839,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
                               </button>
                             </td>
                           </tr>
-                          {expandedRows.has(idx) && (
+                          {browseExpanded.has(row.key) && (
                             <tr className="border-b last:border-0 bg-muted/20">
                               <td colSpan={3} className="px-3 py-2">
                                 <FieldGrid fields={row.fields} />

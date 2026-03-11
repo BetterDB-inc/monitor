@@ -1,5 +1,5 @@
 import { Controller, Get, Post, Param, Body, Query, HttpException, HttpStatus } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiHeader } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
 import { VectorSearchService } from './vector-search.service';
 import { ConnectionId } from '../common/decorators';
 import { VectorIndexInfo } from '../common/types/metrics.types';
@@ -41,27 +41,6 @@ export class VectorSearchController {
       );
     } catch (error) {
       throw this.mapError(error, 'Failed to sample keys');
-    }
-  }
-
-  @Get('indexes/:name/browse')
-  @ApiOperation({ summary: 'Browse index with filters', description: 'FT.SEARCH without KNN — filter-only browse mode' })
-  @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  async browseIndex(
-    @Param('name') name: string,
-    @Query('filter') filter?: string,
-    @Query('limit') limit?: string,
-    @ConnectionId() connectionId?: string,
-  ) {
-    try {
-      return await this.vectorSearchService.browseIndex(
-        connectionId,
-        name,
-        filter,
-        limit ? parseInt(limit, 10) : 10,
-      );
-    } catch (error) {
-      throw this.mapError(error, 'Browse failed');
     }
   }
 

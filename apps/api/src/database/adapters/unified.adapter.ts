@@ -644,12 +644,6 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
     let memorySizeMb = Number(map.get('vector_index_sz_mb') ?? 0);
     if (memorySizeMb === 0) {
-      memorySizeMb = Number(map.get('inverted_sz_mb') ?? 0);
-    }
-    if (memorySizeMb === 0) {
-      memorySizeMb = Number(map.get('offset_vectors_sz_mb') ?? 0);
-    }
-    if (memorySizeMb === 0) {
       const inverted = Number(map.get('inverted_sz_mb') ?? 0);
       const offsetVectors = Number(map.get('offset_vectors_sz_mb') ?? 0);
       const docTable = Number(map.get('doc_table_size_mb') ?? 0);
@@ -771,7 +765,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     try {
       const m = UnifiedDatabaseAdapter.toMap(raw);
       return {
-        gcCycles: Number(m.get('current_hz') ?? m.get('gc_numeric_trees_missed') ?? 0),
+        gcCycles: Number(m.get('gc_stats_cycles') ?? m.get('gc_numeric_trees_missed') ?? 0),
         bytesCollected: Number(m.get('bytes_collected') ?? 0),
         totalMsRun: Number(m.get('total_ms_run') ?? 0),
       };
@@ -798,6 +792,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
   }
 
+  async getHashFieldBuffer(key: string, field: string): Promise<Buffer | null> {
+    return this.client.hgetBuffer(key, field);
+  }
+
+  private static readonly FIELD_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
   async vectorSearch(
     indexName: string,
     vectorFieldName: string,
@@ -805,6 +805,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     k: number,
     filter?: string,
   ): Promise<VectorSearchResult[]> {
+    if (!UnifiedDatabaseAdapter.FIELD_NAME_RE.test(vectorFieldName)) {
+      throw new Error(`Invalid vector field name: ${vectorFieldName}`);
+    }
     const prefix = filter?.trim() ? `(${filter.trim()})` : '*';
     const result = (await this.client.call(
       'FT.SEARCH',
