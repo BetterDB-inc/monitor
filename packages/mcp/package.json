@@ -1,0 +1,27 @@
+{
+  "name": "@betterdb/mcp",
+  "version": "0.1.0",
+  "description": "BetterDB MCP server - Valkey observability for Claude Code and other MCP clients",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "betterdb-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@betterdb/shared": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

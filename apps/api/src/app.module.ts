@@ -16,6 +16,7 @@ import { SettingsModule } from './settings/settings.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { TelemetryModule } from './telemetry/telemetry.module';
 import { CloudAuthModule } from './auth/cloud-auth.module';
+import { McpModule } from './mcp/mcp.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -115,6 +116,7 @@ const baseImports = [
   PrometheusModule,
   SettingsModule,
   WebhooksModule,
+  McpModule,
 ];
 
 const proprietaryImports = [
