@@ -371,13 +371,4 @@ export const metricsApi = {
       `/vector-search/indexes/${encodeURIComponent(indexName)}/keys${qs ? `?${qs}` : ''}`,
     );
   },
-  browseIndex: (indexName: string, params?: { filter?: string; limit?: number }) => {
-    const q = new URLSearchParams();
-    if (params?.filter) q.set('filter', params.filter);
-    if (params?.limit) q.set('limit', params.limit.toString());
-    const qs = q.toString();
-    return fetchApi<{ results: Array<{ key: string; fields: Record<string, string> }>; total: number }>(
-      `/vector-search/indexes/${encodeURIComponent(indexName)}/browse${qs ? `?${qs}` : ''}`,
-    );
-  },
 };

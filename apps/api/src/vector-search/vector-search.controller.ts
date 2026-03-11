@@ -37,7 +37,7 @@ export class VectorSearchController {
         connectionId,
         name,
         cursor ?? '0',
-        limit ? parseInt(limit, 10) : 50,
+        limit ? (parseInt(limit, 10) || 50) : 50,
       );
     } catch (error) {
       throw this.mapError(error, 'Failed to sample keys');
@@ -86,7 +86,8 @@ export class VectorSearchController {
   private mapError(error: unknown, fallback: string): HttpException {
     if (error instanceof HttpException) return error;
     const msg = error instanceof Error ? error.message : 'Unknown error';
-    const status = msg.includes('not available') ? HttpStatus.NOT_IMPLEMENTED : HttpStatus.INTERNAL_SERVER_ERROR;
+    const status = (msg.includes('not available') || msg.includes('not supported'))
+      ? HttpStatus.NOT_IMPLEMENTED : HttpStatus.INTERNAL_SERVER_ERROR;
     return new HttpException(`${fallback}: ${msg}`, status);
   }
 }

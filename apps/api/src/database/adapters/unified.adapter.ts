@@ -808,7 +808,11 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     if (!UnifiedDatabaseAdapter.FIELD_NAME_RE.test(vectorFieldName)) {
       throw new Error(`Invalid vector field name: ${vectorFieldName}`);
     }
-    const prefix = filter?.trim() ? `(${filter.trim()})` : '*';
+    const sanitizedFilter = filter?.trim();
+    if (sanitizedFilter && (sanitizedFilter.length > 1024 || /[\x00-\x1f]/.test(sanitizedFilter))) {
+      throw new Error('Invalid filter: too long or contains control characters');
+    }
+    const prefix = sanitizedFilter ? `(${sanitizedFilter})` : '*';
     const result = (await this.client.call(
       'FT.SEARCH',
       indexName,
