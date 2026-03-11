@@ -26,5 +26,6 @@ export function useCapabilities() {
     hasClusterSlotStats: (capabilities?.hasClusterSlotStats ?? false) && (runtime?.canClusterSlotStats ?? true),
     hasLatency: runtime?.canLatency ?? true,
     hasMemory: runtime?.canMemory ?? true,
+    hasVectorSearch: capabilities?.hasVectorSearch ?? false,
   };
 }

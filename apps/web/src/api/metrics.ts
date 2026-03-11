@@ -32,6 +32,8 @@ import type {
   StoredLatencySnapshot,
   StoredLatencyHistogram,
   StoredMemorySnapshot,
+  VectorIndexInfo,
+  VectorSearchResult,
 } from '../types/metrics';
 import type {
   DiscoveredNode,
@@ -349,4 +351,33 @@ export const metricsApi = {
   getAnomalySummary: () => fetchApi<any>('/anomaly/summary'),
 
   getAnomalyBuffers: () => fetchApi<any[]>('/anomaly/buffers'),
+
+  // Vector Search
+  getVectorIndexList: (signal?: AbortSignal) =>
+    fetchApi<{ indexes: string[] }>('/vector-search/indexes', { signal }),
+  getVectorIndexInfo: (name: string) =>
+    fetchApi<VectorIndexInfo>(`/vector-search/indexes/${encodeURIComponent(name)}`),
+  vectorSearch: (indexName: string, params: { sourceKey: string; vectorField: string; k?: number; filter?: string }) =>
+    fetchApi<{ results: VectorSearchResult[]; query: { sourceKey: string; vectorField: string; k: number; filter?: string } }>(
+      `/vector-search/indexes/${encodeURIComponent(indexName)}/search`,
+      { method: 'POST', body: JSON.stringify(params) },
+    ),
+  sampleIndexKeys: (indexName: string, params?: { cursor?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.cursor) q.set('cursor', params.cursor);
+    if (params?.limit) q.set('limit', params.limit.toString());
+    const qs = q.toString();
+    return fetchApi<{ keys: Array<{ key: string; fields: Record<string, string> }>; cursor: string }>(
+      `/vector-search/indexes/${encodeURIComponent(indexName)}/keys${qs ? `?${qs}` : ''}`,
+    );
+  },
+  browseIndex: (indexName: string, params?: { filter?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.filter) q.set('filter', params.filter);
+    if (params?.limit) q.set('limit', params.limit.toString());
+    const qs = q.toString();
+    return fetchApi<{ results: Array<{ key: string; fields: Record<string, string> }>; total: number }>(
+      `/vector-search/indexes/${encodeURIComponent(indexName)}/browse${qs ? `?${qs}` : ''}`,
+    );
+  },
 };

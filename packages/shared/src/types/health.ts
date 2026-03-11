@@ -8,6 +8,7 @@ export interface DatabaseCapabilities {
   hasAclLog: boolean;
   hasMemoryDoctor: boolean;
   hasConfig: boolean;
+  hasVectorSearch: boolean;
 }
 
 export interface RuntimeCapabilities {

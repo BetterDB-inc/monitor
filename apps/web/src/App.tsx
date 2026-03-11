@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { Tooltip } from 'react-tooltip';
 import { metricsApi } from './api/metrics';
-import { CapabilitiesContext, CapabilitiesState } from './hooks/useCapabilities';
+import { CapabilitiesContext, CapabilitiesState, useCapabilities } from './hooks/useCapabilities';
 import { LicenseContext, useLicenseStatus, useLicense } from './hooks/useLicense';
 import { UpgradePromptContext, useUpgradePromptState } from './hooks/useUpgradePrompt';
 import { ConnectionContext, useConnectionState } from './hooks/useConnection';
@@ -27,6 +27,7 @@ import { KeyAnalytics } from './pages/KeyAnalytics';
 import { ClusterDashboard } from './pages/ClusterDashboard';
 import { Settings } from './pages/Settings';
 import { Webhooks } from './pages/Webhooks';
+import { VectorSearch } from './pages/VectorSearch';
 import { Members } from './pages/Members';
 import { workspaceApi, CloudUser } from './api/workspace';
 import { Feature } from '@betterdb/shared';
@@ -93,6 +94,7 @@ function AppContent() {
 
 function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
   const location = useLocation();
+  const { hasVectorSearch } = useCapabilities();
   useIdleTracker();
   useNavigationTracker();
 
@@ -141,6 +143,11 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
           >
             Key Analytics
           </NavItem>
+          {hasVectorSearch && (
+            <NavItem to="/vector-search" active={location.pathname === '/vector-search'}>
+              Vector Search
+            </NavItem>
+          )}
           <NavItem to="/audit" active={location.pathname === '/audit'}>
             Audit Trail
           </NavItem>
@@ -198,6 +205,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
             <Route path="/client-analytics/deep-dive" element={<NoConnectionsGuard><ClientAnalyticsDeepDive /></NoConnectionsGuard>} />
             <Route path="/anomalies" element={<NoConnectionsGuard><AnomalyDashboard /></NoConnectionsGuard>} />
             <Route path="/key-analytics" element={<NoConnectionsGuard><KeyAnalytics /></NoConnectionsGuard>} />
+            <Route path="/vector-search" element={<NoConnectionsGuard><VectorSearch /></NoConnectionsGuard>} />
             <Route path="/cluster" element={<NoConnectionsGuard><ClusterDashboard /></NoConnectionsGuard>} />
             <Route path="/audit" element={<NoConnectionsGuard><AuditTrail /></NoConnectionsGuard>} />
             <Route path="/helper" element={<NoConnectionsGuard><AiAssistant /></NoConnectionsGuard>} />

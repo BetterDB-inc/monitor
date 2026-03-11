@@ -31,6 +31,9 @@ export class DatabaseCapabilitiesDto implements DatabaseCapabilities {
 
   @ApiProperty({ description: 'Whether CONFIG command is available (disabled on some managed services like AWS ElastiCache)', example: true })
   hasConfig: boolean;
+
+  @ApiProperty({ description: 'Whether Search module (FT commands) is available', example: false })
+  hasVectorSearch: boolean;
 }
 
 /**

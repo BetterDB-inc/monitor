@@ -21,6 +21,8 @@ import type {
   ClusterNode,
   SlotStats,
   ConfigGetResponse,
+  VectorIndexInfo,
+  VectorSearchResult,
 } from '../../apps/api/src/common/types/metrics.types';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 
@@ -51,6 +53,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
       hasAclLog: agentHello.capabilities.includes('ACL'),
       hasMemoryDoctor: agentHello.capabilities.includes('MEMORY'),
       hasConfig: agentHello.capabilities.includes('CONFIG'),
+      hasVectorSearch: agentHello.capabilities.includes('FT'),
     };
 
     ws.on('message', (data) => {
@@ -423,6 +426,21 @@ export class AgentDatabaseAdapter implements DatabasePort {
   async collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult> {
     const response = await this.sendCommand('COLLECT_KEY_ANALYTICS', [JSON.stringify(options)]);
     return JSON.parse(response as string);
+  }
+
+  async getVectorIndexList(): Promise<string[]> {
+    if (!this.capabilities.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    return (await this.sendCommand('FT._LIST')) as string[];
+  }
+
+  async getVectorIndexInfo(_indexName: string): Promise<VectorIndexInfo> {
+    throw new Error('getVectorIndexInfo is not supported through agent connections');
+  }
+
+  async vectorSearch(_indexName: string, _vectorFieldName: string, _queryVector: Buffer, _k: number, _filter?: string): Promise<VectorSearchResult[]> {
+    throw new Error('vectorSearch is not supported through agent connections');
   }
 
   getClient(): never {

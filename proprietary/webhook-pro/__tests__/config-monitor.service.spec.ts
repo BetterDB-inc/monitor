@@ -327,6 +327,7 @@ describe('ConfigMonitorService', () => {
         hasAclLog: false,
         hasMemoryDoctor: true,
         hasConfig: true,
+        hasVectorSearch: false,
       });
 
       // onModuleInit should not throw
@@ -344,6 +345,7 @@ describe('ConfigMonitorService', () => {
         hasAclLog: true,
         hasMemoryDoctor: true,
         hasConfig: false,
+        hasVectorSearch: false,
       });
 
       // ACL works fine
