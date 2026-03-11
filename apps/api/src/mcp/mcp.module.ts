@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, Logger } from '@nestjs/common';
 import { StorageModule } from '../storage/storage.module';
 import { McpController } from './mcp.controller';
 import { AgentTokenGuard, MCP_TOKEN_SERVICE } from '../common/guards/agent-token.guard';
@@ -7,20 +7,22 @@ import { CommandLogAnalyticsModule } from '../commandlog-analytics/commandlog-an
 import { ClientAnalyticsModule } from '../client-analytics/client-analytics.module';
 import { ClusterModule } from '../cluster/cluster.module';
 
+const logger = new Logger('McpModule');
+
 let AgentTokensServiceClass: any = null;
 try {
   const mod = require('../../../../proprietary/agent/agent-tokens.service');
   AgentTokensServiceClass = mod.AgentTokensService;
-} catch {
-  // Community edition - MCP endpoints will be unauthenticated
+} catch (e) {
+  logger.debug(`Agent tokens service not available: ${e instanceof Error ? e.message : 'module not found'}`);
 }
 
 let AnomalyModule: any = null;
 try {
   const mod = require('../../../../proprietary/anomaly-detection/anomaly.module');
   AnomalyModule = mod.AnomalyModule;
-} catch {
-  // Proprietary anomaly detection not available
+} catch (e) {
+  logger.debug(`Anomaly module not available: ${e instanceof Error ? e.message : 'module not found'}`);
 }
 
 const tokenProviders = AgentTokensServiceClass

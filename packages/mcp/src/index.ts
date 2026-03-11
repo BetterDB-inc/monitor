@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-const BETTERDB_URL = process.env.BETTERDB_URL || 'http://localhost:3001';
+const BETTERDB_URL = (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, '');
 const BETTERDB_TOKEN = process.env.BETTERDB_TOKEN;
 const BETTERDB_INSTANCE_ID = process.env.BETTERDB_INSTANCE_ID || null;
 
@@ -36,8 +36,7 @@ async function apiFetch(path: string): Promise<unknown> {
   }
 
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(`HTTP ${res.status}: ${text}`);
+    throw new Error(`Request failed with status ${res.status}`);
   }
 
   return res.json();
@@ -437,5 +436,10 @@ server.tool(
   },
 );
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+try {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+} catch (error) {
+  console.error(`Failed to start MCP server: ${error instanceof Error ? error.message : 'unknown error'}`);
+  process.exit(1);
+}

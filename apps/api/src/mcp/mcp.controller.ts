@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, HttpException, HttpStatus, UseGuards, Optional, Inject, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Param, Query, HttpException, HttpStatus, UseGuards, Optional, Inject, BadRequestException, PipeTransform, Injectable } from '@nestjs/common';
 import { ANOMALY_SERVICE } from '@betterdb/shared';
 import { RequiresFeature, Feature } from '@proprietary/license';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -11,8 +11,19 @@ import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 
+const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 const EVENT_NAME_RE = /^[a-zA-Z0-9_.-]+$/;
 const VALID_ORDER_BY = new Set(['key-count', 'cpu-usec']);
+
+@Injectable()
+class ValidateInstanceIdPipe implements PipeTransform<string, string> {
+  transform(value: string): string {
+    if (!INSTANCE_ID_RE.test(value)) {
+      throw new BadRequestException('Invalid instance ID');
+    }
+    return value;
+  }
+}
 
 function safeParseInt(value: string | undefined, defaultValue: number): number;
 function safeParseInt(value: string | undefined, defaultValue?: undefined): number | undefined;
@@ -21,6 +32,11 @@ function safeParseInt(value: string | undefined, defaultValue?: number): number 
   const parsed = parseInt(value, 10);
   if (isNaN(parsed)) return defaultValue;
   return parsed;
+}
+
+function safeNumber(value: unknown, defaultValue: number): number {
+  const n = Number(value);
+  return isNaN(n) ? defaultValue : n;
 }
 
 @Controller('mcp')
@@ -58,7 +74,7 @@ export class McpController {
   }
 
   @Get('instance/:id/info')
-  async getInfo(@Param('id') id: string) {
+  async getInfo(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       const client = this.registry.get(id);
       const info = await client.getInfoParsed();
@@ -69,7 +85,7 @@ export class McpController {
   }
 
   @Get('instance/:id/slowlog')
-  async getSlowlog(@Param('id') id: string, @Query('count') count?: string) {
+  async getSlowlog(@Param('id', ValidateInstanceIdPipe) id: string, @Query('count') count?: string) {
     try {
       const client = this.registry.get(id);
       const parsedCount = safeParseInt(count, 25);
@@ -80,7 +96,7 @@ export class McpController {
   }
 
   @Get('instance/:id/latency')
-  async getLatency(@Param('id') id: string) {
+  async getLatency(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       const client = this.registry.get(id);
       return await client.getLatestLatencyEvents();
@@ -90,7 +106,7 @@ export class McpController {
   }
 
   @Get('instance/:id/memory')
-  async getMemory(@Param('id') id: string) {
+  async getMemory(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       const client = this.registry.get(id);
       const [doctor, stats] = await Promise.all([
@@ -104,7 +120,7 @@ export class McpController {
   }
 
   @Get('instance/:id/commandlog')
-  async getCommandlog(@Param('id') id: string, @Query('count') count?: string) {
+  async getCommandlog(@Param('id', ValidateInstanceIdPipe) id: string, @Query('count') count?: string) {
     try {
       const client = this.registry.get(id);
       const capabilities = client.getCapabilities();
@@ -119,7 +135,7 @@ export class McpController {
   }
 
   @Get('instance/:id/clients')
-  async getClients(@Param('id') id: string) {
+  async getClients(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       const client = this.registry.get(id);
       return await client.getClients();
@@ -130,7 +146,7 @@ export class McpController {
 
   @Get('instance/:id/history/slowlog-patterns')
   async getSlowlogPatterns(
-    @Param('id') id: string,
+    @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('limit') limit?: string,
   ) {
     try {
@@ -143,7 +159,7 @@ export class McpController {
 
   @Get('instance/:id/history/commandlog')
   async getCommandlogHistory(
-    @Param('id') id: string,
+    @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
     @Query('command') command?: string,
@@ -160,14 +176,18 @@ export class McpController {
         offset: 0,
         connectionId: id,
       });
-    } catch {
-      return { entries: [], note: 'COMMANDLOG not available on this instance' };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : '';
+      if (msg.includes('unknown command') || msg.includes('COMMANDLOG')) {
+        return { entries: [], note: 'COMMANDLOG not available on this instance' };
+      }
+      throw new HttpException('Failed to get commandlog history', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
   @Get('instance/:id/history/commandlog-patterns')
   async getCommandlogPatterns(
-    @Param('id') id: string,
+    @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
     @Query('limit') limit?: string,
@@ -179,15 +199,19 @@ export class McpController {
         limit: safeParseInt(limit, 500),
         connectionId: id,
       });
-    } catch {
-      return { entries: [], note: 'COMMANDLOG not available on this instance' };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : '';
+      if (msg.includes('unknown command') || msg.includes('COMMANDLOG')) {
+        return { entries: [], note: 'COMMANDLOG not available on this instance' };
+      }
+      throw new HttpException('Failed to get commandlog patterns', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
   @Get('instance/:id/history/anomalies')
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   async getAnomalies(
-    @Param('id') id: string,
+    @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('limit') limit?: string,
     @Query('metricType') metricType?: string,
     @Query('startTime') startTime?: string,
@@ -213,7 +237,7 @@ export class McpController {
 
   @Get('instance/:id/history/client-activity')
   async getClientActivity(
-    @Param('id') id: string,
+    @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
     @Query('bucketSizeMinutes') bucketSizeMinutes?: string,
@@ -233,7 +257,7 @@ export class McpController {
   }
 
   @Get('instance/:id/cluster/nodes')
-  async getClusterNodes(@Param('id') id: string) {
+  async getClusterNodes(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       return await this.clusterDiscoveryService.discoverNodes(id);
     } catch {
@@ -242,7 +266,7 @@ export class McpController {
   }
 
   @Get('instance/:id/cluster/node-stats')
-  async getClusterNodeStats(@Param('id') id: string) {
+  async getClusterNodeStats(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       return await this.clusterMetricsService.getClusterNodeStats(id);
     } catch {
@@ -252,7 +276,7 @@ export class McpController {
 
   @Get('instance/:id/cluster/slowlog')
   async getClusterSlowlog(
-    @Param('id') id: string,
+    @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('limit') limit?: string,
   ) {
     try {
@@ -265,7 +289,7 @@ export class McpController {
 
   @Get('instance/:id/cluster/slot-stats')
   async getClusterSlotStats(
-    @Param('id') id: string,
+    @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('orderBy') orderBy?: string,
     @Query('limit') limit?: string,
   ) {
@@ -286,7 +310,7 @@ export class McpController {
 
   @Get('instance/:id/latency/history/:eventName')
   async getLatencyHistory(
-    @Param('id') id: string,
+    @Param('id', ValidateInstanceIdPipe) id: string,
     @Param('eventName') eventName: string,
   ) {
     if (!EVENT_NAME_RE.test(eventName)) {
@@ -301,7 +325,7 @@ export class McpController {
 
   @Get('instance/:id/audit')
   async getAuditEntries(
-    @Param('id') id: string,
+    @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('username') username?: string,
     @Query('reason') reason?: string,
     @Query('startTime') startTime?: string,
@@ -323,7 +347,7 @@ export class McpController {
   }
 
   @Get('instance/:id/health')
-  async getHealth(@Param('id') id: string) {
+  async getHealth(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       const client = this.registry.get(id);
       const info: InfoResponse = await client.getInfoParsed();
@@ -334,19 +358,19 @@ export class McpController {
       const replication = info.replication as Record<string, unknown> | undefined;
       const keyspace = info.keyspace as Record<string, unknown> | undefined;
 
-      const keyspaceHits = Number(stats?.keyspace_hits ?? 0);
-      const keyspaceMisses = Number(stats?.keyspace_misses ?? 0);
+      const keyspaceHits = safeNumber(stats?.keyspace_hits, 0);
+      const keyspaceMisses = safeNumber(stats?.keyspace_misses, 0);
       const totalLookups = keyspaceHits + keyspaceMisses;
       const hitRate = totalLookups > 0 ? keyspaceHits / totalLookups : null;
 
-      const fragRatio = Number(memory?.mem_fragmentation_ratio ?? 0);
-      const connectedClients = Number(clients?.connected_clients ?? 0);
+      const fragRatio = safeNumber(memory?.mem_fragmentation_ratio, 0);
+      const connectedClients = safeNumber(clients?.connected_clients, 0);
 
       const role = String(replication?.role ?? 'unknown');
       let replicationLag: number | null = null;
       if (role === 'slave' || role === 'replica') {
-        const offset = Number(replication?.master_repl_offset ?? 0);
-        const slaveOffset = Number(replication?.slave_repl_offset ?? 0);
+        const offset = safeNumber(replication?.master_repl_offset, 0);
+        const slaveOffset = safeNumber(replication?.slave_repl_offset, 0);
         replicationLag = offset - slaveOffset;
       }
 
