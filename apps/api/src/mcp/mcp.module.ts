@@ -10,15 +10,13 @@ import { ClusterModule } from '../cluster/cluster.module';
 const logger = new Logger('McpModule');
 
 let AgentTokensServiceClass: any = null;
-try {
-  const mod = require('../../../../proprietary/agent/agent-tokens.service');
-  AgentTokensServiceClass = mod.AgentTokensService;
-} catch (e) {
-  const msg = e instanceof Error ? e.message : 'module not found';
-  if (process.env.CLOUD_MODE === 'true') {
+if (process.env.CLOUD_MODE === 'true') {
+  try {
+    const mod = require('../../../../proprietary/agent/agent-tokens.service');
+    AgentTokensServiceClass = mod.AgentTokensService;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'module not found';
     logger.warn(`Agent tokens service failed to load in cloud mode: ${msg}`);
-  } else {
-    logger.debug(`Agent tokens service not available: ${msg}`);
   }
 }
 

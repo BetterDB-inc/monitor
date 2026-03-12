@@ -10,18 +10,16 @@ const BETTERDB_INSTANCE_ID = process.env.BETTERDB_INSTANCE_ID || null;
 
 let activeInstanceId: string | null = BETTERDB_INSTANCE_ID;
 
-if (!BETTERDB_TOKEN) {
-  console.error('BETTERDB_TOKEN environment variable is required');
-  process.exit(1);
-}
-
 async function apiFetch(path: string): Promise<unknown> {
   const url = `${BETTERDB_URL}${path}`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (BETTERDB_TOKEN) {
+    headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
+  }
   const res = await fetch(url, {
-    headers: {
-      'Authorization': `Bearer ${BETTERDB_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
+    headers,
     signal: AbortSignal.timeout(30_000),
   });
 
