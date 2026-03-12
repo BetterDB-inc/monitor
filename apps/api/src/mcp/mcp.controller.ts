@@ -342,7 +342,11 @@ export class McpController {
       if (msg.includes('not supported')) {
         return { error: 'not_supported', message: 'CLUSTER SLOT-STATS requires Valkey 8.0+.' };
       }
-      return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
+      if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
+        return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
+      }
+      this.logger.error(`Failed to get cluster slot stats for ${id}`, error instanceof Error ? error.stack : error);
+      throw new HttpException('Failed to get cluster slot stats', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
