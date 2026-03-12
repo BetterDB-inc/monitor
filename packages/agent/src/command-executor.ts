@@ -15,6 +15,8 @@ const ALLOWED_COMMANDS: Set<string> = new Set([
   'ROLE',
   'LASTSAVE',
   'COLLECT_KEY_ANALYTICS',
+  'FT',
+  'HGETFIELD_BUFFER',
 ]);
 
 // Subcommands that are explicitly allowed for each command
@@ -28,6 +30,7 @@ const ALLOWED_SUBCOMMANDS: Record<string, Set<string>> = {
   CLUSTER: new Set(['INFO', 'SLOTS', 'SLOT-STATS', 'NODES']),
   MEMORY: new Set(['DOCTOR', 'STATS']),
   COMMAND: new Set(['COUNT', 'DOCS']),
+  FT: new Set(['_LIST', 'INFO', 'SEARCH']),
 };
 
 export class CommandExecutor {
@@ -52,7 +55,7 @@ export class CommandExecutor {
     return true;
   }
 
-  async execute(cmd: string, args?: string[]): Promise<unknown> {
+  async execute(cmd: string, args?: string[], binaryArgs?: Record<string, Buffer>): Promise<unknown> {
     const upperCmd = cmd.toUpperCase();
 
     if (!this.isAllowed(upperCmd, args)) {
@@ -86,9 +89,36 @@ export class CommandExecutor {
       return this.executeCollectKeyAnalytics(args[0]);
     }
 
+    if (upperCmd === 'HGETFIELD_BUFFER' && args && args.length >= 2) {
+      return this.client.hgetBuffer(args[0], args[1]);
+    }
+
+    // For FT commands, join command with subcommand using dot notation
+    if (upperCmd === 'FT' && args && args.length > 0) {
+      const ftCmd = `FT.${args[0].toUpperCase()}`;
+      const ftArgs: (string | Buffer)[] = [...args.slice(1)];
+      if (binaryArgs) {
+        for (let i = 0; i < ftArgs.length; i++) {
+          const key = ftArgs[i];
+          if (typeof key === 'string' && key in binaryArgs) {
+            ftArgs[i] = binaryArgs[key];
+          }
+        }
+      }
+      return this.client.call(ftCmd, ...(ftArgs as [string, ...(string | Buffer)[]]));
+    }
+
     // For all other commands, use call()
-    const callArgs = args ? [upperCmd, ...args] : [upperCmd];
-    return this.client.call(...(callArgs as [string, ...string[]]));
+    const callArgs: (string | Buffer)[] = args ? [upperCmd, ...args] : [upperCmd];
+    if (binaryArgs) {
+      for (let i = 0; i < callArgs.length; i++) {
+        const key = callArgs[i];
+        if (typeof key === 'string' && key in binaryArgs) {
+          callArgs[i] = binaryArgs[key];
+        }
+      }
+    }
+    return this.client.call(...(callArgs as [string, ...(string | Buffer)[]]));
   }
 
   private async executeCollectKeyAnalytics(optionsJson: string): Promise<string> {

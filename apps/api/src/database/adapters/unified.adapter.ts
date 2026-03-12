@@ -22,11 +22,9 @@ import {
   SlotStats,
   ConfigGetResponse,
   VectorIndexInfo,
-  VectorIndexField,
-  VectorIndexGcStats,
-  VectorIndexDefinition,
   VectorSearchResult,
 } from '../../common/types/metrics.types';
+import { parseVectorIndexInfo, parseVectorSearchResponse, FIELD_NAME_RE, INDEX_NAME_RE } from '../parsers/vector-index.parser';
 import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyPatternData } from '@betterdb/shared';
 import { extractPattern } from '@betterdb/shared';
 
@@ -596,211 +594,22 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     if (!this.capabilities?.hasVectorSearch) {
       throw new Error('Vector search is not available on this connection (Search module not loaded)');
     }
-    if (!UnifiedDatabaseAdapter.INDEX_NAME_RE.test(indexName)) {
+    if (!INDEX_NAME_RE.test(indexName)) {
       throw new Error(`Invalid index name: ${indexName}`);
     }
     try {
       const raw = (await this.client.call('FT.INFO', indexName)) as unknown[];
       this.logger.debug(`FT.INFO raw keys for ${indexName}: ${raw.filter((_, i) => i % 2 === 0)}`);
-      return this.parseVectorIndexInfo(indexName, raw);
+      return parseVectorIndexInfo(indexName, raw);
     } catch (error) {
       this.logger.error(`Failed to get vector index info for ${indexName}: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
   }
 
-  /** Parse a flat key-value array into a Map */
-  private static toMap(arr: unknown[]): Map<string, unknown> {
-    const m = new Map<string, unknown>();
-    for (let i = 0; i < arr.length; i += 2) {
-      m.set(String(arr[i]), arr[i + 1]);
-    }
-    return m;
-  }
-
-  private parseVectorIndexInfo(indexName: string, raw: unknown[]): VectorIndexInfo {
-    const map = UnifiedDatabaseAdapter.toMap(raw);
-
-    const numDocs = Number(map.get('num_docs') ?? 0);
-    const numRecords = Number(map.get('num_records') ?? 0);
-    const indexingFailures = Number(map.get('hash_indexing_failures') ?? 0);
-
-    // Valkey Search: "backfill_complete_percent" (float 0-1), RediSearch: "percent_indexed"
-    const percentRaw = map.get('backfill_complete_percent') ?? map.get('percent_indexed') ?? 0;
-    const percentIndexed = Math.min(Number(percentRaw) * 100, 100);
-
-    // Valkey Search: "state" ("ready"|"backfilling"|...), RediSearch: "indexing" (0|1)
-    const stateRaw = map.get('state');
-    const indexingRaw = map.get('indexing');
-    let indexingState: string;
-    if (stateRaw !== undefined) {
-      indexingState = stateRaw === 'ready' ? 'indexed' : 'indexing';
-    } else {
-      indexingState = (indexingRaw === '1' || indexingRaw === 1) ? 'indexing' : 'indexed';
-    }
-
-    // Debug: log memory-related keys to identify the correct field
-    const memoryKeys = Array.from(map.keys()).filter(k =>
-      typeof k === 'string' && (k.includes('sz') || k.includes('size') || k.includes('memory')),
-    );
-    this.logger.debug(`FT.INFO memory keys for ${indexName}: ${memoryKeys.map(k => `${k}=${map.get(k)}`).join(', ')}`);
-
-    let memorySizeMb = Number(map.get('vector_index_sz_mb') ?? 0);
-    if (memorySizeMb === 0) {
-      const inverted = Number(map.get('inverted_sz_mb') ?? 0);
-      const offsetVectors = Number(map.get('offset_vectors_sz_mb') ?? 0);
-      const docTable = Number(map.get('doc_table_size_mb') ?? 0);
-      const keyTable = Number(map.get('key_table_size_mb') ?? 0);
-      memorySizeMb = inverted + offsetVectors + docTable + keyTable;
-    }
-
-    // Parse all attributes into fields
-    const fields: VectorIndexField[] = [];
-    let numVectorFields = 0;
-    const attributes = map.get('attributes');
-    if (Array.isArray(attributes)) {
-      for (const attr of attributes) {
-        if (!Array.isArray(attr)) continue;
-        const field = this.parseAttributeField(attr);
-        fields.push(field);
-        if (field.type === 'VECTOR') numVectorFields++;
-      }
-    }
-
-    // Parse gc_stats (RediSearch only, absent in Valkey Search)
-    const gcStats = this.parseGcStats(map.get('gc_stats'));
-
-    // Parse index_definition
-    const indexDefinition = this.parseIndexDefinition(map.get('index_definition'));
-
-    return {
-      name: indexName,
-      numDocs,
-      numRecords,
-      numVectorFields,
-      indexingState,
-      percentIndexed,
-      memorySizeMb,
-      indexingFailures,
-      fields,
-      gcStats,
-      indexDefinition,
-    };
-  }
-
-  private parseAttributeField(attr: unknown[]): VectorIndexField {
-    const attrMap = UnifiedDatabaseAdapter.toMap(attr);
-    const name = String(attrMap.get('identifier') ?? attrMap.get('attribute') ?? '');
-    const type = String(attrMap.get('type') ?? '').toUpperCase();
-
-    let algorithm: string | null = null;
-    let dimension: number | null = null;
-    let distanceMetric: string | null = null;
-    let hnswM: number | null = null;
-    let hnswEfConstruction: number | null = null;
-    let hnswEfRuntime: number | null = null;
-
-    if (type === 'VECTOR') {
-      // Valkey Search: vector params nested under "index" key
-      const indexData = attrMap.get('index');
-      if (Array.isArray(indexData)) {
-        const idxMap = UnifiedDatabaseAdapter.toMap(indexData);
-        dimension = Number(idxMap.get('dimensions') ?? idxMap.get('DIM') ?? null);
-        if (isNaN(dimension as number)) dimension = null;
-        const dm = idxMap.get('distance_metric') ?? idxMap.get('DISTANCE_METRIC');
-        distanceMetric = dm != null ? String(dm) : null;
-        const algoData = idxMap.get('algorithm');
-        if (Array.isArray(algoData)) {
-          const algoMap = UnifiedDatabaseAdapter.toMap(algoData);
-          algorithm = algoMap.has('name') ? String(algoMap.get('name')) : null;
-          // HNSW params from algorithm sub-array
-          const m = algoMap.get('m') ?? algoMap.get('M');
-          if (m != null) hnswM = Number(m);
-          const efC = algoMap.get('ef_construction') ?? algoMap.get('EF_CONSTRUCTION');
-          if (efC != null) hnswEfConstruction = Number(efC);
-          const efR = algoMap.get('ef_runtime') ?? algoMap.get('EF_RUNTIME');
-          if (efR != null) hnswEfRuntime = Number(efR);
-        } else if (typeof algoData === 'string') {
-          algorithm = algoData;
-        }
-      }
-
-      // RediSearch: DIM/DISTANCE_METRIC/algorithm may be flat in the attribute array
-      if (dimension === null && attrMap.has('DIM')) {
-        dimension = Number(attrMap.get('DIM'));
-      }
-      if (distanceMetric === null && attrMap.has('DISTANCE_METRIC')) {
-        distanceMetric = String(attrMap.get('DISTANCE_METRIC'));
-      }
-      if (algorithm === null && attrMap.has('algorithm') && typeof attrMap.get('algorithm') === 'string') {
-        algorithm = String(attrMap.get('algorithm'));
-      }
-      // RediSearch: HNSW params flat in attribute array
-      if (hnswM === null && (attrMap.has('M') || attrMap.has('m'))) {
-        hnswM = Number(attrMap.get('M') ?? attrMap.get('m'));
-      }
-      if (hnswEfConstruction === null && (attrMap.has('EF_CONSTRUCTION') || attrMap.has('ef_construction'))) {
-        hnswEfConstruction = Number(attrMap.get('EF_CONSTRUCTION') ?? attrMap.get('ef_construction'));
-      }
-      if (hnswEfRuntime === null && (attrMap.has('EF_RUNTIME') || attrMap.has('ef_runtime'))) {
-        hnswEfRuntime = Number(attrMap.get('EF_RUNTIME') ?? attrMap.get('ef_runtime'));
-      }
-    }
-
-    // Non-vector field attributes
-    const sepRaw = attrMap.get('SEPARATOR') ?? attrMap.get('separator');
-    const separator = sepRaw != null ? String(sepRaw) : null;
-    const caseSensitive = attrMap.has('CASESENSITIVE') || attrMap.has('case_sensitive');
-    const sortable = attrMap.has('SORTABLE') || attrMap.has('sortable');
-    const noStem = attrMap.has('NOSTEM') || attrMap.has('nostem');
-    const weightRaw = attrMap.get('WEIGHT') ?? attrMap.get('weight');
-    const weight = weightRaw != null ? Number(weightRaw) : null;
-
-    return {
-      name, type, algorithm, dimension, distanceMetric,
-      hnswM, hnswEfConstruction, hnswEfRuntime,
-      separator, caseSensitive, sortable, noStem, weight,
-    };
-  }
-
-  private parseGcStats(raw: unknown): VectorIndexGcStats | null {
-    if (!Array.isArray(raw)) return null;
-    try {
-      const m = UnifiedDatabaseAdapter.toMap(raw);
-      return {
-        gcCycles: Number(m.get('gc_stats_cycles') ?? m.get('gc_numeric_trees_missed') ?? 0),
-        bytesCollected: Number(m.get('bytes_collected') ?? 0),
-        totalMsRun: Number(m.get('total_ms_run') ?? 0),
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  private parseIndexDefinition(raw: unknown): VectorIndexDefinition | null {
-    if (!Array.isArray(raw)) return null;
-    try {
-      const m = UnifiedDatabaseAdapter.toMap(raw);
-      const prefixesRaw = m.get('prefixes');
-      const prefixes = Array.isArray(prefixesRaw) ? prefixesRaw.map(String) : [];
-      const lang = m.get('default_language');
-      const score = m.get('default_score');
-      return {
-        prefixes,
-        defaultLanguage: lang != null ? String(lang) : null,
-        defaultScore: score != null ? Number(score) : null,
-      };
-    } catch {
-      return null;
-    }
-  }
-
   async getHashFieldBuffer(key: string, field: string): Promise<Buffer | null> {
     return this.client.hgetBuffer(key, field);
   }
-
-  private static readonly FIELD_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-  private static readonly INDEX_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_.\-]*$/;
 
   async vectorSearch(
     indexName: string,
@@ -809,10 +618,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     k: number,
     filter?: string,
   ): Promise<VectorSearchResult[]> {
-    if (!UnifiedDatabaseAdapter.INDEX_NAME_RE.test(indexName)) {
+    if (!INDEX_NAME_RE.test(indexName)) {
       throw new Error(`Invalid index name: ${indexName}`);
     }
-    if (!UnifiedDatabaseAdapter.FIELD_NAME_RE.test(vectorFieldName)) {
+    if (!FIELD_NAME_RE.test(vectorFieldName)) {
       throw new Error(`Invalid vector field name: ${vectorFieldName}`);
     }
     const sanitizedFilter = filter?.trim();
@@ -832,31 +641,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       '2',
     )) as unknown[];
 
-    const results: VectorSearchResult[] = [];
-    const scoreKey = `__${vectorFieldName}_score`;
-
-    for (let i = 1; i < result.length; i += 2) {
-      const key = String(result[i]);
-      const fieldsArr = result[i + 1] as unknown[];
-      if (!Array.isArray(fieldsArr)) continue;
-
-      const fields: Record<string, string> = {};
-      let score = 0;
-
-      for (let j = 0; j < fieldsArr.length; j += 2) {
-        const fieldName = String(fieldsArr[j]);
-        const fieldValue = fieldsArr[j + 1];
-        if (fieldName === scoreKey) {
-          score = Number(fieldValue);
-        } else if (fieldName !== vectorFieldName) {
-          fields[fieldName] = String(fieldValue);
-        }
-      }
-
-      results.push({ key, score, fields });
-    }
-
-    return results;
+    return parseVectorSearchResponse(result, vectorFieldName);
   }
 
   getClient(): Valkey {

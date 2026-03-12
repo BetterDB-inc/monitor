@@ -52,7 +52,7 @@ export class VectorSearchService {
   ): Promise<{ keys: Array<{ key: string; fields: Record<string, string> }>; cursor: string }> {
     const client = this.getCheckedClient(connectionId);
     const indexInfo = await client.getVectorIndexInfo(indexName);
-    const prefix = indexInfo.indexDefinition?.prefixes?.[0];
+    const prefixes = indexInfo.indexDefinition?.prefixes ?? [];
 
     const vectorFieldNames = new Set(
       indexInfo.fields.filter(f => f.type === 'VECTOR').map(f => f.name),
@@ -65,13 +65,66 @@ export class VectorSearchService {
       throw new Error('Key browsing is not supported on this connection type');
     }
     const cappedLimit = Math.min(Math.max(limit, 1), 200);
-    const [nextCursor, scannedKeys] = prefix
-      ? await rawClient.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', cappedLimit)
-      : await rawClient.scan(cursor, 'COUNT', cappedLimit);
-    const limitedKeys = (scannedKeys as string[]).slice(0, cappedLimit);
+
+    // Composite cursor: "prefixIdx:scanCursor" for multi-prefix, plain cursor otherwise
+    let prefixIdx = 0;
+    let scanCursor = cursor;
+    if (prefixes.length > 1 && cursor !== '0' && cursor.includes(':')) {
+      const colonPos = cursor.indexOf(':');
+      prefixIdx = parseInt(cursor.substring(0, colonPos), 10) || 0;
+      scanCursor = cursor.substring(colonPos + 1) || '0';
+    }
+
+    let allKeys: string[] = [];
+    let outPrefixIdx = prefixIdx;
+    let outScanCursor = '0';
+
+    if (prefixes.length === 0) {
+      const [nc, keys] = await rawClient.scan(scanCursor, 'COUNT', cappedLimit);
+      allKeys = (keys as string[]).slice(0, cappedLimit);
+      outScanCursor = String(nc);
+    } else {
+      let currentCursor = scanCursor;
+      for (let i = prefixIdx; i < prefixes.length; i++) {
+        if (allKeys.length >= cappedLimit) {
+          outPrefixIdx = i;
+          outScanCursor = currentCursor;
+          break;
+        }
+        const remaining = cappedLimit - allKeys.length;
+        const useCursor = i === prefixIdx ? currentCursor : '0';
+        const [nc, keys] = await rawClient.scan(
+          useCursor, 'MATCH', `${prefixes[i]}*`, 'COUNT', remaining,
+        );
+        allKeys.push(...(keys as string[]).slice(0, remaining));
+
+        const nextCursor = String(nc);
+        if (nextCursor === '0') {
+          outPrefixIdx = i + 1;
+          outScanCursor = '0';
+          currentCursor = '0';
+        } else {
+          outPrefixIdx = i;
+          outScanCursor = nextCursor;
+          break;
+        }
+      }
+    }
+
+    const limitedKeys = allKeys.slice(0, cappedLimit);
+
+    // Build return cursor
+    let returnCursor: string;
+    if (prefixes.length <= 1) {
+      returnCursor = outScanCursor;
+    } else if (outPrefixIdx >= prefixes.length && outScanCursor === '0') {
+      returnCursor = '0';
+    } else {
+      returnCursor = `${outPrefixIdx}:${outScanCursor}`;
+    }
 
     if (limitedKeys.length === 0) {
-      return { keys: [], cursor: String(nextCursor) };
+      return { keys: [], cursor: returnCursor };
     }
 
     const pipeline = rawClient.pipeline();
@@ -95,7 +148,7 @@ export class VectorSearchService {
       keys.push({ key: limitedKeys[i], fields });
     }
 
-    return { keys, cursor: String(nextCursor) };
+    return { keys, cursor: returnCursor };
   }
 
 }
