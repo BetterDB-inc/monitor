@@ -111,7 +111,7 @@ export class CommandExecutor {
     // For all other commands, use call()
     const callArgs: (string | Buffer)[] = args ? [upperCmd, ...args] : [upperCmd];
     if (binaryArgs) {
-      for (let i = 0; i < callArgs.length; i++) {
+      for (let i = 1; i < callArgs.length; i++) {
         const key = callArgs[i];
         if (typeof key === 'string' && key in binaryArgs) {
           callArgs[i] = binaryArgs[key];

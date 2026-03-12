@@ -617,6 +617,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     k: number,
     filter?: string,
   ): Promise<VectorSearchResult[]> {
+    if (!this.capabilities?.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
     if (!INDEX_NAME_RE.test(indexName)) {
       throw new Error(`Invalid index name: ${indexName}`);
     }
