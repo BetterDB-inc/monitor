@@ -58,7 +58,12 @@ export class VectorSearchService {
       indexInfo.fields.filter(f => f.type === 'VECTOR').map(f => f.name),
     );
 
-    const rawClient = client.getClient();
+    let rawClient: ReturnType<typeof client.getClient>;
+    try {
+      rawClient = client.getClient();
+    } catch {
+      throw new Error('Key browsing is not supported on this connection type');
+    }
     const cappedLimit = Math.min(Math.max(limit, 1), 200);
     const [nextCursor, scannedKeys] = prefix
       ? await rawClient.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', cappedLimit)
@@ -75,18 +80,20 @@ export class VectorSearchService {
     }
     const pipelineResults = await pipeline.exec();
 
-    const keys = limitedKeys.map((key, i) => {
+    const keys: Array<{ key: string; fields: Record<string, string> }> = [];
+    for (let i = 0; i < limitedKeys.length; i++) {
       const [err, rawFields] = pipelineResults![i];
+      if (err || !rawFields || typeof rawFields !== 'object' || Object.keys(rawFields as object).length === 0) {
+        continue; // skip non-hash keys or empty results
+      }
       const fields: Record<string, string> = {};
-      if (!err && rawFields && typeof rawFields === 'object') {
-        for (const [fieldName, fieldValue] of Object.entries(rawFields as Record<string, string>)) {
-          if (!vectorFieldNames.has(fieldName) && typeof fieldValue === 'string' && fieldValue.length < 2000) {
-            fields[fieldName] = fieldValue;
-          }
+      for (const [fieldName, fieldValue] of Object.entries(rawFields as Record<string, string>)) {
+        if (!vectorFieldNames.has(fieldName) && typeof fieldValue === 'string' && fieldValue.length < 2000) {
+          fields[fieldName] = fieldValue;
         }
       }
-      return { key, fields };
-    });
+      keys.push({ key: limitedKeys[i], fields });
+    }
 
     return { keys, cursor: String(nextCursor) };
   }

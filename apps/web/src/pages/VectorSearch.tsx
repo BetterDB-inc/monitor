@@ -31,7 +31,8 @@ export function VectorSearch() {
         indexes.map(name => metricsApi.getVectorIndexInfo(name))
       );
       return { indexes, details };
-    } catch {
+    } catch (err) {
+      console.warn('Failed to fetch index details:', err);
       return { indexes, details: [] };
     }
   }, []);
@@ -434,6 +435,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
   const [pickerCursor, setPickerCursor] = useState('0');
   const [pickerLoading, setPickerLoading] = useState(false);
   const [pickerDone, setPickerDone] = useState(false);
+  const [pickerError, setPickerError] = useState<string | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
 
   // --- Browse state ---
@@ -443,6 +445,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseDone, setBrowseDone] = useState(false);
   const [browseLoaded, setBrowseLoaded] = useState(false);
+  const [browseError, setBrowseError] = useState<string | null>(null);
 
   if (vectorFields.length === 0) return null;
 
@@ -463,8 +466,8 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
       setPickerKeys(prev => cursor === '0' ? keys : [...prev, ...keys]);
       setPickerCursor(nextCursor);
       setPickerDone(nextCursor === '0');
-    } catch {
-      // silently fail — picker is best-effort
+    } catch (err) {
+      setPickerError(err instanceof Error ? err.message : 'Failed to load keys');
     } finally {
       setPickerLoading(false);
     }
@@ -547,8 +550,9 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
       setBrowseCursor(nextCursor);
       setBrowseDone(nextCursor === '0');
       setBrowseLoaded(true);
-    } catch {
-      // best-effort
+      setBrowseError(null);
+    } catch (err) {
+      setBrowseError(err instanceof Error ? err.message : 'Failed to load documents');
     } finally {
       setBrowseLoading(false);
     }
@@ -608,7 +612,10 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
               {/* Key picker dropdown */}
               {pickerOpen && (
                 <div className="absolute z-50 top-full left-0 right-0 mt-1 border rounded-md bg-popover shadow-lg max-h-[300px] overflow-y-auto">
-                  {pickerKeys.length === 0 && !pickerLoading && (
+                  {pickerError && (
+                    <p className="px-3 py-2 text-sm text-destructive text-center">{pickerError}</p>
+                  )}
+                  {pickerKeys.length === 0 && !pickerLoading && !pickerError && (
                     <p className="px-3 py-4 text-sm text-muted-foreground text-center">No keys found for this index</p>
                   )}
                   {pickerKeys.map(({ key, fields }) => {
@@ -715,7 +722,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
                 </thead>
                 <tbody>
                   {simResults.map((result, idx) => (
-                    <Fragment key={result.key}>
+                    <Fragment key={`${idx}-${result.key}`}>
                       <tr
                         onClick={() => setSimExpanded(prev => toggleInSet(prev, result.key))}
                         className="border-b last:border-0 cursor-pointer hover:bg-muted/30 transition-colors"
@@ -783,6 +790,8 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
               />
             </div>
           )}
+
+          {browseError && <p className="text-sm text-destructive">{browseError}</p>}
 
           {browseLoading && browseKeys.length === 0 && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">

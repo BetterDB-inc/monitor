@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Param, Body, Query, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
 import { VectorSearchService } from './vector-search.service';
+import { VectorSearchDto } from './dto/vector-search.dto';
 import { ConnectionId } from '../common/decorators';
 import { VectorIndexInfo } from '../common/types/metrics.types';
 
@@ -49,7 +50,7 @@ export class VectorSearchController {
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   async search(
     @Param('name') name: string,
-    @Body() body: { sourceKey: string; vectorField: string; k?: number; filter?: string },
+    @Body() body: VectorSearchDto,
     @ConnectionId() connectionId?: string,
   ) {
     try {

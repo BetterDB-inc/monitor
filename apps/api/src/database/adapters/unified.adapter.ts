@@ -596,6 +596,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     if (!this.capabilities?.hasVectorSearch) {
       throw new Error('Vector search is not available on this connection (Search module not loaded)');
     }
+    if (!UnifiedDatabaseAdapter.INDEX_NAME_RE.test(indexName)) {
+      throw new Error(`Invalid index name: ${indexName}`);
+    }
     try {
       const raw = (await this.client.call('FT.INFO', indexName)) as unknown[];
       this.logger.debug(`FT.INFO raw keys for ${indexName}: ${raw.filter((_, i) => i % 2 === 0)}`);
@@ -624,7 +627,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
     // Valkey Search: "backfill_complete_percent" (float 0-1), RediSearch: "percent_indexed"
     const percentRaw = map.get('backfill_complete_percent') ?? map.get('percent_indexed') ?? 0;
-    const percentIndexed = Number(percentRaw) * 100;
+    const percentIndexed = Math.min(Number(percentRaw) * 100, 100);
 
     // Valkey Search: "state" ("ready"|"backfilling"|...), RediSearch: "indexing" (0|1)
     const stateRaw = map.get('state');
@@ -797,6 +800,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   private static readonly FIELD_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+  private static readonly INDEX_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_.\-]*$/;
 
   async vectorSearch(
     indexName: string,
@@ -805,12 +809,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     k: number,
     filter?: string,
   ): Promise<VectorSearchResult[]> {
+    if (!UnifiedDatabaseAdapter.INDEX_NAME_RE.test(indexName)) {
+      throw new Error(`Invalid index name: ${indexName}`);
+    }
     if (!UnifiedDatabaseAdapter.FIELD_NAME_RE.test(vectorFieldName)) {
       throw new Error(`Invalid vector field name: ${vectorFieldName}`);
     }
     const sanitizedFilter = filter?.trim();
-    if (sanitizedFilter && (sanitizedFilter.length > 1024 || /[\x00-\x1f]/.test(sanitizedFilter))) {
-      throw new Error('Invalid filter: too long or contains control characters');
+    if (sanitizedFilter && (sanitizedFilter.length > 1024 || /[\x00-\x1f]/.test(sanitizedFilter) || sanitizedFilter.includes('=>'))) {
+      throw new Error('Invalid filter: too long, contains control characters, or contains forbidden operator');
     }
     const prefix = sanitizedFilter ? `(${sanitizedFilter})` : '*';
     const result = (await this.client.call(
