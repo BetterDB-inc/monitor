@@ -492,7 +492,7 @@ function AgentTab({
     setLoadingTokens(true);
     try {
       const [tokenList, agentList] = await Promise.all([
-        agentTokensApi.list(),
+        agentTokensApi.list('agent'),
         agentTokensApi.getConnections(),
       ]);
       setTokens(tokenList);
@@ -523,7 +523,7 @@ function AgentTab({
     setGenerating(true);
     setError(null);
     try {
-      const result = await agentTokensApi.generate(tokenName.trim());
+      const result = await agentTokensApi.generate(tokenName.trim(), 'agent');
       setGeneratedToken(result);
       setTokenName('');
       await loadData();

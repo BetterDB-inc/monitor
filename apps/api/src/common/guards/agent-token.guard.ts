@@ -26,7 +26,7 @@ export class AgentTokenGuard implements CanActivate {
     const auth = req.headers['authorization'];
     const raw = auth?.startsWith('Bearer ') ? auth.slice(7) : undefined;
     if (!raw) throw new UnauthorizedException();
-    const result = await this.tokenService.validateToken(raw);
+    const result = await this.tokenService.validateToken(raw, 'mcp');
     if (!result.valid) throw new UnauthorizedException();
     return true;
   }

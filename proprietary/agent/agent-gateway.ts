@@ -46,7 +46,7 @@ export class AgentGateway {
       return;
     }
 
-    const validation = await this.tokenService.validateToken(token);
+    const validation = await this.tokenService.validateToken(token, 'agent');
     if (!validation.valid) {
       this.logger.warn('Agent connection rejected: invalid token');
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');

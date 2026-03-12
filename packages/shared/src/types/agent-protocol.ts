@@ -52,9 +52,12 @@ export type AgentMessage =
   | AgentPongMessage;
 
 // Agent token metadata (stored in DB, returned by API)
+export type TokenType = 'agent' | 'mcp';
+
 export interface AgentToken {
   id: string;
   name: string;
+  type: TokenType;
   tokenHash: string;
   createdAt: number;
   expiresAt: number;

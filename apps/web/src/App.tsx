@@ -205,7 +205,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
             {cloudUser && (
               <Route path="/workspace/members" element={<Members cloudUser={cloudUser} />} />
             )}
-            <Route path="/settings" element={<Settings />} />
+            <Route path="/settings" element={<Settings isCloudMode={!!cloudUser} />} />
           </Routes>
         </div>
       </main>

@@ -2617,6 +2617,7 @@ export class SqliteAdapter implements StoragePort {
       CREATE TABLE IF NOT EXISTS agent_tokens (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'agent',
         token_hash TEXT NOT NULL UNIQUE,
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
@@ -2624,6 +2625,12 @@ export class SqliteAdapter implements StoragePort {
         last_used_at INTEGER
       )
     `);
+
+    // Migration: add type column to existing agent_tokens tables
+    const atCols = this.db.prepare("PRAGMA table_info(agent_tokens)").all() as { name: string }[];
+    if (!atCols.some(c => c.name === 'type')) {
+      this.db.exec("ALTER TABLE agent_tokens ADD COLUMN type TEXT NOT NULL DEFAULT 'agent'");
+    }
 
     const stmt = this.db.prepare(`
       INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, is_default, created_at, updated_at)
@@ -2763,20 +2770,24 @@ export class SqliteAdapter implements StoragePort {
 
   // Agent Token Methods
 
-  async saveAgentToken(token: { id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }): Promise<void> {
+  async saveAgentToken(token: { id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
     this.db.prepare(
-      `INSERT OR REPLACE INTO agent_tokens (id, name, token_hash, created_at, expires_at, revoked_at, last_used_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(token.id, token.name, token.tokenHash, token.createdAt, token.expiresAt, token.revokedAt, token.lastUsedAt);
+      `INSERT OR REPLACE INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(token.id, token.name, token.type, token.tokenHash, token.createdAt, token.expiresAt, token.revokedAt, token.lastUsedAt);
   }
 
-  async getAgentTokens(): Promise<Array<{ id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>> {
+  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<Array<{ id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>> {
     if (!this.db) throw new Error('Database not initialized');
-    const rows = this.db.prepare('SELECT * FROM agent_tokens ORDER BY created_at DESC').all() as any[];
+    const query = type
+      ? 'SELECT * FROM agent_tokens WHERE type = ? ORDER BY created_at DESC'
+      : 'SELECT * FROM agent_tokens ORDER BY created_at DESC';
+    const rows = (type ? this.db.prepare(query).all(type) : this.db.prepare(query).all()) as any[];
     return rows.map((row: any) => ({
       id: row.id,
       name: row.name,
+      type: row.type || 'agent',
       tokenHash: row.token_hash,
       createdAt: row.created_at,
       expiresAt: row.expires_at,
@@ -2785,13 +2796,14 @@ export class SqliteAdapter implements StoragePort {
     }));
   }
 
-  async getAgentTokenByHash(hash: string): Promise<{ id: string; name: string; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null } | null> {
+  async getAgentTokenByHash(hash: string): Promise<{ id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null } | null> {
     if (!this.db) throw new Error('Database not initialized');
     const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token_hash = ?').get(hash) as any;
     if (!row) return null;
     return {
       id: row.id,
       name: row.name,
+      type: row.type || 'agent',
       tokenHash: row.token_hash,
       createdAt: row.created_at,
       expiresAt: row.expires_at,

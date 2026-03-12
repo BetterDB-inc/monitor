@@ -2,7 +2,7 @@ import { Injectable, Logger, Inject, NotFoundException } from '@nestjs/common';
 import { randomUUID, createHash } from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { StoragePort } from '../../apps/api/src/common/interfaces/storage-port.interface';
-import type { AgentToken } from '@betterdb/shared';
+import type { AgentToken, TokenType } from '@betterdb/shared';
 
 @Injectable()
 export class AgentTokensService {
@@ -15,7 +15,7 @@ export class AgentTokensService {
     this.sessionSecret = process.env.SESSION_SECRET || '';
   }
 
-  async generateToken(name: string): Promise<{ token: string; metadata: AgentToken }> {
+  async generateToken(name: string, type: TokenType = 'agent'): Promise<{ token: string; metadata: AgentToken }> {
     const id = randomUUID();
     const now = Date.now();
     const expiresAt = now + 365 * 24 * 60 * 60 * 1000; // 1 year
@@ -23,7 +23,7 @@ export class AgentTokensService {
     const token = jwt.sign(
       {
         sub: id,
-        type: 'agent',
+        type,
         name,
       },
       this.sessionSecret,
@@ -35,6 +35,7 @@ export class AgentTokensService {
     const metadata: AgentToken = {
       id,
       name,
+      type,
       tokenHash,
       createdAt: now,
       expiresAt,
@@ -43,13 +44,13 @@ export class AgentTokensService {
     };
 
     await this.storage.saveAgentToken(metadata);
-    this.logger.log(`Generated agent token: ${id} (${name})`);
+    this.logger.log(`Generated ${type} token: ${id} (${name})`);
 
     return { token, metadata };
   }
 
-  async listTokens(): Promise<AgentToken[]> {
-    return this.storage.getAgentTokens();
+  async listTokens(type?: TokenType): Promise<AgentToken[]> {
+    return this.storage.getAgentTokens(type);
   }
 
   async revokeToken(id: string): Promise<void> {
@@ -62,13 +63,17 @@ export class AgentTokensService {
     this.logger.log(`Revoked agent token: ${id}`);
   }
 
-  async validateToken(rawToken: string): Promise<{ valid: boolean; tokenId?: string; name?: string }> {
+  async validateToken(rawToken: string, expectedType?: TokenType): Promise<{ valid: boolean; tokenId?: string; name?: string; type?: TokenType }> {
     try {
       const payload = jwt.verify(rawToken, this.sessionSecret, {
         algorithms: ['HS256'],
       }) as any;
 
-      if (payload.type !== 'agent') {
+      const tokenType = payload.type as TokenType;
+      if (tokenType !== 'agent' && tokenType !== 'mcp') {
+        return { valid: false };
+      }
+      if (expectedType && tokenType !== expectedType) {
         return { valid: false };
       }
 
@@ -82,7 +87,7 @@ export class AgentTokensService {
       // Update last used
       await this.storage.updateAgentTokenLastUsed(stored.id);
 
-      return { valid: true, tokenId: stored.id, name: stored.name };
+      return { valid: true, tokenId: stored.id, name: stored.name, type: tokenType };
     } catch {
       return { valid: false };
     }

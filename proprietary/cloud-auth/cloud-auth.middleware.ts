@@ -30,6 +30,10 @@ export class CloudAuthMiddleware implements NestMiddleware {
       path.startsWith('/health') ||
       path.startsWith('/agent/ws') ||
       path.startsWith('/api/agent/ws') ||
+      path.startsWith('/mcp/') ||
+      path.startsWith('/api/mcp/') ||
+      path.startsWith('/agent-tokens') ||
+      path.startsWith('/api/agent-tokens') ||
       path.startsWith('/assets/') ||
       path.startsWith('/favicon') ||
       path === '/symbol-white.svg'

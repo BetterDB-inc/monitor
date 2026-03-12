@@ -1,13 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { settingsApi } from '../api/settings';
+import { agentTokensApi, TokenListItem, GeneratedToken } from '../api/agent-tokens';
 import { useConnection } from '../hooks/useConnection';
 import { AppSettings, SettingsUpdateRequest } from '@betterdb/shared';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 
-type SettingsCategory = 'audit' | 'clientAnalytics' | 'anomaly';
+type SettingsCategory = 'audit' | 'clientAnalytics' | 'anomaly' | 'mcpTokens';
 
-export function Settings() {
+export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -18,9 +19,32 @@ export function Settings() {
   const [formData, setFormData] = useState<Partial<AppSettings>>({});
   const [hasChanges, setHasChanges] = useState(false);
 
+  // MCP Tokens state (must be before any early returns)
+  const [mcpTokens, setMcpTokens] = useState<TokenListItem[]>([]);
+  const [mcpTokenName, setMcpTokenName] = useState('');
+  const [mcpGenerating, setMcpGenerating] = useState(false);
+  const [mcpGeneratedToken, setMcpGeneratedToken] = useState<GeneratedToken | null>(null);
+  const [mcpCopied, setMcpCopied] = useState(false);
+  const [mcpError, setMcpError] = useState<string | null>(null);
+
+  const loadMcpTokens = useCallback(async () => {
+    try {
+      const tokens = await agentTokensApi.list('mcp');
+      setMcpTokens(tokens);
+    } catch {
+      // Token API not available in community mode
+    }
+  }, []);
+
   useEffect(() => {
     loadSettings();
   }, [currentConnection?.id]);
+
+  useEffect(() => {
+    if (activeCategory === 'mcpTokens') {
+      loadMcpTokens();
+    }
+  }, [isCloudMode, activeCategory, loadMcpTokens]);
 
   const loadSettings = async () => {
     try {
@@ -107,10 +131,42 @@ export function Settings() {
     );
   }
 
+  const handleMcpGenerate = async () => {
+    if (!mcpTokenName.trim()) return;
+    setMcpGenerating(true);
+    setMcpError(null);
+    try {
+      const result = await agentTokensApi.generate(mcpTokenName.trim(), 'mcp');
+      setMcpGeneratedToken(result);
+      setMcpTokenName('');
+      await loadMcpTokens();
+    } catch (err) {
+      setMcpError(err instanceof Error ? err.message : 'Failed to generate token');
+    } finally {
+      setMcpGenerating(false);
+    }
+  };
+
+  const handleMcpRevoke = async (id: string) => {
+    try {
+      await agentTokensApi.revoke(id);
+      await loadMcpTokens();
+    } catch (err) {
+      setMcpError(err instanceof Error ? err.message : 'Failed to revoke token');
+    }
+  };
+
+  const copyMcpToken = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setMcpCopied(true);
+    setTimeout(() => setMcpCopied(false), 2000);
+  };
+
   const categories: { id: SettingsCategory; label: string }[] = [
     { id: 'audit', label: 'Audit Trail' },
     { id: 'clientAnalytics', label: 'Client Analytics' },
     { id: 'anomaly', label: 'Anomaly Detection' },
+    { id: 'mcpTokens' as const, label: 'MCP Tokens' },
   ];
 
   return (
@@ -219,6 +275,138 @@ export function Settings() {
                     className="w-full px-3 py-2 border rounded-md"
                   />
                 </div>
+              </div>
+            )}
+
+            {activeCategory === 'mcpTokens' && (
+              <div className="space-y-4">
+                <h2 className="text-xl font-semibold mb-4">MCP Tokens</h2>
+                <p className="text-sm text-gray-500">
+                  Generate tokens for MCP (Model Context Protocol) clients like Claude Code to access your database observability data.
+                </p>
+
+                {mcpError && (
+                  <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-md p-2">
+                    {mcpError}
+                  </div>
+                )}
+
+                {/* Generate Token */}
+                {!mcpGeneratedToken && (
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Generate MCP Token</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={mcpTokenName}
+                        onChange={(e) => setMcpTokenName(e.target.value)}
+                        placeholder="Token name (e.g., claude-code)"
+                        className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        onKeyDown={(e) => e.key === 'Enter' && handleMcpGenerate()}
+                      />
+                      <button
+                        onClick={handleMcpGenerate}
+                        disabled={mcpGenerating || !mcpTokenName.trim()}
+                        className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                      >
+                        {mcpGenerating ? 'Generating...' : 'Generate'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Show Generated Token */}
+                {mcpGeneratedToken && (
+                  <div className="border rounded-md p-3 bg-amber-50 border-amber-300">
+                    <h3 className="text-sm font-medium text-amber-700 mb-2">
+                      Save this token - it won't be shown again
+                    </h3>
+                    <div className="flex gap-2 mb-3">
+                      <code className="flex-1 text-xs bg-white p-2 rounded border font-mono break-all select-all">
+                        {mcpGeneratedToken.token}
+                      </code>
+                      <button
+                        onClick={() => copyMcpToken(mcpGeneratedToken.token)}
+                        className="px-3 py-1 text-xs border rounded hover:bg-gray-50 flex-shrink-0"
+                      >
+                        {mcpCopied ? 'Copied!' : 'Copy'}
+                      </button>
+                    </div>
+
+                    <h4 className="text-xs font-medium mb-1">Add to your Claude Code MCP config:</h4>
+                    <pre className="text-xs bg-white p-2 rounded border overflow-x-auto">
+{`{
+  "mcpServers": {
+    "betterdb": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@betterdb/mcp"],
+      "env": {
+        "BETTERDB_URL": "${window.location.origin}",
+        "BETTERDB_TOKEN": "${mcpGeneratedToken.token}"
+      }
+    }
+  }
+}`}
+                    </pre>
+
+                    <button
+                      onClick={() => setMcpGeneratedToken(null)}
+                      className="mt-3 text-xs text-blue-600 hover:underline"
+                    >
+                      I've saved the token
+                    </button>
+                  </div>
+                )}
+
+                {/* Existing Tokens */}
+                {mcpTokens.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-medium mb-2">Existing Tokens</h3>
+                    <div className="space-y-1">
+                      {mcpTokens.map((token) => {
+                        const isActive = !token.revokedAt && token.expiresAt > Date.now();
+                        return (
+                          <div
+                            key={token.id}
+                            className="flex items-center justify-between p-2 border rounded-md text-sm"
+                          >
+                            <div className="min-w-0">
+                              <div className="font-medium truncate">{token.name}</div>
+                              <div className="text-xs text-gray-500">
+                                Created {new Date(token.createdAt).toLocaleDateString()}
+                                {token.lastUsedAt && ` · Last used ${new Date(token.lastUsedAt).toLocaleDateString()}`}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              {token.revokedAt ? (
+                                <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded">
+                                  Revoked
+                                </span>
+                              ) : !isActive ? (
+                                <span className="text-xs px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded">
+                                  Expired
+                                </span>
+                              ) : (
+                                <>
+                                  <span className="text-xs px-1.5 py-0.5 bg-green-100 text-green-700 rounded">
+                                    Active
+                                  </span>
+                                  <button
+                                    onClick={() => handleMcpRevoke(token.id)}
+                                    className="text-xs px-2 py-1 border border-red-300 text-red-600 rounded hover:bg-red-50"
+                                  >
+                                    Revoke
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
