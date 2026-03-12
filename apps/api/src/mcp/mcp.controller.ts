@@ -42,7 +42,8 @@ function safeLimit(value: string | undefined, defaultValue: number): number {
 /** Convert ms timestamp query param to seconds for commandlog service */
 function msToSeconds(value: string | undefined): number | undefined {
   const ms = safeParseInt(value);
-  return ms !== undefined ? Math.floor(ms / 1000) : undefined;
+  if (ms === undefined || ms < 0) return undefined;
+  return Math.floor(ms / 1000);
 }
 
 @Controller('mcp')
@@ -140,8 +141,13 @@ export class McpController {
       }
       const parsedCount = safeLimit(count, 25);
       return await client.getCommandLog(parsedCount);
-    } catch {
-      return { entries: [], note: 'COMMANDLOG unavailable' };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : '';
+      if (msg.includes('unknown command') || msg.includes('COMMANDLOG')) {
+        return { entries: [], note: 'COMMANDLOG not available on this instance' };
+      }
+      this.logger.error(`Failed to get commandlog for ${id}`, error instanceof Error ? error.stack : error);
+      throw new HttpException('Failed to get commandlog', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -277,8 +283,13 @@ export class McpController {
   async getClusterNodes(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       return await this.clusterDiscoveryService.discoverNodes(id);
-    } catch {
-      return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : '';
+      if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
+        return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
+      }
+      this.logger.error(`Failed to get cluster nodes for ${id}`, error instanceof Error ? error.stack : error);
+      throw new HttpException('Failed to get cluster nodes', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -286,8 +297,13 @@ export class McpController {
   async getClusterNodeStats(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       return await this.clusterMetricsService.getClusterNodeStats(id);
-    } catch {
-      return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : '';
+      if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
+        return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
+      }
+      this.logger.error(`Failed to get cluster node stats for ${id}`, error instanceof Error ? error.stack : error);
+      throw new HttpException('Failed to get cluster node stats', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -299,8 +315,13 @@ export class McpController {
     try {
       const parsedLimit = safeLimit(limit, 100);
       return await this.clusterMetricsService.getClusterSlowlog(parsedLimit, id);
-    } catch {
-      return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : '';
+      if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
+        return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
+      }
+      this.logger.error(`Failed to get cluster slowlog for ${id}`, error instanceof Error ? error.stack : error);
+      throw new HttpException('Failed to get cluster slowlog', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
