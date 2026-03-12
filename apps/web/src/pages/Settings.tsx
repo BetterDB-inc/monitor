@@ -41,7 +41,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   }, [currentConnection?.id]);
 
   useEffect(() => {
-    if (activeCategory === 'mcpTokens') {
+    if (isCloudMode && activeCategory === 'mcpTokens') {
       loadMcpTokens();
     }
   }, [isCloudMode, activeCategory, loadMcpTokens]);
@@ -166,7 +166,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     { id: 'audit', label: 'Audit Trail' },
     { id: 'clientAnalytics', label: 'Client Analytics' },
     { id: 'anomaly', label: 'Anomaly Detection' },
-    { id: 'mcpTokens' as const, label: 'MCP Tokens' },
+    ...(isCloudMode ? [{ id: 'mcpTokens' as const, label: 'MCP Tokens' }] : []),
   ];
 
   return (

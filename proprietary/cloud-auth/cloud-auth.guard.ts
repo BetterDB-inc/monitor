@@ -20,7 +20,7 @@ export class CloudAuthGuardImpl implements CanActivate {
 
     const request = context.switchToHttp().getRequest<FastifyRequest>();
     const reply = context.switchToHttp().getResponse<FastifyReply>();
-    const path = request.url;
+    const path = (request.url || '').split('?')[0];
 
     // Skip auth for callback route, logout route, health checks, agent WebSocket, and static assets
     if (path.startsWith('/auth/callback') ||
