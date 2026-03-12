@@ -34,9 +34,12 @@ export function parseVectorIndexInfo(indexName: string, raw: unknown[]): VectorI
   const numRecords = Number(map.get('num_records') ?? 0);
   const indexingFailures = Number(map.get('hash_indexing_failures') ?? 0);
 
-  // Valkey Search: "backfill_complete_percent" (float 0-1), RediSearch: "percent_indexed"
-  const percentRaw = map.get('backfill_complete_percent') ?? map.get('percent_indexed') ?? 0;
-  const percentIndexed = Math.min(Number(percentRaw) * 100, 100);
+  // Valkey Search: "backfill_complete_percent" (float 0-1), RediSearch: "percent_indexed" (float 0-1)
+  const backfillPercent = map.get('backfill_complete_percent');
+  const percentRaw = backfillPercent ?? map.get('percent_indexed') ?? 0;
+  const num = Number(percentRaw);
+  // Values > 1 are already in 0-100 range (some Valkey Search versions); values <= 1 are 0-1 floats
+  const percentIndexed = num > 1 ? Math.min(num, 100) : Math.min(num * 100, 100);
 
   // Valkey Search: "state" ("ready"|"backfilling"|...), RediSearch: "indexing" (0|1)
   const stateRaw = map.get('state');

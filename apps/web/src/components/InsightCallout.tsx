@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { AlertTriangle, AlertCircle, Info } from 'lucide-react';
 
 interface InsightCalloutProps {
@@ -6,6 +7,7 @@ interface InsightCalloutProps {
   description: string;
   docUrl: string;
   docLabel: string;
+  children?: ReactNode;
 }
 
 const styles = {
@@ -35,7 +37,7 @@ const styles = {
   },
 };
 
-export function InsightCallout({ severity, title, description, docUrl, docLabel }: InsightCalloutProps) {
+export function InsightCallout({ severity, title, description, docUrl, docLabel, children }: InsightCalloutProps) {
   const s = styles[severity];
   const { Icon } = s;
 
@@ -43,17 +45,20 @@ export function InsightCallout({ severity, title, description, docUrl, docLabel 
     <div className={`border-l-4 ${s.border} ${s.bg} rounded-r-md px-4 py-3`}>
       <div className="flex items-start gap-2.5">
         <Icon className={`w-4 h-4 mt-0.5 shrink-0 ${s.title}`} />
-        <div className="space-y-1 min-w-0">
+        <div className="space-y-1 min-w-0 flex-1">
           <p className={`text-sm font-medium ${s.title}`}>{title}</p>
           <p className={`text-sm ${s.text}`}>{description}</p>
-          <a
-            href={docUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className={`inline-block text-xs font-medium ${s.link} mt-1`}
-          >
-            {docLabel} &rarr;
-          </a>
+          <div className="flex items-center justify-between gap-2">
+            <a
+              href={docUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={`inline-block text-xs font-medium ${s.link} mt-1`}
+            >
+              {docLabel} &rarr;
+            </a>
+            {children}
+          </div>
         </div>
       </div>
     </div>

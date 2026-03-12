@@ -1,10 +1,12 @@
-import { IsString, IsOptional, IsInt, Min, Max } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsInt, Min, Max } from 'class-validator';
 
 export class VectorSearchDto {
   @IsString()
+  @IsNotEmpty()
   sourceKey: string;
 
   @IsString()
+  @IsNotEmpty()
   vectorField: string;
 
   @IsOptional()

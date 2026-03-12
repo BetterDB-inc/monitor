@@ -599,7 +599,6 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
     try {
       const raw = (await this.client.call('FT.INFO', indexName)) as unknown[];
-      this.logger.debug(`FT.INFO raw keys for ${indexName}: ${raw.filter((_, i) => i % 2 === 0)}`);
       return parseVectorIndexInfo(indexName, raw);
     } catch (error) {
       this.logger.error(`Failed to get vector index info for ${indexName}: ${error instanceof Error ? error.message : error}`);

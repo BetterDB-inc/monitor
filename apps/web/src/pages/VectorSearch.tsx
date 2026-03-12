@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, Fragment } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
@@ -163,14 +163,16 @@ function IndexCard({ info }: { info: VectorIndexInfo }) {
             tooltip="Records includes duplicates from document updates. A large gap between Records and Documents indicates index fragmentation."
           />
           <StatItem label="Vector Fields" value={info.numVectorFields.toLocaleString()} />
-          <StatItem label="Memory" value={formatMemory(info.memorySizeMb)} />
+          {info.memorySizeMb > 0 && <StatItem label="Memory" value={formatMemory(info.memorySizeMb)} />}
         </div>
 
         {/* Insight callouts */}
         {insights.length > 0 ? (
           <div className="space-y-2">
             {insights.map((insight, i) => (
-              <InsightCallout key={i} {...insight} />
+              <InsightCallout key={i} severity={insight.severity} title={insight.title} description={insight.description} docUrl={insight.docUrl} docLabel={insight.docLabel}>
+                {insight.copyCommand && <CopyButton text={insight.copyCommand.text} label={insight.copyCommand.label} />}
+              </InsightCallout>
             ))}
           </div>
         ) : (
@@ -391,17 +393,388 @@ function getKeyLabel(fields: Record<string, string>, nonVectorFields: VectorInde
   return null;
 }
 
-function FieldGrid({ fields }: { fields: Record<string, string> }) {
+// --- Field classification ---
+
+type FieldClass = 'title' | 'timestamp' | 'proportion' | 'json' | 'default';
+
+/** Pure classifier — no React, no side effects. */
+function classifyField(name: string, value: string, allValues: string[]): FieldClass {
+  // timestamp: 13-digit Unix ms, or valid ISO 8601 (contains T or -)
+  const isIdLike = /id/i.test(name) && /^[0-9a-f]{8}-/i.test(value);
+  if (!isIdLike) {
+    if (/^\d{13}$/.test(value)) return 'timestamp';
+    if ((value.includes('T') || value.includes('-')) && !isNaN(new Date(value).getTime())) return 'timestamp';
+  }
+
+  // proportion: float 0-1, consistently across all sampled values
+  if (!/(?:id|version|count)/i.test(name)) {
+    const num = parseFloat(value);
+    if (!isNaN(num) && num >= 0 && num <= 1 && allValues.length > 0) {
+      if (allValues.every(v => { const n = parseFloat(v); return !isNaN(n) && n >= 0 && n <= 1; })) {
+        return 'proportion';
+      }
+    }
+  }
+
+  // json: starts with { or [ and parses
+  if ((value.startsWith('{') || value.startsWith('[')) && value.length > 1) {
+    try { JSON.parse(value); return 'json'; } catch { /* not json */ }
+  }
+
+  // title candidate: sentence-like text (>20 chars, >=2 spaces)
+  if (value.length > 20 && (value.match(/ /g) || []).length >= 2) return 'title';
+
+  return 'default';
+}
+
+function parseTimestampValue(value: string): number {
+  if (/^\d{13}$/.test(value)) return parseInt(value, 10);
+  return new Date(value).getTime();
+}
+
+type FieldRole = 'identifier' | 'provenance' | 'temporal' | 'metric' | 'payload' | 'content' | 'default';
+
+interface FieldMeta {
+  name: string;
+  classification: FieldClass;
+  role: FieldRole;
+  avgLength: number;
+  allValuesAreShort: boolean;
+}
+
+const PROVENANCE_RE = /(?:project|branch|source|origin|author|user|tenant)/i;
+const METRIC_NAME_RE = /(?:score|rate|rank|weight)/i;
+const ID_SUFFIX_RE = /(?:id|Id|key)$/;
+
+function detectRole(name: string, cls: FieldClass, avgLength: number, allValues: string[]): FieldRole {
+  // identifier: UUID-like values, or field name ends with id/Id/key
+  if (ID_SUFFIX_RE.test(name)) return 'identifier';
+  if (allValues.length > 0 && allValues.every(v => /^[0-9a-f]{8}-/i.test(v))) return 'identifier';
+
+  // provenance
+  if (PROVENANCE_RE.test(name)) return 'provenance';
+
+  // temporal
+  if (cls === 'timestamp') return 'temporal';
+
+  // metric
+  if (cls === 'proportion') return 'metric';
+  if (METRIC_NAME_RE.test(name)) return 'metric';
+
+  // payload
+  if (cls === 'json') return 'payload';
+
+  // content
+  if (cls === 'title') return 'content';
+  if (avgLength > 60) return 'content';
+
+  return 'default';
+}
+
+function buildFieldMeta(docs: Array<{ fields: Record<string, string> }>): Record<string, FieldMeta> {
+  const allValues: Record<string, string[]> = {};
+  for (const doc of docs) {
+    for (const [k, v] of Object.entries(doc.fields)) {
+      if (!allValues[k]) allValues[k] = [];
+      allValues[k].push(v);
+    }
+  }
+
+  const meta: Record<string, FieldMeta> = {};
+  for (const [name, values] of Object.entries(allValues)) {
+    const avg = values.reduce((s, v) => s + v.length, 0) / values.length;
+    const representative = values[0] ?? '';
+    const cls = classifyField(name, representative, values);
+    meta[name] = {
+      name,
+      classification: cls,
+      role: detectRole(name, cls, avg, values),
+      avgLength: avg,
+      allValuesAreShort: avg < 30,
+    };
+  }
+  return meta;
+}
+
+function humanizeFieldName(name: string): string {
+  return name
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/[_-]+/g, ' ')
+    .toLowerCase()
+    .trim();
+}
+
+function formatRelativeTime(timestamp: number): string {
+  const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+  const delta = timestamp - Date.now();
+  const abs = Math.abs(delta);
+  const sign = delta < 0 ? -1 : 1;
+  const secs = abs / 1000;
+  if (secs < 60) return rtf.format(Math.round(sign * secs), 'second');
+  const mins = secs / 60;
+  if (mins < 60) return rtf.format(Math.round(sign * mins), 'minute');
+  const hrs = mins / 60;
+  if (hrs < 24) return rtf.format(Math.round(sign * hrs), 'hour');
+  const days = hrs / 24;
+  if (days < 30) return rtf.format(Math.round(sign * days), 'day');
+  const months = days / 30.44;
+  if (months < 12) return rtf.format(Math.round(sign * months), 'month');
+  return rtf.format(Math.round(sign * days / 365.25), 'year');
+}
+
+async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard) {
+    try { await navigator.clipboard.writeText(text); return; } catch { /* fallback */ }
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+}
+
+function buildFtCreateCommand(info: VectorIndexInfo, opts?: { forceHnsw?: boolean }): string {
+  const parts: string[] = ['FT.CREATE', info.name, 'ON', 'HASH'];
+  const prefixes = info.indexDefinition?.prefixes ?? [];
+  if (prefixes.length > 0) parts.push('PREFIX', String(prefixes.length), ...prefixes);
+  parts.push('SCHEMA');
+  for (const field of info.fields) {
+    parts.push(field.name);
+    if (field.type === 'VECTOR') {
+      const useHnsw = opts?.forceHnsw;
+      const attrs: string[] = ['TYPE', 'FLOAT32'];
+      if (field.dimension != null) attrs.push('DIM', String(field.dimension));
+      if (field.distanceMetric) attrs.push('DISTANCE_METRIC', field.distanceMetric);
+      if (useHnsw || field.algorithm === 'HNSW') {
+        attrs.push('M', useHnsw ? '16' : String(field.hnswM ?? 16));
+        attrs.push('EF_CONSTRUCTION', useHnsw ? '200' : String(field.hnswEfConstruction ?? 200));
+      }
+      parts.push('VECTOR', useHnsw ? 'HNSW' : (field.algorithm ?? 'HNSW'), String(attrs.length), ...attrs);
+    } else if (field.type === 'TAG') {
+      parts.push('TAG');
+      if (field.separator && field.separator !== ',') parts.push('SEPARATOR', field.separator);
+      if (field.caseSensitive) parts.push('CASESENSITIVE');
+    } else if (field.type === 'NUMERIC') {
+      parts.push('NUMERIC');
+      if (field.sortable) parts.push('SORTABLE');
+    } else if (field.type === 'TEXT') {
+      parts.push('TEXT');
+      if (field.noStem) parts.push('NOSTEM');
+      if (field.weight != null && field.weight !== 1.0) parts.push('WEIGHT', String(field.weight));
+      if (field.sortable) parts.push('SORTABLE');
+    } else {
+      parts.push(field.type);
+    }
+  }
+  return parts.join(' ');
+}
+
+function CopyButton({ text, label = 'Copy commands' }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async (e) => {
+        e.stopPropagation();
+        await copyToClipboard(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }}
+      className="mt-1 px-2.5 py-1 text-xs font-medium border rounded-md hover:bg-background/50 transition-colors"
+    >
+      {copied ? 'Copied \u2713' : label}
+    </button>
+  );
+}
+
+function getKeyLastSegment(docKey: string): string {
+  const parts = docKey.split(':');
+  return parts[parts.length - 1];
+}
+
+function groupFieldsByRole(
+  fields: Record<string, string>,
+  meta: Record<string, FieldMeta>,
+  docKey: string,
+): Record<FieldRole, Array<{ key: string; value: string }>> {
+  const groups: Record<FieldRole, Array<{ key: string; value: string }>> = {
+    content: [], metric: [], temporal: [], provenance: [], default: [], identifier: [], payload: [],
+  };
+  const keySuffix = getKeyLastSegment(docKey);
+  let contentFound = false;
+
+  for (const [k, v] of Object.entries(fields)) {
+    // Identifier deduplication: skip if value matches the key's last segment
+    if (v === keySuffix) continue;
+
+    const m = meta[k];
+    let role: FieldRole = m?.role ?? 'default';
+
+    // Only promote one content field
+    if (role === 'content') {
+      if (contentFound) role = 'default';
+      else contentFound = true;
+    }
+
+    groups[role].push({ key: k, value: v });
+  }
+  return groups;
+}
+
+function FieldGrid({ fields, fieldMeta, docKey }: { fields: Record<string, string>; fieldMeta: Record<string, FieldMeta>; docKey: string }) {
+  const [expandedJson, setExpandedJson] = useState<Set<string>>(new Set());
+  const [showIds, setShowIds] = useState(false);
+
   const entries = Object.entries(fields);
   if (entries.length === 0) return <p className="text-xs text-muted-foreground">No fields returned</p>;
+
+  const groups = groupFieldsByRole(fields, fieldMeta, docKey);
+
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs">
-      {entries.map(([k, v]) => (
-        <div key={k} className="flex gap-2 min-w-0">
-          <span className="text-muted-foreground shrink-0">{k}:</span>
-          <span className="truncate font-mono">{v}</span>
-        </div>
+    <div>
+      {/* content */}
+      {groups.content.map(({ key: k, value: v }) => (
+        <p key={k} className="text-sm font-medium text-foreground">{v}</p>
       ))}
+
+      {/* metric */}
+      {groups.metric.length > 0 && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
+          {groups.metric.map(({ key: k, value: v }) => {
+            const m = fieldMeta[k];
+            if (m?.classification === 'proportion') {
+              const score = parseFloat(v);
+              const color = score >= 0.7 ? 'bg-green-500' : score >= 0.4 ? 'bg-amber-400' : 'bg-red-400';
+              return (
+                <span key={k} className="flex items-center gap-1.5 text-xs">
+                  <span className="text-gray-500 dark:text-gray-400">{humanizeFieldName(k)}</span>
+                  <span className="h-1.5 w-12 rounded-full bg-muted overflow-hidden inline-block">
+                    <span className={`block h-1.5 rounded-full ${color}`} style={{ width: `${score * 100}%` }} />
+                  </span>
+                  <span className="font-mono">{Math.round(score * 100)}%</span>
+                </span>
+              );
+            }
+            return (
+              <span key={k} className="text-xs">
+                <span className="text-gray-500 dark:text-gray-400">{humanizeFieldName(k)}</span>{' '}
+                <span className="font-mono">{v}</span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      {/* temporal — deduplicate identical relative times */}
+      {groups.temporal.length > 0 && (() => {
+        const byRelative = new Map<string, { names: string[]; iso: string }>();
+        for (const { key: k, value: v } of groups.temporal) {
+          const ts = parseTimestampValue(v);
+          const rel = formatRelativeTime(ts);
+          const existing = byRelative.get(rel);
+          if (existing) {
+            existing.names.push(k);
+          } else {
+            byRelative.set(rel, { names: [k], iso: new Date(ts).toISOString() });
+          }
+        }
+        return (
+          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
+            {[...byRelative.entries()].map(([rel, { names, iso }]) => (
+              <span key={names.join(',')} className="text-xs">
+                <span className="text-gray-500 dark:text-gray-400">{names.map(humanizeFieldName).join(', ')}</span>{' '}
+                <span className="font-mono" title={iso}>{rel}</span>
+              </span>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* provenance */}
+      {groups.provenance.length > 0 && (
+        <div className="grid gap-x-4 gap-y-0.5 mt-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))' }}>
+          {groups.provenance.map(({ key: k, value: v }) => (
+            <div key={k} className="min-w-0">
+              <span className="text-xs text-gray-400 dark:text-gray-500">{humanizeFieldName(k)}</span>
+              <p className="text-xs font-medium truncate">{v}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* default */}
+      {groups.default.length > 0 && (
+        <div className="grid gap-x-4 gap-y-0.5 mt-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))' }}>
+          {groups.default.map(({ key: k, value: v }) => (
+            <div key={k} className="min-w-0">
+              <span className="text-xs text-gray-400 dark:text-gray-500">{humanizeFieldName(k)}</span>
+              {v.length > 200 ? (
+                <LongValue value={v} />
+              ) : (
+                <p className="text-xs font-mono truncate" title={v}>{v}</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* identifier */}
+      {groups.identifier.length > 0 && (
+        <div className="mt-2">
+          <button
+            onClick={() => setShowIds(prev => !prev)}
+            className="text-xs text-gray-400 dark:text-gray-500 cursor-pointer hover:text-foreground transition-colors"
+          >
+            {showIds ? 'Hide identifiers \u2191' : 'Show identifiers \u2193'}
+          </button>
+          {showIds && (
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
+              {groups.identifier.map(({ key: k, value: v }) => (
+                <span key={k} className="text-xs text-gray-400 dark:text-gray-500 font-mono">
+                  {humanizeFieldName(k)}: {v}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* payload */}
+      {groups.payload.map(({ key: k, value: v }) => {
+        const isExpanded = expandedJson.has(k);
+        let pretty = v;
+        try { pretty = JSON.stringify(JSON.parse(v), null, 2); } catch { /* use raw */ }
+        return (
+          <div key={k} className="mt-2">
+            <button
+              onClick={() => setExpandedJson(prev => toggleInSet(prev, k))}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {isExpanded ? `Hide ${humanizeFieldName(k)}` : `Show ${humanizeFieldName(k)}`}
+            </button>
+            {isExpanded && (
+              <pre className="text-xs overflow-auto max-h-48 mt-1 p-2 bg-muted/50 rounded whitespace-pre-wrap font-mono">{pretty}</pre>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function LongValue({ value }: { value: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="text-xs font-mono break-all">
+      {expanded ? value : value.slice(0, 200) + '\u2026'}
+      <button
+        onClick={() => setExpanded(prev => !prev)}
+        className="text-primary ml-1 text-[10px]"
+      >
+        {expanded ? 'Show less' : 'Show more'}
+      </button>
     </div>
   );
 }
@@ -414,7 +787,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
   const vectorFields = info.fields.filter(f => f.type === 'VECTOR');
   const nonVectorFields = info.fields.filter(f => f.type !== 'VECTOR');
 
-  const [tab, setTab] = useState<SearchTab>('similar');
+  const [tab, setTab] = useState<SearchTab>('browse');
 
   // --- Expanded rows (key-based, separate per tab) ---
   const [simExpanded, setSimExpanded] = useState<Set<string>>(new Set());
@@ -566,6 +939,10 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
       })
     : browseKeys;
 
+  // Field meta for adaptive layout
+  const simFieldMeta = useMemo(() => buildFieldMeta(simResults ?? []), [simResults]);
+  const browseFieldMeta = useMemo(() => buildFieldMeta(browseKeys), [browseKeys]);
+
   // --- Tab bar ---
   const tabClass = (t: SearchTab) =>
     `px-3 py-1.5 text-sm font-medium border-b-2 transition-colors ${
@@ -578,8 +955,8 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
     <div className="border-t pt-4 space-y-3">
       {/* Tabs */}
       <div className="flex gap-1 border-b">
-        <button className={tabClass('similar')} onClick={() => setTab('similar')}>Find Similar</button>
         <button className={tabClass('browse')} onClick={() => setTab('browse')}>Browse</button>
+        <button className={tabClass('similar')} onClick={() => setTab('similar')}>Find Similar</button>
       </div>
 
       {/* === Find Similar Tab === */}
@@ -748,7 +1125,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
                       {simExpanded.has(result.key) && (
                         <tr className="border-b last:border-0 bg-muted/20">
                           <td colSpan={4} className="px-3 py-2">
-                            <FieldGrid fields={result.fields} />
+                            <FieldGrid fields={result.fields} fieldMeta={simFieldMeta} docKey={result.key} />
                           </td>
                         </tr>
                       )}
@@ -851,7 +1228,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
                           {browseExpanded.has(row.key) && (
                             <tr className="border-b last:border-0 bg-muted/20">
                               <td colSpan={3} className="px-3 py-2">
-                                <FieldGrid fields={row.fields} />
+                                <FieldGrid fields={row.fields} fieldMeta={browseFieldMeta} docKey={row.key} />
                               </td>
                             </tr>
                           )}
@@ -908,6 +1285,7 @@ interface Insight {
   description: string;
   docUrl: string;
   docLabel: string;
+  copyCommand?: { text: string; label: string };
 }
 
 function getInsights(info: VectorIndexInfo): Insight[] {
@@ -920,32 +1298,37 @@ function getInsights(info: VectorIndexInfo): Insight[] {
     insights.push({
       severity: 'error',
       title: `${info.indexingFailures.toLocaleString()} document${s} failed to index`,
-      description: `These documents were skipped silently. The most common cause is a mismatch between the document's field types and the index schema \u2014 for example, a field expected to be NUMERIC containing a string value.`,
+      description: `These documents were skipped silently. The most common cause is a mismatch between the document's field types and the index schema \u2014 for example, a field expected to be NUMERIC containing a string value. Run FT.INFO in your Valkey CLI to see the full failure details.`,
       docUrl: 'https://valkey.io/topics/search/',
       docLabel: 'Indexing troubleshooting',
+      copyCommand: { text: `FT.INFO ${info.name}`, label: 'Copy diagnostic command' },
     });
   }
 
   // 2. Index fragmentation (warning)
   if (info.numDocs > 0 && info.numRecords > info.numDocs * 2) {
     const ratio = (info.numRecords / info.numDocs).toFixed(1);
+    const dropAndCreate = `# Step 1: Drop the index (data is preserved)\nFT.DROPINDEX ${info.name}\n\n# Step 2: Recreate (this triggers a full backfill)\n${buildFtCreateCommand(info)}`;
     insights.push({
       severity: 'warning',
       title: 'Index fragmentation detected',
       description: `This index has ${info.numRecords.toLocaleString()} records for ${info.numDocs.toLocaleString()} documents \u2014 a ${ratio}x ratio. High fragmentation wastes memory and can slow down queries. To resolve fragmentation, drop and recreate the index with \`FT.DROPINDEX ${info.name}\` followed by \`FT.CREATE\`. Note: this will trigger a full reindex backfill.`,
       docUrl: 'https://valkey.io/commands/ft.dropindex/',
       docLabel: 'FT.DROPINDEX docs',
+      copyCommand: { text: dropAndCreate, label: 'Copy commands' },
     });
   }
 
   // 3. FLAT algorithm with large dataset (warning)
   if (vectorField?.algorithm === 'FLAT' && info.numDocs > 10000) {
+    const hnswTemplate = `# Adjust M and EF_CONSTRUCTION for your recall/speed tradeoff\n${buildFtCreateCommand(info, { forceHnsw: true })}`;
     insights.push({
       severity: 'warning',
       title: 'FLAT index may be slow at this scale',
       description: `FLAT (brute-force) search examines every vector on every query. With ${info.numDocs.toLocaleString()} documents this may cause high query latency. HNSW (Hierarchical Navigable Small World) offers much faster approximate nearest-neighbor search at this scale.`,
       docUrl: 'https://valkey.io/commands/ft.create/',
       docLabel: 'HNSW vs FLAT',
+      copyCommand: { text: hnswTemplate, label: 'Copy HNSW template' },
     });
   }
 
@@ -980,6 +1363,7 @@ function getInsights(info: VectorIndexInfo): Insight[] {
 // --- Formatters ---
 
 function formatMemory(mb: number): string {
+  if (mb === 0) return 'N/A';
   if (mb < 0.01) return '< 0.01 MB';
   return `${mb.toFixed(2)} MB`;
 }
