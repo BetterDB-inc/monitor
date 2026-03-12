@@ -24,7 +24,7 @@ import {
   VectorIndexInfo,
   VectorSearchResult,
 } from '../../common/types/metrics.types';
-import { parseVectorIndexInfo, parseVectorSearchResponse, FIELD_NAME_RE, INDEX_NAME_RE } from '../parsers/vector-index.parser';
+import { parseVectorIndexInfo, parseVectorSearchResponse, sanitizeFilter, FIELD_NAME_RE, INDEX_NAME_RE } from '../parsers/vector-index.parser';
 import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyPatternData } from '@betterdb/shared';
 import { extractPattern } from '@betterdb/shared';
 
@@ -624,11 +624,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     if (!FIELD_NAME_RE.test(vectorFieldName)) {
       throw new Error(`Invalid vector field name: ${vectorFieldName}`);
     }
-    const sanitizedFilter = filter?.trim();
-    if (sanitizedFilter && (sanitizedFilter.length > 1024 || /[\x00-\x1f]/.test(sanitizedFilter) || sanitizedFilter.includes('=>'))) {
-      throw new Error('Invalid filter: too long, contains control characters, or contains forbidden operator');
-    }
-    const prefix = sanitizedFilter ? `(${sanitizedFilter})` : '*';
+    const sanitized = sanitizeFilter(filter);
+    const prefix = sanitized ? `(${sanitized})` : '*';
     const result = (await this.client.call(
       'FT.SEARCH',
       indexName,

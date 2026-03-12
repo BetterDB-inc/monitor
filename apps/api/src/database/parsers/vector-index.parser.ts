@@ -9,6 +9,15 @@ import type {
 export const FIELD_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 export const INDEX_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_.\-]*$/;
 
+/** Sanitize and validate a vector search filter string. Returns the trimmed filter or undefined. */
+export function sanitizeFilter(filter?: string): string | undefined {
+  const trimmed = filter?.trim();
+  if (trimmed && (trimmed.length > 1024 || /[\x00-\x1f]/.test(trimmed) || trimmed.includes('=>'))) {
+    throw new Error('Invalid filter: too long, contains control characters, or contains forbidden operator');
+  }
+  return trimmed || undefined;
+}
+
 /** Parse a flat key-value array into a Map */
 export function toMap(arr: unknown[]): Map<string, unknown> {
   const m = new Map<string, unknown>();

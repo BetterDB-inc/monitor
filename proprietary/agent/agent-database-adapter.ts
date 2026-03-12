@@ -24,7 +24,7 @@ import type {
   VectorIndexInfo,
   VectorSearchResult,
 } from '../../apps/api/src/common/types/metrics.types';
-import { parseVectorIndexInfo, parseVectorSearchResponse, INDEX_NAME_RE, FIELD_NAME_RE } from '../../apps/api/src/database/parsers/vector-index.parser';
+import { parseVectorIndexInfo, parseVectorSearchResponse, sanitizeFilter, INDEX_NAME_RE, FIELD_NAME_RE } from '../../apps/api/src/database/parsers/vector-index.parser';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 
 const COMMAND_TIMEOUT_MS = 15000;
@@ -448,7 +448,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
     if (!this.capabilities.hasVectorSearch) {
       throw new Error('Vector search is not available on this connection (Search module not loaded)');
     }
-    return (await this.sendCommand('FT._LIST')) as string[];
+    return (await this.sendCommand('FT', ['_LIST'])) as string[];
   }
 
   async getVectorIndexInfo(indexName: string): Promise<VectorIndexInfo> {
@@ -478,11 +478,8 @@ export class AgentDatabaseAdapter implements DatabasePort {
     if (!FIELD_NAME_RE.test(vectorFieldName)) {
       throw new Error(`Invalid vector field name: ${vectorFieldName}`);
     }
-    const sanitizedFilter = filter?.trim();
-    if (sanitizedFilter && (sanitizedFilter.length > 1024 || /[\x00-\x1f]/.test(sanitizedFilter) || sanitizedFilter.includes('=>'))) {
-      throw new Error('Invalid filter: too long, contains control characters, or contains forbidden operator');
-    }
-    const prefix = sanitizedFilter ? `(${sanitizedFilter})` : '*';
+    const sanitized = sanitizeFilter(filter);
+    const prefix = sanitized ? `(${sanitized})` : '*';
     const query = `${prefix}=>[KNN ${k} @${vectorFieldName} $vec]`;
     const raw = await this.sendCommandWithBinary(
       'FT',
