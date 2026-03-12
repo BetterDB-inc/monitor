@@ -354,8 +354,8 @@ export class McpController {
       return await this.storageClient.getAclEntries({
         username,
         reason,
-        startTime: safeParseInt(startTime),
-        endTime: safeParseInt(endTime),
+        startTime: msToSeconds(startTime),
+        endTime: msToSeconds(endTime),
         limit: limit !== undefined ? safeLimit(limit, MAX_LIMIT) : undefined,
         connectionId: id,
       });

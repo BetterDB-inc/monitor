@@ -78,7 +78,7 @@ export class ClusterMetricsService {
 
   async getClusterSlowlog(limit: number = 100, connectionId?: string): Promise<ClusterSlowlogEntry[]> {
     const nodes = await this.discoveryService.discoverNodes(connectionId);
-    const slowlogPromises = nodes.map((node) => this.getNodeSlowlog(node, limit));
+    const slowlogPromises = nodes.map((node) => this.getNodeSlowlog(node, limit, connectionId));
 
     const results = await Promise.allSettled(slowlogPromises);
 
@@ -96,9 +96,9 @@ export class ClusterMetricsService {
     return allEntries.slice(0, limit);
   }
 
-  private async getNodeSlowlog(node: DiscoveredNode, limit: number): Promise<ClusterSlowlogEntry[]> {
+  private async getNodeSlowlog(node: DiscoveredNode, limit: number, connectionId?: string): Promise<ClusterSlowlogEntry[]> {
     try {
-      const client = await this.discoveryService.getNodeConnection(node.id);
+      const client = await this.discoveryService.getNodeConnection(node.id, connectionId);
       const rawLog = await client.slowlog('GET', limit);
       const entries = MetricsParser.parseSlowLog(rawLog as unknown[]);
 
@@ -209,7 +209,7 @@ export class ClusterMetricsService {
 
   async getClusterNodeStats(connectionId?: string): Promise<NodeStats[]> {
     const nodes = await this.discoveryService.discoverNodes(connectionId);
-    const statsPromises = nodes.map((node) => this.getNodeStats(node));
+    const statsPromises = nodes.map((node) => this.getNodeStats(node, connectionId));
 
     const results = await Promise.allSettled(statsPromises);
 
@@ -224,9 +224,9 @@ export class ClusterMetricsService {
     return allStats;
   }
 
-  private async getNodeStats(node: DiscoveredNode): Promise<NodeStats | null> {
+  private async getNodeStats(node: DiscoveredNode, connectionId?: string): Promise<NodeStats | null> {
     try {
-      const client = await this.discoveryService.getNodeConnection(node.id);
+      const client = await this.discoveryService.getNodeConnection(node.id, connectionId);
       const infoString = await client.info();
       const info = InfoParser.parse(infoString);
 

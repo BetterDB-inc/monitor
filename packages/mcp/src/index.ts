@@ -200,6 +200,19 @@ server.tool(
   },
 );
 
+server.tool(
+  'get_health',
+  'Get a synthetic health summary for the active instance: keyspace hit rate, memory fragmentation ratio, connected clients, replication lag (replicas only), and keyspace size. Use this as the first call when investigating an instance — it surfaces the most actionable signals without requiring you to parse raw INFO output.',
+  { instanceId: z.string().optional().describe('Optional instance ID override') },
+  async ({ instanceId }) => {
+    const id = resolveInstanceId(instanceId);
+    const data = await apiFetch(`/mcp/instance/${id}/health`);
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    };
+  },
+);
+
 // --- Historical data tools ---
 
 function buildQuery(params: Record<string, string | number | boolean | undefined>): string {
