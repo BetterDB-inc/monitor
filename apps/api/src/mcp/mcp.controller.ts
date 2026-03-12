@@ -365,4 +365,13 @@ export class McpController {
     }
   }
 
+  @Get('instance/:id/health')
+  async getHealth(@Param('id', ValidateInstanceIdPipe) id: string) {
+    try {
+      return await this.metricsService.getHealthSummary(id);
+    } catch (error) {
+      this.logger.error(`Failed to get health for ${id}`, error instanceof Error ? error.stack : error);
+      throw new HttpException('Failed to get health', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
 }

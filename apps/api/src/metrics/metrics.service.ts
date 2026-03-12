@@ -170,6 +170,49 @@ export class MetricsService {
     return this.getClient(connectionId).getLastSaveTime();
   }
 
+  async getHealthSummary(connectionId?: string) {
+    const info = await this.getInfoParsed(undefined, connectionId);
+
+    const stats = info.stats;
+    const memory = info.memory;
+    const clients = info.clients;
+    const replication = info.replication;
+    const keyspace = info.keyspace;
+
+    const keyspaceHits = Number(stats?.keyspace_hits ?? 0);
+    const keyspaceMisses = Number(stats?.keyspace_misses ?? 0);
+    const totalLookups = keyspaceHits + keyspaceMisses;
+    const hitRate = totalLookups > 0 ? keyspaceHits / totalLookups : null;
+
+    const fragRatio = Number(memory?.mem_fragmentation_ratio ?? 0) || 0;
+    const connectedClients = Number(clients?.connected_clients ?? 0) || 0;
+
+    const role = replication?.role ?? 'unknown';
+    let replicationLag: number | null = null;
+    if (role === 'slave' || role === 'replica') {
+      const lastIo = Number(replication?.master_last_io_seconds_ago ?? -1);
+      replicationLag = lastIo >= 0 ? lastIo : null;
+    }
+
+    let keyspaceSize = 0;
+    if (keyspace) {
+      for (const [key, val] of Object.entries(keyspace)) {
+        if (key.startsWith('db') && val && typeof val === 'object' && 'keys' in val) {
+          keyspaceSize += (val as { keys: number }).keys;
+        }
+      }
+    }
+
+    return {
+      hitRate,
+      memFragmentationRatio: fragRatio,
+      connectedClients,
+      replicationLag,
+      keyspaceSize,
+      role,
+    };
+  }
+
   async getSlowLogPatternAnalysis(count?: number, connectionId?: string): Promise<SlowLogPatternAnalysis> {
     const resolvedConnectionId = connectionId || this.connectionRegistry.getDefaultId();
     if (!resolvedConnectionId) {
