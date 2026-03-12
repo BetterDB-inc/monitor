@@ -390,6 +390,28 @@ export class McpController {
     }
   }
 
+  @Get('instance/:id/hot-keys')
+  async getHotKeys(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+    @Query('limit') limit?: string,
+  ) {
+    try {
+      const parsedLimit = safeLimit(limit, 50);
+      return await this.storageClient.getHotKeys({
+        connectionId: id,
+        startTime: safeParseInt(startTime),
+        endTime: safeParseInt(endTime),
+        limit: Math.min(parsedLimit, 200),
+        latest: true,
+      });
+    } catch (error) {
+      this.logger.error(`Failed to get hot keys for ${id}`, error instanceof Error ? error.stack : error);
+      throw new HttpException('Failed to get hot keys', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
   @Get('instance/:id/health')
   async getHealth(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {

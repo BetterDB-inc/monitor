@@ -331,6 +331,30 @@ server.tool(
   },
 );
 
+// --- Hot keys ---
+
+server.tool(
+  'get_hot_keys',
+  'Get hot key tracking data from persisted storage. BetterDB periodically scans keys using LFU frequency scores (when maxmemory-policy is an LFU variant) or OBJECT IDLETIME / COMMANDLOG-derived frequency. Each snapshot captures the top keys ranked by access frequency. Use this to find cache-busting keys, uneven access patterns, or keys that dominate throughput. The signalType field in each entry indicates which detection mode was active (lfu or idletime).',
+  {
+    startTime: z.number().optional().describe('Start time (Unix timestamp ms)'),
+    endTime: z.number().optional().describe('End time (Unix timestamp ms)'),
+    limit: z.number().optional().describe('Max entries to return (default 50, max 200)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ startTime, endTime, limit, instanceId }) => {
+    const id = resolveInstanceId(instanceId);
+    const qs = buildQuery({ startTime, endTime, limit });
+    const data = await apiFetch(`/mcp/instance/${id}/hot-keys${qs}`);
+    if (isLicenseError(data)) {
+      return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+    }
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    };
+  },
+);
+
 // --- Cluster tools ---
 
 server.tool(
