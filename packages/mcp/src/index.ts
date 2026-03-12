@@ -22,6 +22,7 @@ async function apiFetch(path: string): Promise<unknown> {
       'Authorization': `Bearer ${BETTERDB_TOKEN}`,
       'Content-Type': 'application/json',
     },
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (res.status === 402) {
@@ -106,21 +107,8 @@ server.tool(
 );
 
 server.tool(
-  'get_health',
-  'Get a health summary for the active instance: hit rate, memory fragmentation, connected clients, replication lag.',
-  { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => {
-    const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/health`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  },
-);
-
-server.tool(
   'get_info',
-  'Get raw INFO stats for the active instance. Optionally filter to a section: server|clients|memory|stats|replication|keyspace',
+  'Get INFO stats for the active instance. Contains all health data: memory, clients, replication, keyspace, stats (hit rate, ops/sec), and server info. Optionally filter to a section: server|clients|memory|stats|replication|keyspace.',
   {
     section: z.string().optional().describe('INFO section to filter (server, clients, memory, stats, replication, keyspace)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),

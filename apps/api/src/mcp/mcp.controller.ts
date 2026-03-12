@@ -3,7 +3,6 @@ import { ANOMALY_SERVICE } from '@betterdb/shared';
 import { RequiresFeature, Feature } from '@proprietary/license';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { AgentTokenGuard } from '../common/guards/agent-token.guard';
-import { InfoResponse } from '../common/types/metrics.types';
 import { MetricsService } from '../metrics/metrics.service';
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
 import { ClientAnalyticsAnalysisService } from '../client-analytics/client-analytics-analysis.service';
@@ -35,14 +34,9 @@ function safeParseInt(value: string | undefined, defaultValue?: number): number 
   return parsed;
 }
 
-function safeNumber(value: unknown, defaultValue: number): number {
-  const n = Number(value);
-  return isNaN(n) ? defaultValue : n;
-}
-
 /** Parse and cap a limit/count query param */
 function safeLimit(value: string | undefined, defaultValue: number): number {
-  return Math.min(safeParseInt(value, defaultValue), MAX_LIMIT);
+  return Math.max(1, Math.min(safeParseInt(value, defaultValue), MAX_LIMIT));
 }
 
 /** Convert ms timestamp query param to seconds for commandlog service */
@@ -371,55 +365,4 @@ export class McpController {
     }
   }
 
-  @Get('instance/:id/health')
-  async getHealth(@Param('id', ValidateInstanceIdPipe) id: string) {
-    try {
-      const client = this.registry.get(id);
-      const info: InfoResponse = await client.getInfoParsed();
-
-      const stats = info.stats as Record<string, unknown> | undefined;
-      const memory = info.memory as Record<string, unknown> | undefined;
-      const clients = info.clients as Record<string, unknown> | undefined;
-      const replication = info.replication as Record<string, unknown> | undefined;
-      const keyspace = info.keyspace as Record<string, unknown> | undefined;
-
-      const keyspaceHits = safeNumber(stats?.keyspace_hits, 0);
-      const keyspaceMisses = safeNumber(stats?.keyspace_misses, 0);
-      const totalLookups = keyspaceHits + keyspaceMisses;
-      const hitRate = totalLookups > 0 ? keyspaceHits / totalLookups : null;
-
-      const fragRatio = safeNumber(memory?.mem_fragmentation_ratio, 0);
-      const connectedClients = safeNumber(clients?.connected_clients, 0);
-
-      const role = String(replication?.role ?? 'unknown');
-      let replicationLag: number | null = null;
-      if (role === 'slave' || role === 'replica') {
-        const offset = safeNumber(replication?.master_repl_offset, 0);
-        const slaveOffset = safeNumber(replication?.slave_repl_offset, 0);
-        replicationLag = offset - slaveOffset;
-      }
-
-      let keyspaceSize = 0;
-      if (keyspace && typeof keyspace === 'object') {
-        for (const [key, val] of Object.entries(keyspace)) {
-          if (key.startsWith('db') && typeof val === 'string') {
-            const match = val.match(/keys=(\d+)/);
-            if (match) keyspaceSize += parseInt(match[1], 10);
-          }
-        }
-      }
-
-      return {
-        hitRate,
-        memFragmentationRatio: fragRatio,
-        connectedClients,
-        replicationLag,
-        keyspaceSize,
-        role,
-      };
-    } catch (error) {
-      this.logger.error(`Failed to get health for ${id}`, error instanceof Error ? error.stack : error);
-      throw new HttpException('Failed to get health', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-  }
 }
