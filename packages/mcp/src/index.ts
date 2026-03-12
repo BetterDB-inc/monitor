@@ -88,7 +88,7 @@ server.tool(
 server.tool(
   'select_instance',
   'Select which instance subsequent tool calls operate on.',
-  { instanceId: z.string().describe('The instance ID to select') },
+  { instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format').describe('The instance ID to select') },
   async ({ instanceId }) => {
     const data = await apiFetch('/mcp/instances') as { instances: Array<{ id: string; name: string }> };
     const found = data.instances.find((inst) => inst.id === instanceId);
@@ -246,8 +246,8 @@ server.tool(
   'get_commandlog_history',
   'Get persisted COMMANDLOG entries from storage (Valkey 8+ only). Supports time range filtering to investigate specific incidents. Returns empty with a note if COMMANDLOG is not supported on this instance.',
   {
-    startTime: z.number().optional().describe('Start time (Unix timestamp in seconds)'),
-    endTime: z.number().optional().describe('End time (Unix timestamp in seconds)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp ms)'),
+    endTime: z.number().optional().describe('End time (Unix timestamp ms)'),
     command: z.string().optional().describe('Filter by command name'),
     minDuration: z.number().optional().describe('Min duration in microseconds'),
     limit: z.number().optional().describe('Max entries to return'),
@@ -270,8 +270,8 @@ server.tool(
   'get_commandlog_patterns',
   'Get analyzed COMMANDLOG patterns from persisted storage (Valkey 8+ only). Like get_slowlog_patterns but includes large-request and large-reply patterns in addition to slow commands.',
   {
-    startTime: z.number().optional().describe('Start time (Unix timestamp in seconds)'),
-    endTime: z.number().optional().describe('End time (Unix timestamp in seconds)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp ms)'),
+    endTime: z.number().optional().describe('End time (Unix timestamp ms)'),
     limit: z.number().optional().describe('Max entries to analyze'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },

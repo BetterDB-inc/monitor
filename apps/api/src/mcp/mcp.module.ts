@@ -14,7 +14,12 @@ try {
   const mod = require('../../../../proprietary/agent/agent-tokens.service');
   AgentTokensServiceClass = mod.AgentTokensService;
 } catch (e) {
-  logger.debug(`Agent tokens service not available: ${e instanceof Error ? e.message : 'module not found'}`);
+  const msg = e instanceof Error ? e.message : 'module not found';
+  if (process.env.CLOUD_MODE === 'true') {
+    logger.warn(`Agent tokens service failed to load in cloud mode: ${msg}`);
+  } else {
+    logger.debug(`Agent tokens service not available: ${msg}`);
+  }
 }
 
 let AnomalyModule: any = null;
@@ -22,7 +27,12 @@ try {
   const mod = require('../../../../proprietary/anomaly-detection/anomaly.module');
   AnomalyModule = mod.AnomalyModule;
 } catch (e) {
-  logger.debug(`Anomaly module not available: ${e instanceof Error ? e.message : 'module not found'}`);
+  const msg = e instanceof Error ? e.message : 'module not found';
+  if (process.env.CLOUD_MODE === 'true') {
+    logger.warn(`Anomaly module failed to load in cloud mode: ${msg}`);
+  } else {
+    logger.debug(`Anomaly module not available: ${msg}`);
+  }
 }
 
 const tokenProviders = AgentTokensServiceClass
