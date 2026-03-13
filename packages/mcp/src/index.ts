@@ -10,18 +10,47 @@ const BETTERDB_INSTANCE_ID = process.env.BETTERDB_INSTANCE_ID || null;
 
 let activeInstanceId: string | null = BETTERDB_INSTANCE_ID;
 
-async function apiFetch(path: string): Promise<unknown> {
-  const url = `${BETTERDB_URL}${path}`;
+// Auto-detect whether the API lives at /api/* (production) or /* (local dev).
+// Probe once on first request, then cache the result.
+let detectedPrefix: string | null = null;
+const API_PREFIXES = ['/api', ''];
+
+async function rawFetch(prefix: string, path: string): Promise<Response> {
+  const url = `${BETTERDB_URL}${prefix}${path}`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
   if (BETTERDB_TOKEN) {
     headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
   }
-  const res = await fetch(url, {
-    headers,
-    signal: AbortSignal.timeout(30_000),
-  });
+  return fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+}
+
+function isJsonResponse(res: Response): boolean {
+  const ct = res.headers.get('content-type') || '';
+  return ct.includes('application/json');
+}
+
+async function detectPrefix(): Promise<string> {
+  for (const prefix of API_PREFIXES) {
+    try {
+      const res = await rawFetch(prefix, '/mcp/instances');
+      if (isJsonResponse(res)) {
+        return prefix;
+      }
+    } catch {
+      // network error — try next prefix
+    }
+  }
+  // Fall back to /api if detection fails entirely
+  return '/api';
+}
+
+async function apiFetch(path: string): Promise<unknown> {
+  if (detectedPrefix === null) {
+    detectedPrefix = await detectPrefix();
+  }
+  const res = await rawFetch(detectedPrefix, path);
 
   if (res.status === 402) {
     const body = await res.json().catch(() => ({})) as Record<string, unknown>;
