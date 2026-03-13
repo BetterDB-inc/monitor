@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { Socket } from 'net';
-import { randomUUID } from 'crypto';
 import { AgentTokensService } from './agent-tokens.service';
 import { AgentDatabaseAdapter } from './agent-database-adapter';
 import { ConnectionRegistry } from '../../apps/api/src/connections/connection-registry.service';
@@ -60,7 +59,7 @@ export class AgentGateway {
   }
 
   private onConnection(ws: WebSocket, tokenId: string, tokenName: string): void {
-    const connectionId = `agent-${randomUUID().slice(0, 8)}`;
+    const connectionId = `agent-${tokenId}`;
     this.logger.log(`Agent connected: ${connectionId} (token: ${tokenName})`);
 
     const agent: AgentConnection = {
