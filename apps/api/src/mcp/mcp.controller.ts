@@ -1,6 +1,5 @@
 import { Controller, Get, Param, Query, HttpException, HttpStatus, UseGuards, Optional, Inject, BadRequestException, PipeTransform, Injectable, Logger } from '@nestjs/common';
 import { ANOMALY_SERVICE } from '@betterdb/shared';
-import { RequiresFeature, Feature } from '@proprietary/license';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { AgentTokenGuard } from '../common/guards/agent-token.guard';
 import { MetricsService } from '../metrics/metrics.service';
@@ -229,8 +228,10 @@ export class McpController {
     }
   }
 
+  // License gating is handled at runtime: anomalyService is only injected when
+  // the proprietary anomaly module is available, and the null check below returns
+  // a graceful "not available" response in community mode.
   @Get('instance/:id/history/anomalies')
-  @RequiresFeature(Feature.ANOMALY_DETECTION)
   async getAnomalies(
     @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('limit') limit?: string,
