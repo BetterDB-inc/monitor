@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.betterdb-inc/monitor",
+  "name": "io.github.BetterDB-inc/monitor",
   "description": "BetterDB MCP server - Valkey observability for Claude Code and other MCP clients",
   "repository": {
     "url": "https://github.com/BetterDB-inc/monitor",
