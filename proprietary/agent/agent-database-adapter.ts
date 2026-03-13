@@ -21,7 +21,10 @@ import type {
   ClusterNode,
   SlotStats,
   ConfigGetResponse,
+  VectorIndexInfo,
+  VectorSearchResult,
 } from '../../apps/api/src/common/types/metrics.types';
+import { parseVectorIndexInfo, parseVectorSearchResponse, sanitizeFilter, INDEX_NAME_RE, FIELD_NAME_RE } from '../../apps/api/src/database/parsers/vector-index.parser';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 
 const COMMAND_TIMEOUT_MS = 15000;
@@ -51,6 +54,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
       hasAclLog: agentHello.capabilities.includes('ACL'),
       hasMemoryDoctor: agentHello.capabilities.includes('MEMORY'),
       hasConfig: agentHello.capabilities.includes('CONFIG'),
+      hasVectorSearch: agentHello.capabilities.includes('FT'),
     };
 
     ws.on('message', (data) => {
@@ -64,7 +68,8 @@ export class AgentDatabaseAdapter implements DatabasePort {
             if (msg.type === 'error') {
               pending.reject(new Error(msg.error));
             } else {
-              pending.resolve(msg.data);
+              const result = msg.binary ? Buffer.from(msg.data as string, 'base64') : msg.data;
+              pending.resolve(result);
             }
           }
         }
@@ -77,6 +82,10 @@ export class AgentDatabaseAdapter implements DatabasePort {
   }
 
   private sendCommand(cmd: string, args?: string[]): Promise<unknown> {
+    return this.sendCommandWithBinary(cmd, args);
+  }
+
+  private sendCommandWithBinary(cmd: string, args?: string[], binaryArgs?: Record<string, string>): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this._connected || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('Agent connection is closed'));
@@ -90,7 +99,11 @@ export class AgentDatabaseAdapter implements DatabasePort {
       }, COMMAND_TIMEOUT_MS);
 
       this.pendingRequests.set(id, { resolve, reject, timer });
-      this.ws.send(JSON.stringify({ id, type: 'command', cmd, args }));
+      const payload: Record<string, unknown> = { id, type: 'command', cmd, args };
+      if (binaryArgs) {
+        payload.binaryArgs = binaryArgs;
+      }
+      this.ws.send(JSON.stringify(payload));
     });
   }
 
@@ -423,6 +436,57 @@ export class AgentDatabaseAdapter implements DatabasePort {
   async collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult> {
     const response = await this.sendCommand('COLLECT_KEY_ANALYTICS', [JSON.stringify(options)]);
     return JSON.parse(response as string);
+  }
+
+  async getHashFieldBuffer(key: string, field: string): Promise<Buffer | null> {
+    const result = await this.sendCommand('HGETFIELD_BUFFER', [key, field]);
+    if (result === null) return null;
+    return result as Buffer;
+  }
+
+  async getVectorIndexList(): Promise<string[]> {
+    if (!this.capabilities.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    return (await this.sendCommand('FT', ['_LIST'])) as string[];
+  }
+
+  async getVectorIndexInfo(indexName: string): Promise<VectorIndexInfo> {
+    if (!this.capabilities.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    if (!INDEX_NAME_RE.test(indexName)) {
+      throw new Error(`Invalid index name: ${indexName}`);
+    }
+    const raw = await this.sendCommand('FT', ['INFO', indexName]);
+    return parseVectorIndexInfo(indexName, raw as unknown[]);
+  }
+
+  async vectorSearch(
+    indexName: string,
+    vectorFieldName: string,
+    queryVector: Buffer,
+    k: number,
+    filter?: string,
+  ): Promise<VectorSearchResult[]> {
+    if (!this.capabilities.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    if (!INDEX_NAME_RE.test(indexName)) {
+      throw new Error(`Invalid index name: ${indexName}`);
+    }
+    if (!FIELD_NAME_RE.test(vectorFieldName)) {
+      throw new Error(`Invalid vector field name: ${vectorFieldName}`);
+    }
+    const sanitized = sanitizeFilter(filter);
+    const prefix = sanitized ? `(${sanitized})` : '*';
+    const query = `${prefix}=>[KNN ${k} @${vectorFieldName} $vec]`;
+    const raw = await this.sendCommandWithBinary(
+      'FT',
+      ['SEARCH', indexName, query, 'PARAMS', '2', 'vec', '__BINARY_VEC__', 'DIALECT', '2'],
+      { '__BINARY_VEC__': queryVector.toString('base64') },
+    );
+    return parseVectorSearchResponse(raw as unknown[], vectorFieldName);
   }
 
   getClient(): never {

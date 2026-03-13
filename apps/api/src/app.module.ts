@@ -15,6 +15,7 @@ import { PrometheusModule } from './prometheus/prometheus.module';
 import { SettingsModule } from './settings/settings.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { TelemetryModule } from './telemetry/telemetry.module';
+import { VectorSearchModule } from './vector-search/vector-search.module';
 import { CloudAuthModule } from './auth/cloud-auth.module';
 
 let AiModule: any = null;
@@ -115,6 +116,7 @@ const baseImports = [
   PrometheusModule,
   SettingsModule,
   WebhooksModule,
+  VectorSearchModule,
 ];
 
 const proprietaryImports = [

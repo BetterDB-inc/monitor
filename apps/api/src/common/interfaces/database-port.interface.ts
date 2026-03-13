@@ -14,6 +14,8 @@ import {
   ClusterNode,
   SlotStats,
   ConfigGetResponse,
+  VectorIndexInfo,
+  VectorSearchResult,
 } from '../types/metrics.types';
 import type { KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 
@@ -31,6 +33,7 @@ export interface DatabaseCapabilities {
   hasAclLog: boolean;
   hasMemoryDoctor: boolean;
   hasConfig: boolean;
+  hasVectorSearch: boolean;
 }
 
 export interface DatabasePort {
@@ -70,5 +73,9 @@ export interface DatabasePort {
   getDbSize(): Promise<number>;
   getLastSaveTime(): Promise<number>;
   collectKeyAnalytics(options: KeyAnalyticsOptions): Promise<KeyAnalyticsResult>;
+  getVectorIndexList(): Promise<string[]>;
+  getVectorIndexInfo(indexName: string): Promise<VectorIndexInfo>;
+  getHashFieldBuffer(key: string, field: string): Promise<Buffer | null>;
+  vectorSearch(indexName: string, vectorFieldName: string, queryVector: Buffer, k: number, filter?: string): Promise<VectorSearchResult[]>;
   getClient(): Valkey;
 }
