@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.betterdb-inc/monitor",
+  "description": "BetterDB MCP server - Valkey observability for Claude Code and other MCP clients",
+  "repository": {
+    "url": "https://github.com/BetterDB-inc/monitor",
+    "source": "github",
+    "subfolder": "packages/mcp"
+  },
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@betterdb/mcp",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "URL of the BetterDB monitor instance",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "BETTERDB_URL"
+        },
+        {
+          "description": "MCP authentication token generated from the BetterDB Settings page",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "BETTERDB_TOKEN"
+        },
+        {
+          "description": "Instance ID to target when using multi-instance cloud deployments",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "BETTERDB_INSTANCE_ID"
+        }
+      ]
+    }
+  ]
+}
