@@ -429,6 +429,54 @@ export interface ConfigGetResponse {
   [key: string]: string;
 }
 
+export interface VectorIndexField {
+  name: string;
+  type: string;
+  algorithm: string | null;
+  dimension: number | null;
+  distanceMetric: string | null;
+  hnswM: number | null;
+  hnswEfConstruction: number | null;
+  hnswEfRuntime: number | null;
+  separator: string | null;
+  caseSensitive: boolean;
+  sortable: boolean;
+  noStem: boolean;
+  weight: number | null;
+}
+
+export interface VectorSearchResult {
+  key: string;
+  score: number;
+  fields: Record<string, string>;
+}
+
+export interface VectorIndexGcStats {
+  gcCycles: number;
+  bytesCollected: number;
+  totalMsRun: number;
+}
+
+export interface VectorIndexDefinition {
+  prefixes: string[];
+  defaultLanguage: string | null;
+  defaultScore: number | null;
+}
+
+export interface VectorIndexInfo {
+  name: string;
+  numDocs: number;
+  numRecords: number;
+  numVectorFields: number;
+  indexingState: string;
+  percentIndexed: number;
+  memorySizeMb: number;
+  indexingFailures: number;
+  fields: VectorIndexField[];
+  gcStats: VectorIndexGcStats | null;
+  indexDefinition: VectorIndexDefinition | null;
+}
+
 export type {
   SlowLogPatternExample,
   SlowLogPatternStats,

@@ -21,7 +21,10 @@ import {
   ClusterNode,
   SlotStats,
   ConfigGetResponse,
+  VectorIndexInfo,
+  VectorSearchResult,
 } from '../../common/types/metrics.types';
+import { parseVectorIndexInfo, parseVectorSearchResponse, sanitizeFilter, FIELD_NAME_RE, INDEX_NAME_RE } from '../parsers/vector-index.parser';
 import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyPatternData } from '@betterdb/shared';
 import { extractPattern } from '@betterdb/shared';
 
@@ -135,6 +138,17 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       this.logger.warn('CONFIG command is not available (common on managed Redis services like AWS ElastiCache). Config monitoring will be disabled.');
     }
 
+    // Probe whether FT._LIST is available (Search module loaded)
+    let hasVectorSearch = false;
+    try {
+      const result = await this.client.call('FT._LIST');
+      if (Array.isArray(result)) {
+        hasVectorSearch = true;
+      }
+    } catch {
+      // Search module not loaded
+    }
+
     this.capabilities = {
       dbType: isValkey ? 'valkey' : 'redis',
       version,
@@ -145,6 +159,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       hasAclLog: majorVersion >= 6,
       hasMemoryDoctor: true,
       hasConfig,
+      hasVectorSearch,
     };
   }
 
@@ -560,6 +575,72 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       patterns: Array.from(patternsMap.values()),
       keyDetails,
     };
+  }
+
+  async getVectorIndexList(): Promise<string[]> {
+    if (!this.capabilities?.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    try {
+      const result = await this.client.call('FT._LIST');
+      return (result as string[]) || [];
+    } catch (error) {
+      this.logger.error(`Failed to list vector indexes: ${error instanceof Error ? error.message : error}`);
+      throw error;
+    }
+  }
+
+  async getVectorIndexInfo(indexName: string): Promise<VectorIndexInfo> {
+    if (!this.capabilities?.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    if (!INDEX_NAME_RE.test(indexName)) {
+      throw new Error(`Invalid index name: ${indexName}`);
+    }
+    try {
+      const raw = (await this.client.call('FT.INFO', indexName)) as unknown[];
+      return parseVectorIndexInfo(indexName, raw);
+    } catch (error) {
+      this.logger.error(`Failed to get vector index info for ${indexName}: ${error instanceof Error ? error.message : error}`);
+      throw error;
+    }
+  }
+
+  async getHashFieldBuffer(key: string, field: string): Promise<Buffer | null> {
+    return this.client.hgetBuffer(key, field);
+  }
+
+  async vectorSearch(
+    indexName: string,
+    vectorFieldName: string,
+    queryVector: Buffer,
+    k: number,
+    filter?: string,
+  ): Promise<VectorSearchResult[]> {
+    if (!this.capabilities?.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    if (!INDEX_NAME_RE.test(indexName)) {
+      throw new Error(`Invalid index name: ${indexName}`);
+    }
+    if (!FIELD_NAME_RE.test(vectorFieldName)) {
+      throw new Error(`Invalid vector field name: ${vectorFieldName}`);
+    }
+    const sanitized = sanitizeFilter(filter);
+    const prefix = sanitized ? `(${sanitized})` : '*';
+    const result = (await this.client.call(
+      'FT.SEARCH',
+      indexName,
+      `${prefix}=>[KNN ${k} @${vectorFieldName} $vec]`,
+      'PARAMS',
+      '2',
+      'vec',
+      queryVector,
+      'DIALECT',
+      '2',
+    )) as unknown[];
+
+    return parseVectorSearchResponse(result, vectorFieldName);
   }
 
   getClient(): Valkey {

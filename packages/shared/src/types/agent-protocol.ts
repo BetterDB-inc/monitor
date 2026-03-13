@@ -4,6 +4,7 @@ export interface AgentCommandMessage {
   type: 'command';
   cmd: string;
   args?: string[];
+  binaryArgs?: Record<string, string>; // placeholder → base64-encoded binary
 }
 
 // Agent → Cloud
@@ -11,6 +12,7 @@ export interface AgentResponseMessage {
   id: string;
   type: 'response';
   data: unknown;
+  binary?: boolean; // true when data is base64-encoded binary
 }
 
 export interface AgentErrorMessage {

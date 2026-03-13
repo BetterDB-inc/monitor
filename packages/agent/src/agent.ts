@@ -117,6 +117,14 @@ export class Agent {
     if (this.isCluster) {
       this.capabilities.push('CLUSTER');
     }
+
+    // Detect FT (Search) module
+    try {
+      await this.client.call('FT._LIST');
+      this.capabilities.push('FT');
+    } catch {
+      // Search module not loaded
+    }
   }
 
   private onWsOpen(): void {
@@ -165,12 +173,32 @@ export class Agent {
     }
 
     try {
-      const result = await this.executor.execute(msg.cmd, msg.args);
-      this.wsClient.send(JSON.stringify({
-        id: msg.id,
-        type: 'response',
-        data: result,
-      }));
+      // Decode base64 binaryArgs to Buffers
+      let binaryArgs: Record<string, Buffer> | undefined;
+      if (msg.binaryArgs) {
+        binaryArgs = {};
+        for (const [key, val] of Object.entries(msg.binaryArgs)) {
+          binaryArgs[key] = Buffer.from(val, 'base64');
+        }
+      }
+
+      const result = await this.executor.execute(msg.cmd, msg.args, binaryArgs);
+
+      // If result is a Buffer, encode as base64 and flag as binary
+      if (Buffer.isBuffer(result)) {
+        this.wsClient.send(JSON.stringify({
+          id: msg.id,
+          type: 'response',
+          data: result.toString('base64'),
+          binary: true,
+        }));
+      } else {
+        this.wsClient.send(JSON.stringify({
+          id: msg.id,
+          type: 'response',
+          data: result,
+        }));
+      }
     } catch (err: any) {
       this.wsClient.send(JSON.stringify({
         id: msg.id,
