@@ -198,7 +198,7 @@ export class MetricsService {
     if (keyspace) {
       for (const [key, val] of Object.entries(keyspace)) {
         if (key.startsWith('db') && val && typeof val === 'object' && 'keys' in val) {
-          keyspaceSize += (val as { keys: number }).keys;
+          keyspaceSize += Number((val as { keys: number }).keys) || 0;
         }
       }
     }
