@@ -1,6 +1,7 @@
 {
   "name": "api",
   "version": "0.9.1",
+  "homepage": "https://betterdb.com",
   "private": true,
   "scripts": {
     "dev": "ts-node -r tsconfig-paths/register src/main.ts",

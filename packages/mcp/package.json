@@ -45,6 +45,7 @@
     "url": "https://github.com/BetterDB-inc/monitor",
     "directory": "packages/mcp"
   },
+  "homepage": "https://betterdb.com",
   "engines": {
     "node": ">=20.0.0"
   }

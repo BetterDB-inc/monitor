@@ -1,6 +1,7 @@
 {
   "name": "web",
   "version": "0.9.1",
+  "homepage": "https://betterdb.com",
   "private": true,
   "type": "module",
   "scripts": {
