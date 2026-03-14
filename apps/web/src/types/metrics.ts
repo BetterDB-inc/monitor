@@ -266,14 +266,7 @@ export interface VectorIndexInfo {
   indexDefinition: VectorIndexDefinition | null;
 }
 
-export interface VectorIndexSnapshot {
-  id: string;
-  timestamp: number;
-  connectionId: string;
-  indexName: string;
-  numDocs: number;
-  memorySizeMb: number;
-}
+export type { VectorIndexSnapshot } from '@betterdb/shared';
 
 export type {
   StoredAclEntry,

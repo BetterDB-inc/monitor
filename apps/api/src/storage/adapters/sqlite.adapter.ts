@@ -1095,22 +1095,6 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('memory_snapshots', 'cpu_user', 'REAL', '0');
     addColumnIfMissing('memory_snapshots', 'io_threaded_reads', 'INTEGER', '0');
     addColumnIfMissing('memory_snapshots', 'io_threaded_writes', 'INTEGER', '0');
-
-    // Migration: add vector_index_snapshots table if missing
-    try {
-      this.db!.exec(`
-        CREATE TABLE IF NOT EXISTS vector_index_snapshots (
-          id TEXT PRIMARY KEY,
-          timestamp INTEGER NOT NULL,
-          connection_id TEXT NOT NULL,
-          index_name TEXT NOT NULL,
-          num_docs INTEGER NOT NULL,
-          memory_size_mb REAL NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_vis_timestamp ON vector_index_snapshots(timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
-      `);
-    } catch { /* table already exists */ }
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
@@ -2618,7 +2602,7 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db || snapshots.length === 0) return 0;
 
     const stmt = this.db.prepare(`
-      INSERT INTO vector_index_snapshots (id, timestamp, connection_id, index_name, num_docs, memory_size_mb)
+      INSERT OR IGNORE INTO vector_index_snapshots (id, timestamp, connection_id, index_name, num_docs, memory_size_mb)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
 

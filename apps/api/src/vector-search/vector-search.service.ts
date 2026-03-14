@@ -11,6 +11,8 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
   protected readonly logger = new Logger(VectorSearchService.name);
 
   private readonly POLL_INTERVAL_MS = 30_000;
+  private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+  private lastPruneTime = 0;
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -49,10 +51,15 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       }));
 
       await this.storage.saveVectorIndexSnapshots(snapshots, ctx.connectionId);
-      await this.storage.pruneOldVectorIndexSnapshots(
-        Date.now() - 7 * 24 * 60 * 60 * 1000,
-        ctx.connectionId,
-      );
+
+      const now = Date.now();
+      if (now - this.lastPruneTime > this.PRUNE_INTERVAL_MS) {
+        this.lastPruneTime = now;
+        await this.storage.pruneOldVectorIndexSnapshots(
+          now - 7 * 24 * 60 * 60 * 1000,
+          ctx.connectionId,
+        );
+      }
     } catch (error) {
       this.logger.error(`Error capturing vector index snapshots for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
