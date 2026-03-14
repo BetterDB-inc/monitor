@@ -26,6 +26,8 @@ export type {
   WebhookEventType,
   DeliveryStatus,
   DatabaseConnectionConfig,
+  VectorIndexSnapshot,
+  VectorIndexSnapshotQueryOptions,
 } from '@betterdb/shared';
 import type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/shared';
 import type {
@@ -55,6 +57,8 @@ import type {
   WebhookEventType,
   DeliveryStatus,
   DatabaseConnectionConfig,
+  VectorIndexSnapshot,
+  VectorIndexSnapshotQueryOptions,
 } from '@betterdb/shared';
 
 // Anomaly Event Types
@@ -349,6 +353,11 @@ export interface StoragePort {
   saveMemorySnapshots(snapshots: StoredMemorySnapshot[], connectionId: string): Promise<number>;
   getMemorySnapshots(options?: MemorySnapshotQueryOptions): Promise<StoredMemorySnapshot[]>;
   pruneOldMemorySnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Vector Index Snapshot Methods
+  saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number>;
+  getVectorIndexSnapshots(options: VectorIndexSnapshotQueryOptions): Promise<VectorIndexSnapshot[]>;
+  pruneOldVectorIndexSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Connection Management Methods (not connection-scoped, they manage connections themselves)
   saveConnection(config: DatabaseConnectionConfig): Promise<void>;

@@ -36,6 +36,7 @@ import {
   StoredMemorySnapshot,
   MemorySnapshotQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
+import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 
 export interface SqliteAdapterConfig {
@@ -1067,6 +1068,18 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
+
+      CREATE TABLE IF NOT EXISTS vector_index_snapshots (
+        id TEXT PRIMARY KEY,
+        timestamp INTEGER NOT NULL,
+        connection_id TEXT NOT NULL,
+        index_name TEXT NOT NULL,
+        num_docs INTEGER NOT NULL,
+        memory_size_mb REAL NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_vis_timestamp ON vector_index_snapshots(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
     `);
 
     // Idempotent migration for existing deployments without ops/CPU columns
@@ -1082,6 +1095,22 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('memory_snapshots', 'cpu_user', 'REAL', '0');
     addColumnIfMissing('memory_snapshots', 'io_threaded_reads', 'INTEGER', '0');
     addColumnIfMissing('memory_snapshots', 'io_threaded_writes', 'INTEGER', '0');
+
+    // Migration: add vector_index_snapshots table if missing
+    try {
+      this.db!.exec(`
+        CREATE TABLE IF NOT EXISTS vector_index_snapshots (
+          id TEXT PRIMARY KEY,
+          timestamp INTEGER NOT NULL,
+          connection_id TEXT NOT NULL,
+          index_name TEXT NOT NULL,
+          num_docs INTEGER NOT NULL,
+          memory_size_mb REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vis_timestamp ON vector_index_snapshots(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
+      `);
+    } catch { /* table already exists */ }
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
@@ -2581,6 +2610,92 @@ export class SqliteAdapter implements StoragePort {
     }
 
     const result = this.db.prepare('DELETE FROM memory_snapshots WHERE timestamp < ?').run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  // Vector Index Snapshot Methods
+  async saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number> {
+    if (!this.db || snapshots.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO vector_index_snapshots (id, timestamp, connection_id, index_name, num_docs, memory_size_mb)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    let count = 0;
+    const transaction = this.db.transaction((connId: string) => {
+      for (const snapshot of snapshots) {
+        const result = stmt.run(
+          snapshot.id || randomUUID(),
+          snapshot.timestamp,
+          connId,
+          snapshot.indexName,
+          snapshot.numDocs,
+          snapshot.memorySizeMb,
+        );
+        count += result.changes;
+      }
+    });
+    transaction(connectionId);
+
+    return count;
+  }
+
+  async getVectorIndexSnapshots(options: VectorIndexSnapshotQueryOptions = {}): Promise<VectorIndexSnapshot[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (options.connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
+    if (options.indexName) {
+      conditions.push('index_name = ?');
+      params.push(options.indexName);
+    }
+    if (options.startTime) {
+      conditions.push('timestamp >= ?');
+      params.push(options.startTime);
+    }
+    if (options.endTime) {
+      conditions.push('timestamp <= ?');
+      params.push(options.endTime);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = options.limit ?? 200;
+
+    const query = `
+      SELECT id, timestamp, connection_id, index_name, num_docs, memory_size_mb
+      FROM vector_index_snapshots
+      ${whereClause}
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `;
+    params.push(limit);
+
+    const rows = this.db.prepare(query).all(...params) as any[];
+    return rows.map(row => ({
+      id: row.id,
+      timestamp: row.timestamp,
+      connectionId: row.connection_id,
+      indexName: row.index_name,
+      numDocs: row.num_docs,
+      memorySizeMb: row.memory_size_mb,
+    }));
+  }
+
+  async pruneOldVectorIndexSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db.prepare('DELETE FROM vector_index_snapshots WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
+
+    const result = this.db.prepare('DELETE FROM vector_index_snapshots WHERE timestamp < ?').run(cutoffTimestamp);
     return result.changes;
   }
 

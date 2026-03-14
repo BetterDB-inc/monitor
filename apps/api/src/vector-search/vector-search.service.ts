@@ -1,12 +1,72 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { VectorIndexInfo, VectorSearchResult } from '../common/types/metrics.types';
+import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import type { VectorIndexSnapshot } from '@betterdb/shared';
 
 @Injectable()
-export class VectorSearchService {
+export class VectorSearchService extends MultiConnectionPoller implements OnModuleInit {
+  protected readonly logger = new Logger(VectorSearchService.name);
+
+  private readonly POLL_INTERVAL_MS = 30_000;
+
   constructor(
-    private readonly connectionRegistry: ConnectionRegistry,
-  ) {}
+    connectionRegistry: ConnectionRegistry,
+    @Inject('STORAGE_CLIENT') private storage: StoragePort,
+  ) {
+    super(connectionRegistry);
+  }
+
+  protected getIntervalMs(): number {
+    return this.POLL_INTERVAL_MS;
+  }
+
+  async onModuleInit(): Promise<void> {
+    this.logger.log(`Starting vector index snapshot polling (interval: ${this.getIntervalMs()}ms)`);
+    this.start();
+  }
+
+  protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    if (!ctx.client.getCapabilities().hasVectorSearch) return;
+
+    try {
+      const indexes = await ctx.client.getVectorIndexList();
+      if (indexes.length === 0) return;
+
+      const details = await Promise.all(
+        indexes.map(name => ctx.client.getVectorIndexInfo(name)),
+      );
+
+      const snapshots: VectorIndexSnapshot[] = details.map(info => ({
+        id: randomUUID(),
+        timestamp: Date.now(),
+        connectionId: ctx.connectionId,
+        indexName: info.name,
+        numDocs: info.numDocs,
+        memorySizeMb: info.memorySizeMb,
+      }));
+
+      await this.storage.saveVectorIndexSnapshots(snapshots, ctx.connectionId);
+      await this.storage.pruneOldVectorIndexSnapshots(
+        Date.now() - 7 * 24 * 60 * 60 * 1000,
+        ctx.connectionId,
+      );
+    } catch (error) {
+      this.logger.error(`Error capturing vector index snapshots for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  async getSnapshots(connectionId: string | undefined, indexName: string, hours: number = 24): Promise<VectorIndexSnapshot[]> {
+    const resolvedId = connectionId ?? this.connectionRegistry.getDefaultId() ?? undefined;
+    return this.storage.getVectorIndexSnapshots({
+      connectionId: resolvedId,
+      indexName,
+      startTime: Date.now() - hours * 60 * 60 * 1000,
+      limit: 200,
+    });
+  }
 
   private getCheckedClient(connectionId?: string) {
     const client = this.connectionRegistry.get(connectionId);
@@ -150,5 +210,4 @@ export class VectorSearchService {
 
     return { keys, cursor: returnCursor };
   }
-
 }

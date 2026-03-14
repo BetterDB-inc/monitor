@@ -12,3 +12,4 @@ export * from './types/agent-protocol';
 export * from './utils/key-patterns';
 export * from './license/index';
 export * from './webhooks/index';
+export * from './types/vector-index-snapshots';

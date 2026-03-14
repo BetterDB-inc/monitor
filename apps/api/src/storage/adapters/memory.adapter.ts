@@ -31,6 +31,7 @@ import {
   StoredMemorySnapshot,
   MemorySnapshotQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
+import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions } from '@betterdb/shared';
 
 export class MemoryAdapter implements StoragePort {
   private aclEntries: StoredAclEntry[] = [];
@@ -42,6 +43,7 @@ export class MemoryAdapter implements StoragePort {
   private latencySnapshots: StoredLatencySnapshot[] = [];
   private latencyHistograms: import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram[] = [];
   private memorySnapshots: StoredMemorySnapshot[] = [];
+  private vectorIndexSnapshots: VectorIndexSnapshot[] = [];
   private settings: AppSettings | null = null;
   private webhooks: Map<string, Webhook> = new Map();
   private deliveries: Map<string, WebhookDelivery> = new Map();
@@ -1033,6 +1035,45 @@ export class MemoryAdapter implements StoragePort {
       this.memorySnapshots = this.memorySnapshots.filter(e => e.timestamp >= cutoffTimestamp);
     }
     return before - this.memorySnapshots.length;
+  }
+
+  // Vector Index Snapshot Methods
+  async saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number> {
+    for (const snapshot of snapshots) {
+      this.vectorIndexSnapshots.push({ ...snapshot, connectionId });
+    }
+    return snapshots.length;
+  }
+
+  async getVectorIndexSnapshots(options: VectorIndexSnapshotQueryOptions = {}): Promise<VectorIndexSnapshot[]> {
+    let filtered = [...this.vectorIndexSnapshots];
+
+    if (options.connectionId) {
+      filtered = filtered.filter(e => e.connectionId === options.connectionId);
+    }
+    if (options.indexName) {
+      filtered = filtered.filter(e => e.indexName === options.indexName);
+    }
+    if (options.startTime) {
+      filtered = filtered.filter(e => e.timestamp >= options.startTime!);
+    }
+    if (options.endTime) {
+      filtered = filtered.filter(e => e.timestamp <= options.endTime!);
+    }
+
+    return filtered
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, options.limit ?? 200);
+  }
+
+  async pruneOldVectorIndexSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    const before = this.vectorIndexSnapshots.length;
+    if (connectionId) {
+      this.vectorIndexSnapshots = this.vectorIndexSnapshots.filter(e => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId);
+    } else {
+      this.vectorIndexSnapshots = this.vectorIndexSnapshots.filter(e => e.timestamp >= cutoffTimestamp);
+    }
+    return before - this.vectorIndexSnapshots.length;
   }
 
   // Connection Management Methods (in-memory storage)

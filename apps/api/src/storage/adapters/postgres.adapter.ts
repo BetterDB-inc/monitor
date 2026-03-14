@@ -31,6 +31,7 @@ import {
   StoredMemorySnapshot,
   MemorySnapshotQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
+import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 
 export interface PostgresAdapterConfig {
@@ -1342,6 +1343,18 @@ export class PostgresAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
+
+      CREATE TABLE IF NOT EXISTS vector_index_snapshots (
+        id TEXT PRIMARY KEY,
+        timestamp BIGINT NOT NULL,
+        connection_id TEXT NOT NULL,
+        index_name TEXT NOT NULL,
+        num_docs INTEGER NOT NULL,
+        memory_size_mb DOUBLE PRECISION NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_vis_timestamp ON vector_index_snapshots(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
 
       -- Idempotent migration for existing deployments without ops/CPU/IO columns
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS ops_per_sec BIGINT NOT NULL DEFAULT 0;
@@ -2981,6 +2994,101 @@ export class PostgresAdapter implements StoragePort {
 
     const result = await this.pool.query(
       'DELETE FROM memory_snapshots WHERE timestamp < $1',
+      [cutoffTimestamp]
+    );
+    return result.rowCount ?? 0;
+  }
+
+  // Vector Index Snapshot Methods
+  async saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number> {
+    if (!this.pool || snapshots.length === 0) return 0;
+
+    const values: any[] = [];
+    const placeholders: string[] = [];
+    let paramIndex = 1;
+
+    for (const snapshot of snapshots) {
+      placeholders.push(`($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`);
+      values.push(
+        snapshot.id,
+        snapshot.timestamp,
+        connectionId,
+        snapshot.indexName,
+        snapshot.numDocs,
+        snapshot.memorySizeMb,
+      );
+    }
+
+    const query = `
+      INSERT INTO vector_index_snapshots (id, timestamp, connection_id, index_name, num_docs, memory_size_mb)
+      VALUES ${placeholders.join(', ')}
+      ON CONFLICT (id) DO NOTHING
+    `;
+
+    const result = await this.pool.query(query, values);
+    return result.rowCount ?? 0;
+  }
+
+  async getVectorIndexSnapshots(options: VectorIndexSnapshotQueryOptions = {}): Promise<VectorIndexSnapshot[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (options.connectionId) {
+      conditions.push(`connection_id = $${paramIndex++}`);
+      params.push(options.connectionId);
+    }
+    if (options.indexName) {
+      conditions.push(`index_name = $${paramIndex++}`);
+      params.push(options.indexName);
+    }
+    if (options.startTime) {
+      conditions.push(`timestamp >= $${paramIndex++}`);
+      params.push(options.startTime);
+    }
+    if (options.endTime) {
+      conditions.push(`timestamp <= $${paramIndex++}`);
+      params.push(options.endTime);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = options.limit ?? 200;
+
+    const query = `
+      SELECT id, timestamp, connection_id, index_name, num_docs, memory_size_mb
+      FROM vector_index_snapshots
+      ${whereClause}
+      ORDER BY timestamp DESC
+      LIMIT $${paramIndex++}
+    `;
+    params.push(limit);
+
+    const result = await this.pool.query(query, params);
+    return result.rows.map((row: any) => ({
+      id: row.id,
+      timestamp: Number(row.timestamp),
+      connectionId: row.connection_id,
+      indexName: row.index_name,
+      numDocs: Number(row.num_docs),
+      memorySizeMb: Number(row.memory_size_mb),
+    }));
+  }
+
+  async pruneOldVectorIndexSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = await this.pool.query(
+        'DELETE FROM vector_index_snapshots WHERE timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId]
+      );
+      return result.rowCount ?? 0;
+    }
+
+    const result = await this.pool.query(
+      'DELETE FROM vector_index_snapshots WHERE timestamp < $1',
       [cutoffTimestamp]
     );
     return result.rowCount ?? 0;

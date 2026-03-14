@@ -45,6 +45,23 @@ export class VectorSearchController {
     }
   }
 
+  @Get('indexes/:name/snapshots')
+  @ApiOperation({ summary: 'Get historical snapshots for a vector index' })
+  @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
+  async getSnapshots(
+    @Param('name') name: string,
+    @Query('hours') hours?: string,
+    @ConnectionId() connectionId?: string,
+  ) {
+    try {
+      const h = Math.min(Math.max(parseInt(hours || '24', 10) || 24, 1), 168);
+      const snapshots = await this.vectorSearchService.getSnapshots(connectionId, name, h);
+      return { snapshots };
+    } catch (error) {
+      throw this.mapError(error, 'Failed to get index snapshots');
+    }
+  }
+
   @Post('indexes/:name/search')
   @ApiOperation({ summary: 'Similarity search', description: 'Find keys similar to a source key using KNN vector search' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })

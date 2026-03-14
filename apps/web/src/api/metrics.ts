@@ -34,6 +34,7 @@ import type {
   StoredMemorySnapshot,
   VectorIndexInfo,
   VectorSearchResult,
+  VectorIndexSnapshot,
 } from '../types/metrics';
 import type {
   DiscoveredNode,
@@ -362,6 +363,14 @@ export const metricsApi = {
       `/vector-search/indexes/${encodeURIComponent(indexName)}/search`,
       { method: 'POST', body: JSON.stringify(params) },
     ),
+  getVectorIndexSnapshots: (name: string, hours?: number) => {
+    const q = new URLSearchParams();
+    if (hours) q.set('hours', hours.toString());
+    const qs = q.toString();
+    return fetchApi<{ snapshots: VectorIndexSnapshot[] }>(
+      `/vector-search/indexes/${encodeURIComponent(name)}/snapshots${qs ? `?${qs}` : ''}`,
+    );
+  },
   sampleIndexKeys: (indexName: string, params?: { cursor?: string; limit?: number }) => {
     const q = new URLSearchParams();
     if (params?.cursor) q.set('cursor', params.cursor);

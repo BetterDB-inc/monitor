@@ -8,7 +8,7 @@ import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useCapabilities } from '../hooks/useCapabilities';
 import { metricsApi } from '../api/metrics';
-import type { VectorIndexInfo, VectorIndexField, VectorSearchResult } from '../types/metrics';
+import type { VectorIndexInfo, VectorIndexField, VectorSearchResult, VectorIndexSnapshot } from '../types/metrics';
 
 interface PollingData {
   indexes: string[];
@@ -147,11 +147,42 @@ function PageHeader() {
   );
 }
 
+function Sparkline({ snapshots }: { snapshots: VectorIndexSnapshot[] }) {
+  if (snapshots.length < 3) return null;
+
+  const sorted = [...snapshots].sort((a, b) => a.timestamp - b.timestamp);
+  const values = sorted.map(s => s.numDocs);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const w = 80;
+  const h = 24;
+  const points = values.map((v, i) =>
+    `${(i / (values.length - 1)) * w},${h - ((v - min) / range) * (h - 2) - 1}`
+  ).join(' ');
+
+  return (
+    <div className="min-w-[80px]">
+      <span className="text-muted-foreground text-xs">docs / 24h</span>
+      <svg width={w} height={h} className="block mt-0.5">
+        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
+      </svg>
+    </div>
+  );
+}
+
 function IndexCard({ info, usedMemoryBytes }: { info: VectorIndexInfo; usedMemoryBytes: number }) {
   const [showDetails, setShowDetails] = useState(false);
+  const [snapshots, setSnapshots] = useState<VectorIndexSnapshot[] | null>(null);
   const insights = getInsights(info);
   const vectorField = info.fields.find(f => f.type === 'VECTOR');
   const semanticCache = isSemanticCache(info);
+
+  useEffect(() => {
+    metricsApi.getVectorIndexSnapshots(info.name, 24)
+      .then(res => setSnapshots(res.snapshots))
+      .catch(() => { /* ignore */ });
+  }, [info.name]);
 
   return (
     <Card>
@@ -180,12 +211,13 @@ function IndexCard({ info, usedMemoryBytes }: { info: VectorIndexInfo; usedMemor
                 {formatMemory(info.memorySizeMb)}
                 {usedMemoryBytes > 0 && (
                   <span className="text-muted-foreground text-xs ml-1">
-                    ({((info.memorySizeMb * 1024 * 1024) / usedMemoryBytes * 100).toFixed(1)}% of instance)
+                    ({Math.min((info.memorySizeMb * 1024 * 1024) / usedMemoryBytes * 100, 100).toFixed(1)}% of instance)
                   </span>
                 )}
               </>
             } />
           )}
+          {snapshots && <Sparkline snapshots={snapshots} />}
         </div>
 
         {/* Insight callouts */}
