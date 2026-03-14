@@ -13,6 +13,7 @@ import type { VectorIndexInfo, VectorIndexField, VectorSearchResult } from '../t
 interface PollingData {
   indexes: string[];
   details: VectorIndexInfo[];
+  usedMemoryBytes: number;
 }
 
 export function VectorSearch() {
@@ -23,17 +24,23 @@ export function VectorSearch() {
     const { indexes } = await metricsApi.getVectorIndexList(signal);
 
     if (indexes.length === 0) {
-      return { indexes, details: [] };
+      return { indexes, details: [], usedMemoryBytes: 0 };
     }
+
+    let usedMemoryBytes = 0;
+    try {
+      const info = await metricsApi.getInfo(['memory']);
+      usedMemoryBytes = parseInt(info.memory?.used_memory || '0', 10) || 0;
+    } catch { /* don't break index list */ }
 
     try {
       const details = await Promise.all(
         indexes.map(name => metricsApi.getVectorIndexInfo(name))
       );
-      return { indexes, details };
+      return { indexes, details, usedMemoryBytes };
     } catch (err) {
       console.warn('Failed to fetch index details:', err);
-      return { indexes, details: [] };
+      return { indexes, details: [], usedMemoryBytes };
     }
   }, []);
 
@@ -116,7 +123,7 @@ export function VectorSearch() {
         <div className="space-y-4">
           {details.length > 0
             ? details.map(info => (
-              <IndexCard key={info.name} info={info} />
+              <IndexCard key={info.name} info={info} usedMemoryBytes={data?.usedMemoryBytes ?? 0} />
             ))
             : indexes.map(name => (
               <Card key={name}>
@@ -140,16 +147,20 @@ function PageHeader() {
   );
 }
 
-function IndexCard({ info }: { info: VectorIndexInfo }) {
+function IndexCard({ info, usedMemoryBytes }: { info: VectorIndexInfo; usedMemoryBytes: number }) {
   const [showDetails, setShowDetails] = useState(false);
   const insights = getInsights(info);
   const vectorField = info.fields.find(f => f.type === 'VECTOR');
+  const semanticCache = isSemanticCache(info);
 
   return (
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-lg font-semibold truncate">{info.name}</CardTitle>
+          <div className="flex items-center gap-2 min-w-0">
+            <CardTitle className="text-lg font-semibold truncate">{info.name}</CardTitle>
+            {semanticCache && <Badge variant="secondary">Semantic Cache</Badge>}
+          </div>
           <StatusBadge info={info} />
         </div>
       </CardHeader>
@@ -163,7 +174,18 @@ function IndexCard({ info }: { info: VectorIndexInfo }) {
             tooltip="Records includes duplicates from document updates. A large gap between Records and Documents indicates index fragmentation."
           />
           <StatItem label="Vector Fields" value={info.numVectorFields.toLocaleString()} />
-          {info.memorySizeMb > 0 && <StatItem label="Memory" value={formatMemory(info.memorySizeMb)} />}
+          {info.memorySizeMb > 0 && (
+            <StatItem label="Memory" value={
+              <>
+                {formatMemory(info.memorySizeMb)}
+                {usedMemoryBytes > 0 && (
+                  <span className="text-muted-foreground text-xs ml-1">
+                    ({((info.memorySizeMb * 1024 * 1024) / usedMemoryBytes * 100).toFixed(1)}% of instance)
+                  </span>
+                )}
+              </>
+            } />
+          )}
         </div>
 
         {/* Insight callouts */}
@@ -1258,7 +1280,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
 
 // --- Shared components ---
 
-function StatItem({ label, value, tooltip }: { label: string; value: string; tooltip?: string }) {
+function StatItem({ label, value, tooltip }: { label: string; value: React.ReactNode; tooltip?: string }) {
   return (
     <div className="min-w-[80px]" title={tooltip}>
       <span className="text-muted-foreground text-xs">{label}</span>
@@ -1275,6 +1297,19 @@ function StatusBadge({ info }: { info: VectorIndexInfo }) {
     return <Badge variant="success">Indexed</Badge>;
   }
   return <Badge variant="warning">Indexing {Math.round(info.percentIndexed)}%</Badge>;
+}
+
+// --- Semantic cache detection ---
+
+const SEMANTIC_CACHE_INDEX_NAMES = ['llmcache', 'semantic_cache', 'semanticcache', 'betterdb_memory', 'llm_cache'];
+const SEMANTIC_CACHE_VECTOR_FIELDS = ['embedding', 'embeddings', 'vector_field', 'content_vector', 'text_embedding'];
+
+function isSemanticCache(info: VectorIndexInfo): boolean {
+  const nameLower = info.name.toLowerCase();
+  if (SEMANTIC_CACHE_INDEX_NAMES.some(n => nameLower === n)) return true;
+  return info.fields.some(
+    f => f.type === 'VECTOR' && SEMANTIC_CACHE_VECTOR_FIELDS.includes(f.name.toLowerCase()),
+  );
 }
 
 // --- Insight evaluation ---
@@ -1354,6 +1389,17 @@ function getInsights(info: VectorIndexInfo): Insight[] {
       description: `${dim}-dimension vectors with ${info.numDocs.toLocaleString()} documents require significant memory. Each vector takes approximately ${perVectorKb} KB. Estimated vector storage: ~${estimatedMb} MB.`,
       docUrl: 'https://valkey.io/commands/ft.create/',
       docLabel: 'Vector memory planning',
+    });
+  }
+
+  // 6. Semantic cache without TTLs (warning)
+  if (isSemanticCache(info) && info.numDocs > 1000) {
+    insights.push({
+      severity: 'warning',
+      title: 'Semantic cache may be missing TTLs',
+      description: `Semantic caches should set a TTL on every document to prevent unbounded memory growth. This index has ${info.numDocs.toLocaleString()} documents — if cached responses have no expiry, the index will grow until eviction pressure hits. Set a TTL when storing cache entries (e.g. EX 3600 in your application code).`,
+      docUrl: 'https://valkey.io/commands/expire/',
+      docLabel: 'EXPIRE docs',
     });
   }
 
