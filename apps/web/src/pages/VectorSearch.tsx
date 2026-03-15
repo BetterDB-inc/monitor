@@ -1334,11 +1334,14 @@ function StatusBadge({ info }: { info: VectorIndexInfo }) {
 // --- Semantic cache detection ---
 
 const SEMANTIC_CACHE_INDEX_NAMES = ['llmcache', 'semantic_cache', 'semanticcache', 'betterdb_memory', 'llm_cache'];
+const CACHE_NAME_RE = /cache|llm|semantic/i;
 const SEMANTIC_CACHE_VECTOR_FIELDS = ['embedding', 'embeddings', 'vector_field', 'content_vector', 'text_embedding'];
 
 function isSemanticCache(info: VectorIndexInfo): boolean {
   const nameLower = info.name.toLowerCase();
   if (SEMANTIC_CACHE_INDEX_NAMES.some(n => nameLower === n)) return true;
+  // Only match on vector field names if the index name also hints at caching
+  if (!CACHE_NAME_RE.test(info.name)) return false;
   return info.fields.some(
     f => f.type === 'VECTOR' && SEMANTIC_CACHE_VECTOR_FIELDS.includes(f.name.toLowerCase()),
   );
