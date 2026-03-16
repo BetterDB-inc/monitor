@@ -730,8 +730,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       throw new Error('Query is required and must be under 1024 characters');
     }
     try {
-      const args: string[] = [indexName, 'SEARCH', 'QUERY', query];
+      const args: string[] = [indexName, 'SEARCH'];
       if (limited) args.push('LIMITED');
+      args.push('QUERY', query);
       const raw = (await this.client.call('FT.PROFILE', ...args)) as unknown[];
       return parseProfileResponse(raw);
     } catch {

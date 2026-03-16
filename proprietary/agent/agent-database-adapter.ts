@@ -552,8 +552,9 @@ export class AgentDatabaseAdapter implements DatabasePort {
     if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
     if (!INDEX_NAME_RE.test(indexName)) throw new Error(`Invalid index name: ${indexName}`);
     try {
-      const args = ['PROFILE', indexName, 'SEARCH', 'QUERY', query];
+      const args = ['PROFILE', indexName, 'SEARCH'];
       if (limited) args.push('LIMITED');
+      args.push('QUERY', query);
       const raw = await this.sendCommand('FT', args);
       return parseProfileResponse(raw as unknown[]);
     } catch {
