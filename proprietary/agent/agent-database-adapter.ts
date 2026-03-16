@@ -551,6 +551,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
   async profileSearch(indexName: string, query: string, limited = false): Promise<ProfileResult> {
     if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
     if (!INDEX_NAME_RE.test(indexName)) throw new Error(`Invalid index name: ${indexName}`);
+    if (!query || query.length > 1024) throw new Error('Query is required and must be under 1024 characters');
     try {
       const args = ['PROFILE', indexName, 'SEARCH'];
       if (limited) args.push('LIMITED');

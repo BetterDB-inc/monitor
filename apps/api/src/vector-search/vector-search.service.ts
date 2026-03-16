@@ -41,9 +41,13 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       const indexes = await ctx.client.getVectorIndexList();
       if (indexes.length === 0) return;
 
-      const details = await Promise.all(
+      const settled = await Promise.allSettled(
         indexes.map(name => ctx.client.getVectorIndexInfo(name)),
       );
+      const details = settled
+        .filter((r): r is PromiseFulfilledResult<VectorIndexInfo> => r.status === 'fulfilled')
+        .map(r => r.value);
+      if (details.length === 0) return;
 
       const snapshots: VectorIndexSnapshot[] = details.map(info => ({
         id: randomUUID(),

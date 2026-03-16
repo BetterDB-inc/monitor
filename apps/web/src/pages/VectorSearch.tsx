@@ -2057,7 +2057,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
   const [nodeCount, setNodeCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedNode, setSelectedNode] = useState<GNode | null>(null);
+  const [selectedNodeVersion, setSelectedNodeVersion] = useState(0);
   const [expanding, setExpanding] = useState(false);
   const [legend, setLegend] = useState<Array<[string, string]>>([]);
 
@@ -2071,6 +2071,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     nodeMap: new Map<string, GNode>(),
     colorMap: new Map<string, string>(),
     camX: 0, camY: 0, zoom: 1,
+    selected: null as GNode | null,
     hovered: null as GNode | null,
     drag: null as GNode | null,
     panning: false,
@@ -2081,6 +2082,11 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     w: 900, h: 600,
     dpr: 1,
   });
+
+  const selectNode = useCallback((node: GNode | null) => {
+    gs.current.selected = node;
+    setSelectedNodeVersion(v => v + 1);
+  }, []);
 
   const s2w = useCallback((sx: number, sy: number) => {
     const g = gs.current;
@@ -2128,7 +2134,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     ctx.scale(g.zoom, g.zoom);
     ctx.translate(-g.camX, -g.camY);
 
-    const sel = selectedNode;
+    const sel = g.selected;
     let nbrSet: Set<string> | null = null;
     if (sel) {
       nbrSet = new Set<string>();
@@ -2225,7 +2231,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     ctx.fillText(`${g.nodes.length} nodes \u00b7 ${g.edges.length} edges`, 12, h - 10);
     ctx.textAlign = 'right';
     ctx.fillText(`${Math.round(g.zoom * 100)}%`, w - 12, h - 10);
-  }, [selectedNode]);
+  }, []);
 
   const animate = useCallback(() => {
     const g = gs.current;
@@ -2255,6 +2261,8 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
         .on('tick', () => {});
       g.sim = sim;
       g.camX = 0; g.camY = 0; g.zoom = 1;
+    }).catch(err => {
+      setError(`Failed to load graph library: ${err instanceof Error ? err.message : 'Unknown error'}`);
     });
   }, []);
 
@@ -2263,7 +2271,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     if (!vectorField) return;
     setLoading(true);
     setError(null);
-    setSelectedNode(null);
+    selectNode(null);
 
     const g = gs.current;
     g.hovered = null;
@@ -2435,10 +2443,10 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
       const w = s2w(ev.clientX - rect.left, ev.clientY - rect.top);
       const h = hit(w.x, w.y);
       if (h) {
-        setSelectedNode(prev => prev?.id === h.id ? null : h);
+        selectNode(gs.current.selected?.id === h.id ? null : h);
         if (!h.expanded) expandNode(h);
       } else {
-        setSelectedNode(null);
+        selectNode(null);
       }
     };
 
@@ -2478,7 +2486,9 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     return () => { g.running = false; cancelAnimationFrame(g.frame); g.sim?.stop(); };
   }, [nodeCount, animate]);
 
-  useEffect(() => { draw(); }, [selectedNode, draw]);
+  // Read from ref — re-evaluated each render (triggered by selectedNodeVersion bumps)
+  const selectedNode = gs.current.selected;
+  void selectedNodeVersion; // ensure React tracks this dependency
 
   return (
     <div className="space-y-3">
@@ -2508,28 +2518,28 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
       <div ref={containerRef} className="rounded-lg overflow-hidden relative border bg-background" style={{ height: 600 }}>
         <canvas ref={canvasRef} style={{ width: '100%', height: '100%', cursor: 'grab' }} />
         {legend.length > 0 && (
-          <div className="absolute top-3 right-3 rounded-lg px-3 py-2 text-[11px] space-y-1 max-w-[180px] shadow-md" style={{ background: 'rgba(255,255,255,0.92)', border: '1px solid rgba(0,0,0,0.08)' }}>
-            <div className="font-medium text-gray-500 mb-1.5 text-[10px] uppercase tracking-wider">{colorField}</div>
+          <div className="absolute top-3 right-3 rounded-lg px-3 py-2 text-[11px] space-y-1 max-w-[180px] shadow-md bg-card/95 border">
+            <div className="font-medium text-muted-foreground mb-1.5 text-[10px] uppercase tracking-wider">{colorField}</div>
             {legend.map(([v, c]) => (
               <div key={v} className="flex items-center gap-2 truncate">
                 <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: c, boxShadow: `0 0 4px ${c}` }} />
-                <span className="truncate text-gray-700">{v}</span>
+                <span className="truncate text-foreground">{v}</span>
               </div>
             ))}
           </div>
         )}
         {selectedNode && (
-          <div className="absolute bottom-3 left-3 rounded-lg px-4 py-3 text-xs max-w-[350px] shadow-lg" style={{ background: 'rgba(255,255,255,0.95)', border: '1px solid rgba(0,0,0,0.1)' }}>
+          <div className="absolute bottom-3 left-3 rounded-lg px-4 py-3 text-xs max-w-[350px] shadow-lg bg-card/95 border">
             <div className="flex items-center justify-between mb-2">
-              <span className="font-mono font-medium text-gray-900 truncate mr-3 text-[13px]">{selectedNode.id}</span>
-              <button onClick={() => setSelectedNode(null)} className="text-gray-400 hover:text-gray-700 transition-colors"><X className="w-4 h-4" /></button>
+              <span className="font-mono font-medium text-foreground truncate mr-3 text-[13px]">{selectedNode.id}</span>
+              <button onClick={() => selectNode(null)} className="text-muted-foreground hover:text-foreground transition-colors"><X className="w-4 h-4" /></button>
             </div>
             <div className="space-y-1 max-h-[140px] overflow-y-auto pr-1">
               {Object.entries(selectedNode.fields).slice(0, 15).map(([k, v]) => (
-                <div key={k} className="flex gap-2"><span className="text-gray-400 flex-shrink-0">{k}</span><span className="truncate font-mono text-gray-700">{v}</span></div>
+                <div key={k} className="flex gap-2"><span className="text-muted-foreground flex-shrink-0">{k}</span><span className="truncate font-mono text-foreground">{v}</span></div>
               ))}
             </div>
-            <div className="flex items-center gap-3 mt-2 pt-2 text-[10px] text-gray-400" style={{ borderTop: '1px solid rgba(0,0,0,0.06)' }}>
+            <div className="flex items-center gap-3 mt-2 pt-2 text-[10px] text-muted-foreground border-t">
               <span>{selectedNode.degree} connections</span>
               {expanding && <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Expanding...</span>}
               {selectedNode.expanded && !expanding && <span>Expanded</span>}
@@ -2538,7 +2548,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
         )}
         {nodeCount === 0 && !loading && (
           <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center"><div className="text-gray-400 text-sm mb-2">Click &ldquo;Build Graph&rdquo; to visualize the vector space</div><div className="text-gray-300 text-xs">Nodes represent keys, edges show vector similarity</div></div>
+            <div className="text-center"><div className="text-muted-foreground text-sm mb-2">Click &ldquo;Build Graph&rdquo; to visualize the vector space</div><div className="text-muted-foreground/60 text-xs">Nodes represent keys, edges show vector similarity</div></div>
           </div>
         )}
       </div>

@@ -5,7 +5,6 @@ import type {
   VectorIndexDefinition,
   VectorSearchResult,
   TextSearchResult,
-  AggregateResult,
   ProfileResult,
   ProfileIterator,
   ProfileProcessor,
@@ -271,25 +270,6 @@ export function parseSearchConfig(raw: unknown[]): Record<string, string> {
     }
   }
   return config;
-}
-
-// --- Aggregate ---
-
-export function parseAggregateResponse(raw: unknown[]): AggregateResult {
-  const totalResults = Number(raw[0] ?? 0);
-  const results: Array<Record<string, string>> = [];
-
-  for (let i = 1; i < raw.length; i++) {
-    const row = raw[i];
-    if (!Array.isArray(row)) continue;
-    const record: Record<string, string> = {};
-    for (let j = 0; j < row.length; j += 2) {
-      record[String(row[j])] = String(row[j + 1] ?? '');
-    }
-    results.push(record);
-  }
-
-  return { totalResults, results };
 }
 
 // --- Profile ---
