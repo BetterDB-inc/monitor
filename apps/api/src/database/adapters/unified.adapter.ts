@@ -24,12 +24,11 @@ import {
   VectorIndexInfo,
   VectorSearchResult,
   TextSearchResult,
-  AggregateResult,
   ProfileResult,
 } from '../../common/types/metrics.types';
 import {
   parseVectorIndexInfo, parseVectorSearchResponse, parseTextSearchResponse,
-  parseSearchConfig, parseAggregateResponse, parseProfileResponse,
+  parseSearchConfig, parseProfileResponse,
   sanitizeFilter, FIELD_NAME_RE, INDEX_NAME_RE,
 } from '../parsers/vector-index.parser';
 import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyPatternData } from '@betterdb/shared';
@@ -717,27 +716,6 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     } catch {
       // FT.CONFIG not available (e.g., Valkey Search) — return empty config
       return {};
-    }
-  }
-
-  async aggregate(indexName: string, query: string, args: string[]): Promise<AggregateResult> {
-    if (!this.capabilities?.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
-    }
-    if (!INDEX_NAME_RE.test(indexName)) {
-      throw new Error(`Invalid index name: ${indexName}`);
-    }
-    if (!query || query.length > 1024) {
-      throw new Error('Query is required and must be under 1024 characters');
-    }
-    try {
-      const raw = (await this.client.call(
-        'FT.AGGREGATE', indexName, query, ...args,
-      )) as unknown[];
-      return parseAggregateResponse(raw);
-    } catch {
-      // FT.AGGREGATE not available (e.g., Valkey Search) — return empty result
-      return { totalResults: 0, results: [] };
     }
   }
 

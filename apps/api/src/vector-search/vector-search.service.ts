@@ -1,7 +1,7 @@
 import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
-import { VectorIndexInfo, VectorSearchResult, TextSearchResult, AggregateResult, ProfileResult, FieldDistribution } from '../common/types/metrics.types';
+import { VectorIndexInfo, VectorSearchResult, TextSearchResult, ProfileResult, FieldDistribution } from '../common/types/metrics.types';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import type { VectorIndexSnapshot } from '@betterdb/shared';
@@ -233,10 +233,6 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
 
   async getSearchConfig(connectionId?: string): Promise<Record<string, string>> {
     return this.getCheckedClient(connectionId).getSearchConfig();
-  }
-
-  async aggregate(connectionId: string | undefined, indexName: string, query: string, args: string[]): Promise<AggregateResult> {
-    return this.getCheckedClient(connectionId).aggregate(indexName, query, args);
   }
 
   async profileSearch(connectionId: string | undefined, indexName: string, query: string, limited?: boolean): Promise<ProfileResult> {

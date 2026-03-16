@@ -24,12 +24,11 @@ import type {
   VectorIndexInfo,
   VectorSearchResult,
   TextSearchResult,
-  AggregateResult,
   ProfileResult,
 } from '../../apps/api/src/common/types/metrics.types';
 import {
   parseVectorIndexInfo, parseVectorSearchResponse, parseTextSearchResponse,
-  parseSearchConfig, parseAggregateResponse, parseProfileResponse,
+  parseSearchConfig, parseProfileResponse,
   sanitizeFilter, INDEX_NAME_RE, FIELD_NAME_RE,
 } from '../../apps/api/src/database/parsers/vector-index.parser';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
@@ -499,7 +498,10 @@ export class AgentDatabaseAdapter implements DatabasePort {
   async textSearch(indexName: string, query: string, offset = 0, limit = 20): Promise<TextSearchResult> {
     if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
     if (!INDEX_NAME_RE.test(indexName)) throw new Error(`Invalid index name: ${indexName}`);
-    const args = ['SEARCH', indexName, query, 'LIMIT', String(offset), String(limit)];
+    if (!query || query.length > 1024) throw new Error('Query is required and must be under 1024 characters');
+    const clampedLimit = Math.min(Math.max(limit, 1), 100);
+    const clampedOffset = Math.max(offset, 0);
+    const args = ['SEARCH', indexName, query, 'LIMIT', String(clampedOffset), String(clampedLimit)];
     if (this.capabilities?.dbType === 'redis') {
       args.push('DIALECT', '2');
     }
@@ -543,18 +545,6 @@ export class AgentDatabaseAdapter implements DatabasePort {
     } catch {
       // FT.CONFIG not available (e.g., Valkey Search) — return empty config
       return {};
-    }
-  }
-
-  async aggregate(indexName: string, query: string, args: string[]): Promise<AggregateResult> {
-    if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
-    if (!INDEX_NAME_RE.test(indexName)) throw new Error(`Invalid index name: ${indexName}`);
-    try {
-      const raw = await this.sendCommand('FT', ['AGGREGATE', indexName, query, ...args]);
-      return parseAggregateResponse(raw as unknown[]);
-    } catch {
-      // FT.AGGREGATE not available (e.g., Valkey Search) — return empty result
-      return { totalResults: 0, results: [] };
     }
   }
 
