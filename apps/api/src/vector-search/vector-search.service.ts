@@ -76,12 +76,19 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
 
   async getSnapshots(connectionId: string | undefined, indexName: string, hours: number = 24): Promise<VectorIndexSnapshot[]> {
     const resolvedId = connectionId ?? this.connectionRegistry.getDefaultId() ?? undefined;
-    return this.storage.getVectorIndexSnapshots({
+    const allSnapshots = await this.storage.getVectorIndexSnapshots({
       connectionId: resolvedId,
       indexName,
       startTime: Date.now() - hours * 60 * 60 * 1000,
-      limit: 200,
     });
+    // Downsample to ~200 points for display — evenly spaced across the window
+    if (allSnapshots.length <= 200) return allSnapshots;
+    const step = allSnapshots.length / 200;
+    const sampled: VectorIndexSnapshot[] = [];
+    for (let i = 0; i < 200; i++) {
+      sampled.push(allSnapshots[Math.round(i * step)]);
+    }
+    return sampled;
   }
 
   private getCheckedClient(connectionId?: string) {
