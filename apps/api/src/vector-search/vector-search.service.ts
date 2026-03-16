@@ -1,7 +1,7 @@
 import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
-import { VectorIndexInfo, VectorSearchResult } from '../common/types/metrics.types';
+import { VectorIndexInfo, VectorSearchResult, TextSearchResult, AggregateResult, ProfileResult, FieldDistribution } from '../common/types/metrics.types';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import type { VectorIndexSnapshot } from '@betterdb/shared';
@@ -12,7 +12,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
 
   private readonly POLL_INTERVAL_MS = 30_000;
   private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-  private lastPruneTime = 0;
+  private lastPruneByConnection = new Map<string, number>();
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -28,6 +28,10 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
   async onModuleInit(): Promise<void> {
     this.logger.log(`Starting vector index snapshot polling (interval: ${this.getIntervalMs()}ms)`);
     this.start();
+  }
+
+  protected onConnectionRemoved(connectionId: string): void {
+    this.lastPruneByConnection.delete(connectionId);
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
@@ -53,8 +57,9 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       await this.storage.saveVectorIndexSnapshots(snapshots, ctx.connectionId);
 
       const now = Date.now();
-      if (now - this.lastPruneTime > this.PRUNE_INTERVAL_MS) {
-        this.lastPruneTime = now;
+      const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;
+      if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
+        this.lastPruneByConnection.set(ctx.connectionId, now);
         await this.storage.pruneOldVectorIndexSnapshots(
           now - 7 * 24 * 60 * 60 * 1000,
           ctx.connectionId,
@@ -216,5 +221,97 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
     }
 
     return { keys, cursor: returnCursor };
+  }
+
+  async textSearch(connectionId: string | undefined, indexName: string, query: string, offset?: number, limit?: number): Promise<TextSearchResult> {
+    return this.getCheckedClient(connectionId).textSearch(indexName, query, offset, limit);
+  }
+
+  async getTagValues(connectionId: string | undefined, indexName: string, fieldName: string): Promise<string[]> {
+    return this.getCheckedClient(connectionId).getTagValues(indexName, fieldName);
+  }
+
+  async getSearchConfig(connectionId?: string): Promise<Record<string, string>> {
+    return this.getCheckedClient(connectionId).getSearchConfig();
+  }
+
+  async aggregate(connectionId: string | undefined, indexName: string, query: string, args: string[]): Promise<AggregateResult> {
+    return this.getCheckedClient(connectionId).aggregate(indexName, query, args);
+  }
+
+  async profileSearch(connectionId: string | undefined, indexName: string, query: string, limited?: boolean): Promise<ProfileResult> {
+    return this.getCheckedClient(connectionId).profileSearch(indexName, query, limited);
+  }
+
+  async getFieldDistribution(connectionId: string | undefined, indexName: string, fieldName: string, fieldType: string): Promise<FieldDistribution> {
+    const docs = await this.sampleDocuments(connectionId, indexName);
+
+    if (fieldType === 'TAG') {
+      return this.getTagDistribution(docs, fieldName);
+    }
+    if (fieldType === 'NUMERIC') {
+      return this.getNumericDistribution(docs, fieldName);
+    }
+    return this.getTextDistribution(docs, fieldName);
+  }
+
+  /** Try FT.SEARCH * first; fall back to SCAN-based sampling (Valkey Search doesn't support wildcard text queries) */
+  private async sampleDocuments(connectionId: string | undefined, indexName: string): Promise<Record<string, string>[]> {
+    const client = this.getCheckedClient(connectionId);
+    try {
+      const result = await client.textSearch(indexName, '*', 0, 100);
+      return result.results.map(r => r.fields);
+    } catch {
+      // FT.SEARCH * not supported (Valkey Search) — fall back to SCAN + HGETALL
+      const sampled = await this.sampleKeys(connectionId, indexName, '0', 100);
+      return sampled.keys.map(k => k.fields);
+    }
+  }
+
+  private getTagDistribution(docs: Record<string, string>[], fieldName: string): FieldDistribution {
+    const freq = new Map<string, number>();
+    for (const fields of docs) {
+      const v = fields[fieldName];
+      if (v) {
+        for (const tag of v.split(',')) {
+          const trimmed = tag.trim();
+          if (trimmed) freq.set(trimmed, (freq.get(trimmed) ?? 0) + 1);
+        }
+      }
+    }
+    const distribution = [...freq.entries()]
+      .map(([value, count]) => ({ value, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 50);
+    return { fieldName, type: 'TAG', distribution };
+  }
+
+  private getNumericDistribution(docs: Record<string, string>[], fieldName: string): FieldDistribution {
+    const values = docs
+      .map(f => parseFloat(f[fieldName]))
+      .filter(v => !isNaN(v));
+    if (values.length === 0) {
+      return { fieldName, type: 'NUMERIC', distribution: [], stats: { min: 0, max: 0, avg: 0, count: 0 } };
+    }
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const avg = values.reduce((s, v) => s + v, 0) / values.length;
+    return { fieldName, type: 'NUMERIC', distribution: [], stats: { min, max, avg, count: docs.length } };
+  }
+
+  private getTextDistribution(docs: Record<string, string>[], fieldName: string): FieldDistribution {
+    const freq = new Map<string, number>();
+    for (const fields of docs) {
+      const v = fields[fieldName];
+      if (v) {
+        const truncated = v.length > 60 ? v.slice(0, 57) + '...' : v;
+        freq.set(truncated, (freq.get(truncated) ?? 0) + 1);
+      }
+    }
+    const distribution = [...freq.entries()]
+      .map(([value, count]) => ({ value, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 50);
+    return { fieldName, type: 'TEXT', distribution };
   }
 }

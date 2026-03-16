@@ -3,12 +3,13 @@ import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card'
 import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
 import { InsightCallout } from '../components/InsightCallout';
-import { Search, ChevronDown, ChevronUp, ChevronRight, CheckCircle, Loader2 } from 'lucide-react';
+import { Search, ChevronDown, ChevronUp, ChevronRight, CheckCircle, Loader2, TrendingUp, TrendingDown, Minus, Clock, BarChart3, X } from 'lucide-react';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useCapabilities } from '../hooks/useCapabilities';
 import { metricsApi } from '../api/metrics';
-import type { VectorIndexInfo, VectorIndexField, VectorSearchResult, VectorIndexSnapshot } from '../types/metrics';
+import { LineChart, Line, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import type { VectorIndexInfo, VectorIndexField, VectorSearchResult, VectorIndexSnapshot, TextSearchResult, FieldDistribution, ProfileResult, ProfileIterator } from '../types/metrics';
 
 interface PollingData {
   indexes: string[];
@@ -18,7 +19,7 @@ interface PollingData {
 
 export function VectorSearch() {
   const { currentConnection } = useConnection();
-  const { hasVectorSearch } = useCapabilities();
+  const { hasVectorSearch, isValkey } = useCapabilities();
 
   const fetchIndexes = useCallback(async (signal?: AbortSignal): Promise<PollingData> => {
     const { indexes } = await metricsApi.getVectorIndexList(signal);
@@ -121,6 +122,10 @@ export function VectorSearch() {
         </Card>
       ) : (
         <div className="space-y-4">
+          {/* Multi-index overview when >1 index */}
+          {details.length > 1 && (
+            <IndexOverviewGrid details={details} usedMemoryBytes={data?.usedMemoryBytes ?? 0} />
+          )}
           {details.length > 0
             ? details.map(info => (
               <IndexCard key={info.name} info={info} usedMemoryBytes={data?.usedMemoryBytes ?? 0} />
@@ -132,6 +137,9 @@ export function VectorSearch() {
               </Card>
             ))
           }
+
+          {/* Search Module Config — only available on RediSearch */}
+          {!isValkey && <SearchConfigCard />}
         </div>
       )}
     </div>
@@ -147,7 +155,60 @@ function PageHeader() {
   );
 }
 
-function Sparkline({ snapshots }: { snapshots: VectorIndexSnapshot[] }) {
+// --- Multi-index overview grid (feature #5) ---
+
+function IndexOverviewGrid({ details, usedMemoryBytes }: { details: VectorIndexInfo[]; usedMemoryBytes: number }) {
+  const totalDocs = details.reduce((s, d) => s + d.numDocs, 0);
+  const totalMemory = details.reduce((s, d) => s + d.memorySizeMb, 0);
+  const indexing = details.filter(d => d.percentIndexed < 100);
+  const withFailures = details.filter(d => d.indexingFailures > 0);
+
+  return (
+    <Card>
+      <CardContent className="pt-4 pb-3">
+        <div className="flex flex-wrap gap-6 text-sm">
+          <div>
+            <span className="text-muted-foreground text-xs">Indexes</span>
+            <p className="font-semibold text-base">{details.length}</p>
+          </div>
+          <div>
+            <span className="text-muted-foreground text-xs">Total Documents</span>
+            <p className="font-semibold text-base">{totalDocs.toLocaleString()}</p>
+          </div>
+          {totalMemory > 0 && (
+            <div>
+              <span className="text-muted-foreground text-xs">Total Index Memory</span>
+              <p className="font-semibold text-base">
+                {formatMemory(totalMemory)}
+                {usedMemoryBytes > 0 && (
+                  <span className="text-muted-foreground text-xs ml-1">
+                    ({Math.min((totalMemory * 1024 * 1024) / usedMemoryBytes * 100, 100).toFixed(1)}% of instance)
+                  </span>
+                )}
+              </p>
+            </div>
+          )}
+          {indexing.length > 0 && (
+            <div>
+              <span className="text-muted-foreground text-xs">Currently Indexing</span>
+              <p className="font-semibold text-base text-amber-600">{indexing.length}</p>
+            </div>
+          )}
+          {withFailures.length > 0 && (
+            <div>
+              <span className="text-muted-foreground text-xs">With Failures</span>
+              <p className="font-semibold text-base text-destructive">{withFailures.length}</p>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// --- Sparkline with click-to-expand trend chart (feature #1) ---
+
+function Sparkline({ snapshots, hoursLabel }: { snapshots: VectorIndexSnapshot[]; hoursLabel: string }) {
   if (snapshots.length < 3) return null;
 
   const sorted = [...snapshots].sort((a, b) => a.timestamp - b.timestamp);
@@ -161,28 +222,125 @@ function Sparkline({ snapshots }: { snapshots: VectorIndexSnapshot[] }) {
     `${(i / (values.length - 1)) * w},${h - ((v - min) / range) * (h - 2) - 1}`
   ).join(' ');
 
+  // Trend indicator
+  const first = values[0];
+  const last = values[values.length - 1];
+  const delta = last - first;
+  const pctChange = first > 0 ? ((delta / first) * 100) : 0;
+
   return (
     <div className="min-w-[80px]">
-      <span className="text-muted-foreground text-xs">docs / 24h</span>
-      <svg width={w} height={h} className="block mt-0.5">
-        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
-      </svg>
+      <span className="text-muted-foreground text-xs">docs / {hoursLabel}</span>
+      <div className="flex items-center gap-1.5 mt-0.5">
+        <svg width={w} height={h} className="block">
+          <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
+        </svg>
+        <TrendIndicator delta={delta} pctChange={pctChange} />
+      </div>
+    </div>
+  );
+}
+
+function TrendIndicator({ delta, pctChange }: { delta: number; pctChange: number }) {
+  if (Math.abs(pctChange) < 0.1) {
+    return <Minus className="w-3 h-3 text-muted-foreground" />;
+  }
+  if (delta > 0) {
+    return (
+      <span className="flex items-center gap-0.5 text-[10px] text-green-600">
+        <TrendingUp className="w-3 h-3" />
+        +{Math.abs(pctChange).toFixed(1)}%
+      </span>
+    );
+  }
+  return (
+    <span className="flex items-center gap-0.5 text-[10px] text-red-500">
+      <TrendingDown className="w-3 h-3" />
+      -{Math.abs(pctChange).toFixed(1)}%
+    </span>
+  );
+}
+
+// --- Expanded trend chart modal (feature #1) ---
+
+function TrendChartPanel({ snapshots, indexName, hoursLabel, onClose }: { snapshots: VectorIndexSnapshot[]; indexName: string; hoursLabel: string; onClose: () => void }) {
+  const sorted = useMemo(() => [...snapshots].sort((a, b) => a.timestamp - b.timestamp), [snapshots]);
+
+  const docData = sorted.map(s => ({
+    time: new Date(s.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    docs: s.numDocs,
+  }));
+
+  const memData = sorted.filter(s => s.memorySizeMb > 0).map(s => ({
+    time: new Date(s.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    memory: s.memorySizeMb,
+  }));
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  return (
+    <div className="border rounded-lg p-4 bg-card space-y-4">
+      <div className="flex items-center justify-between">
+        <h4 className="text-sm font-medium flex items-center gap-1.5">
+          <BarChart3 className="w-4 h-4" />
+          {indexName} — {hoursLabel} Trend
+        </h4>
+        <button onClick={onClose} className="p-1 hover:bg-muted rounded transition-colors">
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div>
+        <p className="text-xs text-muted-foreground mb-1">Document Count</p>
+        <ResponsiveContainer width="100%" height={160}>
+          <LineChart data={docData}>
+            <XAxis dataKey="time" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
+            <YAxis tick={{ fontSize: 10 }} width={50} tickFormatter={v => v.toLocaleString()} />
+            <Tooltip formatter={(v) => [Number(v).toLocaleString(), 'Documents']} />
+            <Line type="monotone" dataKey="docs" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      {memData.length > 3 && (
+        <div>
+          <p className="text-xs text-muted-foreground mb-1">Memory Usage (MB)</p>
+          <ResponsiveContainer width="100%" height={120}>
+            <AreaChart data={memData}>
+              <XAxis dataKey="time" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
+              <YAxis tick={{ fontSize: 10 }} width={50} tickFormatter={v => `${v.toFixed(1)}`} />
+              <Tooltip formatter={(v) => [`${Number(v).toFixed(2)} MB`, 'Memory']} />
+              <Area type="monotone" dataKey="memory" stroke="hsl(var(--primary))" fill="hsl(var(--primary))" fillOpacity={0.1} strokeWidth={2} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      )}
     </div>
   );
 }
 
 function IndexCard({ info, usedMemoryBytes }: { info: VectorIndexInfo; usedMemoryBytes: number }) {
+  const { currentConnection } = useConnection();
   const [showDetails, setShowDetails] = useState(false);
+  const [showTrendChart, setShowTrendChart] = useState(false);
   const [snapshots, setSnapshots] = useState<VectorIndexSnapshot[] | null>(null);
+  const [snapshotHours, setSnapshotHours] = useState(24);
   const insights = getInsights(info);
   const vectorField = info.fields.find(f => f.type === 'VECTOR');
   const semanticCache = isSemanticCache(info);
 
   useEffect(() => {
-    metricsApi.getVectorIndexSnapshots(info.name, 24)
+    setSnapshots(null);
+    metricsApi.getVectorIndexSnapshots(info.name, snapshotHours)
       .then(res => setSnapshots(res.snapshots))
       .catch(() => { /* ignore */ });
-  }, [info.name]);
+  }, [info.name, currentConnection?.id, snapshotHours]);
+
+  const hoursLabel = snapshotHours <= 24 ? `${snapshotHours}h` : '7d';
 
   return (
     <Card>
@@ -196,6 +354,25 @@ function IndexCard({ info, usedMemoryBytes }: { info: VectorIndexInfo; usedMemor
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* Indexing progress bar (feature #2) */}
+        {info.percentIndexed < 100 && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground flex items-center gap-1">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Indexing in progress
+              </span>
+              <span className="font-medium">{Math.round(info.percentIndexed)}%</span>
+            </div>
+            <div className="h-2 w-full bg-muted rounded-full overflow-hidden">
+              <div
+                className="h-full bg-primary rounded-full transition-all duration-500"
+                style={{ width: `${Math.min(info.percentIndexed, 100)}%` }}
+              />
+            </div>
+          </div>
+        )}
+
         {/* Section 1: Overview row */}
         <div className="flex flex-wrap gap-6 text-sm">
           <StatItem label="Documents" value={info.numDocs.toLocaleString()} />
@@ -217,8 +394,43 @@ function IndexCard({ info, usedMemoryBytes }: { info: VectorIndexInfo; usedMemor
               </>
             } />
           )}
-          {snapshots && <Sparkline snapshots={snapshots} />}
+          {snapshots && snapshots.length >= 3 && (
+            <button
+              onClick={() => setShowTrendChart(prev => !prev)}
+              className="hover:bg-muted/50 rounded px-1 -mx-1 transition-colors"
+              title="Click to expand trend chart"
+            >
+              <Sparkline snapshots={snapshots} hoursLabel={hoursLabel} />
+            </button>
+          )}
+          {snapshots && snapshots.length < 3 && <Sparkline snapshots={snapshots} hoursLabel={hoursLabel} />}
+          {/* Snapshot time window control */}
+          <div className="inline-flex items-center border rounded overflow-hidden ml-auto">
+            {([6, 24, 168] as const).map(h => (
+              <button
+                key={h}
+                onClick={() => setSnapshotHours(h)}
+                className={`px-1.5 py-0.5 text-[11px] leading-tight ${snapshotHours === h ? 'bg-muted text-foreground font-medium' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                {h <= 24 ? `${h}h` : '7d'}
+              </button>
+            ))}
+          </div>
         </div>
+
+        {/* Expanded trend chart (feature #1) */}
+        {showTrendChart && snapshots && snapshots.length >= 3 && (
+          <TrendChartPanel snapshots={snapshots} indexName={info.name} hoursLabel={hoursLabel} onClose={() => setShowTrendChart(false)} />
+        )}
+
+        {/* GC stats summary (feature #3) — promoted from collapsible */}
+        {info.gcStats && (
+          <div className="flex flex-wrap gap-4 text-xs text-muted-foreground bg-muted/30 rounded-md px-3 py-2">
+            <span>GC Cycles: <span className="font-medium text-foreground">{info.gcStats.gcCycles.toLocaleString()}</span></span>
+            <span>Bytes Collected: <span className="font-medium text-foreground">{formatBytes(info.gcStats.bytesCollected)}</span></span>
+            <span>GC Time: <span className="font-medium text-foreground">{info.gcStats.totalMsRun.toLocaleString()} ms</span></span>
+          </div>
+        )}
 
         {/* Insight callouts */}
         {insights.length > 0 ? (
@@ -258,7 +470,7 @@ function IndexCard({ info, usedMemoryBytes }: { info: VectorIndexInfo; usedMemor
                       </Badge>
                     </td>
                     <td className="px-3 py-1.5 text-muted-foreground">
-                      <FieldDetails field={field} />
+                      <FieldDetails field={field} indexName={info.name} />
                     </td>
                   </tr>
                 ))}
@@ -368,7 +580,7 @@ const HNSW_TOOLTIP = [
   'ef_runtime: Candidates examined per query. Higher = better recall, slower queries. Can be overridden per-query with EF_RUNTIME.',
 ].join('\n');
 
-function FieldDetails({ field }: { field: VectorIndexField }) {
+function FieldDetails({ field, indexName }: { field: VectorIndexField; indexName: string }) {
   if (field.type === 'VECTOR') {
     const primary = [
       field.dimension != null ? `dim=${field.dimension}` : null,
@@ -414,7 +626,9 @@ function FieldDetails({ field }: { field: VectorIndexField }) {
     if (field.sortable) badges.push('SORTABLE');
   }
 
-  if (parts.length === 0 && badges.length === 0) return null;
+  const showTagExplorer = field.type === 'TAG';
+
+  if (parts.length === 0 && badges.length === 0 && !showTagExplorer) return null;
 
   return (
     <span className="inline-flex items-center gap-1.5 flex-wrap">
@@ -422,6 +636,7 @@ function FieldDetails({ field }: { field: VectorIndexField }) {
       {badges.map(b => (
         <Badge key={b} variant="outline" className="text-[10px] px-1 py-0">{b}</Badge>
       ))}
+      {showTagExplorer && <TagValueExplorer indexName={indexName} fieldName={field.name} />}
     </span>
   );
 }
@@ -835,9 +1050,10 @@ function LongValue({ value }: { value: string }) {
 
 // --- Search tester ---
 
-type SearchTab = 'similar' | 'browse';
+type SearchTab = 'browse' | 'similar' | 'text' | 'distribution' | 'profile' | 'graph';
 
 function SearchTester({ info }: { info: VectorIndexInfo }) {
+  const { isValkey } = useCapabilities();
   const vectorFields = info.fields.filter(f => f.type === 'VECTOR');
   const nonVectorFields = info.fields.filter(f => f.type !== 'VECTOR');
 
@@ -855,6 +1071,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
   const [simResults, setSimResults] = useState<VectorSearchResult[] | null>(null);
   const [simLoading, setSimLoading] = useState(false);
   const [simError, setSimError] = useState<string | null>(null);
+  const [searchLatencyMs, setSearchLatencyMs] = useState<number | null>(null);
 
   // --- Key picker state ---
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -936,6 +1153,8 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
     setSimError(null);
     setSimResults(null);
     setSimExpanded(new Set());
+    setSearchLatencyMs(null);
+    const t0 = performance.now();
     try {
       const { results: res } = await metricsApi.vectorSearch(info.name, {
         sourceKey: key,
@@ -943,6 +1162,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
         k,
         filter: filter.trim() || undefined,
       });
+      setSearchLatencyMs(Math.round(performance.now() - t0));
       setSimResults(res);
     } catch (err) {
       if (err instanceof Error) {
@@ -1008,9 +1228,19 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
   return (
     <div className="border-t pt-4 space-y-3">
       {/* Tabs */}
-      <div className="flex gap-1 border-b">
+      <div className="flex gap-1 border-b flex-wrap">
         <button className={tabClass('browse')} onClick={() => setTab('browse')}>Browse</button>
         <button className={tabClass('similar')} onClick={() => setTab('similar')}>Find Similar</button>
+        {!isValkey && info.fields.some(f => f.type === 'TEXT' || f.type === 'TAG') && (
+          <button className={tabClass('text')} onClick={() => setTab('text')}>Text Search</button>
+        )}
+        <button className={tabClass('distribution')} onClick={() => setTab('distribution')}>Data</button>
+        {vectorFields.length > 0 && (
+          <button className={tabClass('graph')} onClick={() => setTab('graph')}>Graph</button>
+        )}
+        {!isValkey && (
+          <button className={tabClass('profile')} onClick={() => setTab('profile')}>Profiler</button>
+        )}
       </div>
 
       {/* === Find Similar Tab === */}
@@ -1140,6 +1370,12 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
           {/* Results */}
           {simError && <p className="text-sm text-destructive">{simError}</p>}
           {simResults && simResults.length === 0 && <p className="text-sm text-muted-foreground">No results found.</p>}
+          {simResults && simResults.length > 0 && searchLatencyMs != null && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Clock className="w-3 h-3" />
+              <span>{simResults.length} result{simResults.length !== 1 ? 's' : ''} in <span className="font-medium text-foreground">{searchLatencyMs} ms</span></span>
+            </div>
+          )}
           {simResults && simResults.length > 0 && (
             <div className="border rounded-md overflow-hidden">
               <table className="w-full text-sm">
@@ -1218,7 +1454,18 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
                 onChange={e => setBrowseFilter(e.target.value)}
                 placeholder="Type to filter..."
                 className="w-full px-2.5 py-1.5 text-sm border rounded-md bg-background"
+                list={`browse-fields-${info.name}`}
               />
+              {/* Auto-suggest field names (feature #6) */}
+              <datalist id={`browse-fields-${info.name}`}>
+                {nonVectorFields.map(f => (
+                  <option key={f.name} value={f.name} />
+                ))}
+              </datalist>
+              {/* Prefix breakdown when multiple prefixes */}
+              {info.indexDefinition?.prefixes && info.indexDefinition.prefixes.length > 1 && browseKeys.length > 0 && (
+                <PrefixBreakdown keys={browseKeys} prefixes={info.indexDefinition.prefixes} />
+              )}
             </div>
           )}
 
@@ -1306,6 +1553,1105 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
           )}
         </div>
       )}
+
+      {/* === Text Search Tab === */}
+      {tab === 'text' && (
+        <TextSearchTab info={info} />
+      )}
+
+      {/* === Distribution Tab === */}
+      {tab === 'distribution' && (
+        <DistributionTab info={info} />
+      )}
+
+      {/* === Graph Tab === */}
+      {tab === 'graph' && (
+        <VectorGraphTab info={info} />
+      )}
+
+      {/* === Profiler Tab === */}
+      {tab === 'profile' && (
+        <ProfilerTab info={info} />
+      )}
+    </div>
+  );
+}
+
+// --- Text Search Tab ---
+
+function TextSearchTab({ info }: { info: VectorIndexInfo }) {
+  const [query, setQuery] = useState('*');
+  const [results, setResults] = useState<TextSearchResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [offset, setOffset] = useState(0);
+  const limit = 20;
+
+  const handleSearch = async (newOffset = 0) => {
+    if (!query.trim()) return;
+    setLoading(true);
+    setError(null);
+    setLatencyMs(null);
+    setOffset(newOffset);
+    const t0 = performance.now();
+    try {
+      const res = await metricsApi.textSearch(info.name, { query: query.trim(), offset: newOffset, limit });
+      setLatencyMs(Math.round(performance.now() - t0));
+      setResults(res);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Search failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fieldMeta = useMemo(() => buildFieldMeta(results?.results ?? []), [results]);
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Run full-text queries using FT.SEARCH syntax.
+      </p>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="hello world | @field:{value} | @price:[0 100]"
+          className="flex-1 px-2.5 py-1.5 text-sm border rounded-md bg-background font-mono"
+          onKeyDown={e => { if (e.key === 'Enter') handleSearch(0); }}
+        />
+        <button
+          onClick={() => handleSearch(0)}
+          disabled={loading || !query.trim()}
+          className="px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 flex items-center gap-1.5"
+        >
+          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+          Search
+        </button>
+      </div>
+      <p className="text-[11px] text-muted-foreground/60">
+        Examples: <code className="font-mono">*</code> (all), <code className="font-mono">hello world</code> (text), <code className="font-mono">@tag:{'{'}val{'}'}</code> (tag filter), <code className="font-mono">@num:[0 100]</code> (range)
+      </p>
+
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
+      {results && (
+        <>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {latencyMs != null && <><Clock className="w-3 h-3" /><span>{results.totalResults.toLocaleString()} total result{results.totalResults !== 1 ? 's' : ''} in <span className="font-medium text-foreground">{latencyMs} ms</span></span></>}
+            {results.totalResults > limit && <span className="ml-2">Showing {offset + 1}–{Math.min(offset + limit, results.totalResults)}</span>}
+          </div>
+
+          {results.results.length > 0 && (
+            <TextSearchResults results={results.results} fieldMeta={fieldMeta} />
+          )}
+          {results.results.length === 0 && <p className="text-sm text-muted-foreground">No results found.</p>}
+
+          {results.totalResults > limit && (
+            <div className="flex gap-2 justify-center">
+              <button
+                disabled={offset === 0}
+                onClick={() => handleSearch(Math.max(0, offset - limit))}
+                className="px-3 py-1 text-xs border rounded-md disabled:opacity-30"
+              >
+                Previous
+              </button>
+              <button
+                disabled={offset + limit >= results.totalResults}
+                onClick={() => handleSearch(offset + limit)}
+                className="px-3 py-1 text-xs border rounded-md disabled:opacity-30"
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function TextSearchResults({ results, fieldMeta }: { results: Array<{ key: string; fields: Record<string, string> }>; fieldMeta: Record<string, FieldMeta> }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  return (
+    <div className="border rounded-md overflow-hidden">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b bg-muted/50">
+            <th className="text-left px-3 py-1.5 font-medium w-[40px]">#</th>
+            <th className="text-left px-3 py-1.5 font-medium">Key</th>
+          </tr>
+        </thead>
+        <tbody>
+          {results.map((row, idx) => (
+            <Fragment key={row.key}>
+              <tr
+                onClick={() => setExpanded(prev => toggleInSet(prev, row.key))}
+                className="border-b last:border-0 cursor-pointer hover:bg-muted/30 transition-colors"
+              >
+                <td className="px-3 py-1.5 text-muted-foreground">{idx + 1}</td>
+                <td className="px-3 py-1.5">
+                  <span className="flex items-center gap-1">
+                    <ChevronRight className={`w-3 h-3 shrink-0 transition-transform ${expanded.has(row.key) ? 'rotate-90' : ''}`} />
+                    <span className="font-mono text-xs truncate">{row.key}</span>
+                  </span>
+                </td>
+              </tr>
+              {expanded.has(row.key) && (
+                <tr className="border-b last:border-0 bg-muted/20">
+                  <td colSpan={2} className="px-3 py-2">
+                    <FieldGrid fields={row.fields} fieldMeta={fieldMeta} docKey={row.key} />
+                  </td>
+                </tr>
+              )}
+            </Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// --- Distribution Tab ---
+
+function DistributionTab({ info }: { info: VectorIndexInfo }) {
+  const nonVectorFields = info.fields.filter(f => f.type !== 'VECTOR');
+  const [distributions, setDistributions] = useState<Record<string, FieldDistribution>>({});
+  const [loading, setLoading] = useState<Set<string>>(new Set());
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  const loadDistribution = async (fieldName: string, fieldType: string) => {
+    setLoading(prev => new Set(prev).add(fieldName));
+    try {
+      const dist = await metricsApi.getFieldDistribution(info.name, fieldName, fieldType);
+      setDistributions(prev => ({ ...prev, [fieldName]: dist }));
+      setErrors(prev => { const n = { ...prev }; delete n[fieldName]; return n; });
+    } catch (err) {
+      setErrors(prev => ({ ...prev, [fieldName]: err instanceof Error ? err.message : 'Failed' }));
+    } finally {
+      setLoading(prev => { const n = new Set(prev); n.delete(fieldName); return n; });
+    }
+  };
+
+  const loadAll = async () => {
+    for (const field of nonVectorFields) {
+      loadDistribution(field.name, field.type);
+    }
+  };
+
+  if (nonVectorFields.length === 0) {
+    return <p className="text-sm text-muted-foreground">No non-vector fields to analyze.</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-muted-foreground">Value distribution per field using FT.AGGREGATE. Stats computed from up to 100 sampled documents — may not be representative for large indexes.</p>
+        <button
+          onClick={loadAll}
+          className="px-3 py-1 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+        >
+          Load all
+        </button>
+      </div>
+
+      <div className="grid gap-3">
+        {nonVectorFields.map(field => {
+          const dist = distributions[field.name];
+          const isLoading = loading.has(field.name);
+          const error = errors[field.name];
+
+          return (
+            <div key={field.name} className="border rounded-md p-3">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-sm">{field.name}</span>
+                  <Badge variant="secondary" className="text-[10px]">{field.type}</Badge>
+                </div>
+                {!dist && !isLoading && (
+                  <button
+                    onClick={() => loadDistribution(field.name, field.type)}
+                    className="text-xs text-primary hover:text-primary/80"
+                  >
+                    Load
+                  </button>
+                )}
+                {isLoading && <Loader2 className="w-3 h-3 animate-spin" />}
+              </div>
+
+              {error && <p className="text-xs text-destructive">{error}</p>}
+
+              {dist?.stats && (
+                <div className="flex flex-wrap gap-4 text-xs">
+                  <span>Min: <span className="font-mono font-medium">{dist.stats.min?.toLocaleString()}</span></span>
+                  <span>Max: <span className="font-mono font-medium">{dist.stats.max?.toLocaleString()}</span></span>
+                  <span>Avg: <span className="font-mono font-medium">{dist.stats.avg?.toFixed(2)}</span></span>
+                  <span>Count: <span className="font-mono font-medium">{dist.stats.count?.toLocaleString()}</span></span>
+                </div>
+              )}
+
+              {dist?.distribution && dist.distribution.length > 0 && (
+                <DistributionBars distribution={dist.distribution} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DistributionBars({ distribution }: { distribution: Array<{ value: string; count: number }> }) {
+  const maxCount = Math.max(...distribution.map(d => d.count));
+  return (
+    <div className="space-y-0.5 mt-1">
+      {distribution.slice(0, 20).map(d => (
+        <div key={d.value} className="flex items-center gap-2 text-xs">
+          <span className="w-24 truncate font-mono text-muted-foreground" title={d.value}>{d.value || '(empty)'}</span>
+          <div className="flex-1 h-3 bg-muted rounded overflow-hidden">
+            <div className="h-full bg-primary/60 rounded" style={{ width: `${(d.count / maxCount) * 100}%` }} />
+          </div>
+          <span className="w-12 text-right font-mono">{d.count.toLocaleString()}</span>
+        </div>
+      ))}
+      {distribution.length > 20 && (
+        <p className="text-[10px] text-muted-foreground mt-1">Showing top 20 of {distribution.length} values</p>
+      )}
+    </div>
+  );
+}
+
+// --- Profiler Tab ---
+
+function ProfilerTab({ info }: { info: VectorIndexInfo }) {
+  const [query, setQuery] = useState('*');
+  const [limited, setLimited] = useState(false);
+  const [result, setResult] = useState<ProfileResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleProfile = async () => {
+    if (!query.trim()) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await metricsApi.profileSearch(info.name, { query: query.trim(), limited });
+      setResult(res);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Profile failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Profile a search query to see execution timing breakdown using FT.PROFILE.
+      </p>
+      <div className="flex gap-2 items-end">
+        <div className="flex-1">
+          <label className="text-xs text-muted-foreground block mb-1">Query</label>
+          <input
+            type="text"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="* | hello | @field:{value}"
+            className="w-full px-2.5 py-1.5 text-sm border rounded-md bg-background font-mono"
+            onKeyDown={e => { if (e.key === 'Enter') handleProfile(); }}
+          />
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground pb-1.5">
+          <input type="checkbox" checked={limited} onChange={e => setLimited(e.target.checked)} className="rounded" />
+          LIMITED
+        </label>
+        <button
+          onClick={handleProfile}
+          disabled={loading || !query.trim()}
+          className="px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 flex items-center gap-1.5"
+        >
+          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BarChart3 className="w-3.5 h-3.5" />}
+          Profile
+        </button>
+      </div>
+
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
+      {result && (
+        <div className="space-y-3">
+          {/* Timing summary */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <TimingCard label="Total Time" ms={result.profile.totalTimeMs} />
+            <TimingCard label="Parsing" ms={result.profile.parsingTimeMs} />
+            <TimingCard label="Results" count={result.results.totalResults} />
+            <TimingCard label="Processors" count={result.profile.resultProcessorsProfile.length} />
+          </div>
+
+          {/* Iterator tree */}
+          {result.profile.iteratorsProfile && (
+            <div>
+              <h4 className="text-xs font-medium text-muted-foreground mb-1">Iterator Tree</h4>
+              <div className="border rounded-md p-3 bg-muted/20 font-mono text-xs space-y-0.5">
+                <IteratorNode node={result.profile.iteratorsProfile} totalMs={result.profile.totalTimeMs} depth={0} />
+              </div>
+            </div>
+          )}
+
+          {/* Result processors */}
+          {result.profile.resultProcessorsProfile.length > 0 && (
+            <div>
+              <h4 className="text-xs font-medium text-muted-foreground mb-1">Result Processors</h4>
+              <div className="border rounded-md overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b bg-muted/50">
+                      <th className="text-left px-3 py-1 font-medium">Type</th>
+                      <th className="text-right px-3 py-1 font-medium">Time</th>
+                      <th className="text-right px-3 py-1 font-medium">Counter</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.profile.resultProcessorsProfile.map((p, i) => (
+                      <tr key={i} className="border-b last:border-0">
+                        <td className="px-3 py-1">{p.type}</td>
+                        <td className="px-3 py-1 text-right">
+                          <TimingBadge ms={p.timeMs} />
+                        </td>
+                        <td className="px-3 py-1 text-right text-muted-foreground">{p.counter.toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TimingCard({ label, ms, count }: { label: string; ms?: number; count?: number }) {
+  return (
+    <div className="border rounded-md p-2 text-center">
+      <p className="text-[10px] text-muted-foreground uppercase tracking-wide">{label}</p>
+      {ms != null ? (
+        <p className="text-lg font-semibold mt-0.5"><TimingBadge ms={ms} large /></p>
+      ) : (
+        <p className="text-lg font-semibold mt-0.5">{count?.toLocaleString()}</p>
+      )}
+    </div>
+  );
+}
+
+function TimingBadge({ ms, large }: { ms: number; large?: boolean }) {
+  const color = ms < 1 ? 'text-green-600' : ms < 10 ? 'text-amber-600' : 'text-red-500';
+  const size = large ? 'text-lg' : 'text-xs';
+  return <span className={`${color} ${size} font-mono`}>{ms.toFixed(2)} ms</span>;
+}
+
+function IteratorNode({ node, totalMs, depth }: { node: ProfileIterator; totalMs: number; depth: number }) {
+  const pct = totalMs > 0 ? (node.timeMs / totalMs) * 100 : 0;
+  return (
+    <>
+      <div style={{ paddingLeft: depth * 16 }} className="flex items-center gap-2">
+        <span className="text-muted-foreground">{depth > 0 ? '└─' : ''}</span>
+        <span className="font-medium">{node.type}</span>
+        {node.queryType && <span className="text-muted-foreground">({node.queryType})</span>}
+        <TimingBadge ms={node.timeMs} />
+        {pct > 1 && <span className="text-[10px] text-muted-foreground">{pct.toFixed(0)}%</span>}
+        <span className="text-muted-foreground">×{node.counter.toLocaleString()}</span>
+      </div>
+      {node.childIterators?.map((child, i) => (
+        <IteratorNode key={i} node={child} totalMs={totalMs} depth={depth + 1} />
+      ))}
+    </>
+  );
+}
+
+// --- Tag value explorer (feature #2) ---
+
+function TagValueExplorer({ indexName, fieldName }: { indexName: string; fieldName: string }) {
+  const [values, setValues] = useState<string[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+
+  const load = async () => {
+    if (values) { setOpen(!open); return; }
+    setLoading(true);
+    try {
+      const res = await metricsApi.getTagValues(indexName, fieldName);
+      setValues(res.values);
+      setOpen(true);
+    } catch {
+      setValues([]);
+      setOpen(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <span className="inline">
+      <button onClick={load} className="text-[10px] text-primary hover:text-primary/80 ml-1">
+        {loading ? '...' : open ? 'hide' : 'values'}
+      </button>
+      {open && values && (
+        <span className="flex flex-wrap gap-1 mt-1">
+          {values.length === 0 && <span className="text-[10px] text-muted-foreground">No values</span>}
+          {values.slice(0, 100).map(v => (
+            <Badge key={v} variant="outline" className="text-[10px] px-1 py-0 font-mono">{v}</Badge>
+          ))}
+          {values.length > 100 && <span className="text-[10px] text-muted-foreground">+{values.length - 100} more</span>}
+        </span>
+      )}
+    </span>
+  );
+}
+
+// --- Vector Space Graph (Canvas, high-perf) ---
+
+interface GNode {
+  id: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  fx?: number | null;
+  fy?: number | null;
+  fields: Record<string, string>;
+  color: string;
+  expanded?: boolean;
+  degree: number;
+}
+
+interface GEdge {
+  source: string;
+  target: string;
+  score: number;
+}
+
+const GRAPH_PALETTE = [
+  '#7c3aed', '#db2777', '#d97706', '#059669', '#2563eb',
+  '#9333ea', '#e11d48', '#0d9488', '#ea580c', '#0891b2',
+  '#65a30d', '#c026d3', '#c2410c', '#0e7490', '#ca8a04',
+];
+
+function mkColorMap(nodes: GNode[], field: string) {
+  const m = new Map<string, string>();
+  if (!field) return m;
+  const vals = [...new Set(nodes.map(n => n.fields[field] || '').filter(Boolean))];
+  vals.forEach((v, i) => m.set(v, GRAPH_PALETTE[i % GRAPH_PALETTE.length]));
+  return m;
+}
+
+function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
+  const vectorFields = info.fields.filter(f => f.type === 'VECTOR');
+  const nonVectorFields = info.fields.filter(f => f.type !== 'VECTOR');
+
+  const [vectorField, setVectorField] = useState(vectorFields[0]?.name ?? '');
+  const [colorField, setColorField] = useState(nonVectorFields[0]?.name ?? '');
+  const [nodeCount, setNodeCount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedNode, setSelectedNode] = useState<GNode | null>(null);
+  const [expanding, setExpanding] = useState(false);
+  const [legend, setLegend] = useState<Array<[string, string]>>([]);
+
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // All mutable graph state in a single ref — zero React re-renders during animation
+  const gs = useRef({
+    nodes: [] as GNode[],
+    edges: [] as GEdge[],
+    nodeMap: new Map<string, GNode>(),
+    colorMap: new Map<string, string>(),
+    camX: 0, camY: 0, zoom: 1,
+    hovered: null as GNode | null,
+    drag: null as GNode | null,
+    panning: false,
+    panSX: 0, panSY: 0, camSX: 0, camSY: 0,
+    sim: null as any, // eslint-disable-line @typescript-eslint/no-explicit-any
+    running: false,
+    frame: 0,
+    w: 900, h: 600,
+    dpr: 1,
+  });
+
+  const s2w = useCallback((sx: number, sy: number) => {
+    const g = gs.current;
+    return { x: (sx - g.w / 2) / g.zoom + g.camX, y: (sy - g.h / 2) / g.zoom + g.camY };
+  }, []);
+
+  const hit = useCallback((wx: number, wy: number): GNode | null => {
+    const arr = gs.current.nodes;
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const n = arr[i];
+      const r = 3 + Math.min(n.degree, 20) * 0.8 + 4;
+      const dx = n.x - wx, dy = n.y - wy;
+      if (dx * dx + dy * dy < r * r) return n;
+    }
+    return null;
+  }, []);
+
+  // --- Canvas draw ---
+  const draw = useCallback(() => {
+    const cvs = canvasRef.current;
+    if (!cvs) return;
+    const ctx = cvs.getContext('2d');
+    if (!ctx) return;
+    const g = gs.current;
+    const dpr = g.dpr;
+    const w = g.w, h = g.h;
+
+    if (cvs.width !== w * dpr || cvs.height !== h * dpr) {
+      cvs.width = w * dpr;
+      cvs.height = h * dpr;
+      cvs.style.width = w + 'px';
+      cvs.style.height = h + 'px';
+    }
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.scale(g.zoom, g.zoom);
+    ctx.translate(-g.camX, -g.camY);
+
+    const sel = selectedNode;
+    let nbrSet: Set<string> | null = null;
+    if (sel) {
+      nbrSet = new Set<string>();
+      for (const e of g.edges) {
+        if (e.source === sel.id) nbrSet.add(e.target);
+        if (e.target === sel.id) nbrSet.add(e.source);
+      }
+    }
+
+    // Edges
+    for (const e of g.edges) {
+      const sn = g.nodeMap.get(e.source), tn = g.nodeMap.get(e.target);
+      if (!sn || !tn) continue;
+      const highlighted = sel && (e.source === sel.id || e.target === sel.id);
+      ctx.strokeStyle = highlighted ? sel!.color : sn.color;
+      ctx.globalAlpha = highlighted ? 0.45 : 0.1 + (1 - Math.min(e.score, 1)) * 0.12;
+      ctx.lineWidth = highlighted ? 1.5 : 0.5;
+      ctx.beginPath();
+      ctx.moveTo(sn.x, sn.y);
+      ctx.lineTo(tn.x, tn.y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // Nodes
+    for (const n of g.nodes) {
+      const r = 3 + Math.min(n.degree, 20) * 0.8;
+      const isH = g.hovered?.id === n.id;
+      const isS = sel?.id === n.id;
+      const isN = nbrSet?.has(n.id);
+      const dim = sel && !isS && !isN;
+
+      ctx.save();
+      if (!dim) { ctx.shadowColor = n.color; ctx.shadowBlur = isH || isS ? 16 : 6; }
+      ctx.globalAlpha = dim ? 0.1 : 0.85;
+      ctx.fillStyle = n.color;
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, isH || isS ? r * 1.5 : r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      if (isS) {
+        ctx.strokeStyle = '#1e293b';
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.7;
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r * 1.5 + 3, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      if (!dim) {
+        ctx.fillStyle = '#fff';
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r * 0.25, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // Labels
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    for (const n of g.nodes) {
+      const isH = g.hovered?.id === n.id;
+      const isS = sel?.id === n.id;
+      const show = isH || isS || (n.degree >= 5 && g.zoom > 0.6);
+      if (!show) continue;
+      const dim = sel && !isS && !nbrSet?.has(n.id);
+      if (dim) continue;
+
+      const r = 3 + Math.min(n.degree, 20) * 0.8;
+      const lbl = n.id.length > 24 ? n.id.slice(0, 21) + '...' : n.id;
+      const fs = Math.max(9, Math.min(12, 10 / g.zoom));
+      ctx.font = `${fs}px ui-monospace, monospace`;
+      const tw = ctx.measureText(lbl).width;
+      const p = 3;
+      ctx.fillStyle = '#ffffff';
+      ctx.globalAlpha = 0.8;
+      ctx.fillRect(n.x - tw / 2 - p, n.y - r * 1.6 - fs - p, tw + p * 2, fs + p * 2);
+      ctx.globalAlpha = isH || isS ? 1 : 0.7;
+      ctx.fillStyle = '#1e293b';
+      ctx.fillText(lbl, n.x, n.y - r * 1.6);
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+
+    // HUD
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`${g.nodes.length} nodes \u00b7 ${g.edges.length} edges`, 12, h - 10);
+    ctx.textAlign = 'right';
+    ctx.fillText(`${Math.round(g.zoom * 100)}%`, w - 12, h - 10);
+  }, [selectedNode]);
+
+  const animate = useCallback(() => {
+    const g = gs.current;
+    if (!g.running) return;
+    if (g.sim) g.sim.tick();
+    draw();
+    g.frame = requestAnimationFrame(animate);
+  }, [draw]);
+
+  const startSim = useCallback(() => {
+    const g = gs.current;
+    g.sim?.stop();
+    import('d3').then(d3 => {
+      if (!g.running) return;
+      const links = g.edges.map(e => ({
+        source: g.nodeMap.get(e.source)!, target: g.nodeMap.get(e.target)!, score: e.score,
+      })).filter(e => e.source && e.target);
+
+      const sim = d3.forceSimulation(g.nodes)
+        .force('link', d3.forceLink(links).id((d: any) => d.id) // eslint-disable-line @typescript-eslint/no-explicit-any
+          .distance((e: any) => 20 + (e.score ?? 0.5) * 40).strength(0.7)) // eslint-disable-line @typescript-eslint/no-explicit-any
+        .force('charge', d3.forceManyBody().strength(-60).distanceMax(250))
+        .force('center', d3.forceCenter(0, 0).strength(0.08))
+        .force('collision', d3.forceCollide((d: any) => 3 + Math.min(d.degree || 0, 20) * 0.5)) // eslint-disable-line @typescript-eslint/no-explicit-any
+        .alphaDecay(0.05)
+        .velocityDecay(0.6)
+        .on('tick', () => {});
+      g.sim = sim;
+      g.camX = 0; g.camY = 0; g.zoom = 1;
+    });
+  }, []);
+
+  // Build graph
+  const buildGraph = useCallback(async () => {
+    if (!vectorField) return;
+    setLoading(true);
+    setError(null);
+    setSelectedNode(null);
+
+    const g = gs.current;
+    g.hovered = null;
+    g.running = false;
+    cancelAnimationFrame(g.frame);
+    g.sim?.stop();
+
+    try {
+      const { keys } = await metricsApi.sampleIndexKeys(info.name, { limit: 40 });
+      if (keys.length === 0) { setError('No keys found'); setLoading(false); return; }
+
+      const nodes: GNode[] = keys.map(k => ({
+        id: k.key, x: (Math.random() - 0.5) * 400, y: (Math.random() - 0.5) * 400,
+        vx: 0, vy: 0, fields: k.fields, color: '#6b7280', degree: 0,
+      }));
+
+      const edgeSet = new Set<string>();
+      const edges: GEdge[] = [];
+      const search = keys.slice(0, Math.min(20, keys.length));
+      const ids = new Set(nodes.map(n => n.id));
+
+      const res = await Promise.allSettled(
+        search.map(k => metricsApi.vectorSearch(info.name, { sourceKey: k.key, vectorField, k: 6 }))
+      );
+
+      for (let i = 0; i < res.length; i++) {
+        if (res[i].status !== 'fulfilled') continue;
+        const src = search[i].key;
+        for (const m of (res[i] as PromiseFulfilledResult<any>).value.results) { // eslint-disable-line @typescript-eslint/no-explicit-any
+          if (m.key === src) continue;
+          const ek = [src, m.key].sort().join('||');
+          if (edgeSet.has(ek)) continue;
+          edgeSet.add(ek);
+          if (!ids.has(m.key)) {
+            ids.add(m.key);
+            nodes.push({ id: m.key, x: (Math.random() - 0.5) * 400, y: (Math.random() - 0.5) * 400, vx: 0, vy: 0, fields: m.fields, color: '#6b7280', degree: 0 });
+          }
+          edges.push({ source: src, target: m.key, score: m.score });
+        }
+      }
+
+      for (const e of edges) {
+        const s = nodes.find(n => n.id === e.source), t = nodes.find(n => n.id === e.target);
+        if (s) s.degree++;
+        if (t) t.degree++;
+      }
+      const cm = mkColorMap(nodes, colorField);
+      for (const n of nodes) n.color = cm.get(n.fields[colorField] || '') || '#6b7280';
+
+      g.nodes = nodes;
+      g.edges = edges;
+      g.nodeMap = new Map(nodes.map(n => [n.id, n]));
+      g.colorMap = cm;
+      g.dpr = window.devicePixelRatio || 1;
+      g.running = true;
+
+      setNodeCount(nodes.length);
+
+      setLegend([...cm.entries()].slice(0, 12));
+
+      startSim();
+      g.frame = requestAnimationFrame(animate);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to build graph');
+    } finally {
+      setLoading(false);
+    }
+  }, [info.name, vectorField, colorField, startSim, animate]);
+
+  // Expand node
+  const expandNode = useCallback(async (node: GNode) => {
+    if (!vectorField || expanding) return;
+    setExpanding(true);
+    try {
+      const r = await metricsApi.vectorSearch(info.name, { sourceKey: node.id, vectorField, k: 10 });
+      const g = gs.current;
+      const exist = new Set(g.nodes.map(n => n.id));
+      const existE = new Set(g.edges.map(e => [e.source, e.target].sort().join('||')));
+
+      for (const m of r.results) {
+        if (m.key === node.id) continue;
+        const ek = [node.id, m.key].sort().join('||');
+        if (!existE.has(ek)) { existE.add(ek); g.edges.push({ source: node.id, target: m.key, score: m.score }); node.degree++; }
+        if (!exist.has(m.key)) {
+          exist.add(m.key);
+          const nn: GNode = { id: m.key, x: node.x + (Math.random() - 0.5) * 60, y: node.y + (Math.random() - 0.5) * 60, vx: 0, vy: 0, fields: m.fields, color: g.colorMap.get(m.fields[colorField] || '') || '#6b7280', degree: 1 };
+          g.nodes.push(nn);
+          g.nodeMap.set(nn.id, nn);
+        } else { const ex = g.nodeMap.get(m.key); if (ex) ex.degree++; }
+      }
+      node.expanded = true;
+      setNodeCount(g.nodes.length);
+      startSim();
+    } catch { /* silent */ } finally { setExpanding(false); }
+  }, [info.name, vectorField, colorField, expanding, startSim]);
+
+  // Resize
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const obs = new ResizeObserver(entries => {
+      for (const e of entries) {
+        gs.current.w = Math.round(e.contentRect.width);
+        gs.current.h = Math.round(Math.max(e.contentRect.height, 500));
+      }
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  // Mouse handlers
+  useEffect(() => {
+    const cvs = canvasRef.current;
+    if (!cvs) return;
+
+    const onMove = (ev: MouseEvent) => {
+      const rect = cvs.getBoundingClientRect();
+      const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
+      const g = gs.current;
+
+      if (g.drag) {
+        const w = s2w(sx, sy);
+        g.drag.fx = w.x; g.drag.fy = w.y;
+        g.drag.x = w.x; g.drag.y = w.y;
+        g.drag.vx = 0; g.drag.vy = 0;
+        if (g.sim) g.sim.alpha(0.3).restart();
+        return;
+      }
+      if (g.panning) {
+        g.camX = g.camSX - (sx - g.panSX) / g.zoom;
+        g.camY = g.camSY - (sy - g.panSY) / g.zoom;
+        return;
+      }
+      const w = s2w(sx, sy);
+      g.hovered = hit(w.x, w.y);
+      cvs.style.cursor = g.hovered ? 'pointer' : 'grab';
+    };
+
+    const onDown = (ev: MouseEvent) => {
+      const rect = cvs.getBoundingClientRect();
+      const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
+      const g = gs.current;
+      const w = s2w(sx, sy);
+      const h = hit(w.x, w.y);
+      if (h) {
+        g.drag = h;
+        h.fx = h.x; h.fy = h.y;
+        if (g.sim) g.sim.alphaTarget(0.3).restart();
+      } else {
+        g.panning = true;
+        g.panSX = sx; g.panSY = sy;
+        g.camSX = g.camX; g.camSY = g.camY;
+        cvs.style.cursor = 'grabbing';
+      }
+    };
+
+    const onUp = () => {
+      const g = gs.current;
+      if (g.drag) {
+        g.drag.fx = null; g.drag.fy = null;
+        if (g.sim) g.sim.alphaTarget(0);
+        g.drag = null;
+      }
+      if (g.panning) { g.panning = false; cvs.style.cursor = g.hovered ? 'pointer' : 'grab'; }
+    };
+
+    const onClick = (ev: MouseEvent) => {
+      const rect = cvs.getBoundingClientRect();
+      const w = s2w(ev.clientX - rect.left, ev.clientY - rect.top);
+      const h = hit(w.x, w.y);
+      if (h) {
+        setSelectedNode(prev => prev?.id === h.id ? null : h);
+        if (!h.expanded) expandNode(h);
+      } else {
+        setSelectedNode(null);
+      }
+    };
+
+    const onWheel = (ev: WheelEvent) => {
+      ev.preventDefault();
+      const g = gs.current;
+      const rect = cvs.getBoundingClientRect();
+      const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
+      const before = s2w(sx, sy);
+      g.zoom = Math.max(0.1, Math.min(8, g.zoom * (ev.deltaY < 0 ? 1.12 : 1 / 1.12)));
+      const after = s2w(sx, sy);
+      g.camX -= after.x - before.x;
+      g.camY -= after.y - before.y;
+    };
+
+    cvs.addEventListener('mousemove', onMove);
+    cvs.addEventListener('mousedown', onDown);
+    cvs.addEventListener('mouseup', onUp);
+    cvs.addEventListener('mouseleave', onUp);
+    cvs.addEventListener('click', onClick);
+    cvs.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      cvs.removeEventListener('mousemove', onMove);
+      cvs.removeEventListener('mousedown', onDown);
+      cvs.removeEventListener('mouseup', onUp);
+      cvs.removeEventListener('mouseleave', onUp);
+      cvs.removeEventListener('click', onClick);
+      cvs.removeEventListener('wheel', onWheel);
+    };
+  }, [s2w, hit, expandNode]);
+
+  // Keep animation running
+  useEffect(() => {
+    if (nodeCount === 0) return;
+    const g = gs.current;
+    if (!g.running) { g.running = true; g.frame = requestAnimationFrame(animate); }
+    return () => { g.running = false; cancelAnimationFrame(g.frame); g.sim?.stop(); };
+  }, [nodeCount, animate]);
+
+  useEffect(() => { draw(); }, [selectedNode, draw]);
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Visualize vector similarity as a force-directed graph. Scroll to zoom, drag to pan, click nodes to expand neighbors.
+        Showing a sample of up to 40 documents from {info.numDocs.toLocaleString()} total.
+      </p>
+      <div className="flex flex-wrap gap-3 items-end">
+        <div>
+          <label className="text-xs text-muted-foreground block mb-1">Vector field</label>
+          <select className="px-2 py-1.5 text-sm border rounded-md bg-background" value={vectorField} onChange={e => setVectorField(e.target.value)}>
+            {vectorFields.map(f => <option key={f.name} value={f.name}>{f.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-muted-foreground block mb-1">Color by</label>
+          <select className="px-2 py-1.5 text-sm border rounded-md bg-background" value={colorField} onChange={e => setColorField(e.target.value)}>
+            <option value="">None</option>
+            {nonVectorFields.map(f => <option key={f.name} value={f.name}>{f.name}</option>)}
+          </select>
+        </div>
+        <button onClick={buildGraph} disabled={loading} className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 flex items-center gap-1.5">
+          {loading ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Building...</> : nodeCount > 0 ? 'Rebuild' : 'Build Graph'}
+        </button>
+      </div>
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      <div ref={containerRef} className="rounded-lg overflow-hidden relative border" style={{ height: 600, background: '#ffffff' }}>
+        <canvas ref={canvasRef} style={{ width: '100%', height: '100%', cursor: 'grab' }} />
+        {legend.length > 0 && (
+          <div className="absolute top-3 right-3 rounded-lg px-3 py-2 text-[11px] space-y-1 max-w-[180px] shadow-md" style={{ background: 'rgba(255,255,255,0.92)', border: '1px solid rgba(0,0,0,0.08)' }}>
+            <div className="font-medium text-gray-500 mb-1.5 text-[10px] uppercase tracking-wider">{colorField}</div>
+            {legend.map(([v, c]) => (
+              <div key={v} className="flex items-center gap-2 truncate">
+                <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: c, boxShadow: `0 0 4px ${c}` }} />
+                <span className="truncate text-gray-700">{v}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {selectedNode && (
+          <div className="absolute bottom-3 left-3 rounded-lg px-4 py-3 text-xs max-w-[350px] shadow-lg" style={{ background: 'rgba(255,255,255,0.95)', border: '1px solid rgba(0,0,0,0.1)' }}>
+            <div className="flex items-center justify-between mb-2">
+              <span className="font-mono font-medium text-gray-900 truncate mr-3 text-[13px]">{selectedNode.id}</span>
+              <button onClick={() => setSelectedNode(null)} className="text-gray-400 hover:text-gray-700 transition-colors"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="space-y-1 max-h-[140px] overflow-y-auto pr-1">
+              {Object.entries(selectedNode.fields).slice(0, 15).map(([k, v]) => (
+                <div key={k} className="flex gap-2"><span className="text-gray-400 flex-shrink-0">{k}</span><span className="truncate font-mono text-gray-700">{v}</span></div>
+              ))}
+            </div>
+            <div className="flex items-center gap-3 mt-2 pt-2 text-[10px] text-gray-400" style={{ borderTop: '1px solid rgba(0,0,0,0.06)' }}>
+              <span>{selectedNode.degree} connections</span>
+              {expanding && <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Expanding...</span>}
+              {selectedNode.expanded && !expanding && <span>Expanded</span>}
+            </div>
+          </div>
+        )}
+        {nodeCount === 0 && !loading && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="text-center"><div className="text-gray-400 text-sm mb-2">Click &ldquo;Build Graph&rdquo; to visualize the vector space</div><div className="text-gray-300 text-xs">Nodes represent keys, edges show vector similarity</div></div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Config Inspector (feature #5) ---
+
+function SearchConfigCard() {
+  const [open, setOpen] = useState(false);
+  return (
+    <Card>
+      <CardHeader className="pb-0">
+        <button
+          onClick={() => setOpen(!open)}
+          className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          Search Module Configuration
+        </button>
+      </CardHeader>
+      {open && (
+        <CardContent className="pt-3">
+          <SearchConfigPanel />
+        </CardContent>
+      )}
+    </Card>
+  );
+}
+
+function SearchConfigPanel() {
+  const [config, setConfig] = useState<Record<string, string> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState('');
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await metricsApi.getSearchConfig();
+      setConfig(res.config);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load config');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  if (loading && !config) return <div className="flex items-center gap-2 text-sm text-muted-foreground py-4"><Loader2 className="w-4 h-4 animate-spin" /> Loading config...</div>;
+  if (error) return <p className="text-sm text-destructive">{error}</p>;
+  if (!config) return null;
+  if (Object.keys(config).length === 0) return <p className="text-sm text-muted-foreground py-2">Search configuration is not available on this server.</p>;
+
+  const entries = Object.entries(config).filter(([k]) =>
+    !filter || k.toLowerCase().includes(filter.toLowerCase())
+  );
+
+  return (
+    <div className="space-y-2">
+      <input
+        type="text"
+        value={filter}
+        onChange={e => setFilter(e.target.value)}
+        placeholder="Filter settings..."
+        className="w-full px-2.5 py-1.5 text-sm border rounded-md bg-background"
+      />
+      <div className="border rounded-md overflow-hidden">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b bg-muted/50">
+              <th className="text-left px-3 py-1.5 font-medium">Setting</th>
+              <th className="text-left px-3 py-1.5 font-medium">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map(([k, v]) => (
+              <tr key={k} className="border-b last:border-0">
+                <td className="px-3 py-1 font-mono">{k}</td>
+                <td className="px-3 py-1 font-mono text-muted-foreground">{v}</td>
+              </tr>
+            ))}
+            {entries.length === 0 && (
+              <tr><td colSpan={2} className="px-3 py-3 text-center text-muted-foreground">No matching settings</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// --- Prefix breakdown for browse tab (feature #6) ---
+
+function PrefixBreakdown({ keys, prefixes }: { keys: Array<{ key: string }>; prefixes: string[] }) {
+  const counts = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const prefix of prefixes) map[prefix] = 0;
+    for (const { key } of keys) {
+      for (const prefix of prefixes) {
+        if (key.startsWith(prefix)) { map[prefix]++; break; }
+      }
+    }
+    return map;
+  }, [keys, prefixes]);
+
+  return (
+    <div className="flex flex-wrap gap-2 mt-1.5">
+      {prefixes.map(prefix => (
+        <span key={prefix} className="text-[10px] px-1.5 py-0.5 border rounded bg-muted/50">
+          <span className="font-mono">{prefix}*</span>
+          <span className="ml-1 text-muted-foreground">{counts[prefix] ?? 0}</span>
+        </span>
+      ))}
     </div>
   );
 }

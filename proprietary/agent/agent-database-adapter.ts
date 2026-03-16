@@ -23,8 +23,15 @@ import type {
   ConfigGetResponse,
   VectorIndexInfo,
   VectorSearchResult,
+  TextSearchResult,
+  AggregateResult,
+  ProfileResult,
 } from '../../apps/api/src/common/types/metrics.types';
-import { parseVectorIndexInfo, parseVectorSearchResponse, sanitizeFilter, INDEX_NAME_RE, FIELD_NAME_RE } from '../../apps/api/src/database/parsers/vector-index.parser';
+import {
+  parseVectorIndexInfo, parseVectorSearchResponse, parseTextSearchResponse,
+  parseSearchConfig, parseAggregateResponse, parseProfileResponse,
+  sanitizeFilter, INDEX_NAME_RE, FIELD_NAME_RE,
+} from '../../apps/api/src/database/parsers/vector-index.parser';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 
 const COMMAND_TIMEOUT_MS = 15000;
@@ -487,6 +494,81 @@ export class AgentDatabaseAdapter implements DatabasePort {
       { '__BINARY_VEC__': queryVector.toString('base64') },
     );
     return parseVectorSearchResponse(raw as unknown[], vectorFieldName);
+  }
+
+  async textSearch(indexName: string, query: string, offset = 0, limit = 20): Promise<TextSearchResult> {
+    if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
+    if (!INDEX_NAME_RE.test(indexName)) throw new Error(`Invalid index name: ${indexName}`);
+    const args = ['SEARCH', indexName, query, 'LIMIT', String(offset), String(limit)];
+    if (this.capabilities?.dbType === 'redis') {
+      args.push('DIALECT', '2');
+    }
+    const raw = await this.sendCommand('FT', args);
+    return parseTextSearchResponse(raw as unknown[]);
+  }
+
+  async getTagValues(indexName: string, fieldName: string): Promise<string[]> {
+    if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
+    if (!INDEX_NAME_RE.test(indexName)) throw new Error(`Invalid index name: ${indexName}`);
+    if (!FIELD_NAME_RE.test(fieldName)) throw new Error(`Invalid field name: ${fieldName}`);
+    try {
+      const raw = await this.sendCommand('FT', ['TAGVALS', indexName, fieldName]);
+      return (raw as string[]) || [];
+    } catch {
+      // FT.TAGVALS not available — try FT.SEARCH * fallback
+      try {
+        const args = ['SEARCH', indexName, '*', 'LIMIT', '0', '100'];
+        if (this.capabilities?.dbType === 'redis') {
+          args.push('DIALECT', '2');
+        }
+        const raw = await this.sendCommand('FT', args);
+        const result = parseTextSearchResponse(raw as unknown[]);
+        const values = new Set<string>();
+        for (const doc of result.results) {
+          const v = doc.fields[fieldName];
+          if (v) v.split(',').forEach(tag => values.add(tag.trim()));
+        }
+        return [...values].sort();
+      } catch {
+        return [];
+      }
+    }
+  }
+
+  async getSearchConfig(pattern?: string): Promise<Record<string, string>> {
+    if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
+    try {
+      const raw = await this.sendCommand('FT', ['CONFIG', 'GET', pattern || '*']);
+      return parseSearchConfig(raw as unknown[]);
+    } catch {
+      // FT.CONFIG not available (e.g., Valkey Search) — return empty config
+      return {};
+    }
+  }
+
+  async aggregate(indexName: string, query: string, args: string[]): Promise<AggregateResult> {
+    if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
+    if (!INDEX_NAME_RE.test(indexName)) throw new Error(`Invalid index name: ${indexName}`);
+    try {
+      const raw = await this.sendCommand('FT', ['AGGREGATE', indexName, query, ...args]);
+      return parseAggregateResponse(raw as unknown[]);
+    } catch {
+      // FT.AGGREGATE not available (e.g., Valkey Search) — return empty result
+      return { totalResults: 0, results: [] };
+    }
+  }
+
+  async profileSearch(indexName: string, query: string, limited = false): Promise<ProfileResult> {
+    if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
+    if (!INDEX_NAME_RE.test(indexName)) throw new Error(`Invalid index name: ${indexName}`);
+    try {
+      const args = ['PROFILE', indexName, 'SEARCH', 'QUERY', query];
+      if (limited) args.push('LIMITED');
+      const raw = await this.sendCommand('FT', args);
+      return parseProfileResponse(raw as unknown[]);
+    } catch {
+      throw new Error('Query profiling (FT.PROFILE) is not available on this server');
+    }
   }
 
   getClient(): never {

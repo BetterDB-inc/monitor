@@ -3,7 +3,7 @@ import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
 import { VectorSearchService } from './vector-search.service';
 import { VectorSearchDto } from './dto/vector-search.dto';
 import { ConnectionId } from '../common/decorators';
-import { VectorIndexInfo } from '../common/types/metrics.types';
+import { VectorIndexInfo, TextSearchResult, ProfileResult, FieldDistribution } from '../common/types/metrics.types';
 
 @ApiTags('vector-search')
 @Controller('vector-search')
@@ -11,6 +11,18 @@ export class VectorSearchController {
   constructor(
     private readonly vectorSearchService: VectorSearchService,
   ) {}
+
+  @Get('config')
+  @ApiOperation({ summary: 'Get search module configuration' })
+  @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
+  async getSearchConfig(@ConnectionId() connectionId?: string): Promise<{ config: Record<string, string> }> {
+    try {
+      const config = await this.vectorSearchService.getSearchConfig(connectionId);
+      return { config };
+    } catch (error) {
+      throw this.mapError(error, 'Failed to get search config');
+    }
+  }
 
   @Get('indexes')
   @ApiOperation({ summary: 'List vector search indexes' })
@@ -59,6 +71,70 @@ export class VectorSearchController {
       return { snapshots };
     } catch (error) {
       throw this.mapError(error, 'Failed to get index snapshots');
+    }
+  }
+
+  @Post('indexes/:name/text-search')
+  @ApiOperation({ summary: 'Full-text search' })
+  @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
+  async textSearch(
+    @Param('name') name: string,
+    @Body() body: { query: string; offset?: number; limit?: number },
+    @ConnectionId() connectionId?: string,
+  ): Promise<TextSearchResult> {
+    try {
+      if (!body.query?.trim()) throw new HttpException('Query is required', HttpStatus.BAD_REQUEST);
+      return await this.vectorSearchService.textSearch(connectionId, name, body.query, body.offset, body.limit);
+    } catch (error) {
+      throw this.mapError(error, 'Text search failed');
+    }
+  }
+
+  @Get('indexes/:name/fields/:field/tagvals')
+  @ApiOperation({ summary: 'Get distinct tag values for a field' })
+  @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
+  async getTagValues(
+    @Param('name') name: string,
+    @Param('field') field: string,
+    @ConnectionId() connectionId?: string,
+  ): Promise<{ values: string[] }> {
+    try {
+      const values = await this.vectorSearchService.getTagValues(connectionId, name, field);
+      return { values };
+    } catch (error) {
+      throw this.mapError(error, 'Failed to get tag values');
+    }
+  }
+
+  @Get('indexes/:name/fields/:field/distribution')
+  @ApiOperation({ summary: 'Get field value distribution' })
+  @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
+  async getFieldDistribution(
+    @Param('name') name: string,
+    @Param('field') field: string,
+    @Query('type') fieldType?: string,
+    @ConnectionId() connectionId?: string,
+  ): Promise<FieldDistribution> {
+    try {
+      return await this.vectorSearchService.getFieldDistribution(connectionId, name, field, fieldType || 'TAG');
+    } catch (error) {
+      throw this.mapError(error, 'Failed to get field distribution');
+    }
+  }
+
+  @Post('indexes/:name/profile')
+  @ApiOperation({ summary: 'Profile a search query' })
+  @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
+  async profileSearch(
+    @Param('name') name: string,
+    @Body() body: { query: string; limited?: boolean },
+    @ConnectionId() connectionId?: string,
+  ): Promise<ProfileResult> {
+    try {
+      if (!body.query?.trim()) throw new HttpException('Query is required', HttpStatus.BAD_REQUEST);
+      return await this.vectorSearchService.profileSearch(connectionId, name, body.query, body.limited);
+    } catch (error) {
+      throw this.mapError(error, 'Profile search failed');
     }
   }
 

@@ -4,10 +4,15 @@ import type {
   VectorIndexGcStats,
   VectorIndexDefinition,
   VectorSearchResult,
+  TextSearchResult,
+  AggregateResult,
+  ProfileResult,
+  ProfileIterator,
+  ProfileProcessor,
 } from '../../common/types/metrics.types';
 
 export const FIELD_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-export const INDEX_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_.\-]*$/;
+export const INDEX_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_.\-:]*$/;
 
 /** Sanitize and validate a vector search filter string. Returns the trimmed filter or undefined. */
 export function sanitizeFilter(filter?: string): string | undefined {
@@ -227,4 +232,121 @@ export function parseVectorSearchResponse(raw: unknown[], vectorFieldName: strin
   }
 
   return results;
+}
+
+// --- Text Search ---
+
+export function parseTextSearchResponse(raw: unknown[]): TextSearchResult {
+  const totalResults = Number(raw[0] ?? 0);
+  const results: Array<{ key: string; fields: Record<string, string> }> = [];
+
+  for (let i = 1; i < raw.length; i += 2) {
+    const key = String(raw[i]);
+    const fieldsArr = raw[i + 1] as unknown[];
+    if (!Array.isArray(fieldsArr)) continue;
+
+    const fields: Record<string, string> = {};
+    for (let j = 0; j < fieldsArr.length; j += 2) {
+      const val = fieldsArr[j + 1];
+      if (typeof val === 'string' || typeof val === 'number') {
+        fields[String(fieldsArr[j])] = String(val);
+      }
+    }
+    results.push({ key, fields });
+  }
+
+  return { totalResults, results };
+}
+
+// --- Search Config ---
+
+export function parseSearchConfig(raw: unknown[]): Record<string, string> {
+  const config: Record<string, string> = {};
+  // FT.CONFIG GET returns [[key, value], [key, value], ...]
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (Array.isArray(entry) && entry.length >= 2) {
+        config[String(entry[0])] = String(entry[1] ?? '');
+      }
+    }
+  }
+  return config;
+}
+
+// --- Aggregate ---
+
+export function parseAggregateResponse(raw: unknown[]): AggregateResult {
+  const totalResults = Number(raw[0] ?? 0);
+  const results: Array<Record<string, string>> = [];
+
+  for (let i = 1; i < raw.length; i++) {
+    const row = raw[i];
+    if (!Array.isArray(row)) continue;
+    const record: Record<string, string> = {};
+    for (let j = 0; j < row.length; j += 2) {
+      record[String(row[j])] = String(row[j + 1] ?? '');
+    }
+    results.push(record);
+  }
+
+  return { totalResults, results };
+}
+
+// --- Profile ---
+
+function parseProfileIterator(raw: unknown): ProfileIterator | null {
+  if (!Array.isArray(raw)) return null;
+  const m = toMap(raw);
+
+  const type = String(m.get('Type') ?? m.get('type') ?? 'unknown');
+  const queryType = m.get('Query type') ? String(m.get('Query type')) : undefined;
+  const counter = Number(m.get('Counter') ?? m.get('counter') ?? 0);
+  const timeMs = Number(m.get('Time') ?? m.get('time') ?? 0);
+
+  let childIterators: ProfileIterator[] | undefined;
+  const children = m.get('Child iterators') ?? m.get('child iterators');
+  if (Array.isArray(children)) {
+    childIterators = children
+      .map(c => parseProfileIterator(c))
+      .filter((c): c is ProfileIterator => c !== null);
+  }
+
+  return { type, queryType, counter, timeMs, childIterators };
+}
+
+function parseProfileProcessors(raw: unknown): ProfileProcessor[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(entry => {
+    if (!Array.isArray(entry)) return null;
+    const m = toMap(entry);
+    return {
+      type: String(m.get('Type') ?? m.get('type') ?? 'unknown'),
+      timeMs: Number(m.get('Time') ?? m.get('time') ?? 0),
+      counter: Number(m.get('Counter') ?? m.get('counter') ?? 0),
+    };
+  }).filter((p): p is ProfileProcessor => p !== null);
+}
+
+export function parseProfileResponse(raw: unknown[]): ProfileResult {
+  // raw[0] = search results, raw[1] = profile data
+  const searchResults = parseTextSearchResponse(raw[0] as unknown[]);
+
+  const profileRaw = raw[1] as unknown[];
+  const profileMap = Array.isArray(profileRaw) ? toMap(profileRaw) : new Map();
+
+  const totalTimeMs = Number(profileMap.get('Total profile time') ?? profileMap.get('total_profile_time') ?? 0);
+  const parsingTimeMs = Number(profileMap.get('Parsing time') ?? profileMap.get('parsing_time') ?? 0);
+
+  const iteratorsRaw = profileMap.get('Iterators profile') ?? profileMap.get('iterators_profile');
+  const processorsRaw = profileMap.get('Result processors profile') ?? profileMap.get('result_processors_profile');
+
+  return {
+    results: searchResults,
+    profile: {
+      totalTimeMs,
+      parsingTimeMs,
+      iteratorsProfile: parseProfileIterator(iteratorsRaw),
+      resultProcessorsProfile: parseProfileProcessors(processorsRaw),
+    },
+  };
 }

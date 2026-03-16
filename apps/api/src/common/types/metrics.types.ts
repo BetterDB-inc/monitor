@@ -477,6 +477,53 @@ export interface VectorIndexInfo {
   indexDefinition: VectorIndexDefinition | null;
 }
 
+// --- Text Search ---
+
+export interface TextSearchResult {
+  totalResults: number;
+  results: Array<{ key: string; fields: Record<string, string> }>;
+}
+
+// --- Aggregate / Distribution ---
+
+export interface AggregateResult {
+  totalResults: number;
+  results: Array<Record<string, string>>;
+}
+
+export interface FieldDistribution {
+  fieldName: string;
+  type: string;
+  distribution: Array<{ value: string; count: number }>;
+  stats?: { min?: number; max?: number; avg?: number; count?: number };
+}
+
+// --- Query Profiler ---
+
+export interface ProfileIterator {
+  type: string;
+  queryType?: string;
+  counter: number;
+  timeMs: number;
+  childIterators?: ProfileIterator[];
+}
+
+export interface ProfileProcessor {
+  type: string;
+  timeMs: number;
+  counter: number;
+}
+
+export interface ProfileResult {
+  results: TextSearchResult;
+  profile: {
+    totalTimeMs: number;
+    parsingTimeMs: number;
+    iteratorsProfile: ProfileIterator | null;
+    resultProcessorsProfile: ProfileProcessor[];
+  };
+}
+
 export type {
   SlowLogPatternExample,
   SlowLogPatternStats,

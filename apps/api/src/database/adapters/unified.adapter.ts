@@ -23,8 +23,15 @@ import {
   ConfigGetResponse,
   VectorIndexInfo,
   VectorSearchResult,
+  TextSearchResult,
+  AggregateResult,
+  ProfileResult,
 } from '../../common/types/metrics.types';
-import { parseVectorIndexInfo, parseVectorSearchResponse, sanitizeFilter, FIELD_NAME_RE, INDEX_NAME_RE } from '../parsers/vector-index.parser';
+import {
+  parseVectorIndexInfo, parseVectorSearchResponse, parseTextSearchResponse,
+  parseSearchConfig, parseAggregateResponse, parseProfileResponse,
+  sanitizeFilter, FIELD_NAME_RE, INDEX_NAME_RE,
+} from '../parsers/vector-index.parser';
 import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyPatternData } from '@betterdb/shared';
 import { extractPattern } from '@betterdb/shared';
 
@@ -641,6 +648,118 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     )) as unknown[];
 
     return parseVectorSearchResponse(result, vectorFieldName);
+  }
+
+  async textSearch(indexName: string, query: string, offset = 0, limit = 20): Promise<TextSearchResult> {
+    if (!this.capabilities?.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    if (!INDEX_NAME_RE.test(indexName)) {
+      throw new Error(`Invalid index name: ${indexName}`);
+    }
+    if (!query || query.length > 1024) {
+      throw new Error('Query is required and must be under 1024 characters');
+    }
+    const clampedLimit = Math.min(Math.max(limit, 1), 100);
+    const clampedOffset = Math.max(offset, 0);
+    const args: string[] = ['FT.SEARCH', indexName, query, 'LIMIT', String(clampedOffset), String(clampedLimit)];
+    // DIALECT 2 is needed for RediSearch modern query syntax but not supported by Valkey Search
+    if (this.capabilities?.dbType === 'redis') {
+      args.push('DIALECT', '2');
+    }
+    const raw = (await this.client.call(...(args as [string, ...string[]]))) as unknown[];
+    return parseTextSearchResponse(raw);
+  }
+
+  async getTagValues(indexName: string, fieldName: string): Promise<string[]> {
+    if (!this.capabilities?.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    if (!INDEX_NAME_RE.test(indexName)) {
+      throw new Error(`Invalid index name: ${indexName}`);
+    }
+    if (!FIELD_NAME_RE.test(fieldName)) {
+      throw new Error(`Invalid field name: ${fieldName}`);
+    }
+    // Try FT.TAGVALS first, then FT.SEARCH *, then give up
+    try {
+      const raw = await this.client.call('FT.TAGVALS', indexName, fieldName);
+      return (raw as string[]) || [];
+    } catch {
+      // FT.TAGVALS not available — try FT.SEARCH * fallback
+      try {
+        const args: string[] = ['FT.SEARCH', indexName, '*', 'LIMIT', '0', '100'];
+        if (this.capabilities?.dbType === 'redis') {
+          args.push('DIALECT', '2');
+        }
+        const raw = (await this.client.call(...(args as [string, ...string[]]))) as unknown[];
+        const result = parseTextSearchResponse(raw);
+        const values = new Set<string>();
+        for (const doc of result.results) {
+          const v = doc.fields[fieldName];
+          if (v) v.split(',').forEach(tag => values.add(tag.trim()));
+        }
+        return [...values].sort();
+      } catch {
+        // Neither FT.TAGVALS nor FT.SEARCH * supported — return empty
+        return [];
+      }
+    }
+  }
+
+  async getSearchConfig(pattern?: string): Promise<Record<string, string>> {
+    if (!this.capabilities?.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    try {
+      const raw = await this.client.call('FT.CONFIG', 'GET', pattern || '*');
+      return parseSearchConfig(raw as unknown[]);
+    } catch {
+      // FT.CONFIG not available (e.g., Valkey Search) — return empty config
+      return {};
+    }
+  }
+
+  async aggregate(indexName: string, query: string, args: string[]): Promise<AggregateResult> {
+    if (!this.capabilities?.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    if (!INDEX_NAME_RE.test(indexName)) {
+      throw new Error(`Invalid index name: ${indexName}`);
+    }
+    if (!query || query.length > 1024) {
+      throw new Error('Query is required and must be under 1024 characters');
+    }
+    try {
+      const raw = (await this.client.call(
+        'FT.AGGREGATE', indexName, query, ...args,
+      )) as unknown[];
+      return parseAggregateResponse(raw);
+    } catch {
+      // FT.AGGREGATE not available (e.g., Valkey Search) — return empty result
+      return { totalResults: 0, results: [] };
+    }
+  }
+
+  async profileSearch(indexName: string, query: string, limited = false): Promise<ProfileResult> {
+    if (!this.capabilities?.hasVectorSearch) {
+      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+    }
+    if (!INDEX_NAME_RE.test(indexName)) {
+      throw new Error(`Invalid index name: ${indexName}`);
+    }
+    if (!query || query.length > 1024) {
+      throw new Error('Query is required and must be under 1024 characters');
+    }
+    try {
+      const args: string[] = [indexName, 'SEARCH', 'QUERY', query];
+      if (limited) args.push('LIMITED');
+      const raw = (await this.client.call('FT.PROFILE', ...args)) as unknown[];
+      return parseProfileResponse(raw);
+    } catch {
+      // FT.PROFILE not available (e.g., Valkey Search)
+      throw new Error('Query profiling (FT.PROFILE) is not available on this server');
+    }
   }
 
   getClient(): Valkey {

@@ -268,6 +268,42 @@ export interface VectorIndexInfo {
 
 export type { VectorIndexSnapshot } from '@betterdb/shared';
 
+export interface TextSearchResult {
+  totalResults: number;
+  results: Array<{ key: string; fields: Record<string, string> }>;
+}
+
+export interface FieldDistribution {
+  fieldName: string;
+  type: string;
+  distribution: Array<{ value: string; count: number }>;
+  stats?: { min?: number; max?: number; avg?: number; count?: number };
+}
+
+export interface ProfileIterator {
+  type: string;
+  queryType?: string;
+  counter: number;
+  timeMs: number;
+  childIterators?: ProfileIterator[];
+}
+
+export interface ProfileProcessor {
+  type: string;
+  timeMs: number;
+  counter: number;
+}
+
+export interface ProfileResult {
+  results: TextSearchResult;
+  profile: {
+    totalTimeMs: number;
+    parsingTimeMs: number;
+    iteratorsProfile: ProfileIterator | null;
+    resultProcessorsProfile: ProfileProcessor[];
+  };
+}
+
 export type {
   StoredAclEntry,
   AuditStats,
