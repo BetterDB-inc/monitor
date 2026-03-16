@@ -2241,7 +2241,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     g.frame = requestAnimationFrame(animate);
   }, [draw]);
 
-  const startSim = useCallback(() => {
+  const startSim = useCallback((resetCamera = true) => {
     const g = gs.current;
     g.sim?.stop();
     import('d3').then(d3 => {
@@ -2260,7 +2260,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
         .velocityDecay(0.6)
         .on('tick', () => {});
       g.sim = sim;
-      g.camX = 0; g.camY = 0; g.zoom = 1;
+      if (resetCamera) { g.camX = 0; g.camY = 0; g.zoom = 1; }
     }).catch(err => {
       setError(`Failed to load graph library: ${err instanceof Error ? err.message : 'Unknown error'}`);
     });
@@ -2364,7 +2364,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
       }
       node.expanded = true;
       setNodeCount(g.nodes.length);
-      startSim();
+      startSim(false);
     } catch { /* silent */ } finally { setExpanding(false); }
   }, [info.name, vectorField, colorField, expanding, startSim]);
 
