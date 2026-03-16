@@ -296,7 +296,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
     const min = Math.min(...values);
     const max = Math.max(...values);
     const avg = values.reduce((s, v) => s + v, 0) / values.length;
-    return { fieldName, type: 'NUMERIC', distribution: [], stats: { min, max, avg, count: docs.length } };
+    return { fieldName, type: 'NUMERIC', distribution: [], stats: { min, max, avg, count: values.length } };
   }
 
   private getTextDistribution(docs: Record<string, string>[], fieldName: string): FieldDistribution {

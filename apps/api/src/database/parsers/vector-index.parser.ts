@@ -328,6 +328,9 @@ function parseProfileProcessors(raw: unknown): ProfileProcessor[] {
 }
 
 export function parseProfileResponse(raw: unknown[]): ProfileResult {
+  if (!Array.isArray(raw) || raw.length < 2) {
+    return { results: { totalResults: 0, results: [] }, profile: { totalTimeMs: 0, parsingTimeMs: 0, iteratorsProfile: null, resultProcessorsProfile: [] } };
+  }
   // raw[0] = search results, raw[1] = profile data
   const searchResults = parseTextSearchResponse(raw[0] as unknown[]);
 

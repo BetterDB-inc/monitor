@@ -2116,7 +2116,11 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     }
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = '#ffffff';
+    const cs = containerRef.current ? getComputedStyle(containerRef.current) : null;
+    const bgColor = cs?.getPropertyValue('--background').trim() || '#ffffff';
+    const fgColor = cs?.getPropertyValue('--foreground').trim() || '#1e293b';
+    const mutedFg = cs?.getPropertyValue('--muted-foreground').trim() || '#94a3b8';
+    ctx.fillStyle = `hsl(${bgColor})`;
     ctx.fillRect(0, 0, w, h);
 
     ctx.save();
@@ -2167,7 +2171,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
       ctx.restore();
 
       if (isS) {
-        ctx.strokeStyle = '#1e293b';
+        ctx.strokeStyle = `hsl(${fgColor})`;
         ctx.lineWidth = 1.5;
         ctx.globalAlpha = 0.7;
         ctx.beginPath();
@@ -2202,11 +2206,11 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
       ctx.font = `${fs}px ui-monospace, monospace`;
       const tw = ctx.measureText(lbl).width;
       const p = 3;
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = `hsl(${bgColor})`;
       ctx.globalAlpha = 0.8;
       ctx.fillRect(n.x - tw / 2 - p, n.y - r * 1.6 - fs - p, tw + p * 2, fs + p * 2);
       ctx.globalAlpha = isH || isS ? 1 : 0.7;
-      ctx.fillStyle = '#1e293b';
+      ctx.fillStyle = `hsl(${fgColor})`;
       ctx.fillText(lbl, n.x, n.y - r * 1.6);
       ctx.globalAlpha = 1;
     }
@@ -2214,7 +2218,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     ctx.restore();
 
     // HUD
-    ctx.fillStyle = '#94a3b8';
+    ctx.fillStyle = `hsl(${mutedFg})`;
     ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
@@ -2501,7 +2505,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
         </button>
       </div>
       {error && <p className="text-sm text-destructive">{error}</p>}
-      <div ref={containerRef} className="rounded-lg overflow-hidden relative border" style={{ height: 600, background: '#ffffff' }}>
+      <div ref={containerRef} className="rounded-lg overflow-hidden relative border bg-background" style={{ height: 600 }}>
         <canvas ref={canvasRef} style={{ width: '100%', height: '100%', cursor: 'grab' }} />
         {legend.length > 0 && (
           <div className="absolute top-3 right-3 rounded-lg px-3 py-2 text-[11px] space-y-1 max-w-[180px] shadow-md" style={{ background: 'rgba(255,255,255,0.92)', border: '1px solid rgba(0,0,0,0.08)' }}>
