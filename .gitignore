@@ -67,3 +67,6 @@ Thumbs.db
 terraform.tfvars
 *.tfvars
 !*.tfvars.example
+packages/mcp/.mcpregistry_github_token
+.gitignore
+packages/mcp/.mcpregistry_registry_token
