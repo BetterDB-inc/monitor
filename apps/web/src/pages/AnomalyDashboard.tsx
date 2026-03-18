@@ -187,8 +187,8 @@ export function AnomalyDashboard() {
     }
 
     return Object.entries(buckets)
-      .map(([ts, counts]) => ({ time: formatTime(parseInt(ts)), ...counts }))
-      .sort((a, b) => a.time.localeCompare(b.time));
+      .sort(([a], [b]) => parseInt(a) - parseInt(b))
+      .map(([ts, counts]) => ({ time: formatTime(parseInt(ts)), ...counts }));
   }, [events, effectiveRangeMs]);
 
   // Metrics breakdown for bar chart
