@@ -144,7 +144,7 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
         .catch((): StoredMemorySnapshot[] => []),
       slowPromise
         .catch((): (SlowLogEntry | CommandLogEntry)[] => []),
-      metricsApi.getAnomalyEvents({ startTime: effectiveStart })
+      metricsApi.getAnomalyEvents({ startTime: effectiveStart, endTime: effectiveEnd })
         .catch((): AnomalyEvent[] => []),
       metricsApi.getStoredLatencySnapshots({ startTime: effectiveStart, endTime: effectiveEnd, limit: 500 })
         .catch((): StoredLatencySnapshot[] => []),
@@ -340,7 +340,7 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
       type: 'slowlog',
       items: evts.map(e => ({
         timestamp: toMs(e.timestamp),
-        command: e.command.join(' '),
+        command: Array.isArray(e.command) ? e.command.join(' ') : String(e.command),
         duration: e.duration,
         clientAddress: e.clientAddress,
       })),
@@ -547,7 +547,7 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
                 <Tooltip
                   wrapperStyle={{ zIndex: 10 }}
                   content={<LaneTooltip fields={[
-                    { key: 'latencyMax', label: 'Max Latency', format: v => `${v}ms` },
+                    { key: 'latencyMax', label: 'Max Latency', format: v => `${(v / 1000).toFixed(1)}ms` },
                   ]} />}
                 />
                 <Bar

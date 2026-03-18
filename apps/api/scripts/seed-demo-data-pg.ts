@@ -85,7 +85,7 @@ async function seedSlowLog(pool: Pool): Promise<number> {
   console.log('Seeding Slow Log entries...');
 
   // Clear existing
-  await pool.query('DELETE FROM slow_log_entries');
+  await pool.query('DELETE FROM slow_log_entries WHERE connection_id = $1', [CONNECTION_ID]);
 
   let total = 0;
   const BATCH = 100;
@@ -228,7 +228,7 @@ async function insertCommandLogBatch(pool: Pool, rows: any[][]): Promise<void> {
 async function seedLatencySnapshots(pool: Pool): Promise<number> {
   console.log('Seeding Latency Snapshots...');
 
-  await pool.query('DELETE FROM latency_snapshots');
+  await pool.query('DELETE FROM latency_snapshots WHERE connection_id = $1', [CONNECTION_ID]);
 
   let total = 0;
   const BATCH = 200;
@@ -300,7 +300,7 @@ async function insertLatencyBatch(pool: Pool, rows: any[][]): Promise<void> {
 async function seedLatencyHistograms(pool: Pool): Promise<number> {
   console.log('Seeding Latency Histograms...');
 
-  await pool.query('DELETE FROM latency_histograms');
+  await pool.query('DELETE FROM latency_histograms WHERE connection_id = $1', [CONNECTION_ID]);
 
   const commandNames = ['GET', 'SET', 'HGET', 'HSET', 'LPUSH', 'RPOP', 'ZADD', 'ZRANGE', 'DEL', 'EXPIRE'];
   let total = 0;
@@ -341,7 +341,7 @@ async function seedLatencyHistograms(pool: Pool): Promise<number> {
 async function seedMemorySnapshots(pool: Pool): Promise<number> {
   console.log('Seeding Memory Snapshots...');
 
-  await pool.query('DELETE FROM memory_snapshots');
+  await pool.query('DELETE FROM memory_snapshots WHERE connection_id = $1', [CONNECTION_ID]);
 
   const maxmemory = 4_294_967_296;
   let usedMemory = randomInt(500_000_000, 1_000_000_000);
