@@ -651,7 +651,7 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
                       <span className="inline-block w-2 h-2 rounded-full bg-blue-500" />
                     </td>
                     <td className="py-1.5 pr-3 whitespace-nowrap font-medium tabular-nums">
-                      {item.maxLatency}ms
+                      {(item.maxLatency / 1000).toFixed(1)}ms
                     </td>
                     <td className="py-1.5 pr-3">{item.eventName}</td>
                     <td className="py-1.5 text-xs text-muted-foreground whitespace-nowrap text-right">
