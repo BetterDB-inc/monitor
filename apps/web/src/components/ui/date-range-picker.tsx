@@ -79,6 +79,11 @@ export function DateRangePicker({ value, onChange, className }: DateRangePickerP
 
   const formatDisplayValue = () => {
     if (!value) return 'All time';
+    // Show time when both dates fall on the same day (e.g. drag-selected range)
+    const sameDay = format(value.from, 'yyyy-MM-dd') === format(value.to, 'yyyy-MM-dd');
+    if (sameDay) {
+      return `${format(value.from, 'MMM d, HH:mm')} – ${format(value.to, 'HH:mm')}`;
+    }
     return `${format(value.from, 'MMM d, yyyy')} – ${format(value.to, 'MMM d, yyyy')}`;
   };
 

@@ -1,7 +1,9 @@
 import { useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { metricsApi } from '../api/metrics';
+import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import {
   AlertTriangle,
@@ -31,8 +33,6 @@ import {
   BarChart,
   Bar,
 } from 'recharts';
-
-type TimeRange = '1h' | '6h' | '24h';
 
 interface AnomalyEvent {
   id: string;
@@ -118,26 +118,38 @@ function formatValue(value: number, metric: string): string {
 
 export function AnomalyDashboard() {
   const { currentConnection } = useConnection();
-  const [timeRange, setTimeRange] = useState<TimeRange>('1h');
+  const [searchParams] = useSearchParams();
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
-  const timeRangeMs = { '1h': 3600000, '6h': 21600000, '24h': 86400000 }[timeRange];
-  const startTime = Date.now() - timeRangeMs;
+  // Time filter — initialise from URL ?start=&end= (epoch ms)
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
+    const s = searchParams.get('start');
+    const e = searchParams.get('end');
+    if (s && e) {
+      const from = new Date(Number(s));
+      const to = new Date(Number(e));
+      if (!isNaN(from.getTime()) && !isNaN(to.getTime())) return { from, to };
+    }
+    return undefined;
+  });
+
+  const startTime = dateRange?.from ? dateRange.from.getTime() : undefined;
+  const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
 
   const { data: summary } = usePolling<AnomalySummary>({
-    fetcher: () => metricsApi.getAnomalySummary(),
+    fetcher: () => metricsApi.getAnomalySummary({ startTime, endTime }),
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
 
   const { data: events } = usePolling<AnomalyEvent[]>({
-    fetcher: () => metricsApi.getAnomalyEvents({ startTime }),
+    fetcher: () => metricsApi.getAnomalyEvents({ startTime, endTime }),
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
 
   const { data: groups } = usePolling<CorrelatedGroup[]>({
-    fetcher: () => metricsApi.getAnomalyGroups({ startTime }),
+    fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
@@ -158,10 +170,14 @@ export function AnomalyDashboard() {
   };
 
   // Timeline data for chart
-  const timelineData = useMemo(() => {
-    if (!events?.length) return [];
+  const effectiveRangeMs = startTime != null
+    ? (endTime ?? Date.now()) - startTime
+    : 24 * 3_600_000; // fallback: 24 h when no range selected
 
-    const bucketSize = timeRangeMs / 60; // 60 buckets
+  const timelineData = useMemo(() => {
+    if (!events?.length || effectiveRangeMs <= 0) return [];
+
+    const bucketSize = effectiveRangeMs / 60; // 60 buckets
     const buckets: Record<number, { critical: number; warning: number; info: number }> = {};
 
     for (const event of events) {
@@ -173,7 +189,7 @@ export function AnomalyDashboard() {
     return Object.entries(buckets)
       .map(([ts, counts]) => ({ time: formatTime(parseInt(ts)), ...counts }))
       .sort((a, b) => a.time.localeCompare(b.time));
-  }, [events, timeRangeMs]);
+  }, [events, effectiveRangeMs]);
 
   // Metrics breakdown for bar chart
   const metricsData = useMemo(() => {
@@ -192,21 +208,7 @@ export function AnomalyDashboard() {
           <h1 className="text-3xl font-bold">Anomaly Detection</h1>
           <p className="text-muted-foreground">Real-time monitoring across all metrics</p>
         </div>
-        <div className="flex gap-2">
-          {(['1h', '6h', '24h'] as TimeRange[]).map(range => (
-            <button
-              key={range}
-              onClick={() => setTimeRange(range)}
-              className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-                timeRange === range
-                  ? 'bg-primary text-primary-foreground'
-                  : 'bg-muted hover:bg-muted/80'
-              }`}
-            >
-              {range.toUpperCase()}
-            </button>
-          ))}
-        </div>
+        <DateRangePicker value={dateRange} onChange={setDateRange} />
       </div>
 
       {/* Summary Cards */}

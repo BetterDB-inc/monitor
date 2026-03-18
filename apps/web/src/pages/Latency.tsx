@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
@@ -30,6 +31,7 @@ const COMMAND_X_AXIS = { angle: -45, textAnchor: 'end' as const, height: 100 };
 
 export function Latency() {
   const { currentConnection } = useConnection();
+  const [searchParams] = useSearchParams();
   const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
   const [selectedCommand, setSelectedCommand] = useState<string | null>(null);
   const [historyData, setHistoryData] = useState<LatencyHistoryEntry[]>([]);
@@ -38,8 +40,17 @@ export function Latency() {
   const [doctorReport, setDoctorReport] = useState<string>();
   const [doctorLoading, setDoctorLoading] = useState(true);
 
-  // Time filter state
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
+  // Time filter state — initialise from URL ?start=&end= (epoch ms)
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
+    const s = searchParams.get('start');
+    const e = searchParams.get('end');
+    if (s && e) {
+      const from = new Date(Number(s));
+      const to = new Date(Number(e));
+      if (!isNaN(from.getTime()) && !isNaN(to.getTime())) return { from, to };
+    }
+    return undefined;
+  });
 
   const startTime = dateRange?.from
     ? dateRange.from.getTime()

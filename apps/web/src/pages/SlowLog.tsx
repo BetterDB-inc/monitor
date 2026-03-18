@@ -45,8 +45,17 @@ export function SlowLog() {
   const PAGE_SIZE = 100;
   const [page, setPage] = useState(0);
 
-  // Time filter state
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
+  // Time filter state — initialise from URL ?start=&end= (epoch ms)
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
+    const s = searchParams.get('start');
+    const e = searchParams.get('end');
+    if (s && e) {
+      const from = new Date(Number(s));
+      const to = new Date(Number(e));
+      if (!isNaN(from.getTime()) && !isNaN(to.getTime())) return { from, to };
+    }
+    return undefined;
+  });
 
   const handleDateRangeChange = (range: DateRange | undefined) => {
     setDateRange(range);

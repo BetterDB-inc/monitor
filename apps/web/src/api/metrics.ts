@@ -334,25 +334,33 @@ export const metricsApi = {
   },
 
   // Anomaly Detection
-  getAnomalyEvents: (params?: { limit?: number; metricType?: string; startTime?: number }) => {
+  getAnomalyEvents: (params?: { limit?: number; metricType?: string; startTime?: number; endTime?: number }) => {
     const query = new URLSearchParams();
     if (params?.limit) query.append('limit', params.limit.toString());
     if (params?.metricType) query.append('metricType', params.metricType);
     if (params?.startTime) query.append('startTime', params.startTime.toString());
+    if (params?.endTime) query.append('endTime', params.endTime.toString());
     const queryString = query.toString();
     return fetchApi<any[]>(`/anomaly/events${queryString ? `?${queryString}` : ''}`);
   },
 
-  getAnomalyGroups: (params?: { limit?: number; pattern?: string; startTime?: number }) => {
+  getAnomalyGroups: (params?: { limit?: number; pattern?: string; startTime?: number; endTime?: number }) => {
     const query = new URLSearchParams();
     if (params?.limit) query.append('limit', params.limit.toString());
     if (params?.pattern) query.append('pattern', params.pattern);
     if (params?.startTime) query.append('startTime', params.startTime.toString());
+    if (params?.endTime) query.append('endTime', params.endTime.toString());
     const queryString = query.toString();
     return fetchApi<any[]>(`/anomaly/groups${queryString ? `?${queryString}` : ''}`);
   },
 
-  getAnomalySummary: () => fetchApi<any>('/anomaly/summary'),
+  getAnomalySummary: (params?: { startTime?: number; endTime?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.startTime) query.append('startTime', params.startTime.toString());
+    if (params?.endTime) query.append('endTime', params.endTime.toString());
+    const queryString = query.toString();
+    return fetchApi<any>(`/anomaly/summary${queryString ? `?${queryString}` : ''}`);
+  },
 
   getAnomalyBuffers: () => fetchApi<any[]>('/anomaly/buffers'),
 

@@ -27,6 +27,13 @@
   }
 }
 
+@layer components {
+  .event-timeline-lanes .recharts-responsive-container,
+  .event-timeline-lanes .recharts-wrapper {
+    overflow: visible !important;
+  }
+}
+
 @layer base {
   * {
     @apply border-border;

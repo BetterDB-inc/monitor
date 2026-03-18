@@ -1,10 +1,11 @@
 import { useState, useMemo, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useCapabilities } from '../hooks/useCapabilities';
 import { useLicense } from '../hooks/useLicense';
+import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Badge } from '../components/ui/badge';
@@ -31,13 +32,7 @@ import type {
   SpikeDetectionResponse,
 } from '../types/metrics';
 
-type TimeRange = '1h' | '6h' | '24h';
-
-const TIME_RANGE_MS: Record<TimeRange, number> = {
-  '1h': 3600000,
-  '6h': 6 * 3600000,
-  '24h': 24 * 3600000,
-};
+const ONE_HOUR_MS = 3_600_000;
 
 function formatShortTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString();
@@ -56,15 +51,30 @@ const CHART_COLORS = ['hsl(var(--primary))', '#8884d8', '#82ca9d', '#ffc658', '#
 export function ClientAnalyticsDeepDive() {
   const { currentConnection } = useConnection();
   const { hasClientList } = useCapabilities();
-  const [timeRange, setTimeRange] = useState<TimeRange>('1h');
+  const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<string>('commands');
   const { hasFeature } = useLicense();
   const hasAnomalyDetection = hasFeature(Feature.ANOMALY_DETECTION);
 
+  // Time filter — initialise from URL ?start=&end= (epoch ms)
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
+    const s = searchParams.get('start');
+    const e = searchParams.get('end');
+    if (s && e) {
+      const from = new Date(Number(s));
+      const to = new Date(Number(e));
+      if (!isNaN(from.getTime()) && !isNaN(to.getTime())) return { from, to };
+    }
+    return undefined;
+  });
+
   const timeRangeParams = useMemo(() => {
+    if (dateRange?.from && dateRange?.to) {
+      return { start: dateRange.from.getTime(), end: dateRange.to.getTime() };
+    }
     const now = Date.now();
-    return { start: now - TIME_RANGE_MS[timeRange], end: now };
-  }, [timeRange]);
+    return { start: now - ONE_HOUR_MS, end: now };
+  }, [dateRange]);
 
   // Fetchers as stable callbacks
   const fetchCommandDist = useCallback(
@@ -190,21 +200,7 @@ export function ClientAnalyticsDeepDive() {
             Advanced analytics and anomaly detection for client connections
           </p>
         </div>
-        <div className="flex gap-2">
-          {(['1h', '6h', '24h'] as TimeRange[]).map((range) => (
-            <button
-              key={range}
-              onClick={() => setTimeRange(range)}
-              className={`px-3 py-1 rounded text-sm ${
-                timeRange === range
-                  ? 'bg-primary text-primary-foreground'
-                  : 'bg-muted hover:bg-muted/80'
-              }`}
-            >
-              {range.toUpperCase()}
-            </button>
-          ))}
-        </div>
+        <DateRangePicker value={dateRange} onChange={setDateRange} />
       </div>
 
       {/* Summary Cards */}

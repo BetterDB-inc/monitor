@@ -9,8 +9,8 @@ import { OpsChart } from '../components/dashboard/OpsChart';
 import { CpuChart } from '../components/dashboard/CpuChart';
 import { IoThreadChart } from '../components/dashboard/IoThreadChart';
 import { deriveStoredIoDeltas } from '../components/dashboard/io-threads.utils';
+import { EventTimeline } from '../components/dashboard/EventTimeline';
 import { CapabilitiesBadges } from '../components/dashboard/CapabilitiesBadges';
-import { DoctorCard } from '../components/DoctorCard';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import type { StoredMemorySnapshot } from '../types/metrics';
 
@@ -36,8 +36,6 @@ export function Dashboard() {
   const [hasEverSeenIoActivity, setHasEverSeenIoActivity] = useState(false);
   const prevCpuRef = useRef<{ sys: number; user: number; ts: number } | null>(null);
   const prevIoCounters = useRef<{ reads: number; writes: number; ts: number } | null>(null);
-  const [memoryDoctorReport, setMemoryDoctorReport] = useState<string>();
-  const [memoryDoctorLoading, setMemoryDoctorLoading] = useState(true);
 
   // Time filter state for memory snapshots
   const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
@@ -174,14 +172,6 @@ export function Dashboard() {
     }
   }, [info]);
 
-  useEffect(() => {
-    setMemoryDoctorLoading(true);
-    metricsApi.getMemoryDoctor()
-      .then(data => setMemoryDoctorReport(data.report))
-      .catch(console.error)
-      .finally(() => setMemoryDoctorLoading(false));
-  }, [currentConnection?.id]);
-
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -197,11 +187,7 @@ export function Dashboard() {
         <OverviewCards info={info} />
       </div>
 
-      <DoctorCard
-        title="Memory Doctor"
-        report={memoryDoctorReport}
-        isLoading={memoryDoctorLoading}
-      />
+      <EventTimeline startTime={startTime} endTime={endTime} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <MemoryChart data={isTimeFiltered ? (storedMemoryHistory ?? []) : memoryHistory} />

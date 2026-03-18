@@ -613,6 +613,368 @@ function seedKeyPatternSnapshots(): void {
   console.log(`  Created ${snapshots.length} key pattern snapshots`);
 }
 
+// ============================================================================
+// SLOW LOG & LATENCY & MEMORY SEED FUNCTIONS
+// ============================================================================
+
+const SLOW_COMMANDS: { cmd: string[]; baseDuration: number }[] = [
+  { cmd: ['KEYS', '*'], baseDuration: 500_000 },
+  { cmd: ['KEYS', 'user:*'], baseDuration: 300_000 },
+  { cmd: ['SCAN', '0', 'COUNT', '1000000'], baseDuration: 200_000 },
+  { cmd: ['SMEMBERS', 'large_set'], baseDuration: 150_000 },
+  { cmd: ['HGETALL', 'big_hash'], baseDuration: 120_000 },
+  { cmd: ['SORT', 'mylist'], baseDuration: 80_000 },
+  { cmd: ['LRANGE', 'queue:tasks', '0', '-1'], baseDuration: 60_000 },
+  { cmd: ['ZRANGEBYSCORE', 'leaderboard', '-inf', '+inf'], baseDuration: 45_000 },
+  { cmd: ['SINTER', 'set1', 'set2', 'set3'], baseDuration: 40_000 },
+  { cmd: ['MGET', 'k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7', 'k8', 'k9', 'k10'], baseDuration: 25_000 },
+  { cmd: ['GET', 'session:abc123'], baseDuration: 15_000 },
+  { cmd: ['SET', 'cache:page:home', '<large_html>'], baseDuration: 12_000 },
+  { cmd: ['XREAD', 'COUNT', '1000', 'STREAMS', 'events', '0'], baseDuration: 35_000 },
+  { cmd: ['CLUSTER', 'INFO'], baseDuration: 18_000 },
+  { cmd: ['DEBUG', 'SLEEP', '0.1'], baseDuration: 100_000 },
+];
+
+const LATENCY_EVENTS = [
+  'command',
+  'fast-command',
+  'fork',
+  'aof-fsync-always',
+  'aof-write',
+  'rdb-unlink-temp-file',
+  'expire-cycle',
+  'eviction-cycle',
+  'active-defrag-cycle',
+];
+
+function seedSlowLogEntries(): void {
+  console.log('Seeding Slow Log entries...');
+
+  // Ensure table exists
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS slow_log_entries (
+      pk INTEGER PRIMARY KEY AUTOINCREMENT,
+      slowlog_id INTEGER NOT NULL,
+      timestamp INTEGER NOT NULL,
+      duration INTEGER NOT NULL,
+      command TEXT NOT NULL DEFAULT '[]',
+      client_address TEXT,
+      client_name TEXT,
+      captured_at INTEGER NOT NULL,
+      source_host TEXT NOT NULL,
+      source_port INTEGER NOT NULL,
+      connection_id TEXT NOT NULL DEFAULT 'env-default',
+      UNIQUE(slowlog_id, source_host, source_port, connection_id)
+    );
+  `);
+
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO slow_log_entries (
+      slowlog_id, timestamp, duration, command,
+      client_address, client_name, captured_at,
+      source_host, source_port, connection_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const entries: any[] = [];
+
+  // Generate ~300 slow log entries spread over 7 days
+  // Cluster them: more during business hours, occasional bursts
+  for (let i = 0; i < 300; i++) {
+    const dayOffset = randomInt(0, 6);
+    const hour = randomInt(0, 23);
+    // More entries during business hours (9-18)
+    if (hour < 9 || hour > 18) {
+      if (Math.random() < 0.6) continue; // Skip 60% of off-hours entries
+    }
+
+    const baseTs = SEVEN_DAYS_AGO + dayOffset * DAY_MS + hour * HOUR_MS + randomInt(0, HOUR_MS);
+    const timestampSec = Math.floor(baseTs / 1000); // slow log uses seconds
+
+    const slow = randomChoice(SLOW_COMMANDS);
+    // Add realistic jitter to duration (±50%)
+    const duration = Math.floor(slow.baseDuration * randomFloat(0.5, 2.5));
+
+    const clientIP = generateIP();
+    const clientPort = randomInt(40000, 65000);
+
+    entries.push({
+      slowlogId: 1000 + i,
+      timestamp: timestampSec,
+      duration,
+      command: JSON.stringify(slow.cmd),
+      clientAddress: `${clientIP}:${clientPort}`,
+      clientName: randomChoice(CLIENT_NAMES),
+      capturedAt: baseTs + randomInt(0, 5000), // captured shortly after
+      sourceHost: SOURCE_HOST,
+      sourcePort: SOURCE_PORT,
+      connectionId: 'env-default',
+    });
+  }
+
+  const insertMany = db.transaction((entries: any[]) => {
+    for (const e of entries) {
+      insert.run(
+        e.slowlogId, e.timestamp, e.duration, e.command,
+        e.clientAddress, e.clientName, e.capturedAt,
+        e.sourceHost, e.sourcePort, e.connectionId
+      );
+    }
+  });
+
+  insertMany(entries);
+  console.log(`  Created ${entries.length} slow log entries`);
+}
+
+function seedLatencySnapshots(): void {
+  console.log('Seeding Latency Snapshots...');
+
+  // Ensure table exists
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS latency_snapshots (
+      id TEXT PRIMARY KEY,
+      timestamp INTEGER NOT NULL,
+      event_name TEXT NOT NULL,
+      latest_event_timestamp INTEGER NOT NULL,
+      max_latency INTEGER NOT NULL,
+      connection_id TEXT NOT NULL DEFAULT 'env-default'
+    );
+  `);
+
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO latency_snapshots (
+      id, timestamp, event_name, latest_event_timestamp, max_latency, connection_id
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `);
+
+  const entries: any[] = [];
+
+  // Generate snapshots every ~30 minutes for 7 days
+  // Each snapshot records a latency event with a max latency value
+  for (let minuteOffset = 0; minuteOffset < 7 * 24 * 60; minuteOffset += 30) {
+    const ts = SEVEN_DAYS_AGO + minuteOffset * MINUTE_MS;
+
+    // Not every event fires every 30 min — pick 1-4 events per snapshot window
+    const activeEvents = randomSubset(LATENCY_EVENTS, 1, 4);
+
+    for (const eventName of activeEvents) {
+      // Base latency in microseconds, varies by event type
+      let baseLatency: number;
+      switch (eventName) {
+        case 'fork':           baseLatency = randomInt(5_000, 50_000); break;
+        case 'aof-fsync-always': baseLatency = randomInt(1_000, 20_000); break;
+        case 'aof-write':      baseLatency = randomInt(500, 10_000); break;
+        case 'expire-cycle':   baseLatency = randomInt(200, 5_000); break;
+        case 'eviction-cycle': baseLatency = randomInt(500, 8_000); break;
+        case 'command':        baseLatency = randomInt(100, 3_000); break;
+        case 'fast-command':   baseLatency = randomInt(50, 500); break;
+        default:               baseLatency = randomInt(100, 2_000);
+      }
+
+      // Occasional spikes (10% chance)
+      if (Math.random() < 0.1) {
+        baseLatency = Math.floor(baseLatency * randomFloat(3, 10));
+      }
+
+      const eventTs = Math.floor(ts / 1000); // LATENCY LATEST uses seconds
+
+      entries.push({
+        id: randomUUID(),
+        timestamp: ts,          // capture time (ms)
+        eventName,
+        latestEventTimestamp: eventTs,
+        maxLatency: baseLatency, // microseconds
+        connectionId: 'env-default',
+      });
+    }
+  }
+
+  const insertMany = db.transaction((entries: any[]) => {
+    for (const e of entries) {
+      insert.run(e.id, e.timestamp, e.eventName, e.latestEventTimestamp, e.maxLatency, e.connectionId);
+    }
+  });
+
+  insertMany(entries);
+  console.log(`  Created ${entries.length} latency snapshots`);
+}
+
+function seedLatencyHistograms(): void {
+  console.log('Seeding Latency Histograms...');
+
+  // Ensure table exists
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS latency_histograms (
+      id TEXT PRIMARY KEY,
+      timestamp INTEGER NOT NULL,
+      histogram_data TEXT NOT NULL,
+      connection_id TEXT NOT NULL DEFAULT 'env-default'
+    );
+  `);
+
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO latency_histograms (id, timestamp, histogram_data, connection_id)
+    VALUES (?, ?, ?, ?)
+  `);
+
+  const entries: any[] = [];
+  const commandNames = ['GET', 'SET', 'HGET', 'HSET', 'LPUSH', 'RPOP', 'ZADD', 'ZRANGE', 'DEL', 'EXPIRE'];
+
+  // Generate one histogram snapshot every 4 hours for 7 days
+  for (let hourOffset = 0; hourOffset < 7 * 24; hourOffset += 4) {
+    const ts = SEVEN_DAYS_AGO + hourOffset * HOUR_MS;
+
+    const data: Record<string, { calls: number; histogram: Record<string, number> }> = {};
+
+    for (const cmd of commandNames) {
+      const calls = randomInt(1000, 500_000);
+      const histogram: Record<string, number> = {};
+
+      // Build cumulative histogram buckets (microseconds)
+      // Most calls are fast, tail gets smaller
+      const buckets = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384];
+      let remaining = calls;
+
+      for (let i = 0; i < buckets.length && remaining > 0; i++) {
+        // Earlier buckets get more calls (fast commands)
+        const fraction = i < 5 ? randomFloat(0.1, 0.35) : randomFloat(0.01, 0.1);
+        const count = Math.min(Math.floor(calls * fraction), remaining);
+        if (count > 0) {
+          histogram[buckets[i].toString()] = count;
+          remaining -= count;
+        }
+      }
+      // Dump the rest into the first bucket
+      if (remaining > 0) {
+        histogram['1'] = (histogram['1'] || 0) + remaining;
+      }
+
+      data[cmd] = { calls, histogram };
+    }
+
+    entries.push({
+      id: randomUUID(),
+      timestamp: ts,
+      data: JSON.stringify(data),
+      connectionId: 'env-default',
+    });
+  }
+
+  const insertMany = db.transaction((entries: any[]) => {
+    for (const e of entries) {
+      insert.run(e.id, e.timestamp, e.data, e.connectionId);
+    }
+  });
+
+  insertMany(entries);
+  console.log(`  Created ${entries.length} latency histograms`);
+}
+
+function seedMemorySnapshots(): void {
+  console.log('Seeding Memory Snapshots...');
+
+  // Ensure table exists
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_snapshots (
+      id TEXT PRIMARY KEY,
+      timestamp INTEGER NOT NULL,
+      used_memory INTEGER NOT NULL,
+      used_memory_rss INTEGER NOT NULL,
+      used_memory_peak INTEGER NOT NULL,
+      mem_fragmentation_ratio REAL NOT NULL,
+      maxmemory INTEGER NOT NULL DEFAULT 0,
+      allocator_frag_ratio REAL NOT NULL DEFAULT 0,
+      ops_per_sec INTEGER NOT NULL DEFAULT 0,
+      cpu_sys REAL NOT NULL DEFAULT 0,
+      cpu_user REAL NOT NULL DEFAULT 0,
+      io_threaded_reads INTEGER NOT NULL DEFAULT 0,
+      io_threaded_writes INTEGER NOT NULL DEFAULT 0,
+      connection_id TEXT NOT NULL DEFAULT 'env-default'
+    );
+  `);
+
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO memory_snapshots (
+      id, timestamp, used_memory, used_memory_rss, used_memory_peak,
+      mem_fragmentation_ratio, maxmemory, allocator_frag_ratio,
+      ops_per_sec, cpu_sys, cpu_user,
+      io_threaded_reads, io_threaded_writes, connection_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const entries: any[] = [];
+  const maxmemory = 4_294_967_296; // 4 GB
+
+  // Base values that drift over time
+  let usedMemory = randomInt(500_000_000, 1_000_000_000); // ~500MB-1GB start
+  let peakMemory = usedMemory;
+  let cumulativeIoReads = 0;
+  let cumulativeIoWrites = 0;
+
+  // Generate a snapshot every 30 seconds for 7 days = ~20160 entries
+  // That's too many — let's do every 5 minutes = ~2016 entries
+  for (let minOffset = 0; minOffset < 7 * 24 * 60; minOffset += 5) {
+    const ts = SEVEN_DAYS_AGO + minOffset * MINUTE_MS;
+
+    // Simulate gradual memory growth with daily cycles
+    const hourOfDay = (minOffset / 60) % 24;
+    const isBusinessHours = hourOfDay >= 8 && hourOfDay <= 20;
+    const trafficMultiplier = isBusinessHours ? randomFloat(1.0, 1.5) : randomFloat(0.7, 1.0);
+
+    // Memory drifts slightly each tick
+    usedMemory += Math.floor(randomFloat(-2_000_000, 5_000_000) * trafficMultiplier);
+    usedMemory = Math.max(200_000_000, Math.min(usedMemory, 3_500_000_000)); // clamp
+
+    if (usedMemory > peakMemory) peakMemory = usedMemory;
+
+    const rss = Math.floor(usedMemory * randomFloat(1.05, 1.3));
+    const fragRatio = parseFloat((rss / usedMemory).toFixed(2));
+    const allocFragRatio = parseFloat(randomFloat(1.0, 1.15).toFixed(2));
+
+    const opsPerSec = Math.floor(randomInt(500, 5000) * trafficMultiplier);
+    const cpuSys = parseFloat(randomFloat(0.5, 5.0).toFixed(3));
+    const cpuUser = parseFloat(randomFloat(1.0, 15.0).toFixed(3));
+
+    cumulativeIoReads += Math.floor(randomInt(10, 200) * trafficMultiplier);
+    cumulativeIoWrites += Math.floor(randomInt(5, 100) * trafficMultiplier);
+
+    entries.push({
+      id: randomUUID(),
+      timestamp: ts,
+      usedMemory,
+      usedMemoryRss: rss,
+      usedMemoryPeak: peakMemory,
+      memFragmentationRatio: fragRatio,
+      maxmemory,
+      allocatorFragRatio: allocFragRatio,
+      opsPerSec,
+      cpuSys,
+      cpuUser,
+      ioThreadedReads: cumulativeIoReads,
+      ioThreadedWrites: cumulativeIoWrites,
+      connectionId: 'env-default',
+    });
+  }
+
+  const insertMany = db.transaction((batch: any[]) => {
+    for (const e of batch) {
+      insert.run(
+        e.id, e.timestamp, e.usedMemory, e.usedMemoryRss, e.usedMemoryPeak,
+        e.memFragmentationRatio, e.maxmemory, e.allocatorFragRatio,
+        e.opsPerSec, e.cpuSys, e.cpuUser,
+        e.ioThreadedReads, e.ioThreadedWrites, e.connectionId
+      );
+    }
+  });
+
+  // Insert in batches to avoid huge transactions
+  const BATCH_SIZE = 500;
+  for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+    insertMany(entries.slice(i, i + BATCH_SIZE));
+  }
+  console.log(`  Created ${entries.length} memory snapshots`);
+}
+
 function seedWebhooks(): void {
   console.log('Seeding Webhooks and Deliveries...');
 
@@ -861,6 +1223,10 @@ function clearExistingData(): void {
   db.exec('DELETE FROM correlated_anomaly_groups');
   db.exec('DELETE FROM key_pattern_snapshots');
   db.exec('DELETE FROM app_settings');
+  // These tables may not exist yet if the app hasn't been started; the seed functions create them
+  for (const table of ['slow_log_entries', 'latency_snapshots', 'latency_histograms', 'memory_snapshots']) {
+    try { db.exec(`DELETE FROM ${table}`); } catch { /* table may not exist yet */ }
+  }
 
   console.log('  Cleared all tables');
 }
@@ -885,6 +1251,10 @@ function main(): void {
     seedAnomalyEvents();
     seedKeyPatternSnapshots();
     seedWebhooks();
+    seedSlowLogEntries();
+    seedLatencySnapshots();
+    seedLatencyHistograms();
+    seedMemorySnapshots();
 
     console.log();
     console.log('='.repeat(60));
@@ -897,6 +1267,10 @@ function main(): void {
     console.log('  - 80 anomaly events with correlated groups');
     console.log('  - 56 key pattern snapshots (8 patterns x 7 days)');
     console.log('  - 5 webhooks with ~200 deliveries');
+    console.log('  - ~300 slow log entries (7 days)');
+    console.log('  - ~1500 latency snapshots (7 days)');
+    console.log('  - ~42 latency histograms (7 days)');
+    console.log('  - ~2000 memory snapshots (7 days)');
     console.log('  - App settings configured');
     console.log();
     console.log('You can now start the application and explore the demo data!');
