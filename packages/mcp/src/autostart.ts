@@ -71,9 +71,9 @@ export async function startMonitor(opts: {
     fs.unlinkSync(PID_FILE);
   }
 
-  // Build env
+  // Build env — filter out undefined values from process.env
   const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
+    ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined)) as Record<string, string>,
     PORT: String(opts.port),
     STORAGE_TYPE: opts.storage,
     NODE_ENV: 'production',
@@ -156,7 +156,7 @@ export async function stopMonitor(): Promise<{ stopped: boolean; message: string
     }
   }
 
-  fs.unlinkSync(PID_FILE);
+  try { fs.unlinkSync(PID_FILE); } catch { /* already removed */ }
   return wasRunning
     ? { stopped: true, message: `Stopped monitor (PID ${pid}).` }
     : { stopped: true, message: `Removed stale PID file (process ${pid} was not running).` };

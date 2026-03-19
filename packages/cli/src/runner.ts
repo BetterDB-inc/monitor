@@ -28,17 +28,17 @@ export function mapConfigToEnv(
     BETTERDB_STATIC_DIR: staticDir,
 
     // Database connection — environment variables take precedence over saved config
-    DB_HOST: process.env.DB_HOST || config.database.host,
-    DB_PORT: process.env.DB_PORT || String(config.database.port),
-    DB_USERNAME: process.env.DB_USERNAME || config.database.username,
-    DB_PASSWORD: process.env.DB_PASSWORD || config.database.password,
-    DB_TYPE: process.env.DB_TYPE || config.database.type,
+    DB_HOST: process.env.DB_HOST ?? config.database.host,
+    DB_PORT: process.env.DB_PORT ?? String(config.database.port),
+    DB_USERNAME: process.env.DB_USERNAME ?? config.database.username,
+    DB_PASSWORD: process.env.DB_PASSWORD ?? config.database.password,
+    DB_TYPE: process.env.DB_TYPE ?? config.database.type,
 
     // Storage configuration
-    STORAGE_TYPE: process.env.STORAGE_TYPE || config.storage.type,
+    STORAGE_TYPE: process.env.STORAGE_TYPE ?? config.storage.type,
 
     // Application settings — environment variables take precedence over saved config
-    PORT: process.env.PORT || String(config.app.port),
+    PORT: process.env.PORT ?? String(config.app.port),
     ANOMALY_DETECTION_ENABLED: config.app.anomalyDetection ? 'true' : 'false',
   };
 
