@@ -111,7 +111,7 @@ export async function startMonitor(opts: {
   if (opts.persist) {
     // Persistent mode: detached, PID file written
     fs.mkdirSync(BETTERDB_DIR, { recursive: true });
-    child = spawn(npxCmd, ['@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
+    child = spawn(npxCmd, ['--yes', '@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
       env,
       stdio: 'ignore',
       detached: true,
@@ -132,7 +132,7 @@ export async function startMonitor(opts: {
     }
   } else {
     // Ephemeral mode: attached, cleaned up on exit
-    child = spawn(npxCmd, ['@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
+    child = spawn(npxCmd, ['--yes', '@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
       env,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
