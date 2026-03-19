@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
+const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+
 export const BETTERDB_DIR = path.join(os.homedir(), '.betterdb');
 export const PID_FILE = path.join(BETTERDB_DIR, 'monitor.pid');
 
@@ -93,7 +95,7 @@ export async function startMonitor(opts: {
   if (opts.persist) {
     // Persistent mode: detached, PID file written
     fs.mkdirSync(BETTERDB_DIR, { recursive: true });
-    child = spawn('npx', ['@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
+    child = spawn(npxCmd, ['@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
       env,
       stdio: 'ignore',
       detached: true,
@@ -114,7 +116,7 @@ export async function startMonitor(opts: {
     }
   } else {
     // Ephemeral mode: attached, cleaned up on exit
-    child = spawn('npx', ['@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
+    child = spawn(npxCmd, ['@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
       env,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
