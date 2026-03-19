@@ -1,21 +1,61 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.BetterDB-inc/monitor",
-  "description": "BetterDB MCP server - Valkey observability for Claude Code and other MCP clients",
+  "description": "BetterDB MCP server - Valkey and Redis observability for Claude Code and other MCP clients",
   "repository": {
     "url": "https://github.com/BetterDB-inc/monitor",
     "source": "github",
     "subfolder": "packages/mcp"
   },
-  "version": "0.1.4",
+  "version": "1.0.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@betterdb/mcp",
-      "version": "0.1.3",
+      "version": "1.0.0",
       "transport": {
         "type": "stdio"
       },
+      "arguments": [
+        {
+          "type": "named",
+          "name": "--autostart",
+          "description": "Automatically spawn and manage a local BetterDB monitor process on startup",
+          "format": "boolean",
+          "isRequired": false
+        },
+        {
+          "type": "named",
+          "name": "--persist",
+          "description": "Keep the monitor process running after the MCP server exits (requires --autostart)",
+          "format": "boolean",
+          "isRequired": false
+        },
+        {
+          "type": "named",
+          "name": "--port",
+          "description": "Port for the auto-started monitor API",
+          "format": "number",
+          "default": "3001",
+          "isRequired": false
+        },
+        {
+          "type": "named",
+          "name": "--storage",
+          "description": "Storage backend for the auto-started monitor",
+          "format": "string",
+          "choices": ["sqlite", "memory"],
+          "default": "sqlite",
+          "isRequired": false
+        },
+        {
+          "type": "named",
+          "name": "--stop",
+          "description": "Stop a previously persisted monitor process and exit",
+          "format": "boolean",
+          "isRequired": false
+        }
+      ],
       "environmentVariables": [
         {
           "description": "URL of the BetterDB monitor instance",

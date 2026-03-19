@@ -43,7 +43,7 @@ Add to your MCP client config (e.g. Claude Code or OpenAI Codex):
 }
 ```
 
-For local development (token not required):
+For local development with an existing monitor (token not required):
 
 ```json
 {
@@ -55,6 +55,20 @@ For local development (token not required):
       "env": {
         "BETTERDB_URL": "http://localhost:3001"
       }
+    }
+  }
+}
+```
+
+For zero-config local development (auto-starts and manages a monitor process):
+
+```json
+{
+  "mcpServers": {
+    "betterdb": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@betterdb/mcp", "--autostart", "--persist"]
     }
   }
 }
@@ -72,13 +86,27 @@ Once connected, your AI assistant can query your databases directly:
 
 ## Configuration
 
-| Environment Variable | Default | Description |
+### Environment Variables
+
+| Variable | Default | Description |
 |---|---|---|
 | `BETTERDB_URL` | `http://localhost:3001` | BetterDB instance URL (port depends on your Docker config) |
 | `BETTERDB_TOKEN` | — | MCP token from Settings (required for cloud, optional for local) |
 | `BETTERDB_INSTANCE_ID` | — | Pre-select a specific instance (skips `select_instance`) |
 
+### CLI Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--autostart` | — | Spawn and manage a local BetterDB monitor process on startup |
+| `--persist` | — | Keep the monitor running after the MCP server exits (requires `--autostart`) |
+| `--port <number>` | `3001` | Port for the auto-started monitor API |
+| `--storage <type>` | `sqlite` | Storage backend: `sqlite` or `memory` |
+| `--stop` | — | Stop a previously persisted monitor process and exit |
+
 ## Available Tools
+
+### Instance Tools
 
 | Tool | Description |
 |---|---|
@@ -104,10 +132,26 @@ Once connected, your AI assistant can query your databases directly:
 | `get_cluster_slowlog` | Aggregated slowlog across all cluster nodes |
 | `get_slot_stats` | Per-slot key counts and CPU usage (Valkey 8+) |
 
+### Connection Management Tools
+
+| Tool | Description |
+|---|---|
+| `add_connection` | Add a new Valkey/Redis connection to BetterDB |
+| `test_connection` | Test connection credentials without persisting |
+| `remove_connection` | Remove a connection from BetterDB |
+| `set_default_connection` | Set a connection as the active default |
+
+### Monitor Lifecycle Tools
+
+| Tool | Description |
+|---|---|
+| `start_monitor` | Start a persistent BetterDB monitor background process |
+| `stop_monitor` | Stop a previously started persistent monitor process |
+
 ## Requirements
 
 - Node.js 20+
-- A running [BetterDB](https://betterdb.com) instance (cloud or self-hosted)
+- A running [BetterDB](https://betterdb.com) instance (cloud or self-hosted), or use `--autostart` to have the MCP server manage one automatically
 
 ## Documentation
 
