@@ -48,8 +48,12 @@ export async function startMonitor(opts: {
       }
       // Process is alive but unhealthy — terminate it before re-spawning
       try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
-      // Give it a moment to release the port
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Wait for the port to be released (up to 5s)
+      const killDeadline = Date.now() + 5_000;
+      while (Date.now() < killDeadline) {
+        try { process.kill(pid, 0); } catch { break; } // process exited
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
     }
 
     fs.unlinkSync(PID_FILE);
@@ -80,6 +84,9 @@ export async function startMonitor(opts: {
       detached: true,
     });
     child.unref();
+    if (!child.pid) {
+      throw new Error('Failed to spawn monitor process');
+    }
     fs.writeFileSync(PID_FILE, String(child.pid));
 
     try {
@@ -104,9 +111,9 @@ export async function startMonitor(opts: {
       });
     }
 
-    process.on('exit', () => child.kill());
-    process.on('SIGTERM', () => process.exit(0));
-    process.on('SIGINT', () => process.exit(0));
+    process.once('exit', () => child.kill());
+    process.once('SIGTERM', () => process.exit(0));
+    process.once('SIGINT', () => process.exit(0));
 
     await waitForHealth(opts.port);
   }

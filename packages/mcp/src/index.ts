@@ -83,30 +83,6 @@ async function detectPrefix(): Promise<string> {
   return '/api';
 }
 
-async function apiFetch(path: string): Promise<unknown> {
-  if (detectedPrefix === null) {
-    detectedPrefix = await detectPrefix();
-  }
-  const res = await rawFetch(detectedPrefix, path);
-
-  if (res.status === 402) {
-    const body = await res.json().catch(() => ({})) as Record<string, unknown>;
-    return {
-      __licenseError: true,
-      feature: body.feature ?? 'unknown',
-      currentTier: body.currentTier ?? 'community',
-      requiredTier: body.requiredTier ?? 'Pro or Enterprise',
-      upgradeUrl: body.upgradeUrl ?? 'https://betterdb.com/pricing',
-    };
-  }
-
-  if (!res.ok) {
-    throw new Error(`Request failed with status ${res.status}`);
-  }
-
-  return res.json();
-}
-
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
   if (detectedPrefix === null) {
     detectedPrefix = await detectPrefix();
@@ -152,6 +128,10 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
 
   const text = await res.text();
   return text ? JSON.parse(text) : {};
+}
+
+async function apiFetch(path: string): Promise<unknown> {
+  return apiRequest('GET', path);
 }
 
 function isLicenseError(data: unknown): data is { __licenseError: true; requiredTier: string; currentTier: string; upgradeUrl: string } {
@@ -275,7 +255,7 @@ server.tool(
         };
       }
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify(data.capabilities, null, 2) }],
+        content: [{ type: 'text' as const, text: data.capabilities ? JSON.stringify(data.capabilities, null, 2) : 'Connection successful' }],
       };
     } catch (err) {
       return {

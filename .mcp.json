@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "betterdb": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/home/kristiyan/projects/valkey/monitor/packages/mcp/dist/index.js", "--autostart", "--persist", "--port", "3001", "--storage", "sqlite"]
-    }
-  }
-}

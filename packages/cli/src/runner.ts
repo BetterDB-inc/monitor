@@ -44,18 +44,26 @@ export function mapConfigToEnv(
 
   // Add SQLite path if configured
   if (env.STORAGE_TYPE === 'sqlite') {
-    env.STORAGE_SQLITE_FILEPATH = process.env.STORAGE_SQLITE_FILEPATH
-      || (config.storage.sqlitePath ? expandPath(config.storage.sqlitePath) : '');
+    const sqlitePath = process.env.STORAGE_SQLITE_FILEPATH
+      || (config.storage.sqlitePath ? expandPath(config.storage.sqlitePath) : undefined);
+    if (sqlitePath) {
+      env.STORAGE_SQLITE_FILEPATH = sqlitePath;
+    }
   }
 
   // Add PostgreSQL URL if configured
   if (env.STORAGE_TYPE === 'postgres') {
-    env.STORAGE_URL = process.env.STORAGE_URL || config.storage.postgresUrl || '';
+    const postgresUrl = process.env.STORAGE_URL || config.storage.postgresUrl;
+    if (postgresUrl) {
+      env.STORAGE_URL = postgresUrl;
+    }
   }
 
   // Add license key if configured
-  if (process.env.BETTERDB_LICENSE_KEY || config.app.licenseKey) {
-    env.BETTERDB_LICENSE_KEY = process.env.BETTERDB_LICENSE_KEY || config.app.licenseKey!;
+  if (process.env.BETTERDB_LICENSE_KEY) {
+    env.BETTERDB_LICENSE_KEY = process.env.BETTERDB_LICENSE_KEY;
+  } else if (config.app.licenseKey) {
+    env.BETTERDB_LICENSE_KEY = config.app.licenseKey;
   }
 
   return env;
