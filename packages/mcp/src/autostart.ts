@@ -6,6 +6,18 @@ import os from 'node:os';
 export const BETTERDB_DIR = path.join(os.homedir(), '.betterdb');
 export const PID_FILE = path.join(BETTERDB_DIR, 'monitor.pid');
 
+// Track the current ephemeral child so signal handlers always reference the right process.
+let ephemeralChild: ChildProcess | null = null;
+let signalHandlersRegistered = false;
+
+function registerEphemeralHandlers(): void {
+  if (signalHandlersRegistered) return;
+  signalHandlersRegistered = true;
+  process.once('exit', () => { ephemeralChild?.kill(); });
+  process.once('SIGTERM', () => { ephemeralChild?.kill(); process.exit(0); });
+  process.once('SIGINT', () => { ephemeralChild?.kill(); process.exit(0); });
+}
+
 async function checkHealth(port: number): Promise<boolean> {
   try {
     const res = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(2000) });
@@ -92,7 +104,8 @@ export async function startMonitor(opts: {
     try {
       await waitForHealth(opts.port);
     } catch (err) {
-      // Health check failed — clean up PID file so next run doesn't find a stale entry
+      // Health check failed — kill the orphaned child and clean up PID file
+      try { process.kill(child.pid!, 'SIGTERM'); } catch { /* already dead */ }
       try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
       throw err;
     }
@@ -100,7 +113,7 @@ export async function startMonitor(opts: {
     // Ephemeral mode: attached, cleaned up on exit
     child = spawn('npx', ['@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'ignore', 'pipe'],
     });
 
     if (child.stderr) {
@@ -111,9 +124,8 @@ export async function startMonitor(opts: {
       });
     }
 
-    process.once('exit', () => child.kill());
-    process.once('SIGTERM', () => process.exit(0));
-    process.once('SIGINT', () => process.exit(0));
+    ephemeralChild = child;
+    registerEphemeralHandlers();
 
     await waitForHealth(opts.port);
   }
@@ -121,7 +133,7 @@ export async function startMonitor(opts: {
   return { url, alreadyRunning: false };
 }
 
-export function stopMonitor(): { stopped: boolean; message: string } {
+export async function stopMonitor(): Promise<{ stopped: boolean; message: string }> {
   if (!fs.existsSync(PID_FILE)) {
     return { stopped: false, message: 'No persisted monitor found.' };
   }
@@ -134,6 +146,16 @@ export function stopMonitor(): { stopped: boolean; message: string } {
   } catch {
     // Process not running — stale PID file
   }
+
+  if (wasRunning) {
+    // Wait for process to actually exit (up to 5s)
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      try { process.kill(pid, 0); } catch { break; }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
+
   fs.unlinkSync(PID_FILE);
   return wasRunning
     ? { stopped: true, message: `Stopped monitor (PID ${pid}).` }

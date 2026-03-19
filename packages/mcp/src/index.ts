@@ -36,7 +36,7 @@ if (MONITOR_STORAGE !== 'sqlite' && MONITOR_STORAGE !== 'memory') {
 
 if (STOP) {
   const { stopMonitor } = await import('./autostart.js');
-  const result = stopMonitor();
+  const result = await stopMonitor();
   console.error(result.message);
   process.exit(0);
 }
@@ -682,11 +682,9 @@ server.tool(
     try {
       const { startMonitor } = await import('./autostart.js');
       const result = await startMonitor({ persist: true, port, storage });
-      if (!result.alreadyRunning) {
-        BETTERDB_URL = result.url;
-        process.env.BETTERDB_URL = result.url;
-        detectedPrefix = null;
-      }
+      BETTERDB_URL = result.url;
+      process.env.BETTERDB_URL = result.url;
+      detectedPrefix = null;
       const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
       return {
         content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
@@ -707,7 +705,7 @@ server.tool(
   async () => {
     try {
       const { stopMonitor } = await import('./autostart.js');
-      const result = stopMonitor();
+      const result = await stopMonitor();
       return {
         content: [{ type: 'text' as const, text: result.message }],
       };
@@ -728,13 +726,10 @@ try {
       port: MONITOR_PORT,
       storage: MONITOR_STORAGE,
     });
-    if (!result.alreadyRunning) {
-      // Override BETTERDB_URL for this process so apiFetch targets the local monitor
-      BETTERDB_URL = result.url;
-      process.env.BETTERDB_URL = result.url;
-      // Reset the cached prefix so apiFetch re-detects against the new URL
-      detectedPrefix = null;
-    }
+    // Always update URL/prefix to target the monitor (whether freshly started or already running)
+    BETTERDB_URL = result.url;
+    process.env.BETTERDB_URL = result.url;
+    detectedPrefix = null;
   }
 
   const transport = new StdioServerTransport();
