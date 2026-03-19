@@ -4,7 +4,44 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-const BETTERDB_URL = (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, '');
+// --- CLI arg parsing ---
+
+const args = process.argv.slice(2);
+const AUTOSTART = args.includes('--autostart');
+const PERSIST   = args.includes('--persist');
+const STOP      = args.includes('--stop');
+
+function getArgValue(flag: string, fallback: string): string {
+  const i = args.indexOf(flag);
+  if (i !== -1 && args[i + 1] && !args[i + 1].startsWith('--')) {
+    return args[i + 1];
+  }
+  return fallback;
+}
+
+const MONITOR_PORT    = Number(getArgValue('--port', '3001'));
+const MONITOR_STORAGE = getArgValue('--storage', 'sqlite') as 'sqlite' | 'memory';
+
+if (!Number.isFinite(MONITOR_PORT) || MONITOR_PORT < 1 || MONITOR_PORT > 65535) {
+  console.error(`Invalid --port value. Must be a number between 1 and 65535.`);
+  process.exit(1);
+}
+
+if (MONITOR_STORAGE !== 'sqlite' && MONITOR_STORAGE !== 'memory') {
+  console.error(`Invalid --storage value "${MONITOR_STORAGE}". Must be sqlite or memory.`);
+  process.exit(1);
+}
+
+// --- --stop: kill a persisted monitor and exit ---
+
+if (STOP) {
+  const { stopMonitor } = await import('./autostart.js');
+  const result = stopMonitor();
+  console.error(result.message);
+  process.exit(0);
+}
+
+let BETTERDB_URL = (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, '');
 const BETTERDB_TOKEN = process.env.BETTERDB_TOKEN;
 const BETTERDB_INSTANCE_ID = process.env.BETTERDB_INSTANCE_ID || null;
 
@@ -70,6 +107,53 @@ async function apiFetch(path: string): Promise<unknown> {
   return res.json();
 }
 
+async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
+  if (detectedPrefix === null) {
+    detectedPrefix = await detectPrefix();
+  }
+  const url = `${BETTERDB_URL}${detectedPrefix}${path}`;
+  const headers: Record<string, string> = {};
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (BETTERDB_TOKEN) {
+    headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
+  }
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (res.status === 402) {
+    const data = await res.json().catch(() => ({})) as Record<string, unknown>;
+    return {
+      __licenseError: true,
+      feature: data.feature ?? 'unknown',
+      currentTier: data.currentTier ?? 'community',
+      requiredTier: data.requiredTier ?? 'Pro or Enterprise',
+      upgradeUrl: data.upgradeUrl ?? 'https://betterdb.com/pricing',
+    };
+  }
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    let message = `Request failed with status ${res.status}`;
+    try {
+      const parsed = JSON.parse(errText);
+      if (parsed.error) message = String(parsed.error);
+      else if (parsed.message) message = String(parsed.message);
+    } catch {
+      if (errText) message = errText;
+    }
+    throw new Error(message);
+  }
+
+  const text = await res.text();
+  return text ? JSON.parse(text) : {};
+}
+
 function isLicenseError(data: unknown): data is { __licenseError: true; requiredTier: string; currentTier: string; upgradeUrl: string } {
   return data != null && typeof data === 'object' && (data as any).__licenseError === true;
 }
@@ -130,6 +214,123 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: `Selected instance: ${found.name} (${instanceId})` }],
     };
+  },
+);
+
+// --- Connection management tools ---
+
+server.tool(
+  'add_connection',
+  'Add a new Valkey/Redis connection to BetterDB. Optionally set it as the active default.',
+  {
+    name: z.string().describe('Display name for the connection'),
+    host: z.string().describe('Hostname or IP address'),
+    port: z.number().int().min(1).max(65535).default(6379).describe('Port number'),
+    username: z.string().optional().describe('ACL username (default: "default")'),
+    password: z.string().optional().describe('Auth password'),
+    setAsDefault: z.boolean().optional().describe('Set this connection as the active default'),
+  },
+  async (params) => {
+    try {
+      const data = await apiRequest('POST', '/connections', params) as { id: string };
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: `Added connection: ${params.name} (${data.id})` }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'test_connection',
+  'Test a Valkey/Redis connection without persisting it. Use before add_connection to validate credentials.',
+  {
+    name: z.string().describe('Display name for the connection'),
+    host: z.string().describe('Hostname or IP address'),
+    port: z.number().int().min(1).max(65535).default(6379).describe('Port number'),
+    username: z.string().optional().describe('ACL username (default: "default")'),
+    password: z.string().optional().describe('Auth password'),
+  },
+  async (params) => {
+    try {
+      const data = await apiRequest('POST', '/connections/test', params) as {
+        success: boolean;
+        capabilities?: unknown;
+        error?: string;
+      };
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      if (!data.success) {
+        return {
+          content: [{ type: 'text' as const, text: data.error ?? 'Connection test failed' }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data.capabilities, null, 2) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'remove_connection',
+  'Remove a connection from BetterDB.',
+  {
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format').describe('The instance ID to remove'),
+  },
+  async ({ instanceId }) => {
+    try {
+      const data = await apiRequest('DELETE', `/connections/${encodeURIComponent(instanceId)}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: `Removed connection: ${instanceId}` }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'set_default_connection',
+  'Set a connection as the active default for BetterDB.',
+  {
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format').describe('The instance ID to set as default'),
+  },
+  async ({ instanceId }) => {
+    try {
+      const data = await apiRequest('POST', `/connections/${encodeURIComponent(instanceId)}/default`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: `Set as default: ${instanceId}` }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
   },
 );
 
@@ -488,7 +689,74 @@ server.tool(
   },
 );
 
+// --- Monitor lifecycle tools ---
+
+server.tool(
+  'start_monitor',
+  'Start the BetterDB monitor as a persistent background process. If already running, returns the existing URL. The monitor persists across MCP sessions and must be stopped explicitly with stop_monitor.',
+  {
+    port: z.number().int().min(1).max(65535).default(3001).describe('Port for the monitor API (default 3001)'),
+    storage: z.enum(['sqlite', 'memory']).default('sqlite').describe('Storage backend (default sqlite)'),
+  },
+  async ({ port, storage }) => {
+    try {
+      const { startMonitor } = await import('./autostart.js');
+      const result = await startMonitor({ persist: true, port, storage });
+      if (!result.alreadyRunning) {
+        BETTERDB_URL = result.url;
+        process.env.BETTERDB_URL = result.url;
+        detectedPrefix = null;
+      }
+      const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
+      return {
+        content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Failed to start monitor: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'stop_monitor',
+  'Stop a persistent BetterDB monitor process that was previously started with start_monitor or --autostart --persist.',
+  {},
+  async () => {
+    try {
+      const { stopMonitor } = await import('./autostart.js');
+      const result = stopMonitor();
+      return {
+        content: [{ type: 'text' as const, text: result.message }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Failed to stop monitor: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 try {
+  if (AUTOSTART) {
+    const { startMonitor } = await import('./autostart.js');
+    const result = await startMonitor({
+      persist: PERSIST,
+      port: MONITOR_PORT,
+      storage: MONITOR_STORAGE,
+    });
+    if (!result.alreadyRunning) {
+      // Override BETTERDB_URL for this process so apiFetch targets the local monitor
+      BETTERDB_URL = result.url;
+      process.env.BETTERDB_URL = result.url;
+      // Reset the cached prefix so apiFetch re-detects against the new URL
+      detectedPrefix = null;
+    }
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 } catch (error) {
