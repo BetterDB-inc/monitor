@@ -52,7 +52,7 @@ export function mapConfigToEnv(
   }
 
   // Add PostgreSQL URL if configured
-  if (env.STORAGE_TYPE === 'postgres') {
+  if (env.STORAGE_TYPE === 'postgres' || env.STORAGE_TYPE === 'postgresql') {
     const postgresUrl = process.env.STORAGE_URL || config.storage.postgresUrl;
     if (postgresUrl) {
       env.STORAGE_URL = postgresUrl;

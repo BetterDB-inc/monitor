@@ -45,7 +45,10 @@ export async function startMonitor(opts: {
 
   // Pre-check: existing PID file
   if (fs.existsSync(PID_FILE)) {
-    const pid = Number(fs.readFileSync(PID_FILE, 'utf-8').trim());
+    const raw = fs.readFileSync(PID_FILE, 'utf-8').trim();
+    const [pidStr, portStr] = raw.split(':');
+    const pid = Number(pidStr);
+    const existingPort = portStr ? Number(portStr) : opts.port; // fallback for old format
     let processAlive = false;
     try {
       process.kill(pid, 0);
@@ -55,8 +58,8 @@ export async function startMonitor(opts: {
     }
 
     if (processAlive) {
-      if (await checkHealth(opts.port)) {
-        return { url, alreadyRunning: true };
+      if (await checkHealth(existingPort)) {
+        return { url: `http://localhost:${existingPort}`, alreadyRunning: true };
       }
       // Process is alive but unhealthy — terminate it before re-spawning
       try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
@@ -99,7 +102,7 @@ export async function startMonitor(opts: {
     if (!child.pid) {
       throw new Error('Failed to spawn monitor process');
     }
-    fs.writeFileSync(PID_FILE, String(child.pid));
+    fs.writeFileSync(PID_FILE, `${child.pid}:${opts.port}`);
 
     try {
       await waitForHealth(opts.port);
@@ -137,7 +140,8 @@ export async function stopMonitor(): Promise<{ stopped: boolean; message: string
   if (!fs.existsSync(PID_FILE)) {
     return { stopped: false, message: 'No persisted monitor found.' };
   }
-  const pid = Number(fs.readFileSync(PID_FILE, 'utf-8').trim());
+  const raw = fs.readFileSync(PID_FILE, 'utf-8').trim();
+  const pid = Number(raw.split(':')[0]);
   let wasRunning = false;
   try {
     process.kill(pid, 0);
