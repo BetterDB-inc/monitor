@@ -29,6 +29,17 @@ async function checkHealth(port: number): Promise<boolean> {
   }
 }
 
+function readValidPid(file: string): number | null {
+  try {
+    const raw = fs.readFileSync(file, 'utf8').trim();
+    const pid = Number(raw.split(':')[0]);
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    return pid;
+  } catch {
+    return null;
+  }
+}
+
 async function waitForHealth(port: number): Promise<void> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
@@ -48,32 +59,37 @@ export async function startMonitor(opts: {
   // Pre-check: existing PID file
   if (fs.existsSync(PID_FILE)) {
     const raw = fs.readFileSync(PID_FILE, 'utf-8').trim();
-    const [pidStr, portStr] = raw.split(':');
-    const pid = Number(pidStr);
-    const existingPort = portStr ? Number(portStr) : opts.port; // fallback for old format
-    let processAlive = false;
-    try {
-      process.kill(pid, 0);
-      processAlive = true;
-    } catch {
-      // Process not running
-    }
+    const [, portStr] = raw.split(':');
+    const pid = readValidPid(PID_FILE);
+    const existingPort = portStr ? Number(portStr) : opts.port;
 
-    if (processAlive) {
-      if (await checkHealth(existingPort)) {
-        return { url: `http://localhost:${existingPort}`, alreadyRunning: true };
+    if (pid === null) {
+      fs.unlinkSync(PID_FILE);
+    } else {
+      let processAlive = false;
+      try {
+        process.kill(pid, 0);
+        processAlive = true;
+      } catch {
+        // Process not running
       }
-      // Process is alive but unhealthy — terminate it before re-spawning
-      try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
-      // Wait for the port to be released (up to 5s)
-      const killDeadline = Date.now() + 5_000;
-      while (Date.now() < killDeadline) {
-        try { process.kill(pid, 0); } catch { break; } // process exited
-        await new Promise(resolve => setTimeout(resolve, 250));
-      }
-    }
 
-    fs.unlinkSync(PID_FILE);
+      if (processAlive) {
+        if (await checkHealth(existingPort)) {
+          return { url: `http://localhost:${existingPort}`, alreadyRunning: true };
+        }
+        // Process is alive but unhealthy — terminate it before re-spawning
+        try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+        // Wait for the port to be released (up to 5s)
+        const killDeadline = Date.now() + 5_000;
+        while (Date.now() < killDeadline) {
+          try { process.kill(pid, 0); } catch { break; } // process exited
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+
+      fs.unlinkSync(PID_FILE);
+    }
   }
 
   // Build env — filter out undefined values from process.env
@@ -142,8 +158,11 @@ export async function stopMonitor(): Promise<{ stopped: boolean; message: string
   if (!fs.existsSync(PID_FILE)) {
     return { stopped: false, message: 'No persisted monitor found.' };
   }
-  const raw = fs.readFileSync(PID_FILE, 'utf-8').trim();
-  const pid = Number(raw.split(':')[0]);
+  const pid = readValidPid(PID_FILE);
+  if (pid === null) {
+    try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
+    return { stopped: true, message: 'Removed corrupted PID file.' };
+  }
   let wasRunning = false;
   try {
     process.kill(pid, 0);
