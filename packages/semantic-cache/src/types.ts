@@ -72,7 +72,11 @@ export interface CacheCheckOptions {
    * unsanitised user input.
    */
   filter?: string;
-  /** Number of nearest neighbours to fetch before threshold check. Default: 1. */
+  /**
+   * Number of nearest neighbours to fetch via KNN. Default: 1.
+   * Currently only the closest result is evaluated for hit/miss.
+   * Values > 1 are reserved for future multi-candidate support.
+   */
   k?: number;
 }
 

@@ -263,10 +263,13 @@ export class SemanticCache {
             .labels({ cache_name: this.name, result: 'miss', category: categoryLabel })
             .inc();
 
+          const searchDurationMiss = (performance.now() - searchStart) / 1000;
           span.setAttributes({
             'cache.hit': false,
             'cache.name': this.name,
             'cache.category': categoryLabel,
+            'embedding_latency_ms': embedDuration * 1000,
+            'search_latency_ms': searchDurationMiss * 1000,
           });
           span.setStatus({ code: SpanStatusCode.OK });
 
@@ -294,10 +297,13 @@ export class SemanticCache {
             .labels({ cache_name: this.name, result: 'miss', category: categoryLabel })
             .inc();
 
+          const searchDurationNearMiss = (performance.now() - searchStart) / 1000;
           span.setAttributes({
             'cache.hit': false,
             'cache.name': this.name,
             'cache.category': categoryLabel,
+            'embedding_latency_ms': embedDuration * 1000,
+            'search_latency_ms': searchDurationNearMiss * 1000,
             ...(isNaN(score) ? {} : { 'cache.similarity': score, 'cache.threshold': threshold }),
           });
           span.setStatus({ code: SpanStatusCode.OK });
@@ -529,6 +535,12 @@ export class SemanticCache {
   }
 
   async stats(): Promise<CacheStats> {
+    if (!this._initialized) {
+      throw new SemanticCacheUsageError(
+        'SemanticCache.initialize() must be called before stats().',
+      );
+    }
+
     const raw = await this.client.hgetall(this.statsKey);
     const hits = parseInt(raw?.hits ?? '0', 10);
     const misses = parseInt(raw?.misses ?? '0', 10);
@@ -616,6 +628,7 @@ export class SemanticCache {
     await this.client.del([`${this.name}:__stats`]);
 
     this._initialized = false;
+    this._initPromise = null;
   }
 
   private parseDimensionFromInfo(info: unknown[]): number {
