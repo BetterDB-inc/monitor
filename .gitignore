@@ -70,3 +70,4 @@ terraform.tfvars
 packages/mcp/.mcpregistry_github_token
 .gitignore
 packages/mcp/.mcpregistry_registry_token
+.betterdb_context.md

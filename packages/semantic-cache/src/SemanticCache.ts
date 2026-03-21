@@ -70,7 +70,9 @@ export class SemanticCache {
       try {
         try {
           const info = (await this.client.call('FT.INFO', this.indexName)) as unknown[];
-          this._dimension = this.parseDimensionFromInfo(info);
+          const parsedDimension = this.parseDimensionFromInfo(info);
+          this._dimension =
+            parsedDimension > 0 ? parsedDimension : await this.probeDimension();
           this._initialized = true;
         } catch (err: unknown) {
           const message =
@@ -83,17 +85,7 @@ export class SemanticCache {
             message.toLowerCase().includes('no such index') ||
             message.toLowerCase().includes('not found')
           ) {
-            let probeVec: number[];
-            try {
-              probeVec = await this.embedFn('probe');
-            } catch (embedErr) {
-              throw new EmbeddingError(
-                `embedFn failed: ${embedErr instanceof Error ? embedErr.message : String(embedErr)}`,
-                embedErr,
-              );
-            }
-
-            this._dimension = probeVec.length;
+            this._dimension = await this.probeDimension();
 
             try {
               await this.client.call(
@@ -570,6 +562,18 @@ export class SemanticCache {
     this._initialized = false;
   }
 
+  private async probeDimension(): Promise<number> {
+    try {
+      const probeVec = await this.embedFn('probe');
+      return probeVec.length;
+    } catch (embedErr) {
+      throw new EmbeddingError(
+        `embedFn failed: ${embedErr instanceof Error ? embedErr.message : String(embedErr)}`,
+        embedErr,
+      );
+    }
+  }
+
   private parseDimensionFromInfo(info: unknown[]): number {
     // FT.INFO returns a flat array: [key, value, key, value, ...]
     // We need to find the 'attributes' section which contains field definitions.
@@ -616,7 +620,7 @@ export class SemanticCache {
       }
     }
 
-    // Fallback: if we can't parse dimension from info, call embedFn
+    // Fallback probing happens in initialize() when this returns 0.
     return 0;
   }
 }
