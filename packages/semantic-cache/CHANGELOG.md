@@ -16,14 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `stats()` — hit/miss/total counts and hit rate, persisted in Valkey so BetterDB Monitor can poll them independently
 - `indexInfo()` — returns index metadata from `FT.INFO`
 - `flush()` — drops the FT index and cleans up all entry keys via `SCAN` + `DEL`
-- `close()` — no-op; caller owns the iovalkey client lifecycle
 - Per-category threshold overrides via `categoryThresholds` option
 - Uncertainty band: hits within `uncertaintyBand` of the threshold are flagged `confidence: 'uncertain'`
 - Sliding TTL refresh on cache hits when `defaultTtl` is set
 - Built-in OpenTelemetry spans on every operation (`semantic_cache.check`, `semantic_cache.store`, `semantic_cache.invalidate`, `semantic_cache.initialize`) with `cache.hit`, `cache.similarity`, `cache.threshold`, `cache.confidence`, `cache.category` attributes
 - Four Prometheus metrics via `prom-client`: `{prefix}_requests_total`, `{prefix}_similarity_score`, `{prefix}_operation_duration_seconds`, `{prefix}_embedding_duration_seconds`
 - Optional `telemetry.registry` parameter to isolate metrics from the host application's default prom-client registry
-- Typed error classes: `SemanticCacheError`, `IndexNotInitializedError`, `EmbeddingError`, `ValkeyCommandError`, `DimensionMismatchError`
+- Typed error classes: `SemanticCacheUsageError`, `EmbeddingError`, `ValkeyCommandError`
 - Full TypeScript types exported from package root
 - 23 tests: 13 unit tests (`utils.test.ts`) and 10 integration tests (`SemanticCache.integration.test.ts`); integration tests skip gracefully when Valkey is unreachable
 

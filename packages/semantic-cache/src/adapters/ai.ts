@@ -75,7 +75,10 @@ export function createSemanticCacheMiddleware(
 
   async function ensureInitialized(): Promise<void> {
     if (!initPromise) {
-      initPromise = cache.initialize();
+      initPromise = cache.initialize().catch((err) => {
+        initPromise = null; // allow retry on transient failure
+        throw err;
+      });
     }
     await initPromise;
   }

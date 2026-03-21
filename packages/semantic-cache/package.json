@@ -8,14 +8,17 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "import": "./dist/index.js",
       "require": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
     "./langchain": {
+      "import": "./dist/adapters/langchain.js",
       "require": "./dist/adapters/langchain.js",
       "types": "./dist/adapters/langchain.d.ts"
     },
     "./ai": {
+      "import": "./dist/adapters/ai.js",
       "require": "./dist/adapters/ai.js",
       "types": "./dist/adapters/ai.d.ts"
     }

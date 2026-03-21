@@ -35,6 +35,7 @@ export class SemanticCache {
 
   private _initialized = false;
   private _dimension = 0;
+  private _initPromise: Promise<void> | null = null;
 
   /**
    * Creates a new SemanticCache instance.
@@ -65,6 +66,16 @@ export class SemanticCache {
   }
 
   async initialize(): Promise<void> {
+    if (!this._initPromise) {
+      this._initPromise = this._doInitialize().catch((err) => {
+        this._initPromise = null; // allow retry on failure
+        throw err;
+      });
+    }
+    return this._initPromise;
+  }
+
+  private async _doInitialize(): Promise<void> {
     const startTime = performance.now();
     return this.telemetry.tracer.startActiveSpan('semantic_cache.initialize', async (span) => {
       try {
@@ -440,6 +451,13 @@ export class SemanticCache {
     });
   }
 
+  /**
+   * Deletes all entries matching a valkey-search filter expression.
+   *
+   * **Security note:** `filter` is passed directly to FT.SEARCH. Only pass
+   * trusted, programmatically-constructed expressions — never unsanitised
+   * user input.
+   */
   async invalidate(filter: string): Promise<InvalidateResult> {
     if (!this._initialized) {
       throw new SemanticCacheUsageError(

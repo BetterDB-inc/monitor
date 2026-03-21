@@ -34,7 +34,10 @@ export class BetterDBSemanticCache extends BaseCache {
 
   private async ensureInitialized(): Promise<void> {
     if (!this.initPromise) {
-      this.initPromise = this.cache.initialize();
+      this.initPromise = this.cache.initialize().catch((err) => {
+        this.initPromise = null; // allow retry on transient failure
+        throw err;
+      });
     }
     await this.initPromise;
   }
