@@ -66,6 +66,10 @@ export interface CacheCheckOptions {
    * Additional FT.SEARCH pre-filter expression.
    * Example: '@model:{gpt-4o}'
    * Applied as: "({filter})=>[KNN {k} @embedding $vec AS __score]"
+   *
+   * **Security note:** this string is interpolated directly into the FT.SEARCH
+   * query. Only pass trusted, programmatically-constructed expressions — never
+   * unsanitised user input.
    */
   filter?: string;
   /** Number of nearest neighbours to fetch before threshold check. Default: 1. */

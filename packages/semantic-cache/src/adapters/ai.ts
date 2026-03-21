@@ -71,13 +71,13 @@ export function createSemanticCacheMiddleware(
   const { cache } = opts;
   const extractPrompt = opts.extractPrompt ?? defaultExtractPrompt;
   const extractResponse = opts.extractResponse ?? defaultExtractResponse;
-  let initialized = false;
+  let initPromise: Promise<void> | null = null;
 
   async function ensureInitialized(): Promise<void> {
-    if (!initialized) {
-      await cache.initialize();
-      initialized = true;
+    if (!initPromise) {
+      initPromise = cache.initialize();
     }
+    await initPromise;
   }
 
   return {

@@ -128,11 +128,17 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Wait for npm propagation
-        run: sleep 30
-
-      - name: Verify npm package
+      - name: Verify npm package (with retry)
         env:
           VERSION: ${{ needs.publish-npm.outputs.version }}
         run: |
-          npm view @betterdb/semantic-cache@$VERSION || echo "Package not yet available"
+          for i in 1 2 3 4 5; do
+            if npm view "@betterdb/semantic-cache@$VERSION" version; then
+              echo "Package verified successfully"
+              exit 0
+            fi
+            echo "Attempt $i: package not yet available, retrying in 30s..."
+            sleep 30
+          done
+          echo "Package not available after 5 attempts"
+          exit 1

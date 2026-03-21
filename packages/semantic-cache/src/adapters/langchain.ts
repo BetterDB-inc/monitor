@@ -24,7 +24,7 @@ export interface BetterDBSemanticCacheOptions {
 export class BetterDBSemanticCache extends BaseCache {
   private cache: SemanticCache;
   private filterByModel: boolean;
-  private initialized = false;
+  private initPromise: Promise<void> | null = null;
 
   constructor(opts: BetterDBSemanticCacheOptions) {
     super();
@@ -33,10 +33,10 @@ export class BetterDBSemanticCache extends BaseCache {
   }
 
   private async ensureInitialized(): Promise<void> {
-    if (!this.initialized) {
-      await this.cache.initialize();
-      this.initialized = true;
+    if (!this.initPromise) {
+      this.initPromise = this.cache.initialize();
     }
+    await this.initPromise;
   }
 
   private modelHash(llm_string: string): string {

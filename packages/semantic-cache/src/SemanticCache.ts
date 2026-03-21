@@ -71,6 +71,23 @@ export class SemanticCache {
         try {
           const info = (await this.client.call('FT.INFO', this.indexName)) as unknown[];
           this._dimension = this.parseDimensionFromInfo(info);
+
+          // If we couldn't parse dimension from FT.INFO (e.g. unexpected schema
+          // variant), fall back to a probe embedding rather than initializing
+          // with dimension 0 which would make every store() fail.
+          if (this._dimension === 0) {
+            let probeVec: number[];
+            try {
+              probeVec = await this.embedFn('probe');
+            } catch (embedErr) {
+              throw new EmbeddingError(
+                `embedFn failed during dimension probe: ${embedErr instanceof Error ? embedErr.message : String(embedErr)}`,
+                embedErr,
+              );
+            }
+            this._dimension = probeVec.length;
+          }
+
           this._initialized = true;
         } catch (err: unknown) {
           const message =
@@ -188,6 +205,7 @@ export class SemanticCache {
           .observe(embedDuration);
 
         // Build query and search
+        const searchStart = performance.now();
         const filter = options?.filter;
         const query = `${filter ? `(${filter})` : '*'}=>[KNN ${k} @embedding $vec AS __score]`;
         const encodedVec = encodeFloat32(embedding);
@@ -304,7 +322,7 @@ export class SemanticCache {
           await this.client.expire(matchedKey, this.defaultTtl);
         }
 
-        const searchDuration = (performance.now() - startTime) / 1000;
+        const searchDuration = (performance.now() - searchStart) / 1000;
         span.setAttributes({
           'cache.hit': true,
           'cache.similarity': score,
@@ -423,6 +441,12 @@ export class SemanticCache {
   }
 
   async invalidate(filter: string): Promise<InvalidateResult> {
+    if (!this._initialized) {
+      throw new SemanticCacheUsageError(
+        'SemanticCache.initialize() must be called before invalidate().',
+      );
+    }
+
     const startTime = performance.now();
     return this.telemetry.tracer.startActiveSpan('semantic_cache.invalidate', async (span) => {
       try {
@@ -500,6 +524,12 @@ export class SemanticCache {
   }
 
   async indexInfo(): Promise<IndexInfo> {
+    if (!this._initialized) {
+      throw new SemanticCacheUsageError(
+        'SemanticCache.initialize() must be called before indexInfo().',
+      );
+    }
+
     let raw: unknown;
     try {
       raw = await this.client.call('FT.INFO', this.indexName);
@@ -616,7 +646,7 @@ export class SemanticCache {
       }
     }
 
-    // Fallback: if we can't parse dimension from info, call embedFn
+    // Could not parse dimension — caller (initialize) falls back to embedFn probe.
     return 0;
   }
 }

@@ -259,7 +259,7 @@ Searches the cache for a semantically similar prompt using KNN vector search. Re
 
 On a hit, refreshes the entry's TTL if `defaultTtl` is configured (sliding window).
 
-**Throws:** `IndexNotInitializedError` if `initialize()` was not called, `EmbeddingError` if `embedFn` fails, `ValkeyCommandError` if `FT.SEARCH` fails.
+**Throws:** `SemanticCacheUsageError` if `initialize()` was not called, `EmbeddingError` if `embedFn` fails, `ValkeyCommandError` if `FT.SEARCH` fails.
 
 ### `cache.store(prompt: string, response: string, options?: CacheStoreOptions): Promise<string>`
 
@@ -274,17 +274,17 @@ Stores a prompt/response pair with its embedding vector. Returns the Valkey key 
 | `model` | `string` | `''` | Model name tag (e.g. `'gpt-4o'`) |
 | `metadata` | `Record<string, string \| number>` | `{}` | Arbitrary metadata stored as JSON |
 
-**Throws:** `IndexNotInitializedError` if `initialize()` was not called, `EmbeddingError` if `embedFn` fails, `DimensionMismatchError` if the embedding dimension doesn't match the index (usually means the embedding model changed — call `flush()` then `initialize()` to rebuild), `ValkeyCommandError` if `HSET` fails.
+**Throws:** `SemanticCacheUsageError` if `initialize()` was not called, `EmbeddingError` if `embedFn` fails, `SemanticCacheUsageError` if the embedding dimension doesn't match the index (usually means the embedding model changed — call `flush()` then `initialize()` to rebuild), `ValkeyCommandError` if `HSET` fails.
 
-### `cache.invalidate(filter: string): Promise<number>`
+### `cache.invalidate(filter: string): Promise<InvalidateResult>`
 
-Deletes all entries matching a `valkey-search` filter expression. Fetches up to 1000 matching keys via `FT.SEARCH`, then deletes them in a single `DEL` call. Returns the count of deleted entries.
+Deletes all entries matching a `valkey-search` filter expression. Fetches up to 1000 matching keys via `FT.SEARCH`, then deletes them in a single `DEL` call. Returns `{ deleted: number, truncated: boolean }`. If `truncated` is true, call again with the same filter until it returns false.
 
 ```typescript
-const deleted = await cache.invalidate('@model:{gpt-4o}');
+const { deleted, truncated } = await cache.invalidate('@model:{gpt-4o}');
 ```
 
-**Throws:** `ValkeyCommandError` if `FT.SEARCH` or `DEL` fails.
+**Throws:** `SemanticCacheUsageError` if `initialize()` was not called, `ValkeyCommandError` if `FT.SEARCH` or `DEL` fails.
 
 ### `cache.stats(): Promise<CacheStats>`
 
@@ -318,6 +318,4 @@ interface IndexInfo {
 
 Drops the FT index via `FT.DROPINDEX` and deletes all entry keys and the stats hash via `SCAN` + `DEL`. Resets the instance to uninitialized — call `initialize()` again to rebuild.
 
-### `cache.close(): Promise<void>`
-
-No-op. The caller owns the `iovalkey` client instance — close it directly when done. Included for API completeness and forward compatibility.
+The caller owns the `iovalkey` client lifecycle — call `client.quit()` or `client.disconnect()` yourself when the application shuts down.
