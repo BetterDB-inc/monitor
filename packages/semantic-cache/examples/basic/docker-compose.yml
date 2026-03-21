@@ -1,0 +1,6 @@
+services:
+  valkey:
+    image: valkey/valkey-bundle:latest
+    ports:
+      - "6399:6379"
+    command: ["valkey-server", "--loglevel", "notice"]

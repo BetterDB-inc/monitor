@@ -1,0 +1,138 @@
+# Publish @betterdb/semantic-cache to npm
+#
+# Required secrets:
+#   NPM_TOKEN — npmjs.com automation token with publish access to @betterdb/semantic-cache
+
+name: Publish Semantic Cache
+
+on:
+  push:
+    tags:
+      - 'semantic-cache-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.1.0)'
+        required: true
+        type: string
+      skip_npm:
+        description: 'Skip npm publish'
+        type: boolean
+        default: false
+
+jobs:
+  publish-npm:
+    if: ${{ !inputs.skip_npm }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
+          else
+            # semantic-cache-v0.1.0 → 0.1.0
+            echo "version=${GITHUB_REF_NAME#semantic-cache-v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update package.json version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd packages/semantic-cache
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Build semantic-cache
+        run: pnpm --filter @betterdb/semantic-cache build
+
+      - name: Verify build
+        run: |
+          test -f packages/semantic-cache/dist/index.js
+          test -f packages/semantic-cache/dist/index.d.ts
+
+      - name: Prepare for publishing
+        run: |
+          cd packages/semantic-cache
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+            delete pkg.devDependencies;
+            fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: cd packages/semantic-cache && npm publish --provenance --access public
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: semantic-cache-v${{ steps.version.outputs.version }}
+          name: Semantic Cache v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    needs: publish-npm
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_npm }}
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Wait for npm propagation
+        run: sleep 30
+
+      - name: Verify npm package
+        env:
+          VERSION: ${{ needs.publish-npm.outputs.version }}
+        run: |
+          npm view @betterdb/semantic-cache@$VERSION || echo "Package not yet available"
