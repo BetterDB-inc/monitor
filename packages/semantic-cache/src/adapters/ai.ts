@@ -91,18 +91,22 @@ export function createSemanticCacheMiddleware(
 
       const prompt = extractPrompt(params as unknown as { prompt: Array<{ role: string; content: unknown }> });
       if (prompt) {
-        const cached = await cache.check(prompt);
-        if (cached.hit && cached.response) {
-          // Return a minimal generate result. Cast required because
-          // LanguageModelV3GenerateResult is imported transitively via the
-          // LanguageModelMiddleware type — we construct it inline to avoid
-          // depending on @ai-sdk/provider directly.
-          return {
-            content: [{ type: 'text', text: cached.response }],
-            finishReason: 'stop',
-            usage: { promptTokens: 0, completionTokens: 0 },
-            warnings: [],
-          } as unknown as Awaited<ReturnType<typeof doGenerate>>;
+        try {
+          const cached = await cache.check(prompt);
+          if (cached.hit && cached.response) {
+            // Return a minimal generate result. Cast required because
+            // LanguageModelV3GenerateResult is imported transitively via the
+            // LanguageModelMiddleware type — we construct it inline to avoid
+            // depending on @ai-sdk/provider directly.
+            return {
+              content: [{ type: 'text', text: cached.response }],
+              finishReason: 'stop',
+              usage: { promptTokens: 0, completionTokens: 0 },
+              warnings: [],
+            } as unknown as Awaited<ReturnType<typeof doGenerate>>;
+          }
+        } catch {
+          // Swallow check errors — caching should not break inference
         }
       }
 

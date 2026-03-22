@@ -42,6 +42,7 @@ export class SemanticCache {
   private _initialized = false;
   private _dimension = 0;
   private _initPromise: Promise<void> | null = null;
+  private _initGeneration = 0;
 
   /**
    * Creates a new SemanticCache instance.
@@ -86,8 +87,10 @@ export class SemanticCache {
   async flush(): Promise<void> {
     // Mark uninitialized immediately so concurrent check()/store() calls get
     // a clear SemanticCacheUsageError instead of cryptic Valkey errors.
+    // Bump generation so any in-flight _doInitialize() won't overwrite this state.
     this._initialized = false;
     this._initPromise = null;
+    this._initGeneration++;
 
     // Valkey Search 1.2 does not support the DD (Delete Documents) flag on
     // FT.DROPINDEX. Drop the index first, then clean up keys separately.
@@ -333,8 +336,12 @@ export class SemanticCache {
   // ── Private helpers ────────────────────────────────────────
 
   private async _doInitialize(): Promise<void> {
+    const gen = this._initGeneration;
     return this.traced('initialize', async () => {
-      this._dimension = await this.ensureIndexAndGetDimension();
+      const dim = await this.ensureIndexAndGetDimension();
+      // If flush() ran while we were initializing, don't overwrite its state.
+      if (this._initGeneration !== gen) return;
+      this._dimension = dim;
       this._initialized = true;
     });
   }
