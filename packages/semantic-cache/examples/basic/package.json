@@ -9,8 +9,7 @@
   },
   "dependencies": {
     "@betterdb/semantic-cache": "^0.1.0",
-    "iovalkey": "^0.3.0",
-    "openai": "^4.0.0"
+    "iovalkey": "^0.3.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

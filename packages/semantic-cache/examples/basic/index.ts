@@ -4,27 +4,32 @@ import { mockEmbed, tokenise, STOP_WORDS } from './mock-embedder';
 
 const USE_MOCK = process.argv.includes('--mock') || process.env.MOCK_EMBEDDINGS === 'true';
 
-/** Real embedder — only constructed if not in mock mode. */
-async function openaiEmbed(text: string): Promise<number[]> {
-  const apiKey = process.env.OPENAI_API_KEY;
+/** Real embedder using Voyage AI — only constructed if not in mock mode. */
+async function voyageEmbed(text: string): Promise<number[]> {
+  const apiKey = process.env.VOYAGE_API_KEY;
   if (!apiKey) {
     throw new Error(
-      'OPENAI_API_KEY environment variable is not set.\n' +
+      'VOYAGE_API_KEY environment variable is not set.\n' +
         'Run with --mock to use the built-in mock embedder instead:\n' +
         '  npm start -- --mock',
     );
   }
-  // Lazy import so openai package is not loaded in mock mode
-  const { default: OpenAI } = await import('openai');
-  const client = new OpenAI({ apiKey });
-  const res = await client.embeddings.create({
-    model: 'text-embedding-3-small',
-    input: text,
+  const res = await fetch('https://api.voyageai.com/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ model: 'voyage-3-lite', input: [text] }),
   });
-  return res.data[0].embedding;
+  if (!res.ok) {
+    throw new Error(`Voyage API error: ${res.status} ${await res.text()}`);
+  }
+  const json = (await res.json()) as { data: Array<{ embedding: number[] }> };
+  return json.data[0].embedding;
 }
 
-const embedFn = USE_MOCK ? mockEmbed : openaiEmbed;
+const embedFn = USE_MOCK ? mockEmbed : voyageEmbed;
 
 const storedPrompts = [
   'What is the capital of France?',
@@ -65,11 +70,11 @@ async function main() {
     console.log('  will produce different results for some queries.');
     console.log('');
     console.log(`  Threshold: 0.25 (mock) vs 0.10 (real mode default)`);
-    console.log('  Run without --mock to use OpenAI text-embedding-3-small.');
+    console.log('  Run without --mock to use Voyage AI voyage-3-lite.');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log();
   } else {
-    console.log('Running with OpenAI text-embedding-3-small');
+    console.log('Running with Voyage AI voyage-3-lite');
   }
   console.log();
 
@@ -111,19 +116,19 @@ async function main() {
 
   await cache.store('What is the capital of France?', 'Paris', {
     category: 'geography',
-    model: 'gpt-4o',
+    model: 'claude-sonnet-4-6',
   });
   console.log('  Stored: "What is the capital of France?" -> "Paris" [geography]');
 
   await cache.store('Who wrote Romeo and Juliet?', 'William Shakespeare', {
     category: 'literature',
-    model: 'gpt-4o',
+    model: 'claude-sonnet-4-6',
   });
   console.log('  Stored: "Who wrote Romeo and Juliet?" -> "William Shakespeare" [literature]');
 
   await cache.store('What is the speed of light?', 'Approximately 299,792 kilometres per second', {
     category: 'science',
-    model: 'gpt-4o',
+    model: 'claude-sonnet-4-6',
   });
   console.log('  Stored: "What is the speed of light?" -> "Approximately 299,792 km/s" [science]');
   console.log();
