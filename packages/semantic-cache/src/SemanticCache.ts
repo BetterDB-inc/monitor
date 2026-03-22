@@ -452,7 +452,7 @@ export class SemanticCache {
     return (
       msg.includes('unknown index name') ||
       msg.includes('no such index') ||
-      msg.includes('not found in database')
+      msg.includes('not found')
     );
   }
 

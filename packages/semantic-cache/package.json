@@ -46,7 +46,7 @@
     "node": ">=20.0.0"
   },
   "peerDependencies": {
-    "iovalkey": ">=0.2.0",
+    "iovalkey": ">=0.3.0",
     "@langchain/core": ">=0.3.0",
     "ai": ">=4.0.0"
   },

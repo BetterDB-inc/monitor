@@ -1,6 +1,6 @@
 services:
   valkey:
-    image: valkey/valkey-bundle:latest
+    image: valkey/valkey-bundle:unstable
     ports:
       - "6399:6379"
     command: ["valkey-server", "--loglevel", "notice"]
