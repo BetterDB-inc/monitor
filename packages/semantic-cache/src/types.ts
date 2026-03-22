@@ -87,7 +87,10 @@ export interface CacheStoreOptions {
   category?: string;
   /** Model name stored with the entry (e.g. 'gpt-4o'). Enables invalidation by model. */
   model?: string;
-  /** Arbitrary metadata stored as JSON alongside the entry. */
+  /**
+   * Arbitrary metadata stored as JSON alongside the entry.
+   * Stored for external consumption (e.g. BetterDB Monitor) — not returned by check().
+   */
   metadata?: Record<string, string | number>;
 }
 

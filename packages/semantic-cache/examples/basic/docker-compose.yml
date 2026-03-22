@@ -1,5 +1,7 @@
 services:
   valkey:
+    # unstable is currently the only tag shipping valkey-search 1.2 (TEXT fields, etc.)
+    # Pin to a stable tag once a release includes valkey-search >= 1.2.
     image: valkey/valkey-bundle:unstable
     ports:
       - "6399:6379"

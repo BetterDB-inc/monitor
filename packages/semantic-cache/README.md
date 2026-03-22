@@ -46,16 +46,20 @@ As of 2026, no existing semantic cache library simultaneously satisfies all thre
 ```typescript
 import Valkey from 'iovalkey';
 import { SemanticCache } from '@betterdb/semantic-cache';
-import OpenAI from 'openai';
 
-const client = new Valkey({ host: 'localhost', port: 6380 });
-const openai = new OpenAI();
+const client = new Valkey({ host: 'localhost', port: 6399 });
 
 const cache = new SemanticCache({
   client,
   embedFn: async (text) => {
-    const res = await openai.embeddings.create({ model: 'text-embedding-3-small', input: text });
-    return res.data[0].embedding;
+    // Any embedding provider works — OpenAI, Voyage AI, Cohere, a local model, etc.
+    const res = await fetch('https://api.voyageai.com/v1/embeddings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.VOYAGE_API_KEY}` },
+      body: JSON.stringify({ model: 'voyage-3-lite', input: [text] }),
+    });
+    const json = await res.json();
+    return json.data[0].embedding;
   },
 });
 
@@ -74,7 +78,7 @@ const result = await cache.check('Capital city of France?');
 SemanticCache does **not** own the iovalkey client. You create it, you close it:
 
 ```typescript
-const client = new Valkey({ host: 'localhost', port: 6380 });
+const client = new Valkey({ host: 'localhost', port: 6399 });
 const cache = new SemanticCache({ client, embedFn });
 
 // ... use cache ...

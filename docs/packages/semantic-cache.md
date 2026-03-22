@@ -29,19 +29,20 @@ npm install @betterdb/semantic-cache iovalkey
 ```typescript
 import Valkey from 'iovalkey';
 import { SemanticCache } from '@betterdb/semantic-cache';
-import OpenAI from 'openai';
 
-const client = new Valkey({ host: 'localhost', port: 6379 });
-const openai = new OpenAI();
+const client = new Valkey({ host: 'localhost', port: 6399 });
 
 const cache = new SemanticCache({
   client,
   embedFn: async (text) => {
-    const res = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
-      input: text,
+    // Any embedding provider works — OpenAI, Voyage AI, Cohere, a local model, etc.
+    const res = await fetch('https://api.voyageai.com/v1/embeddings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.VOYAGE_API_KEY}` },
+      body: JSON.stringify({ model: 'voyage-3-lite', input: [text] }),
     });
-    return res.data[0].embedding;
+    const json = await res.json();
+    return json.data[0].embedding;
   },
   defaultThreshold: 0.1,
   defaultTtl: 3600,

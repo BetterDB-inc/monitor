@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import type {
   SemanticCacheOptions,
@@ -112,7 +112,7 @@ export class SemanticCache {
       if (keys.length > 0) await this.client.del(keys);
     } while (cursor !== '0');
 
-    await this.client.del([this.statsKey]);
+    await this.client.del(this.statsKey);
   }
 
   // ── Public operations ──────────────────────────────────────
@@ -306,9 +306,9 @@ export class SemanticCache {
   async stats(): Promise<CacheStats> {
     this.assertInitialized('stats');
     const raw = await this.client.hgetall(this.statsKey);
-    const hits = parseInt(raw?.hits ?? '0', 10);
-    const misses = parseInt(raw?.misses ?? '0', 10);
-    const total = parseInt(raw?.total ?? '0', 10);
+    const hits = parseInt(raw.hits ?? '0', 10);
+    const misses = parseInt(raw.misses ?? '0', 10);
+    const total = parseInt(raw.total ?? '0', 10);
     return { hits, misses, total, hitRate: total === 0 ? 0 : hits / total };
   }
 

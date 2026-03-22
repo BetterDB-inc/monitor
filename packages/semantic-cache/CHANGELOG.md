@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional `telemetry.registry` parameter to isolate metrics from the host application's default prom-client registry
 - Typed error classes: `SemanticCacheUsageError`, `EmbeddingError`, `ValkeyCommandError`
 - Full TypeScript types exported from package root
-- 23 tests: 13 unit tests (`utils.test.ts`) and 10 integration tests (`SemanticCache.integration.test.ts`); integration tests skip gracefully when Valkey is unreachable
+- 27 tests: 9 unit tests (`utils.test.ts`), 8 adapter tests (`adapters.test.ts`), and 10 integration tests (`SemanticCache.integration.test.ts`); integration tests skip gracefully when Valkey is unreachable
 
 ### Valkey Search 1.2 compatibility notes
 

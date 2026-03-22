@@ -1,6 +1,6 @@
 import Valkey from 'iovalkey';
 import { SemanticCache, CacheCheckResult } from '@betterdb/semantic-cache';
-import { mockEmbed, tokenise, STOP_WORDS } from './mock-embedder';
+import { mockEmbed, tokenise } from './mock-embedder';
 
 const USE_MOCK = process.argv.includes('--mock') || process.env.MOCK_EMBEDDINGS === 'true';
 
@@ -62,7 +62,7 @@ async function main() {
 
   if (USE_MOCK) {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('  MOCK MODE — no OpenAI API key needed');
+    console.log('  MOCK MODE — no API key needed');
     console.log('');
     console.log('  ⚠️  Uses WORD OVERLAP, not semantic understanding.');
     console.log('  A hit occurs when prompts share tokens — not because');

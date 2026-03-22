@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
 import { BaseCache } from '@langchain/core/caches';
 import type { Generation } from '@langchain/core/outputs';
 import { SemanticCache } from '../SemanticCache';
 import type { CacheCheckOptions } from '../types';
+import { sha256 } from '../utils';
 
 export interface BetterDBSemanticCacheOptions {
   /** A pre-configured SemanticCache instance. */
@@ -45,7 +45,7 @@ export class BetterDBSemanticCache extends BaseCache {
   private modelHash(llm_string: string): string {
     // llm_string is a serialised LangChain LLM config — not human-readable.
     // Hash it to a stable, TAG-safe identifier.
-    return createHash('sha256').update(llm_string).digest('hex').slice(0, 16);
+    return sha256(llm_string).slice(0, 16);
   }
 
   async lookup(prompt: string, llm_string: string): Promise<Generation[] | null> {

@@ -26,7 +26,7 @@ Expected output (abbreviated):
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  MOCK MODE — no OpenAI API key needed
+  MOCK MODE — no API key needed
 
   ⚠️  Uses WORD OVERLAP, not semantic understanding.
   ...
@@ -52,10 +52,10 @@ Expected output (abbreviated):
 Cache stats: 2 hits / 4 lookups (50.0% hit rate)
 ```
 
-## With OpenAI (real semantic similarity)
+## With Voyage AI (real semantic similarity)
 
 ```bash
-OPENAI_API_KEY=sk-... npm start
+VOYAGE_API_KEY=pa-... npm start
 ```
 
 ## Mock mode vs real embeddings
