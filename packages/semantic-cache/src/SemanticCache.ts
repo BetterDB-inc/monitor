@@ -101,15 +101,21 @@ export class SemanticCache {
 
           this._initialized = true;
         } catch (err: unknown) {
+          // Re-throw EmbeddingError immediately — it comes from the dimension
+          // probe above, not from FT.INFO, and must not be pattern-matched.
+          if (err instanceof EmbeddingError) throw err;
+
           const message =
             err instanceof Error ? err.message : String(err);
           // Valkey Search 1.2 returns "Index with name '...' not found in database 0"
           // rather than "Unknown Index name" (Redis/RediSearch convention) or
-          // "no such index". We check all three patterns for cross-compatibility.
+          // "no such index". We match specific patterns to avoid masking
+          // unrelated errors like "command not found" or "module not found".
+          const lowerMsg = message.toLowerCase();
           if (
-            message.toLowerCase().includes('unknown index name') ||
-            message.toLowerCase().includes('no such index') ||
-            message.toLowerCase().includes('not found')
+            lowerMsg.includes('unknown index name') ||
+            lowerMsg.includes('no such index') ||
+            lowerMsg.includes('not found in database')
           ) {
             let probeVec: number[];
             try {
@@ -214,6 +220,12 @@ export class SemanticCache {
         this.telemetry.metrics.embeddingDuration
           .labels({ cache_name: this.name })
           .observe(embedDuration);
+
+        if (embedding.length !== this._dimension) {
+          throw new SemanticCacheUsageError(
+            `Embedding dimension mismatch: index expects ${this._dimension}, embedFn returned ${embedding.length}. Call flush() then initialize() to rebuild.`,
+          );
+        }
 
         // Build query and search
         const searchStart = performance.now();
@@ -589,6 +601,11 @@ export class SemanticCache {
   }
 
   async flush(): Promise<void> {
+    // Mark uninitialized immediately so concurrent check()/store() calls get
+    // a clear SemanticCacheUsageError instead of cryptic Valkey errors.
+    this._initialized = false;
+    this._initPromise = null;
+
     // Valkey Search 1.2 does not support the DD (Delete Documents) flag on
     // FT.DROPINDEX — it fails with "wrong number of arguments". We drop the
     // index first, then clean up entry keys and the stats hash separately
@@ -601,7 +618,7 @@ export class SemanticCache {
       const notFound =
         msg.includes('unknown index name') ||
         msg.includes('no such index') ||
-        msg.includes('not found');
+        msg.includes('not found in database');
       if (!notFound) {
         throw new ValkeyCommandError('FT.DROPINDEX', err);
       }
@@ -626,9 +643,6 @@ export class SemanticCache {
 
     // Step 3: delete the stats hash
     await this.client.del([`${this.name}:__stats`]);
-
-    this._initialized = false;
-    this._initPromise = null;
   }
 
   private parseDimensionFromInfo(info: unknown[]): number {
