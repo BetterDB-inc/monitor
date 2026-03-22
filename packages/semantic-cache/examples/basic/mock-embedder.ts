@@ -24,7 +24,7 @@
 
 const DIM = 128;
 
-const STOP_WORDS = new Set([
+export const STOP_WORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'do', 'for',
   'from', 'had', 'has', 'have', 'he', 'her', 'his', 'how', 'i', 'if', 'in',
   'is', 'it', 'its', 'me', 'my', 'no', 'not', 'of', 'on', 'or', 'our',
@@ -44,7 +44,7 @@ function hashToIndex(s: string, max: number): number {
 }
 
 /** Tokenise: lowercase, strip punctuation, split on whitespace, remove stop words. */
-function tokenise(text: string): string[] {
+export function tokenise(text: string): string[] {
   return text
     .toLowerCase()
     .replace(/[^\w\s]/g, ' ')

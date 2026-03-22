@@ -1,6 +1,6 @@
 import Valkey from 'iovalkey';
 import { SemanticCache, CacheCheckResult } from '@betterdb/semantic-cache';
-import { mockEmbed } from './mock-embedder';
+import { mockEmbed, tokenise, STOP_WORDS } from './mock-embedder';
 
 const USE_MOCK = process.argv.includes('--mock') || process.env.MOCK_EMBEDDINGS === 'true';
 
@@ -32,21 +32,8 @@ const storedPrompts = [
   'What is the speed of light?',
 ];
 
-const STOP_WORDS = new Set([
-  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'do', 'for',
-  'from', 'had', 'has', 'have', 'he', 'her', 'his', 'how', 'i', 'if', 'in',
-  'is', 'it', 'its', 'me', 'my', 'no', 'not', 'of', 'on', 'or', 'our',
-  'she', 'so', 'than', 'that', 'the', 'their', 'them', 'then', 'there',
-  'these', 'they', 'this', 'to', 'us', 'was', 'we', 'what', 'when', 'where',
-  'which', 'who', 'will', 'with', 'would', 'you', 'your',
-]);
-
 function mockReason(prompt: string, result: CacheCheckResult): string {
   if (!USE_MOCK) return '';
-
-  const tokenise = (t: string) =>
-    t.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/)
-      .filter(w => w.length > 1 && !STOP_WORDS.has(w));
 
   const queryTokens = new Set(tokenise(prompt));
 
