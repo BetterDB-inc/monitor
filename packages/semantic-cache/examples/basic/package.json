@@ -1,0 +1,19 @@
+{
+  "name": "@betterdb/semantic-cache-example-basic",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Basic usage example for @betterdb/semantic-cache",
+  "scripts": {
+    "start": "ts-node index.ts",
+    "dev": "ts-node --watch index.ts"
+  },
+  "dependencies": {
+    "@betterdb/semantic-cache": "^0.1.0",
+    "iovalkey": "^0.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.4.0"
+  }
+}
