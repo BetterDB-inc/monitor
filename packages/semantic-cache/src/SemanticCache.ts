@@ -126,7 +126,7 @@ export class SemanticCache {
           ? this.categoryThresholds[category]
           : this.defaultThreshold);
 
-      const { vector: embedding, durationMs: embedMs } = await this.embed(prompt);
+      const { vector: embedding, durationSec: embedSec } = await this.embed(prompt);
       this.assertDimension(embedding);
 
       // FT.SEARCH — Valkey Search 1.2 rejects KNN aliases in RETURN/SORTBY,
@@ -149,7 +149,7 @@ export class SemanticCache {
 
       const parsed = parseFtSearchResponse(rawResult);
       const categoryLabel = category || 'none';
-      const timingAttrs = { 'embedding_latency_ms': embedMs, 'search_latency_ms': searchMs };
+      const timingAttrs = { 'embedding_latency_ms': embedSec * 1000, 'search_latency_ms': searchMs };
 
       // No candidates at all
       if (parsed.length === 0) {
@@ -163,7 +163,8 @@ export class SemanticCache {
         return { hit: false, confidence: 'miss' as const };
       }
 
-      const score = this.parseScore(parsed[0]);
+      const scoreStr = parsed[0].fields['__score'];
+      const score = scoreStr !== undefined ? parseFloat(scoreStr) : NaN;
 
       if (!isNaN(score)) {
         this.telemetry.metrics.similarityScore
@@ -220,7 +221,7 @@ export class SemanticCache {
     this.assertInitialized('store');
 
     return this.traced('store', async (span) => {
-      const { vector: embedding, durationMs: embedMs } = await this.embed(prompt);
+      const { vector: embedding, durationSec: embedSec } = await this.embed(prompt);
       this.assertDimension(embedding);
 
       const entryKey = `${this.entryPrefix}${randomUUID()}`;
@@ -244,7 +245,7 @@ export class SemanticCache {
       span.setAttributes({
         'cache.name': this.name, 'cache.key': entryKey, 'cache.ttl': ttl ?? -1,
         'cache.category': category || 'none', 'cache.model': model || 'none',
-        'embedding_latency_ms': embedMs,
+        'embedding_latency_ms': embedSec * 1000,
       });
 
       return entryKey;
@@ -333,12 +334,12 @@ export class SemanticCache {
 
   private async _doInitialize(): Promise<void> {
     return this.traced('initialize', async () => {
-      this._dimension = await this.detectOrCreateIndex();
+      this._dimension = await this.ensureIndexAndGetDimension();
       this._initialized = true;
     });
   }
 
-  private async detectOrCreateIndex(): Promise<number> {
+  private async ensureIndexAndGetDimension(): Promise<number> {
     // Try reading an existing index
     try {
       const info = (await this.client.call('FT.INFO', this.indexName)) as unknown[];
@@ -375,7 +376,7 @@ export class SemanticCache {
   }
 
   /** Wraps embedFn with error handling and duration tracking. */
-  private async embed(text: string): Promise<{ vector: number[]; durationMs: number }> {
+  private async embed(text: string): Promise<{ vector: number[]; durationSec: number }> {
     const start = performance.now();
     let vector: number[];
     try {
@@ -383,14 +384,19 @@ export class SemanticCache {
     } catch (err) {
       throw new EmbeddingError(`embedFn failed: ${errMsg(err)}`, err);
     }
-    const durationMs = performance.now() - start;
+    const durationSec = (performance.now() - start) / 1000;
     this.telemetry.metrics.embeddingDuration
       .labels({ cache_name: this.name })
-      .observe(durationMs / 1000);
-    return { vector, durationMs };
+      .observe(durationSec);
+    return { vector, durationSec };
   }
 
-  /** Wraps a method body in an OTel span with duration metrics. */
+  /**
+   * Wraps a method body in an OTel span with automatic status, end, and
+   * operation duration metric. The span is passed to fn so callers can
+   * set attributes — but callers must NOT call span.end() or span.setStatus(),
+   * as traced() handles both.
+   */
   private async traced<T>(operation: string, fn: (span: Span) => Promise<T>): Promise<T> {
     const start = performance.now();
     return this.telemetry.tracer.startActiveSpan(`semantic_cache.${operation}`, async (span) => {
@@ -441,11 +447,6 @@ export class SemanticCache {
       msg.includes('no such index') ||
       msg.includes('not found in database')
     );
-  }
-
-  private parseScore(result: { fields: Record<string, string> }): number {
-    const scoreStr = result.fields['__score'];
-    return scoreStr !== undefined ? parseFloat(scoreStr) : NaN;
   }
 
   private parseDimensionFromInfo(info: unknown[]): number {
