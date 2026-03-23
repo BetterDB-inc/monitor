@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/**/*",
+    "test/**/*",
+    "apps/**/*",
+    "libs/**/*",
+    "../../proprietary/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "../../proprietary/entitlement/**/*",
+    "../../proprietary/infra/**/*"
+  ]
+}

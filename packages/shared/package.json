@@ -27,8 +27,8 @@
     "clean": "rm -rf dist"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.7.2"
+    "@types/node": "^22.19.15",
+    "typescript": "^5.9.3"
   },
   "homepage": "https://betterdb.com"
 }
