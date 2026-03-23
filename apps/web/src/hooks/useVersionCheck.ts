@@ -42,7 +42,7 @@ export function useVersionCheckState(): VersionCheckContextValue {
     };
   });
 
-  const intervalRef = useRef<ReturnType<typeof setInterval>>();
+  const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   const intervalMsRef = useRef(3600000);
 
   const fetchVersion = useCallback(async () => {

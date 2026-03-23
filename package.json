@@ -57,6 +57,11 @@
     "pnpm": ">=9.0.0"
   },
   "pnpm": {
+    "peerDependencyRules": {
+      "allowedVersions": {
+        "eslint-plugin-react-hooks>eslint": "^10.0.0"
+      }
+    },
     "overrides": {
       "@fastify/middie": "9.1.0",
       "fastify": "^5.7.2",

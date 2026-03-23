@@ -52,7 +52,7 @@
   },
   "devDependencies": {
     "@langchain/core": "^1.1.35",
-    "@types/node": "^20.19.37",
+    "@types/node": "^22.19.15",
     "ai": "^6.0.135",
     "typescript": "^5.9.3",
     "vitest": "^4.1.1"

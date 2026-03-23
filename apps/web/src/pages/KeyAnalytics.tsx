@@ -9,7 +9,20 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '../components/ui/table';
 import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Legend,
+  type TooltipValueType,
+} from 'recharts';
 import { BarChart3 } from 'lucide-react';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 
@@ -38,6 +51,24 @@ function formatNumber(num: number): string {
   if (num >= 1000000) return `${(num / 1000000).toFixed(2)}M`;
   if (num >= 1000) return `${(num / 1000).toFixed(2)}K`;
   return num.toString();
+}
+
+/** Recharts Tooltip `ValueType` includes arrays; coerce for numeric charts. */
+function numericFromTooltipValue(value: TooltipValueType | undefined): number {
+  if (value === undefined) {
+    return 0;
+  }
+  if (typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return Number(value) || 0;
+  }
+  const first = value[0];
+  if (typeof first === 'number') {
+    return first;
+  }
+  return Number(first) || 0;
 }
 
 function formatTime(seconds?: number): string {
@@ -272,7 +303,9 @@ export function KeyAnalytics() {
                   <CardTitle className="text-sm">Total Keys</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{summary ? formatNumber(summary.totalKeys) : '0'}</div>
+                  <div className="text-2xl font-bold">
+                    {summary ? formatNumber(summary.totalKeys) : '0'}
+                  </div>
                   <div className="text-xs text-muted-foreground mt-1">
                     across {summary?.totalPatterns || 0} patterns
                   </div>
@@ -284,9 +317,15 @@ export function KeyAnalytics() {
                   <CardTitle className="text-sm">Total Memory</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{summary ? formatBytes(summary.totalMemoryBytes) : '0 B'}</div>
+                  <div className="text-2xl font-bold">
+                    {summary ? formatBytes(summary.totalMemoryBytes) : '0 B'}
+                  </div>
                   <div className="text-xs text-muted-foreground mt-1">
-                    avg {summary ? formatBytes(Math.round(summary.totalMemoryBytes / (summary.totalKeys || 1))) : '0 B'}/key
+                    avg{' '}
+                    {summary
+                      ? formatBytes(Math.round(summary.totalMemoryBytes / (summary.totalKeys || 1)))
+                      : '0 B'}
+                    /key
                   </div>
                 </CardContent>
               </Card>
@@ -296,10 +335,10 @@ export function KeyAnalytics() {
                   <CardTitle className="text-sm">Stale Keys</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold text-amber-600">{summary ? formatNumber(summary.staleKeyCount) : '0'}</div>
-                  <div className="text-xs text-muted-foreground mt-1">
-                    idle &gt; 24 hours
+                  <div className="text-2xl font-bold text-amber-600">
+                    {summary ? formatNumber(summary.staleKeyCount) : '0'}
                   </div>
+                  <div className="text-xs text-muted-foreground mt-1">idle &gt; 24 hours</div>
                 </CardContent>
               </Card>
 
@@ -308,10 +347,10 @@ export function KeyAnalytics() {
                   <CardTitle className="text-sm">Expiring Soon</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold text-red-600">{summary ? formatNumber(summary.keysExpiringSoon) : '0'}</div>
-                  <div className="text-xs text-muted-foreground mt-1">
-                    TTL &lt; 1 hour
+                  <div className="text-2xl font-bold text-red-600">
+                    {summary ? formatNumber(summary.keysExpiringSoon) : '0'}
                   </div>
+                  <div className="text-xs text-muted-foreground mt-1">TTL &lt; 1 hour</div>
                 </CardContent>
               </Card>
             </div>
@@ -331,13 +370,18 @@ export function KeyAnalytics() {
                         <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
                         <YAxis />
                         <Tooltip
-                          formatter={(value: number | undefined, _name: string | undefined, props: any) => [formatNumber(value || 0), props.payload.fullName]}
+                          formatter={(value, _name, item) => [
+                            formatNumber(numericFromTooltipValue(value)),
+                            String(item.payload?.fullName ?? ''),
+                          ]}
                         />
                         <Bar dataKey="value" fill="hsl(var(--primary))" />
                       </BarChart>
                     </ResponsiveContainer>
                   ) : (
-                    <div className="text-center py-12 text-muted-foreground">No pattern data available</div>
+                    <div className="text-center py-12 text-muted-foreground">
+                      No pattern data available
+                    </div>
                   )}
                 </CardContent>
               </Card>
@@ -364,12 +408,16 @@ export function KeyAnalytics() {
                             <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                           ))}
                         </Pie>
-                        <Tooltip formatter={(value: number | undefined) => formatBytes(value || 0)} />
+                        <Tooltip
+                          formatter={(value) => formatBytes(numericFromTooltipValue(value))}
+                        />
                         <Legend />
                       </PieChart>
                     </ResponsiveContainer>
                   ) : (
-                    <div className="text-center py-12 text-muted-foreground">No pattern data available</div>
+                    <div className="text-center py-12 text-muted-foreground">
+                      No pattern data available
+                    </div>
                   )}
                 </CardContent>
               </Card>
@@ -383,8 +431,13 @@ export function KeyAnalytics() {
               <CardContent>
                 {patternsLoading ? (
                   <div className="text-center py-12">
-                    <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-current border-r-transparent align-[-0.125em] motion-reduce:animate-[spin_1.5s_linear_infinite]" role="status">
-                      <span className="!absolute !-m-px !h-px !w-px !overflow-hidden !whitespace-nowrap !border-0 !p-0 ![clip:rect(0,0,0,0)]">Loading...</span>
+                    <div
+                      className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-current border-r-transparent align-[-0.125em] motion-reduce:animate-[spin_1.5s_linear_infinite]"
+                      role="status"
+                    >
+                      <span className="!absolute !-m-px !h-px !w-px !overflow-hidden !whitespace-nowrap !border-0 !p-0 ![clip:rect(0,0,0,0)]">
+                        Loading...
+                      </span>
                     </div>
                   </div>
                 ) : sortedPatterns.length > 0 ? (
@@ -426,18 +479,25 @@ export function KeyAnalytics() {
                         {sortedPatterns.map((pattern) => (
                           <tr
                             key={pattern.id}
-                            className={`border-b hover:bg-muted cursor-pointer transition-colors ${selectedPattern === pattern.pattern ? 'bg-primary/10 border-l-4 border-l-primary' : ''
-                              }`}
+                            className={`border-b hover:bg-muted cursor-pointer transition-colors ${
+                              selectedPattern === pattern.pattern
+                                ? 'bg-primary/10 border-l-4 border-l-primary'
+                                : ''
+                            }`}
                             onClick={() => setSelectedPattern(pattern.pattern)}
                           >
                             <td className="p-2 font-mono text-xs">{pattern.pattern}</td>
                             <td className="p-2 font-bold">{formatNumber(pattern.keyCount)}</td>
-                            <td className="p-2 text-muted-foreground">{formatNumber(pattern.sampledKeyCount)}</td>
+                            <td className="p-2 text-muted-foreground">
+                              {formatNumber(pattern.sampledKeyCount)}
+                            </td>
                             <td className="p-2">{formatBytes(pattern.totalMemoryBytes)}</td>
                             <td className="p-2">{formatBytes(pattern.avgMemoryBytes)}</td>
                             <td className="p-2">{formatNumber(pattern.keysWithTtl)}</td>
                             <td className="p-2">{formatTime(pattern.avgIdleTimeSeconds)}</td>
-                            <td className={`p-2 ${(pattern.staleKeyCount || 0) > 0 ? 'text-amber-600 font-semibold' : ''}`}>
+                            <td
+                              className={`p-2 ${(pattern.staleKeyCount || 0) > 0 ? 'text-amber-600 font-semibold' : ''}`}
+                            >
                               {formatNumber(pattern.staleKeyCount || 0)}
                             </td>
                           </tr>
@@ -472,7 +532,7 @@ export function KeyAnalytics() {
                 </CardHeader>
                 <CardContent>
                   {(() => {
-                    const pattern = sortedPatterns.find(p => p.pattern === selectedPattern);
+                    const pattern = sortedPatterns.find((p) => p.pattern === selectedPattern);
                     if (!pattern) return null;
 
                     return (
@@ -483,61 +543,88 @@ export function KeyAnalytics() {
                         </div>
                         <div>
                           <div className="text-xs text-muted-foreground">Total Memory</div>
-                          <div className="text-lg font-bold">{formatBytes(pattern.totalMemoryBytes)}</div>
+                          <div className="text-lg font-bold">
+                            {formatBytes(pattern.totalMemoryBytes)}
+                          </div>
                         </div>
                         <div>
                           <div className="text-xs text-muted-foreground">Avg Memory/Key</div>
-                          <div className="text-lg font-bold">{formatBytes(pattern.avgMemoryBytes)}</div>
+                          <div className="text-lg font-bold">
+                            {formatBytes(pattern.avgMemoryBytes)}
+                          </div>
                         </div>
                         <div>
                           <div className="text-xs text-muted-foreground">Max Memory</div>
-                          <div className="text-lg font-bold">{formatBytes(pattern.maxMemoryBytes)}</div>
+                          <div className="text-lg font-bold">
+                            {formatBytes(pattern.maxMemoryBytes)}
+                          </div>
                         </div>
                         <div>
                           <div className="text-xs text-muted-foreground">Keys with TTL</div>
-                          <div className="text-lg font-bold">{formatNumber(pattern.keysWithTtl)}</div>
+                          <div className="text-lg font-bold">
+                            {formatNumber(pattern.keysWithTtl)}
+                          </div>
                         </div>
                         <div>
                           <div className="text-xs text-muted-foreground">Expiring Soon</div>
-                          <div className="text-lg font-bold text-red-600">{formatNumber(pattern.keysExpiringSoon)}</div>
+                          <div className="text-lg font-bold text-red-600">
+                            {formatNumber(pattern.keysExpiringSoon)}
+                          </div>
                         </div>
                         <div>
                           <div className="text-xs text-muted-foreground">Avg Idle Time</div>
-                          <div className="text-lg font-bold">{formatTime(pattern.avgIdleTimeSeconds)}</div>
+                          <div className="text-lg font-bold">
+                            {formatTime(pattern.avgIdleTimeSeconds)}
+                          </div>
                         </div>
                         <div>
                           <div className="text-xs text-muted-foreground">Stale Keys</div>
-                          <div className="text-lg font-bold text-amber-600">{formatNumber(pattern.staleKeyCount || 0)}</div>
+                          <div className="text-lg font-bold text-amber-600">
+                            {formatNumber(pattern.staleKeyCount || 0)}
+                          </div>
                         </div>
-                        {pattern.avgAccessFrequency !== undefined && pattern.avgAccessFrequency !== null && (
-                          <>
-                            <div>
-                              <div className="text-xs text-muted-foreground">Avg Access Freq</div>
-                              <div className="text-lg font-bold">{pattern.avgAccessFrequency.toFixed(2)}</div>
-                            </div>
-                            <div>
-                              <div className="text-xs text-muted-foreground">Hot Keys</div>
-                              <div className="text-lg font-bold text-red-600">{formatNumber(pattern.hotKeyCount || 0)}</div>
-                            </div>
-                            <div>
-                              <div className="text-xs text-muted-foreground">Cold Keys</div>
-                              <div className="text-lg font-bold text-blue-600">{formatNumber(pattern.coldKeyCount || 0)}</div>
-                            </div>
-                          </>
-                        )}
+                        {pattern.avgAccessFrequency !== undefined &&
+                          pattern.avgAccessFrequency !== null && (
+                            <>
+                              <div>
+                                <div className="text-xs text-muted-foreground">Avg Access Freq</div>
+                                <div className="text-lg font-bold">
+                                  {pattern.avgAccessFrequency.toFixed(2)}
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-xs text-muted-foreground">Hot Keys</div>
+                                <div className="text-lg font-bold text-red-600">
+                                  {formatNumber(pattern.hotKeyCount || 0)}
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-xs text-muted-foreground">Cold Keys</div>
+                                <div className="text-lg font-bold text-blue-600">
+                                  {formatNumber(pattern.coldKeyCount || 0)}
+                                </div>
+                              </div>
+                            </>
+                          )}
                         {pattern.avgTtlSeconds !== undefined && pattern.avgTtlSeconds !== null && (
                           <>
                             <div>
                               <div className="text-xs text-muted-foreground">Avg TTL</div>
-                              <div className="text-lg font-bold">{formatTime(pattern.avgTtlSeconds)}</div>
+                              <div className="text-lg font-bold">
+                                {formatTime(pattern.avgTtlSeconds)}
+                              </div>
                             </div>
                             <div>
                               <div className="text-xs text-muted-foreground">Min TTL</div>
-                              <div className="text-lg font-bold">{formatTime(pattern.minTtlSeconds)}</div>
+                              <div className="text-lg font-bold">
+                                {formatTime(pattern.minTtlSeconds)}
+                              </div>
                             </div>
                             <div>
                               <div className="text-xs text-muted-foreground">Max TTL</div>
-                              <div className="text-lg font-bold">{formatTime(pattern.maxTtlSeconds)}</div>
+                              <div className="text-lg font-bold">
+                                {formatTime(pattern.maxTtlSeconds)}
+                              </div>
                             </div>
                           </>
                         )}
@@ -557,9 +644,7 @@ export function KeyAnalytics() {
                 <div className="flex items-center justify-between flex-wrap gap-3">
                   <div className="flex items-center gap-3">
                     <CardTitle>Hot Keys</CardTitle>
-                    {hotKeySignalType === 'lfu' && (
-                      <Badge variant="default">LFU signal</Badge>
-                    )}
+                    {hotKeySignalType === 'lfu' && <Badge variant="default">LFU signal</Badge>}
                     {hotKeySignalType === 'idletime' && (
                       <Badge variant="secondary">Idle time signal</Badge>
                     )}
@@ -567,7 +652,10 @@ export function KeyAnalytics() {
                   <DateRangePicker value={hotKeyDateRange} onChange={setHotKeyDateRange} />
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  Top 50 keys by access frequency{isHotKeyTimeFiltered ? ' — showing rank movement vs. earliest snapshot in range' : ''}
+                  Top 50 keys by access frequency
+                  {isHotKeyTimeFiltered
+                    ? ' — showing rank movement vs. earliest snapshot in range'
+                    : ''}
                 </p>
               </CardHeader>
               <CardContent>
@@ -593,7 +681,9 @@ export function KeyAnalytics() {
                         <TableHead className="w-12">#</TableHead>
                         <TableHead className="w-16"></TableHead>
                         <TableHead>Key Name</TableHead>
-                        <TableHead>{hotKeySignalType === 'lfu' ? 'Access Frequency' : 'Idle Time'}</TableHead>
+                        <TableHead>
+                          {hotKeySignalType === 'lfu' ? 'Access Frequency' : 'Idle Time'}
+                        </TableHead>
                         <TableHead>Memory</TableHead>
                         <TableHead>TTL</TableHead>
                       </TableRow>
@@ -601,12 +691,24 @@ export function KeyAnalytics() {
                     <TableBody>
                       {Array.from({ length: 5 }).map((_, i) => (
                         <TableRow key={i}>
-                          <TableCell><Skeleton className="h-4 w-6" /></TableCell>
-                          <TableCell><Skeleton className="h-4 w-10" /></TableCell>
-                          <TableCell><Skeleton className="h-4 w-48" /></TableCell>
-                          <TableCell><Skeleton className="h-4 w-20" /></TableCell>
-                          <TableCell><Skeleton className="h-4 w-16" /></TableCell>
-                          <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-6" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-10" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-48" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-20" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-16" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-20" />
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -622,7 +724,9 @@ export function KeyAnalytics() {
                         <TableHead className="w-12">#</TableHead>
                         <TableHead className="w-16">Move</TableHead>
                         <TableHead>Key Name</TableHead>
-                        <TableHead>{hotKeySignalType === 'lfu' ? 'Access Frequency' : 'Idle Time'}</TableHead>
+                        <TableHead>
+                          {hotKeySignalType === 'lfu' ? 'Access Frequency' : 'Idle Time'}
+                        </TableHead>
                         <TableHead>Memory</TableHead>
                         <TableHead>TTL</TableHead>
                       </TableRow>
@@ -636,8 +740,12 @@ export function KeyAnalytics() {
                             key={entry.id}
                             className={isTop10 ? 'border-l-2 border-l-primary' : ''}
                           >
-                            <TableCell className="text-muted-foreground font-medium">{entry.rank}</TableCell>
-                            <TableCell className={`text-xs ${delta.className}`}>{delta.label}</TableCell>
+                            <TableCell className="text-muted-foreground font-medium">
+                              {entry.rank}
+                            </TableCell>
+                            <TableCell className={`text-xs ${delta.className}`}>
+                              {delta.label}
+                            </TableCell>
                             <TableCell className="font-mono text-sm">{entry.keyName}</TableCell>
                             <TableCell>
                               {entry.signalType === 'lfu' ? (
@@ -648,22 +756,28 @@ export function KeyAnalytics() {
                                       style={{ width: `${((entry.freqScore ?? 0) / 255) * 100}%` }}
                                     />
                                   </div>
-                                  <span className="text-xs text-muted-foreground">{entry.freqScore} / 255</span>
+                                  <span className="text-xs text-muted-foreground">
+                                    {entry.freqScore} / 255
+                                  </span>
                                 </div>
                               ) : (
-                                <span className={`font-medium ${
-                                  (entry.idleSeconds ?? 0) < 60
-                                    ? 'text-red-500'
-                                    : (entry.idleSeconds ?? 0) < 3600
-                                      ? 'text-amber-500'
-                                      : 'text-muted-foreground'
-                                }`}>
+                                <span
+                                  className={`font-medium ${
+                                    (entry.idleSeconds ?? 0) < 60
+                                      ? 'text-red-500'
+                                      : (entry.idleSeconds ?? 0) < 3600
+                                        ? 'text-amber-500'
+                                        : 'text-muted-foreground'
+                                  }`}
+                                >
                                   {formatTime(entry.idleSeconds)}
                                 </span>
                               )}
                             </TableCell>
                             <TableCell>
-                              {entry.memoryBytes != null ? formatBytes(entry.memoryBytes) : '\u2014'}
+                              {entry.memoryBytes != null
+                                ? formatBytes(entry.memoryBytes)
+                                : '\u2014'}
                             </TableCell>
                             <TableCell>{formatTtl(entry.ttl)}</TableCell>
                           </TableRow>
@@ -680,7 +794,8 @@ export function KeyAnalytics() {
                 <span className="shrink-0 mt-0.5">i</span>
                 <div>
                   <p>
-                    For more accurate hot key detection, enable LFU eviction on your Valkey instance:
+                    For more accurate hot key detection, enable LFU eviction on your Valkey
+                    instance:
                   </p>
                   <code className="mt-1.5 block w-fit rounded bg-muted px-2 py-1 font-mono text-xs text-foreground">
                     CONFIG SET maxmemory-policy allkeys-lfu
