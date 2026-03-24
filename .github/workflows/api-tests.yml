@@ -44,6 +44,10 @@ jobs:
         working-directory: apps/api
         run: pnpm test
 
+      - name: Run entitlement unit tests
+        working-directory: proprietary/entitlement
+        run: pnpm vitest run --exclude 'src/**/integration/**'
+
       - name: Show container logs on failure
         if: failure()
         run: |
