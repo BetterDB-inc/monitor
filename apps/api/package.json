@@ -39,7 +39,7 @@
   },
   "dependencies": {
     "@betterdb/shared": "workspace:*",
-    "@fastify/static": "^8.3.0",
+    "@fastify/static": "^9.0.0",
     "@fastify/swagger": "^9.7.0",
     "@fastify/swagger-ui": "^5.2.5",
     "@lancedb/lancedb": "^0.23.0",
@@ -58,7 +58,7 @@
     "apache-arrow": "^21.1.0",
     "better-sqlite3": "^12.8.0",
     "class-transformer": "^0.5.1",
-    "class-validator": "^0.14.4",
+    "class-validator": "^0.15.1",
     "fastify": "^5.8.4",
     "hnswlib-node": "^3.0.0",
     "iovalkey": "^0.3.3",
@@ -84,7 +84,7 @@
     "@types/node": "^22.19.15",
     "@types/pg": "^8.20.0",
     "@types/semver": "^7.7.1",
-    "@types/supertest": "^6.0.3",
+    "@types/supertest": "^7.2.0",
     "@types/ws": "^8.18.1",
     "eslint": "^10.1.0",
     "globals": "^15.15.0",
@@ -95,6 +95,6 @@
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.57.1"
+    "typescript-eslint": "^8.57.2"
   }
 }
