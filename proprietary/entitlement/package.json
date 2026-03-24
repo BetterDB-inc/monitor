@@ -2,11 +2,12 @@
   "name": "@app/entitlement",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main",
-    "test": "jest",
+    "test": "vitest run",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio"
@@ -19,23 +20,23 @@
     "@nestjs/core": "^11.1.17",
     "@nestjs/platform-fastify": "^11.1.17",
     "@nestjs/throttler": "^6.5.0",
-    "@prisma/client": "^5.22.0",
+    "@prisma/adapter-pg": "^7.5.0",
+    "@prisma/client": "^7.5.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "dotenv": "^17.3.1",
     "jsonwebtoken": "^9.0.3",
-    "reflect-metadata": "^0.1.14",
+    "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "stripe": "^14.25.0"
+    "stripe": "^20.4.1"
   },
   "devDependencies": {
-    "@nestjs/cli": "^10.4.9",
+    "@nestjs/cli": "^11.0.16",
     "@nestjs/testing": "^11.1.17",
-    "@types/jest": "^29.5.14",
     "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "^20.19.37",
-    "jest": "^29.7.0",
-    "prisma": "^5.22.0",
-    "ts-jest": "^29.4.6",
-    "typescript": "^5.9.3"
+    "@types/node": "^22.19.15",
+    "prisma": "^7.5.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.1"
   }
 }

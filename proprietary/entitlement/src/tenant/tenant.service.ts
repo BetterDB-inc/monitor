@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { TenantStatus } from '@prisma/client';
+import { TenantStatus } from '../generated/prisma/client.js';
 
 const RESERVED_SUBDOMAINS = [
   'www', 'api', 'app', 'admin', 'system', 'test', 'staging', 'prod',

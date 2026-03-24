@@ -21,9 +21,7 @@ export class StripeService {
     if (!apiKey) {
       this.logger.warn('STRIPE_SECRET_KEY not set - Stripe integration disabled');
     }
-    this.stripe = new Stripe(apiKey || 'sk_test_placeholder', {
-      apiVersion: '2023-10-16',
-    });
+    this.stripe = new Stripe(apiKey || 'sk_test_placeholder');
     this.webhookSecret = this.config.get<string>('STRIPE_WEBHOOK_SECRET', '');
   }
 
@@ -77,8 +75,8 @@ export class StripeService {
         stripeEventId: eventId,
         tier,
         status: subscription.status as SubscriptionStatus,
-        currentPeriodStart: new Date(subscription.current_period_start * 1000),
-        currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+        currentPeriodStart: new Date(subscription.items.data[0].current_period_start * 1000),
+        currentPeriodEnd: new Date(subscription.items.data[0].current_period_end * 1000),
         cancelAtPeriodEnd: subscription.cancel_at_period_end,
       },
     });
@@ -121,8 +119,8 @@ export class StripeService {
       where: { id: dbSub.id },
       data: {
         status: subscription.status as SubscriptionStatus,
-        currentPeriodStart: new Date(subscription.current_period_start * 1000),
-        currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+        currentPeriodStart: new Date(subscription.items.data[0].current_period_start * 1000),
+        currentPeriodEnd: new Date(subscription.items.data[0].current_period_end * 1000),
         cancelAtPeriodEnd: subscription.cancel_at_period_end,
         stripeEventId: eventId,
       },

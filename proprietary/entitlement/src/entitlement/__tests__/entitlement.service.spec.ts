@@ -1,3 +1,4 @@
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { Test, TestingModule } from '@nestjs/testing';
 import { UnauthorizedException } from '@nestjs/common';
 import { EntitlementService } from '../entitlement.service';
@@ -6,7 +7,7 @@ import { Tier, EntitlementRequest } from '@betterdb/shared';
 
 type MockPrismaService = {
   license: {
-    findUnique: jest.Mock;
+    findUnique: Mock;
   };
 };
 
@@ -17,7 +18,7 @@ describe('EntitlementService', () => {
   beforeEach(async () => {
     const mockPrisma: MockPrismaService = {
       license: {
-        findUnique: jest.fn(),
+        findUnique: vi.fn(),
       },
     };
 
@@ -114,7 +115,7 @@ describe('EntitlementService', () => {
     });
 
     it('should throw UnauthorizedException for invalid license key', async () => {
-      (prisma.license.findUnique as jest.Mock).mockResolvedValue(null);
+      (prisma.license.findUnique as Mock).mockResolvedValue(null);
 
       await expect(
         service.validateLicense({

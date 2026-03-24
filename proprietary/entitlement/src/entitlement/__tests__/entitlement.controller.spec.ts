@@ -1,3 +1,4 @@
+import { describe, it, expect, beforeEach, vi, type Mocked } from 'vitest';
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException } from '@nestjs/common';
 import { EntitlementController } from '../entitlement.controller';
@@ -6,12 +7,12 @@ import { Tier, EntitlementRequest } from '@betterdb/shared';
 
 describe('EntitlementController', () => {
   let controller: EntitlementController;
-  let service: jest.Mocked<EntitlementService>;
+  let service: Mocked<EntitlementService>;
 
   beforeEach(async () => {
     const mockService = {
-      validateLicense: jest.fn(),
-      handleKeylessInstance: jest.fn(),
+      validateLicense: vi.fn(),
+      handleKeylessInstance: vi.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
