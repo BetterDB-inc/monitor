@@ -689,7 +689,7 @@ export class ProvisioningService {
     }
   }
 
-  private async createIngress(namespace: string, subdomain: string, hostname: string): Promise<void> {
+  private async createIngress(namespace: string, _subdomain: string, hostname: string): Promise<void> {
     try {
       await this.networkingApi.createNamespacedIngress({
         namespace,
