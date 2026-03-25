@@ -67,4 +67,8 @@ export class UsageTelemetryService implements OnModuleInit {
   async trackPageView(path: string): Promise<void> {
     await this.sendEvent('page_view', { path });
   }
+
+  async trackMcpToolCall(event: { toolName: string; success: boolean; durationMs: number; error?: string }): Promise<void> {
+    await this.sendEvent('mcp_tool_call', event);
+  }
 }

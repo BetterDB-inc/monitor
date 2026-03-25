@@ -3,6 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { initTelemetry, trackToolCall, stopTelemetry } from './telemetry.js';
 
 // --- CLI arg parsing ---
 
@@ -72,7 +73,7 @@ async function detectPrefix(): Promise<string> {
   for (const prefix of API_PREFIXES) {
     try {
       const res = await rawFetch(prefix, '/mcp/instances');
-      if (isJsonResponse(res)) {
+      if (res.ok && isJsonResponse(res)) {
         return prefix;
       }
     } catch {
@@ -155,6 +156,28 @@ function resolveInstanceId(overrideId?: string): string {
   return id;
 }
 
+type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
+
+async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): Promise<ToolResult> {
+  const start = Date.now();
+  let success = true;
+  let error: string | undefined;
+  try {
+    const result = await fn();
+    if (result.isError) {
+      success = false;
+      error = result.content[0]?.text?.slice(0, 200);
+    }
+    return result;
+  } catch (err) {
+    success = false;
+    error = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+    throw err;
+  } finally {
+    trackToolCall({ toolName, success, durationMs: Date.now() - start, error });
+  }
+}
+
 const server = new McpServer({
   name: 'betterdb',
   version: '0.1.0',
@@ -164,7 +187,7 @@ server.tool(
   'list_instances',
   'List all Valkey/Redis instances registered in BetterDB. Shows connection status and capabilities.',
   {},
-  async () => {
+  async () => withTelemetry('list_instances', async () => {
     const data = await apiFetch('/mcp/instances') as { instances: Array<{ id: string; name: string; isDefault: boolean; isConnected: boolean; [key: string]: unknown }> };
     const lines = data.instances.map((inst) => {
       const active = inst.id === activeInstanceId ? ' [ACTIVE]' : '';
@@ -174,14 +197,14 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: lines.join('\n') || 'No instances found.' }],
     };
-  },
+  }),
 );
 
 server.tool(
   'select_instance',
   'Select which instance subsequent tool calls operate on.',
   { instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format').describe('The instance ID to select') },
-  async ({ instanceId }) => {
+  async ({ instanceId }) => withTelemetry('select_instance', async () => {
     const data = await apiFetch('/mcp/instances') as { instances: Array<{ id: string; name: string }> };
     const found = data.instances.find((inst) => inst.id === instanceId);
     if (!found) {
@@ -194,7 +217,7 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: `Selected instance: ${found.name} (${instanceId})` }],
     };
-  },
+  }),
 );
 
 // --- Connection management tools ---
@@ -210,7 +233,7 @@ server.tool(
     password: z.string().optional().describe('Auth password'),
     setAsDefault: z.boolean().optional().describe('Set this connection as the active default'),
   },
-  async (params) => {
+  async (params) => withTelemetry('add_connection', async () => {
     try {
       const data = await apiRequest('POST', '/connections', params) as { id: string };
       if (isLicenseError(data)) {
@@ -225,7 +248,7 @@ server.tool(
         isError: true,
       };
     }
-  },
+  }),
 );
 
 server.tool(
@@ -238,7 +261,7 @@ server.tool(
     username: z.string().optional().describe('ACL username (default: "default")'),
     password: z.string().optional().describe('Auth password'),
   },
-  async (params) => {
+  async (params) => withTelemetry('test_connection', async () => {
     try {
       const data = await apiRequest('POST', '/connections/test', params) as {
         success: boolean;
@@ -263,7 +286,7 @@ server.tool(
         isError: true,
       };
     }
-  },
+  }),
 );
 
 server.tool(
@@ -272,7 +295,7 @@ server.tool(
   {
     instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format').describe('The instance ID to remove'),
   },
-  async ({ instanceId }) => {
+  async ({ instanceId }) => withTelemetry('remove_connection', async () => {
     try {
       const data = await apiRequest('DELETE', `/connections/${encodeURIComponent(instanceId)}`);
       if (isLicenseError(data)) {
@@ -287,7 +310,7 @@ server.tool(
         isError: true,
       };
     }
-  },
+  }),
 );
 
 server.tool(
@@ -296,7 +319,7 @@ server.tool(
   {
     instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format').describe('The instance ID to set as default'),
   },
-  async ({ instanceId }) => {
+  async ({ instanceId }) => withTelemetry('set_default_connection', async () => {
     try {
       const data = await apiRequest('POST', `/connections/${encodeURIComponent(instanceId)}/default`);
       if (isLicenseError(data)) {
@@ -311,7 +334,7 @@ server.tool(
         isError: true,
       };
     }
-  },
+  }),
 );
 
 server.tool(
@@ -321,7 +344,7 @@ server.tool(
     section: z.string().optional().describe('INFO section to filter (server, clients, memory, stats, replication, keyspace)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ section, instanceId }) => {
+  async ({ section, instanceId }) => withTelemetry('get_info', async () => {
     const id = resolveInstanceId(instanceId);
     const data = await apiFetch(`/mcp/instance/${id}/info`) as Record<string, unknown>;
     if (section && data[section] !== undefined) {
@@ -332,7 +355,7 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
@@ -342,14 +365,14 @@ server.tool(
     count: z.number().optional().describe('Number of entries to return (default 25)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ count, instanceId }) => {
+  async ({ count, instanceId }) => withTelemetry('get_slowlog', async () => {
     const id = resolveInstanceId(instanceId);
     const n = count ?? 25;
     const data = await apiFetch(`/mcp/instance/${id}/slowlog?count=${n}`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
@@ -359,66 +382,66 @@ server.tool(
     count: z.number().optional().describe('Number of entries to return (default 25)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ count, instanceId }) => {
+  async ({ count, instanceId }) => withTelemetry('get_commandlog', async () => {
     const id = resolveInstanceId(instanceId);
     const n = count ?? 25;
     const data = await apiFetch(`/mcp/instance/${id}/commandlog?count=${n}`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
   'get_latency',
   'Get latency event history for the active instance.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => {
+  async ({ instanceId }) => withTelemetry('get_latency', async () => {
     const id = resolveInstanceId(instanceId);
     const data = await apiFetch(`/mcp/instance/${id}/latency`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
   'get_memory',
   'Get memory diagnostics: MEMORY DOCTOR assessment and MEMORY STATS breakdown.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => {
+  async ({ instanceId }) => withTelemetry('get_memory', async () => {
     const id = resolveInstanceId(instanceId);
     const data = await apiFetch(`/mcp/instance/${id}/memory`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
   'get_clients',
   'Get the active client list with connection details.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => {
+  async ({ instanceId }) => withTelemetry('get_clients', async () => {
     const id = resolveInstanceId(instanceId);
     const data = await apiFetch(`/mcp/instance/${id}/clients`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
   'get_health',
   'Get a synthetic health summary for the active instance: keyspace hit rate, memory fragmentation ratio, connected clients, replication lag (replicas only), and keyspace size. Use this as the first call when investigating an instance — it surfaces the most actionable signals without requiring you to parse raw INFO output.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => {
+  async ({ instanceId }) => withTelemetry('get_health', async () => {
     const id = resolveInstanceId(instanceId);
     const data = await apiFetch(`/mcp/instance/${id}/health`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 // --- Historical data tools ---
@@ -438,7 +461,7 @@ server.tool(
     limit: z.number().optional().describe('Max entries to analyze'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ limit, instanceId }) => {
+  async ({ limit, instanceId }) => withTelemetry('get_slowlog_patterns', async () => {
     const id = resolveInstanceId(instanceId);
     const qs = buildQuery({ limit });
     const data = await apiFetch(`/mcp/instance/${id}/history/slowlog-patterns${qs}`);
@@ -448,7 +471,7 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
@@ -462,7 +485,7 @@ server.tool(
     limit: z.number().optional().describe('Max entries to return'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ startTime, endTime, command, minDuration, limit, instanceId }) => {
+  async ({ startTime, endTime, command, minDuration, limit, instanceId }) => withTelemetry('get_commandlog_history', async () => {
     const id = resolveInstanceId(instanceId);
     const qs = buildQuery({ startTime, endTime, command, minDuration, limit });
     const data = await apiFetch(`/mcp/instance/${id}/history/commandlog${qs}`);
@@ -472,7 +495,7 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
@@ -484,7 +507,7 @@ server.tool(
     limit: z.number().optional().describe('Max entries to analyze'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ startTime, endTime, limit, instanceId }) => {
+  async ({ startTime, endTime, limit, instanceId }) => withTelemetry('get_commandlog_patterns', async () => {
     const id = resolveInstanceId(instanceId);
     const qs = buildQuery({ startTime, endTime, limit });
     const data = await apiFetch(`/mcp/instance/${id}/history/commandlog-patterns${qs}`);
@@ -494,7 +517,7 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
@@ -506,7 +529,7 @@ server.tool(
     startTime: z.number().optional().describe('Start time (Unix timestamp ms)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ limit, metricType, startTime, instanceId }) => {
+  async ({ limit, metricType, startTime, instanceId }) => withTelemetry('get_anomalies', async () => {
     const id = resolveInstanceId(instanceId);
     const qs = buildQuery({ limit, metricType, startTime });
     const data = await apiFetch(`/mcp/instance/${id}/history/anomalies${qs}`);
@@ -516,7 +539,7 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
@@ -528,7 +551,7 @@ server.tool(
     bucketSizeMinutes: z.number().optional().describe('Bucket size in minutes (default 5)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ startTime, endTime, bucketSizeMinutes, instanceId }) => {
+  async ({ startTime, endTime, bucketSizeMinutes, instanceId }) => withTelemetry('get_client_activity', async () => {
     const id = resolveInstanceId(instanceId);
     const qs = buildQuery({ startTime, endTime, bucketSizeMinutes });
     const data = await apiFetch(`/mcp/instance/${id}/history/client-activity${qs}`);
@@ -538,7 +561,7 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 // --- Hot keys ---
@@ -552,7 +575,7 @@ server.tool(
     limit: z.number().optional().describe('Max entries to return (default 50, max 200)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ startTime, endTime, limit, instanceId }) => {
+  async ({ startTime, endTime, limit, instanceId }) => withTelemetry('get_hot_keys', async () => {
     const id = resolveInstanceId(instanceId);
     const qs = buildQuery({ startTime, endTime, limit });
     const data = await apiFetch(`/mcp/instance/${id}/hot-keys${qs}`);
@@ -562,7 +585,7 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 // --- Cluster tools ---
@@ -571,26 +594,26 @@ server.tool(
   'get_cluster_nodes',
   'Discover all nodes in the Valkey cluster — role (master/replica), address, health status, and slot ranges. Returns an error message if this instance is not running in cluster mode.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => {
+  async ({ instanceId }) => withTelemetry('get_cluster_nodes', async () => {
     const id = resolveInstanceId(instanceId);
     const data = await apiFetch(`/mcp/instance/${id}/cluster/nodes`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
   'get_cluster_node_stats',
   'Get per-node performance stats: memory usage, ops/sec, connected clients, replication offset, and CPU. Use this to identify hot nodes, lagging replicas, or uneven load distribution.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => {
+  async ({ instanceId }) => withTelemetry('get_cluster_node_stats', async () => {
     const id = resolveInstanceId(instanceId);
     const data = await apiFetch(`/mcp/instance/${id}/cluster/node-stats`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
@@ -600,14 +623,14 @@ server.tool(
     limit: z.number().optional().describe('Max entries to return (default 100)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ limit, instanceId }) => {
+  async ({ limit, instanceId }) => withTelemetry('get_cluster_slowlog', async () => {
     const id = resolveInstanceId(instanceId);
     const qs = buildQuery({ limit });
     const data = await apiFetch(`/mcp/instance/${id}/cluster/slowlog${qs}`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 server.tool(
@@ -618,14 +641,14 @@ server.tool(
     limit: z.number().optional().describe('Max slots to return (default 20)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ orderBy, limit, instanceId }) => {
+  async ({ orderBy, limit, instanceId }) => withTelemetry('get_slot_stats', async () => {
     const id = resolveInstanceId(instanceId);
     const qs = buildQuery({ orderBy, limit });
     const data = await apiFetch(`/mcp/instance/${id}/cluster/slot-stats${qs}`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 // --- Latency history ---
@@ -637,13 +660,13 @@ server.tool(
     eventName: z.string().regex(/^[a-zA-Z0-9_.-]+$/, 'Invalid event name').describe('Latency event name to query'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ eventName, instanceId }) => {
+  async ({ eventName, instanceId }) => withTelemetry('get_latency_history', async () => {
     const id = resolveInstanceId(instanceId);
     const data = await apiFetch(`/mcp/instance/${id}/latency/history/${encodeURIComponent(eventName)}`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 // --- ACL audit ---
@@ -659,14 +682,14 @@ server.tool(
     limit: z.number().optional().describe('Max entries to return'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ username, reason, startTime, endTime, limit, instanceId }) => {
+  async ({ username, reason, startTime, endTime, limit, instanceId }) => withTelemetry('get_acl_audit', async () => {
     const id = resolveInstanceId(instanceId);
     const qs = buildQuery({ username, reason, startTime, endTime, limit });
     const data = await apiFetch(`/mcp/instance/${id}/audit${qs}`);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     };
-  },
+  }),
 );
 
 // --- Monitor lifecycle tools ---
@@ -678,7 +701,7 @@ server.tool(
     port: z.number().int().min(1).max(65535).default(3001).describe('Port for the monitor API (default 3001)'),
     storage: z.enum(['sqlite', 'memory']).default('sqlite').describe('Storage backend (default sqlite)'),
   },
-  async ({ port, storage }) => {
+  async ({ port, storage }) => withTelemetry('start_monitor', async () => {
     try {
       const { startMonitor } = await import('./autostart.js');
       const result = await startMonitor({ persist: true, port, storage });
@@ -695,14 +718,14 @@ server.tool(
         isError: true,
       };
     }
-  },
+  }),
 );
 
 server.tool(
   'stop_monitor',
   'Stop a persistent BetterDB monitor process that was previously started with start_monitor or --autostart --persist.',
   {},
-  async () => {
+  async () => withTelemetry('stop_monitor', async () => {
     try {
       const { stopMonitor } = await import('./autostart.js');
       const result = await stopMonitor();
@@ -715,7 +738,7 @@ server.tool(
         isError: true,
       };
     }
-  },
+  }),
 );
 
 try {
@@ -731,6 +754,19 @@ try {
     process.env.BETTERDB_URL = result.url;
     detectedPrefix = null;
   }
+
+  initTelemetry(apiRequest);
+
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await stopTelemetry();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  process.stdin.on('end', shutdown);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
