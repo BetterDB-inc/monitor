@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
-import { TenantStatus } from '../generated/prisma/client.js';
+import { TenantStatus } from '@prisma/client';
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
