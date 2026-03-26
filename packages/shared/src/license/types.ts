@@ -42,6 +42,7 @@ export enum Feature {
   AI_CLOUD = 'aiCloud',
   WEBHOOK_COMPLIANCE_EVENTS = 'webhookComplianceEvents',
   WEBHOOK_DLQ = 'webhookDlq',
+  MIGRATION_EXECUTION = 'migrationExecution',
 }
 
 export const TIER_FEATURES: Record<Tier, Feature[]> = {
@@ -56,6 +57,7 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
     Feature.WEBHOOK_CUSTOM_HEADERS,
     Feature.WEBHOOK_DELIVERY_PAYLOAD,
     Feature.WEBHOOK_CONFIGURABLE_RETRY,
+    Feature.MIGRATION_EXECUTION,
   ],
   [Tier.enterprise]: Object.values(Feature),
 };

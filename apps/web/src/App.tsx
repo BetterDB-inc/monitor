@@ -27,6 +27,7 @@ import { KeyAnalytics } from './pages/KeyAnalytics';
 import { ClusterDashboard } from './pages/ClusterDashboard';
 import { Settings } from './pages/Settings';
 import { Webhooks } from './pages/Webhooks';
+import { MigrationPage } from './pages/MigrationPage';
 import { VectorSearch } from './pages/VectorSearch';
 import { Members } from './pages/Members';
 import { workspaceApi, CloudUser } from './api/workspace';
@@ -155,6 +156,9 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
           <NavItem to="/webhooks" active={location.pathname === '/webhooks'}>
             Webhooks
           </NavItem>
+          <NavItem to="/migration" active={location.pathname === '/migration'}>
+            Migration
+          </NavItem>
           {!cloudUser && (
             <NavItem to="/helper" active={location.pathname === '/helper'}>
               <span className="flex items-center justify-between w-full">
@@ -213,6 +217,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
             <Route path="/audit" element={<NoConnectionsGuard><AuditTrail /></NoConnectionsGuard>} />
             <Route path="/helper" element={<NoConnectionsGuard><AiAssistant /></NoConnectionsGuard>} />
             <Route path="/webhooks" element={<NoConnectionsGuard><Webhooks /></NoConnectionsGuard>} />
+            <Route path="/migration" element={<NoConnectionsGuard><MigrationPage /></NoConnectionsGuard>} />
             {cloudUser && (
               <Route path="/workspace/members" element={<Members cloudUser={cloudUser} />} />
             )}
@@ -220,6 +225,12 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
           </Routes>
         </div>
       </main>
+      <style>{`
+        @media print {
+          aside, .print\\:hidden, nav { display: none !important; }
+          main { padding-left: 0 !important; }
+        }
+      `}</style>
     </div>
   );
 }
