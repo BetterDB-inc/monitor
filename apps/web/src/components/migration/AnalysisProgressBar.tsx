@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { fetchApi } from '../../api/client';
 import type { MigrationAnalysisResult } from '@betterdb/shared';
 
@@ -22,6 +22,12 @@ function getStepLabel(progress: number): string {
 
 export function AnalysisProgressBar({ analysisId, onComplete, onError, onCancel }: Props) {
   const [job, setJob] = useState<MigrationAnalysisResult | null>(null);
+  const onCompleteRef = useRef(onComplete);
+  const onErrorRef = useRef(onError);
+  const onCancelRef = useRef(onCancel);
+  onCompleteRef.current = onComplete;
+  onErrorRef.current = onError;
+  onCancelRef.current = onCancel;
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -30,21 +36,21 @@ export function AnalysisProgressBar({ analysisId, onComplete, onError, onCancel 
         setJob(result);
         if (result.status === 'completed') {
           clearInterval(interval);
-          onComplete(result);
+          onCompleteRef.current(result);
         } else if (result.status === 'failed') {
           clearInterval(interval);
-          onError(result.error ?? 'Analysis failed');
+          onErrorRef.current(result.error ?? 'Analysis failed');
         } else if (result.status === 'cancelled') {
           clearInterval(interval);
-          onCancel();
+          onCancelRef.current();
         }
       } catch {
         clearInterval(interval);
-        onError('Analysis job not found or server error');
+        onErrorRef.current('Analysis job not found or server error');
       }
     }, 2000);
     return () => clearInterval(interval);
-  }, [analysisId, onComplete, onError, onCancel]);
+  }, [analysisId]);
 
   const handleCancel = async () => {
     try {

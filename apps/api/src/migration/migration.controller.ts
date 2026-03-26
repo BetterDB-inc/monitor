@@ -2,6 +2,8 @@ import { Controller, Get, Post, Delete, Param, Body, NotFoundException, BadReque
 import type { MigrationAnalysisRequest, StartAnalysisResponse, MigrationAnalysisResult } from '@betterdb/shared';
 import { MigrationService } from './migration.service';
 
+// Migration analysis is intentionally community-tier (no license guard).
+// MIGRATION_EXECUTION gating applies to the execution phase only.
 @Controller('migration')
 export class MigrationController {
   constructor(private readonly migrationService: MigrationService) {}

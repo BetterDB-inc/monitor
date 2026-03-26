@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import Valkey from 'iovalkey';
-import type { MigrationAnalysisRequest, MigrationAnalysisResult, StartAnalysisResponse, DataTypeBreakdown, DataTypeCount } from '@betterdb/shared';
+import type { MigrationAnalysisRequest, MigrationAnalysisResult, StartAnalysisResponse, DataTypeBreakdown, DataTypeCount, TtlDistribution } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { AnalysisJob } from './analysis/analysis-job';
 import { sampleKeyTypes } from './analysis/type-sampler';
@@ -57,13 +57,13 @@ export class MigrationService {
       return undefined;
     }
     return {
+      ...job.result,
       id: job.id,
       status: job.status,
       progress: job.progress,
       createdAt: job.createdAt,
       completedAt: job.completedAt,
       error: job.error,
-      ...job.result,
     } as MigrationAnalysisResult;
   }
 
@@ -150,7 +150,6 @@ export class MigrationService {
       let isCluster = false;
       let clusterMasterCount = 0;
       const scanClients: Valkey[] = [];
-      let isAdapterClient = false;
 
       const clusterEnabled = String(keyspaceInfo['cluster_enabled'] ?? '0');
       if (clusterEnabled === '1') {
@@ -182,7 +181,6 @@ export class MigrationService {
         }
       } else {
         scanClients.push(adapter.getClient());
-        isAdapterClient = true;
       }
 
       job.result.isCluster = isCluster;
@@ -209,30 +207,41 @@ export class MigrationService {
       if (job.cancelled) return;
       job.progress = 50;
 
-      // Step 5: Memory sampling
-      const memoryClient = isAdapterClient ? adapter.getClient() : (tempClients[0] ?? adapter.getClient());
-      const memoryByType = new Map<string, { count: number; bytes: number }>();
+      // Step 5: Memory sampling (per-node to avoid cross-slot errors in cluster mode)
+      const keysByClientIndex = new Map<number, typeof sampledKeys>();
+      for (const sk of sampledKeys) {
+        const group = keysByClientIndex.get(sk.clientIndex) ?? [];
+        group.push(sk);
+        keysByClientIndex.set(sk.clientIndex, group);
+      }
 
-      for (let i = 0; i < sampledKeys.length; i += 1000) {
-        if (job.cancelled) return;
-        const batch = sampledKeys.slice(i, i + 1000);
-        const pipeline = memoryClient.pipeline();
-        for (const { key } of batch) {
-          pipeline.call('MEMORY', 'USAGE', key, 'SAMPLES', '0');
-        }
-        const results = await pipeline.exec();
-        if (results) {
-          for (let j = 0; j < batch.length; j++) {
-            const [err, mem] = results[j] ?? [];
-            const bytes = err ? 0 : Number(mem) || 0;
-            const t = batch[j].type;
-            const entry = memoryByType.get(t) ?? { count: 0, bytes: 0 };
-            entry.count++;
-            entry.bytes += bytes;
-            memoryByType.set(t, entry);
+      const memoryByType = new Map<string, { count: number; bytes: number }>();
+      let memoryProcessed = 0;
+
+      for (const [clientIndex, clientKeys] of keysByClientIndex) {
+        const client = scanClients[clientIndex];
+        for (let i = 0; i < clientKeys.length; i += 1000) {
+          if (job.cancelled) return;
+          const batch = clientKeys.slice(i, i + 1000);
+          const pipeline = client.pipeline();
+          for (const { key } of batch) {
+            pipeline.call('MEMORY', 'USAGE', key, 'SAMPLES', '0');
           }
+          const results = await pipeline.exec();
+          if (results) {
+            for (let j = 0; j < batch.length; j++) {
+              const [err, mem] = results[j] ?? [];
+              const bytes = err ? 0 : Number(mem) || 0;
+              const t = batch[j].type;
+              const entry = memoryByType.get(t) ?? { count: 0, bytes: 0 };
+              entry.count++;
+              entry.bytes += bytes;
+              memoryByType.set(t, entry);
+            }
+          }
+          memoryProcessed += batch.length;
+          job.progress = Math.round(50 + (memoryProcessed / sampledKeys.length) * 15);
         }
-        job.progress = Math.round(50 + ((i + batch.length) / sampledKeys.length) * 15);
       }
 
       // Build DataTypeBreakdown
@@ -286,26 +295,60 @@ export class MigrationService {
       if (job.cancelled) return;
       job.progress = 65;
 
-      // Step 6: TTL distribution
-      const allKeyNames = sampledKeys.map(k => k.key);
-      const ttlClient = isAdapterClient ? adapter.getClient() : (tempClients[0] ?? adapter.getClient());
-      job.result.ttlDistribution = await sampleTtls(ttlClient, allKeyNames);
+      // Step 6: TTL distribution (per-node)
+      const mergedTtl: TtlDistribution = {
+        noExpiry: 0, expiresWithin1h: 0, expiresWithin24h: 0,
+        expiresWithin7d: 0, expiresAfter7d: 0, sampledKeyCount: sampledKeys.length,
+      };
+      for (const [clientIndex, clientKeys] of keysByClientIndex) {
+        const nodeTtl = await sampleTtls(scanClients[clientIndex], clientKeys.map(k => k.key));
+        mergedTtl.noExpiry += nodeTtl.noExpiry;
+        mergedTtl.expiresWithin1h += nodeTtl.expiresWithin1h;
+        mergedTtl.expiresWithin24h += nodeTtl.expiresWithin24h;
+        mergedTtl.expiresWithin7d += nodeTtl.expiresWithin7d;
+        mergedTtl.expiresAfter7d += nodeTtl.expiresAfter7d;
+      }
+      job.result.ttlDistribution = mergedTtl;
 
       if (job.cancelled) return;
       job.progress = 75;
 
-      // Step 7: HFE detection
+      // Step 7: HFE detection (per-node)
       if (capabilities.dbType === 'valkey') {
-        const hashKeys = sampledKeys.filter(k => k.type === 'hash').map(k => k.key);
+        const hashKeys = sampledKeys.filter(k => k.type === 'hash');
         const totalEstimatedHashKeys = totalKeys > 0 && sampledKeys.length > 0
           ? Math.round((hashKeys.length / sampledKeys.length) * totalKeys)
           : hashKeys.length;
-        const hfeClient = isAdapterClient ? adapter.getClient() : (tempClients[0] ?? adapter.getClient());
-        const hfeResult = await detectHfe(hfeClient, hashKeys, totalEstimatedHashKeys);
-        job.result.hfeDetected = hfeResult.hfeDetected;
-        job.result.hfeSupported = hfeResult.hfeSupported;
-        job.result.hfeKeyCount = hfeResult.hfeKeyCount;
-        job.result.hfeOversizedHashesSkipped = hfeResult.hfeOversizedHashesSkipped;
+
+        // Group hash keys by originating client
+        const hashByClient = new Map<number, string[]>();
+        for (const hk of hashKeys) {
+          const group = hashByClient.get(hk.clientIndex) ?? [];
+          group.push(hk.key);
+          hashByClient.set(hk.clientIndex, group);
+        }
+
+        let hfeDetected = false;
+        let hfeSupported = true;
+        let hfeKeyCount = 0;
+        let hfeOversizedHashesSkipped = 0;
+
+        for (const [clientIndex, nodeHashKeys] of hashByClient) {
+          // Each node's estimated share of total hash keys
+          const nodeEstimatedTotal = hashKeys.length > 0
+            ? Math.round((nodeHashKeys.length / hashKeys.length) * totalEstimatedHashKeys)
+            : 0;
+          const hfeResult = await detectHfe(scanClients[clientIndex], nodeHashKeys, nodeEstimatedTotal);
+          if (!hfeResult.hfeSupported) hfeSupported = false;
+          if (hfeResult.hfeDetected) hfeDetected = true;
+          hfeKeyCount += hfeResult.hfeKeyCount;
+          hfeOversizedHashesSkipped += hfeResult.hfeOversizedHashesSkipped;
+        }
+
+        job.result.hfeDetected = hfeDetected;
+        job.result.hfeSupported = hfeSupported;
+        job.result.hfeKeyCount = hfeKeyCount;
+        job.result.hfeOversizedHashesSkipped = hfeOversizedHashesSkipped;
       } else {
         job.result.hfeSupported = false;
         job.result.hfeDetected = false;

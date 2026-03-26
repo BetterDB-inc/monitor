@@ -3,6 +3,7 @@ import type Valkey from 'iovalkey';
 export interface SampledKey {
   key: string;
   type: string;
+  clientIndex: number;
 }
 
 /**
@@ -16,7 +17,8 @@ export async function sampleKeyTypes(
 ): Promise<SampledKey[]> {
   const allKeys: SampledKey[] = [];
 
-  for (const client of clients) {
+  for (let ci = 0; ci < clients.length; ci++) {
+    const client = clients[ci];
     const nodeKeys: string[] = [];
     let cursor = '0';
     do {
@@ -40,7 +42,7 @@ export async function sampleKeyTypes(
       if (results) {
         for (let j = 0; j < batch.length; j++) {
           const [err, type] = results[j] ?? [];
-          allKeys.push({ key: batch[j], type: err ? 'unknown' : String(type) });
+          allKeys.push({ key: batch[j], type: err ? 'unknown' : String(type), clientIndex: ci });
         }
       }
     }
