@@ -6,3 +6,16 @@ if [ ! -x "$ROBOREV" ]; then
     [ -z "$ROBOREV" ] || [ ! -x "$ROBOREV" ] && exit 0
 fi
 "$ROBOREV" post-commit 2>/dev/null
+
+# Open roborev stream in a new terminal if one isn't already running
+if ! pgrep -f "roborev stream" >/dev/null 2>&1; then
+    case "$(uname -s)" in
+        Darwin)
+            open -a Terminal.app "$ROBOREV" --args stream >/dev/null 2>&1 &
+            ;;
+        Linux)
+            konsole -e "$ROBOREV" stream >/dev/null 2>&1 &
+            ;;
+    esac
+    disown 2>/dev/null
+fi
