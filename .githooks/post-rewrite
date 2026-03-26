@@ -1,0 +1,8 @@
+#!/bin/sh
+# roborev post-rewrite hook v2 - remaps reviews after rebase/amend
+ROBOREV="/home/kristiyan/.local/bin/roborev"
+if [ ! -x "$ROBOREV" ]; then
+    ROBOREV=$(command -v roborev 2>/dev/null)
+    [ -z "$ROBOREV" ] || [ ! -x "$ROBOREV" ] && exit 0
+fi
+"$ROBOREV" remap --quiet 2>/dev/null
