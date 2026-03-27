@@ -176,7 +176,8 @@
       "Bash(tar:*)",
       "Bash(chmod:*)",
       "Bash(~/.betterdb/bin/redis-shake:*)",
-      "Bash(wget:*)"
+      "Bash(wget:*)",
+      "Bash(wc:*)"
     ],
     "deny": [],
     "ask": []

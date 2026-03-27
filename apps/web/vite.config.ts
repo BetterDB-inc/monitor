@@ -14,4 +14,7 @@ export default defineConfig({
       '@betterdb/shared/license': path.resolve(__dirname, '../../packages/shared/src/license/index.ts'),
     },
   },
+  test: {
+    environment: 'jsdom',
+  },
 });
