@@ -17,7 +17,8 @@ describe('Migration API (e2e)', () => {
     app = await createTestApp();
 
     // Seed a handful of test keys on port 6380
-    const seedClient = new Valkey({ host: 'localhost', port: 6380, lazyConnect: true });
+    const dbPassword = process.env.DB_PASSWORD || 'devpassword';
+    const seedClient = new Valkey({ host: 'localhost', port: 6380, password: dbPassword, lazyConnect: true });
     try {
       await seedClient.connect();
       await seedClient.set('migration:test:string', 'hello');
@@ -32,7 +33,7 @@ describe('Migration API (e2e)', () => {
     // Create two connections both pointing to 6380
     const res1 = await request(app.getHttpServer())
       .post('/connections')
-      .send({ name: 'Migration Source', host: 'localhost', port: 6380 });
+      .send({ name: 'Migration Source', host: 'localhost', port: 6380, password: dbPassword });
     if (res1.status === 200 || res1.status === 201) {
       sourceConnectionId = res1.body.id;
       createdConnectionIds.push(sourceConnectionId);
@@ -40,7 +41,7 @@ describe('Migration API (e2e)', () => {
 
     const res2 = await request(app.getHttpServer())
       .post('/connections')
-      .send({ name: 'Migration Target', host: 'localhost', port: 6380 });
+      .send({ name: 'Migration Target', host: 'localhost', port: 6380, password: dbPassword });
     if (res2.status === 200 || res2.status === 201) {
       targetConnectionId = res2.body.id;
       createdConnectionIds.push(targetConnectionId);
@@ -49,7 +50,7 @@ describe('Migration API (e2e)', () => {
 
   afterAll(async () => {
     // Clean up test keys
-    const cleanupClient = new Valkey({ host: 'localhost', port: 6380, lazyConnect: true });
+    const cleanupClient = new Valkey({ host: 'localhost', port: 6380, password: process.env.DB_PASSWORD || 'devpassword', lazyConnect: true });
     try {
       await cleanupClient.connect();
       await cleanupClient.del(
