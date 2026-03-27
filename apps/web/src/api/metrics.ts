@@ -1,5 +1,5 @@
 import { fetchApi } from './client';
-import type { ThroughputForecast, ThroughputSettings, ThroughputSettingsUpdate } from '../types/throughput';
+import type { ThroughputForecast, ThroughputSettings, ThroughputSettingsUpdate } from '@betterdb/shared';
 import type {
   HealthResponse,
   InfoResponse,

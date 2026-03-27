@@ -10,7 +10,12 @@ interface UsePollingOptions<T> {
   refetchKey?: string | number;
 }
 
-export function usePolling<T>({ fetcher, interval = 5000, enabled = true, refetchKey }: UsePollingOptions<T>) {
+export function usePolling<T>({
+  fetcher,
+  interval = 5000,
+  enabled = true,
+  refetchKey,
+}: UsePollingOptions<T>) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState(true);
@@ -38,7 +43,9 @@ export function usePolling<T>({ fetcher, interval = 5000, enabled = true, refetc
 
       try {
         setError(null);
-        const result = await (fetcherRef.current as (signal?: AbortSignal) => Promise<T>)(abortController.signal);
+        const result = await (fetcherRef.current as (signal?: AbortSignal) => Promise<T>)(
+          abortController.signal,
+        );
 
         if (!abortController.signal.aborted) {
           setData(result);
@@ -62,7 +69,7 @@ export function usePolling<T>({ fetcher, interval = 5000, enabled = true, refetc
       }
     };
 
-    refresh();
+    void refresh();
     const timer = setInterval(refresh, interval);
 
     return () => {
