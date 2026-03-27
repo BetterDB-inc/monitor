@@ -81,7 +81,7 @@ export class MigrationExecutionService {
     if (mode === 'redis_shake') {
       const tomlContent = buildScanReaderToml(sourceConfig, targetConfig, clusterEnabled);
       const tomlPath = join(os.tmpdir(), `${id}.toml`);
-      writeFileSync(tomlPath, tomlContent, 'utf-8');
+      writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
       job.tomlPath = tomlPath;
 
       this.runRedisShake(job, binaryPath!).catch(err => {

@@ -38,20 +38,24 @@ export function ExecutionPanel({ executionId, onStopped }: Props) {
 
   useEffect(() => {
     let stopped = false;
+    let errorCount = 0;
     const poll = async () => {
       try {
         const result = await fetchApi<MigrationExecutionResult>(`/migration/execution/${executionId}`);
         if (stopped) return;
+        errorCount = 0;
         setExecution(result);
         if (result.status === 'completed' || result.status === 'failed' || result.status === 'cancelled') {
-          return; // Stop polling
+          onStoppedRef.current();
+          return;
         }
       } catch {
         if (stopped) return;
-        // Keep polling on transient errors
+        errorCount++;
       }
       if (!stopped) {
-        timer = setTimeout(poll, 2000);
+        const delay = errorCount > 0 ? Math.min(2000 * 2 ** errorCount, 30000) : 2000;
+        timer = setTimeout(poll, delay);
       }
     };
     let timer: ReturnType<typeof setTimeout> | undefined;

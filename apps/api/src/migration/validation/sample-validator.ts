@@ -85,12 +85,20 @@ export async function validateSample(
 async function collectSampleKeys(client: Valkey, sampleSize: number): Promise<string[]> {
   const keys: string[] = [];
   const seen = new Set<string>();
-  // Random starting cursor to avoid always sampling the same keys
-  let cursor = String(Math.floor(Math.random() * 1000000));
+  // Skip a random number of initial SCAN iterations to avoid always sampling the same keys
+  const skipIterations = Math.floor(Math.random() * 10);
+  let cursor = '0';
+  let skipped = 0;
 
   do {
     const [nextCursor, batch] = await client.scan(cursor, 'COUNT', 100);
     cursor = nextCursor;
+
+    if (skipped < skipIterations) {
+      skipped++;
+      if (cursor === '0') break; // keyspace smaller than skip window
+      continue;
+    }
 
     for (const key of batch) {
       if (!seen.has(key)) {
@@ -100,6 +108,22 @@ async function collectSampleKeys(client: Valkey, sampleSize: number): Promise<st
       }
     }
   } while (cursor !== '0');
+
+  // If skipping caused us to collect fewer keys than needed, do a full pass
+  if (keys.length < sampleSize && skipped > 0) {
+    cursor = '0';
+    do {
+      const [nextCursor, batch] = await client.scan(cursor, 'COUNT', 100);
+      cursor = nextCursor;
+      for (const key of batch) {
+        if (!seen.has(key)) {
+          seen.add(key);
+          keys.push(key);
+          if (keys.length >= sampleSize) return keys;
+        }
+      }
+    } while (cursor !== '0');
+  }
 
   return keys;
 }

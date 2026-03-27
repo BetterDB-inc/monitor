@@ -26,23 +26,26 @@ export function ValidationPanel({ validationId, onComplete }: Props) {
 
   useEffect(() => {
     let stopped = false;
+    let errorCount = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const poll = async () => {
       try {
         const result = await fetchApi<MigrationValidationResult>(`/migration/validation/${validationId}`);
         if (stopped) return;
+        errorCount = 0;
         setValidation(result);
         if (result.status === 'completed' || result.status === 'failed') {
           onCompleteRef.current?.();
-          return; // Stop polling
+          return;
         }
       } catch {
         if (stopped) return;
-        // Keep polling on transient errors
+        errorCount++;
       }
       if (!stopped) {
-        timer = setTimeout(poll, 2000);
+        const delay = errorCount > 0 ? Math.min(2000 * 2 ** errorCount, 30000) : 2000;
+        timer = setTimeout(poll, delay);
       }
     };
 

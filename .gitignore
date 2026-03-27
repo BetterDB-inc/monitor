@@ -46,6 +46,12 @@ pnpm-debug.log*
 .env.test.local
 .env.production.local
 
+# Build info
+*.tsbuildinfo
+
+# Claude Code
+.claude/settings.local.json
+
 # Turbo
 .turbo
 
