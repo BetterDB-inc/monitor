@@ -78,6 +78,7 @@ function AppContent() {
               <VersionCheckContext.Provider value={versionCheckState}>
                 <AppLayout cloudUser={cloudUser} />
                 <Tooltip id="license-tooltip" />
+                <Tooltip id="info-tip" place="top" className="max-w-xs text-sm" style={{ zIndex: 50 }} />
                 {upgradePromptState.error && (
                   <UpgradePrompt
                     error={upgradePromptState.error}

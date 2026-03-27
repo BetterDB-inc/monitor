@@ -1,4 +1,5 @@
 import type { BaselineComparison, BaselineMetricStatus } from '@betterdb/shared';
+import { InfoTip } from './InfoTip';
 
 interface Props {
   baseline?: BaselineComparison;
@@ -23,6 +24,13 @@ function formatMetricValue(name: string, value: number | null): string {
   return value.toFixed(2);
 }
 
+const metricTooltips: Record<string, string> = {
+  opsPerSec: "Compares the target's current throughput to the source's pre-migration average. A drop to zero is expected if no application traffic has been directed to the target yet. An increase is expected if writes are still landing on the target.",
+  usedMemory: "Compares the target's current memory to the source's pre-migration average. Higher usage is expected if the target already held data before migration or received additional writes.",
+  memFragmentationRatio: 'Ratio of OS-allocated memory to actual data. Values near 1.0 are ideal. High values indicate fragmentation from deletes or expires.',
+  cpuSys: 'Cumulative CPU seconds since server start — not a rate. A large delta is expected when the target has been running longer or processed heavy migration writes.',
+};
+
 function MetricLabel({ name }: { name: string }) {
   const labels: Record<string, string> = {
     opsPerSec: 'Ops/sec',
@@ -30,7 +38,13 @@ function MetricLabel({ name }: { name: string }) {
     memFragmentationRatio: 'Mem Fragmentation',
     cpuSys: 'CPU Sys',
   };
-  return <>{labels[name] ?? name}</>;
+  const tooltip = metricTooltips[name];
+  return (
+    <>
+      {labels[name] ?? name}
+      {tooltip && <InfoTip text={tooltip} />}
+    </>
+  );
 }
 
 function StatusBadge({ status }: { status: BaselineMetricStatus }) {

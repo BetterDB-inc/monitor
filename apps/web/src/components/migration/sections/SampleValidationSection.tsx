@@ -1,4 +1,5 @@
 import type { SampleValidationResult, SampleKeyStatus } from '@betterdb/shared';
+import { InfoTip } from './InfoTip';
 
 interface Props {
   sample?: SampleValidationResult;
@@ -31,7 +32,10 @@ export function SampleValidationSection({ sample }: Props) {
       <div className="flex flex-wrap gap-4 text-sm">
         <span>
           <span className="font-mono font-medium">{sample.matched}</span>
-          <span className="text-muted-foreground">/{sample.sampledKeys} matched</span>
+          <span className="text-muted-foreground">
+            /{sample.sampledKeys} matched
+            <InfoTip text="500 randomly sampled keys were compared by type and value between source and target." />
+          </span>
         </span>
         {sample.missing > 0 && (
           <span className="text-red-700">{sample.missing} missing</span>

@@ -1,4 +1,5 @@
 import type { KeyCountComparison } from '@betterdb/shared';
+import { InfoTip } from './InfoTip';
 
 interface Props {
   keyCount?: KeyCountComparison;
@@ -34,7 +35,10 @@ export function KeyCountSection({ keyCount }: Props) {
           <p className="font-mono font-medium">{targetKeys.toLocaleString()}</p>
         </div>
         <div>
-          <span className="text-muted-foreground">Discrepancy</span>
+          <span className="text-muted-foreground">
+            Discrepancy
+            <InfoTip text="A positive discrepancy means the target has more keys than the source. This is expected if the target already contained data before migration." />
+          </span>
           <p className={`font-mono font-medium ${discrepancyColor}`}>
             {sign}{discrepancy.toLocaleString()} ({discrepancyPercent}%)
           </p>
