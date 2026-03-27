@@ -25,7 +25,6 @@ import {
   Webhook,
   WebhookDelivery,
   WebhookEventType,
-  DeliveryStatus,
   StoredSlowLogEntry,
   SlowLogQueryOptions,
   StoredCommandLogEntry,
@@ -35,6 +34,10 @@ import {
   LatencySnapshotQueryOptions,
   StoredMemorySnapshot,
   MemorySnapshotQueryOptions,
+  ThroughputSettings,
+  DatabaseConnectionConfig,
+  HotKeyEntry,
+  HotKeyQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
@@ -43,12 +46,21 @@ export interface SqliteAdapterConfig {
   filepath: string;
 }
 
+type ThroughputSettingsRow = {
+  connection_id: string;
+  enabled: number;
+  ops_ceiling: number | null;
+  rolling_window_ms: number;
+  alert_threshold_ms: number;
+  updated_at: number;
+} | null;
+
 export class SqliteAdapter implements StoragePort {
   private db: Database.Database | null = null;
   private ready: boolean = false;
   private readonly mappers = new RowMappers(SqliteDialect);
 
-  constructor(private config: SqliteAdapterConfig) { }
+  constructor(private config: SqliteAdapterConfig) {}
 
   async initialize(): Promise<void> {
     try {
@@ -70,7 +82,9 @@ export class SqliteAdapter implements StoragePort {
       this.ready = true;
     } catch (error) {
       this.ready = false;
-      throw new Error(`Failed to initialize SQLite: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to initialize SQLite: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
     }
   }
 
@@ -81,8 +95,8 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) return;
 
     // Get existing columns in webhooks table
-    const tableInfo = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
-    const existingColumns = new Set(tableInfo.map(col => col.name));
+    const tableInfo = this.db.prepare('PRAGMA table_info(webhooks)').all() as { name: string }[];
+    const existingColumns = new Set(tableInfo.map((col) => col.name));
 
     // Add new columns if they don't exist
     const newColumns = [
@@ -94,6 +108,28 @@ export class SqliteAdapter implements StoragePort {
     for (const col of newColumns) {
       if (!existingColumns.has(col.name)) {
         this.db.exec(`ALTER TABLE webhooks ADD COLUMN ${col.name} ${col.type}`);
+      }
+    }
+
+    // Add throughput forecasting columns to app_settings if they don't exist
+    const settingsInfo = this.db.prepare('PRAGMA table_info(app_settings)').all() as {
+      name: string;
+    }[];
+    const settingsColumns = new Set(settingsInfo.map((col) => col.name));
+    const throughputColumns = [
+      { name: 'throughput_forecasting_enabled', type: 'INTEGER NOT NULL DEFAULT 1' },
+      {
+        name: 'throughput_forecasting_default_rolling_window_ms',
+        type: 'INTEGER NOT NULL DEFAULT 21600000',
+      },
+      {
+        name: 'throughput_forecasting_default_alert_threshold_ms',
+        type: 'INTEGER NOT NULL DEFAULT 7200000',
+      },
+    ];
+    for (const col of throughputColumns) {
+      if (!settingsColumns.has(col.name)) {
+        this.db.exec(`ALTER TABLE app_settings ADD COLUMN ${col.name} ${col.type}`);
       }
     }
 
@@ -124,11 +160,13 @@ export class SqliteAdapter implements StoragePort {
       try {
         // Check if column exists
         const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-        if (!columns.some(c => c.name === 'connection_id')) {
+        if (!columns.some((c) => c.name === 'connection_id')) {
           // Add connection_id column with default value
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN connection_id TEXT DEFAULT 'env-default'`);
           // Create index
-          this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_connection_id ON ${table}(connection_id)`);
+          this.db.exec(
+            `CREATE INDEX IF NOT EXISTS idx_${table}_connection_id ON ${table}(connection_id)`,
+          );
         }
       } catch (error) {
         // Table might not exist yet - that's fine, createSchema will handle it
@@ -252,7 +290,11 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapAclEntryRow(row));
   }
 
-  async getAuditStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AuditStats> {
+  async getAuditStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<AuditStats> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -309,7 +351,9 @@ export class SqliteAdapter implements StoragePort {
 
     // Time range
     const timeRangeResult = this.db
-      .prepare(`SELECT MIN(captured_at) as earliest, MAX(captured_at) as latest FROM acl_audit ${whereClause}`)
+      .prepare(
+        `SELECT MIN(captured_at) as earliest, MAX(captured_at) as latest FROM acl_audit ${whereClause}`,
+      )
       .get(...params) as { earliest: number | null; latest: number | null };
 
     const timeRange =
@@ -332,11 +376,15 @@ export class SqliteAdapter implements StoragePort {
     }
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM acl_audit WHERE captured_at < ? AND connection_id = ?').run(olderThanTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM acl_audit WHERE captured_at < ? AND connection_id = ?')
+        .run(olderThanTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM acl_audit WHERE captured_at < ?').run(olderThanTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM acl_audit WHERE captured_at < ?')
+      .run(olderThanTimestamp);
 
     return result.changes;
   }
@@ -385,7 +433,9 @@ export class SqliteAdapter implements StoragePort {
     return clients.length;
   }
 
-  async getClientSnapshots(options: ClientSnapshotQueryOptions = {}): Promise<StoredClientSnapshot[]> {
+  async getClientSnapshots(
+    options: ClientSnapshotQueryOptions = {},
+  ): Promise<StoredClientSnapshot[]> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -445,7 +495,12 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapClientRow(row));
   }
 
-  async getClientTimeSeries(startTime: number, endTime: number, bucketSizeMs: number = 60000, connectionId?: string): Promise<ClientTimeSeriesPoint[]> {
+  async getClientTimeSeries(
+    startTime: number,
+    endTime: number,
+    bucketSizeMs: number = 60000,
+    connectionId?: string,
+  ): Promise<ClientTimeSeriesPoint[]> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -508,7 +563,11 @@ export class SqliteAdapter implements StoragePort {
     return Array.from(pointsMap.values()).sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  async getClientAnalyticsStats(startTime?: number, endTime?: number, connectionId?: string): Promise<ClientAnalyticsStats> {
+  async getClientAnalyticsStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsStats> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -540,10 +599,9 @@ export class SqliteAdapter implements StoragePort {
     const currentConditions = latestTimestamp.latest
       ? [...conditions, 'captured_at = ?']
       : conditions;
-    const currentParams = latestTimestamp.latest
-      ? [...params, latestTimestamp.latest]
-      : params;
-    const currentWhereClause = currentConditions.length > 0 ? `WHERE ${currentConditions.join(' AND ')}` : '';
+    const currentParams = latestTimestamp.latest ? [...params, latestTimestamp.latest] : params;
+    const currentWhereClause =
+      currentConditions.length > 0 ? `WHERE ${currentConditions.join(' AND ')}` : '';
 
     const currentConnectionsResult = this.db
       .prepare(`SELECT COUNT(*) as count FROM client_snapshots ${currentWhereClause}`)
@@ -556,7 +614,9 @@ export class SqliteAdapter implements StoragePort {
       ORDER BY count DESC
       LIMIT 1
     `;
-    const peakResult = this.db.prepare(peakQuery).get(...params) as { captured_at: number; count: number } | undefined;
+    const peakResult = this.db.prepare(peakQuery).get(...params) as
+      | { captured_at: number; count: number }
+      | undefined;
 
     const uniqueNamesResult = this.db
       .prepare(`SELECT COUNT(DISTINCT name) as count FROM client_snapshots ${whereClause}`)
@@ -567,35 +627,49 @@ export class SqliteAdapter implements StoragePort {
       .get(...params) as { count: number };
 
     const uniqueIpsResult = this.db
-      .prepare(`SELECT COUNT(DISTINCT substr(addr, 1, instr(addr, ':') - 1)) as count FROM client_snapshots ${whereClause}`)
+      .prepare(
+        `SELECT COUNT(DISTINCT substr(addr, 1, instr(addr, ':') - 1)) as count FROM client_snapshots ${whereClause}`,
+      )
       .get(...params) as { count: number };
 
-    const byNameRows = this.db.prepare(`
+    const byNameRows = this.db
+      .prepare(
+        `
       SELECT
         name,
         COUNT(*) as total,
         AVG(age) as avg_age
       FROM client_snapshots ${whereClause}
       GROUP BY name
-    `).all(...params) as Array<{ name: string; total: number; avg_age: number }>;
+    `,
+      )
+      .all(...params) as Array<{ name: string; total: number; avg_age: number }>;
 
     const connectionsByName: Record<string, { current: number; peak: number; avgAge: number }> = {};
     for (const row of byNameRows) {
       if (row.name) {
-        const namePeakResult = this.db.prepare(`
+        const namePeakResult = this.db
+          .prepare(
+            `
           SELECT captured_at, COUNT(*) as count
           FROM client_snapshots
           WHERE name = ? ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
           GROUP BY captured_at
           ORDER BY count DESC
           LIMIT 1
-        `).get(row.name, ...params) as { count: number } | undefined;
+        `,
+          )
+          .get(row.name, ...params) as { count: number } | undefined;
 
-        const nameCurrentResult = this.db.prepare(`
+        const nameCurrentResult = this.db
+          .prepare(
+            `
           SELECT COUNT(*) as count
           FROM client_snapshots
           WHERE name = ? ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-        `).get(row.name, ...currentParams) as { count: number };
+        `,
+          )
+          .get(row.name, ...currentParams) as { count: number };
 
         connectionsByName[row.name] = {
           current: nameCurrentResult.count,
@@ -605,29 +679,41 @@ export class SqliteAdapter implements StoragePort {
       }
     }
 
-    const byUserRows = this.db.prepare(`
+    const byUserRows = this.db
+      .prepare(
+        `
       SELECT user, COUNT(*) as total
       FROM client_snapshots ${whereClause}
       GROUP BY user
-    `).all(...params) as Array<{ user: string; total: number }>;
+    `,
+      )
+      .all(...params) as Array<{ user: string; total: number }>;
 
     const connectionsByUser: Record<string, { current: number; peak: number }> = {};
     for (const row of byUserRows) {
       if (row.user) {
-        const userPeakResult = this.db.prepare(`
+        const userPeakResult = this.db
+          .prepare(
+            `
           SELECT captured_at, COUNT(*) as count
           FROM client_snapshots
           WHERE user = ? ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
           GROUP BY captured_at
           ORDER BY count DESC
           LIMIT 1
-        `).get(row.user, ...params) as { count: number } | undefined;
+        `,
+          )
+          .get(row.user, ...params) as { count: number } | undefined;
 
-        const userCurrentResult = this.db.prepare(`
+        const userCurrentResult = this.db
+          .prepare(
+            `
           SELECT COUNT(*) as count
           FROM client_snapshots
           WHERE user = ? ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-        `).get(row.user, ...currentParams) as { count: number };
+        `,
+          )
+          .get(row.user, ...currentParams) as { count: number };
 
         connectionsByUser[row.user] = {
           current: userCurrentResult.count,
@@ -636,7 +722,9 @@ export class SqliteAdapter implements StoragePort {
       }
     }
 
-    const byUserAndNameRows = this.db.prepare(`
+    const byUserAndNameRows = this.db
+      .prepare(
+        `
       SELECT
         user,
         name,
@@ -644,26 +732,39 @@ export class SqliteAdapter implements StoragePort {
         AVG(age) as avg_age
       FROM client_snapshots ${whereClause}
       GROUP BY user, name
-    `).all(...params) as Array<{ user: string; name: string; total: number; avg_age: number }>;
+    `,
+      )
+      .all(...params) as Array<{ user: string; name: string; total: number; avg_age: number }>;
 
-    const connectionsByUserAndName: Record<string, { user: string; name: string; current: number; peak: number; avgAge: number }> = {};
+    const connectionsByUserAndName: Record<
+      string,
+      { user: string; name: string; current: number; peak: number; avgAge: number }
+    > = {};
     for (const row of byUserAndNameRows) {
       const key = `${row.user}:${row.name}`;
 
-      const combinedPeakResult = this.db.prepare(`
+      const combinedPeakResult = this.db
+        .prepare(
+          `
         SELECT captured_at, COUNT(*) as count
         FROM client_snapshots
         WHERE user = ? AND name = ? ${whereClause ? 'AND ' + whereClause.substring(6) : ''}
         GROUP BY captured_at
         ORDER BY count DESC
         LIMIT 1
-      `).get(row.user, row.name, ...params) as { count: number } | undefined;
+      `,
+        )
+        .get(row.user, row.name, ...params) as { count: number } | undefined;
 
-      const combinedCurrentResult = this.db.prepare(`
+      const combinedCurrentResult = this.db
+        .prepare(
+          `
         SELECT COUNT(*) as count
         FROM client_snapshots
         WHERE user = ? AND name = ? ${currentWhereClause ? 'AND ' + currentWhereClause.substring(6) : ''}
-      `).get(row.user, row.name, ...currentParams) as { count: number };
+      `,
+        )
+        .get(row.user, row.name, ...currentParams) as { count: number };
 
       connectionsByUserAndName[key] = {
         user: row.user,
@@ -675,7 +776,9 @@ export class SqliteAdapter implements StoragePort {
     }
 
     const timeRangeResult = this.db
-      .prepare(`SELECT MIN(captured_at) as earliest, MAX(captured_at) as latest FROM client_snapshots ${whereClause}`)
+      .prepare(
+        `SELECT MIN(captured_at) as earliest, MAX(captured_at) as latest FROM client_snapshots ${whereClause}`,
+      )
       .get(...params) as { earliest: number | null; latest: number | null };
 
     const timeRange =
@@ -753,17 +856,24 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapClientRow(row));
   }
 
-  async pruneOldClientSnapshots(olderThanTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldClientSnapshots(
+    olderThanTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM client_snapshots WHERE captured_at < ? AND connection_id = ?').run(olderThanTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM client_snapshots WHERE captured_at < ? AND connection_id = ?')
+        .run(olderThanTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM client_snapshots WHERE captured_at < ?').run(olderThanTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM client_snapshots WHERE captured_at < ?')
+      .run(olderThanTimestamp);
 
     return result.changes;
   }
@@ -937,8 +1047,20 @@ export class SqliteAdapter implements StoragePort {
         anomaly_poll_interval_ms INTEGER NOT NULL DEFAULT 1000,
         anomaly_cache_ttl_ms INTEGER NOT NULL DEFAULT 3600000,
         anomaly_prometheus_interval_ms INTEGER NOT NULL DEFAULT 30000,
+        throughput_forecasting_enabled INTEGER NOT NULL DEFAULT 1,
+        throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
+        throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
         created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+      );
+
+      CREATE TABLE IF NOT EXISTS throughput_settings (
+        connection_id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        ops_ceiling INTEGER,
+        rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
+        alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
+        updated_at INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS webhooks (
@@ -1083,9 +1205,16 @@ export class SqliteAdapter implements StoragePort {
     `);
 
     // Idempotent migration for existing deployments without ops/CPU columns
-    const addColumnIfMissing = (table: string, column: string, type: string, defaultVal: string) => {
+    const addColumnIfMissing = (
+      table: string,
+      column: string,
+      type: string,
+      defaultVal: string,
+    ) => {
       try {
-        this.db!.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type} NOT NULL DEFAULT ${defaultVal}`);
+        this.db!.exec(
+          `ALTER TABLE ${table} ADD COLUMN ${column} ${type} NOT NULL DEFAULT ${defaultVal}`,
+        );
       } catch {
         // Column already exists — ignore
       }
@@ -1232,7 +1361,11 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapAnomalyEventRow(row));
   }
 
-  async getAnomalyStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AnomalyStats> {
+  async getAnomalyStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<AnomalyStats> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -1258,15 +1391,21 @@ export class SqliteAdapter implements StoragePort {
       .get(...params) as { count: number };
 
     const severityResult = this.db
-      .prepare(`SELECT severity, COUNT(*) as count FROM anomaly_events ${whereClause} GROUP BY severity`)
+      .prepare(
+        `SELECT severity, COUNT(*) as count FROM anomaly_events ${whereClause} GROUP BY severity`,
+      )
       .all(...params) as Array<{ severity: string; count: number }>;
 
     const metricResult = this.db
-      .prepare(`SELECT metric_type, COUNT(*) as count FROM anomaly_events ${whereClause} GROUP BY metric_type`)
+      .prepare(
+        `SELECT metric_type, COUNT(*) as count FROM anomaly_events ${whereClause} GROUP BY metric_type`,
+      )
       .all(...params) as Array<{ metric_type: string; count: number }>;
 
     const unresolvedResult = this.db
-      .prepare(`SELECT COUNT(*) as count FROM anomaly_events ${whereClause ? whereClause + ' AND' : 'WHERE'} resolved = 0`)
+      .prepare(
+        `SELECT COUNT(*) as count FROM anomaly_events ${whereClause ? whereClause + ' AND' : 'WHERE'} resolved = 0`,
+      )
       .get(...params) as { count: number };
 
     const bySeverity: Record<string, number> = {};
@@ -1305,11 +1444,15 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM anomaly_events WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM anomaly_events WHERE timestamp < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM anomaly_events WHERE timestamp < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM anomaly_events WHERE timestamp < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
@@ -1394,15 +1537,22 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM correlated_anomaly_groups WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM correlated_anomaly_groups WHERE timestamp < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM correlated_anomaly_groups WHERE timestamp < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM correlated_anomaly_groups WHERE timestamp < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
-  async saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[], connectionId: string): Promise<number> {
+  async saveKeyPatternSnapshots(
+    snapshots: KeyPatternSnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     if (!this.db || snapshots.length === 0) return 0;
 
     const stmt = this.db.prepare(`
@@ -1445,7 +1595,9 @@ export class SqliteAdapter implements StoragePort {
     return snapshots.length;
   }
 
-  async getKeyPatternSnapshots(options: KeyPatternQueryOptions = {}): Promise<KeyPatternSnapshot[]> {
+  async getKeyPatternSnapshots(
+    options: KeyPatternQueryOptions = {},
+  ): Promise<KeyPatternSnapshot[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -1486,7 +1638,11 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
   }
 
-  async getKeyAnalyticsSummary(startTime?: number, endTime?: number, connectionId?: string): Promise<KeyAnalyticsSummary | null> {
+  async getKeyAnalyticsSummary(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<KeyAnalyticsSummary | null> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -1527,7 +1683,9 @@ export class SqliteAdapter implements StoragePort {
     }
 
     // Build aggregation query for latest snapshots only
-    const patternConditions = latestSnapshots.map(() => '(pattern = ? AND timestamp = ?)').join(' OR ');
+    const patternConditions = latestSnapshots
+      .map(() => '(pattern = ? AND timestamp = ?)')
+      .join(' OR ');
     const patternParams: any[] = [];
     for (const snapshot of latestSnapshots) {
       patternParams.push(snapshot.pattern, snapshot.latest_timestamp);
@@ -1578,7 +1736,9 @@ export class SqliteAdapter implements StoragePort {
 
     // Get time range
     const timeRangeResult = this.db
-      .prepare(`SELECT MIN(timestamp) as earliest, MAX(timestamp) as latest FROM key_pattern_snapshots ${whereClause}`)
+      .prepare(
+        `SELECT MIN(timestamp) as earliest, MAX(timestamp) as latest FROM key_pattern_snapshots ${whereClause}`,
+      )
       .get(...params) as { earliest: number | null; latest: number | null };
 
     const timeRange =
@@ -1599,12 +1759,19 @@ export class SqliteAdapter implements StoragePort {
     };
   }
 
-  async getKeyPatternTrends(pattern: string, startTime: number, endTime: number, connectionId?: string): Promise<Array<{
-    timestamp: number;
-    keyCount: number;
-    memoryBytes: number;
-    staleCount: number;
-  }>> {
+  async getKeyPatternTrends(
+    pattern: string,
+    startTime: number,
+    endTime: number,
+    connectionId?: string,
+  ): Promise<
+    Array<{
+      timestamp: number;
+      keyCount: number;
+      memoryBytes: number;
+      staleCount: number;
+    }>
+  > {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions = ['pattern = ?', 'timestamp >= ?', 'timestamp <= ?'];
@@ -1628,7 +1795,7 @@ export class SqliteAdapter implements StoragePort {
 
     const rows = this.db.prepare(query).all(...params) as any[];
 
-    return rows.map(row => ({
+    return rows.map((row) => ({
       timestamp: row.timestamp,
       keyCount: row.key_count,
       memoryBytes: row.total_memory_bytes,
@@ -1636,19 +1803,26 @@ export class SqliteAdapter implements StoragePort {
     }));
   }
 
-  async pruneOldKeyPatternSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldKeyPatternSnapshots(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM key_pattern_snapshots WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM key_pattern_snapshots WHERE timestamp < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM key_pattern_snapshots WHERE timestamp < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM key_pattern_snapshots WHERE timestamp < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
-  async saveHotKeys(entries: import('../../common/interfaces/storage-port.interface').HotKeyEntry[], connectionId: string): Promise<number> {
+  async saveHotKeys(entries: HotKeyEntry[], connectionId: string): Promise<number> {
     if (!this.db || entries.length === 0) return 0;
 
     const stmt = this.db.prepare(`
@@ -1658,7 +1832,7 @@ export class SqliteAdapter implements StoragePort {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const insertMany = this.db.transaction((entries: import('../../common/interfaces/storage-port.interface').HotKeyEntry[], connId: string) => {
+    const insertMany = this.db.transaction((entries: HotKeyEntry[], connId: string) => {
       for (const entry of entries) {
         stmt.run(
           entry.id,
@@ -1679,7 +1853,7 @@ export class SqliteAdapter implements StoragePort {
     return entries.length;
   }
 
-  async getHotKeys(options: import('../../common/interfaces/storage-port.interface').HotKeyQueryOptions = {}): Promise<import('../../common/interfaces/storage-port.interface').HotKeyEntry[]> {
+  async getHotKeys(options: HotKeyQueryOptions = {}): Promise<HotKeyEntry[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -1723,14 +1897,18 @@ export class SqliteAdapter implements StoragePort {
     const offset = options.offset ?? 0;
     params.push(limit, offset);
 
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT id, key_name, connection_id, captured_at, signal_type,
              freq_score, idle_seconds, memory_bytes, ttl, rank
       FROM hot_key_stats
       ${whereClause}
       ORDER BY captured_at DESC, rank ASC
       LIMIT ? OFFSET ?
-    `).all(...params) as any[];
+    `,
+      )
+      .all(...params) as any[];
 
     return rows.map((row: any) => ({
       id: row.id,
@@ -1750,11 +1928,15 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM hot_key_stats WHERE captured_at < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM hot_key_stats WHERE captured_at < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM hot_key_stats WHERE captured_at < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM hot_key_stats WHERE captured_at < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
@@ -1778,14 +1960,18 @@ export class SqliteAdapter implements StoragePort {
       INSERT INTO app_settings (
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
+        throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
         updated_at, created_at
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = excluded.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = excluded.client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms = excluded.anomaly_poll_interval_ms,
         anomaly_cache_ttl_ms = excluded.anomaly_cache_ttl_ms,
         anomaly_prometheus_interval_ms = excluded.anomaly_prometheus_interval_ms,
+        throughput_forecasting_enabled = excluded.throughput_forecasting_enabled,
+        throughput_forecasting_default_rolling_window_ms = excluded.throughput_forecasting_default_rolling_window_ms,
+        throughput_forecasting_default_alert_threshold_ms = excluded.throughput_forecasting_default_alert_threshold_ms,
         updated_at = excluded.updated_at
     `);
 
@@ -1795,8 +1981,11 @@ export class SqliteAdapter implements StoragePort {
       settings.anomalyPollIntervalMs,
       settings.anomalyCacheTtlMs,
       settings.anomalyPrometheusIntervalMs,
+      settings.throughputForecastingEnabled ? 1 : 0,
+      settings.throughputForecastingDefaultRollingWindowMs,
+      settings.throughputForecastingDefaultAlertThresholdMs,
       now,
-      settings.createdAt || now
+      settings.createdAt || now,
     );
 
     const saved = await this.getSettings();
@@ -1847,7 +2036,7 @@ export class SqliteAdapter implements StoragePort {
       webhook.thresholds ? JSON.stringify(webhook.thresholds) : null,
       webhook.connectionId || null,
       now,
-      now
+      now,
     );
 
     return {
@@ -1881,12 +2070,18 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const rows = this.db.prepare('SELECT * FROM webhooks WHERE connection_id = ? OR connection_id IS NULL ORDER BY created_at DESC').all(connectionId) as any[];
+      const rows = this.db
+        .prepare(
+          'SELECT * FROM webhooks WHERE connection_id = ? OR connection_id IS NULL ORDER BY created_at DESC',
+        )
+        .all(connectionId) as any[];
       return rows.map((row) => this.mappers.mapWebhookRow(row));
     }
 
     // No connectionId provided - only return global webhooks (not scoped to any connection)
-    const rows = this.db.prepare('SELECT * FROM webhooks WHERE connection_id IS NULL ORDER BY created_at DESC').all() as any[];
+    const rows = this.db
+      .prepare('SELECT * FROM webhooks WHERE connection_id IS NULL ORDER BY created_at DESC')
+      .all() as any[];
     return rows.map((row) => this.mappers.mapWebhookRow(row));
   }
 
@@ -1895,20 +2090,29 @@ export class SqliteAdapter implements StoragePort {
 
     if (connectionId) {
       // Return webhooks scoped to this connection OR global webhooks (no connectionId)
-      const rows = this.db.prepare('SELECT * FROM webhooks WHERE enabled = 1 AND (connection_id = ? OR connection_id IS NULL)').all(connectionId) as any[];
+      const rows = this.db
+        .prepare(
+          'SELECT * FROM webhooks WHERE enabled = 1 AND (connection_id = ? OR connection_id IS NULL)',
+        )
+        .all(connectionId) as any[];
       return rows
         .map((row) => this.mappers.mapWebhookRow(row))
         .filter((webhook) => webhook.events.includes(event));
     }
 
     // No connectionId provided - only return global webhooks (not scoped to any connection)
-    const rows = this.db.prepare('SELECT * FROM webhooks WHERE enabled = 1 AND connection_id IS NULL').all() as any[];
+    const rows = this.db
+      .prepare('SELECT * FROM webhooks WHERE enabled = 1 AND connection_id IS NULL')
+      .all() as any[];
     return rows
       .map((row) => this.mappers.mapWebhookRow(row))
       .filter((webhook) => webhook.events.includes(event));
   }
 
-  async updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null> {
+  async updateWebhook(
+    id: string,
+    updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<Webhook | null> {
     if (!this.db) throw new Error('Database not initialized');
 
     const setClauses: string[] = [];
@@ -1981,7 +2185,9 @@ export class SqliteAdapter implements StoragePort {
     return result.changes > 0;
   }
 
-  async createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery> {
+  async createDelivery(
+    delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>,
+  ): Promise<WebhookDelivery> {
     if (!this.db) throw new Error('Database not initialized');
 
     const id = randomUUID();
@@ -2007,7 +2213,7 @@ export class SqliteAdapter implements StoragePort {
       delivery.completedAt || null,
       delivery.durationMs || null,
       delivery.connectionId || null,
-      now
+      now,
     );
 
     return {
@@ -2036,15 +2242,26 @@ export class SqliteAdapter implements StoragePort {
     return this.mappers.mapDeliveryRow(row);
   }
 
-  async getDeliveriesByWebhook(webhookId: string, limit: number = 50, offset: number = 0): Promise<WebhookDelivery[]> {
+  async getDeliveriesByWebhook(
+    webhookId: string,
+    limit: number = 50,
+    offset: number = 0,
+  ): Promise<WebhookDelivery[]> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const rows = this.db.prepare('SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?').all(webhookId, limit, offset) as any[];
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
+      )
+      .all(webhookId, limit, offset) as any[];
 
     return rows.map((row) => this.mappers.mapDeliveryRow(row));
   }
 
-  async updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean> {
+  async updateDelivery(
+    id: string,
+    updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>,
+  ): Promise<boolean> {
     if (!this.db) throw new Error('Database not initialized');
 
     const setClauses: string[] = [];
@@ -2083,33 +2300,42 @@ export class SqliteAdapter implements StoragePort {
 
     params.push(id);
 
-    const stmt = this.db.prepare(`UPDATE webhook_deliveries SET ${setClauses.join(', ')} WHERE id = ?`);
+    const stmt = this.db.prepare(
+      `UPDATE webhook_deliveries SET ${setClauses.join(', ')} WHERE id = ?`,
+    );
     const result = stmt.run(...params);
 
     return result.changes > 0;
   }
 
-  async getRetriableDeliveries(limit: number = 100, connectionId?: string): Promise<WebhookDelivery[]> {
+  async getRetriableDeliveries(
+    limit: number = 100,
+    connectionId?: string,
+  ): Promise<WebhookDelivery[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const now = Date.now();
 
     if (connectionId) {
-      const rows = this.db.prepare(
-        `SELECT * FROM webhook_deliveries
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM webhook_deliveries
          WHERE status = 'retrying' AND next_retry_at <= ? AND connection_id = ?
          ORDER BY next_retry_at ASC
-         LIMIT ?`
-      ).all(now, connectionId, limit) as any[];
+         LIMIT ?`,
+        )
+        .all(now, connectionId, limit) as any[];
       return rows.map((row) => this.mappers.mapDeliveryRow(row));
     }
 
-    const rows = this.db.prepare(
-      `SELECT * FROM webhook_deliveries
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM webhook_deliveries
        WHERE status = 'retrying' AND next_retry_at <= ?
        ORDER BY next_retry_at ASC
-       LIMIT ?`
-    ).all(now, limit) as any[];
+       LIMIT ?`,
+      )
+      .all(now, limit) as any[];
 
     return rows.map((row) => this.mappers.mapDeliveryRow(row));
   }
@@ -2118,11 +2344,15 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM webhook_deliveries WHERE created_at < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM webhook_deliveries WHERE created_at < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM webhook_deliveries WHERE created_at < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM webhook_deliveries WHERE created_at < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
@@ -2144,7 +2374,7 @@ export class SqliteAdapter implements StoragePort {
           entry.id,
           entry.timestamp,
           entry.duration,
-          JSON.stringify(entry.command),  // Store as JSON string
+          JSON.stringify(entry.command), // Store as JSON string
           entry.clientAddress || '',
           entry.clientName || '',
           entry.capturedAt,
@@ -2195,14 +2425,16 @@ export class SqliteAdapter implements StoragePort {
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
-    const rows = this.db.prepare(
-      `SELECT slowlog_id, timestamp, duration, command,
+    const rows = this.db
+      .prepare(
+        `SELECT slowlog_id, timestamp, duration, command,
               client_address, client_name, captured_at, source_host, source_port, connection_id
        FROM slow_log_entries
        ${whereClause}
        ORDER BY timestamp DESC
-       LIMIT ? OFFSET ?`
-    ).all(...params, limit, offset) as any[];
+       LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as any[];
 
     return rows.map((row) => this.mappers.mapSlowLogEntryRow(row));
   }
@@ -2211,11 +2443,15 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const row = this.db.prepare('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = ?').get(connectionId) as any;
+      const row = this.db
+        .prepare('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = ?')
+        .get(connectionId) as any;
       return row?.max_id ?? null;
     }
 
-    const row = this.db.prepare('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries').get() as any;
+    const row = this.db
+      .prepare('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries')
+      .get() as any;
     return row?.max_id ?? null;
   }
 
@@ -2223,16 +2459,23 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM slow_log_entries WHERE captured_at < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM slow_log_entries WHERE captured_at < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM slow_log_entries WHERE captured_at < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM slow_log_entries WHERE captured_at < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
   // Command Log Methods
-  async saveCommandLogEntries(entries: StoredCommandLogEntry[], connectionId: string): Promise<number> {
+  async saveCommandLogEntries(
+    entries: StoredCommandLogEntry[],
+    connectionId: string,
+  ): Promise<number> {
     if (!this.db || entries.length === 0) return 0;
 
     const stmt = this.db.prepare(`
@@ -2266,7 +2509,9 @@ export class SqliteAdapter implements StoragePort {
     return count;
   }
 
-  async getCommandLogEntries(options: CommandLogQueryOptions = {}): Promise<StoredCommandLogEntry[]> {
+  async getCommandLogEntries(
+    options: CommandLogQueryOptions = {},
+  ): Promise<StoredCommandLogEntry[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2305,14 +2550,16 @@ export class SqliteAdapter implements StoragePort {
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
-    const rows = this.db.prepare(
-      `SELECT commandlog_id, timestamp, duration, command,
+    const rows = this.db
+      .prepare(
+        `SELECT commandlog_id, timestamp, duration, command,
               client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
        FROM command_log_entries
        ${whereClause}
        ORDER BY timestamp DESC
-       LIMIT ? OFFSET ?`
-    ).all(...params, limit, offset) as any[];
+       LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as any[];
 
     return rows.map((row) => this.mappers.mapCommandLogEntryRow(row));
   }
@@ -2321,15 +2568,17 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const row = this.db.prepare(
-        'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ? AND connection_id = ?'
-      ).get(type, connectionId) as any;
+      const row = this.db
+        .prepare(
+          'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ? AND connection_id = ?',
+        )
+        .get(type, connectionId) as any;
       return row?.max_id ?? null;
     }
 
-    const row = this.db.prepare(
-      'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ?'
-    ).get(type) as any;
+    const row = this.db
+      .prepare('SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ?')
+      .get(type) as any;
     return row?.max_id ?? null;
   }
 
@@ -2337,18 +2586,23 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare(
-        'DELETE FROM command_log_entries WHERE captured_at < ? AND connection_id = ?'
-      ).run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM command_log_entries WHERE captured_at < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM command_log_entries WHERE captured_at < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM command_log_entries WHERE captured_at < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
   // Latency Snapshot Methods
-  async saveLatencySnapshots(snapshots: StoredLatencySnapshot[], connectionId: string): Promise<number> {
+  async saveLatencySnapshots(
+    snapshots: StoredLatencySnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     if (!this.db || snapshots.length === 0) return 0;
 
     const stmt = this.db.prepare(`
@@ -2375,7 +2629,9 @@ export class SqliteAdapter implements StoragePort {
     return count;
   }
 
-  async getLatencySnapshots(options: LatencySnapshotQueryOptions = {}): Promise<StoredLatencySnapshot[]> {
+  async getLatencySnapshots(
+    options: LatencySnapshotQueryOptions = {},
+  ): Promise<StoredLatencySnapshot[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2408,7 +2664,7 @@ export class SqliteAdapter implements StoragePort {
     params.push(limit, offset);
 
     const rows = this.db.prepare(query).all(...params) as any[];
-    return rows.map(row => ({
+    return rows.map((row) => ({
       id: row.id,
       timestamp: row.timestamp,
       eventName: row.event_name,
@@ -2422,26 +2678,37 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM latency_snapshots WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM latency_snapshots WHERE timestamp < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM latency_snapshots WHERE timestamp < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM latency_snapshots WHERE timestamp < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
   // Latency Histogram Methods
-  async saveLatencyHistogram(histogram: import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram, connectionId: string): Promise<number> {
+  async saveLatencyHistogram(
+    histogram: StoredLatencyHistogram,
+    connectionId: string,
+  ): Promise<number> {
     if (!this.db) return 0;
 
-    const result = this.db.prepare(
-      `INSERT INTO latency_histograms (id, timestamp, histogram_data, connection_id)
-       VALUES (?, ?, ?, ?)`
-    ).run(histogram.id, histogram.timestamp, JSON.stringify(histogram.data), connectionId);
+    const result = this.db
+      .prepare(
+        `INSERT INTO latency_histograms (id, timestamp, histogram_data, connection_id)
+       VALUES (?, ?, ?, ?)`,
+      )
+      .run(histogram.id, histogram.timestamp, JSON.stringify(histogram.data), connectionId);
     return result.changes;
   }
 
-  async getLatencyHistograms(options: { connectionId?: string; startTime?: number; endTime?: number; limit?: number } = {}): Promise<import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram[]> {
+  async getLatencyHistograms(
+    options: { connectionId?: string; startTime?: number; endTime?: number; limit?: number } = {},
+  ): Promise<StoredLatencyHistogram[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2473,7 +2740,7 @@ export class SqliteAdapter implements StoragePort {
     params.push(limit);
 
     const rows = this.db.prepare(query).all(...params) as any[];
-    return rows.map(row => ({
+    return rows.map((row) => ({
       id: row.id,
       timestamp: row.timestamp,
       data: JSON.parse(row.histogram_data),
@@ -2485,16 +2752,23 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM latency_histograms WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM latency_histograms WHERE timestamp < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM latency_histograms WHERE timestamp < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM latency_histograms WHERE timestamp < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
   // Memory Snapshot Methods
-  async saveMemorySnapshots(snapshots: StoredMemorySnapshot[], connectionId: string): Promise<number> {
+  async saveMemorySnapshots(
+    snapshots: StoredMemorySnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     if (!this.db || snapshots.length === 0) return 0;
 
     const stmt = this.db.prepare(`
@@ -2532,7 +2806,9 @@ export class SqliteAdapter implements StoragePort {
     return count;
   }
 
-  async getMemorySnapshots(options: MemorySnapshotQueryOptions = {}): Promise<StoredMemorySnapshot[]> {
+  async getMemorySnapshots(
+    options: MemorySnapshotQueryOptions = {},
+  ): Promise<StoredMemorySnapshot[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2567,7 +2843,7 @@ export class SqliteAdapter implements StoragePort {
     params.push(limit, offset);
 
     const rows = this.db.prepare(query).all(...params) as any[];
-    return rows.map(row => ({
+    return rows.map((row) => ({
       id: row.id,
       timestamp: row.timestamp,
       usedMemory: row.used_memory,
@@ -2589,16 +2865,23 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM memory_snapshots WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM memory_snapshots WHERE timestamp < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM memory_snapshots WHERE timestamp < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM memory_snapshots WHERE timestamp < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
   // Vector Index Snapshot Methods
-  async saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number> {
+  async saveVectorIndexSnapshots(
+    snapshots: VectorIndexSnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     if (!this.db || snapshots.length === 0) return 0;
 
     const stmt = this.db.prepare(`
@@ -2625,7 +2908,9 @@ export class SqliteAdapter implements StoragePort {
     return count;
   }
 
-  async getVectorIndexSnapshots(options: VectorIndexSnapshotQueryOptions = {}): Promise<VectorIndexSnapshot[]> {
+  async getVectorIndexSnapshots(
+    options: VectorIndexSnapshotQueryOptions = {},
+  ): Promise<VectorIndexSnapshot[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2661,7 +2946,7 @@ export class SqliteAdapter implements StoragePort {
     params.push(limit);
 
     const rows = this.db.prepare(query).all(...params) as any[];
-    return rows.map(row => ({
+    return rows.map((row) => ({
       id: row.id,
       timestamp: row.timestamp,
       connectionId: row.connection_id,
@@ -2671,20 +2956,27 @@ export class SqliteAdapter implements StoragePort {
     }));
   }
 
-  async pruneOldVectorIndexSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldVectorIndexSnapshots(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      const result = this.db.prepare('DELETE FROM vector_index_snapshots WHERE timestamp < ? AND connection_id = ?').run(cutoffTimestamp, connectionId);
+      const result = this.db
+        .prepare('DELETE FROM vector_index_snapshots WHERE timestamp < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
       return result.changes;
     }
 
-    const result = this.db.prepare('DELETE FROM vector_index_snapshots WHERE timestamp < ?').run(cutoffTimestamp);
+    const result = this.db
+      .prepare('DELETE FROM vector_index_snapshots WHERE timestamp < ?')
+      .run(cutoffTimestamp);
     return result.changes;
   }
 
   // Connection Management Methods
-  async saveConnection(config: import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig): Promise<void> {
+  async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
 
     // Ensure connections table exists
@@ -2706,8 +2998,8 @@ export class SqliteAdapter implements StoragePort {
     `);
 
     // Migration: add password_encrypted column if it doesn't exist
-    const columns = this.db.prepare("PRAGMA table_info(connections)").all() as { name: string }[];
-    if (!columns.some(c => c.name === 'password_encrypted')) {
+    const columns = this.db.prepare('PRAGMA table_info(connections)').all() as { name: string }[];
+    if (!columns.some((c) => c.name === 'password_encrypted')) {
       this.db.exec('ALTER TABLE connections ADD COLUMN password_encrypted INTEGER DEFAULT 0');
     }
 
@@ -2726,8 +3018,8 @@ export class SqliteAdapter implements StoragePort {
     `);
 
     // Migration: add type column to existing agent_tokens tables
-    const atCols = this.db.prepare("PRAGMA table_info(agent_tokens)").all() as { name: string }[];
-    if (!atCols.some(c => c.name === 'type')) {
+    const atCols = this.db.prepare('PRAGMA table_info(agent_tokens)').all() as { name: string }[];
+    if (!atCols.some((c) => c.name === 'type')) {
       this.db.exec("ALTER TABLE agent_tokens ADD COLUMN type TEXT NOT NULL DEFAULT 'agent'");
     }
 
@@ -2763,16 +3055,20 @@ export class SqliteAdapter implements StoragePort {
     );
   }
 
-  async getConnections(): Promise<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig[]> {
+  async getConnections(): Promise<DatabaseConnectionConfig[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     // Return empty array if table doesn't exist
-    const tableExists = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='connections'").get();
+    const tableExists = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='connections'")
+      .get();
     if (!tableExists) return [];
 
-    const rows = this.db.prepare('SELECT * FROM connections ORDER BY created_at ASC').all() as any[];
+    const rows = this.db
+      .prepare('SELECT * FROM connections ORDER BY created_at ASC')
+      .all() as any[];
 
-    return rows.map(row => ({
+    return rows.map((row) => ({
       id: row.id,
       name: row.name,
       host: row.host,
@@ -2788,10 +3084,12 @@ export class SqliteAdapter implements StoragePort {
     }));
   }
 
-  async getConnection(id: string): Promise<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig | null> {
+  async getConnection(id: string): Promise<DatabaseConnectionConfig | null> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const tableExists = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='connections'").get();
+    const tableExists = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='connections'")
+      .get();
     if (!tableExists) return null;
 
     const row = this.db.prepare('SELECT * FROM connections WHERE id = ?').get(id) as any;
@@ -2819,7 +3117,7 @@ export class SqliteAdapter implements StoragePort {
     this.db.prepare('DELETE FROM connections WHERE id = ?').run(id);
   }
 
-  async updateConnection(id: string, updates: Partial<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig>): Promise<void> {
+  async updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
 
     const setClauses: string[] = [];
@@ -2869,15 +3167,46 @@ export class SqliteAdapter implements StoragePort {
 
   // Agent Token Methods
 
-  async saveAgentToken(token: { id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }): Promise<void> {
+  async saveAgentToken(token: {
+    id: string;
+    name: string;
+    type: 'agent' | 'mcp';
+    tokenHash: string;
+    createdAt: number;
+    expiresAt: number;
+    revokedAt: number | null;
+    lastUsedAt: number | null;
+  }): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
-    this.db.prepare(
-      `INSERT OR REPLACE INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(token.id, token.name, token.type, token.tokenHash, token.createdAt, token.expiresAt, token.revokedAt, token.lastUsedAt);
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        token.id,
+        token.name,
+        token.type,
+        token.tokenHash,
+        token.createdAt,
+        token.expiresAt,
+        token.revokedAt,
+        token.lastUsedAt,
+      );
   }
 
-  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<Array<{ id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>> {
+  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<
+    Array<{
+      id: string;
+      name: string;
+      type: 'agent' | 'mcp';
+      tokenHash: string;
+      createdAt: number;
+      expiresAt: number;
+      revokedAt: number | null;
+      lastUsedAt: number | null;
+    }>
+  > {
     if (!this.db) throw new Error('Database not initialized');
     const query = type
       ? 'SELECT * FROM agent_tokens WHERE type = ? ORDER BY created_at DESC'
@@ -2895,7 +3224,16 @@ export class SqliteAdapter implements StoragePort {
     }));
   }
 
-  async getAgentTokenByHash(hash: string): Promise<{ id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null } | null> {
+  async getAgentTokenByHash(hash: string): Promise<{
+    id: string;
+    name: string;
+    type: 'agent' | 'mcp';
+    tokenHash: string;
+    createdAt: number;
+    expiresAt: number;
+    revokedAt: number | null;
+    lastUsedAt: number | null;
+  } | null> {
     if (!this.db) throw new Error('Database not initialized');
     const row = this.db.prepare('SELECT * FROM agent_tokens WHERE token_hash = ?').get(hash) as any;
     if (!row) return null;
@@ -2919,5 +3257,79 @@ export class SqliteAdapter implements StoragePort {
   async updateAgentTokenLastUsed(id: string): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
     this.db.prepare('UPDATE agent_tokens SET last_used_at = ? WHERE id = ?').run(Date.now(), id);
+  }
+
+  // Throughput Forecasting Settings
+  async getThroughputSettings(connectionId: string): Promise<ThroughputSettings | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const row = this.db
+      .prepare('SELECT * FROM throughput_settings WHERE connection_id = ?')
+      .get(connectionId) as unknown as ThroughputSettingsRow;
+
+    if (!row) {
+      return null;
+    }
+    return {
+      connectionId: row.connection_id,
+      enabled: !!row.enabled,
+      opsCeiling: row.ops_ceiling ?? null,
+      rollingWindowMs: row.rolling_window_ms,
+      alertThresholdMs: row.alert_threshold_ms,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async saveThroughputSettings(settings: ThroughputSettings): Promise<ThroughputSettings> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `
+      INSERT INTO throughput_settings (connection_id, enabled, ops_ceiling, rolling_window_ms, alert_threshold_ms, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(connection_id) DO UPDATE SET
+        enabled = excluded.enabled,
+        ops_ceiling = excluded.ops_ceiling,
+        rolling_window_ms = excluded.rolling_window_ms,
+        alert_threshold_ms = excluded.alert_threshold_ms,
+        updated_at = excluded.updated_at
+    `,
+      )
+      .run(
+        settings.connectionId,
+        settings.enabled ? 1 : 0,
+        settings.opsCeiling,
+        settings.rollingWindowMs,
+        settings.alertThresholdMs,
+        settings.updatedAt,
+      );
+    return { ...settings };
+  }
+
+  async deleteThroughputSettings(connectionId: string): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare('DELETE FROM throughput_settings WHERE connection_id = ?')
+      .run(connectionId);
+    return result.changes > 0;
+  }
+
+  async getActiveThroughputSettings(): Promise<ThroughputSettings[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare('SELECT * FROM throughput_settings WHERE enabled = 1 AND ops_ceiling IS NOT NULL')
+      .all() as ThroughputSettingsRow[];
+    if (!rows || rows.length === 0) {
+      return [];
+    }
+    return rows.map((row) => ({
+      connectionId: row!.connection_id,
+      enabled: !!row!.enabled,
+      opsCeiling: row!.ops_ceiling,
+      rollingWindowMs: row!.rolling_window_ms,
+      alertThresholdMs: row!.alert_threshold_ms,
+      updatedAt: row!.updated_at,
+    }));
   }
 }

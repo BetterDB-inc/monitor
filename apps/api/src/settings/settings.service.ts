@@ -50,10 +50,29 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     return {
       id: 1,
       auditPollIntervalMs: parseInt(this.configService.get('AUDIT_POLL_INTERVAL_MS', '60000'), 10),
-      clientAnalyticsPollIntervalMs: parseInt(this.configService.get('CLIENT_ANALYTICS_POLL_INTERVAL_MS', '60000'), 10),
-      anomalyPollIntervalMs: parseInt(this.configService.get('ANOMALY_POLL_INTERVAL_MS', '1000'), 10),
+      clientAnalyticsPollIntervalMs: parseInt(
+        this.configService.get('CLIENT_ANALYTICS_POLL_INTERVAL_MS', '60000'),
+        10,
+      ),
+      anomalyPollIntervalMs: parseInt(
+        this.configService.get('ANOMALY_POLL_INTERVAL_MS', '1000'),
+        10,
+      ),
       anomalyCacheTtlMs: parseInt(this.configService.get('ANOMALY_CACHE_TTL_MS', '3600000'), 10),
-      anomalyPrometheusIntervalMs: parseInt(this.configService.get('ANOMALY_PROMETHEUS_INTERVAL_MS', '30000'), 10),
+      anomalyPrometheusIntervalMs: parseInt(
+        this.configService.get('ANOMALY_PROMETHEUS_INTERVAL_MS', '30000'),
+        10,
+      ),
+      throughputForecastingEnabled:
+        this.configService.get('THROUGHPUT_FORECASTING_ENABLED', 'true') === 'true',
+      throughputForecastingDefaultRollingWindowMs: parseInt(
+        this.configService.get('THROUGHPUT_FORECASTING_DEFAULT_ROLLING_WINDOW_MS', '21600000'),
+        10,
+      ),
+      throughputForecastingDefaultAlertThresholdMs: parseInt(
+        this.configService.get('THROUGHPUT_FORECASTING_DEFAULT_ALERT_THRESHOLD_MS', '7200000'),
+        10,
+      ),
       createdAt: now,
       updatedAt: now,
     };

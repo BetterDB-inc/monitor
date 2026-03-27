@@ -29,36 +29,29 @@ export type {
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
 } from '@betterdb/shared';
-import type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/shared';
+export type { ThroughputSettings } from '@betterdb/shared';
 import type {
-  StoredClientSnapshot,
+  AppSettings,
+  AuditQueryOptions,
+  AuditStats,
+  ClientAnalyticsStats,
   ClientSnapshotQueryOptions,
   ClientTimeSeriesPoint,
-  ClientAnalyticsStats,
-  CommandDistributionParams,
-  CommandDistributionResponse,
-  IdleConnectionsParams,
-  IdleConnectionsResponse,
-  BufferAnomaliesParams,
-  BufferAnomaliesResponse,
-  ActivityTimelineParams,
-  ActivityTimelineResponse,
-  SpikeDetectionParams,
-  SpikeDetectionResponse,
-  AppSettings,
-  SettingsUpdateRequest,
-  KeyPatternSnapshot,
-  KeyPatternQueryOptions,
-  KeyAnalyticsSummary,
+  DatabaseConnectionConfig,
   HotKeyEntry,
   HotKeyQueryOptions,
+  KeyAnalyticsSummary,
+  KeyPatternQueryOptions,
+  KeyPatternSnapshot,
+  SettingsUpdateRequest,
+  StoredAclEntry,
+  StoredClientSnapshot,
+  ThroughputSettings,
+  VectorIndexSnapshot,
+  VectorIndexSnapshotQueryOptions,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
-  DeliveryStatus,
-  DatabaseConnectionConfig,
-  VectorIndexSnapshot,
-  VectorIndexSnapshotQueryOptions,
 } from '@betterdb/shared';
 
 // Anomaly Event Types
@@ -120,24 +113,24 @@ export interface AnomalyStats {
 
 // Slow Log Entry Types
 export interface StoredSlowLogEntry {
-  id: number;  // Original slowlog ID from Valkey/Redis
-  timestamp: number;  // Unix timestamp in seconds
-  duration: number;  // Microseconds
-  command: string[];  // Command name + args (e.g., ['GET', 'key1'])
+  id: number; // Original slowlog ID from Valkey/Redis
+  timestamp: number; // Unix timestamp in seconds
+  duration: number; // Microseconds
+  command: string[]; // Command name + args (e.g., ['GET', 'key1'])
   clientAddress: string;
   clientName: string;
-  capturedAt: number;  // When we captured this entry (ms)
+  capturedAt: number; // When we captured this entry (ms)
   sourceHost: string;
   sourcePort: number;
   connectionId?: string;
 }
 
 export interface SlowLogQueryOptions {
-  startTime?: number;  // Unix timestamp in seconds
+  startTime?: number; // Unix timestamp in seconds
   endTime?: number;
   command?: string;
   clientName?: string;
-  minDuration?: number;  // Microseconds
+  minDuration?: number; // Microseconds
   limit?: number;
   offset?: number;
   connectionId?: string;
@@ -147,26 +140,26 @@ export interface SlowLogQueryOptions {
 export type CommandLogType = 'slow' | 'large-request' | 'large-reply';
 
 export interface StoredCommandLogEntry {
-  id: number;  // Original commandlog ID from Valkey
-  timestamp: number;  // Unix timestamp in seconds
-  duration: number;  // Microseconds
-  command: string[];  // Command name + args
+  id: number; // Original commandlog ID from Valkey
+  timestamp: number; // Unix timestamp in seconds
+  duration: number; // Microseconds
+  command: string[]; // Command name + args
   clientAddress: string;
   clientName: string;
-  type: CommandLogType;  // slow, large-request, or large-reply
-  capturedAt: number;  // When we captured this entry (ms)
+  type: CommandLogType; // slow, large-request, or large-reply
+  capturedAt: number; // When we captured this entry (ms)
   sourceHost: string;
   sourcePort: number;
   connectionId?: string;
 }
 
 export interface CommandLogQueryOptions {
-  startTime?: number;  // Unix timestamp in seconds
+  startTime?: number; // Unix timestamp in seconds
   endTime?: number;
   command?: string;
   clientName?: string;
   type?: CommandLogType;
-  minDuration?: number;  // Microseconds
+  minDuration?: number; // Microseconds
   limit?: number;
   offset?: number;
   connectionId?: string;
@@ -174,11 +167,11 @@ export interface CommandLogQueryOptions {
 
 // Latency Snapshot Types
 export interface StoredLatencySnapshot {
-  id: string;  // UUID
-  timestamp: number;  // When we captured this snapshot (ms)
+  id: string; // UUID
+  timestamp: number; // When we captured this snapshot (ms)
   eventName: string;
-  latestEventTimestamp: number;  // Unix timestamp from LATENCY LATEST
-  maxLatency: number;  // Microseconds
+  latestEventTimestamp: number; // Unix timestamp from LATENCY LATEST
+  maxLatency: number; // Microseconds
   connectionId?: string;
 }
 
@@ -199,8 +192,8 @@ export interface StoredLatencyHistogram {
 
 // Memory Snapshot Types
 export interface StoredMemorySnapshot {
-  id: string;  // UUID
-  timestamp: number;  // When we captured this snapshot (ms)
+  id: string; // UUID
+  timestamp: number; // When we captured this snapshot (ms)
   usedMemory: number;
   usedMemoryRss: number;
   usedMemoryPeak: number;
@@ -272,16 +265,34 @@ export interface StoragePort {
   // Client Analytics Methods - connectionId required for writes, optional filter for reads
   saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number>;
   getClientSnapshots(options?: ClientSnapshotQueryOptions): Promise<StoredClientSnapshot[]>;
-  getClientTimeSeries(startTime: number, endTime: number, bucketSizeMs?: number, connectionId?: string): Promise<ClientTimeSeriesPoint[]>;
-  getClientAnalyticsStats(startTime?: number, endTime?: number, connectionId?: string): Promise<ClientAnalyticsStats>;
-  getClientConnectionHistory(identifier: { name?: string; user?: string; addr?: string }, startTime?: number, endTime?: number, connectionId?: string): Promise<StoredClientSnapshot[]>;
+  getClientTimeSeries(
+    startTime: number,
+    endTime: number,
+    bucketSizeMs?: number,
+    connectionId?: string,
+  ): Promise<ClientTimeSeriesPoint[]>;
+  getClientAnalyticsStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsStats>;
+  getClientConnectionHistory(
+    identifier: { name?: string; user?: string; addr?: string },
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<StoredClientSnapshot[]>;
   pruneOldClientSnapshots(olderThanTimestamp: number, connectionId?: string): Promise<number>;
 
   // Anomaly Methods - connectionId required for writes, optional filter for reads
   saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string>;
   saveAnomalyEvents(events: StoredAnomalyEvent[], connectionId: string): Promise<number>;
   getAnomalyEvents(options?: AnomalyQueryOptions): Promise<StoredAnomalyEvent[]>;
-  getAnomalyStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AnomalyStats>;
+  getAnomalyStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<AnomalyStats>;
   resolveAnomaly(id: string, resolvedAt: number): Promise<boolean>;
   pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
@@ -292,13 +303,24 @@ export interface StoragePort {
   // Key Analytics Methods - connectionId required for writes, optional filter for reads
   saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[], connectionId: string): Promise<number>;
   getKeyPatternSnapshots(options?: KeyPatternQueryOptions): Promise<KeyPatternSnapshot[]>;
-  getKeyAnalyticsSummary(startTime?: number, endTime?: number, connectionId?: string): Promise<KeyAnalyticsSummary | null>;
-  getKeyPatternTrends(pattern: string, startTime: number, endTime: number, connectionId?: string): Promise<Array<{
-    timestamp: number;
-    keyCount: number;
-    memoryBytes: number;
-    staleCount: number;
-  }>>;
+  getKeyAnalyticsSummary(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<KeyAnalyticsSummary | null>;
+  getKeyPatternTrends(
+    pattern: string,
+    startTime: number,
+    endTime: number,
+    connectionId?: string,
+  ): Promise<
+    Array<{
+      timestamp: number;
+      keyCount: number;
+      memoryBytes: number;
+      staleCount: number;
+    }>
+  >;
   pruneOldKeyPatternSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Hot Key Stats Methods - connectionId required for writes, optional filter for reads
@@ -316,14 +338,24 @@ export interface StoragePort {
   getWebhook(id: string): Promise<Webhook | null>;
   getWebhooksByInstance(connectionId?: string): Promise<Webhook[]>;
   getWebhooksByEvent(event: WebhookEventType, connectionId?: string): Promise<Webhook[]>;
-  updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null>;
+  updateWebhook(
+    id: string,
+    updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<Webhook | null>;
   deleteWebhook(id: string): Promise<boolean>;
 
   // Webhook Delivery Methods - connectionId optional filter
   createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery>;
   getDelivery(id: string): Promise<WebhookDelivery | null>;
-  getDeliveriesByWebhook(webhookId: string, limit?: number, offset?: number): Promise<WebhookDelivery[]>;
-  updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean>;
+  getDeliveriesByWebhook(
+    webhookId: string,
+    limit?: number,
+    offset?: number,
+  ): Promise<WebhookDelivery[]>;
+  updateDelivery(
+    id: string,
+    updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>,
+  ): Promise<boolean>;
   getRetriableDeliveries(limit?: number, connectionId?: string): Promise<WebhookDelivery[]>;
   pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
@@ -346,7 +378,12 @@ export interface StoragePort {
 
   // Latency Histogram Methods
   saveLatencyHistogram(histogram: StoredLatencyHistogram, connectionId: string): Promise<number>;
-  getLatencyHistograms(options?: { connectionId?: string; startTime?: number; endTime?: number; limit?: number }): Promise<StoredLatencyHistogram[]>;
+  getLatencyHistograms(options?: {
+    connectionId?: string;
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+  }): Promise<StoredLatencyHistogram[]>;
   pruneOldLatencyHistograms(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Memory Snapshot Methods - connectionId required for writes, optional filter for reads
@@ -367,9 +404,44 @@ export interface StoragePort {
   updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void>;
 
   // Agent/MCP Token Methods (cloud-only, optional — implementations may no-op)
-  saveAgentToken(token: { id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }): Promise<void>;
-  getAgentTokens(type?: 'agent' | 'mcp'): Promise<Array<{ id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>>;
-  getAgentTokenByHash(hash: string): Promise<{ id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null } | null>;
+  saveAgentToken(token: {
+    id: string;
+    name: string;
+    type: 'agent' | 'mcp';
+    tokenHash: string;
+    createdAt: number;
+    expiresAt: number;
+    revokedAt: number | null;
+    lastUsedAt: number | null;
+  }): Promise<void>;
+  getAgentTokens(type?: 'agent' | 'mcp'): Promise<
+    Array<{
+      id: string;
+      name: string;
+      type: 'agent' | 'mcp';
+      tokenHash: string;
+      createdAt: number;
+      expiresAt: number;
+      revokedAt: number | null;
+      lastUsedAt: number | null;
+    }>
+  >;
+  getAgentTokenByHash(hash: string): Promise<{
+    id: string;
+    name: string;
+    type: 'agent' | 'mcp';
+    tokenHash: string;
+    createdAt: number;
+    expiresAt: number;
+    revokedAt: number | null;
+    lastUsedAt: number | null;
+  } | null>;
   revokeAgentToken(id: string): Promise<void>;
   updateAgentTokenLastUsed(id: string): Promise<void>;
+
+  // Throughput Forecasting Settings
+  getThroughputSettings(connectionId: string): Promise<ThroughputSettings | null>;
+  saveThroughputSettings(settings: ThroughputSettings): Promise<ThroughputSettings>;
+  deleteThroughputSettings(connectionId: string): Promise<boolean>;
+  getActiveThroughputSettings(): Promise<ThroughputSettings[]>;
 }

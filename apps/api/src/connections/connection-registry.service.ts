@@ -9,6 +9,7 @@ import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 
+// TODO: Export and use across the codebase instead of hardcoded 'env-default' strings
 const ENV_DEFAULT_ID = 'env-default';
 
 @Injectable()

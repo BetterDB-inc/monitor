@@ -20,7 +20,6 @@ import {
   Webhook,
   WebhookDelivery,
   WebhookEventType,
-  DeliveryStatus,
   StoredSlowLogEntry,
   SlowLogQueryOptions,
   StoredCommandLogEntry,
@@ -30,8 +29,12 @@ import {
   LatencySnapshotQueryOptions,
   StoredMemorySnapshot,
   MemorySnapshotQueryOptions,
+  StoredLatencyHistogram,
+  HotKeyEntry,
+  HotKeyQueryOptions,
+  DatabaseConnectionConfig,
 } from '../../common/interfaces/storage-port.interface';
-import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions } from '@betterdb/shared';
+import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions, ThroughputSettings } from '@betterdb/shared';
 
 export class MemoryAdapter implements StoragePort {
   private aclEntries: StoredAclEntry[] = [];
@@ -41,9 +44,10 @@ export class MemoryAdapter implements StoragePort {
   private slowLogEntries: StoredSlowLogEntry[] = [];
   private commandLogEntries: StoredCommandLogEntry[] = [];
   private latencySnapshots: StoredLatencySnapshot[] = [];
-  private latencyHistograms: import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram[] = [];
+  private latencyHistograms: StoredLatencyHistogram[] = [];
   private memorySnapshots: StoredMemorySnapshot[] = [];
   private vectorIndexSnapshots: VectorIndexSnapshot[] = [];
+  private throughputSettings: Map<string, ThroughputSettings> = new Map();
   private settings: AppSettings | null = null;
   private webhooks: Map<string, Webhook> = new Map();
   private deliveries: Map<string, WebhookDelivery> = new Map();
@@ -133,7 +137,11 @@ export class MemoryAdapter implements StoragePort {
     return filtered.slice(offset, offset + limit);
   }
 
-  async getAuditStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AuditStats> {
+  async getAuditStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<AuditStats> {
     let filtered = [...this.aclEntries];
 
     if (connectionId) {
@@ -179,7 +187,9 @@ export class MemoryAdapter implements StoragePort {
   async pruneOldEntries(olderThanTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.aclEntries.length;
     if (connectionId) {
-      this.aclEntries = this.aclEntries.filter((e) => e.capturedAt >= olderThanTimestamp || e.connectionId !== connectionId);
+      this.aclEntries = this.aclEntries.filter(
+        (e) => e.capturedAt >= olderThanTimestamp || e.connectionId !== connectionId,
+      );
     } else {
       this.aclEntries = this.aclEntries.filter((e) => e.capturedAt >= olderThanTimestamp);
     }
@@ -193,7 +203,9 @@ export class MemoryAdapter implements StoragePort {
     return clients.length;
   }
 
-  async getClientSnapshots(options: ClientSnapshotQueryOptions = {}): Promise<StoredClientSnapshot[]> {
+  async getClientSnapshots(
+    options: ClientSnapshotQueryOptions = {},
+  ): Promise<StoredClientSnapshot[]> {
     let filtered = [...this.clientSnapshots];
 
     if (options.connectionId) {
@@ -284,7 +296,11 @@ export class MemoryAdapter implements StoragePort {
     return Array.from(pointsMap.values()).sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  async getClientAnalyticsStats(startTime?: number, endTime?: number, connectionId?: string): Promise<ClientAnalyticsStats> {
+  async getClientAnalyticsStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsStats> {
     let filtered = [...this.clientSnapshots];
 
     if (connectionId) {
@@ -299,7 +315,8 @@ export class MemoryAdapter implements StoragePort {
       filtered = filtered.filter((c) => c.capturedAt <= endTime);
     }
 
-    const latestTimestamp = filtered.length > 0 ? Math.max(...filtered.map((c) => c.capturedAt)) : 0;
+    const latestTimestamp =
+      filtered.length > 0 ? Math.max(...filtered.map((c) => c.capturedAt)) : 0;
     const currentClients = filtered.filter((c) => c.capturedAt === latestTimestamp);
 
     // Group by captured_at to find peak
@@ -337,7 +354,10 @@ export class MemoryAdapter implements StoragePort {
       const currentCount = currentClients.filter((c) => c.name === name).length;
       const byTimestampForName = new Map<number, number>();
       for (const client of clients) {
-        byTimestampForName.set(client.capturedAt, (byTimestampForName.get(client.capturedAt) || 0) + 1);
+        byTimestampForName.set(
+          client.capturedAt,
+          (byTimestampForName.get(client.capturedAt) || 0) + 1,
+        );
       }
       const peakForName = Math.max(...Array.from(byTimestampForName.values()));
       const avgAge = clients.reduce((sum, c) => sum + c.age, 0) / clients.length;
@@ -365,7 +385,10 @@ export class MemoryAdapter implements StoragePort {
       const currentCount = currentClients.filter((c) => c.user === user).length;
       const byTimestampForUser = new Map<number, number>();
       for (const client of clients) {
-        byTimestampForUser.set(client.capturedAt, (byTimestampForUser.get(client.capturedAt) || 0) + 1);
+        byTimestampForUser.set(
+          client.capturedAt,
+          (byTimestampForUser.get(client.capturedAt) || 0) + 1,
+        );
       }
       const peakForUser = Math.max(...Array.from(byTimestampForUser.values()));
 
@@ -376,7 +399,10 @@ export class MemoryAdapter implements StoragePort {
     }
 
     // Connections by user and name
-    const connectionsByUserAndName: Record<string, { user: string; name: string; current: number; peak: number; avgAge: number }> = {};
+    const connectionsByUserAndName: Record<
+      string,
+      { user: string; name: string; current: number; peak: number; avgAge: number }
+    > = {};
     const byUserAndName = new Map<string, StoredClientSnapshot[]>();
     for (const client of filtered) {
       if (client.user && client.name) {
@@ -393,7 +419,10 @@ export class MemoryAdapter implements StoragePort {
       const currentCount = currentClients.filter((c) => c.user === user && c.name === name).length;
       const byTimestampForCombined = new Map<number, number>();
       for (const client of clients) {
-        byTimestampForCombined.set(client.capturedAt, (byTimestampForCombined.get(client.capturedAt) || 0) + 1);
+        byTimestampForCombined.set(
+          client.capturedAt,
+          (byTimestampForCombined.get(client.capturedAt) || 0) + 1,
+        );
       }
       const peakForCombined = Math.max(...Array.from(byTimestampForCombined.values()));
       const avgAge = clients.reduce((sum, c) => sum + c.age, 0) / clients.length;
@@ -466,10 +495,15 @@ export class MemoryAdapter implements StoragePort {
     return filtered.sort((a, b) => a.capturedAt - b.capturedAt);
   }
 
-  async pruneOldClientSnapshots(olderThanTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldClientSnapshots(
+    olderThanTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     const before = this.clientSnapshots.length;
     if (connectionId) {
-      this.clientSnapshots = this.clientSnapshots.filter((c) => c.capturedAt >= olderThanTimestamp || c.connectionId !== connectionId);
+      this.clientSnapshots = this.clientSnapshots.filter(
+        (c) => c.capturedAt >= olderThanTimestamp || c.connectionId !== connectionId,
+      );
     } else {
       this.clientSnapshots = this.clientSnapshots.filter((c) => c.capturedAt >= olderThanTimestamp);
     }
@@ -491,23 +525,29 @@ export class MemoryAdapter implements StoragePort {
   async getAnomalyEvents(options: AnomalyQueryOptions = {}): Promise<StoredAnomalyEvent[]> {
     let filtered = [...this.anomalyEvents];
 
-    if (options.connectionId) filtered = filtered.filter(e => e.connectionId === options.connectionId);
-    if (options.startTime) filtered = filtered.filter(e => e.timestamp >= options.startTime!);
-    if (options.endTime) filtered = filtered.filter(e => e.timestamp <= options.endTime!);
-    if (options.severity) filtered = filtered.filter(e => e.severity === options.severity);
-    if (options.metricType) filtered = filtered.filter(e => e.metricType === options.metricType);
-    if (options.resolved !== undefined) filtered = filtered.filter(e => e.resolved === options.resolved);
+    if (options.connectionId)
+      filtered = filtered.filter((e) => e.connectionId === options.connectionId);
+    if (options.startTime) filtered = filtered.filter((e) => e.timestamp >= options.startTime!);
+    if (options.endTime) filtered = filtered.filter((e) => e.timestamp <= options.endTime!);
+    if (options.severity) filtered = filtered.filter((e) => e.severity === options.severity);
+    if (options.metricType) filtered = filtered.filter((e) => e.metricType === options.metricType);
+    if (options.resolved !== undefined)
+      filtered = filtered.filter((e) => e.resolved === options.resolved);
 
     return filtered
       .sort((a, b) => b.timestamp - a.timestamp)
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
   }
 
-  async getAnomalyStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AnomalyStats> {
+  async getAnomalyStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<AnomalyStats> {
     let filtered = [...this.anomalyEvents];
-    if (connectionId) filtered = filtered.filter(e => e.connectionId === connectionId);
-    if (startTime) filtered = filtered.filter(e => e.timestamp >= startTime);
-    if (endTime) filtered = filtered.filter(e => e.timestamp <= endTime);
+    if (connectionId) filtered = filtered.filter((e) => e.connectionId === connectionId);
+    if (startTime) filtered = filtered.filter((e) => e.timestamp >= startTime);
+    if (endTime) filtered = filtered.filter((e) => e.timestamp <= endTime);
 
     const bySeverity: Record<string, number> = {};
     const byMetric: Record<string, number> = {};
@@ -522,12 +562,12 @@ export class MemoryAdapter implements StoragePort {
       bySeverity,
       byMetric,
       byPattern: {},
-      unresolvedCount: filtered.filter(e => !e.resolved).length,
+      unresolvedCount: filtered.filter((e) => !e.resolved).length,
     };
   }
 
   async resolveAnomaly(id: string, resolvedAt: number): Promise<boolean> {
-    const event = this.anomalyEvents.find(e => e.id === id);
+    const event = this.anomalyEvents.find((e) => e.id === id);
     if (event && !event.resolved) {
       event.resolved = true;
       event.resolvedAt = resolvedAt;
@@ -540,15 +580,19 @@ export class MemoryAdapter implements StoragePort {
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.anomalyEvents.length;
     if (connectionId) {
-      this.anomalyEvents = this.anomalyEvents.filter(e => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId);
+      this.anomalyEvents = this.anomalyEvents.filter(
+        (e) => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId,
+      );
     } else {
-      this.anomalyEvents = this.anomalyEvents.filter(e => e.timestamp >= cutoffTimestamp);
+      this.anomalyEvents = this.anomalyEvents.filter((e) => e.timestamp >= cutoffTimestamp);
     }
     return before - this.anomalyEvents.length;
   }
 
   async saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string> {
-    const existing = this.correlatedGroups.findIndex(g => g.correlationId === group.correlationId && g.connectionId === connectionId);
+    const existing = this.correlatedGroups.findIndex(
+      (g) => g.correlationId === group.correlationId && g.connectionId === connectionId,
+    );
     if (existing >= 0) {
       this.correlatedGroups[existing] = { ...group, connectionId };
     } else {
@@ -560,11 +604,12 @@ export class MemoryAdapter implements StoragePort {
   async getCorrelatedGroups(options: AnomalyQueryOptions = {}): Promise<StoredCorrelatedGroup[]> {
     let filtered = [...this.correlatedGroups];
 
-    if (options.connectionId) filtered = filtered.filter(g => g.connectionId === options.connectionId);
-    if (options.startTime) filtered = filtered.filter(g => g.timestamp >= options.startTime!);
-    if (options.endTime) filtered = filtered.filter(g => g.timestamp <= options.endTime!);
-    if (options.severity) filtered = filtered.filter(g => g.severity === options.severity);
-    if (options.pattern) filtered = filtered.filter(g => g.pattern === options.pattern);
+    if (options.connectionId)
+      filtered = filtered.filter((g) => g.connectionId === options.connectionId);
+    if (options.startTime) filtered = filtered.filter((g) => g.timestamp >= options.startTime!);
+    if (options.endTime) filtered = filtered.filter((g) => g.timestamp <= options.endTime!);
+    if (options.severity) filtered = filtered.filter((g) => g.severity === options.severity);
+    if (options.pattern) filtered = filtered.filter((g) => g.pattern === options.pattern);
 
     return filtered
       .sort((a, b) => b.timestamp - a.timestamp)
@@ -574,14 +619,19 @@ export class MemoryAdapter implements StoragePort {
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.correlatedGroups.length;
     if (connectionId) {
-      this.correlatedGroups = this.correlatedGroups.filter(g => g.timestamp >= cutoffTimestamp || g.connectionId !== connectionId);
+      this.correlatedGroups = this.correlatedGroups.filter(
+        (g) => g.timestamp >= cutoffTimestamp || g.connectionId !== connectionId,
+      );
     } else {
-      this.correlatedGroups = this.correlatedGroups.filter(g => g.timestamp >= cutoffTimestamp);
+      this.correlatedGroups = this.correlatedGroups.filter((g) => g.timestamp >= cutoffTimestamp);
     }
     return before - this.correlatedGroups.length;
   }
 
-  async saveKeyPatternSnapshots(_snapshots: KeyPatternSnapshot[], _connectionId: string): Promise<number> {
+  async saveKeyPatternSnapshots(
+    _snapshots: KeyPatternSnapshot[],
+    _connectionId: string,
+  ): Promise<number> {
     throw new Error('Key analytics not supported in memory adapter');
   }
 
@@ -589,28 +639,47 @@ export class MemoryAdapter implements StoragePort {
     throw new Error('Key analytics not supported in memory adapter');
   }
 
-  async getKeyAnalyticsSummary(_startTime?: number, _endTime?: number, _connectionId?: string): Promise<KeyAnalyticsSummary | null> {
+  async getKeyAnalyticsSummary(
+    _startTime?: number,
+    _endTime?: number,
+    _connectionId?: string,
+  ): Promise<KeyAnalyticsSummary | null> {
     throw new Error('Key analytics not supported in memory adapter');
   }
 
-  async getKeyPatternTrends(_pattern: string, _startTime: number, _endTime: number, _connectionId?: string): Promise<Array<{
-    timestamp: number;
-    keyCount: number;
-    memoryBytes: number;
-    staleCount: number;
-  }>> {
+  async getKeyPatternTrends(
+    _pattern: string,
+    _startTime: number,
+    _endTime: number,
+    _connectionId?: string,
+  ): Promise<
+    Array<{
+      timestamp: number;
+      keyCount: number;
+      memoryBytes: number;
+      staleCount: number;
+    }>
+  > {
     throw new Error('Key analytics not supported in memory adapter');
   }
 
-  async pruneOldKeyPatternSnapshots(_cutoffTimestamp: number, _connectionId?: string): Promise<number> {
+  async pruneOldKeyPatternSnapshots(
+    _cutoffTimestamp: number,
+    _connectionId?: string,
+  ): Promise<number> {
     throw new Error('Key analytics not supported in memory adapter');
   }
 
-  async saveHotKeys(_entries: import('../../common/interfaces/storage-port.interface').HotKeyEntry[], _connectionId: string): Promise<number> {
+  async saveHotKeys(
+    _entries: HotKeyEntry[],
+    _connectionId: string,
+  ): Promise<number> {
     throw new Error('Hot key stats not supported in memory adapter');
   }
 
-  async getHotKeys(_options?: import('../../common/interfaces/storage-port.interface').HotKeyQueryOptions): Promise<import('../../common/interfaces/storage-port.interface').HotKeyEntry[]> {
+  async getHotKeys(
+    _options?: HotKeyQueryOptions,
+  ): Promise<HotKeyEntry[]> {
     throw new Error('Hot key stats not supported in memory adapter');
   }
 
@@ -655,6 +724,17 @@ export class MemoryAdapter implements StoragePort {
     if (updates.anomalyPrometheusIntervalMs !== undefined) {
       validUpdates.anomalyPrometheusIntervalMs = updates.anomalyPrometheusIntervalMs;
     }
+    if (updates.throughputForecastingEnabled !== undefined) {
+      validUpdates.throughputForecastingEnabled = updates.throughputForecastingEnabled;
+    }
+    if (updates.throughputForecastingDefaultRollingWindowMs !== undefined) {
+      validUpdates.throughputForecastingDefaultRollingWindowMs =
+        updates.throughputForecastingDefaultRollingWindowMs;
+    }
+    if (updates.throughputForecastingDefaultAlertThresholdMs !== undefined) {
+      validUpdates.throughputForecastingDefaultAlertThresholdMs =
+        updates.throughputForecastingDefaultAlertThresholdMs;
+    }
 
     this.settings = {
       ...this.settings,
@@ -685,36 +765,38 @@ export class MemoryAdapter implements StoragePort {
   async getWebhooksByInstance(connectionId?: string): Promise<Webhook[]> {
     let webhooks = Array.from(this.webhooks.values());
     if (connectionId) {
-      webhooks = webhooks.filter(w => w.connectionId === connectionId || !w.connectionId);
+      webhooks = webhooks.filter((w) => w.connectionId === connectionId || !w.connectionId);
     } else {
       // No connectionId provided - only return global webhooks (not scoped to any connection)
-      webhooks = webhooks.filter(w => !w.connectionId);
+      webhooks = webhooks.filter((w) => !w.connectionId);
     }
-    return webhooks
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .map(w => ({ ...w }));
+    return webhooks.sort((a, b) => b.createdAt - a.createdAt).map((w) => ({ ...w }));
   }
 
   async getWebhooksByEvent(event: WebhookEventType, connectionId?: string): Promise<Webhook[]> {
-    let webhooks = Array.from(this.webhooks.values())
-      .filter(w => w.enabled && w.events.includes(event));
+    let webhooks = Array.from(this.webhooks.values()).filter(
+      (w) => w.enabled && w.events.includes(event),
+    );
     if (connectionId) {
       // Return webhooks scoped to this connection OR global webhooks (no connectionId)
-      webhooks = webhooks.filter(w => w.connectionId === connectionId || !w.connectionId);
+      webhooks = webhooks.filter((w) => w.connectionId === connectionId || !w.connectionId);
     } else {
       // No connectionId provided - only return global webhooks (not scoped to any connection)
-      webhooks = webhooks.filter(w => !w.connectionId);
+      webhooks = webhooks.filter((w) => !w.connectionId);
     }
-    return webhooks.map(w => ({ ...w }));
+    return webhooks.map((w) => ({ ...w }));
   }
 
-  async updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null> {
+  async updateWebhook(
+    id: string,
+    updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<Webhook | null> {
     const webhook = this.webhooks.get(id);
     if (!webhook) return null;
 
     // Filter out undefined values to prevent overwriting existing fields
     const definedUpdates = Object.fromEntries(
-      Object.entries(updates).filter(([_, value]) => value !== undefined)
+      Object.entries(updates).filter(([_, value]) => value !== undefined),
     );
 
     const updated: Webhook = {
@@ -734,12 +816,14 @@ export class MemoryAdapter implements StoragePort {
       const deliveriesToDelete = Array.from(this.deliveries.entries())
         .filter(([_, d]) => d.webhookId === id)
         .map(([id]) => id);
-      deliveriesToDelete.forEach(deliveryId => this.deliveries.delete(deliveryId));
+      deliveriesToDelete.forEach((deliveryId) => this.deliveries.delete(deliveryId));
     }
     return deleted;
   }
 
-  async createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery> {
+  async createDelivery(
+    delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>,
+  ): Promise<WebhookDelivery> {
     const now = Date.now();
     const id = randomUUID();
     const newDelivery: WebhookDelivery = {
@@ -750,12 +834,12 @@ export class MemoryAdapter implements StoragePort {
     this.deliveries.set(id, newDelivery);
 
     const webhookDeliveries = Array.from(this.deliveries.values())
-      .filter(d => d.webhookId === delivery.webhookId)
+      .filter((d) => d.webhookId === delivery.webhookId)
       .sort((a, b) => b.createdAt - a.createdAt);
 
     if (webhookDeliveries.length > this.MAX_DELIVERIES_PER_WEBHOOK) {
       const toDelete = webhookDeliveries.slice(this.MAX_DELIVERIES_PER_WEBHOOK);
-      toDelete.forEach(d => this.deliveries.delete(d.id));
+      toDelete.forEach((d) => this.deliveries.delete(d.id));
     }
 
     return { ...newDelivery };
@@ -766,15 +850,22 @@ export class MemoryAdapter implements StoragePort {
     return delivery ? { ...delivery } : null;
   }
 
-  async getDeliveriesByWebhook(webhookId: string, limit: number = 50, offset: number = 0): Promise<WebhookDelivery[]> {
+  async getDeliveriesByWebhook(
+    webhookId: string,
+    limit: number = 50,
+    offset: number = 0,
+  ): Promise<WebhookDelivery[]> {
     return Array.from(this.deliveries.values())
-      .filter(d => d.webhookId === webhookId)
+      .filter((d) => d.webhookId === webhookId)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(offset, offset + limit)
-      .map(d => ({ ...d }));
+      .map((d) => ({ ...d }));
   }
 
-  async updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean> {
+  async updateDelivery(
+    id: string,
+    updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>,
+  ): Promise<boolean> {
     const delivery = this.deliveries.get(id);
     if (!delivery) return false;
 
@@ -789,23 +880,30 @@ export class MemoryAdapter implements StoragePort {
     return true;
   }
 
-  async getRetriableDeliveries(limit: number = 100, connectionId?: string): Promise<WebhookDelivery[]> {
+  async getRetriableDeliveries(
+    limit: number = 100,
+    connectionId?: string,
+  ): Promise<WebhookDelivery[]> {
     const now = Date.now();
-    let deliveries = Array.from(this.deliveries.values())
-      .filter(d => d.status === 'retrying' && d.nextRetryAt && d.nextRetryAt <= now);
+    let deliveries = Array.from(this.deliveries.values()).filter(
+      (d) => d.status === 'retrying' && d.nextRetryAt && d.nextRetryAt <= now,
+    );
     if (connectionId) {
-      deliveries = deliveries.filter(d => d.connectionId === connectionId);
+      deliveries = deliveries.filter((d) => d.connectionId === connectionId);
     }
     return deliveries
       .sort((a, b) => (a.nextRetryAt || 0) - (b.nextRetryAt || 0))
       .slice(0, limit)
-      .map(d => ({ ...d }));
+      .map((d) => ({ ...d }));
   }
 
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.deliveries.size;
     Array.from(this.deliveries.entries())
-      .filter(([_, d]) => d.createdAt < cutoffTimestamp && (!connectionId || d.connectionId === connectionId))
+      .filter(
+        ([_, d]) =>
+          d.createdAt < cutoffTimestamp && (!connectionId || d.connectionId === connectionId),
+      )
       .forEach(([id]) => this.deliveries.delete(id));
     return before - this.deliveries.size;
   }
@@ -816,7 +914,11 @@ export class MemoryAdapter implements StoragePort {
     for (const entry of entries) {
       // Check for duplicates based on unique constraint (including connectionId)
       const exists = this.slowLogEntries.some(
-        e => e.id === entry.id && e.sourceHost === entry.sourceHost && e.sourcePort === entry.sourcePort && e.connectionId === connectionId
+        (e) =>
+          e.id === entry.id &&
+          e.sourceHost === entry.sourceHost &&
+          e.sourcePort === entry.sourcePort &&
+          e.connectionId === connectionId,
       );
       if (!exists) {
         this.slowLogEntries.push({ ...entry, connectionId });
@@ -830,25 +932,25 @@ export class MemoryAdapter implements StoragePort {
     let filtered = [...this.slowLogEntries];
 
     if (options.connectionId) {
-      filtered = filtered.filter(e => e.connectionId === options.connectionId);
+      filtered = filtered.filter((e) => e.connectionId === options.connectionId);
     }
     if (options.startTime) {
-      filtered = filtered.filter(e => e.timestamp >= options.startTime!);
+      filtered = filtered.filter((e) => e.timestamp >= options.startTime!);
     }
     if (options.endTime) {
-      filtered = filtered.filter(e => e.timestamp <= options.endTime!);
+      filtered = filtered.filter((e) => e.timestamp <= options.endTime!);
     }
     if (options.command) {
       const cmd = options.command.toLowerCase();
       // command is an array, check if the first element (command name) matches
-      filtered = filtered.filter(e => e.command[0]?.toLowerCase().includes(cmd));
+      filtered = filtered.filter((e) => e.command[0]?.toLowerCase().includes(cmd));
     }
     if (options.clientName) {
       const name = options.clientName.toLowerCase();
-      filtered = filtered.filter(e => e.clientName.toLowerCase().includes(name));
+      filtered = filtered.filter((e) => e.clientName.toLowerCase().includes(name));
     }
     if (options.minDuration) {
-      filtered = filtered.filter(e => e.duration >= options.minDuration!);
+      filtered = filtered.filter((e) => e.duration >= options.minDuration!);
     }
 
     return filtered
@@ -859,28 +961,38 @@ export class MemoryAdapter implements StoragePort {
   async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
     let entries = this.slowLogEntries;
     if (connectionId) {
-      entries = entries.filter(e => e.connectionId === connectionId);
+      entries = entries.filter((e) => e.connectionId === connectionId);
     }
     if (entries.length === 0) return null;
-    return Math.max(...entries.map(e => e.id));
+    return Math.max(...entries.map((e) => e.id));
   }
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.slowLogEntries.length;
     if (connectionId) {
-      this.slowLogEntries = this.slowLogEntries.filter(e => e.capturedAt >= cutoffTimestamp || e.connectionId !== connectionId);
+      this.slowLogEntries = this.slowLogEntries.filter(
+        (e) => e.capturedAt >= cutoffTimestamp || e.connectionId !== connectionId,
+      );
     } else {
-      this.slowLogEntries = this.slowLogEntries.filter(e => e.capturedAt >= cutoffTimestamp);
+      this.slowLogEntries = this.slowLogEntries.filter((e) => e.capturedAt >= cutoffTimestamp);
     }
     return before - this.slowLogEntries.length;
   }
 
   // Command Log Methods
-  async saveCommandLogEntries(entries: StoredCommandLogEntry[], connectionId: string): Promise<number> {
+  async saveCommandLogEntries(
+    entries: StoredCommandLogEntry[],
+    connectionId: string,
+  ): Promise<number> {
     let savedCount = 0;
     for (const entry of entries) {
       const exists = this.commandLogEntries.some(
-        e => e.id === entry.id && e.type === entry.type && e.sourceHost === entry.sourceHost && e.sourcePort === entry.sourcePort && e.connectionId === connectionId
+        (e) =>
+          e.id === entry.id &&
+          e.type === entry.type &&
+          e.sourceHost === entry.sourceHost &&
+          e.sourcePort === entry.sourcePort &&
+          e.connectionId === connectionId,
       );
       if (!exists) {
         this.commandLogEntries.push({ ...entry, connectionId });
@@ -890,31 +1002,33 @@ export class MemoryAdapter implements StoragePort {
     return savedCount;
   }
 
-  async getCommandLogEntries(options: CommandLogQueryOptions = {}): Promise<StoredCommandLogEntry[]> {
+  async getCommandLogEntries(
+    options: CommandLogQueryOptions = {},
+  ): Promise<StoredCommandLogEntry[]> {
     let filtered = [...this.commandLogEntries];
 
     if (options.connectionId) {
-      filtered = filtered.filter(e => e.connectionId === options.connectionId);
+      filtered = filtered.filter((e) => e.connectionId === options.connectionId);
     }
     if (options.startTime) {
-      filtered = filtered.filter(e => e.timestamp >= options.startTime!);
+      filtered = filtered.filter((e) => e.timestamp >= options.startTime!);
     }
     if (options.endTime) {
-      filtered = filtered.filter(e => e.timestamp <= options.endTime!);
+      filtered = filtered.filter((e) => e.timestamp <= options.endTime!);
     }
     if (options.command) {
       const cmd = options.command.toLowerCase();
-      filtered = filtered.filter(e => e.command[0]?.toLowerCase().includes(cmd));
+      filtered = filtered.filter((e) => e.command[0]?.toLowerCase().includes(cmd));
     }
     if (options.clientName) {
       const name = options.clientName.toLowerCase();
-      filtered = filtered.filter(e => e.clientName.toLowerCase().includes(name));
+      filtered = filtered.filter((e) => e.clientName.toLowerCase().includes(name));
     }
     if (options.type) {
-      filtered = filtered.filter(e => e.type === options.type);
+      filtered = filtered.filter((e) => e.type === options.type);
     }
     if (options.minDuration) {
-      filtered = filtered.filter(e => e.duration >= options.minDuration!);
+      filtered = filtered.filter((e) => e.duration >= options.minDuration!);
     }
 
     return filtered
@@ -923,43 +1037,52 @@ export class MemoryAdapter implements StoragePort {
   }
 
   async getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null> {
-    let entriesOfType = this.commandLogEntries.filter(e => e.type === type);
+    let entriesOfType = this.commandLogEntries.filter((e) => e.type === type);
     if (connectionId) {
-      entriesOfType = entriesOfType.filter(e => e.connectionId === connectionId);
+      entriesOfType = entriesOfType.filter((e) => e.connectionId === connectionId);
     }
     if (entriesOfType.length === 0) return null;
-    return Math.max(...entriesOfType.map(e => e.id));
+    return Math.max(...entriesOfType.map((e) => e.id));
   }
 
   async pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.commandLogEntries.length;
     if (connectionId) {
-      this.commandLogEntries = this.commandLogEntries.filter(e => e.capturedAt >= cutoffTimestamp || e.connectionId !== connectionId);
+      this.commandLogEntries = this.commandLogEntries.filter(
+        (e) => e.capturedAt >= cutoffTimestamp || e.connectionId !== connectionId,
+      );
     } else {
-      this.commandLogEntries = this.commandLogEntries.filter(e => e.capturedAt >= cutoffTimestamp);
+      this.commandLogEntries = this.commandLogEntries.filter(
+        (e) => e.capturedAt >= cutoffTimestamp,
+      );
     }
     return before - this.commandLogEntries.length;
   }
 
   // Latency Snapshot Methods
-  async saveLatencySnapshots(snapshots: StoredLatencySnapshot[], connectionId: string): Promise<number> {
+  async saveLatencySnapshots(
+    snapshots: StoredLatencySnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     for (const snapshot of snapshots) {
       this.latencySnapshots.push({ ...snapshot, connectionId });
     }
     return snapshots.length;
   }
 
-  async getLatencySnapshots(options: LatencySnapshotQueryOptions = {}): Promise<StoredLatencySnapshot[]> {
+  async getLatencySnapshots(
+    options: LatencySnapshotQueryOptions = {},
+  ): Promise<StoredLatencySnapshot[]> {
     let filtered = [...this.latencySnapshots];
 
     if (options.connectionId) {
-      filtered = filtered.filter(e => e.connectionId === options.connectionId);
+      filtered = filtered.filter((e) => e.connectionId === options.connectionId);
     }
     if (options.startTime) {
-      filtered = filtered.filter(e => e.timestamp >= options.startTime!);
+      filtered = filtered.filter((e) => e.timestamp >= options.startTime!);
     }
     if (options.endTime) {
-      filtered = filtered.filter(e => e.timestamp <= options.endTime!);
+      filtered = filtered.filter((e) => e.timestamp <= options.endTime!);
     }
 
     return filtered
@@ -970,56 +1093,71 @@ export class MemoryAdapter implements StoragePort {
   async pruneOldLatencySnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.latencySnapshots.length;
     if (connectionId) {
-      this.latencySnapshots = this.latencySnapshots.filter(e => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId);
+      this.latencySnapshots = this.latencySnapshots.filter(
+        (e) => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId,
+      );
     } else {
-      this.latencySnapshots = this.latencySnapshots.filter(e => e.timestamp >= cutoffTimestamp);
+      this.latencySnapshots = this.latencySnapshots.filter((e) => e.timestamp >= cutoffTimestamp);
     }
     return before - this.latencySnapshots.length;
   }
 
   // Latency Histogram Methods
-  async saveLatencyHistogram(histogram: import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram, connectionId: string): Promise<number> {
+  async saveLatencyHistogram(
+    histogram: StoredLatencyHistogram,
+    connectionId: string,
+  ): Promise<number> {
     this.latencyHistograms.push({ ...histogram, connectionId });
     return 1;
   }
 
-  async getLatencyHistograms(options: { connectionId?: string; startTime?: number; endTime?: number; limit?: number } = {}): Promise<import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram[]> {
+  async getLatencyHistograms(
+    options: { connectionId?: string; startTime?: number; endTime?: number; limit?: number } = {},
+  ): Promise<StoredLatencyHistogram[]> {
     let filtered = [...this.latencyHistograms];
-    if (options.connectionId) filtered = filtered.filter(e => e.connectionId === options.connectionId);
-    if (options.startTime) filtered = filtered.filter(e => e.timestamp >= options.startTime!);
-    if (options.endTime) filtered = filtered.filter(e => e.timestamp <= options.endTime!);
+    if (options.connectionId)
+      filtered = filtered.filter((e) => e.connectionId === options.connectionId);
+    if (options.startTime) filtered = filtered.filter((e) => e.timestamp >= options.startTime!);
+    if (options.endTime) filtered = filtered.filter((e) => e.timestamp <= options.endTime!);
     return filtered.sort((a, b) => b.timestamp - a.timestamp).slice(0, options.limit ?? 1);
   }
 
   async pruneOldLatencyHistograms(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.latencyHistograms.length;
     if (connectionId) {
-      this.latencyHistograms = this.latencyHistograms.filter(e => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId);
+      this.latencyHistograms = this.latencyHistograms.filter(
+        (e) => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId,
+      );
     } else {
-      this.latencyHistograms = this.latencyHistograms.filter(e => e.timestamp >= cutoffTimestamp);
+      this.latencyHistograms = this.latencyHistograms.filter((e) => e.timestamp >= cutoffTimestamp);
     }
     return before - this.latencyHistograms.length;
   }
 
   // Memory Snapshot Methods
-  async saveMemorySnapshots(snapshots: StoredMemorySnapshot[], connectionId: string): Promise<number> {
+  async saveMemorySnapshots(
+    snapshots: StoredMemorySnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     for (const snapshot of snapshots) {
       this.memorySnapshots.push({ ...snapshot, connectionId });
     }
     return snapshots.length;
   }
 
-  async getMemorySnapshots(options: MemorySnapshotQueryOptions = {}): Promise<StoredMemorySnapshot[]> {
+  async getMemorySnapshots(
+    options: MemorySnapshotQueryOptions = {},
+  ): Promise<StoredMemorySnapshot[]> {
     let filtered = [...this.memorySnapshots];
 
     if (options.connectionId) {
-      filtered = filtered.filter(e => e.connectionId === options.connectionId);
+      filtered = filtered.filter((e) => e.connectionId === options.connectionId);
     }
     if (options.startTime) {
-      filtered = filtered.filter(e => e.timestamp >= options.startTime!);
+      filtered = filtered.filter((e) => e.timestamp >= options.startTime!);
     }
     if (options.endTime) {
-      filtered = filtered.filter(e => e.timestamp <= options.endTime!);
+      filtered = filtered.filter((e) => e.timestamp <= options.endTime!);
     }
 
     return filtered
@@ -1030,64 +1168,87 @@ export class MemoryAdapter implements StoragePort {
   async pruneOldMemorySnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.memorySnapshots.length;
     if (connectionId) {
-      this.memorySnapshots = this.memorySnapshots.filter(e => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId);
+      this.memorySnapshots = this.memorySnapshots.filter(
+        (e) => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId,
+      );
     } else {
-      this.memorySnapshots = this.memorySnapshots.filter(e => e.timestamp >= cutoffTimestamp);
+      this.memorySnapshots = this.memorySnapshots.filter((e) => e.timestamp >= cutoffTimestamp);
     }
     return before - this.memorySnapshots.length;
   }
 
   // Vector Index Snapshot Methods
-  async saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number> {
+  async saveVectorIndexSnapshots(
+    snapshots: VectorIndexSnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     for (const snapshot of snapshots) {
       this.vectorIndexSnapshots.push({ ...snapshot, connectionId });
     }
     return snapshots.length;
   }
 
-  async getVectorIndexSnapshots(options: VectorIndexSnapshotQueryOptions = {}): Promise<VectorIndexSnapshot[]> {
+  async getVectorIndexSnapshots(
+    options: VectorIndexSnapshotQueryOptions = {},
+  ): Promise<VectorIndexSnapshot[]> {
     let filtered = [...this.vectorIndexSnapshots];
 
     if (options.connectionId) {
-      filtered = filtered.filter(e => e.connectionId === options.connectionId);
+      filtered = filtered.filter((e) => e.connectionId === options.connectionId);
     }
     if (options.indexName) {
-      filtered = filtered.filter(e => e.indexName === options.indexName);
+      filtered = filtered.filter((e) => e.indexName === options.indexName);
     }
     if (options.startTime) {
-      filtered = filtered.filter(e => e.timestamp >= options.startTime!);
+      filtered = filtered.filter((e) => e.timestamp >= options.startTime!);
     }
     if (options.endTime) {
-      filtered = filtered.filter(e => e.timestamp <= options.endTime!);
+      filtered = filtered.filter((e) => e.timestamp <= options.endTime!);
     }
 
-    return filtered
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, options.limit ?? 200);
+    return filtered.sort((a, b) => b.timestamp - a.timestamp).slice(0, options.limit ?? 200);
   }
 
-  async pruneOldVectorIndexSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldVectorIndexSnapshots(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     const before = this.vectorIndexSnapshots.length;
     if (connectionId) {
-      this.vectorIndexSnapshots = this.vectorIndexSnapshots.filter(e => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId);
+      this.vectorIndexSnapshots = this.vectorIndexSnapshots.filter(
+        (e) => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId,
+      );
     } else {
-      this.vectorIndexSnapshots = this.vectorIndexSnapshots.filter(e => e.timestamp >= cutoffTimestamp);
+      this.vectorIndexSnapshots = this.vectorIndexSnapshots.filter(
+        (e) => e.timestamp >= cutoffTimestamp,
+      );
     }
     return before - this.vectorIndexSnapshots.length;
   }
 
   // Connection Management Methods (in-memory storage)
-  private connections: Map<string, import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig> = new Map();
+  private connections: Map<
+    string,
+    DatabaseConnectionConfig
+  > = new Map();
 
-  async saveConnection(config: import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig): Promise<void> {
+  async saveConnection(
+    config: DatabaseConnectionConfig,
+  ): Promise<void> {
     this.connections.set(config.id, config);
   }
 
-  async getConnections(): Promise<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig[]> {
+  async getConnections(): Promise<
+    DatabaseConnectionConfig[]
+  > {
     return Array.from(this.connections.values()).sort((a, b) => a.createdAt - b.createdAt);
   }
 
-  async getConnection(id: string): Promise<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig | null> {
+  async getConnection(
+    id: string,
+  ): Promise<
+    DatabaseConnectionConfig | null
+  > {
     return this.connections.get(id) || null;
   }
 
@@ -1095,7 +1256,12 @@ export class MemoryAdapter implements StoragePort {
     this.connections.delete(id);
   }
 
-  async updateConnection(id: string, updates: Partial<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig>): Promise<void> {
+  async updateConnection(
+    id: string,
+    updates: Partial<
+      DatabaseConnectionConfig
+    >,
+  ): Promise<void> {
     const config = this.connections.get(id);
     if (config) {
       this.connections.set(id, { ...config, ...updates, updatedAt: Date.now() });
@@ -1104,19 +1270,64 @@ export class MemoryAdapter implements StoragePort {
 
   // Agent Token Methods (no-op for non-cloud deployments)
 
-  private agentTokens = new Map<string, { id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>();
+  private agentTokens = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      type: 'agent' | 'mcp';
+      tokenHash: string;
+      createdAt: number;
+      expiresAt: number;
+      revokedAt: number | null;
+      lastUsedAt: number | null;
+    }
+  >();
 
-  async saveAgentToken(token: { id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }): Promise<void> {
+  async saveAgentToken(token: {
+    id: string;
+    name: string;
+    type: 'agent' | 'mcp';
+    tokenHash: string;
+    createdAt: number;
+    expiresAt: number;
+    revokedAt: number | null;
+    lastUsedAt: number | null;
+  }): Promise<void> {
     this.agentTokens.set(token.id, token);
   }
 
-  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<Array<{ id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>> {
+  async getAgentTokens(
+    type?: 'agent' | 'mcp',
+  ): Promise<
+    Array<{
+      id: string;
+      name: string;
+      type: 'agent' | 'mcp';
+      tokenHash: string;
+      createdAt: number;
+      expiresAt: number;
+      revokedAt: number | null;
+      lastUsedAt: number | null;
+    }>
+  > {
     let tokens = Array.from(this.agentTokens.values());
-    if (type) tokens = tokens.filter(t => t.type === type);
+    if (type) tokens = tokens.filter((t) => t.type === type);
     return tokens.sort((a, b) => b.createdAt - a.createdAt);
   }
 
-  async getAgentTokenByHash(hash: string): Promise<{ id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null } | null> {
+  async getAgentTokenByHash(
+    hash: string,
+  ): Promise<{
+    id: string;
+    name: string;
+    type: 'agent' | 'mcp';
+    tokenHash: string;
+    createdAt: number;
+    expiresAt: number;
+    revokedAt: number | null;
+    lastUsedAt: number | null;
+  } | null> {
     for (const token of this.agentTokens.values()) {
       if (token.tokenHash === hash) return token;
     }
@@ -1135,5 +1346,27 @@ export class MemoryAdapter implements StoragePort {
     if (token) {
       token.lastUsedAt = Date.now();
     }
+  }
+
+  // Throughput Forecasting Settings
+  async getThroughputSettings(
+    connectionId: string,
+  ): Promise<ThroughputSettings | null> {
+    return this.throughputSettings.get(connectionId) ?? null;
+  }
+
+  async saveThroughputSettings(
+    settings: ThroughputSettings,
+  ): Promise<ThroughputSettings> {
+    this.throughputSettings.set(settings.connectionId, settings);
+    return { ...settings };
+  }
+
+  async deleteThroughputSettings(connectionId: string): Promise<boolean> {
+    return this.throughputSettings.delete(connectionId);
+  }
+
+  async getActiveThroughputSettings(): Promise<ThroughputSettings[]> {
+    return [...this.throughputSettings.values()].filter((s) => s.enabled && s.opsCeiling !== null);
   }
 }

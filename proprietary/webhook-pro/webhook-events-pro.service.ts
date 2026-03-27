@@ -253,4 +253,42 @@ export class WebhookEventsProService implements OnModuleInit {
       data.connectionId
     );
   }
+
+  /**
+   * Dispatch throughput limit event (PRO+)
+   * Called when projected time-to-limit drops below configured threshold
+   */
+  async dispatchThroughputLimit(data: {
+    currentOpsPerSec: number;
+    opsCeiling: number;
+    timeToLimitMs: number;
+    threshold: number;
+    growthRate: number;
+    timestamp: number;
+    instance: { host: string; port: number };
+    connectionId?: string;
+  }): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Throughput limit event skipped - requires PRO license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchThresholdAlert(
+      WebhookEventType.THROUGHPUT_LIMIT,
+      `throughput_limit:${data.connectionId || 'default'}`,
+      data.timeToLimitMs,
+      data.threshold,
+      false, // isAbove = false: fire when timeToLimit drops BELOW threshold
+      {
+        currentOpsPerSec: data.currentOpsPerSec,
+        opsCeiling: data.opsCeiling,
+        timeToLimitMs: data.timeToLimitMs,
+        growthRate: data.growthRate,
+        message: `Ops/sec projected to reach ceiling (${data.opsCeiling}) in ~${Math.round(data.timeToLimitMs / 3_600_000)}h`,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
 }

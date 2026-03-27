@@ -16,7 +16,12 @@ import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
 import { HealthService } from '../health/health.service';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
-import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import { InfoResponse } from '../common/types/metrics.types';
+import {
+  MultiConnectionPoller,
+  ConnectionContext,
+} from '../common/services/multi-connection-poller';
+import { ThroughputForecastingService } from '../throughput-forecasting/throughput-forecasting.service';
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
@@ -40,7 +45,7 @@ interface ConnectionMetricState {
 @Injectable()
 export class PrometheusService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(PrometheusService.name);
-  private registry: Registry;
+  private readonly registry: Registry;
   private readonly pollIntervalMs: number;
 
   // Per-connection state tracking
@@ -150,6 +155,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private anomalyDetectionBufferMean: Gauge;
   private anomalyDetectionBufferStdDev: Gauge;
 
+  // Throughput Forecasting Metrics
+  private throughputTimeToLimitSeconds: Gauge;
+
   constructor(
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
     connectionRegistry: ConnectionRegistry,
@@ -159,8 +167,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     private readonly commandLogAnalytics: CommandLogAnalyticsService,
     @Inject(forwardRef(() => HealthService)) private readonly healthService: HealthService,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
-    @Optional() @Inject(WEBHOOK_EVENTS_PRO_SERVICE) private readonly webhookEventsProService?: IWebhookEventsProService,
-    @Optional() @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE) private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
+    @Optional()
+    @Inject(WEBHOOK_EVENTS_PRO_SERVICE)
+    private readonly webhookEventsProService?: IWebhookEventsProService,
+    @Optional()
+    @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE)
+    private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
+    @Optional()
+    private readonly throughputForecastingService?: ThroughputForecastingService,
   ) {
     super(connectionRegistry);
     this.pollIntervalMs = this.configService.get<number>('PROMETHEUS_POLL_INTERVAL_MS', 5000);
@@ -210,7 +224,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   /**
-   * Get or create per-connection metric state
+   * Get or create a per-connection metric state
    */
   private getConnectionState(connectionId: string): ConnectionMetricState {
     if (!this.perConnectionState.has(connectionId)) {
@@ -242,7 +256,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   /**
-   * Create a Gauge with connection label always included
+   * Create a Gauge with a connection label always included
    */
   private createGauge(name: string, help: string, additionalLabels?: string[]): Gauge {
     return new Gauge({
@@ -256,49 +270,135 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private initializeMetrics(): void {
     // ACL Audit (storage-based, per-connection)
     this.aclDeniedTotal = this.createGauge('acl_denied', 'Total ACL denied events captured');
-    this.aclDeniedByReason = this.createGauge('acl_denied_by_reason', 'ACL denied events by reason', ['reason']);
-    this.aclDeniedByUser = this.createGauge('acl_denied_by_user', 'ACL denied events by username', ['username']);
+    this.aclDeniedByReason = this.createGauge(
+      'acl_denied_by_reason',
+      'ACL denied events by reason',
+      ['reason'],
+    );
+    this.aclDeniedByUser = this.createGauge('acl_denied_by_user', 'ACL denied events by username', [
+      'username',
+    ]);
 
     // Client Analytics (storage-based, per-connection)
-    this.clientConnectionsCurrent = this.createGauge('client_connections_current', 'Current number of client connections');
-    this.clientConnectionsByName = this.createGauge('client_connections_by_name', 'Current connections by client name', ['client_name']);
-    this.clientConnectionsByUser = this.createGauge('client_connections_by_user', 'Current connections by ACL user', ['user']);
-    this.clientConnectionsPeak = this.createGauge('client_connections_peak', 'Peak connections in retention period');
+    this.clientConnectionsCurrent = this.createGauge(
+      'client_connections_current',
+      'Current number of client connections',
+    );
+    this.clientConnectionsByName = this.createGauge(
+      'client_connections_by_name',
+      'Current connections by client name',
+      ['client_name'],
+    );
+    this.clientConnectionsByUser = this.createGauge(
+      'client_connections_by_user',
+      'Current connections by ACL user',
+      ['user'],
+    );
+    this.clientConnectionsPeak = this.createGauge(
+      'client_connections_peak',
+      'Peak connections in retention period',
+    );
 
     // Slowlog Patterns (storage-based, per-connection)
-    this.slowlogPatternCount = this.createGauge('slowlog_pattern_count', 'Number of slow queries per pattern', ['pattern']);
-    this.slowlogPatternDuration = this.createGauge('slowlog_pattern_avg_duration_us', 'Average duration in microseconds per pattern', ['pattern']);
-    this.slowlogPatternPercentage = this.createGauge('slowlog_pattern_percentage', 'Percentage of slow queries per pattern', ['pattern']);
+    this.slowlogPatternCount = this.createGauge(
+      'slowlog_pattern_count',
+      'Number of slow queries per pattern',
+      ['pattern'],
+    );
+    this.slowlogPatternDuration = this.createGauge(
+      'slowlog_pattern_avg_duration_us',
+      'Average duration in microseconds per pattern',
+      ['pattern'],
+    );
+    this.slowlogPatternPercentage = this.createGauge(
+      'slowlog_pattern_percentage',
+      'Percentage of slow queries per pattern',
+      ['pattern'],
+    );
 
     // COMMANDLOG (Valkey 8.1+) - storage-based, per-connection
-    this.commandlogLargeRequestCount = this.createGauge('commandlog_large_request', 'Total large request entries');
-    this.commandlogLargeReplyCount = this.createGauge('commandlog_large_reply', 'Total large reply entries');
-    this.commandlogLargeRequestByPattern = this.createGauge('commandlog_large_request_by_pattern', 'Large request count by command pattern', ['pattern']);
-    this.commandlogLargeReplyByPattern = this.createGauge('commandlog_large_reply_by_pattern', 'Large reply count by command pattern', ['pattern']);
+    this.commandlogLargeRequestCount = this.createGauge(
+      'commandlog_large_request',
+      'Total large request entries',
+    );
+    this.commandlogLargeReplyCount = this.createGauge(
+      'commandlog_large_reply',
+      'Total large reply entries',
+    );
+    this.commandlogLargeRequestByPattern = this.createGauge(
+      'commandlog_large_request_by_pattern',
+      'Large request count by command pattern',
+      ['pattern'],
+    );
+    this.commandlogLargeReplyByPattern = this.createGauge(
+      'commandlog_large_reply_by_pattern',
+      'Large reply count by command pattern',
+      ['pattern'],
+    );
 
     // Standard INFO - Server (per connection)
     this.uptimeInSeconds = this.createGauge('uptime_in_seconds', 'Server uptime in seconds');
-    this.instanceInfo = this.createGauge('instance_info', 'Instance information (always 1)', ['version', 'role', 'os']);
+    this.instanceInfo = this.createGauge('instance_info', 'Instance information (always 1)', [
+      'version',
+      'role',
+      'os',
+    ]);
 
     // Standard INFO - Clients (per connection)
     this.connectedClients = this.createGauge('connected_clients', 'Number of client connections');
-    this.blockedClients = this.createGauge('blocked_clients', 'Clients blocked on BLPOP, BRPOP, etc');
-    this.trackingClients = this.createGauge('tracking_clients', 'Clients being tracked for client-side caching');
+    this.blockedClients = this.createGauge(
+      'blocked_clients',
+      'Clients blocked on BLPOP, BRPOP, etc',
+    );
+    this.trackingClients = this.createGauge(
+      'tracking_clients',
+      'Clients being tracked for client-side caching',
+    );
 
     // Standard INFO - Memory (per connection)
     this.memoryUsedBytes = this.createGauge('memory_used_bytes', 'Total allocated memory in bytes');
-    this.memoryUsedRssBytes = this.createGauge('memory_used_rss_bytes', 'RSS memory usage in bytes');
-    this.memoryUsedPeakBytes = this.createGauge('memory_used_peak_bytes', 'Peak memory usage in bytes');
-    this.memoryMaxBytes = this.createGauge('memory_max_bytes', 'Maximum memory limit in bytes (0 if unlimited)');
-    this.memoryFragmentationRatio = this.createGauge('memory_fragmentation_ratio', 'Memory fragmentation ratio');
-    this.memoryFragmentationBytes = this.createGauge('memory_fragmentation_bytes', 'Memory fragmentation in bytes');
+    this.memoryUsedRssBytes = this.createGauge(
+      'memory_used_rss_bytes',
+      'RSS memory usage in bytes',
+    );
+    this.memoryUsedPeakBytes = this.createGauge(
+      'memory_used_peak_bytes',
+      'Peak memory usage in bytes',
+    );
+    this.memoryMaxBytes = this.createGauge(
+      'memory_max_bytes',
+      'Maximum memory limit in bytes (0 if unlimited)',
+    );
+    this.memoryFragmentationRatio = this.createGauge(
+      'memory_fragmentation_ratio',
+      'Memory fragmentation ratio',
+    );
+    this.memoryFragmentationBytes = this.createGauge(
+      'memory_fragmentation_bytes',
+      'Memory fragmentation in bytes',
+    );
 
     // Standard INFO - Stats (per connection)
-    this.connectionsReceivedTotal = this.createGauge('connections_received_total', 'Total connections received');
-    this.commandsProcessedTotal = this.createGauge('commands_processed_total', 'Total commands processed');
-    this.instantaneousOpsPerSec = this.createGauge('instantaneous_ops_per_sec', 'Current operations per second');
-    this.instantaneousInputKbps = this.createGauge('instantaneous_input_kbps', 'Current input kilobytes per second');
-    this.instantaneousOutputKbps = this.createGauge('instantaneous_output_kbps', 'Current output kilobytes per second');
+    this.connectionsReceivedTotal = this.createGauge(
+      'connections_received_total',
+      'Total connections received',
+    );
+    this.commandsProcessedTotal = this.createGauge(
+      'commands_processed_total',
+      'Total commands processed',
+    );
+    this.instantaneousOpsPerSec = this.createGauge(
+      'instantaneous_ops_per_sec',
+      'Current operations per second',
+    );
+    this.instantaneousInputKbps = this.createGauge(
+      'instantaneous_input_kbps',
+      'Current input kilobytes per second',
+    );
+    this.instantaneousOutputKbps = this.createGauge(
+      'instantaneous_output_kbps',
+      'Current output kilobytes per second',
+    );
     this.keyspaceHitsTotal = this.createGauge('keyspace_hits_total', 'Total keyspace hits');
     this.keyspaceMissesTotal = this.createGauge('keyspace_misses_total', 'Total keyspace misses');
     this.evictedKeysTotal = this.createGauge('evicted_keys_total', 'Total evicted keys');
@@ -309,32 +409,67 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // Standard INFO - Replication (per connection)
     this.connectedSlaves = this.createGauge('connected_slaves', 'Number of connected replicas');
     this.replicationOffset = this.createGauge('replication_offset', 'Replication offset');
-    this.masterLinkUp = this.createGauge('master_link_up', '1 if link to master is up (replica only)');
-    this.masterLastIoSecondsAgo = this.createGauge('master_last_io_seconds_ago', 'Seconds since last I/O with master (replica only)');
+    this.masterLinkUp = this.createGauge(
+      'master_link_up',
+      '1 if link to master is up (replica only)',
+    );
+    this.masterLastIoSecondsAgo = this.createGauge(
+      'master_last_io_seconds_ago',
+      'Seconds since last I/O with master (replica only)',
+    );
 
     // Keyspace Metrics (per connection, per database)
     this.dbKeys = this.createGauge('db_keys', 'Total keys in database', ['db']);
-    this.dbKeysExpiring = this.createGauge('db_keys_expiring', 'Keys with expiration in database', ['db']);
+    this.dbKeysExpiring = this.createGauge('db_keys_expiring', 'Keys with expiration in database', [
+      'db',
+    ]);
     this.dbAvgTtlSeconds = this.createGauge('db_avg_ttl_seconds', 'Average TTL in seconds', ['db']);
 
     // Cluster Metrics (per connection)
     this.clusterEnabled = this.createGauge('cluster_enabled', '1 if cluster mode is enabled');
-    this.clusterKnownNodes = this.createGauge('cluster_known_nodes', 'Number of known cluster nodes');
+    this.clusterKnownNodes = this.createGauge(
+      'cluster_known_nodes',
+      'Number of known cluster nodes',
+    );
     this.clusterSize = this.createGauge('cluster_size', 'Number of master nodes in cluster');
-    this.clusterSlotsAssigned = this.createGauge('cluster_slots_assigned', 'Number of assigned slots');
+    this.clusterSlotsAssigned = this.createGauge(
+      'cluster_slots_assigned',
+      'Number of assigned slots',
+    );
     this.clusterSlotsOk = this.createGauge('cluster_slots_ok', 'Number of slots in OK state');
     this.clusterSlotsFail = this.createGauge('cluster_slots_fail', 'Number of slots in FAIL state');
-    this.clusterSlotsPfail = this.createGauge('cluster_slots_pfail', 'Number of slots in PFAIL state');
+    this.clusterSlotsPfail = this.createGauge(
+      'cluster_slots_pfail',
+      'Number of slots in PFAIL state',
+    );
 
     // Cluster Slot Metrics (Valkey 8.0+) - per connection, per slot
     this.clusterSlotKeys = this.createGauge('cluster_slot_keys', 'Keys in cluster slot', ['slot']);
-    this.clusterSlotExpires = this.createGauge('cluster_slot_expires', 'Expiring keys in cluster slot', ['slot']);
-    this.clusterSlotReadsTotal = this.createGauge('cluster_slot_reads_total', 'Total reads for cluster slot', ['slot']);
-    this.clusterSlotWritesTotal = this.createGauge('cluster_slot_writes_total', 'Total writes for cluster slot', ['slot']);
+    this.clusterSlotExpires = this.createGauge(
+      'cluster_slot_expires',
+      'Expiring keys in cluster slot',
+      ['slot'],
+    );
+    this.clusterSlotReadsTotal = this.createGauge(
+      'cluster_slot_reads_total',
+      'Total reads for cluster slot',
+      ['slot'],
+    );
+    this.clusterSlotWritesTotal = this.createGauge(
+      'cluster_slot_writes_total',
+      'Total writes for cluster slot',
+      ['slot'],
+    );
 
     // CPU Metrics (per connection)
-    this.cpuSysSecondsTotal = this.createGauge('cpu_sys_seconds_total', 'System CPU consumed by the server');
-    this.cpuUserSecondsTotal = this.createGauge('cpu_user_seconds_total', 'User CPU consumed by the server');
+    this.cpuSysSecondsTotal = this.createGauge(
+      'cpu_sys_seconds_total',
+      'System CPU consumed by the server',
+    );
+    this.cpuUserSecondsTotal = this.createGauge(
+      'cpu_user_seconds_total',
+      'User CPU consumed by the server',
+    );
 
     // Slowlog Raw Metrics (per connection)
     this.slowlogLength = this.createGauge('slowlog_length', 'Current slowlog length');
@@ -370,14 +505,50 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       labelNames: ['connection', 'pattern', 'severity'],
       registers: [this.registry],
     });
-    this.anomalyEventsCurrent = this.createGauge('anomaly_events_current', 'Unresolved anomalies', ['severity']);
-    this.anomalyBySeverity = this.createGauge('anomaly_by_severity', 'Anomalies in last hour by severity', ['severity']);
-    this.anomalyByMetric = this.createGauge('anomaly_by_metric', 'Anomalies in last hour by metric', ['metric_type']);
-    this.correlatedGroupsBySeverity = this.createGauge('correlated_groups_by_severity', 'Groups in last hour by severity', ['severity']);
-    this.correlatedGroupsByPattern = this.createGauge('correlated_groups_by_pattern', 'Groups in last hour by pattern', ['pattern']);
-    this.anomalyDetectionBufferReady = this.createGauge('anomaly_buffer_ready', 'Buffer ready state (1=ready, 0=warming)', ['metric_type']);
-    this.anomalyDetectionBufferMean = this.createGauge('anomaly_buffer_mean', 'Rolling mean for anomaly detection', ['metric_type']);
-    this.anomalyDetectionBufferStdDev = this.createGauge('anomaly_buffer_stddev', 'Rolling stddev for anomaly detection', ['metric_type']);
+    this.anomalyEventsCurrent = this.createGauge('anomaly_events_current', 'Unresolved anomalies', [
+      'severity',
+    ]);
+    this.anomalyBySeverity = this.createGauge(
+      'anomaly_by_severity',
+      'Anomalies in last hour by severity',
+      ['severity'],
+    );
+    this.anomalyByMetric = this.createGauge(
+      'anomaly_by_metric',
+      'Anomalies in last hour by metric',
+      ['metric_type'],
+    );
+    this.correlatedGroupsBySeverity = this.createGauge(
+      'correlated_groups_by_severity',
+      'Groups in last hour by severity',
+      ['severity'],
+    );
+    this.correlatedGroupsByPattern = this.createGauge(
+      'correlated_groups_by_pattern',
+      'Groups in last hour by pattern',
+      ['pattern'],
+    );
+    this.anomalyDetectionBufferReady = this.createGauge(
+      'anomaly_buffer_ready',
+      'Buffer ready state (1=ready, 0=warming)',
+      ['metric_type'],
+    );
+    this.anomalyDetectionBufferMean = this.createGauge(
+      'anomaly_buffer_mean',
+      'Rolling mean for anomaly detection',
+      ['metric_type'],
+    );
+    this.anomalyDetectionBufferStdDev = this.createGauge(
+      'anomaly_buffer_stddev',
+      'Rolling stddev for anomaly detection',
+      ['metric_type'],
+    );
+
+    // Throughput Forecasting
+    this.throughputTimeToLimitSeconds = this.createGauge(
+      'throughput_time_to_limit_seconds',
+      'Projected seconds until ops/sec reaches configured ceiling. Only exported when a ceiling is configured.',
+    );
   }
 
   /**
@@ -385,7 +556,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    */
   async updateMetrics(): Promise<void> {
     const connections = this.connectionRegistry.list();
-    const connectedConnections = connections.filter(c => c.isConnected);
+    const connectedConnections = connections.filter((c) => c.isConnected);
 
     // Update both INFO-based and storage-based metrics for all connections
     for (const conn of connectedConnections) {
@@ -394,7 +565,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         await this.updateStorageBasedMetricsForConnection(conn.id);
       } catch (error) {
         this.logger.warn(
-          `Failed to update metrics for connection ${conn.name}: ${error instanceof Error ? error.message : 'Unknown'}`
+          `Failed to update metrics for connection ${conn.name}: ${error instanceof Error ? error.message : 'Unknown'}`,
         );
       }
     }
@@ -411,6 +582,23 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     await this.updateClientMetrics(connectionId, connLabel, state);
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
     await this.updateCommandlogMetrics(connectionId, connLabel, state);
+    await this.updateThroughputMetrics(connectionId, connLabel);
+  }
+
+  private async updateThroughputMetrics(connectionId: string, connLabel: string): Promise<void> {
+    if (!this.throughputForecastingService) {
+      return;
+    }
+    try {
+      const forecast = await this.throughputForecastingService.getForecast(connectionId);
+      if (forecast.opsCeiling !== null && !forecast.insufficientData && forecast.enabled) {
+        const value = forecast.timeToLimitMs !== null ? forecast.timeToLimitMs / 1000 : -1;
+        this.throughputTimeToLimitSeconds.labels(connLabel).set(value);
+      }
+    } catch {
+      this.logger.warn(`Failed to update throughput metrics for connection ${connectionId}`);
+      // Silently skip if forecasting unavailable
+    }
   }
 
   /**
@@ -444,7 +632,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
   }
 
-  private updateServerMetrics(info: Record<string, any>, connLabel: string): void {
+  private updateServerMetrics(info: InfoResponse, connLabel: string): void {
     if (!info.server) return;
 
     const version = info.server.valkey_version || info.server.redis_version || 'unknown';
@@ -456,10 +644,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   private updateClientInfoMetrics(
-    info: Record<string, any>,
+    info: InfoResponse,
     connLabel: string,
     connectionId: string,
-    config: { host: string; port: number } | null,
+    _config: { host: string; port: number } | null,
   ): void {
     if (!info.clients) return;
 
@@ -475,27 +663,29 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // Webhook dispatch for connection.critical
     if (this.webhookDispatcher && maxClients > 0) {
       const usedPercent = (connectedClients / maxClients) * 100;
-      this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
-        WebhookEventType.CONNECTION_CRITICAL,
-        'connection_critical',
-        usedPercent,
-        'connectionCriticalPercent',
-        true,
-        {
-          currentConnections: connectedClients,
-          maxConnections: maxClients,
-          usedPercent: parseFloat(usedPercent.toFixed(2)),
-          message: `Connection usage critical: ${usedPercent.toFixed(1)}% (${connectedClients} / ${maxClients})`,
-        },
-        connectionId
-      ).catch(err => {
-        this.logger.error('Failed to dispatch connection.critical webhook', err);
-      });
+      this.webhookDispatcher
+        .dispatchThresholdAlertPerWebhook(
+          WebhookEventType.CONNECTION_CRITICAL,
+          'connection_critical',
+          usedPercent,
+          'connectionCriticalPercent',
+          true,
+          {
+            currentConnections: connectedClients,
+            maxConnections: maxClients,
+            usedPercent: parseFloat(usedPercent.toFixed(2)),
+            message: `Connection usage critical: ${usedPercent.toFixed(1)}% (${connectedClients} / ${maxClients})`,
+          },
+          connectionId,
+        )
+        .catch((err) => {
+          this.logger.error('Failed to dispatch connection.critical webhook', err);
+        });
     }
   }
 
   private updateMemoryMetrics(
-    info: Record<string, any>,
+    info: InfoResponse,
     connLabel: string,
     connectionId: string,
     config: { host: string; port: number } | null,
@@ -510,57 +700,79 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.memoryUsedRssBytes.labels(connLabel).set(parseInt(info.memory.used_memory_rss) || 0);
     this.memoryUsedPeakBytes.labels(connLabel).set(parseInt(info.memory.used_memory_peak) || 0);
     this.memoryMaxBytes.labels(connLabel).set(maxMemory);
-    this.memoryFragmentationRatio.labels(connLabel).set(parseFloat(info.memory.mem_fragmentation_ratio) || 0);
-    this.memoryFragmentationBytes.labels(connLabel).set(parseInt(info.memory.mem_fragmentation_bytes) || 0);
+    this.memoryFragmentationRatio
+      .labels(connLabel)
+      .set(parseFloat(info.memory.mem_fragmentation_ratio) || 0);
+    this.memoryFragmentationBytes
+      .labels(connLabel)
+      .set(parseInt(info.memory.mem_fragmentation_bytes) || 0);
 
     if (this.webhookDispatcher && maxMemory > 0) {
       const usedPercent = (memoryUsed / maxMemory) * 100;
 
-      this.webhookDispatcher.dispatchThresholdAlertPerWebhook(
-        WebhookEventType.MEMORY_CRITICAL,
-        'memory_critical',
-        usedPercent,
-        'memoryCriticalPercent',
-        true,
-        {
-          usedBytes: memoryUsed,
-          maxBytes: maxMemory,
-          usedPercent: parseFloat(usedPercent.toFixed(2)),
-          usedMemoryHuman: this.formatBytes(memoryUsed),
-          maxMemoryHuman: this.formatBytes(maxMemory),
-          message: `Memory usage critical: ${usedPercent.toFixed(1)}% (${this.formatBytes(memoryUsed)} / ${this.formatBytes(maxMemory)})`,
-        },
-        connectionId
-      ).catch(err => {
-        this.logger.error('Failed to dispatch memory.critical webhook', err);
-      });
+      this.webhookDispatcher
+        .dispatchThresholdAlertPerWebhook(
+          WebhookEventType.MEMORY_CRITICAL,
+          'memory_critical',
+          usedPercent,
+          'memoryCriticalPercent',
+          true,
+          {
+            usedBytes: memoryUsed,
+            maxBytes: maxMemory,
+            usedPercent: parseFloat(usedPercent.toFixed(2)),
+            usedMemoryHuman: this.formatBytes(memoryUsed),
+            maxMemoryHuman: this.formatBytes(maxMemory),
+            message: `Memory usage critical: ${usedPercent.toFixed(1)}% (${this.formatBytes(memoryUsed)} / ${this.formatBytes(maxMemory)})`,
+          },
+          connectionId,
+        )
+        .catch((err) => {
+          this.logger.error('Failed to dispatch memory.critical webhook', err);
+        });
 
       // Compliance alert for enterprise tier
-      if (usedPercent > 80 && maxmemoryPolicy === 'noeviction' && this.webhookEventsEnterpriseService) {
-        this.webhookEventsEnterpriseService.dispatchComplianceAlert({
-          complianceType: 'data_retention',
-          severity: 'high',
-          memoryUsedPercent: usedPercent,
-          maxmemoryPolicy,
-          message: `Compliance alert: Memory at ${usedPercent.toFixed(1)}% with 'noeviction' policy may cause data loss and violate retention policies`,
-          timestamp: Date.now(),
-          instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
-          connectionId,
-        }).catch(err => {
-          this.logger.error('Failed to dispatch compliance.alert webhook', err);
-        });
+      if (
+        usedPercent > 80 &&
+        maxmemoryPolicy === 'noeviction' &&
+        this.webhookEventsEnterpriseService
+      ) {
+        this.webhookEventsEnterpriseService
+          .dispatchComplianceAlert({
+            complianceType: 'data_retention',
+            severity: 'high',
+            memoryUsedPercent: usedPercent,
+            maxmemoryPolicy,
+            message: `Compliance alert: Memory at ${usedPercent.toFixed(1)}% with 'noeviction' policy may cause data loss and violate retention policies`,
+            timestamp: Date.now(),
+            instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
+            connectionId,
+          })
+          .catch((err) => {
+            this.logger.error('Failed to dispatch compliance.alert webhook', err);
+          });
       }
     }
   }
 
-  private updateStatsMetrics(info: Record<string, any>, connLabel: string): void {
+  private updateStatsMetrics(info: InfoResponse, connLabel: string): void {
     if (!info.stats) return;
 
-    this.connectionsReceivedTotal.labels(connLabel).set(parseInt(info.stats.total_connections_received) || 0);
-    this.commandsProcessedTotal.labels(connLabel).set(parseInt(info.stats.total_commands_processed) || 0);
-    this.instantaneousOpsPerSec.labels(connLabel).set(parseInt(info.stats.instantaneous_ops_per_sec) || 0);
-    this.instantaneousInputKbps.labels(connLabel).set(parseFloat(info.stats.instantaneous_input_kbps) || 0);
-    this.instantaneousOutputKbps.labels(connLabel).set(parseFloat(info.stats.instantaneous_output_kbps) || 0);
+    this.connectionsReceivedTotal
+      .labels(connLabel)
+      .set(parseInt(info.stats.total_connections_received) || 0);
+    this.commandsProcessedTotal
+      .labels(connLabel)
+      .set(parseInt(info.stats.total_commands_processed) || 0);
+    this.instantaneousOpsPerSec
+      .labels(connLabel)
+      .set(parseInt(info.stats.instantaneous_ops_per_sec) || 0);
+    this.instantaneousInputKbps
+      .labels(connLabel)
+      .set(parseFloat(info.stats.instantaneous_input_kbps) || 0);
+    this.instantaneousOutputKbps
+      .labels(connLabel)
+      .set(parseFloat(info.stats.instantaneous_output_kbps) || 0);
     this.keyspaceHitsTotal.labels(connLabel).set(parseInt(info.stats.keyspace_hits) || 0);
     this.keyspaceMissesTotal.labels(connLabel).set(parseInt(info.stats.keyspace_misses) || 0);
     this.evictedKeysTotal.labels(connLabel).set(parseInt(info.stats.evicted_keys) || 0);
@@ -569,7 +781,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.pubsubPatterns.labels(connLabel).set(parseInt(info.stats.pubsub_patterns) || 0);
   }
 
-  private updateCpuMetrics(info: Record<string, any>, connLabel: string): void {
+  private updateCpuMetrics(info: InfoResponse, connLabel: string): void {
     if (!info.cpu) return;
 
     this.cpuSysSecondsTotal.labels(connLabel).set(parseFloat(info.cpu.used_cpu_sys) || 0);
@@ -577,7 +789,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   private updateReplicationMetrics(
-    info: Record<string, any>,
+    info: InfoResponse,
     connLabel: string,
     connectionId: string,
     config: { host: string; port: number } | null,
@@ -587,41 +799,49 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const role = info.replication.role;
 
     if (role === 'master') {
-      this.connectedSlaves.labels(connLabel).set(parseInt(info.replication.connected_slaves || '0') || 0);
+      this.connectedSlaves
+        .labels(connLabel)
+        .set(parseInt(info.replication.connected_slaves || '0') || 0);
       if (info.replication.master_repl_offset) {
-        this.replicationOffset.labels(connLabel).set(parseInt(info.replication.master_repl_offset) || 0);
+        this.replicationOffset
+          .labels(connLabel)
+          .set(parseInt(info.replication.master_repl_offset) || 0);
       }
     } else if (role === 'slave') {
       const masterLinkStatus = info.replication.master_link_status;
       this.masterLinkUp.labels(connLabel).set(masterLinkStatus === 'up' ? 1 : 0);
 
-      const lastIoSecondsAgo = parseInt(info.replication.master_last_io_seconds_ago) || 0;
+      const lastIoSecondsAgo = parseInt(info.replication.master_last_io_seconds_ago ?? '') || 0;
       if (info.replication.master_last_io_seconds_ago) {
         this.masterLastIoSecondsAgo.labels(connLabel).set(lastIoSecondsAgo);
       }
 
       if (info.replication.slave_repl_offset) {
-        this.replicationOffset.labels(connLabel).set(parseInt(info.replication.slave_repl_offset) || 0);
+        this.replicationOffset
+          .labels(connLabel)
+          .set(parseInt(info.replication.slave_repl_offset) || 0);
       }
 
       // Webhook dispatch for replication.lag
       if (this.webhookEventsProService && masterLinkStatus === 'up') {
-        this.webhookEventsProService.dispatchReplicationLag({
-          lagSeconds: lastIoSecondsAgo,
-          threshold: 10,
-          masterLinkStatus,
-          timestamp: Date.now(),
-          instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
-          connectionId,
-        }).catch(err => {
-          this.logger.error('Failed to dispatch replication.lag webhook', err);
-        });
+        this.webhookEventsProService
+          .dispatchReplicationLag({
+            lagSeconds: lastIoSecondsAgo,
+            threshold: 10,
+            masterLinkStatus,
+            timestamp: Date.now(),
+            instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
+            connectionId,
+          })
+          .catch((err) => {
+            this.logger.error('Failed to dispatch replication.lag webhook', err);
+          });
       }
     }
   }
 
   private updateKeyspaceMetricsFromInfo(
-    info: Record<string, any>,
+    info: InfoResponse,
     connLabel: string,
     state: ConnectionMetricState,
   ): void {
@@ -635,7 +855,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
       if (typeof dbInfo === 'string') {
         const parts = dbInfo.split(',');
-        let keys = 0, expires = 0, avgTtl = 0;
+        let keys = 0,
+          expires = 0,
+          avgTtl = 0;
 
         for (const part of parts) {
           const [key, value] = part.split('=');
@@ -669,7 +891,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   private async updateClusterMetricsFromInfo(
     client: DatabasePort,
-    info: Record<string, any>,
+    info: InfoResponse,
     connLabel: string,
     connectionId: string,
     state: ConnectionMetricState,
@@ -691,13 +913,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       const slotsFail = parseInt(clusterInfo.cluster_slots_fail) || 0;
 
       if (clusterInfo.cluster_known_nodes) {
-        this.clusterKnownNodes.labels(connLabel).set(parseInt(clusterInfo.cluster_known_nodes) || 0);
+        this.clusterKnownNodes
+          .labels(connLabel)
+          .set(parseInt(clusterInfo.cluster_known_nodes) || 0);
       }
       if (clusterInfo.cluster_size) {
         this.clusterSize.labels(connLabel).set(parseInt(clusterInfo.cluster_size) || 0);
       }
       if (clusterInfo.cluster_slots_assigned) {
-        this.clusterSlotsAssigned.labels(connLabel).set(parseInt(clusterInfo.cluster_slots_assigned) || 0);
+        this.clusterSlotsAssigned
+          .labels(connLabel)
+          .set(parseInt(clusterInfo.cluster_slots_assigned) || 0);
       }
       if (clusterInfo.cluster_slots_ok) {
         this.clusterSlotsOk.labels(connLabel).set(parseInt(clusterInfo.cluster_slots_ok) || 0);
@@ -706,7 +932,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         this.clusterSlotsFail.labels(connLabel).set(slotsFail);
       }
       if (clusterInfo.cluster_slots_pfail) {
-        this.clusterSlotsPfail.labels(connLabel).set(parseInt(clusterInfo.cluster_slots_pfail) || 0);
+        this.clusterSlotsPfail
+          .labels(connLabel)
+          .set(parseInt(clusterInfo.cluster_slots_pfail) || 0);
       }
 
       // Webhook dispatch for cluster.failover
@@ -736,7 +964,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
 
       const capabilities = client.getCapabilities();
-      if (capabilities.hasClusterSlotStats && this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')) {
+      if (
+        capabilities.hasClusterSlotStats &&
+        this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
+      ) {
         try {
           const newSlotLabels = new Set<string>();
           const slotStats = await client.getClusterSlotStats('key-count', 100);
@@ -760,12 +991,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
           state.currentClusterSlotLabels = newSlotLabels;
         } catch (slotStatsError) {
-          this.runtimeCapabilityTracker.recordFailure(connectionId, 'canClusterSlotStats', slotStatsError instanceof Error ? slotStatsError : String(slotStatsError));
+          this.runtimeCapabilityTracker.recordFailure(
+            connectionId,
+            'canClusterSlotStats',
+            slotStatsError instanceof Error ? slotStatsError : String(slotStatsError),
+          );
           this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
         }
       }
     } catch (error) {
-      this.runtimeCapabilityTracker.recordFailure(connectionId, 'canClusterInfo', error instanceof Error ? error : String(error));
+      this.runtimeCapabilityTracker.recordFailure(
+        connectionId,
+        'canClusterInfo',
+        error instanceof Error ? error : String(error),
+      );
       this.logger.error(`Failed to update cluster metrics for ${connLabel}`, error);
     }
   }
@@ -903,7 +1142,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       const newRequestPatternLabels = new Set<string>();
       const newReplyPatternLabels = new Set<string>();
 
-      const requestAnalysis = this.commandLogAnalytics.getCachedAnalysis('large-request', connectionId);
+      const requestAnalysis = this.commandLogAnalytics.getCachedAnalysis(
+        'large-request',
+        connectionId,
+      );
       let requestTotal = 0;
       if (requestAnalysis) {
         for (const p of requestAnalysis.patterns) {
@@ -964,18 +1206,24 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
       // Webhook dispatch for slowlog.threshold
       if (this.webhookEventsProService) {
-        this.webhookEventsProService.dispatchSlowlogThreshold({
-          slowlogCount: length,
-          threshold: 100,
-          timestamp: Date.now(),
-          instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
-          connectionId,
-        }).catch(err => {
-          this.logger.error('Failed to dispatch slowlog.threshold webhook', err);
-        });
+        this.webhookEventsProService
+          .dispatchSlowlogThreshold({
+            slowlogCount: length,
+            threshold: 100,
+            timestamp: Date.now(),
+            instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
+            connectionId,
+          })
+          .catch((err) => {
+            this.logger.error('Failed to dispatch slowlog.threshold webhook', err);
+          });
       }
     } catch (error) {
-      this.runtimeCapabilityTracker.recordFailure(connectionId, 'canSlowLog', error instanceof Error ? error : String(error));
+      this.runtimeCapabilityTracker.recordFailure(
+        connectionId,
+        'canSlowLog',
+        error instanceof Error ? error : String(error),
+      );
       this.logger.error(`Failed to update slowlog raw metrics for ${connLabel}`, error);
     }
   }
@@ -985,7 +1233,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const metrics = await this.registry.metrics();
     return metrics
       .split('\n')
-      .filter(line => !line.match(/\s+[Nn]a[Nn]\s*$/))
+      .filter((line) => !line.match(/\s+[Nn]a[Nn]\s*$/))
       .join('\n');
   }
 
@@ -1003,9 +1251,19 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     return this.pollDuration.startTimer({ connection: connLabel, service });
   }
 
-  incrementAnomalyEvent(severity: string, metricType: string, anomalyType: string, connectionId?: string): void {
+  incrementAnomalyEvent(
+    severity: string,
+    metricType: string,
+    anomalyType: string,
+    connectionId?: string,
+  ): void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
-    this.anomalyEventsTotal.inc({ connection: connLabel, severity, metric_type: metricType, anomaly_type: anomalyType });
+    this.anomalyEventsTotal.inc({
+      connection: connLabel,
+      severity,
+      metric_type: metricType,
+      anomaly_type: anomalyType,
+    });
   }
 
   incrementCorrelatedGroup(pattern: string, severity: string, connectionId?: string): void {
@@ -1022,7 +1280,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     },
     connectionId?: string,
   ): void {
-    const effectiveConnectionId = connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
+    const effectiveConnectionId =
+      connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
     const connLabel = this.getConnectionLabel(effectiveConnectionId);
     const state = this.getConnectionState(effectiveConnectionId);
 
@@ -1063,7 +1322,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     buffers: Array<{ metricType: string; mean: number; stdDev: number; ready: boolean }>,
     connectionId?: string,
   ): void {
-    const effectiveConnectionId = connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
+    const effectiveConnectionId =
+      connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
     const connLabel = this.getConnectionLabel(effectiveConnectionId);
     for (const buf of buffers) {
       this.anomalyDetectionBufferReady.labels(connLabel, buf.metricType).set(buf.ready ? 1 : 0);
