@@ -2,9 +2,12 @@ import type { MigrationAnalysisResult } from '@betterdb/shared';
 
 interface Props {
   job: MigrationAnalysisResult;
+  phase?: string;
 }
 
-export function ExportBar({ job }: Props) {
+export function ExportBar({ job, phase }: Props) {
+  if (phase === 'executing') return null;
+
   const handleExportJson = () => {
     const blob = new Blob([JSON.stringify(job, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);

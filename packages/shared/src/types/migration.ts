@@ -99,3 +99,42 @@ export interface StartAnalysisResponse {
   id: string;
   status: 'pending';
 }
+
+// ── Phase 2: Execution types ──
+
+export type ExecutionJobStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export type ExecutionMode = 'redis_shake' | 'command';
+
+export interface MigrationExecutionRequest {
+  sourceConnectionId: string;
+  targetConnectionId: string;
+  mode?: ExecutionMode; // default 'redis_shake'
+}
+
+export interface MigrationExecutionResult {
+  id: string;
+  status: ExecutionJobStatus;
+  mode: ExecutionMode;
+  startedAt: number;
+  completedAt?: number;
+  error?: string;
+  keysTransferred?: number;
+  bytesTransferred?: number;
+  keysSkipped?: number;
+  totalKeys?: number;
+  // Rolling log buffer — last 500 lines.
+  logs: string[];
+  // Parsed progress 0–100, best-effort. null if unparseable.
+  progress: number | null;
+}
+
+export interface StartExecutionResponse {
+  id: string;
+  status: 'pending';
+}

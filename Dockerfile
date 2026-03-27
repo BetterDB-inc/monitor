@@ -76,6 +76,15 @@ ENV NODE_ENV=production
 ENV PORT=3001
 ENV STORAGE_TYPE=memory
 
+# Install RedisShake binary for migration execution
+ARG TARGETARCH
+ARG REDISSHAKE_VERSION=4.6.0
+RUN apk add --no-cache wget && \
+    wget -qO- "https://github.com/tair-opensource/RedisShake/releases/download/v${REDISSHAKE_VERSION}/redis-shake-v${REDISSHAKE_VERSION}-linux-${TARGETARCH}.tar.gz" \
+    | tar -xz --strip-components=0 -C /usr/local/bin ./redis-shake && \
+    chmod +x /usr/local/bin/redis-shake && \
+    apk del wget
+
 # Create non-root user for security (Docker Scout compliance)
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 --ingroup nodejs betterdb

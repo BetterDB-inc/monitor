@@ -20,6 +20,20 @@ export function AnalysisForm({ onStart }: Props) {
     targetConnectionId !== '' &&
     sourceConnectionId === targetConnectionId;
 
+  // The API returns connectionType on each connection but the Connection
+  // interface in useConnection doesn't surface it. Cast to access at runtime.
+  const isAgentConnection = (id: string): boolean => {
+    if (!id) return false;
+    const conn = connections.find(c => c.id === id) as
+      | (typeof connections[number] & { connectionType?: 'direct' | 'agent' })
+      | undefined;
+    return conn?.connectionType === 'agent';
+  };
+  const hasAgentConnection =
+    isAgentConnection(sourceConnectionId) || isAgentConnection(targetConnectionId);
+
+  const isCloudMode = import.meta.env.VITE_CLOUD_MODE === 'true';
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sourceConnectionId || !targetConnectionId || sameConnection) return;
@@ -79,6 +93,22 @@ export function AnalysisForm({ onStart }: Props) {
         )}
       </div>
 
+      {hasAgentConnection && (
+        <p className="text-sm text-amber-600">
+          One or more selected instances is connected via agent. Contact us at{' '}
+          <a href="mailto:support@betterdb.com" className="underline">support@betterdb.com</a> to
+          plan your migration — we'll help you do it safely.
+        </p>
+      )}
+
+      {isCloudMode && (
+        <p className="text-sm text-amber-600">
+          Migration execution is not available in BetterDB Cloud. Contact us at{' '}
+          <a href="mailto:support@betterdb.com" className="underline">support@betterdb.com</a> to
+          plan your migration.
+        </p>
+      )}
+
       <div>
         <label className="block text-sm font-medium mb-1">Sample size</label>
         <select
@@ -100,7 +130,7 @@ export function AnalysisForm({ onStart }: Props) {
 
       <button
         type="submit"
-        disabled={loading || !sourceConnectionId || !targetConnectionId || sameConnection}
+        disabled={loading || !sourceConnectionId || !targetConnectionId || sameConnection || hasAgentConnection}
         className="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium disabled:opacity-50"
       >
         {loading ? 'Starting...' : 'Start Analysis'}

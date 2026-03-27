@@ -172,7 +172,11 @@
       "mcp__betterdb__get_anomalies",
       "Bash(cat:*)",
       "mcp__betterdb-memory__search_context",
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "Bash(tar:*)",
+      "Bash(chmod:*)",
+      "Bash(~/.betterdb/bin/redis-shake:*)",
+      "Bash(wget:*)"
     ],
     "deny": [],
     "ask": []
