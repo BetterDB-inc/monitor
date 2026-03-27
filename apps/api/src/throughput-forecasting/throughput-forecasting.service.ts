@@ -299,7 +299,7 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
       enabled: true,
       insufficientData: true,
       insufficientDataMessage:
-        'Need at least 30 minutes of monitoring history. Data will be available shortly.',
+        'Data will be available shortly. At least 30 minutes of monitoring history required.',
     };
   }
 

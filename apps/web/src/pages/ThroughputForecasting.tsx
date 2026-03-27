@@ -1,12 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useConnection } from '../hooks/useConnection';
-import { usePolling } from '../hooks/usePolling';
 import { metricsApi } from '../api/metrics';
-import type {
-  ThroughputForecast,
-  ThroughputSettings,
-  ThroughputSettingsUpdate,
-} from '@betterdb/shared';
+import type { ThroughputSettingsUpdate } from '@betterdb/shared';
 import {
   ForecastCard,
   formatTime,
@@ -19,70 +15,64 @@ import {
 
 export function ThroughputForecasting() {
   const { currentConnection } = useConnection();
-  const [settings, setSettings] = useState<ThroughputSettings | null>(null);
+  const queryClient = useQueryClient();
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle');
   const saveTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
   const debounceTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const { data: forecast, refresh: refreshForecast } = usePolling<ThroughputForecast>({
-    fetcher: (signal?: AbortSignal) => metricsApi.getThroughputForecast(signal),
-    interval: 30_000,
-    enabled: true,
-    refetchKey: currentConnection?.id,
+  const connectionId = currentConnection?.id;
+
+  const { data: forecast } = useQuery({
+    queryKey: ['throughput-forecast', connectionId],
+    queryFn: ({ signal }) => metricsApi.getThroughputForecast(signal),
+    refetchInterval: 30_000,
   });
 
-  // Load settings
-  useEffect(() => {
-    metricsApi
-      .getThroughputSettings()
-      .then(setSettings)
-      .catch(() => {});
-  }, [currentConnection?.id]);
+  const { data: settings } = useQuery({
+    queryKey: ['throughput-settings', connectionId],
+    queryFn: ({ signal }) => metricsApi.getThroughputSettings(signal),
+  });
 
-  // Chart data
-  const [chartData, setChartData] = useState<Array<{ time: number; ops: number; label: string }>>(
-    [],
-  );
-  useEffect(() => {
-    if (!settings) return;
-    const now = Date.now();
-    metricsApi
-      .getStoredMemorySnapshots({ startTime: now - settings.rollingWindowMs, limit: 1500 })
-      .then((snapshots) => {
-        const sorted = [...snapshots].sort((a, b) => a.timestamp - b.timestamp);
-        setChartData(
-          sorted.map((s) => ({
-            time: s.timestamp,
-            ops: s.opsPerSec,
-            label: formatTime(s.timestamp),
-          })),
-        );
-      })
-      .catch(() => {});
-  }, [currentConnection?.id, forecast, settings]);
-
-  const updateSetting = useCallback(
-    (updates: ThroughputSettingsUpdate) => {
-      if (debounceTimeout.current) clearTimeout(debounceTimeout.current);
-      setSettings((prev: ThroughputSettings | null) =>
-        prev ? { ...prev, ...updates, updatedAt: Date.now() } : prev,
-      );
-
-      debounceTimeout.current = setTimeout(async () => {
-        try {
-          const updated = await metricsApi.updateThroughputSettings(updates);
-          setSettings(updated);
-          setSaveStatus('saved');
-          void refreshForecast();
-          if (saveTimeout.current) clearTimeout(saveTimeout.current);
-          saveTimeout.current = setTimeout(() => setSaveStatus('idle'), 2000);
-        } catch {
-          setSaveStatus('error');
-        }
-      }, 500);
+  const { data: chartData = [] } = useQuery({
+    queryKey: ['throughput-chart', connectionId, settings?.rollingWindowMs],
+    queryFn: async () => {
+      const now = Date.now();
+      const snapshots = await metricsApi.getStoredMemorySnapshots({
+        startTime: now - settings!.rollingWindowMs,
+        limit: 1500,
+      });
+      return [...snapshots]
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .map((s) => ({ time: s.timestamp, ops: s.opsPerSec, label: formatTime(s.timestamp) }));
     },
-    [refreshForecast],
-  );
+    enabled: !!settings,
+    refetchInterval: 30_000,
+  });
+
+  const updateSetting = (updates: ThroughputSettingsUpdate) => {
+    if (debounceTimeout.current) clearTimeout(debounceTimeout.current);
+
+    // Optimistic update
+    queryClient.setQueryData(
+      ['throughput-settings', connectionId],
+      (prev: typeof settings) => (prev ? { ...prev, ...updates, updatedAt: Date.now() } : prev),
+    );
+
+    debounceTimeout.current = setTimeout(async () => {
+      try {
+        const updated = await metricsApi.updateThroughputSettings(updates);
+        queryClient.setQueryData(['throughput-settings', connectionId], updated);
+        setSaveStatus('saved');
+        await queryClient.invalidateQueries({ queryKey: ['throughput-forecast', connectionId] });
+        if (saveTimeout.current) clearTimeout(saveTimeout.current);
+        saveTimeout.current = setTimeout(() => setSaveStatus('idle'), 2000);
+      } catch {
+        // Revert optimistic update
+        await queryClient.invalidateQueries({ queryKey: ['throughput-settings', connectionId] });
+        setSaveStatus('error');
+      }
+    }, 500);
+  };
 
   // ── Page States ──
 
