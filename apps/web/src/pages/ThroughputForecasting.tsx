@@ -98,8 +98,6 @@ export function ThroughputForecasting() {
     <div className="space-y-6">
       <h1 className="text-3xl font-bold">Throughput Forecast</h1>
 
-      <SettingsPanel settings={settings} onUpdate={updateSetting} saveStatus={saveStatus} />
-
       {forecast.insufficientData ? (
         <InsufficientData forecast={forecast} />
       ) : (
@@ -108,6 +106,7 @@ export function ThroughputForecasting() {
           <ThroughputChart chartData={chartData} forecast={forecast} settings={settings} />
         </>
       )}
+      <SettingsPanel settings={settings} onUpdate={updateSetting} saveStatus={saveStatus} />
     </div>
   );
 }

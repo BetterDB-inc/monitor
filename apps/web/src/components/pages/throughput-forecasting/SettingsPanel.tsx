@@ -14,7 +14,7 @@ export function SettingsPanel({
   return (
     <Card className="p-6">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold">Settings</h2>
+        <h2 className="text-lg font-semibold">Instance Settings</h2>
         <div className="flex items-center gap-2">
           {saveStatus === 'saved' && <span className="text-sm text-green-600">Saved</span>}
           {saveStatus === 'error' && <span className="text-sm text-red-600">Error saving</span>}
