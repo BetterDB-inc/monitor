@@ -5,6 +5,7 @@ import { useConnection } from '../hooks/useConnection';
 import { AppSettings, SettingsUpdateRequest } from '@betterdb/shared';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
+import { ThroughputForecastingSettingsSection } from '../components/pages/settings/throughput-forecasting-settings-section';
 
 type SettingsCategory = 'audit' | 'clientAnalytics' | 'anomaly' | 'throughputForecasting' | 'mcpTokens';
 
@@ -280,58 +281,27 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
             )}
 
             {activeCategory === 'throughputForecasting' && (
-              <div className="space-y-4">
-                <h2 className="text-xl font-semibold mb-4">Throughput Forecasting</h2>
-                <p className="text-sm text-gray-500">
-                  These defaults are applied when throughput forecasting is first activated for a connection.
-                  Per-connection settings can be customized on the Throughput Forecast page.
-                </p>
-
-                <div className="flex items-center gap-3">
-                  <label className="block text-sm font-medium">Enable Throughput Forecasting</label>
-                  <button
-                    onClick={() => handleInputChange('throughputForecastingEnabled', !formData.throughputForecastingEnabled)}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                      formData.throughputForecastingEnabled ? 'bg-blue-600' : 'bg-gray-300'
-                    }`}
-                  >
-                    <span
-                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        formData.throughputForecastingEnabled ? 'translate-x-6' : 'translate-x-1'
-                      }`}
-                    />
-                  </button>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-1">Default Rolling Window</label>
-                  <select
-                    value={formData.throughputForecastingDefaultRollingWindowMs || 21600000}
-                    onChange={(e) => handleInputChange('throughputForecastingDefaultRollingWindowMs', parseInt(e.target.value))}
-                    className="w-full px-3 py-2 border rounded-md"
-                  >
-                    <option value={3600000}>1 hour</option>
-                    <option value={10800000}>3 hours</option>
-                    <option value={21600000}>6 hours</option>
-                    <option value={43200000}>12 hours</option>
-                    <option value={86400000}>24 hours</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-1">Default Alert Threshold</label>
-                  <select
-                    value={formData.throughputForecastingDefaultAlertThresholdMs || 7200000}
-                    onChange={(e) => handleInputChange('throughputForecastingDefaultAlertThresholdMs', parseInt(e.target.value))}
-                    className="w-full px-3 py-2 border rounded-md"
-                  >
-                    <option value={1800000}>30 minutes</option>
-                    <option value={3600000}>1 hour</option>
-                    <option value={7200000}>2 hours</option>
-                    <option value={14400000}>4 hours</option>
-                  </select>
-                </div>
-              </div>
+              <ThroughputForecastingSettingsSection
+                throughputForecastingEnabled={Boolean(formData.throughputForecastingEnabled)}
+                throughputForecastingDefaultRollingWindowMs={
+                  formData.throughputForecastingDefaultRollingWindowMs || 21600000
+                }
+                throughputForecastingDefaultAlertThresholdMs={
+                  formData.throughputForecastingDefaultAlertThresholdMs || 7200000
+                }
+                onToggleEnabled={() =>
+                  handleInputChange(
+                    'throughputForecastingEnabled',
+                    !formData.throughputForecastingEnabled,
+                  )
+                }
+                onRollingWindowChange={(value) =>
+                  handleInputChange('throughputForecastingDefaultRollingWindowMs', value)
+                }
+                onAlertThresholdChange={(value) =>
+                  handleInputChange('throughputForecastingDefaultAlertThresholdMs', value)
+                }
+              />
             )}
 
             {activeCategory === 'mcpTokens' && (
