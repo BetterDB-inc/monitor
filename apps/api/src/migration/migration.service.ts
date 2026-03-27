@@ -102,12 +102,14 @@ export class MigrationService {
       job.progress = 10;
 
       // Step 2: Get source server info (keyspace for total key count, memory)
-      const info = await adapter.getInfo(['keyspace', 'memory', 'cluster', 'server', 'persistence']);
-      const keyspaceInfo = info as Record<string, unknown>;
+      const info = await adapter.getInfo(['keyspace', 'memory', 'cluster', 'server', 'persistence']) as Record<string, Record<string, string>>;
+      const keyspaceSection = info.keyspace ?? {};
+      const memorySection = info.memory ?? {};
+      const clusterSection = info.cluster ?? {};
 
-      // Parse total keys from keyspace info
+      // Parse total keys from keyspace section
       let totalKeys = 0;
-      for (const [key, val] of Object.entries(keyspaceInfo)) {
+      for (const [key, val] of Object.entries(keyspaceSection)) {
         if (key.startsWith('db') && typeof val === 'string') {
           const match = val.match(/keys=(\d+)/);
           if (match) totalKeys += parseInt(match[1], 10);
@@ -116,7 +118,7 @@ export class MigrationService {
       job.result.totalKeys = totalKeys;
 
       // Parse used_memory
-      const usedMemory = Number(keyspaceInfo['used_memory']) || 0;
+      const usedMemory = Number(memorySection['used_memory']) || 0;
       job.result.totalMemoryBytes = usedMemory;
 
       if (job.cancelled) return;
@@ -141,7 +143,8 @@ export class MigrationService {
       job.result.targetConnectionName = targetConfig?.name;
       job.result.targetDbType = targetCapabilities.dbType;
       job.result.targetDbVersion = targetCapabilities.version;
-      job.result.targetIsCluster = String((targetInfo as Record<string, unknown>)['cluster_enabled'] ?? '0') === '1';
+      const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
+      job.result.targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
 
       if (job.cancelled) return;
       job.progress = 13;
@@ -151,7 +154,7 @@ export class MigrationService {
       let clusterMasterCount = 0;
       const scanClients: Valkey[] = [];
 
-      const clusterEnabled = String(keyspaceInfo['cluster_enabled'] ?? '0');
+      const clusterEnabled = String(clusterSection['cluster_enabled'] ?? '0');
       if (clusterEnabled === '1') {
         isCluster = true;
         const nodes = await adapter.getClusterNodes();
@@ -372,8 +375,9 @@ export class MigrationService {
         sourceAclUsers = result ?? [];
       } catch { /* ignore - ACL not supported or no permission */ }
 
-      // Build source meta
-      const sourceMeta = buildInstanceMeta(keyspaceInfo, capabilities, sourceAclUsers);
+      // Build source meta (buildInstanceMeta expects a flat key-value object)
+      const flatSourceInfo = flattenInfo(info);
+      const sourceMeta = buildInstanceMeta(flatSourceInfo, capabilities, sourceAclUsers);
 
       // Fetch source modules
       try {
@@ -383,7 +387,8 @@ export class MigrationService {
       } catch { /* ignore */ }
 
       // Build target meta
-      const targetMeta = buildInstanceMeta(targetInfo as Record<string, unknown>, targetCapabilities, targetAclUsers);
+      const flatTargetInfo = flattenInfo(targetInfo);
+      const targetMeta = buildInstanceMeta(flatTargetInfo, targetCapabilities, targetAclUsers);
 
       // Fetch target modules
       try {
@@ -452,6 +457,21 @@ export class MigrationService {
   private isJobStuck(job: AnalysisJob): boolean {
     return job.status === 'running' && Date.now() - job.createdAt > this.STUCK_JOB_TTL_MS;
   }
+}
+
+/**
+ * Flatten a nested INFO object (e.g. { keyspace: { db0: '...' }, memory: { used_memory: '...' } })
+ * into a flat key-value map (e.g. { db0: '...', used_memory: '...' }).
+ * The adapter's getInfo() returns section-grouped output; buildInstanceMeta expects flat keys.
+ */
+function flattenInfo(info: Record<string, unknown>): Record<string, unknown> {
+  const flat: Record<string, unknown> = {};
+  for (const [, value] of Object.entries(info)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      Object.assign(flat, value);
+    }
+  }
+  return flat;
 }
 
 /**

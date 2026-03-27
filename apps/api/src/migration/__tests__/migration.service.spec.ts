@@ -36,8 +36,11 @@ function createMockRegistry() {
       hasCommandLog: false,
     }),
     getInfo: jest.fn().mockResolvedValue({
-      cluster_enabled: '0',
-      used_memory: '1000000',
+      keyspace: { db0: 'keys=100,expires=0,avg_ttl=0' },
+      memory: { used_memory: '1000000' },
+      cluster: { cluster_enabled: '0' },
+      server: {},
+      persistence: { rdb_last_save_time: '0', aof_enabled: '0' },
     }),
     getClient: jest.fn().mockReturnValue(mockClient),
     getClusterNodes: jest.fn().mockResolvedValue([]),
