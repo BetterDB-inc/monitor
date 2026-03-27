@@ -1,10 +1,11 @@
 import { Controller, Get, Post, Delete, Param, Body, UseGuards, NotFoundException, BadRequestException } from '@nestjs/common';
-import type { MigrationAnalysisRequest, StartAnalysisResponse, MigrationAnalysisResult, MigrationExecutionRequest, StartExecutionResponse, MigrationExecutionResult } from '@betterdb/shared';
+import type { MigrationAnalysisRequest, StartAnalysisResponse, MigrationAnalysisResult, MigrationExecutionRequest, StartExecutionResponse, MigrationExecutionResult, MigrationValidationRequest, StartValidationResponse, MigrationValidationResult } from '@betterdb/shared';
 import { Feature } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { MigrationService } from './migration.service';
 import { MigrationExecutionService } from './migration-execution.service';
+import { MigrationValidationService } from './migration-validation.service';
 
 // Migration analysis is intentionally community-tier (no license guard).
 // MIGRATION_EXECUTION gating applies to the execution phase only.
@@ -13,6 +14,7 @@ export class MigrationController {
   constructor(
     private readonly migrationService: MigrationService,
     private readonly executionService: MigrationExecutionService,
+    private readonly validationService: MigrationValidationService,
   ) {}
 
   // ── Analysis endpoints (community-tier) ──
@@ -95,5 +97,45 @@ export class MigrationController {
       throw new NotFoundException(`Execution job '${id}' not found`);
     }
     return { stopped: true };
+  }
+
+  // ── Validation endpoints (Pro-tier) ──
+
+  @Post('validation')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MIGRATION_EXECUTION)
+  async startValidation(@Body() body: MigrationValidationRequest): Promise<StartValidationResponse> {
+    if (!body.sourceConnectionId) {
+      throw new BadRequestException('sourceConnectionId is required');
+    }
+    if (!body.targetConnectionId) {
+      throw new BadRequestException('targetConnectionId is required');
+    }
+    if (body.sourceConnectionId === body.targetConnectionId) {
+      throw new BadRequestException('Source and target must be different connections');
+    }
+    return this.validationService.startValidation(body);
+  }
+
+  @Get('validation/:id')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MIGRATION_EXECUTION)
+  getValidation(@Param('id') id: string): MigrationValidationResult {
+    const result = this.validationService.getValidation(id);
+    if (!result) {
+      throw new NotFoundException(`Validation job '${id}' not found`);
+    }
+    return result;
+  }
+
+  @Delete('validation/:id')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MIGRATION_EXECUTION)
+  cancelValidation(@Param('id') id: string): { cancelled: true } {
+    const found = this.validationService.cancelValidation(id);
+    if (!found) {
+      throw new NotFoundException(`Validation job '${id}' not found`);
+    }
+    return { cancelled: true };
   }
 }
