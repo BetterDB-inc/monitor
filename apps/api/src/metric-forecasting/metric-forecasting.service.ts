@@ -339,7 +339,6 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
           const forecast = await this.getForecast(settings.connectionId, settings.metricKind);
           if (
             forecast.timeToLimitMs !== null &&
-            forecast.timeToLimitMs > 0 &&
             forecast.timeToLimitMs <= settings.alertThresholdMs
           ) {
             const config = this.connectionRegistry.getConfig(settings.connectionId);
