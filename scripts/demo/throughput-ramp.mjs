@@ -30,16 +30,16 @@ import { parseArgs } from 'node:util';
 
 const { values: opts } = parseArgs({
   options: {
-    host:         { type: 'string',  default: 'localhost' },
-    port:         { type: 'string',  default: '6380' },
-    auth:         { type: 'string',  default: '' },
-    duration:     { type: 'string',  default: '60' },
-    'start-rps':  { type: 'string',  default: '100' },
-    'end-rps':    { type: 'string',  default: '5000' },
-    pattern:      { type: 'string',  default: 'ramp' },
-    'grow-keys':  { type: 'boolean', default: false },
-    'value-size': { type: 'string',  default: '1024' },
-    cleanup:      { type: 'boolean', default: false },
+    host: { type: 'string', default: 'localhost' },
+    port: { type: 'string', default: '6380' },
+    auth: { type: 'string', default: 'devpassword' },
+    duration: { type: 'string', default: '60' },
+    'start-rps': { type: 'string', default: '100' },
+    'end-rps': { type: 'string', default: '5000' },
+    pattern: { type: 'string', default: 'ramp' },
+    'grow-keys': { type: 'boolean', default: false },
+    'value-size': { type: 'string', default: '1024' },
+    cleanup: { type: 'boolean', default: false },
   },
   strict: true,
 });
@@ -220,13 +220,13 @@ function scheduleNext() {
     const elapsedMin = Math.floor(elapsed / 60_000);
     const remainingMin = Math.max(0, DURATION_MIN - elapsedMin);
     const pct = Math.min(100, Math.round((elapsed / DURATION_MS) * 100));
-    const filled = Math.round(pct * 20 / 100);
+    const filled = Math.round((pct * 20) / 100);
     const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(20 - filled);
 
     process.stdout.write(
       `\r  ${bar} ${String(pct).padStart(3)}% | ` +
-      `${String(elapsedMin).padStart(3)}m/${DURATION_MIN}m | ` +
-      `${String(opsThisSec).padStart(5)} ops/sec | ${PATTERN} | ${remainingMin}m left `
+        `${String(elapsedMin).padStart(3)}m/${DURATION_MIN}m | ` +
+        `${String(opsThisSec).padStart(5)} ops/sec | ${PATTERN} | ${remainingMin}m left `,
     );
     opsThisSec = 0;
     lastSecond = nowSec;
