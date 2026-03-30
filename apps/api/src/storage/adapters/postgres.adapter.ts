@@ -38,7 +38,6 @@ import {
 import type {
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
-  ThroughputSettings,
   MetricForecastSettings,
   MetricKind,
 } from '@betterdb/shared';
@@ -1171,15 +1170,6 @@ export class PostgresAdapter implements StoragePort {
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_enabled BOOLEAN NOT NULL DEFAULT true;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000;
-
-      CREATE TABLE IF NOT EXISTS throughput_settings (
-        connection_id TEXT PRIMARY KEY,
-        enabled BOOLEAN NOT NULL DEFAULT true,
-        ops_ceiling INTEGER,
-        rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
-        alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
-        updated_at BIGINT NOT NULL
-      );
 
       CREATE TABLE IF NOT EXISTS metric_forecast_settings (
         connection_id TEXT NOT NULL,
@@ -3517,81 +3507,7 @@ export class PostgresAdapter implements StoragePort {
     ]);
   }
 
-  // Throughput Forecasting Settings
-  async getThroughputSettings(connectionId: string): Promise<ThroughputSettings | null> {
-    if (!this.pool) {
-      throw new Error('Database not initialized');
-    }
-    const result = await this.pool.query(
-      'SELECT * FROM throughput_settings WHERE connection_id = $1',
-      [connectionId],
-    );
-    if (result.rows.length === 0) {
-      return null;
-    }
-    const row = result.rows[0];
-    return {
-      connectionId: row.connection_id,
-      enabled: row.enabled,
-      opsCeiling: row.ops_ceiling ?? null,
-      rollingWindowMs: row.rolling_window_ms,
-      alertThresholdMs: row.alert_threshold_ms,
-      updatedAt: Number(row.updated_at),
-    };
-  }
-
-  async saveThroughputSettings(settings: ThroughputSettings): Promise<ThroughputSettings> {
-    if (!this.pool) {
-      throw new Error('Database not initialized');
-    }
-    await this.pool.query(
-      `
-      INSERT INTO throughput_settings (connection_id, enabled, ops_ceiling, rolling_window_ms, alert_threshold_ms, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT(connection_id) DO UPDATE SET
-        enabled = EXCLUDED.enabled,
-        ops_ceiling = EXCLUDED.ops_ceiling,
-        rolling_window_ms = EXCLUDED.rolling_window_ms,
-        alert_threshold_ms = EXCLUDED.alert_threshold_ms,
-        updated_at = EXCLUDED.updated_at
-    `,
-      [
-        settings.connectionId,
-        settings.enabled,
-        settings.opsCeiling,
-        settings.rollingWindowMs,
-        settings.alertThresholdMs,
-        settings.updatedAt,
-      ],
-    );
-    return { ...settings };
-  }
-
-  async deleteThroughputSettings(connectionId: string): Promise<boolean> {
-    if (!this.pool) throw new Error('Database not initialized');
-    const result = await this.pool.query(
-      'DELETE FROM throughput_settings WHERE connection_id = $1',
-      [connectionId],
-    );
-    return (result.rowCount ?? 0) > 0;
-  }
-
-  async getActiveThroughputSettings(): Promise<ThroughputSettings[]> {
-    if (!this.pool) throw new Error('Database not initialized');
-    const result = await this.pool.query(
-      'SELECT * FROM throughput_settings WHERE enabled = true AND ops_ceiling IS NOT NULL',
-    );
-    return result.rows.map((row: any) => ({
-      connectionId: row.connection_id,
-      enabled: row.enabled,
-      opsCeiling: row.ops_ceiling,
-      rollingWindowMs: row.rolling_window_ms,
-      alertThresholdMs: row.alert_threshold_ms,
-      updatedAt: Number(row.updated_at),
-    }));
-  }
-
-  // Generic Metric Forecasting Settings
+  // Metric Forecasting Settings
 
   private mapMetricForecastRow(row: any): MetricForecastSettings {
     return {

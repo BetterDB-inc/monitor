@@ -34,7 +34,6 @@ import {
   LatencySnapshotQueryOptions,
   StoredMemorySnapshot,
   MemorySnapshotQueryOptions,
-  ThroughputSettings,
   DatabaseConnectionConfig,
   HotKeyEntry,
   HotKeyQueryOptions,
@@ -61,15 +60,6 @@ type MetricForecastSettingsRow = {
   alert_threshold_ms: number;
   updated_at: number;
 };
-
-type ThroughputSettingsRow = {
-  connection_id: string;
-  enabled: number;
-  ops_ceiling: number | null;
-  rolling_window_ms: number;
-  alert_threshold_ms: number;
-  updated_at: number;
-} | null;
 
 export class SqliteAdapter implements StoragePort {
   private db: Database.Database | null = null;
@@ -1068,15 +1058,6 @@ export class SqliteAdapter implements StoragePort {
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
         created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
-      );
-
-      CREATE TABLE IF NOT EXISTS throughput_settings (
-        connection_id TEXT PRIMARY KEY,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        ops_ceiling INTEGER,
-        rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
-        alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
-        updated_at INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS metric_forecast_settings (
@@ -3286,81 +3267,7 @@ export class SqliteAdapter implements StoragePort {
     this.db.prepare('UPDATE agent_tokens SET last_used_at = ? WHERE id = ?').run(Date.now(), id);
   }
 
-  // Throughput Forecasting Settings
-  async getThroughputSettings(connectionId: string): Promise<ThroughputSettings | null> {
-    if (!this.db) {
-      throw new Error('Database not initialized');
-    }
-    const row = this.db
-      .prepare('SELECT * FROM throughput_settings WHERE connection_id = ?')
-      .get(connectionId) as unknown as ThroughputSettingsRow;
-
-    if (!row) {
-      return null;
-    }
-    return {
-      connectionId: row.connection_id,
-      enabled: !!row.enabled,
-      opsCeiling: row.ops_ceiling ?? null,
-      rollingWindowMs: row.rolling_window_ms,
-      alertThresholdMs: row.alert_threshold_ms,
-      updatedAt: row.updated_at,
-    };
-  }
-
-  async saveThroughputSettings(settings: ThroughputSettings): Promise<ThroughputSettings> {
-    if (!this.db) throw new Error('Database not initialized');
-    this.db
-      .prepare(
-        `
-      INSERT INTO throughput_settings (connection_id, enabled, ops_ceiling, rolling_window_ms, alert_threshold_ms, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(connection_id) DO UPDATE SET
-        enabled = excluded.enabled,
-        ops_ceiling = excluded.ops_ceiling,
-        rolling_window_ms = excluded.rolling_window_ms,
-        alert_threshold_ms = excluded.alert_threshold_ms,
-        updated_at = excluded.updated_at
-    `,
-      )
-      .run(
-        settings.connectionId,
-        settings.enabled ? 1 : 0,
-        settings.opsCeiling,
-        settings.rollingWindowMs,
-        settings.alertThresholdMs,
-        settings.updatedAt,
-      );
-    return { ...settings };
-  }
-
-  async deleteThroughputSettings(connectionId: string): Promise<boolean> {
-    if (!this.db) throw new Error('Database not initialized');
-    const result = this.db
-      .prepare('DELETE FROM throughput_settings WHERE connection_id = ?')
-      .run(connectionId);
-    return result.changes > 0;
-  }
-
-  async getActiveThroughputSettings(): Promise<ThroughputSettings[]> {
-    if (!this.db) throw new Error('Database not initialized');
-    const rows = this.db
-      .prepare('SELECT * FROM throughput_settings WHERE enabled = 1 AND ops_ceiling IS NOT NULL')
-      .all() as ThroughputSettingsRow[];
-    if (!rows || rows.length === 0) {
-      return [];
-    }
-    return rows.map((row) => ({
-      connectionId: row!.connection_id,
-      enabled: !!row!.enabled,
-      opsCeiling: row!.ops_ceiling,
-      rollingWindowMs: row!.rolling_window_ms,
-      alertThresholdMs: row!.alert_threshold_ms,
-      updatedAt: row!.updated_at,
-    }));
-  }
-
-  // Generic Metric Forecasting Settings
+  // Metric Forecasting Settings
 
   private mapMetricForecastRow(row: MetricForecastSettingsRow): MetricForecastSettings {
     return {

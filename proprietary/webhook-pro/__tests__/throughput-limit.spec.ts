@@ -49,7 +49,7 @@ describe('WebhookEventsProService - dispatchThroughputLimit', () => {
     const [eventType, alertKey, value, threshold, isAbove] =
       webhookDispatcher.dispatchThresholdAlert.mock.calls[0];
 
-    expect(eventType).toBe(WebhookEventType.THROUGHPUT_LIMIT);
+    expect(eventType).toBe(WebhookEventType.METRIC_FORECAST_LIMIT);
     expect(isAbove).toBe(false);
     expect(value).toBe(7_200_000);
     expect(threshold).toBe(7_200_000);

@@ -21,7 +21,6 @@ import {
   MultiConnectionPoller,
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
-import { ThroughputForecastingService } from '../throughput-forecasting/throughput-forecasting.service';
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
 import { ALL_METRIC_KINDS } from '@betterdb/shared';
 
@@ -175,8 +174,6 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     @Optional()
     @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE)
     private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
-    @Optional()
-    private readonly throughputForecastingService?: ThroughputForecastingService,
     @Optional()
     private readonly metricForecastingService?: MetricForecastingService,
   ) {

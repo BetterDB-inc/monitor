@@ -1,5 +1,4 @@
 import { fetchApi } from './client';
-import type { ThroughputForecast, ThroughputSettings, ThroughputSettingsUpdate } from '@betterdb/shared';
 import type {
   HealthResponse,
   InfoResponse,
@@ -409,17 +408,4 @@ export const metricsApi = {
     );
   },
 
-  // Throughput Forecasting
-  getThroughputForecast: (signal?: AbortSignal) =>
-    fetchApi<ThroughputForecast>('/throughput-forecasting/forecast', { signal }),
-
-  getThroughputSettings: (signal?: AbortSignal) =>
-    fetchApi<ThroughputSettings>('/throughput-forecasting/settings', { signal }),
-
-  updateThroughputSettings: (updates: ThroughputSettingsUpdate) =>
-    fetchApi<ThroughputSettings>('/throughput-forecasting/settings', {
-      method: 'PUT',
-      body: JSON.stringify(updates),
-      headers: { 'Content-Type': 'application/json' },
-    }),
 };

@@ -18,7 +18,6 @@ import { TelemetryModule } from './telemetry/telemetry.module';
 import { VectorSearchModule } from './vector-search/vector-search.module';
 import { CloudAuthModule } from './auth/cloud-auth.module';
 import { McpModule } from './mcp/mcp.module';
-import { ThroughputForecastingModule } from './throughput-forecasting/throughput-forecasting.module';
 import { MetricForecastingModule } from './metric-forecasting/metric-forecasting.module';
 
 let AiModule: any = null;
@@ -121,7 +120,6 @@ const baseImports = [
   WebhooksModule,
   McpModule,
   VectorSearchModule,
-  ThroughputForecastingModule,
   MetricForecastingModule,
 ];
 

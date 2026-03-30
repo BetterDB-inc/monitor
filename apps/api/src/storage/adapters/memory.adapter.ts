@@ -37,7 +37,6 @@ import {
 import type {
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
-  ThroughputSettings,
   MetricForecastSettings,
   MetricKind,
 } from '@betterdb/shared';
@@ -53,7 +52,6 @@ export class MemoryAdapter implements StoragePort {
   private latencyHistograms: StoredLatencyHistogram[] = [];
   private memorySnapshots: StoredMemorySnapshot[] = [];
   private vectorIndexSnapshots: VectorIndexSnapshot[] = [];
-  private throughputSettings: Map<string, ThroughputSettings> = new Map();
   private metricForecastSettings: Map<string, MetricForecastSettings> = new Map();
   private settings: AppSettings | null = null;
   private webhooks: Map<string, Webhook> = new Map();
@@ -1355,29 +1353,7 @@ export class MemoryAdapter implements StoragePort {
     }
   }
 
-  // Throughput Forecasting Settings
-  async getThroughputSettings(
-    connectionId: string,
-  ): Promise<ThroughputSettings | null> {
-    return this.throughputSettings.get(connectionId) ?? null;
-  }
-
-  async saveThroughputSettings(
-    settings: ThroughputSettings,
-  ): Promise<ThroughputSettings> {
-    this.throughputSettings.set(settings.connectionId, settings);
-    return { ...settings };
-  }
-
-  async deleteThroughputSettings(connectionId: string): Promise<boolean> {
-    return this.throughputSettings.delete(connectionId);
-  }
-
-  async getActiveThroughputSettings(): Promise<ThroughputSettings[]> {
-    return [...this.throughputSettings.values()].filter((s) => s.enabled && s.opsCeiling !== null);
-  }
-
-  // Generic Metric Forecasting Settings
+  // Metric Forecasting Settings
 
   private metricForecastKey(connectionId: string, metricKind: MetricKind): string {
     return `${connectionId}:${metricKind}`;

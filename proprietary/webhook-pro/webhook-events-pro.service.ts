@@ -274,7 +274,7 @@ export class WebhookEventsProService implements OnModuleInit {
     }
 
     await this.webhookDispatcher.dispatchThresholdAlert(
-      WebhookEventType.THROUGHPUT_LIMIT,
+      WebhookEventType.METRIC_FORECAST_LIMIT,
       `throughput_limit:${data.connectionId || 'default'}`,
       data.timeToLimitMs,
       data.threshold,
