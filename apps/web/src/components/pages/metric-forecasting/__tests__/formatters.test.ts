@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatMetricValue, formatGrowthRate } from '../formatters';
+import { formatMetricValue, formatGrowthRate, formatTime } from '../formatters';
 
 describe('formatMetricValue', () => {
   it('formats bytes as GB', () => {
@@ -37,6 +37,13 @@ describe('formatMetricValue', () => {
   it('formats small ops as integer', () => {
     expect(formatMetricValue(42, 'ops')).toBe('42');
   });
+
+  it('formats zero for each type', () => {
+    expect(formatMetricValue(0, 'bytes')).toBe('0 B');
+    expect(formatMetricValue(0, 'percent')).toBe('0.0%');
+    expect(formatMetricValue(0, 'ratio')).toBe('0.00x');
+    expect(formatMetricValue(0, 'ops')).toBe('0');
+  });
 });
 
 describe('formatGrowthRate', () => {
@@ -46,5 +53,17 @@ describe('formatGrowthRate', () => {
 
   it('formats negative growth', () => {
     expect(formatGrowthRate(-1048576, 'bytes')).toBe('-1.0 MB/hr');
+  });
+
+  it('formats zero growth', () => {
+    expect(formatGrowthRate(0, 'ops')).toBe('+0/hr');
+  });
+});
+
+describe('formatTime', () => {
+  it('returns a time string with hours and minutes', () => {
+    const ts = new Date(2026, 2, 30, 14, 35).getTime();
+    const result = formatTime(ts);
+    expect(result).toMatch(/\d{2}:\d{2}/);
   });
 });

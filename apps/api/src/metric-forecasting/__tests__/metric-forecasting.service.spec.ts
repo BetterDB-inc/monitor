@@ -361,6 +361,315 @@ describe('MetricForecastingService', () => {
     });
   });
 
+  // ── Ceiling exceeded ── (H2)
+
+  describe('ceiling already exceeded', () => {
+    it('memory above maxmemory returns exceeded', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startMemory: 90_000_000, endMemory: 110_000_000,
+          maxmemory: 100_000_000, connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'usedMemory');
+
+      expect(forecast.mode).toBe('forecast');
+      expect(forecast.timeToLimitMs).toBe(0);
+      expect(forecast.timeToLimitHuman).toMatch(/exceeded/i);
+    });
+
+    it('CPU above ceiling returns exceeded', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startCpuSys: 40, endCpuSys: 55, startCpuUser: 40, endCpuUser: 55,
+          connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'cpuTotal');
+
+      expect(forecast.mode).toBe('forecast');
+      expect(forecast.timeToLimitMs).toBe(0);
+      expect(forecast.timeToLimitHuman).toMatch(/exceeded/i);
+    });
+  });
+
+  // ── Falling/stable for non-ops metrics ── (H3)
+
+  describe('falling/stable trends with ceiling', () => {
+    it('falling memory returns not projected', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startMemory: 80_000_000, endMemory: 60_000_000,
+          maxmemory: 100_000_000, connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'usedMemory');
+
+      expect(forecast.mode).toBe('forecast');
+      expect(forecast.trendDirection).toBe('falling');
+      expect(forecast.timeToLimitMs).toBeNull();
+      expect(forecast.timeToLimitHuman).toContain('Not projected');
+    });
+
+    it('stable CPU returns not projected', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startCpuSys: 25, endCpuSys: 25, startCpuUser: 25, endCpuUser: 25,
+          connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'cpuTotal');
+
+      expect(forecast.mode).toBe('forecast');
+      expect(forecast.trendDirection).toBe('stable');
+      expect(forecast.timeToLimitMs).toBeNull();
+    });
+
+    it('falling fragmentation returns not projected', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startFragRatio: 1.4, endFragRatio: 1.1,
+          connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'memFragmentation');
+
+      expect(forecast.trendDirection).toBe('falling');
+      expect(forecast.timeToLimitMs).toBeNull();
+    });
+  });
+
+  // ── Zero slope / flat values ── (H4)
+
+  describe('zero slope (identical values)', () => {
+    it('flat opsPerSec returns stable trend', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startOps: 5_000, endOps: 5_000, connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'opsPerSec');
+
+      expect(forecast.trendDirection).toBe('stable');
+      expect(forecast.growthRate).toBeCloseTo(0, 1);
+      expect(forecast.growthPercent).toBeCloseTo(0, 1);
+    });
+
+    it('flat memory with ceiling returns not projected', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startMemory: 50_000_000, endMemory: 50_000_000,
+          maxmemory: 100_000_000, connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'usedMemory');
+
+      expect(forecast.trendDirection).toBe('stable');
+      expect(forecast.timeToLimitMs).toBeNull();
+    });
+  });
+
+  // ── Connection isolation ── (M1)
+
+  describe('connection isolation', () => {
+    it('different connections return independent forecasts', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startOps: 10_000, endOps: 20_000, connectionId: 'conn-a',
+        }),
+        'conn-a',
+      );
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startOps: 50_000, endOps: 40_000, connectionId: 'conn-b',
+        }),
+        'conn-b',
+      );
+
+      const forecastA = await service.getForecast('conn-a', 'opsPerSec');
+      const forecastB = await service.getForecast('conn-b', 'opsPerSec');
+
+      expect(forecastA.trendDirection).toBe('rising');
+      expect(forecastB.trendDirection).toBe('falling');
+    });
+  });
+
+  // ── Boundary conditions ── (M2)
+
+  describe('data sufficiency boundaries', () => {
+    it('exactly 3 snapshots spanning 30 min is sufficient', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 3, startTime: now - 30 * 60_000, intervalMs: 15 * 60_000,
+          startOps: 10_000, endOps: 20_000, connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'opsPerSec');
+      expect(forecast.insufficientData).toBe(false);
+    });
+
+    it('3 snapshots spanning 29 min is insufficient', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 3, startTime: now - 29 * 60_000, intervalMs: 14.5 * 60_000,
+          startOps: 10_000, endOps: 20_000, connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'opsPerSec');
+      expect(forecast.insufficientData).toBe(true);
+    });
+
+    it('2 snapshots spanning 60 min is insufficient (below MIN_DATA_POINTS)', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 2, startTime: now - 60 * 60_000, intervalMs: 60 * 60_000,
+          startOps: 10_000, endOps: 20_000, connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+
+      const forecast = await service.getForecast('conn-1', 'opsPerSec');
+      expect(forecast.insufficientData).toBe(true);
+    });
+  });
+
+  // ── Alert dispatch ── (H1)
+
+  describe('checkAlerts', () => {
+    let webhookService: { dispatchMetricForecastLimit: jest.Mock };
+    let connectionRegistry: { list: jest.Mock; getConfig: jest.Mock };
+
+    beforeEach(async () => {
+      storage = new MemoryAdapter();
+      await storage.initialize();
+
+      webhookService = {
+        dispatchMetricForecastLimit: jest.fn().mockResolvedValue(undefined),
+      };
+      connectionRegistry = {
+        list: jest.fn().mockReturnValue([]),
+        getConfig: jest.fn().mockReturnValue({ host: 'localhost', port: 6380 }),
+      };
+
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          MetricForecastingService,
+          { provide: 'STORAGE_CLIENT', useValue: storage },
+          { provide: SettingsService, useValue: { getCachedSettings: jest.fn().mockReturnValue(mockGlobalSettings()) } },
+          { provide: ConnectionRegistry, useValue: connectionRegistry },
+          { provide: 'WEBHOOK_EVENTS_PRO_SERVICE', useValue: webhookService },
+        ],
+      }).compile();
+
+      service = module.get(MetricForecastingService);
+    });
+
+    it('dispatches alert when time-to-limit is within threshold', async () => {
+      const now = Date.now();
+      // Rising ops, ceiling 80k, should project ~3h to limit
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startOps: 40_000, endOps: 50_000, connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+      // Set ceiling + alert threshold of 4h so the ~3h projection triggers
+      await storage.saveMetricForecastSettings(
+        makeSettings({
+          ceiling: 80_000,
+          alertThresholdMs: 4 * 3_600_000,
+        }),
+      );
+
+      // Trigger the private checkAlerts by accessing it via prototype
+      await (service as any).checkAlerts();
+
+      expect(webhookService.dispatchMetricForecastLimit).toHaveBeenCalledTimes(1);
+      expect(webhookService.dispatchMetricForecastLimit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'metric_forecast.limit',
+          metricKind: 'opsPerSec',
+          connectionId: 'conn-1',
+        }),
+      );
+    });
+
+    it('does not dispatch when time-to-limit exceeds threshold', async () => {
+      const now = Date.now();
+      await storage.saveMemorySnapshots(
+        generateSnapshots({
+          count: 60, startTime: now - 60 * 60_000, intervalMs: 60_000,
+          startOps: 40_000, endOps: 50_000, connectionId: 'conn-1',
+        }),
+        'conn-1',
+      );
+      // Ceiling very far away, alert threshold small
+      await storage.saveMetricForecastSettings(
+        makeSettings({
+          ceiling: 500_000,
+          alertThresholdMs: 1_800_000, // 30 min — projection is much longer
+        }),
+      );
+
+      await (service as any).checkAlerts();
+
+      expect(webhookService.dispatchMetricForecastLimit).not.toHaveBeenCalled();
+    });
+
+    it('does not dispatch for disabled settings', async () => {
+      await storage.saveMetricForecastSettings(
+        makeSettings({
+          ceiling: 80_000,
+          enabled: false,
+          alertThresholdMs: 999_999_999,
+        }),
+      );
+
+      await (service as any).checkAlerts();
+
+      expect(webhookService.dispatchMetricForecastLimit).not.toHaveBeenCalled();
+    });
+  });
+
   // ── Cache ──
 
   describe('forecast cache', () => {

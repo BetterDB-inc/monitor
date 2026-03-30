@@ -16,11 +16,14 @@ describe('MetricKindValidationPipe', () => {
   });
 
   it('includes valid kinds in error message', () => {
-    try {
-      pipe.transform('bogus');
-    } catch (e) {
-      expect((e as BadRequestException).message).toContain('opsPerSec');
-      expect((e as BadRequestException).message).toContain('usedMemory');
-    }
+    expect(() => pipe.transform('bogus')).toThrow(
+      expect.objectContaining({
+        message: expect.stringContaining('opsPerSec'),
+      }),
+    );
+  });
+
+  it('rejects empty string', () => {
+    expect(() => pipe.transform('')).toThrow(BadRequestException);
   });
 });

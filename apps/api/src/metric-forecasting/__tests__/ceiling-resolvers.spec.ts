@@ -78,6 +78,10 @@ describe('CEILING_RESOLVERS', () => {
     it('defaults to 100 when no ceiling configured', () => {
       expect(CEILING_RESOLVERS.cpuTotal(makeSettings({ ceiling: null }))).toBe(100);
     });
+
+    it('ceiling of 0 returns 0 (not default)', () => {
+      expect(CEILING_RESOLVERS.cpuTotal(makeSettings({ ceiling: 0 }))).toBe(0);
+    });
   });
 
   describe('memFragmentation', () => {
@@ -87,6 +91,10 @@ describe('CEILING_RESOLVERS', () => {
 
     it('defaults to 1.5 when no ceiling configured', () => {
       expect(CEILING_RESOLVERS.memFragmentation(makeSettings({ ceiling: null }))).toBe(1.5);
+    });
+
+    it('ceiling of 0 returns 0 (not default)', () => {
+      expect(CEILING_RESOLVERS.memFragmentation(makeSettings({ ceiling: 0 }))).toBe(0);
     });
   });
 });

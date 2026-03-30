@@ -34,4 +34,14 @@ describe('METRIC_EXTRACTORS', () => {
   it('memFragmentation extracts memFragmentationRatio', () => {
     expect(METRIC_EXTRACTORS.memFragmentation(snapshot)).toBe(1.35);
   });
+
+  it('cpuTotal handles zero values', () => {
+    const s = { ...snapshot, cpuSys: 0, cpuUser: 0 };
+    expect(METRIC_EXTRACTORS.cpuTotal(s)).toBe(0);
+  });
+
+  it('opsPerSec handles zero', () => {
+    const s = { ...snapshot, opsPerSec: 0 };
+    expect(METRIC_EXTRACTORS.opsPerSec(s)).toBe(0);
+  });
 });
