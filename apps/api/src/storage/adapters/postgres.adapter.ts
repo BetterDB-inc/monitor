@@ -39,6 +39,8 @@ import type {
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
   ThroughputSettings,
+  MetricForecastSettings,
+  MetricKind,
 } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 
@@ -1177,6 +1179,17 @@ export class PostgresAdapter implements StoragePort {
         rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         updated_at BIGINT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS metric_forecast_settings (
+        connection_id TEXT NOT NULL,
+        metric_kind TEXT NOT NULL,
+        enabled BOOLEAN NOT NULL DEFAULT true,
+        ceiling DOUBLE PRECISION,
+        rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
+        alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY (connection_id, metric_kind)
       );
 
       CREATE TABLE IF NOT EXISTS webhooks (
@@ -3576,5 +3589,81 @@ export class PostgresAdapter implements StoragePort {
       alertThresholdMs: row.alert_threshold_ms,
       updatedAt: Number(row.updated_at),
     }));
+  }
+
+  // Generic Metric Forecasting Settings
+
+  private mapMetricForecastRow(row: any): MetricForecastSettings {
+    return {
+      connectionId: row.connection_id,
+      metricKind: row.metric_kind as MetricKind,
+      enabled: row.enabled,
+      ceiling: row.ceiling ?? null,
+      rollingWindowMs: row.rolling_window_ms,
+      alertThresholdMs: row.alert_threshold_ms,
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  async getMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<MetricForecastSettings | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT * FROM metric_forecast_settings WHERE connection_id = $1 AND metric_kind = $2',
+      [connectionId, metricKind],
+    );
+    if (result.rows.length === 0) return null;
+    return this.mapMetricForecastRow(result.rows[0]);
+  }
+
+  async saveMetricForecastSettings(
+    settings: MetricForecastSettings,
+  ): Promise<MetricForecastSettings> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `
+      INSERT INTO metric_forecast_settings
+        (connection_id, metric_kind, enabled, ceiling, rolling_window_ms, alert_threshold_ms, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT(connection_id, metric_kind) DO UPDATE SET
+        enabled = EXCLUDED.enabled,
+        ceiling = EXCLUDED.ceiling,
+        rolling_window_ms = EXCLUDED.rolling_window_ms,
+        alert_threshold_ms = EXCLUDED.alert_threshold_ms,
+        updated_at = EXCLUDED.updated_at
+    `,
+      [
+        settings.connectionId,
+        settings.metricKind,
+        settings.enabled,
+        settings.ceiling,
+        settings.rollingWindowMs,
+        settings.alertThresholdMs,
+        settings.updatedAt,
+      ],
+    );
+    return { ...settings };
+  }
+
+  async deleteMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'DELETE FROM metric_forecast_settings WHERE connection_id = $1 AND metric_kind = $2',
+      [connectionId, metricKind],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT * FROM metric_forecast_settings WHERE enabled = true AND ceiling IS NOT NULL',
+    );
+    return result.rows.map((row: any) => this.mapMetricForecastRow(row));
   }
 }

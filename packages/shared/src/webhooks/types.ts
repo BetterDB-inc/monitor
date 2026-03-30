@@ -323,6 +323,19 @@ export interface IWebhookEventsProService {
     instance: WebhookInstanceInfo;
     connectionId?: string;
   }): Promise<void>;
+
+  dispatchMetricForecastLimit(data: {
+    event: string;
+    metricKind: string;
+    currentValue: number;
+    ceiling: number | null;
+    timeToLimitMs: number;
+    threshold: number;
+    growthRate: number;
+    timestamp: number;
+    instance?: { host: string; port: number };
+    connectionId: string;
+  }): Promise<void>;
 }
 
 /**

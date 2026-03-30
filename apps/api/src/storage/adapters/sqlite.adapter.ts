@@ -40,12 +40,27 @@ import {
   HotKeyQueryOptions,
   StoredLatencyHistogram,
 } from '../../common/interfaces/storage-port.interface';
-import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions } from '@betterdb/shared';
+import type {
+  VectorIndexSnapshot,
+  VectorIndexSnapshotQueryOptions,
+  MetricForecastSettings,
+  MetricKind,
+} from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 
 export interface SqliteAdapterConfig {
   filepath: string;
 }
+
+type MetricForecastSettingsRow = {
+  connection_id: string;
+  metric_kind: string;
+  enabled: number;
+  ceiling: number | null;
+  rolling_window_ms: number;
+  alert_threshold_ms: number;
+  updated_at: number;
+};
 
 type ThroughputSettingsRow = {
   connection_id: string;
@@ -1062,6 +1077,17 @@ export class SqliteAdapter implements StoragePort {
         rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS metric_forecast_settings (
+        connection_id TEXT NOT NULL,
+        metric_kind TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        ceiling REAL,
+        rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
+        alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (connection_id, metric_kind)
       );
 
       CREATE TABLE IF NOT EXISTS webhooks (
@@ -3332,5 +3358,82 @@ export class SqliteAdapter implements StoragePort {
       alertThresholdMs: row!.alert_threshold_ms,
       updatedAt: row!.updated_at,
     }));
+  }
+
+  // Generic Metric Forecasting Settings
+
+  private mapMetricForecastRow(row: MetricForecastSettingsRow): MetricForecastSettings {
+    return {
+      connectionId: row.connection_id,
+      metricKind: row.metric_kind as MetricKind,
+      enabled: !!row.enabled,
+      ceiling: row.ceiling ?? null,
+      rollingWindowMs: row.rolling_window_ms,
+      alertThresholdMs: row.alert_threshold_ms,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async getMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<MetricForecastSettings | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare('SELECT * FROM metric_forecast_settings WHERE connection_id = ? AND metric_kind = ?')
+      .get(connectionId, metricKind) as unknown as MetricForecastSettingsRow;
+    if (!row) return null;
+    return this.mapMetricForecastRow(row);
+  }
+
+  async saveMetricForecastSettings(
+    settings: MetricForecastSettings,
+  ): Promise<MetricForecastSettings> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `
+      INSERT INTO metric_forecast_settings
+        (connection_id, metric_kind, enabled, ceiling, rolling_window_ms, alert_threshold_ms, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(connection_id, metric_kind) DO UPDATE SET
+        enabled = excluded.enabled,
+        ceiling = excluded.ceiling,
+        rolling_window_ms = excluded.rolling_window_ms,
+        alert_threshold_ms = excluded.alert_threshold_ms,
+        updated_at = excluded.updated_at
+    `,
+      )
+      .run(
+        settings.connectionId,
+        settings.metricKind,
+        settings.enabled ? 1 : 0,
+        settings.ceiling,
+        settings.rollingWindowMs,
+        settings.alertThresholdMs,
+        settings.updatedAt,
+      );
+    return { ...settings };
+  }
+
+  async deleteMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare('DELETE FROM metric_forecast_settings WHERE connection_id = ? AND metric_kind = ?')
+      .run(connectionId, metricKind);
+    return result.changes > 0;
+  }
+
+  async getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM metric_forecast_settings WHERE enabled = 1 AND ceiling IS NOT NULL',
+      )
+      .all() as MetricForecastSettingsRow[];
+    return rows.map((row) => this.mapMetricForecastRow(row));
   }
 }

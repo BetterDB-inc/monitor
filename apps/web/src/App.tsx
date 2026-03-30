@@ -29,6 +29,7 @@ import { Settings } from './pages/Settings';
 import { Webhooks } from './pages/Webhooks';
 import { VectorSearch } from './pages/VectorSearch';
 import { ThroughputForecasting } from './pages/ThroughputForecasting';
+import { MetricForecasting } from './pages/MetricForecasting';
 import { Members } from './pages/Members';
 import { workspaceApi, CloudUser } from './api/workspace';
 import { Feature } from '@betterdb/shared';
@@ -144,6 +145,9 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
               Throughput Forecast
             </NavItem>
           )}
+          <NavItem to="/forecasting" active={location.pathname === '/forecasting'}>
+            Forecasting
+          </NavItem>
           <NavItem
             to="/anomalies"
             active={location.pathname === '/anomalies'}
@@ -225,6 +229,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
             <Route path="/vector-search" element={<NoConnectionsGuard><VectorSearch /></NoConnectionsGuard>} />
             <Route path="/cluster" element={<NoConnectionsGuard><ClusterDashboard /></NoConnectionsGuard>} />
             <Route path="/throughput" element={<NoConnectionsGuard><ThroughputForecasting /></NoConnectionsGuard>} />
+            <Route path="/forecasting" element={<NoConnectionsGuard><MetricForecasting /></NoConnectionsGuard>} />
             <Route path="/audit" element={<NoConnectionsGuard><AuditTrail /></NoConnectionsGuard>} />
             <Route path="/helper" element={<NoConnectionsGuard><AiAssistant /></NoConnectionsGuard>} />
             <Route path="/webhooks" element={<NoConnectionsGuard><Webhooks /></NoConnectionsGuard>} />

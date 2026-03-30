@@ -34,7 +34,13 @@ import {
   HotKeyQueryOptions,
   DatabaseConnectionConfig,
 } from '../../common/interfaces/storage-port.interface';
-import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions, ThroughputSettings } from '@betterdb/shared';
+import type {
+  VectorIndexSnapshot,
+  VectorIndexSnapshotQueryOptions,
+  ThroughputSettings,
+  MetricForecastSettings,
+  MetricKind,
+} from '@betterdb/shared';
 
 export class MemoryAdapter implements StoragePort {
   private aclEntries: StoredAclEntry[] = [];
@@ -48,6 +54,7 @@ export class MemoryAdapter implements StoragePort {
   private memorySnapshots: StoredMemorySnapshot[] = [];
   private vectorIndexSnapshots: VectorIndexSnapshot[] = [];
   private throughputSettings: Map<string, ThroughputSettings> = new Map();
+  private metricForecastSettings: Map<string, MetricForecastSettings> = new Map();
   private settings: AppSettings | null = null;
   private webhooks: Map<string, Webhook> = new Map();
   private deliveries: Map<string, WebhookDelivery> = new Map();
@@ -1368,5 +1375,41 @@ export class MemoryAdapter implements StoragePort {
 
   async getActiveThroughputSettings(): Promise<ThroughputSettings[]> {
     return [...this.throughputSettings.values()].filter((s) => s.enabled && s.opsCeiling !== null);
+  }
+
+  // Generic Metric Forecasting Settings
+
+  private metricForecastKey(connectionId: string, metricKind: MetricKind): string {
+    return `${connectionId}:${metricKind}`;
+  }
+
+  async getMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<MetricForecastSettings | null> {
+    return this.metricForecastSettings.get(this.metricForecastKey(connectionId, metricKind)) ?? null;
+  }
+
+  async saveMetricForecastSettings(
+    settings: MetricForecastSettings,
+  ): Promise<MetricForecastSettings> {
+    this.metricForecastSettings.set(
+      this.metricForecastKey(settings.connectionId, settings.metricKind),
+      settings,
+    );
+    return { ...settings };
+  }
+
+  async deleteMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<boolean> {
+    return this.metricForecastSettings.delete(this.metricForecastKey(connectionId, metricKind));
+  }
+
+  async getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]> {
+    return [...this.metricForecastSettings.values()].filter(
+      (s) => s.enabled && s.ceiling !== null,
+    );
   }
 }
