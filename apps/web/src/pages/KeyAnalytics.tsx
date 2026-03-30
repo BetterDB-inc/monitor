@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { keyAnalyticsApi } from '../api/keyAnalytics';
 import type { HotKeyEntry } from '../api/keyAnalytics';
+import { useBaselineHotKeys } from '../hooks/useBaselineHotKeys';
 import { extractPattern } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
@@ -137,25 +138,12 @@ export function KeyAnalytics() {
   });
 
   // Fetch history within the selected date range for rank delta
-  const [baselineHotKeys, setBaselineHotKeys] = useState<HotKeyEntry[] | null>(null);
-
-  useEffect(() => {
-    if (activeTab !== 'hot-keys' || !isHotKeyTimeFiltered) {
-      setBaselineHotKeys(null);
-      return;
-    }
-    let cancelled = false;
-    keyAnalyticsApi.getHotKeys({
-      limit: 50,
-      startTime: hotKeyStartTime,
-      endTime: hotKeyEndTime,
-      oldest: true,
-    }).then(entries => {
-      if (cancelled) return;
-      setBaselineHotKeys(entries.length > 0 ? entries : null);
-    }).catch(() => setBaselineHotKeys(null));
-    return () => { cancelled = true; };
-  }, [activeTab, hotKeyStartTime, hotKeyEndTime, isHotKeyTimeFiltered]);
+  const { data: baselineHotKeys } = useBaselineHotKeys({
+    connectionId: currentConnection?.id,
+    startTime: hotKeyStartTime,
+    endTime: hotKeyEndTime,
+    enabled: activeTab === 'hot-keys' && isHotKeyTimeFiltered,
+  });
 
   // Deduplicate: keep only the latest snapshot per pattern (results are ordered by timestamp DESC)
   const patterns = useMemo(() => {
@@ -733,7 +721,7 @@ export function KeyAnalytics() {
                     </TableHeader>
                     <TableBody>
                       {hotKeys?.map((entry: HotKeyEntry) => {
-                        const delta = getRankDelta(entry.rank, entry.keyName, baselineHotKeys);
+                        const delta = getRankDelta(entry.rank, entry.keyName, baselineHotKeys ?? null);
                         const isTop10 = entry.rank <= 10;
                         return (
                           <TableRow

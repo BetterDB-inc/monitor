@@ -38,6 +38,7 @@ import {
   DatabaseConnectionConfig,
   HotKeyEntry,
   HotKeyQueryOptions,
+  StoredLatencyHistogram,
 } from '../../common/interfaces/storage-port.interface';
 import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
