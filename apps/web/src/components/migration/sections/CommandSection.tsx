@@ -13,13 +13,8 @@ const SOURCE_LABELS: Record<string, string> = {
 export function CommandSection({ job }: Props) {
   const cmd = job.commandAnalysis;
 
-  if (!cmd) {
-    return (
-      <section className="bg-card border rounded-lg p-6">
-        <h2 className="text-lg font-semibold mb-2">Command Analysis</h2>
-        <p className="text-sm text-muted-foreground">Not available for this analysis.</p>
-      </section>
-    );
+  if (!cmd || cmd.topCommands.length === 0) {
+    return null;
   }
 
   return (

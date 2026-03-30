@@ -34,7 +34,7 @@ export function DataTypeSection({ job }: Props) {
   return (
     <section className="bg-card border rounded-lg p-6">
       <h2 className="text-lg font-semibold mb-4">Data Types</h2>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>

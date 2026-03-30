@@ -1,10 +1,20 @@
 import { useState } from 'react';
 import { useConnection } from '../../hooks/useConnection';
+import type { Connection } from '../../hooks/useConnection';
 import { fetchApi } from '../../api/client';
 import type { StartAnalysisResponse } from '@betterdb/shared';
 
 interface Props {
   onStart: (analysisId: string) => void;
+}
+
+function connectionLabel(c: Connection): string {
+  const base = `${c.name} (${c.host}:${c.port})`;
+  if (c.capabilities?.dbType && c.capabilities?.version) {
+    const type = c.capabilities.dbType === 'valkey' ? 'Valkey' : 'Redis';
+    return `${base} — ${type} ${c.capabilities.version}`;
+  }
+  return base;
 }
 
 export function AnalysisForm({ onStart }: Props) {
@@ -19,6 +29,9 @@ export function AnalysisForm({ onStart }: Props) {
     sourceConnectionId !== '' &&
     targetConnectionId !== '' &&
     sourceConnectionId === targetConnectionId;
+
+  const targetConnection = connections.find(c => c.id === targetConnectionId);
+  const targetIsOffline = targetConnectionId !== '' && targetConnection && !targetConnection.isConnected;
 
   // The API returns connectionType on each connection but the Connection
   // interface in useConnection doesn't surface it. Cast to access at runtime.
@@ -46,7 +59,12 @@ export function AnalysisForm({ onStart }: Props) {
       });
       onStart(res.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start analysis');
+      const raw = err instanceof Error ? err.message : 'Failed to start analysis';
+      if (/writeable|enableOfflineQueue|offline/i.test(raw)) {
+        setError(`Could not connect to ${targetConnection?.name ?? 'target'} — the instance appears to be offline. Check the connection before running analysis.`);
+      } else {
+        setError(raw);
+      }
     } finally {
       setLoading(false);
     }
@@ -65,7 +83,7 @@ export function AnalysisForm({ onStart }: Props) {
           <option value="">Select a connection...</option>
           {connections.map(c => (
             <option key={c.id} value={c.id}>
-              {c.name} ({c.host}:{c.port})
+              {connectionLabel(c)}
             </option>
           ))}
         </select>
@@ -76,19 +94,29 @@ export function AnalysisForm({ onStart }: Props) {
         <select
           value={targetConnectionId}
           onChange={e => setTargetConnectionId(e.target.value)}
-          className="w-full border rounded-md px-3 py-2 text-sm bg-background"
+          className={`w-full border rounded-md px-3 py-2 text-sm bg-background${sameConnection ? ' border-red-400' : ''}`}
           required
         >
           <option value="">Select a connection...</option>
           {connections.map(c => (
-            <option key={c.id} value={c.id}>
-              {c.name} ({c.host}:{c.port})
+            <option
+              key={c.id}
+              value={c.id}
+              disabled={!c.isConnected}
+              title={!c.isConnected ? 'This instance is offline' : undefined}
+            >
+              {!c.isConnected ? `\u25CB ${connectionLabel(c)} (offline)` : connectionLabel(c)}
             </option>
           ))}
         </select>
         {sameConnection && (
           <p className="text-sm text-red-600 mt-1">
             Source and target must be different connections
+          </p>
+        )}
+        {targetIsOffline && !sameConnection && (
+          <p className="text-sm text-amber-600 mt-1">
+            This instance appears to be offline and may not accept connections.
           </p>
         )}
       </div>
@@ -126,13 +154,20 @@ export function AnalysisForm({ onStart }: Props) {
         </p>
       </div>
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
+          {error}
+        </div>
+      )}
 
       <button
         type="submit"
         disabled={loading || !sourceConnectionId || !targetConnectionId || sameConnection || hasAgentConnection}
-        className="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium disabled:opacity-50"
+        className="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium disabled:opacity-50 inline-flex items-center gap-2"
       >
+        {loading && (
+          <span className="h-3 w-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+        )}
         {loading ? 'Starting...' : 'Start Analysis'}
       </button>
     </form>

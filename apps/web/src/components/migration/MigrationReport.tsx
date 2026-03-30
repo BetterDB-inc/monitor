@@ -15,8 +15,10 @@ export function MigrationReport({ job }: Props) {
     <div className="space-y-6 print:space-y-4" id="migration-report">
       <SummarySection job={job} />
       <VerdictSection job={job} />
-      <DataTypeSection job={job} />
-      <TtlSection job={job} />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <DataTypeSection job={job} />
+        <TtlSection job={job} />
+      </div>
       <CommandSection job={job} />
       <HfeSection job={job} />
     </div>

@@ -116,6 +116,22 @@ export function ExecutionPanel({ executionId, onStopped }: Props) {
         )}
       </div>
 
+      {/* Progress bar — shown while running */}
+      {execution.status === 'running' && execution.progress != null && (
+        <div className="bg-card border rounded-lg p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium">Migration progress</span>
+            <span className="text-sm text-muted-foreground">{Math.min(100, execution.progress)}%</span>
+          </div>
+          <div className="w-full bg-muted rounded-full h-2">
+            <div
+              className="bg-primary h-2 rounded-full transition-all duration-500"
+              style={{ width: `${Math.min(100, execution.progress)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Status banners */}
       {execution.status === 'failed' && (
         <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 text-sm">

@@ -19,19 +19,19 @@ export function ExportBar({ job, phase }: Props) {
   };
 
   return (
-    <div className="flex gap-2 print:hidden">
+    <>
       <button
         onClick={handleExportJson}
-        className="px-3 py-1.5 text-sm border rounded-md hover:bg-muted"
+        className="px-3 py-1.5 text-sm border rounded-md hover:bg-muted print:hidden"
       >
         Export JSON
       </button>
       <button
         onClick={() => window.print()}
-        className="px-3 py-1.5 text-sm border rounded-md hover:bg-muted"
+        className="px-3 py-1.5 text-sm border rounded-md hover:bg-muted print:hidden"
       >
         Print / Save PDF
       </button>
-    </div>
+    </>
   );
 }
