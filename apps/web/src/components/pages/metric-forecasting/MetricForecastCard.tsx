@@ -23,7 +23,7 @@ export function MetricForecastCard({
           <p className="text-2xl font-bold">
             {formatMetricValue(forecast.currentValue, meta.valueFormatter)}
           </p>
-          <p className="text-xs text-muted-foreground">{meta.unitLabel}</p>
+          <p className="text-xs text-muted-foreground">{meta.label}</p>
         </div>
 
         <div>

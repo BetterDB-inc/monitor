@@ -15,7 +15,7 @@ export function MetricInsufficientData({
         {forecast.insufficientDataMessage}
       </p>
       <p className="text-center text-2xl font-bold mt-4">
-        {formatMetricValue(forecast.currentValue, meta.valueFormatter)} {meta.unitLabel}
+        {formatMetricValue(forecast.currentValue, meta.valueFormatter)}
       </p>
     </Card>
   );

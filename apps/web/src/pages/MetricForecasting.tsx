@@ -22,7 +22,7 @@ import {
 } from '../components/pages/metric-forecasting';
 
 const TAB_LABELS: Record<MetricKind, string> = {
-  opsPerSec: 'Ops',
+  opsPerSec: 'Throughput',
   usedMemory: 'Memory',
   cpuTotal: 'CPU',
   memFragmentation: 'Fragmentation',
@@ -113,7 +113,7 @@ export function MetricForecasting() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-3xl font-bold">Metric Forecasting</h1>
+      <h1 className="text-3xl font-bold">Forecast</h1>
 
       {/* Tab bar */}
       <div className="flex border-b">

@@ -27,22 +27,22 @@ describe('formatMetricValue', () => {
   });
 
   it('formats ops as K', () => {
-    expect(formatMetricValue(12_345, 'ops')).toBe('12.3K');
+    expect(formatMetricValue(12_345, 'ops')).toBe('12.3K ops/sec');
   });
 
   it('formats ops as M', () => {
-    expect(formatMetricValue(1_500_000, 'ops')).toBe('1.5M');
+    expect(formatMetricValue(1_500_000, 'ops')).toBe('1.5M ops/sec');
   });
 
   it('formats small ops as integer', () => {
-    expect(formatMetricValue(42, 'ops')).toBe('42');
+    expect(formatMetricValue(42, 'ops')).toBe('42 ops/sec');
   });
 
   it('formats zero for each type', () => {
     expect(formatMetricValue(0, 'bytes')).toBe('0 B');
     expect(formatMetricValue(0, 'percent')).toBe('0.0%');
     expect(formatMetricValue(0, 'ratio')).toBe('0.00x');
-    expect(formatMetricValue(0, 'ops')).toBe('0');
+    expect(formatMetricValue(0, 'ops')).toBe('0 ops/sec');
   });
 });
 
