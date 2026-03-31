@@ -251,7 +251,6 @@ describe('WebhooksService', () => {
 
   describe('Tier Validation', () => {
     beforeEach(() => {
-      delete process.env.DEV_LICENSE_TIER;
       storageClient.createWebhook.mockResolvedValue({
         id: '123',
         name: 'Test',

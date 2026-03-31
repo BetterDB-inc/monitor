@@ -44,7 +44,6 @@ export const envSchema = z.object({
   ANOMALY_PROMETHEUS_INTERVAL_MS: z.coerce.number().int().min(1000).default(30000),
 
   // License configuration (optional)
-  DEV_LICENSE_TIER: z.enum(['community', 'pro', 'enterprise']).optional(),
   BETTERDB_LICENSE_KEY: z.string().optional(),
   ENTITLEMENT_URL: z.string().url().optional(),
   LICENSE_CACHE_TTL_MS: z.coerce.number().int().min(60000).optional(),

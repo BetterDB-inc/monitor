@@ -151,9 +151,8 @@ export class WebhooksService {
    * @throws ForbiddenException if any events are not allowed
    */
   private validateEventTiers(events: WebhookEventType[]): void {
-    // DEV_LICENSE_TIER overrides the license service tier (for local development)
-    const devTier = process.env.DEV_LICENSE_TIER as Tier | undefined;
-    const userTier: Tier = devTier || this.licenseService?.getLicenseTier() || Tier.community;
+    // If no license service available, default to community tier
+    const userTier: Tier = this.licenseService?.getLicenseTier() || Tier.community;
 
     // Check which events are not allowed
     const disallowedEvents = validateEventsForTier(events, userTier);
