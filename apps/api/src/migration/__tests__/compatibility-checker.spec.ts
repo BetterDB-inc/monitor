@@ -24,7 +24,6 @@ describe('compatibility-checker', () => {
         db0: 'keys=100,expires=10',
         db3: 'keys=50,expires=5',
         maxmemory_policy: 'allkeys-lru',
-        rdb_last_save_time: '1700000000',
         aof_enabled: '1',
       };
       const capabilities: DatabaseCapabilities = {
@@ -40,7 +39,7 @@ describe('compatibility-checker', () => {
         hasVectorSearch: false,
       };
 
-      const meta = buildInstanceMeta(info, capabilities, ['default', 'admin']);
+      const meta = buildInstanceMeta(info, capabilities, ['default', 'admin'], '3600 1 300 100');
 
       expect(meta.dbType).toBe('valkey');
       expect(meta.version).toBe('8.1.0');
@@ -60,9 +59,29 @@ describe('compatibility-checker', () => {
       expect(meta.databases).toEqual([0]);
     });
 
-    it('should detect RDB-only persistence', () => {
+    it('should detect RDB-only persistence via CONFIG save schedule', () => {
       const meta = buildInstanceMeta(
-        { rdb_last_save_time: '1700000000', aof_enabled: '0' },
+        { aof_enabled: '0' },
+        { dbType: 'valkey', version: '8.0.0' } as DatabaseCapabilities,
+        [],
+        '3600 1 300 100',
+      );
+      expect(meta.persistenceMode).toBe('rdb');
+    });
+
+    it('should not detect RDB when CONFIG save is empty', () => {
+      const meta = buildInstanceMeta(
+        { aof_enabled: '0' },
+        { dbType: 'valkey', version: '8.0.0' } as DatabaseCapabilities,
+        [],
+        '',
+      );
+      expect(meta.persistenceMode).toBe('none');
+    });
+
+    it('should fall back to rdb_bgsave_in_progress when CONFIG not available', () => {
+      const meta = buildInstanceMeta(
+        { rdb_bgsave_in_progress: '1', aof_enabled: '0' },
         { dbType: 'valkey', version: '8.0.0' } as DatabaseCapabilities,
         [],
       );

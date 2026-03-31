@@ -298,19 +298,20 @@ async function compareSet(source: Valkey, target: Valkey, key: string): Promise<
   }
 
   const [sourceMembers, targetMembers] = await Promise.all([
-    source.smembers(key),
-    target.smembers(key),
+    source.smembersBuffer(key),
+    target.smembersBuffer(key),
   ]);
 
-  const sourceSet = new Set(sourceMembers);
-  const targetSet = new Set(targetMembers);
-
-  if (sourceSet.size !== targetSet.size) {
-    return `set cardinality differs (source: ${sourceSet.size}, target: ${targetSet.size})`;
+  if (sourceMembers.length !== targetMembers.length) {
+    return `set cardinality differs (source: ${sourceMembers.length}, target: ${targetMembers.length})`;
   }
 
-  for (const member of sourceSet) {
-    if (!targetSet.has(member)) {
+  // Sort by raw bytes for deterministic comparison
+  sourceMembers.sort((a, b) => a.compare(b));
+  targetMembers.sort((a, b) => a.compare(b));
+
+  for (let i = 0; i < sourceMembers.length; i++) {
+    if (!sourceMembers[i].equals(targetMembers[i])) {
       return 'set members differ';
     }
   }
@@ -332,8 +333,8 @@ async function compareZset(source: Valkey, target: Valkey, key: string): Promise
   }
 
   const [sourceData, targetData] = await Promise.all([
-    (source as any).call('ZRANGE', key, '0', '-1', 'WITHSCORES') as Promise<string[]>,
-    (target as any).call('ZRANGE', key, '0', '-1', 'WITHSCORES') as Promise<string[]>,
+    source.callBuffer('ZRANGE', key, '0', '-1', 'WITHSCORES') as Promise<Buffer[]>,
+    target.callBuffer('ZRANGE', key, '0', '-1', 'WITHSCORES') as Promise<Buffer[]>,
   ]);
 
   if (!sourceData && !targetData) return null;
@@ -343,7 +344,7 @@ async function compareZset(source: Valkey, target: Valkey, key: string): Promise
   }
 
   for (let i = 0; i < sourceData.length; i++) {
-    if (sourceData[i] !== targetData[i]) {
+    if (!sourceData[i].equals(targetData[i])) {
       return 'zset member or score differs';
     }
   }

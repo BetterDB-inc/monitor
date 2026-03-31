@@ -34,6 +34,7 @@ export function buildInstanceMeta(
   info: Record<string, unknown>,
   capabilities: DatabaseCapabilities,
   aclUsers: string[],
+  rdbSaveConfig?: string,
 ): InstanceMeta {
   // clusterEnabled
   const clusterEnabled = String(info['cluster_enabled'] ?? '0') === '1';
@@ -64,9 +65,17 @@ export function buildInstanceMeta(
   let hasRdb = false;
   let hasAof = false;
 
-  const rdbLastSaveTime = Number(info['rdb_last_save_time'] ?? 0);
-  if (rdbLastSaveTime > 0) {
-    hasRdb = true;
+  // rdb_last_save_time > 0 is unreliable — it's set to server start time even when RDB is disabled.
+  // Use the CONFIG GET save schedule when available; fall back to rdb_bgsave_in_progress as a weak signal.
+  if (rdbSaveConfig !== undefined) {
+    // CONFIG GET save returns "" when RDB is disabled, non-empty when a schedule is set
+    hasRdb = rdbSaveConfig.length > 0;
+  } else {
+    // Fallback: if a BGSAVE is actively running, RDB is clearly configured
+    const bgsaveInProgress = String(info['rdb_bgsave_in_progress'] ?? '0');
+    if (bgsaveInProgress === '1') {
+      hasRdb = true;
+    }
   }
 
   const aofEnabled = String(info['aof_enabled'] ?? '0');

@@ -274,24 +274,34 @@ export class MigrationExecutionService {
     }
 
     if (this.jobs.size >= this.MAX_JOBS) {
-      this.logger.warn(`Execution job limit reached (${this.MAX_JOBS}). Cannot evict running jobs.`);
+      throw new ServiceUnavailableException(
+        `Execution job limit reached (${this.MAX_JOBS}). All slots occupied by running jobs — try again later.`,
+      );
     }
   }
 }
 
 // Redact credentials from RedisShake log lines before serving to the frontend
+const SENSITIVE_KEYS = /(?:password|username|auth|requirepass|masterauth|token)/i;
+
 function sanitizeLogLine(line: string): string {
   let sanitized = line;
-  // 1. Quoted passwords: password = "secret" or password:"secret"
-  sanitized = sanitized.replace(/password\s*[=:]\s*"(?:[^"\\]|\\.)*"/gi, (match) => {
-    const eqIdx = match.search(/[=:]/);
-    return match.slice(0, eqIdx + 1) + ' "***"';
-  });
-  // 2. Unquoted passwords (skip already-redacted quoted ones): password = my secret password
-  sanitized = sanitized.replace(/password\s*[=:]\s*(?!["*])\S.*/gi, (match) => {
-    const eqIdx = match.search(/[=:]/);
-    return match.slice(0, eqIdx + 1) + ' ***';
-  });
+  // 1. Quoted sensitive fields: password = "secret" or username:"admin"
+  sanitized = sanitized.replace(
+    new RegExp(`(${SENSITIVE_KEYS.source})\\s*[=:]\\s*"(?:[^"\\\\]|\\\\.)*"`, 'gi'),
+    (match) => {
+      const eqIdx = match.search(/[=:]/);
+      return match.slice(0, eqIdx + 1) + ' "***"';
+    },
+  );
+  // 2. Unquoted sensitive fields (skip already-redacted quoted ones)
+  sanitized = sanitized.replace(
+    new RegExp(`(${SENSITIVE_KEYS.source})\\s*[=:]\\s*(?!["*])\\S.*`, 'gi'),
+    (match) => {
+      const eqIdx = match.search(/[=:]/);
+      return match.slice(0, eqIdx + 1) + ' ***';
+    },
+  );
   // 3. URL credentials: redis://user:pass@host
   sanitized = sanitized.replace(/\/\/[^:]+:[^@]+@/g, '//***:***@');
   return sanitized;

@@ -39,6 +39,7 @@ export class MigrationController {
   }
 
   @Get('analysis/:id')
+  @UseGuards(LicenseGuard)
   getJob(@Param('id') id: string): MigrationAnalysisResult {
     const job = this.migrationService.getJob(id);
     if (!job) {

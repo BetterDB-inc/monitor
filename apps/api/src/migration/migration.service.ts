@@ -380,9 +380,23 @@ export class MigrationService {
         sourceAclUsers = result ?? [];
       } catch { /* ignore - ACL not supported or no permission */ }
 
+      // Fetch RDB save config from both instances for reliable persistence detection
+      let sourceRdbSaveConfig: string | undefined;
+      let targetRdbSaveConfig: string | undefined;
+      try {
+        const sourceClient = adapter.getClient();
+        const result = await sourceClient.call('CONFIG', 'GET', 'save') as string[];
+        if (result && result.length >= 2) sourceRdbSaveConfig = result[1];
+      } catch { /* ignore - CONFIG not permitted */ }
+      try {
+        const targetClient = targetAdapter.getClient();
+        const result = await targetClient.call('CONFIG', 'GET', 'save') as string[];
+        if (result && result.length >= 2) targetRdbSaveConfig = result[1];
+      } catch { /* ignore - CONFIG not permitted */ }
+
       // Build source meta (buildInstanceMeta expects a flat key-value object)
       const flatSourceInfo = flattenInfo(info);
-      const sourceMeta = buildInstanceMeta(flatSourceInfo, capabilities, sourceAclUsers);
+      const sourceMeta = buildInstanceMeta(flatSourceInfo, capabilities, sourceAclUsers, sourceRdbSaveConfig);
 
       // Fetch source modules
       try {
@@ -393,7 +407,7 @@ export class MigrationService {
 
       // Build target meta
       const flatTargetInfo = flattenInfo(targetInfo);
-      const targetMeta = buildInstanceMeta(flatTargetInfo, targetCapabilities, targetAclUsers);
+      const targetMeta = buildInstanceMeta(flatTargetInfo, targetCapabilities, targetAclUsers, targetRdbSaveConfig);
 
       // Fetch target modules
       try {

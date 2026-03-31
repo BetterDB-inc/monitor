@@ -1,10 +1,16 @@
 import type Valkey from 'iovalkey';
+import { randomBytes } from 'crypto';
 
 // Threshold above which we use cursor-based reads (HSCAN/SSCAN/ZSCAN) instead of bulk reads
 const LARGE_KEY_THRESHOLD = 10_000;
 const SCAN_BATCH = 1000;
 const LIST_CHUNK = 1000;
 const STREAM_CHUNK = 1000;
+
+/** Generate a unique temporary key name to write into before atomic RENAME. */
+function tempKey(key: string): string {
+  return `__betterdb_mig_${randomBytes(8).toString('hex')}:{${key}}`;
+}
 
 export interface MigratedKey {
   key: string;
@@ -86,22 +92,27 @@ async function migrateHash(source: Valkey, target: Valkey, key: string): Promise
   const len = await source.hlen(key);
   if (len === 0) return false;
 
-  // Delete target key first to avoid merging with stale data
-  await target.del(key);
-
-  // Use HSCAN for all sizes so binary field names are preserved as Buffers
-  // (hgetallBuffer returns Record<string, Buffer> which coerces field names to UTF-8)
-  let cursor = '0';
-  do {
-    const [next, fields] = await source.hscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
-    cursor = String(next);
-    if (fields.length === 0) continue;
-    const args: (string | Buffer | number)[] = [key];
-    for (let i = 0; i < fields.length; i += 2) {
-      args.push(fields[i], fields[i + 1]);
-    }
-    await target.call('HSET', ...args);
-  } while (cursor !== '0');
+  // Write to a temp key then atomically RENAME to avoid data loss on crash
+  const tmp = tempKey(key);
+  try {
+    // Use HSCAN for all sizes so binary field names are preserved as Buffers
+    // (hgetallBuffer returns Record<string, Buffer> which coerces field names to UTF-8)
+    let cursor = '0';
+    do {
+      const [next, fields] = await source.hscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
+      cursor = String(next);
+      if (fields.length === 0) continue;
+      const args: (string | Buffer | number)[] = [tmp];
+      for (let i = 0; i < fields.length; i += 2) {
+        args.push(fields[i], fields[i + 1]);
+      }
+      await target.call('HSET', ...args);
+    } while (cursor !== '0');
+    await target.rename(tmp, key);
+  } catch (err) {
+    try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+    throw err;
+  }
   return true;
 }
 
@@ -111,14 +122,19 @@ async function migrateList(source: Valkey, target: Valkey, key: string): Promise
   const len = await source.llen(key);
   if (len === 0) return false;
 
-  // Delete target key first to avoid appending to existing data
-  await target.del(key);
-
-  for (let start = 0; start < len; start += LIST_CHUNK) {
-    const end = Math.min(start + LIST_CHUNK - 1, len - 1);
-    const items = await source.lrangeBuffer(key, start, end);
-    if (items.length === 0) break;
-    await target.call('RPUSH', key, ...items);
+  // Write to a temp key then atomically RENAME to avoid data loss on crash
+  const tmp = tempKey(key);
+  try {
+    for (let start = 0; start < len; start += LIST_CHUNK) {
+      const end = Math.min(start + LIST_CHUNK - 1, len - 1);
+      const items = await source.lrangeBuffer(key, start, end);
+      if (items.length === 0) break;
+      await target.call('RPUSH', tmp, ...items);
+    }
+    await target.rename(tmp, key);
+  } catch (err) {
+    try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+    throw err;
   }
   return true;
 }
@@ -129,21 +145,29 @@ async function migrateSet(source: Valkey, target: Valkey, key: string): Promise<
   const card = await source.scard(key);
   if (card === 0) return false;
 
-  // Delete target key first to avoid merging with stale data
-  await target.del(key);
-
-  if (card <= LARGE_KEY_THRESHOLD) {
-    const members = await source.smembersBuffer(key);
-    if (members.length === 0) return true; // del already ran
-    await target.call('SADD', key, ...members);
-  } else {
-    let cursor = '0';
-    do {
-      const [next, members] = await source.sscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
-      cursor = String(next);
-      if (members.length === 0) continue;
-      await target.call('SADD', key, ...members);
-    } while (cursor !== '0');
+  // Write to a temp key then atomically RENAME to avoid data loss on crash
+  const tmp = tempKey(key);
+  try {
+    if (card <= LARGE_KEY_THRESHOLD) {
+      const members = await source.smembersBuffer(key);
+      if (members.length === 0) {
+        try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+        return true;
+      }
+      await target.call('SADD', tmp, ...members);
+    } else {
+      let cursor = '0';
+      do {
+        const [next, members] = await source.sscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
+        cursor = String(next);
+        if (members.length === 0) continue;
+        await target.call('SADD', tmp, ...members);
+      } while (cursor !== '0');
+    }
+    await target.rename(tmp, key);
+  } catch (err) {
+    try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+    throw err;
   }
   return true;
 }
@@ -154,35 +178,43 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
   const card = await source.zcard(key);
   if (card === 0) return false;
 
-  // Delete target key first to avoid merging with stale data
-  await target.del(key);
-
-  if (card <= LARGE_KEY_THRESHOLD) {
-    // Use callBuffer to preserve binary member data (call() decodes as UTF-8)
-    const raw = await source.callBuffer('ZRANGE', key, '0', '-1', 'WITHSCORES') as Buffer[];
-    if (!raw || raw.length === 0) return true; // del already ran
-    // raw is [member, score, member, score, ...] as Buffers
-    const pipeline = target.pipeline();
-    for (let i = 0; i < raw.length; i += 2) {
-      // Score is always ASCII-safe, member stays as Buffer
-      pipeline.zadd(key, raw[i + 1].toString(), raw[i]);
-    }
-    await pipeline.exec();
-  } else {
-    // zscanBuffer not available — use callBuffer for ZSCAN to preserve binary members
-    let cursor = '0';
-    do {
-      const result = await source.callBuffer('ZSCAN', key, cursor, 'COUNT', String(SCAN_BATCH)) as [Buffer, Buffer[]];
-      cursor = result[0].toString();
-      const entries = result[1];
-      if (!entries || entries.length === 0) continue;
-      // entries is [member, score, member, score, ...] as Buffers
+  // Write to a temp key then atomically RENAME to avoid data loss on crash
+  const tmp = tempKey(key);
+  try {
+    if (card <= LARGE_KEY_THRESHOLD) {
+      // Use callBuffer to preserve binary member data (call() decodes as UTF-8)
+      const raw = await source.callBuffer('ZRANGE', key, '0', '-1', 'WITHSCORES') as Buffer[];
+      if (!raw || raw.length === 0) {
+        try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+        return true;
+      }
+      // raw is [member, score, member, score, ...] as Buffers
       const pipeline = target.pipeline();
-      for (let i = 0; i < entries.length; i += 2) {
-        pipeline.zadd(key, entries[i + 1].toString(), entries[i]);
+      for (let i = 0; i < raw.length; i += 2) {
+        // Score is always ASCII-safe, member stays as Buffer
+        pipeline.zadd(tmp, raw[i + 1].toString(), raw[i]);
       }
       await pipeline.exec();
-    } while (cursor !== '0');
+    } else {
+      // zscanBuffer not available — use callBuffer for ZSCAN to preserve binary members
+      let cursor = '0';
+      do {
+        const result = await source.callBuffer('ZSCAN', key, cursor, 'COUNT', String(SCAN_BATCH)) as [Buffer, Buffer[]];
+        cursor = result[0].toString();
+        const entries = result[1];
+        if (!entries || entries.length === 0) continue;
+        // entries is [member, score, member, score, ...] as Buffers
+        const pipeline = target.pipeline();
+        for (let i = 0; i < entries.length; i += 2) {
+          pipeline.zadd(tmp, entries[i + 1].toString(), entries[i]);
+        }
+        await pipeline.exec();
+      } while (cursor !== '0');
+    }
+    await target.rename(tmp, key);
+  } catch (err) {
+    try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+    throw err;
   }
   return true;
 }
@@ -190,34 +222,42 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
 // ── Stream ──
 
 async function migrateStream(source: Valkey, target: Valkey, key: string): Promise<boolean> {
-  // Delete target key first to avoid duplicates on re-migration
-  await target.del(key);
-
-  let lastId = '-';
-  let hasMore = true;
+  // Write to a temp key then atomically RENAME to avoid data loss on crash
+  const tmp = tempKey(key);
   let wrote = false;
 
-  while (hasMore) {
-    const start = lastId === '-' ? '-' : `(${lastId}`;
-    // Use callBuffer to preserve binary field names and values
-    const raw = await source.callBuffer(
-      'XRANGE', key, start, '+', 'COUNT', String(STREAM_CHUNK),
-    ) as Buffer[][];
-    if (!raw || raw.length === 0) {
-      hasMore = false;
-      break;
+  try {
+    let lastId = '-';
+    let hasMore = true;
+
+    while (hasMore) {
+      const start = lastId === '-' ? '-' : `(${lastId}`;
+      // Use callBuffer to preserve binary field names and values
+      const raw = await source.callBuffer(
+        'XRANGE', key, start, '+', 'COUNT', String(STREAM_CHUNK),
+      ) as Buffer[][];
+      if (!raw || raw.length === 0) {
+        hasMore = false;
+        break;
+      }
+      for (const entry of raw) {
+        // entry[0] = stream ID (always ASCII), entry[1] = [field, value, field, value, ...]
+        const id = entry[0].toString();
+        const fields = entry[1] as unknown as Buffer[];
+        await target.callBuffer('XADD', tmp, id, ...fields);
+        lastId = id;
+        wrote = true;
+      }
+      if (raw.length < STREAM_CHUNK) {
+        hasMore = false;
+      }
     }
-    for (const entry of raw) {
-      // entry[0] = stream ID (always ASCII), entry[1] = [field, value, field, value, ...]
-      const id = entry[0].toString();
-      const fields = entry[1] as unknown as Buffer[];
-      await target.callBuffer('XADD', key, id, ...fields);
-      lastId = id;
-      wrote = true;
+    if (wrote) {
+      await target.rename(tmp, key);
     }
-    if (raw.length < STREAM_CHUNK) {
-      hasMore = false;
-    }
+  } catch (err) {
+    try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+    throw err;
   }
   return wrote;
 }

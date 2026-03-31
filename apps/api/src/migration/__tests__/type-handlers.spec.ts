@@ -39,6 +39,7 @@ function createMockTarget() {
   return {
     set: jest.fn().mockResolvedValue('OK'),
     del: jest.fn().mockResolvedValue(1),
+    rename: jest.fn().mockResolvedValue('OK'),
     pexpire: jest.fn().mockResolvedValue(1),
     call: jest.fn().mockResolvedValue('OK'),
     callBuffer: jest.fn().mockResolvedValue(Buffer.from('OK')),
@@ -77,45 +78,40 @@ describe('type-handlers / migrateKey', () => {
   });
 
   describe('hash', () => {
-    it('should use HSCAN and preserve binary field names', async () => {
+    it('should use HSCAN, write to temp key, and RENAME', async () => {
       source.hlen.mockResolvedValue(5);
 
       const result = await migrateKey(source, target, 'hash:1', 'hash');
 
       expect(result.ok).toBe(true);
       expect(source.hscanBuffer).toHaveBeenCalled();
-      expect(target.del).toHaveBeenCalledWith('hash:1');
-      expect(target.call).toHaveBeenCalledWith('HSET', 'hash:1', expect.any(Buffer), expect.any(Buffer));
+      // Writes to temp key then renames atomically
+      expect(target.call).toHaveBeenCalledWith('HSET', expect.stringContaining('__betterdb_mig_'), expect.any(Buffer), expect.any(Buffer));
+      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'hash:1');
     });
   });
 
   describe('list', () => {
-    it('should LRANGE and RPUSH to target', async () => {
+    it('should LRANGE, RPUSH to temp key, and RENAME', async () => {
       const result = await migrateKey(source, target, 'list:1', 'list');
 
       expect(result.ok).toBe(true);
       expect(source.lrangeBuffer).toHaveBeenCalled();
-      expect(target.call).toHaveBeenCalledWith('RPUSH', 'list:1', expect.any(Buffer), expect.any(Buffer));
-    });
-
-    it('should delete target key first to avoid appending', async () => {
-      const result = await migrateKey(source, target, 'list:1', 'list');
-
-      expect(result.ok).toBe(true);
-      expect(target.del).toHaveBeenCalledWith('list:1');
+      expect(target.call).toHaveBeenCalledWith('RPUSH', expect.stringContaining('__betterdb_mig_'), expect.any(Buffer), expect.any(Buffer));
+      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'list:1');
     });
   });
 
   describe('set', () => {
-    it('should use SMEMBERS for small sets', async () => {
+    it('should use SMEMBERS for small sets, write to temp key, and RENAME', async () => {
       source.scard.mockResolvedValue(5);
 
       const result = await migrateKey(source, target, 'set:1', 'set');
 
       expect(result.ok).toBe(true);
       expect(source.smembersBuffer).toHaveBeenCalledWith('set:1');
-      expect(target.del).toHaveBeenCalledWith('set:1');
-      expect(target.call).toHaveBeenCalledWith('SADD', 'set:1', expect.any(Buffer), expect.any(Buffer));
+      expect(target.call).toHaveBeenCalledWith('SADD', expect.stringContaining('__betterdb_mig_'), expect.any(Buffer), expect.any(Buffer));
+      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'set:1');
     });
 
     it('should use SSCAN for large sets (>10K members)', async () => {
@@ -125,18 +121,19 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.sscanBuffer).toHaveBeenCalled();
+      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'set:big');
     });
   });
 
   describe('zset', () => {
-    it('should use callBuffer ZRANGE WITHSCORES for small sorted sets (binary-safe)', async () => {
+    it('should use callBuffer ZRANGE WITHSCORES, write to temp key, and RENAME', async () => {
       source.zcard.mockResolvedValue(5);
 
       const result = await migrateKey(source, target, 'zset:1', 'zset');
 
       expect(result.ok).toBe(true);
-      expect(target.del).toHaveBeenCalledWith('zset:1');
       expect(source.callBuffer).toHaveBeenCalledWith('ZRANGE', 'zset:1', '0', '-1', 'WITHSCORES');
+      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'zset:1');
     });
 
     it('should use callBuffer ZSCAN for large sorted sets (>10K members)', async () => {
@@ -146,18 +143,20 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.callBuffer).toHaveBeenCalledWith('ZSCAN', 'zset:big', '0', 'COUNT', '1000');
+      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'zset:big');
     });
   });
 
   describe('stream', () => {
-    it('should use callBuffer XRANGE and XADD with preserved binary data', async () => {
+    it('should use callBuffer XRANGE, XADD to temp key, and RENAME', async () => {
       const result = await migrateKey(source, target, 'stream:1', 'stream');
 
       expect(result.ok).toBe(true);
       expect(source.callBuffer).toHaveBeenCalledWith('XRANGE', 'stream:1', '-', '+', 'COUNT', '1000');
       expect(target.callBuffer).toHaveBeenCalledWith(
-        'XADD', 'stream:1', '1-0', Buffer.from('field'), Buffer.from('value'),
+        'XADD', expect.stringContaining('__betterdb_mig_'), '1-0', Buffer.from('field'), Buffer.from('value'),
       );
+      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'stream:1');
     });
   });
 
