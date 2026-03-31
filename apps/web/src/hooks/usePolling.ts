@@ -1,101 +1,62 @@
-import { useState, useEffect, useRef } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useRef } from 'react';
 import { PaymentRequiredError } from '../api/client';
 import { useUpgradePrompt } from './useUpgradePrompt';
 
 interface UsePollingOptions<T> {
-  fetcher: ((signal?: AbortSignal) => Promise<T>) | ((...args: any[]) => Promise<T>);
+  fetcher: (signal: AbortSignal) => Promise<T>;
   interval?: number;
   enabled?: boolean;
   /** Optional key that triggers a refetch when changed (e.g., filter parameters) */
   refetchKey?: string | number;
+  /** Query key — provide explicitly to share cache across components. */
+  queryKey?: readonly unknown[];
 }
+
+let keyCounter = 0;
 
 export function usePolling<T>({
   fetcher,
   interval = 5000,
   enabled = true,
   refetchKey,
+  queryKey,
 }: UsePollingOptions<T>) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<Error | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const fetcherRef = useRef(fetcher);
-  const abortControllerRef = useRef<AbortController | null>(null);
   const { showUpgradePrompt } = useUpgradePrompt();
+  const queryClient = useQueryClient();
+  const fetcherRef = useRef(fetcher);
+  fetcherRef.current = fetcher;
 
-  useEffect(() => {
-    fetcherRef.current = fetcher;
-  }, [fetcher]);
+  // Stable key per hook instance, won't change across renders
+  const stableKeyRef = useRef<number | null>(null);
+  if (stableKeyRef.current === null) {
+    stableKeyRef.current = ++keyCounter;
+  }
 
-  useEffect(() => {
-    if (!enabled) {
-      return;
-    }
+  const resolvedKey = queryKey ?? ['polling', stableKeyRef.current, refetchKey];
 
-    const refresh = async () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-
-      const abortController = new AbortController();
-      abortControllerRef.current = abortController;
-
+  const { data, error, isLoading, dataUpdatedAt } = useQuery<T, Error>({
+    queryKey: resolvedKey,
+    queryFn: async ({ signal }) => {
       try {
-        setError(null);
-        const result = await (fetcherRef.current as (signal?: AbortSignal) => Promise<T>)(
-          abortController.signal,
-        );
-
-        if (!abortController.signal.aborted) {
-          setData(result);
-          setLastUpdated(new Date());
-        }
+        return await fetcherRef.current(signal);
       } catch (e) {
-        if (e instanceof Error && e.name === 'AbortError') {
-          return;
-        }
-
         if (e instanceof PaymentRequiredError) {
           showUpgradePrompt(e);
-          setError(e);
-          return;
         }
-        setError(e instanceof Error ? e : new Error('Unknown error'));
-      } finally {
-        if (!abortController.signal.aborted) {
-          setLoading(false);
-        }
+        throw e;
       }
-    };
+    },
+    enabled,
+    refetchInterval: interval,
+    refetchIntervalInBackground: false,
+  });
 
-    void refresh();
-    const timer = setInterval(refresh, interval);
+  const refresh = useCallback(async () => {
+    await queryClient.invalidateQueries({ queryKey: resolvedKey });
+  }, [queryClient, resolvedKey]);
 
-    return () => {
-      clearInterval(timer);
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
-    };
-  }, [interval, enabled, showUpgradePrompt, refetchKey]);
+  const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null;
 
-  const manualRefresh = async () => {
-    try {
-      setError(null);
-      const result = await fetcherRef.current();
-      setData(result);
-      setLastUpdated(new Date());
-    } catch (e) {
-      if (e instanceof PaymentRequiredError) {
-        showUpgradePrompt(e);
-        setError(e);
-        return;
-      }
-      setError(e instanceof Error ? e : new Error('Unknown error'));
-    }
-  };
-
-  return { data, error, loading, lastUpdated, refresh: manualRefresh };
+  return { data: data ?? null, error, loading: isLoading, lastUpdated, refresh };
 }

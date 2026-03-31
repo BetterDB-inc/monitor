@@ -1,19 +1,17 @@
-import { useState, useEffect, useCallback, useRef, createContext, useContext } from 'react';
+import { useState, useCallback, createContext, useContext } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { versionApi } from '../api/version';
 import type { VersionInfo } from '@betterdb/shared';
 
-interface VersionCheckState extends VersionInfo {
+interface VersionCheckContextValue extends VersionInfo {
   loading: boolean;
   error: Error | null;
   dismissed: boolean;
-}
-
-interface VersionCheckContextValue extends VersionCheckState {
   dismiss: () => void;
   refresh: () => Promise<void>;
 }
 
-const DEFAULT_STATE: VersionCheckState = {
+const DEFAULT_STATE: VersionCheckContextValue = {
   current: 'unknown',
   latest: null,
   updateAvailable: false,
@@ -22,81 +20,50 @@ const DEFAULT_STATE: VersionCheckState = {
   loading: true,
   error: null,
   dismissed: false,
-};
-
-export const VersionCheckContext = createContext<VersionCheckContextValue>({
-  ...DEFAULT_STATE,
   dismiss: () => {},
   refresh: async () => {},
-});
+};
+
+export const VersionCheckContext = createContext<VersionCheckContextValue>(DEFAULT_STATE);
 
 const DISMISS_KEY = 'betterdb_update_dismissed_version';
 
 export function useVersionCheckState(): VersionCheckContextValue {
-  const [state, setState] = useState<VersionCheckState>(() => {
-    // Check if user dismissed this version
-    const dismissedVersion = localStorage.getItem(DISMISS_KEY);
-    return {
-      ...DEFAULT_STATE,
-      dismissed: !!dismissedVersion,
-    };
+  const queryClient = useQueryClient();
+  const [dismissedVersion, setDismissedVersion] = useState(
+    () => localStorage.getItem(DISMISS_KEY),
+  );
+
+  const { data, isLoading, error } = useQuery<VersionInfo, Error>({
+    queryKey: ['version-check'],
+    queryFn: () => versionApi.getVersion(),
+    refetchInterval: (query) => {
+      const intervalMs = (query.state.data as VersionInfo & { versionCheckIntervalMs?: number })
+        ?.versionCheckIntervalMs;
+      return intervalMs ?? 3600000;
+    },
   });
 
-  const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
-  const intervalMsRef = useRef(3600000);
-
-  const fetchVersion = useCallback(async () => {
-    setState((prev) => ({ ...prev, loading: true, error: null }));
-    try {
-      const info = await versionApi.getVersion();
-
-      if (info.versionCheckIntervalMs) {
-        intervalMsRef.current = info.versionCheckIntervalMs;
-      }
-
-      // Check if this specific version was dismissed
-      const dismissedVersion = localStorage.getItem(DISMISS_KEY);
-      const isDismissed = dismissedVersion === info.latest;
-
-      setState({
-        ...info,
-        loading: false,
-        error: null,
-        dismissed: isDismissed,
-      });
-    } catch (err) {
-      setState((prev) => ({
-        ...prev,
-        loading: false,
-        error: err instanceof Error ? err : new Error('Failed to fetch version'),
-      }));
-    }
-  }, []);
-
   const dismiss = useCallback(() => {
-    setState((prev) => {
-      if (prev.latest) {
-        localStorage.setItem(DISMISS_KEY, prev.latest);
-      }
-      return { ...prev, dismissed: true };
-    });
-  }, []);
+    if (data?.latest) {
+      localStorage.setItem(DISMISS_KEY, data.latest);
+      setDismissedVersion(data.latest);
+    }
+  }, [data?.latest]);
 
   const refresh = useCallback(async () => {
-    await fetchVersion();
-  }, [fetchVersion]);
-
-  useEffect(() => {
-    fetchVersion().then(() => {
-      intervalRef.current = setInterval(fetchVersion, intervalMsRef.current);
-    });
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [fetchVersion]);
+    await queryClient.invalidateQueries({ queryKey: ['version-check'] });
+  }, [queryClient]);
 
   return {
-    ...state,
+    current: data?.current ?? 'unknown',
+    latest: data?.latest ?? null,
+    updateAvailable: data?.updateAvailable ?? false,
+    releaseUrl: data?.releaseUrl ?? null,
+    checkedAt: data?.checkedAt ?? null,
+    loading: isLoading,
+    error: error ?? null,
+    dismissed: dismissedVersion !== null && dismissedVersion === data?.latest,
     dismiss,
     refresh,
   };

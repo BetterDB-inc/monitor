@@ -1,14 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
+import { useStoredLatencySnapshots, useStoredLatencyHistograms } from '../hooks/useStoredLatency';
+import { useLatencyHistory } from '../hooks/useLatencyHistory';
+import { useLatencyDoctor } from '../hooks/useLatencyDoctor';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 import { DoctorCard } from '../components/DoctorCard';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
-import type { LatencyHistoryEntry, LatencyEvent, LatencyHistogram, StoredLatencySnapshot } from '../types/metrics';
+import type { LatencyEvent } from '../types/metrics';
 
 const EVENTS_POLL_INTERVAL_MS = 10_000;
 const HISTOGRAM_POLL_INTERVAL_MS = 30_000;
@@ -34,11 +37,9 @@ export function Latency() {
   const [searchParams] = useSearchParams();
   const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
   const [selectedCommand, setSelectedCommand] = useState<string | null>(null);
-  const [historyData, setHistoryData] = useState<LatencyHistoryEntry[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState<string | null>(null);
-  const [doctorReport, setDoctorReport] = useState<string>();
-  const [doctorLoading, setDoctorLoading] = useState(true);
+  const { data: historyData = [], isLoading: historyLoading, error: historyErrorObj } = useLatencyHistory(selectedEvent, currentConnection?.id);
+  const historyError = historyErrorObj?.message ?? null;
+  const { data: doctorReport, isLoading: doctorLoading } = useLatencyDoctor(currentConnection?.id);
 
   // Time filter state — initialise from URL ?start=&end= (epoch ms)
   const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
@@ -77,33 +78,18 @@ export function Latency() {
   });
 
   // Stored data (with time filter)
-  const [storedSnapshots, setStoredSnapshots] = useState<StoredLatencySnapshot[] | null>(null);
-  const [storedHistogramData, setStoredHistogramData] = useState<Record<string, LatencyHistogram> | null>(null);
-
-  useEffect(() => {
-    if (!isTimeFiltered) {
-      setStoredSnapshots(null);
-      setStoredHistogramData(null);
-      return;
-    }
-
-    setStoredSnapshots(null);
-    setStoredHistogramData(null);
-    let cancelled = false;
-
-    Promise.all([
-      metricsApi.getStoredLatencySnapshots({ startTime, endTime, limit: 500 }),
-      metricsApi.getStoredLatencyHistograms({ startTime, endTime, limit: 1 }),
-    ]).then(([snapshots, histograms]) => {
-      if (cancelled) return;
-      setStoredSnapshots(snapshots);
-      setStoredHistogramData(histograms.length > 0 ? histograms[0].data : null);
-    }).catch(err => {
-      console.error('Failed to fetch stored latency data:', err);
-    });
-
-    return () => { cancelled = true; };
-  }, [startTime, endTime, isTimeFiltered, currentConnection?.id]);
+  const { data: storedSnapshots } = useStoredLatencySnapshots({
+    connectionId: currentConnection?.id,
+    startTime,
+    endTime,
+    enabled: isTimeFiltered,
+  });
+  const { data: storedHistogramData } = useStoredLatencyHistograms({
+    connectionId: currentConnection?.id,
+    startTime,
+    endTime,
+    enabled: isTimeFiltered,
+  });
 
   // Convert stored snapshots to LatencyEvent[] shape, keeping only the latest per eventName
   const storedAsEvents: LatencyEvent[] | null = storedSnapshots
@@ -119,25 +105,6 @@ export function Latency() {
 
   const latencyEvents = isTimeFiltered ? storedAsEvents : liveLatencyEvents;
   const histogramData = isTimeFiltered ? storedHistogramData : liveHistogramData;
-
-  useEffect(() => {
-    if (selectedEvent) {
-      setHistoryLoading(true);
-      setHistoryError(null);
-      metricsApi.getLatencyHistory(selectedEvent)
-        .then(setHistoryData)
-        .catch((err) => setHistoryError(err.message || 'Failed to fetch history'))
-        .finally(() => setHistoryLoading(false));
-    }
-  }, [selectedEvent]);
-
-  useEffect(() => {
-    setDoctorLoading(true);
-    metricsApi.getLatencyDoctor()
-      .then(data => setDoctorReport(data.report))
-      .catch(console.error)
-      .finally(() => setDoctorLoading(false));
-  }, [currentConnection?.id]);
 
   const formatLatency = (latency: number) => {
     if (latency < 1000) return `${latency}µs`;
