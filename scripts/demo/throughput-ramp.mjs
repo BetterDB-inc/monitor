@@ -193,6 +193,8 @@ let lastSecond = Math.floor(Date.now() / 1000);
 let tickTimer = null;
 let done = false;
 
+const TICK_MS = 10; // Fire every 10ms, batch commands per tick
+
 function scheduleNext() {
   if (done) return;
 
@@ -203,16 +205,20 @@ function scheduleNext() {
   }
 
   const targetRps = getTargetRps(elapsed);
-  const intervalMs = 1000 / targetRps;
+  const batchSize = Math.max(1, Math.round(targetRps * TICK_MS / 1000));
 
-  // Send one command
-  if (GROW_KEYS) {
-    const key = `${KEY_PREFIX}_${keyCounter++}`;
-    sock.write(encodeCommand('SET', key, valuePayload));
-  } else {
-    sock.write(encodeCommand('PING'));
+  // Send a batch of commands
+  let buf = '';
+  for (let i = 0; i < batchSize; i++) {
+    if (GROW_KEYS) {
+      const key = `${KEY_PREFIX}_${keyCounter++}`;
+      buf += encodeCommand('SET', key, valuePayload);
+    } else {
+      buf += encodeCommand('PING');
+    }
   }
-  opsThisSec++;
+  sock.write(buf);
+  opsThisSec += batchSize;
 
   // Log progress once per second
   const nowSec = Math.floor(Date.now() / 1000);
@@ -232,7 +238,7 @@ function scheduleNext() {
     lastSecond = nowSec;
   }
 
-  tickTimer = setTimeout(scheduleNext, intervalMs);
+  tickTimer = setTimeout(scheduleNext, TICK_MS);
 }
 
 function finish() {
