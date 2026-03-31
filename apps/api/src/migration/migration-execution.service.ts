@@ -244,7 +244,7 @@ export class MigrationExecutionService {
       keysTransferred: job.keysTransferred,
       bytesTransferred: job.bytesTransferred,
       keysSkipped: job.keysSkipped,
-      totalKeys: job.totalKeys || undefined,
+      totalKeys: job.totalKeys ?? undefined,
       logs: job.logs.map(sanitizeLogLine),
       progress: job.progress,
     };
@@ -269,18 +269,19 @@ export class MigrationExecutionService {
 }
 
 // Redact credentials from RedisShake log lines before serving to the frontend
-const CREDENTIAL_PATTERNS = [
-  /password\s*[=:]\s*"[^"]*"/gi,
-  /password\s*[=:]\s*\S+/gi,
-  /\/\/[^:]+:[^@]+@/g,    // redis://user:pass@host
-];
-
 function sanitizeLogLine(line: string): string {
   let sanitized = line;
-  for (const pattern of CREDENTIAL_PATTERNS) {
-    sanitized = sanitized.replace(pattern, (match) =>
-      match.replace(/(?<=[=:"\/])[^"@\s]+/, '***'),
-    );
-  }
+  // 1. Quoted passwords: password = "secret" or password:"secret"
+  sanitized = sanitized.replace(/password\s*[=:]\s*"[^"]*"/gi, (match) => {
+    const eqIdx = match.search(/[=:]/);
+    return match.slice(0, eqIdx + 1) + ' "***"';
+  });
+  // 2. Unquoted passwords (skip already-redacted quoted ones): password = secret
+  sanitized = sanitized.replace(/password\s*[=:]\s*(?!["*])\S+/gi, (match) => {
+    const eqIdx = match.search(/[=:]/);
+    return match.slice(0, eqIdx + 1) + ' ***';
+  });
+  // 3. URL credentials: redis://user:pass@host
+  sanitized = sanitized.replace(/\/\/[^:]+:[^@]+@/g, '//***:***@');
   return sanitized;
 }
