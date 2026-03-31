@@ -614,8 +614,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
             forecast.timeToLimitMs !== null ? forecast.timeToLimitMs / 1000 : Infinity;
           this.metricForecastTimeToLimitSeconds.labels(connLabel, metricKind).set(value);
         }
-      } catch {
-        // Silently skip if forecasting unavailable for this metric kind
+      } catch (err) {
+        this.logger.debug(
+          `Metric forecast scrape skipped for ${connectionId}:${metricKind}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
   }

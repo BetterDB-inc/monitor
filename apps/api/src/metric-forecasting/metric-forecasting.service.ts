@@ -16,6 +16,7 @@ import type {
   MetricKind,
 } from '@betterdb/shared';
 import {
+  METRIC_KIND_META,
   WEBHOOK_EVENTS_PRO_SERVICE,
   WebhookEventType,
   type IWebhookEventsProService,
@@ -238,7 +239,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
       connectionId,
       metricKind,
       enabled: true,
-      ceiling: null,
+      ceiling: METRIC_KIND_META[metricKind].defaultCeiling,
       rollingWindowMs: globalSettings.metricForecastingDefaultRollingWindowMs,
       alertThresholdMs: globalSettings.metricForecastingDefaultAlertThresholdMs,
       updatedAt: Date.now(),
