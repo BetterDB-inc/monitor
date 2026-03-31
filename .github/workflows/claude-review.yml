@@ -24,15 +24,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           trigger_phrase: "@claude"
           use_sticky_comment: false
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
           prompt: |
-            Review this pull request thoroughly. For every issue you find, post an inline review comment on the relevant line. Focus on:
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request thoroughly. Focus on:
 
             - **Correctness**: Logic errors, off-by-one errors, race conditions, null/undefined access
             - **Security**: Injection vulnerabilities (SQL, XSS, command, TOML), auth issues, secrets exposure
@@ -41,5 +46,9 @@ jobs:
             - **Consistency**: Patterns used elsewhere in the codebase but not followed here
 
             For each issue, state the severity (Critical / High / Medium / Low), explain why it's a problem, and suggest a fix with a code snippet when possible.
+
+            Use `mcp__github_inline_comment__create_inline_comment` (with `confirmed: true`) to post inline comments on specific lines.
+            Use `gh pr comment` for top-level summary feedback.
+            Only post GitHub comments — don't submit review text as messages.
 
             Do NOT flag stylistic preferences, minor naming choices, or missing documentation unless they cause a real problem.
