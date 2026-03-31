@@ -1,7 +1,12 @@
 import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { LRUCache } from 'lru-cache';
-import type { Webhook, WebhookPayload, WebhookEventType, WebhookThresholds } from '@betterdb/shared';
+import type {
+  Webhook,
+  WebhookPayload,
+  WebhookEventType,
+  WebhookThresholds,
+} from '@betterdb/shared';
 import {
   DeliveryStatus,
   getDeliveryConfig,
@@ -24,7 +29,13 @@ interface AlertState {
 export class WebhookDispatcherService {
   private readonly logger = new Logger(WebhookDispatcherService.name);
   private readonly DEFAULT_REQUEST_TIMEOUT_MS: number;
-  private readonly BLOCKED_HEADERS = ['host', 'content-length', 'transfer-encoding', 'connection', 'upgrade'];
+  private readonly BLOCKED_HEADERS = [
+    'host',
+    'content-length',
+    'transfer-encoding',
+    'connection',
+    'upgrade',
+  ];
 
   // Alert hysteresis configuration (default, can be overridden per-webhook)
   // 10% hysteresis prevents alert flapping - e.g., for 90% threshold:
@@ -46,7 +57,8 @@ export class WebhookDispatcherService {
   // 10KB limit: Balances debug utility vs. database storage costs
   // Large HTML error pages (500 errors) often exceed this, but we capture enough for debugging
   // For full responses, consider object storage integration (S3, etc.)
-  private readonly DEFAULT_MAX_STORED_RESPONSE_BODY_BYTES = DEFAULT_DELIVERY_CONFIG.maxResponseBodyBytes;
+  private readonly DEFAULT_MAX_STORED_RESPONSE_BODY_BYTES =
+    DEFAULT_DELIVERY_CONFIG.maxResponseBodyBytes;
 
   // Test webhook response preview limit (1KB)
   // Smaller than delivery limit since test responses are returned synchronously to API caller
@@ -68,7 +80,10 @@ export class WebhookDispatcherService {
     private readonly configService: ConfigService,
     @Optional() private readonly connectionRegistry?: ConnectionRegistry,
   ) {
-    this.DEFAULT_REQUEST_TIMEOUT_MS = this.configService.get<number>('WEBHOOK_TIMEOUT_MS', DEFAULT_DELIVERY_CONFIG.timeoutMs);
+    this.DEFAULT_REQUEST_TIMEOUT_MS = this.configService.get<number>(
+      'WEBHOOK_TIMEOUT_MS',
+      DEFAULT_DELIVERY_CONFIG.timeoutMs,
+    );
     this.sourceHost = this.configService.get<string>('database.host', 'localhost');
     this.sourcePort = this.configService.get<number>('database.port', 6379);
   }
@@ -105,20 +120,25 @@ export class WebhookDispatcherService {
       const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
 
       if (webhooks.length === 0) {
-        this.logger.debug(`No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`);
+        this.logger.debug(
+          `No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`,
+        );
         return;
       }
 
-      this.logger.log(`Dispatching ${eventType} to ${webhooks.length} webhook(s)${connectionId ? ` for connection ${connectionId}` : ''}`);
+      this.logger.log(
+        `Dispatching ${eventType} to ${webhooks.length} webhook(s)${connectionId ? ` for connection ${connectionId}` : ''}`,
+      );
 
       // Enrich data with connectionId if provided
       const enrichedData = connectionId ? { ...data, connectionId } : data;
 
       // Dispatch to all webhooks in parallel
       await Promise.allSettled(
-        webhooks.map(webhook => this.dispatchToWebhook(webhook, eventType, enrichedData, connectionId))
+        webhooks.map((webhook) =>
+          this.dispatchToWebhook(webhook, eventType, enrichedData, connectionId),
+        ),
       );
-
     } catch (error) {
       this.logger.error(`Failed to dispatch event ${eventType}:`, error);
     }
@@ -179,7 +199,7 @@ export class WebhookDispatcherService {
   ): Promise<void> {
     if (this.shouldFireAlert(alertKey, currentValue, threshold, isAbove)) {
       this.logger.log(
-        `Threshold alert triggered: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`
+        `Threshold alert triggered: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`,
       );
       await this.dispatchEvent(eventType, data, connectionId);
     }
@@ -210,13 +230,15 @@ export class WebhookDispatcherService {
       const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
 
       if (webhooks.length === 0) {
-        this.logger.debug(`No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`);
+        this.logger.debug(
+          `No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`,
+        );
         return;
       }
 
       // Dispatch to each webhook with its own threshold
       await Promise.allSettled(
-        webhooks.map(async webhook => {
+        webhooks.map(async (webhook) => {
           // Get per-webhook threshold and alert config
           const threshold = getThreshold(webhook, thresholdKey);
           const alertConfig = getAlertConfig(webhook);
@@ -227,9 +249,17 @@ export class WebhookDispatcherService {
             ? `${alertKeyPrefix}:${connectionId}:${webhook.id}`
             : `${alertKeyPrefix}:${webhook.id}`;
 
-          if (this.shouldFireAlert(alertKey, currentValue, threshold, isAbove, alertConfig.hysteresisFactor)) {
+          if (
+            this.shouldFireAlert(
+              alertKey,
+              currentValue,
+              threshold,
+              isAbove,
+              alertConfig.hysteresisFactor,
+            )
+          ) {
             this.logger.log(
-              `Threshold alert triggered for webhook ${webhook.id}: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`
+              `Threshold alert triggered for webhook ${webhook.id}: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`,
             );
 
             // Add threshold info to data
@@ -242,9 +272,8 @@ export class WebhookDispatcherService {
 
             await this.dispatchToWebhook(webhook, eventType, enrichedData, connectionId);
           }
-        })
+        }),
       );
-
     } catch (error) {
       this.logger.error(`Failed to dispatch per-webhook threshold alert ${eventType}:`, error);
     }
@@ -337,11 +366,7 @@ export class WebhookDispatcherService {
   /**
    * Send webhook HTTP request
    */
-  async sendWebhook(
-    webhook: Webhook,
-    deliveryId: string,
-    payload: WebhookPayload,
-  ): Promise<void> {
+  async sendWebhook(webhook: Webhook, deliveryId: string, payload: WebhookPayload): Promise<void> {
     const startTime = Date.now();
     let status: DeliveryStatus = DeliveryStatus.PENDING;
     let statusCode: number | undefined;
@@ -356,7 +381,11 @@ export class WebhookDispatcherService {
       // Prepare request
       const payloadString = JSON.stringify(payload);
       const timestamp = payload.timestamp;
-      const signature = this.generateSignatureWithTimestamp(payloadString, webhook.secret || '', timestamp);
+      const signature = this.generateSignatureWithTimestamp(
+        payloadString,
+        webhook.secret || '',
+        timestamp,
+      );
 
       // Sanitize custom headers
       const sanitizedCustomHeaders = this.sanitizeHeaders(webhook.headers || {});
@@ -397,16 +426,15 @@ export class WebhookDispatcherService {
           // 4xx errors are client errors - don't retry
           status = DeliveryStatus.FAILED;
           this.logger.warn(
-            `Webhook delivery failed with client error ${statusCode}: ${webhook.id} -> ${webhook.url}`
+            `Webhook delivery failed with client error ${statusCode}: ${webhook.id} -> ${webhook.url}`,
           );
         } else {
           // 5xx errors are server errors - retry
           status = DeliveryStatus.RETRYING;
           this.logger.warn(
-            `Webhook delivery failed with server error ${statusCode}: ${webhook.id} -> ${webhook.url}`
+            `Webhook delivery failed with server error ${statusCode}: ${webhook.id} -> ${webhook.url}`,
           );
         }
-
       } catch (fetchError: any) {
         clearTimeout(timeoutId);
 
@@ -421,7 +449,6 @@ export class WebhookDispatcherService {
           this.logger.error(`Webhook delivery error: ${webhook.id} -> ${webhook.url}`, fetchError);
         }
       }
-
     } catch (error: any) {
       status = DeliveryStatus.FAILED;
       responseBody = error.message || 'Unknown error';
@@ -475,19 +502,21 @@ export class WebhookDispatcherService {
       // If retrying, calculate next retry time
       if (status === DeliveryStatus.RETRYING && attempts < webhook.retryPolicy.maxRetries) {
         const delay = Math.min(
-          webhook.retryPolicy.initialDelayMs * Math.pow(webhook.retryPolicy.backoffMultiplier, attempts - 1),
-          webhook.retryPolicy.maxDelayMs
+          webhook.retryPolicy.initialDelayMs *
+            Math.pow(webhook.retryPolicy.backoffMultiplier, attempts - 1),
+          webhook.retryPolicy.maxDelayMs,
         );
         updates.nextRetryAt = Date.now() + delay;
       } else if (status === DeliveryStatus.RETRYING) {
         // Max retries reached - mark as dead letter for manual investigation
         updates.status = DeliveryStatus.DEAD_LETTER;
         updates.completedAt = Date.now();
-        this.logger.warn(`Delivery ${deliveryId} moved to dead letter queue after ${attempts} attempts`);
+        this.logger.warn(
+          `Delivery ${deliveryId} moved to dead letter queue after ${attempts} attempts`,
+        );
       }
 
       await this.storageClient.updateDelivery(deliveryId, updates);
-
     } catch (error) {
       this.logger.error(`Failed to update delivery ${deliveryId}:`, error);
     }
@@ -511,7 +540,8 @@ export class WebhookDispatcherService {
 
     try {
       // Use first subscribed event for testing, or instance.down as fallback
-      const testEventType = webhook.events.length > 0 ? webhook.events[0] : ('instance.down' as WebhookEventType);
+      const testEventType =
+        webhook.events.length > 0 ? webhook.events[0] : ('instance.down' as WebhookEventType);
 
       // Get instance info for the webhook's connection (consistent with real dispatches)
       const instanceInfo = this.getInstanceInfo(webhook.connectionId);
@@ -533,7 +563,11 @@ export class WebhookDispatcherService {
 
       const payloadString = JSON.stringify(testPayload);
       const timestamp = testPayload.timestamp;
-      const signature = this.generateSignatureWithTimestamp(payloadString, webhook.secret || '', timestamp);
+      const signature = this.generateSignatureWithTimestamp(
+        payloadString,
+        webhook.secret || '',
+        timestamp,
+      );
 
       // Sanitize custom headers
       const sanitizedCustomHeaders = this.sanitizeHeaders(webhook.headers || {});
@@ -570,7 +604,6 @@ export class WebhookDispatcherService {
         responseBody: responseBody.substring(0, this.MAX_TEST_RESPONSE_PREVIEW_BYTES),
         durationMs,
       };
-
     } catch (error: any) {
       const durationMs = Date.now() - startTime;
       return {
