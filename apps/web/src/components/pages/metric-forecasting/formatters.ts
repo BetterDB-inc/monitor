@@ -51,7 +51,7 @@ export function formatGrowthRate(
   formatter: 'bytes' | 'percent' | 'ratio' | 'ops',
 ): string {
   const sign = rate >= 0 ? '+' : '-';
-  return `${sign}${formatNumber(Math.abs(rate), formatter)}/hr`;
+  return `${sign}${formatMetricValue(Math.abs(rate), formatter)}/hr`;
 }
 
 export function formatTime(timestamp: number): string {

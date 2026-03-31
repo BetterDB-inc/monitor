@@ -57,12 +57,15 @@ export function MetricChart({
       }
     }
 
+    const chartDataByTime = new Map(chartData.map((d) => [d.time, d]));
+    const trendDataByTime = new Map(trendData.map((d) => [d.time, d]));
+
     const allTimes = new Set([...chartData.map((d) => d.time), ...trendData.map((d) => d.time)]);
     return [...allTimes]
       .sort((a, b) => a - b)
       .map((t) => {
-        const dp = chartData.find((d) => d.time === t);
-        const tp = trendData.find((d) => d.time === t);
+        const dp = chartDataByTime.get(t);
+        const tp = trendDataByTime.get(t);
         return {
           time: t,
           label: formatTime(t),

@@ -50,6 +50,10 @@ export function usePolling<T>({
     enabled,
     refetchInterval: interval,
     refetchIntervalInBackground: false,
+    retry: (failureCount, error) => {
+      if (error instanceof PaymentRequiredError) return false;
+      return failureCount < 1;
+    },
   });
 
   const refresh = useCallback(async () => {
@@ -58,5 +62,5 @@ export function usePolling<T>({
 
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null;
 
-  return { data: data ?? null, error, loading: isLoading, lastUpdated, refresh };
+  return { data: data ?? null, error, loading: enabled ? isLoading : false, lastUpdated, refresh };
 }

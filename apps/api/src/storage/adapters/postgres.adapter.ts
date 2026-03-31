@@ -3578,7 +3578,7 @@ export class PostgresAdapter implements StoragePort {
   async getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]> {
     if (!this.pool) throw new Error('Database not initialized');
     const result = await this.pool.query(
-      'SELECT * FROM metric_forecast_settings WHERE enabled = true AND ceiling IS NOT NULL',
+      'SELECT * FROM metric_forecast_settings WHERE enabled = true',
     );
     return result.rows.map((row: any) => this.mapMetricForecastRow(row));
   }

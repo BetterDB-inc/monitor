@@ -48,7 +48,7 @@ describe('formatMetricValue', () => {
 
 describe('formatGrowthRate', () => {
   it('formats positive growth', () => {
-    expect(formatGrowthRate(5000, 'ops')).toBe('+5.0K/hr');
+    expect(formatGrowthRate(5000, 'ops')).toBe('+5.0K ops/sec/hr');
   });
 
   it('formats negative growth', () => {
@@ -56,7 +56,19 @@ describe('formatGrowthRate', () => {
   });
 
   it('formats zero growth', () => {
-    expect(formatGrowthRate(0, 'ops')).toBe('+0/hr');
+    expect(formatGrowthRate(0, 'ops')).toBe('+0 ops/sec/hr');
+  });
+
+  it('formats percent growth rate with % suffix', () => {
+    expect(formatGrowthRate(0.5, 'percent')).toBe('+0.5%/hr');
+  });
+
+  it('formats ratio growth rate with x suffix', () => {
+    expect(formatGrowthRate(0.1, 'ratio')).toBe('+0.10x/hr');
+  });
+
+  it('formats negative percent growth rate', () => {
+    expect(formatGrowthRate(-2.3, 'percent')).toBe('-2.3%/hr');
   });
 });
 

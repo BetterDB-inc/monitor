@@ -79,7 +79,7 @@ export const METRIC_KIND_META: Record<MetricKind, MetricKindMeta> = {
   },
 };
 
-export const ALL_METRIC_KINDS: MetricKind[] = [
+export const ALL_METRIC_KINDS: readonly MetricKind[] = [
   'opsPerSec',
   'usedMemory',
   'cpuTotal',

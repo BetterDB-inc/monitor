@@ -153,8 +153,9 @@ describe('MetricForecastingService', () => {
         makeSettings({ connectionId: 'c', metricKind: 'cpuTotal', enabled: false, ceiling: 80 }),
       );
       const active = await storage.getActiveMetricForecastSettings();
-      expect(active).toHaveLength(1);
-      expect(active[0].connectionId).toBe('a');
+      expect(active).toHaveLength(2);
+      const ids = active.map((s) => s.connectionId).sort();
+      expect(ids).toEqual(['a', 'b']);
     });
   });
 

@@ -1385,7 +1385,7 @@ export class MemoryAdapter implements StoragePort {
 
   async getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]> {
     return [...this.metricForecastSettings.values()].filter(
-      (s) => s.enabled && s.ceiling !== null,
+      (s) => s.enabled,
     );
   }
 }

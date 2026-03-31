@@ -3338,7 +3338,7 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db) throw new Error('Database not initialized');
     const rows = this.db
       .prepare(
-        'SELECT * FROM metric_forecast_settings WHERE enabled = 1 AND ceiling IS NOT NULL',
+        'SELECT * FROM metric_forecast_settings WHERE enabled = 1',
       )
       .all() as MetricForecastSettingsRow[];
     return rows.map((row) => this.mapMetricForecastRow(row));

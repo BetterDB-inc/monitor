@@ -336,17 +336,31 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private pruneCache(): void {
+    const maxAge = CACHE_TTL_MS * 2;
+    const now = Date.now();
+    for (const [key, entry] of this.forecastCache) {
+      if (now - entry.computedAt > maxAge) {
+        this.forecastCache.delete(key);
+      }
+    }
+  }
+
   private async checkAlerts(): Promise<void> {
     if (!this.webhookEventsProService) {
       this.logger.warn('WebhookEventsProService not initialized');
       return;
     }
 
+    this.pruneCache();
+
     try {
       const activeSettings = await this.storage.getActiveMetricForecastSettings();
       for (const settings of activeSettings) {
         try {
           const forecast = await this.getForecast(settings.connectionId, settings.metricKind);
+          if (!forecast.enabled || forecast.insufficientData) continue;
+          if (forecast.ceiling === null) continue;
           this.logger.debug(
             `[checkAlerts] ${WebhookEventType.METRIC_FORECAST_LIMIT} ${settings.connectionId}:${settings.metricKind} — ` +
               `current=${forecast.currentValue}, ceiling=${forecast.ceiling}, ` +
@@ -359,7 +373,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
             metricKind: settings.metricKind,
             currentValue: forecast.currentValue,
             ceiling: forecast.ceiling,
-            timeToLimitMs: forecast.timeToLimitMs ?? Infinity,
+            timeToLimitMs: forecast.timeToLimitMs ?? Number.MAX_SAFE_INTEGER,
             threshold: settings.alertThresholdMs,
             growthRate: forecast.growthRate,
             timestamp: Date.now(),
