@@ -73,10 +73,10 @@ export class MigrationExecutionService {
       process: null,
       tomlPath: null,
     };
-    this.jobs.set(id, job);
-
-    // 6. Evict old jobs
+    // 6. Evict old jobs before inserting the new one
     this.evictOldJobs();
+
+    this.jobs.set(id, job);
 
     // 7. Fire and forget based on mode
     if (mode === 'redis_shake') {
@@ -245,7 +245,7 @@ export class MigrationExecutionService {
       bytesTransferred: job.bytesTransferred,
       keysSkipped: job.keysSkipped,
       totalKeys: job.totalKeys || undefined,
-      logs: job.logs,
+      logs: job.logs.map(sanitizeLogLine),
       progress: job.progress,
     };
   }
@@ -266,4 +266,21 @@ export class MigrationExecutionService {
       this.logger.warn(`Execution job limit reached (${this.MAX_JOBS}). Cannot evict running jobs.`);
     }
   }
+}
+
+// Redact credentials from RedisShake log lines before serving to the frontend
+const CREDENTIAL_PATTERNS = [
+  /password\s*[=:]\s*"[^"]*"/gi,
+  /password\s*[=:]\s*\S+/gi,
+  /\/\/[^:]+:[^@]+@/g,    // redis://user:pass@host
+];
+
+function sanitizeLogLine(line: string): string {
+  let sanitized = line;
+  for (const pattern of CREDENTIAL_PATTERNS) {
+    sanitized = sanitized.replace(pattern, (match) =>
+      match.replace(/(?<=[=:"\/])[^"@\s]+/, '***'),
+    );
+  }
+  return sanitized;
 }

@@ -66,10 +66,10 @@ export class MigrationValidationService {
       },
       cancelled: false,
     };
-    this.jobs.set(id, job);
-
-    // 5. Evict old jobs
+    // 5. Evict old jobs before inserting the new one
     this.evictOldJobs();
+
+    this.jobs.set(id, job);
 
     // 6. Fire and forget
     const targetAdapter = this.connectionRegistry.get(req.targetConnectionId);
@@ -192,6 +192,11 @@ export class MigrationValidationService {
         this.logger.error(`Validation ${job.id} error: ${message}`);
       }
     } finally {
+      // Ensure cancelled jobs get a terminal status
+      if (job.cancelled && job.status === 'running') {
+        job.status = 'cancelled';
+        job.error = job.error ?? 'Cancelled by user';
+      }
       job.completedAt = Date.now();
       // Graceful cleanup — never Promise.all, never disconnect()
       const clients = [sourceClient, targetClient].filter((c): c is Valkey => c !== null);

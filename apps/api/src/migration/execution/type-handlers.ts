@@ -174,6 +174,9 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
 // ── Stream ──
 
 async function migrateStream(source: Valkey, target: Valkey, key: string): Promise<void> {
+  // Delete target key first to avoid duplicates on re-migration
+  await target.del(key);
+
   let lastId = '-';
   let hasMore = true;
 
