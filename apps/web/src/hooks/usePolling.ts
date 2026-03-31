@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useRef } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import { PaymentRequiredError } from '../api/client';
 import { useUpgradePrompt } from './useUpgradePrompt';
 
@@ -33,7 +33,10 @@ export function usePolling<T>({
     stableKeyRef.current = ++keyCounter;
   }
 
-  const resolvedKey = queryKey ?? ['polling', stableKeyRef.current, refetchKey];
+  const resolvedKey = useMemo(
+    () => queryKey ?? ['polling', stableKeyRef.current, refetchKey],
+    [queryKey, refetchKey],
+  );
 
   const { data, error, isLoading, dataUpdatedAt } = useQuery<T, Error>({
     queryKey: resolvedKey,

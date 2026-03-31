@@ -50,11 +50,25 @@ export function MetricForecasting() {
       ? (tabParam as MetricKind)
       : 'opsPerSec';
 
+  const pendingCallback = useRef<(() => Promise<void>) | null>(null);
+
+  const flushPendingSave = useCallback(() => {
+    if (debounceTimeout.current) {
+      clearTimeout(debounceTimeout.current);
+      debounceTimeout.current = undefined;
+    }
+    if (pendingCallback.current) {
+      pendingCallback.current();
+      pendingCallback.current = null;
+    }
+  }, []);
+
   const setActiveTab = useCallback(
     (tab: MetricKind) => {
+      flushPendingSave();
       setSearchParams({ tab }, { replace: true });
     },
-    [setSearchParams],
+    [setSearchParams, flushPendingSave],
   );
 
   const meta = METRIC_KIND_META[activeTab];
@@ -97,23 +111,28 @@ export function MetricForecasting() {
       (prev: typeof settings) => (prev ? { ...prev, ...updates, updatedAt: Date.now() } : prev),
     );
 
-    debounceTimeout.current = setTimeout(async () => {
+    const saveTab = activeTab;
+    const doSave = async () => {
+      pendingCallback.current = null;
       try {
-        const updated = await metricForecastingApi.updateSettings(activeTab, updates);
-        queryClient.setQueryData(['metric-forecast-settings', connectionId, activeTab], updated);
+        const updated = await metricForecastingApi.updateSettings(saveTab, updates);
+        queryClient.setQueryData(['metric-forecast-settings', connectionId, saveTab], updated);
         setSaveStatus('saved');
         await queryClient.invalidateQueries({
-          queryKey: ['metric-forecast', connectionId, activeTab],
+          queryKey: ['metric-forecast', connectionId, saveTab],
         });
         if (saveTimeout.current) clearTimeout(saveTimeout.current);
         saveTimeout.current = setTimeout(() => setSaveStatus('idle'), 2000);
       } catch {
         await queryClient.invalidateQueries({
-          queryKey: ['metric-forecast-settings', connectionId, activeTab],
+          queryKey: ['metric-forecast-settings', connectionId, saveTab],
         });
         setSaveStatus('error');
       }
-    }, 500);
+    };
+
+    pendingCallback.current = doSave;
+    debounceTimeout.current = setTimeout(doSave, 500);
   };
 
   if (!forecast || !settings) return <MetricLoading />;

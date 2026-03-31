@@ -55,6 +55,7 @@ export const ENTERPRISE_EVENTS: WebhookEventType[] = [
 // ============================================================================
 
 import { Tier } from '../license/types';
+import type { MetricKind } from '../types/metric-forecasting.types';
 export { Tier };
 
 /**
@@ -314,8 +315,8 @@ export interface IWebhookEventsProService {
   }): Promise<void>;
 
   dispatchMetricForecastLimit(data: {
-    event: string;
-    metricKind: string;
+    event: WebhookEventType;
+    metricKind: MetricKind;
     currentValue: number;
     ceiling: number | null;
     timeToLimitMs: number;
