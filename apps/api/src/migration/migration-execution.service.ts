@@ -287,8 +287,8 @@ function sanitizeLogLine(line: string): string {
     const eqIdx = match.search(/[=:]/);
     return match.slice(0, eqIdx + 1) + ' "***"';
   });
-  // 2. Unquoted passwords (skip already-redacted quoted ones): password = secret
-  sanitized = sanitized.replace(/password\s*[=:]\s*(?!["*])\S+/gi, (match) => {
+  // 2. Unquoted passwords (skip already-redacted quoted ones): password = my secret password
+  sanitized = sanitized.replace(/password\s*[=:]\s*(?!["*])\S.*/gi, (match) => {
     const eqIdx = match.search(/[=:]/);
     return match.slice(0, eqIdx + 1) + ' ***';
   });

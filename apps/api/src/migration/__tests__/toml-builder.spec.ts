@@ -127,4 +127,33 @@ describe('buildScanReaderToml', () => {
 
     expect(() => buildScanReaderToml(source, target, false)).toThrow('Invalid host');
   });
+
+  it('should wrap bare IPv6 addresses in brackets for Go net.Dial', () => {
+    const source = makeConfig({ host: '::1', port: 6379 });
+    const target = makeConfig({ host: '2001:db8::1', port: 6380 });
+
+    const toml = buildScanReaderToml(source, target, false);
+
+    expect(toml).toContain('address = "[::1]:6379"');
+    expect(toml).toContain('address = "[2001:db8::1]:6380"');
+  });
+
+  it('should not double-bracket already-bracketed IPv6 addresses', () => {
+    const source = makeConfig({ host: '[::1]', port: 6379 });
+    const target = makeConfig();
+
+    const toml = buildScanReaderToml(source, target, false);
+
+    expect(toml).toContain('address = "[::1]:6379"');
+    expect(toml).not.toContain('[[');
+  });
+
+  it('should not bracket IPv4 addresses containing no colons', () => {
+    const source = makeConfig({ host: '127.0.0.1', port: 6379 });
+    const target = makeConfig();
+
+    const toml = buildScanReaderToml(source, target, false);
+
+    expect(toml).toContain('address = "127.0.0.1:6379"');
+  });
 });

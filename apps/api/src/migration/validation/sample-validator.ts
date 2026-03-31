@@ -226,28 +226,27 @@ async function compareHash(source: Valkey, target: Valkey, key: string): Promise
     return null;
   }
 
-  const [sourceData, targetData] = await Promise.all([
-    source.hgetallBuffer(key),
-    target.hgetallBuffer(key),
-  ]);
+  // Use HSCAN to preserve binary field names as raw Buffers
+  // (hgetallBuffer returns Record<string, Buffer> which coerces field names to UTF-8 strings)
+  const sourceEntries = await scanAllHashFields(source, key);
+  const targetEntries = await scanAllHashFields(target, key);
 
-  const sourceFields = Object.keys(sourceData).sort();
-  const targetFields = Object.keys(targetData).sort();
-
-  if (sourceFields.length !== targetFields.length) {
-    return `field count differs (source: ${sourceFields.length}, target: ${targetFields.length})`;
+  if (sourceEntries.length !== targetEntries.length) {
+    return `field count differs (source: ${sourceEntries.length}, target: ${targetEntries.length})`;
   }
 
-  // Compare first 10 sorted fields (binary-safe via Buffer.equals)
-  const checkCount = Math.min(10, sourceFields.length);
+  // Sort by field name bytes for deterministic comparison
+  sourceEntries.sort((a, b) => a.field.compare(b.field));
+  targetEntries.sort((a, b) => a.field.compare(b.field));
+
+  // Compare first 10 sorted fields (fully binary-safe)
+  const checkCount = Math.min(10, sourceEntries.length);
   for (let i = 0; i < checkCount; i++) {
-    if (sourceFields[i] !== targetFields[i]) {
+    if (!sourceEntries[i].field.equals(targetEntries[i].field)) {
       return `field names differ at index ${i}`;
     }
-    const srcVal = sourceData[sourceFields[i]];
-    const tgtVal = targetData[targetFields[i]];
-    if (!srcVal || !tgtVal || !srcVal.equals(tgtVal)) {
-      return `field "${sourceFields[i]}" value differs`;
+    if (!sourceEntries[i].value.equals(targetEntries[i].value)) {
+      return `field "${sourceEntries[i].field.toString()}" value differs`;
     }
   }
 
@@ -268,8 +267,8 @@ async function compareList(source: Valkey, target: Valkey, key: string): Promise
   }
 
   const [sourceItems, targetItems] = await Promise.all([
-    source.lrange(key, 0, -1),
-    target.lrange(key, 0, -1),
+    source.lrangeBuffer(key, 0, -1),
+    target.lrangeBuffer(key, 0, -1),
   ]);
 
   if (sourceItems.length !== targetItems.length) {
@@ -277,7 +276,7 @@ async function compareList(source: Valkey, target: Valkey, key: string): Promise
   }
 
   for (let i = 0; i < sourceItems.length; i++) {
-    if (sourceItems[i] !== targetItems[i]) {
+    if (!sourceItems[i].equals(targetItems[i])) {
       return `list element differs at index ${i}`;
     }
   }
@@ -350,6 +349,19 @@ async function compareZset(source: Valkey, target: Valkey, key: string): Promise
   }
 
   return null;
+}
+
+async function scanAllHashFields(client: Valkey, key: string): Promise<Array<{ field: Buffer; value: Buffer }>> {
+  const entries: Array<{ field: Buffer; value: Buffer }> = [];
+  let cursor = '0';
+  do {
+    const [next, fields] = await client.hscanBuffer(key, cursor, 'COUNT', 100);
+    cursor = String(next);
+    for (let i = 0; i < fields.length; i += 2) {
+      entries.push({ field: fields[i], value: fields[i + 1] });
+    }
+  } while (cursor !== '0');
+  return entries;
 }
 
 async function compareStream(source: Valkey, target: Valkey, key: string): Promise<string | null> {

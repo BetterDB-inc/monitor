@@ -27,11 +27,19 @@ function validateHost(host: string): string {
   if (!host || host.length > 253) {
     throw new Error('Invalid host: empty or too long');
   }
-  // Allow hostname, IPv4, or bracketed IPv6
   if (/[\s"\\]/.test(host)) {
     throw new Error('Invalid host: contains whitespace, quotes, or backslashes');
   }
   return host;
+}
+
+function formatAddress(host: string, port: number): string {
+  // Bare IPv6 addresses must be wrapped in brackets for Go's net.Dial
+  // e.g. "::1" → "[::1]:6379"
+  if (host.includes(':') && !host.startsWith('[')) {
+    return `[${host}]:${port}`;
+  }
+  return `${host}:${port}`;
 }
 
 export function buildScanReaderToml(
@@ -50,7 +58,7 @@ export function buildScanReaderToml(
   const tgtPassword = target.password ?? '';
 
   let toml = `[scan_reader]
-address = "${escapeTomlString(srcHost)}:${srcPort}"
+address = "${escapeTomlString(formatAddress(srcHost, srcPort))}"
 username = "${escapeTomlString(srcUsername)}"
 password = "${escapeTomlString(srcPassword)}"
 tls = ${source.tls ? 'true' : 'false'}
@@ -62,7 +70,7 @@ tls = ${source.tls ? 'true' : 'false'}
 
   toml += `
 [redis_writer]
-address = "${escapeTomlString(tgtHost)}:${tgtPort}"
+address = "${escapeTomlString(formatAddress(tgtHost, tgtPort))}"
 username = "${escapeTomlString(tgtUsername)}"
 password = "${escapeTomlString(tgtPassword)}"
 tls = ${target.tls ? 'true' : 'false'}
