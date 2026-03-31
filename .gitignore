@@ -52,6 +52,10 @@ pnpm-debug.log*
 # Claude Code
 .claude/settings.local.json
 
+# BetterDB context
+.betterdb_context.md
+**/.betterdb_context.md
+
 # Turbo
 .turbo
 

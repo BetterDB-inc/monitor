@@ -145,7 +145,8 @@ export type ValidationJobStatus =
   | 'pending'
   | 'running'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'cancelled';
 
 export interface KeyCountComparison {
   sourceKeys: number;

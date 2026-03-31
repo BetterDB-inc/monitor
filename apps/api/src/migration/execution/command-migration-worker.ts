@@ -5,6 +5,7 @@ import { migrateKey } from './type-handlers';
 
 const SCAN_COUNT = 500;
 const TYPE_BATCH = 500;
+const MIGRATE_BATCH = 50;
 
 export interface CommandMigrationOptions {
   sourceConfig: DatabaseConnectionConfig;
@@ -98,30 +99,38 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
         // Batch TYPE lookup
         const types = await batchType(sourceClient, keys);
 
-        // Migrate each key
-        for (let i = 0; i < keys.length; i++) {
+        // Migrate keys in parallel batches for throughput
+        for (let batchStart = 0; batchStart < keys.length; batchStart += MIGRATE_BATCH) {
           if (isCancelled(job)) return;
 
-          const key = keys[i];
-          const type = types[i];
+          const batchEnd = Math.min(batchStart + MIGRATE_BATCH, keys.length);
+          const batchPromises: Promise<void>[] = [];
 
-          if (type === 'none') {
-            // Key expired between SCAN and TYPE
-            keysProcessed++;
-            continue;
+          for (let i = batchStart; i < batchEnd; i++) {
+            const key = keys[i];
+            const type = types[i];
+
+            if (type === 'none') {
+              // Key expired between SCAN and TYPE
+              keysProcessed++;
+              continue;
+            }
+
+            batchPromises.push(
+              migrateKey(sourceClient, targetClient, key, type).then(result => {
+                if (result.ok) {
+                  job.keysTransferred++;
+                } else {
+                  keysSkipped++;
+                  job.keysSkipped = keysSkipped;
+                  log(job, maxLogLines, `SKIP ${key} (${type}): ${result.error}`);
+                }
+                keysProcessed++;
+              }),
+            );
           }
 
-          const result = await migrateKey(sourceClient, targetClient, key, type);
-
-          if (result.ok) {
-            job.keysTransferred++;
-          } else {
-            keysSkipped++;
-            job.keysSkipped = keysSkipped;
-            log(job, maxLogLines, `SKIP ${key} (${type}): ${result.error}`);
-          }
-
-          keysProcessed++;
+          await Promise.all(batchPromises);
           job.progress = Math.min(99, Math.round((keysProcessed / totalKeys) * 100));
         }
 

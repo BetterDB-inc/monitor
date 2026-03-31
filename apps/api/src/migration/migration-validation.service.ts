@@ -233,7 +233,7 @@ export class MigrationValidationService {
     if (this.jobs.size < this.MAX_JOBS) return;
 
     const terminal = Array.from(this.jobs.entries())
-      .filter(([, j]) => j.status === 'completed' || j.status === 'failed')
+      .filter(([, j]) => j.status === 'completed' || j.status === 'failed' || j.status === 'cancelled')
       .sort((a, b) => a[1].createdAt - b[1].createdAt);
 
     for (const [id] of terminal) {

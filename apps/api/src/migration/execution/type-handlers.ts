@@ -73,11 +73,11 @@ async function migrateHash(source: Valkey, target: Valkey, key: string): Promise
     // Small hash: single HGETALL
     const data = await source.hgetallBuffer(key);
     if (!data || Object.keys(data).length === 0) return;
-    const args: (string | Buffer)[] = [key];
+    const args: string[] = [key];
     for (const [field, val] of Object.entries(data)) {
-      args.push(field, val as Buffer);
+      args.push(field, String(val));
     }
-    await (target as any).hset(...args);
+    await target.call('HSET', ...args);
   } else {
     // Large hash: HSCAN
     let cursor = '0';
@@ -85,11 +85,11 @@ async function migrateHash(source: Valkey, target: Valkey, key: string): Promise
       const [next, fields] = await source.hscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
       cursor = String(next);
       if (fields.length === 0) continue;
-      const args: (string | Buffer)[] = [key];
+      const args: string[] = [key];
       for (let i = 0; i < fields.length; i += 2) {
-        args.push(fields[i], fields[i + 1]);
+        args.push(String(fields[i]), String(fields[i + 1]));
       }
-      await (target as any).hset(...args);
+      await target.call('HSET', ...args);
     } while (cursor !== '0');
   }
 }
@@ -107,7 +107,7 @@ async function migrateList(source: Valkey, target: Valkey, key: string): Promise
     const end = Math.min(start + LIST_CHUNK - 1, len - 1);
     const items = await source.lrangeBuffer(key, start, end);
     if (items.length === 0) break;
-    await (target as any).rpush(key, ...items);
+    await target.call('RPUSH', key, ...items.map(String));
   }
 }
 
@@ -120,14 +120,14 @@ async function migrateSet(source: Valkey, target: Valkey, key: string): Promise<
   if (card <= LARGE_KEY_THRESHOLD) {
     const members = await source.smembersBuffer(key);
     if (members.length === 0) return;
-    await (target as any).sadd(key, ...members);
+    await target.call('SADD', key, ...members.map(String));
   } else {
     let cursor = '0';
     do {
       const [next, members] = await source.sscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
       cursor = String(next);
       if (members.length === 0) continue;
-      await (target as any).sadd(key, ...members);
+      await target.call('SADD', key, ...members.map(String));
     } while (cursor !== '0');
   }
 }
@@ -139,7 +139,7 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
   if (card === 0) return;
 
   if (card <= LARGE_KEY_THRESHOLD) {
-    const data = await (source as any).call('ZRANGE', key, '0', '-1', 'WITHSCORES') as string[];
+    const data = await source.call('ZRANGE', key, '0', '-1', 'WITHSCORES') as string[];
     if (!data || data.length === 0) return;
     // data is [member, score, member, score, ...]
     const pipeline = target.pipeline();
@@ -176,7 +176,7 @@ async function migrateStream(source: Valkey, target: Valkey, key: string): Promi
     }
     for (const [id, fields] of entries) {
       // XADD with explicit ID to preserve ordering
-      await (target as any).xadd(key, id, ...fields);
+      await target.call('XADD', key, id, ...fields);
       lastId = id;
     }
     if (entries.length < STREAM_CHUNK) {

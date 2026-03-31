@@ -22,7 +22,7 @@ export function buildScanReaderToml(
   const tgtPassword = target.password ?? '';
 
   let toml = `[scan_reader]
-address = "${source.host}:${source.port}"
+address = "${escapeTomlString(source.host)}:${source.port}"
 username = "${escapeTomlString(srcUsername)}"
 password = "${escapeTomlString(srcPassword)}"
 tls = ${source.tls ? 'true' : 'false'}
@@ -34,7 +34,7 @@ tls = ${source.tls ? 'true' : 'false'}
 
   toml += `
 [redis_writer]
-address = "${target.host}:${target.port}"
+address = "${escapeTomlString(target.host)}:${target.port}"
 username = "${escapeTomlString(tgtUsername)}"
 password = "${escapeTomlString(tgtPassword)}"
 tls = ${target.tls ? 'true' : 'false'}

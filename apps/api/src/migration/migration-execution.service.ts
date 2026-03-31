@@ -43,7 +43,8 @@ export class MigrationExecutionService {
 
     // 3. Detect if source is cluster
     const info = await sourceAdapter.getInfo(['cluster']);
-    const clusterEnabled = String((info as Record<string, unknown>)['cluster_enabled'] ?? '0') === '1';
+    const clusterSection = (info as Record<string, Record<string, string>>).cluster ?? {};
+    const clusterEnabled = String(clusterSection['cluster_enabled'] ?? '0') === '1';
 
     // 4. For redis_shake mode, locate the binary upfront
     let binaryPath: string | undefined;

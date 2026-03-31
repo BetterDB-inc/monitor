@@ -27,12 +27,9 @@ function createMockSource(overrides: Record<string, jest.Mock> = {}) {
 function createMockTarget() {
   return {
     set: jest.fn().mockResolvedValue('OK'),
-    hset: jest.fn().mockResolvedValue(1),
-    rpush: jest.fn().mockResolvedValue(1),
-    sadd: jest.fn().mockResolvedValue(1),
     del: jest.fn().mockResolvedValue(1),
-    xadd: jest.fn().mockResolvedValue('1-0'),
     pexpire: jest.fn().mockResolvedValue(1),
+    call: jest.fn().mockResolvedValue('OK'),
     pipeline: jest.fn().mockReturnValue({
       zadd: jest.fn().mockReturnThis(),
       exec: jest.fn().mockResolvedValue([]),
@@ -76,7 +73,7 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.hgetallBuffer).toHaveBeenCalledWith('hash:1');
-      expect(target.hset).toHaveBeenCalled();
+      expect(target.call).toHaveBeenCalledWith('HSET', 'hash:1', expect.any(String), expect.any(String), expect.any(String), expect.any(String));
     });
 
     it('should use HSCAN for large hashes (>10K fields)', async () => {
@@ -95,7 +92,7 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.lrangeBuffer).toHaveBeenCalled();
-      expect(target.rpush).toHaveBeenCalled();
+      expect(target.call).toHaveBeenCalledWith('RPUSH', 'list:1', 'a', 'b');
     });
 
     it('should delete target key first to avoid appending', async () => {
@@ -114,7 +111,7 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.smembersBuffer).toHaveBeenCalledWith('set:1');
-      expect(target.sadd).toHaveBeenCalled();
+      expect(target.call).toHaveBeenCalledWith('SADD', 'set:1', 'm1', 'm2');
     });
 
     it('should use SSCAN for large sets (>10K members)', async () => {
@@ -153,7 +150,7 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.xrange).toHaveBeenCalled();
-      expect(target.xadd).toHaveBeenCalledWith('stream:1', '1-0', 'field', 'value');
+      expect(target.call).toHaveBeenCalledWith('XADD', 'stream:1', '1-0', 'field', 'value');
     });
   });
 
