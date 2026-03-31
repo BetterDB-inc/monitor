@@ -1,0 +1,186 @@
+# Self-contained topology for migration e2e tests.
+# 2 standalone Valkey instances + 2 clusters (3 masters each, no replicas).
+# All services use host networking so cluster nodes advertise 127.0.0.1.
+#
+# Usage:
+#   docker compose -p migration-e2e -f docker-compose.migration-e2e.yml up -d
+#   docker compose -p migration-e2e -f docker-compose.migration-e2e.yml down -v
+
+services:
+  # ── Standalone instances ──────────────────────────────────────────
+
+  source-standalone:
+    image: valkey/valkey:8-alpine
+    container_name: mig-source-standalone
+    network_mode: host
+    command: valkey-server --port 6990 --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "6990", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: "no"
+
+  target-standalone:
+    image: valkey/valkey:8-alpine
+    container_name: mig-target-standalone
+    network_mode: host
+    command: valkey-server --port 6991 --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "6991", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: "no"
+
+  # ── Source cluster (3 masters, no replicas) ───────────────────────
+
+  src-node-1:
+    image: valkey/valkey:8-alpine
+    container_name: mig-src-node-1
+    network_mode: host
+    command: >
+      valkey-server --port 7301
+      --cluster-enabled yes
+      --cluster-config-file /data/nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7301
+      --cluster-announce-bus-port 17301
+      --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "7301", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: "no"
+
+  src-node-2:
+    image: valkey/valkey:8-alpine
+    container_name: mig-src-node-2
+    network_mode: host
+    command: >
+      valkey-server --port 7302
+      --cluster-enabled yes
+      --cluster-config-file /data/nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7302
+      --cluster-announce-bus-port 17302
+      --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "7302", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: "no"
+
+  src-node-3:
+    image: valkey/valkey:8-alpine
+    container_name: mig-src-node-3
+    network_mode: host
+    command: >
+      valkey-server --port 7303
+      --cluster-enabled yes
+      --cluster-config-file /data/nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7303
+      --cluster-announce-bus-port 17303
+      --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "7303", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: "no"
+
+  src-cluster-init:
+    image: valkey/valkey:8-alpine
+    container_name: mig-src-cluster-init
+    network_mode: host
+    depends_on:
+      src-node-1: { condition: service_healthy }
+      src-node-2: { condition: service_healthy }
+      src-node-3: { condition: service_healthy }
+    command: >
+      sh -c "valkey-cli --cluster create
+      127.0.0.1:7301 127.0.0.1:7302 127.0.0.1:7303
+      --cluster-replicas 0 --cluster-yes"
+    restart: "no"
+
+  # ── Target cluster (3 masters, no replicas) ───────────────────────
+
+  tgt-node-1:
+    image: valkey/valkey:8-alpine
+    container_name: mig-tgt-node-1
+    network_mode: host
+    command: >
+      valkey-server --port 7401
+      --cluster-enabled yes
+      --cluster-config-file /data/nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7401
+      --cluster-announce-bus-port 17401
+      --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "7401", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: "no"
+
+  tgt-node-2:
+    image: valkey/valkey:8-alpine
+    container_name: mig-tgt-node-2
+    network_mode: host
+    command: >
+      valkey-server --port 7402
+      --cluster-enabled yes
+      --cluster-config-file /data/nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7402
+      --cluster-announce-bus-port 17402
+      --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "7402", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: "no"
+
+  tgt-node-3:
+    image: valkey/valkey:8-alpine
+    container_name: mig-tgt-node-3
+    network_mode: host
+    command: >
+      valkey-server --port 7403
+      --cluster-enabled yes
+      --cluster-config-file /data/nodes.conf
+      --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7403
+      --cluster-announce-bus-port 17403
+      --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "7403", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: "no"
+
+  tgt-cluster-init:
+    image: valkey/valkey:8-alpine
+    container_name: mig-tgt-cluster-init
+    network_mode: host
+    depends_on:
+      tgt-node-1: { condition: service_healthy }
+      tgt-node-2: { condition: service_healthy }
+      tgt-node-3: { condition: service_healthy }
+    command: >
+      sh -c "valkey-cli --cluster create
+      127.0.0.1:7401 127.0.0.1:7402 127.0.0.1:7403
+      --cluster-replicas 0 --cluster-yes"
+    restart: "no"

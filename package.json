@@ -39,6 +39,7 @@
     "test:integration": "pnpm --filter api test:integration",
     "test:integration:redis": "TEST_DB_PORT=6382 pnpm --filter api test:integration:redis",
     "test:integration:valkey": "TEST_DB_PORT=6380 pnpm --filter api test:integration:valkey",
+    "test:migration-topology": "pnpm --filter api test:migration-topology",
     "lint": "turbo lint",
     "clean": "turbo clean && rm -rf node_modules",
     "cli:build": "pnpm --filter @betterdb/monitor build",

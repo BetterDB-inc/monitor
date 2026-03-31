@@ -2,6 +2,7 @@ import Valkey from 'iovalkey';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import type { ExecutionJob } from './execution-job';
 import { migrateKey } from './type-handlers';
+import { createClient, createTargetClient } from './client-factory';
 
 const SCAN_COUNT = 500;
 const TYPE_BATCH = 500;
@@ -11,6 +12,7 @@ export interface CommandMigrationOptions {
   sourceConfig: DatabaseConnectionConfig;
   targetConfig: DatabaseConnectionConfig;
   sourceIsCluster: boolean;
+  targetIsCluster: boolean;
   job: ExecutionJob;
   maxLogLines: number;
 }
@@ -20,13 +22,13 @@ export interface CommandMigrationOptions {
  * Operates entirely in-process using iovalkey. No external binary needed.
  */
 export async function runCommandMigration(opts: CommandMigrationOptions): Promise<void> {
-  const { sourceConfig, targetConfig, sourceIsCluster, job, maxLogLines } = opts;
+  const { sourceConfig, targetConfig, sourceIsCluster, targetIsCluster, job, maxLogLines } = opts;
   const sourceClients: Valkey[] = [];
-  const targetClient = createClient(targetConfig, 'BetterDB-Migration-Target');
+  const targetClient = createTargetClient(targetConfig, 'BetterDB-Migration-Target', targetIsCluster);
 
   try {
     await targetClient.connect();
-    log(job, maxLogLines, 'Connected to target');
+    log(job, maxLogLines, `Connected to target${targetIsCluster ? ' (cluster mode)' : ''}`);
 
     // Build source clients (one per cluster master, or single standalone)
     if (sourceIsCluster) {
@@ -153,20 +155,6 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
 }
 
 // ── Helpers ──
-
-function createClient(config: DatabaseConnectionConfig, name: string): Valkey {
-  return new Valkey({
-    host: config.host,
-    port: config.port,
-    username: config.username || undefined,
-    password: config.password || undefined,
-    tls: config.tls ? {} : undefined,
-    lazyConnect: true,
-    connectTimeout: 10_000,
-    commandTimeout: 15_000,
-    connectionName: name,
-  });
-}
 
 function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: number }> {
   const results: Array<{ host: string; port: number }> = [];

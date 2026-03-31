@@ -31,14 +31,28 @@ jest.mock('../execution/command-migration-worker', () => ({
   runCommandMigration: jest.fn().mockResolvedValue(undefined),
 }));
 
-function createMockRegistry() {
-  const mockAdapter = {
+function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; targetClusterEnabled?: boolean }) {
+  const sourceCluster = overrides?.sourceClusterEnabled ?? false;
+  const targetCluster = overrides?.targetClusterEnabled ?? false;
+
+  const mockSourceAdapter = {
     getCapabilities: jest.fn().mockReturnValue({ dbType: 'valkey', version: '8.1.0' }),
-    getInfo: jest.fn().mockResolvedValue({ cluster_enabled: '0' }),
+    getInfo: jest.fn().mockResolvedValue({ cluster: { cluster_enabled: sourceCluster ? '1' : '0' } }),
     getClient: jest.fn().mockReturnValue({ quit: jest.fn() }),
   };
+  const mockTargetAdapter = {
+    getCapabilities: jest.fn().mockReturnValue({ dbType: 'valkey', version: '8.1.0' }),
+    getInfo: jest.fn().mockResolvedValue({ cluster: { cluster_enabled: targetCluster ? '1' : '0' } }),
+    getClient: jest.fn().mockReturnValue({ quit: jest.fn() }),
+  };
+
+  const adapters: Record<string, typeof mockSourceAdapter> = {
+    'conn-1': mockSourceAdapter,
+    'conn-2': mockTargetAdapter,
+  };
+
   return {
-    get: jest.fn().mockReturnValue(mockAdapter),
+    get: jest.fn().mockImplementation((id: string) => adapters[id] ?? mockSourceAdapter),
     getConfig: jest.fn().mockReturnValue({
       id: 'conn-1',
       name: 'Test',
@@ -46,6 +60,8 @@ function createMockRegistry() {
       port: 6379,
       createdAt: Date.now(),
     }),
+    mockSourceAdapter,
+    mockTargetAdapter,
   };
 }
 
@@ -101,6 +117,43 @@ describe('MigrationExecutionService', () => {
           targetConnectionId: 'conn-2',
         }),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should pass targetIsCluster: true when target reports cluster_enabled=1', async () => {
+      const { runCommandMigration } = require('../execution/command-migration-worker');
+
+      const clusterRegistry = createMockRegistry({ targetClusterEnabled: true });
+      const clusterService = new MigrationExecutionService(clusterRegistry as any);
+
+      await clusterService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'command',
+      });
+
+      // Wait a tick for the async runCommandMode to call runCommandMigration
+      await new Promise(r => setTimeout(r, 20));
+
+      expect(runCommandMigration).toHaveBeenCalledWith(
+        expect.objectContaining({ targetIsCluster: true }),
+      );
+    });
+
+    it('should pass targetIsCluster: false when target is standalone', async () => {
+      const { runCommandMigration } = require('../execution/command-migration-worker');
+      (runCommandMigration as jest.Mock).mockClear();
+
+      await service.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'command',
+      });
+
+      await new Promise(r => setTimeout(r, 20));
+
+      expect(runCommandMigration).toHaveBeenCalledWith(
+        expect.objectContaining({ targetIsCluster: false }),
+      );
     });
   });
 

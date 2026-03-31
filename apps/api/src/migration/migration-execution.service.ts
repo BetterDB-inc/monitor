@@ -29,7 +29,7 @@ export class MigrationExecutionService {
     // 1. Resolve both connections (throws NotFoundException if missing)
     const sourceAdapter = this.connectionRegistry.get(req.sourceConnectionId);
     const sourceConfig = this.connectionRegistry.getConfig(req.sourceConnectionId);
-    this.connectionRegistry.get(req.targetConnectionId);
+    const targetAdapter = this.connectionRegistry.get(req.targetConnectionId);
     const targetConfig = this.connectionRegistry.getConfig(req.targetConnectionId);
 
     if (!sourceConfig || !targetConfig) {
@@ -41,10 +41,14 @@ export class MigrationExecutionService {
       throw new BadRequestException('Source and target must be different connections');
     }
 
-    // 3. Detect if source is cluster
-    const info = await sourceAdapter.getInfo(['cluster']);
-    const clusterSection = (info as Record<string, Record<string, string>>).cluster ?? {};
-    const clusterEnabled = String(clusterSection['cluster_enabled'] ?? '0') === '1';
+    // 3. Detect if source/target is cluster
+    const sourceInfo = await sourceAdapter.getInfo(['cluster']);
+    const sourceClusterSection = (sourceInfo as Record<string, Record<string, string>>).cluster ?? {};
+    const clusterEnabled = String(sourceClusterSection['cluster_enabled'] ?? '0') === '1';
+
+    const targetInfo = await targetAdapter.getInfo(['cluster']);
+    const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
+    const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
 
     // 4. For redis_shake mode, locate the binary upfront
     let binaryPath: string | undefined;
@@ -90,7 +94,7 @@ export class MigrationExecutionService {
         this.logger.error(`Execution ${id} failed: ${err.message}`);
       });
     } else {
-      this.runCommandMode(job, sourceConfig, targetConfig, clusterEnabled).catch(err => {
+      this.runCommandMode(job, sourceConfig, targetConfig, clusterEnabled, targetIsCluster).catch(err => {
         this.logger.error(`Execution ${id} failed: ${err.message}`);
       });
     }
@@ -180,6 +184,7 @@ export class MigrationExecutionService {
     sourceConfig: Parameters<typeof runCommandMigration>[0]['sourceConfig'],
     targetConfig: Parameters<typeof runCommandMigration>[0]['targetConfig'],
     sourceIsCluster: boolean,
+    targetIsCluster: boolean,
   ): Promise<void> {
     job.status = 'running';
     try {
@@ -187,6 +192,7 @@ export class MigrationExecutionService {
         sourceConfig,
         targetConfig,
         sourceIsCluster,
+        targetIsCluster,
         job,
         maxLogLines: this.MAX_LOG_LINES,
       });

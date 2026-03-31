@@ -15,6 +15,7 @@ import { compareKeyCounts } from './validation/key-count-comparator';
 import { validateSample } from './validation/sample-validator';
 import { compareBaseline } from './validation/baseline-comparator';
 import { MigrationService } from './migration.service';
+import { createClient, createTargetClient } from './execution/client-factory';
 
 @Injectable()
 export class MigrationValidationService {
@@ -94,9 +95,14 @@ export class MigrationValidationService {
     try {
       job.status = 'running';
 
+      // Detect if target is a cluster
+      const targetInfo = await targetAdapter.getInfo(['cluster']);
+      const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
+      const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
+
       // Create temporary iovalkey clients — same pattern as command-migration-worker.ts
       sourceClient = createClient(sourceConfig, 'BetterDB-Validation-Source');
-      targetClient = createClient(targetConfig, 'BetterDB-Validation-Target');
+      targetClient = createTargetClient(targetConfig, 'BetterDB-Validation-Target', targetIsCluster);
 
       // Step 1: Connect check (5%)
       try {
@@ -252,18 +258,3 @@ export class MigrationValidationService {
   }
 }
 
-// ── Helpers ──
-
-function createClient(config: DatabaseConnectionConfig, name: string): Valkey {
-  return new Valkey({
-    host: config.host,
-    port: config.port,
-    username: config.username || undefined,
-    password: config.password || undefined,
-    tls: config.tls ? {} : undefined,
-    lazyConnect: true,
-    connectTimeout: 10_000,
-    commandTimeout: 15_000,
-    connectionName: name,
-  });
-}

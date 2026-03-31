@@ -2,7 +2,7 @@ import { MigrationValidationService } from '../migration-validation.service';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 
 jest.mock('iovalkey', () => {
-  return jest.fn().mockImplementation(() => ({
+  const mockClient = () => ({
     connect: jest.fn().mockResolvedValue(undefined),
     ping: jest.fn().mockResolvedValue('PONG'),
     quit: jest.fn().mockResolvedValue(undefined),
@@ -12,7 +12,10 @@ jest.mock('iovalkey', () => {
       type: jest.fn().mockReturnThis(),
       exec: jest.fn().mockResolvedValue([]),
     }),
-  }));
+  });
+  const Valkey = jest.fn().mockImplementation(mockClient);
+  (Valkey as any).Cluster = jest.fn().mockImplementation(mockClient);
+  return Valkey;
 });
 
 jest.mock('../validation/key-count-comparator', () => ({
@@ -44,10 +47,11 @@ jest.mock('../validation/baseline-comparator', () => ({
   }),
 }));
 
-function createMockRegistry() {
+function createMockRegistry(overrides?: { targetClusterEnabled?: boolean }) {
+  const targetCluster = overrides?.targetClusterEnabled ?? false;
   const mockAdapter = {
     getCapabilities: jest.fn().mockReturnValue({ dbType: 'valkey', version: '8.1.0' }),
-    getInfo: jest.fn().mockResolvedValue({}),
+    getInfo: jest.fn().mockResolvedValue({ cluster: { cluster_enabled: targetCluster ? '1' : '0' } }),
     getClient: jest.fn().mockReturnValue({ quit: jest.fn() }),
   };
   return {
@@ -132,6 +136,30 @@ describe('MigrationValidationService', () => {
           targetConnectionId: 'conn-2',
         }),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should detect cluster target and complete validation', async () => {
+      const clusterRegistry = createMockRegistry({ targetClusterEnabled: true });
+      const clusterStorage = createMockStorage();
+      const clusterMigrationService = createMockMigrationService();
+      const clusterService = new MigrationValidationService(
+        clusterRegistry as any,
+        clusterStorage,
+        clusterMigrationService,
+      );
+
+      const { id } = await clusterService.startValidation({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+      });
+
+      // Wait for async validation to complete
+      await new Promise(r => setTimeout(r, 100));
+
+      const validation = clusterService.getValidation(id);
+      expect(validation).toBeDefined();
+      // Should query target adapter for cluster info
+      expect(clusterRegistry.mockAdapter.getInfo).toHaveBeenCalledWith(['cluster']);
     });
 
     it('should use Phase 1 analysis result when analysisId provided', async () => {
