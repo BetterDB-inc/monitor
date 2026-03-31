@@ -312,19 +312,6 @@ end
 return 1
 `;
 
-/**
- * Read PTTL from source, then atomically RENAME tmp→key + PEXPIRE on target.
- * Eliminates the window where the key exists on target without its TTL.
- */
-async function migrateTtlAtomic(source: Valkey, target: Valkey, key: string): Promise<void> {
-  const pttl = await source.pttl(key);
-  if (pttl > 0) {
-    await target.pexpire(key, pttl);
-  } else if (pttl === -2) {
-    // Key expired between copy and TTL check — remove ghost copy from target
-    await target.del(key);
-  }
-}
 
 /**
  * Atomically RENAME tmp→key and apply PTTL in a single Lua eval.
