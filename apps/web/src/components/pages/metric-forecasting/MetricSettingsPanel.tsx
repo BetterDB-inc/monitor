@@ -49,7 +49,7 @@ export function MetricSettingsPanel({
           <label className="block text-sm font-medium mb-1">Rolling Window</label>
           <select
             value={settings.rollingWindowMs}
-            onChange={(e) => onUpdate({ rollingWindowMs: parseInt(e.target.value) })}
+            onChange={(e) => onUpdate({ rollingWindowMs: parseInt(e.target.value, 10) })}
             className="w-full px-3 py-2 border rounded-md"
           >
             {WINDOW_PRESETS.map((p) => (
@@ -84,7 +84,7 @@ export function MetricSettingsPanel({
           </label>
           <select
             value={settings.alertThresholdMs}
-            onChange={(e) => onUpdate({ alertThresholdMs: parseInt(e.target.value) })}
+            onChange={(e) => onUpdate({ alertThresholdMs: parseInt(e.target.value, 10) })}
             className="w-full px-3 py-2 border rounded-md"
             disabled={settings.ceiling === null}
           >
