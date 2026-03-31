@@ -251,8 +251,7 @@ describe('WebhooksService', () => {
 
   describe('Tier Validation', () => {
     beforeEach(() => {
-      // Reset to non-production environment for tier validation tests
-      process.env.NODE_ENV = 'test';
+      delete process.env.DEV_LICENSE_TIER;
       storageClient.createWebhook.mockResolvedValue({
         id: '123',
         name: 'Test',

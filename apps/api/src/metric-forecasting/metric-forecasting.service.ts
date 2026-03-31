@@ -155,10 +155,9 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
         ),
       };
     } else {
-      // Forecast mode
-      const currentPredicted = slope * now + intercept;
-
-      if (currentPredicted >= resolvedCeiling) {
+      // Forecast mode — use actual current value, not regression estimate,
+      // so fast spikes are detected immediately instead of lagging behind the trend line.
+      if (currentValue >= resolvedCeiling) {
         forecast = {
           ...baseForecast,
           mode: 'forecast',
@@ -175,7 +174,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
           timeToLimitHuman: 'Not projected to reach ceiling',
         };
       } else {
-        const timeToLimitMs = (resolvedCeiling - currentPredicted) / slope;
+        const timeToLimitMs = (resolvedCeiling - currentValue) / slope;
         forecast = {
           ...baseForecast,
           mode: 'forecast',

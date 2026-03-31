@@ -10,7 +10,9 @@ export const CEILING_RESOLVERS: Record<MetricKind, CeilingResolver> = {
   opsPerSec: (s) => s.ceiling,
 
   usedMemory: (s, snapshot) => {
-    if (s.ceiling !== null) return s.ceiling;
+    if (s.ceiling !== null) {
+      return s.ceiling;
+    }
     if (snapshot && snapshot.maxmemory > 0) return snapshot.maxmemory;
     return null;
   },

@@ -1,9 +1,12 @@
 import { execSync } from 'child_process';
 import * as path from 'path';
 
+const COMPOSE_FILE = 'docker-compose.test.yml';
+const PROJECT_NAME = 'betterdb-test';
+
 /**
- * Global test teardown - stops Docker containers after all tests.
- * This ensures clean shutdown and resource cleanup.
+ * Global test teardown - stops test Docker containers after all tests.
+ * Only affects test containers (betterdb-test-*), never dev containers.
  */
 export default async function globalTeardown() {
   const projectRoot = path.resolve(__dirname, '../../..');
@@ -20,18 +23,17 @@ export default async function globalTeardown() {
     return;
   }
 
-  console.log('\nCleaning up Docker containers...');
+  console.log('\nCleaning up test Docker containers...');
 
   try {
-    // Stop and remove containers
-    execSync('docker compose -f docker-compose.yml down --remove-orphans', {
+    execSync(`docker compose -p ${PROJECT_NAME} -f ${COMPOSE_FILE} down --remove-orphans`, {
       cwd: projectRoot,
       stdio: 'inherit',
     });
 
-    console.log('Docker containers stopped and removed\n');
+    console.log('Test Docker containers stopped and removed\n');
   } catch (error) {
-    console.error('Failed to stop Docker containers:', error);
+    console.error('Failed to stop test Docker containers:', error);
     // Don't throw - we want tests to complete even if cleanup fails
   }
 }

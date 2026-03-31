@@ -1,9 +1,19 @@
 import { execSync } from 'child_process';
 import * as path from 'path';
 
+const COMPOSE_FILE = 'docker-compose.test.yml';
+const PROJECT_NAME = 'betterdb-test';
+
+const CONTAINER_NAMES = [
+  'betterdb-test-valkey',
+  'betterdb-test-redis',
+  'betterdb-test-postgres',
+];
+
 /**
  * Global test setup - starts Docker containers before all tests.
- * This ensures tests have a clean, isolated environment.
+ * Uses a separate compose file (docker-compose.test.yml) with dedicated
+ * container names and ports so tests never interfere with dev containers.
  */
 export default async function globalSetup() {
   const projectRoot = path.resolve(__dirname, '../../..');
@@ -25,9 +35,9 @@ export default async function globalSetup() {
       throw new Error('Docker daemon is not running');
     }
 
-    // Stop any existing containers (cleanup from previous failed runs)
+    // Stop any existing test containers (cleanup from previous failed runs)
     try {
-      execSync('docker compose -f docker-compose.yml down --remove-orphans', {
+      execSync(`docker compose -p ${PROJECT_NAME} -f ${COMPOSE_FILE} down --remove-orphans`, {
         cwd: projectRoot,
         stdio: 'ignore',
       });
@@ -35,13 +45,8 @@ export default async function globalSetup() {
       // Ignore errors if containers don't exist
     }
 
-    // Force remove containers by name if they still exist
-    const containerNames = [
-      'betterdb-monitor-valkey',
-      'betterdb-monitor-redis',
-      'betterdb-monitor-postgres',
-    ];
-    for (const containerName of containerNames) {
+    // Force remove test containers by name if they still exist
+    for (const containerName of CONTAINER_NAMES) {
       try {
         execSync(`docker stop ${containerName} 2>/dev/null || true`, { stdio: 'ignore' });
         execSync(`docker rm ${containerName} 2>/dev/null || true`, { stdio: 'ignore' });
@@ -50,12 +55,15 @@ export default async function globalSetup() {
       }
     }
 
-    // Start Docker containers
-    console.log('   Starting valkey, redis, and postgres...');
-    execSync('docker compose -f docker-compose.yml up -d valkey redis postgres', {
-      cwd: projectRoot,
-      stdio: 'inherit',
-    });
+    // Start test Docker containers
+    console.log('   Starting valkey, redis, and postgres (test containers)...');
+    execSync(
+      `docker compose -p ${PROJECT_NAME} -f ${COMPOSE_FILE} up -d valkey redis postgres`,
+      {
+        cwd: projectRoot,
+        stdio: 'inherit',
+      },
+    );
 
     // Wait for services to be healthy
     console.log('   Waiting for services to be healthy...');
@@ -66,23 +74,22 @@ export default async function globalSetup() {
     while (!allHealthy && Date.now() - startTime < maxWaitTime) {
       try {
         const valkeyHealth = execSync(
-          'docker inspect --format="{{.State.Health.Status}}" betterdb-monitor-valkey 2>/dev/null || echo "none"',
-          { encoding: 'utf-8' }
+          'docker inspect --format="{{.State.Health.Status}}" betterdb-test-valkey 2>/dev/null || echo "none"',
+          { encoding: 'utf-8' },
         ).trim();
 
-        const redisRunning = execSync(
-          'docker inspect --format="{{.State.Running}}" betterdb-monitor-redis 2>/dev/null || echo "false"',
-          { encoding: 'utf-8' }
+        const redisHealth = execSync(
+          'docker inspect --format="{{.State.Health.Status}}" betterdb-test-redis 2>/dev/null || echo "none"',
+          { encoding: 'utf-8' },
         ).trim();
 
         const postgresHealth = execSync(
-          'docker inspect --format="{{.State.Health.Status}}" betterdb-monitor-postgres 2>/dev/null || echo "none"',
-          { encoding: 'utf-8' }
+          'docker inspect --format="{{.State.Health.Status}}" betterdb-test-postgres 2>/dev/null || echo "none"',
+          { encoding: 'utf-8' },
         ).trim();
 
-        // Valkey has healthcheck, redis doesn't (check if running), postgres has healthcheck
         const valkeyReady = valkeyHealth === 'healthy';
-        const redisReady = redisRunning === 'true';
+        const redisReady = redisHealth === 'healthy';
         const postgresReady = postgresHealth === 'healthy';
 
         if (valkeyReady && redisReady && postgresReady) {
@@ -91,7 +98,7 @@ export default async function globalSetup() {
         } else {
           const status = [];
           if (!valkeyReady) status.push(`valkey: ${valkeyHealth}`);
-          if (!redisReady) status.push('redis: starting');
+          if (!redisReady) status.push(`redis: ${redisHealth}`);
           if (!postgresReady) status.push(`postgres: ${postgresHealth}`);
           process.stdout.write(`   Waiting... ${status.join(', ')}\r`);
           await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -106,13 +113,13 @@ export default async function globalSetup() {
       throw new Error('Services did not become healthy within timeout');
     }
 
-    // Additional wait for redis to be fully ready (no healthcheck)
+    // Additional wait for redis to be fully ready
     console.log('   Verifying Redis connectivity...');
     let redisReady = false;
     const redisStartTime = Date.now();
     while (!redisReady && Date.now() - redisStartTime < 10000) {
       try {
-        execSync('docker exec betterdb-monitor-redis redis-cli -a devpassword ping', {
+        execSync('docker exec betterdb-test-redis redis-cli -a devpassword ping', {
           stdio: 'ignore',
         });
         redisReady = true;
@@ -132,7 +139,7 @@ export default async function globalSetup() {
     // Show container logs for debugging
     try {
       console.log('\nContainer logs:');
-      execSync('docker compose -f docker-compose.yml logs --tail=50', {
+      execSync(`docker compose -p ${PROJECT_NAME} -f ${COMPOSE_FILE} logs --tail=50`, {
         cwd: projectRoot,
         stdio: 'inherit',
       });
