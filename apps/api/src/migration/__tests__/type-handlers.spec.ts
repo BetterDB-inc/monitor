@@ -55,13 +55,14 @@ describe('type-handlers / migrateKey', () => {
       expect(target.set).toHaveBeenCalledWith('str:1', expect.any(Buffer));
     });
 
-    it('should handle deleted key gracefully', async () => {
+    it('should handle deleted key gracefully and skip TTL', async () => {
       source.getBuffer.mockResolvedValue(null);
       const result = await migrateKey(source, target, 'gone', 'string');
 
-      // migrateString returns early without setting, then migrateTtl runs — no error
       expect(result.ok).toBe(true);
       expect(target.set).not.toHaveBeenCalled();
+      // migrateTtl should be skipped when no data was written
+      expect(source.pttl).not.toHaveBeenCalled();
     });
   });
 

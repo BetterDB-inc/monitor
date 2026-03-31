@@ -99,4 +99,32 @@ describe('buildScanReaderToml', () => {
     expect(toml).toContain('[advanced]');
     expect(toml).toContain('log_level = "info"');
   });
+
+  it('should reject control characters in password instead of silently stripping', () => {
+    const source = makeConfig({ password: 'pass\x00word' });
+    const target = makeConfig();
+
+    expect(() => buildScanReaderToml(source, target, false)).toThrow('control characters');
+  });
+
+  it('should reject invalid port', () => {
+    const source = makeConfig({ port: 99999 as any });
+    const target = makeConfig();
+
+    expect(() => buildScanReaderToml(source, target, false)).toThrow('Invalid port');
+  });
+
+  it('should reject host with whitespace', () => {
+    const source = makeConfig({ host: 'host name' });
+    const target = makeConfig();
+
+    expect(() => buildScanReaderToml(source, target, false)).toThrow('Invalid host');
+  });
+
+  it('should reject empty host', () => {
+    const source = makeConfig({ host: '' });
+    const target = makeConfig();
+
+    expect(() => buildScanReaderToml(source, target, false)).toThrow('Invalid host');
+  });
 });

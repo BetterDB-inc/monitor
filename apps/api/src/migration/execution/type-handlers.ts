@@ -24,30 +24,33 @@ export async function migrateKey(
   type: string,
 ): Promise<MigratedKey> {
   try {
+    let wrote: boolean;
     switch (type) {
       case 'string':
-        await migrateString(source, target, key);
+        wrote = await migrateString(source, target, key);
         break;
       case 'hash':
-        await migrateHash(source, target, key);
+        wrote = await migrateHash(source, target, key);
         break;
       case 'list':
-        await migrateList(source, target, key);
+        wrote = await migrateList(source, target, key);
         break;
       case 'set':
-        await migrateSet(source, target, key);
+        wrote = await migrateSet(source, target, key);
         break;
       case 'zset':
-        await migrateZset(source, target, key);
+        wrote = await migrateZset(source, target, key);
         break;
       case 'stream':
-        await migrateStream(source, target, key);
+        wrote = await migrateStream(source, target, key);
         break;
       default:
         return { key, type, ok: false, error: `Unsupported type: ${type}` };
     }
-    // Preserve TTL
-    await migrateTtl(source, target, key);
+    // Only set TTL if data was actually written to avoid deleting pre-existing target keys
+    if (wrote) {
+      await migrateTtl(source, target, key);
+    }
     return { key, type, ok: true };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -57,17 +60,18 @@ export async function migrateKey(
 
 // ── String ──
 
-async function migrateString(source: Valkey, target: Valkey, key: string): Promise<void> {
+async function migrateString(source: Valkey, target: Valkey, key: string): Promise<boolean> {
   const value = await source.getBuffer(key);
-  if (value === null) return; // key expired/deleted between SCAN and GET
+  if (value === null) return false; // key expired/deleted between SCAN and GET
   await target.set(key, value);
+  return true;
 }
 
 // ── Hash ──
 
-async function migrateHash(source: Valkey, target: Valkey, key: string): Promise<void> {
+async function migrateHash(source: Valkey, target: Valkey, key: string): Promise<boolean> {
   const len = await source.hlen(key);
-  if (len === 0) return;
+  if (len === 0) return false;
 
   // Delete target key first to avoid merging with stale data
   await target.del(key);
@@ -85,13 +89,14 @@ async function migrateHash(source: Valkey, target: Valkey, key: string): Promise
     }
     await target.call('HSET', ...args);
   } while (cursor !== '0');
+  return true;
 }
 
 // ── List ──
 
-async function migrateList(source: Valkey, target: Valkey, key: string): Promise<void> {
+async function migrateList(source: Valkey, target: Valkey, key: string): Promise<boolean> {
   const len = await source.llen(key);
-  if (len === 0) return;
+  if (len === 0) return false;
 
   // Delete target key first to avoid appending to existing data
   await target.del(key);
@@ -102,20 +107,21 @@ async function migrateList(source: Valkey, target: Valkey, key: string): Promise
     if (items.length === 0) break;
     await target.call('RPUSH', key, ...items);
   }
+  return true;
 }
 
 // ── Set ──
 
-async function migrateSet(source: Valkey, target: Valkey, key: string): Promise<void> {
+async function migrateSet(source: Valkey, target: Valkey, key: string): Promise<boolean> {
   const card = await source.scard(key);
-  if (card === 0) return;
+  if (card === 0) return false;
 
   // Delete target key first to avoid merging with stale data
   await target.del(key);
 
   if (card <= LARGE_KEY_THRESHOLD) {
     const members = await source.smembersBuffer(key);
-    if (members.length === 0) return;
+    if (members.length === 0) return true; // del already ran
     await target.call('SADD', key, ...members);
   } else {
     let cursor = '0';
@@ -126,20 +132,21 @@ async function migrateSet(source: Valkey, target: Valkey, key: string): Promise<
       await target.call('SADD', key, ...members);
     } while (cursor !== '0');
   }
+  return true;
 }
 
 // ── Sorted Set ──
 
-async function migrateZset(source: Valkey, target: Valkey, key: string): Promise<void> {
+async function migrateZset(source: Valkey, target: Valkey, key: string): Promise<boolean> {
   const card = await source.zcard(key);
-  if (card === 0) return;
+  if (card === 0) return false;
 
   // Delete target key first to avoid merging with stale data
   await target.del(key);
 
   if (card <= LARGE_KEY_THRESHOLD) {
     const data = await source.call('ZRANGE', key, '0', '-1', 'WITHSCORES') as string[];
-    if (!data || data.length === 0) return;
+    if (!data || data.length === 0) return true; // del already ran
     // data is [member, score, member, score, ...]
     const pipeline = target.pipeline();
     for (let i = 0; i < data.length; i += 2) {
@@ -159,16 +166,18 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
       await pipeline.exec();
     } while (cursor !== '0');
   }
+  return true;
 }
 
 // ── Stream ──
 
-async function migrateStream(source: Valkey, target: Valkey, key: string): Promise<void> {
+async function migrateStream(source: Valkey, target: Valkey, key: string): Promise<boolean> {
   // Delete target key first to avoid duplicates on re-migration
   await target.del(key);
 
   let lastId = '-';
   let hasMore = true;
+  let wrote = false;
 
   while (hasMore) {
     const entries = await source.xrange(key, lastId === '-' ? '-' : `(${lastId}`, '+', 'COUNT', STREAM_CHUNK);
@@ -180,11 +189,13 @@ async function migrateStream(source: Valkey, target: Valkey, key: string): Promi
       // XADD with explicit ID to preserve ordering
       await target.call('XADD', key, id, ...fields);
       lastId = id;
+      wrote = true;
     }
     if (entries.length < STREAM_CHUNK) {
       hasMore = false;
     }
   }
+  return wrote;
 }
 
 // ── TTL ──

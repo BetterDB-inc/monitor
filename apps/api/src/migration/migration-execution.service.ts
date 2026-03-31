@@ -111,7 +111,7 @@ export class MigrationExecutionService {
         const lines = chunk.toString().split('\n');
         for (const line of lines) {
           if (!line) continue;
-          job.logs.push(line);
+          job.logs.push(sanitizeLogLine(line));
           if (job.logs.length > this.MAX_LOG_LINES) {
             job.logs.shift();
           }
@@ -130,11 +130,14 @@ export class MigrationExecutionService {
         proc.on('error', reject);
       });
 
-      const currentStatus = job.status as string;
+      // Status may have been set to 'cancelled' by stopExecution() while the process was running
+      const statusAfterExit = job.status as string;
       if (code === 0) {
-        job.status = 'completed';
-        job.progress = 100;
-      } else if (currentStatus !== 'cancelled') {
+        if (statusAfterExit !== 'cancelled') {
+          job.status = 'completed';
+          job.progress = 100;
+        }
+      } else if (statusAfterExit !== 'cancelled') {
         job.status = 'failed';
         job.error = `RedisShake exited with code ${code}`;
       }
@@ -179,8 +182,7 @@ export class MigrationExecutionService {
         maxLogLines: this.MAX_LOG_LINES,
       });
 
-      const currentStatus = job.status as string;
-      if (currentStatus !== 'cancelled') {
+      if ((job.status as string) !== 'cancelled') {
         job.status = 'completed';
       }
     } catch (err: unknown) {
@@ -245,7 +247,7 @@ export class MigrationExecutionService {
       bytesTransferred: job.bytesTransferred,
       keysSkipped: job.keysSkipped,
       totalKeys: job.totalKeys ?? undefined,
-      logs: job.logs.map(sanitizeLogLine),
+      logs: [...job.logs],
       progress: job.progress,
     };
   }
