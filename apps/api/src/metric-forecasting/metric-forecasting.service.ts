@@ -35,6 +35,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MetricForecastingService.name);
   private forecastCache = new Map<string, { forecast: MetricForecast; computedAt: number }>();
   private alertInterval: ReturnType<typeof setInterval> | null = null;
+  private pruneInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -50,9 +51,15 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('Enabling metric forecasting webhook alerts');
       this.alertInterval = setInterval(() => this.checkAlerts(), ALERT_CHECK_INTERVAL_MS);
     }
+    // Prune stale cache entries even in non-Pro deployments
+    this.pruneInterval = setInterval(() => this.pruneCache(), CACHE_TTL_MS * 10);
   }
 
   onModuleDestroy(): void {
+    if (this.pruneInterval) {
+      clearInterval(this.pruneInterval);
+      this.pruneInterval = null;
+    }
     if (this.alertInterval) {
       clearInterval(this.alertInterval);
       this.alertInterval = null;

@@ -610,9 +610,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         }
 
         if (!forecast.insufficientData) {
-          const value =
-            forecast.timeToLimitMs !== null ? forecast.timeToLimitMs / 1000 : Infinity;
-          this.metricForecastTimeToLimitSeconds.labels(connLabel, metricKind).set(value);
+          if (forecast.timeToLimitMs !== null) {
+            this.metricForecastTimeToLimitSeconds
+              .labels(connLabel, metricKind)
+              .set(forecast.timeToLimitMs / 1000);
+          } else {
+            // Stable/falling — remove label to avoid stale or sentinel values in Prometheus
+            this.metricForecastTimeToLimitSeconds.remove(connLabel, metricKind);
+          }
         }
       } catch (err) {
         this.logger.debug(
