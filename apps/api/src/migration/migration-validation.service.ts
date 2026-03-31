@@ -262,6 +262,8 @@ function createClient(config: DatabaseConnectionConfig, name: string): Valkey {
     password: config.password || undefined,
     tls: config.tls ? {} : undefined,
     lazyConnect: true,
+    connectTimeout: 10_000,
+    commandTimeout: 15_000,
     connectionName: name,
   });
 }

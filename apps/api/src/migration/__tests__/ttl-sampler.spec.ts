@@ -69,16 +69,17 @@ describe('sampleTtls', () => {
     expect(result.sampledKeyCount).toBe(0);
   });
 
-  it('should skip TTL = -2 (key gone) instead of counting as noExpiry', async () => {
+  it('should skip TTL = -2 (key gone) and exclude from sampledKeyCount', async () => {
     const ttls = [-2, -1];
     const client = createMockClient(ttls);
 
     const result = await sampleTtls(client, ['gone', 'persistent']);
 
     expect(result.noExpiry).toBe(1);
+    expect(result.sampledKeyCount).toBe(1);
   });
 
-  it('should skip pipeline errors instead of counting as noExpiry', async () => {
+  it('should skip pipeline errors and exclude from sampledKeyCount', async () => {
     const client = {
       pipeline: jest.fn().mockReturnValue({
         pttl: jest.fn().mockReturnThis(),
@@ -93,5 +94,6 @@ describe('sampleTtls', () => {
 
     expect(result.noExpiry).toBe(0);
     expect(result.expiresWithin1h).toBe(1);
+    expect(result.sampledKeyCount).toBe(1);
   });
 });

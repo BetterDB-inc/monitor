@@ -98,13 +98,14 @@ export async function detectHfe(
       for (let i = 0; i < keyFieldPairs.length; i++) {
         const [err, val] = results[i] ?? [];
         if (err) {
-          // If the error indicates unknown command, HFE not supported
           const errMsg = String(err);
-          if (errMsg.includes('unknown command') || errMsg.includes('ERR')) {
+          // Only mark unsupported for genuinely unknown command errors
+          if (errMsg.includes('unknown command') || errMsg.includes('unknown subcommand')) {
             result.hfeSupported = false;
             result.hfeDetected = false;
             return result;
           }
+          // Transient errors (overload, permission, etc.) — skip this field
           continue;
         }
         // HEXPIRETIME returns an array with the expiry time, >0 means HFE in use

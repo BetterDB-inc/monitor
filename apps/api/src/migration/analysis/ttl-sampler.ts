@@ -11,7 +11,7 @@ export async function sampleTtls(
     expiresWithin24h: 0,
     expiresWithin7d: 0,
     expiresAfter7d: 0,
-    sampledKeyCount: keys.length,
+    sampledKeyCount: 0,
   };
 
   for (let i = 0; i < keys.length; i += 1000) {
@@ -24,11 +24,13 @@ export async function sampleTtls(
     if (!results) continue;
     for (const [err, ttl] of results) {
       const ms = err ? -2 : Number(ttl);
+      if (ms < 0 && ms !== -1) {
+        // ms === -2: key expired between SCAN and PTTL, or pipeline error — skip
+        continue;
+      }
+      dist.sampledKeyCount++;
       if (ms === -1) {
         dist.noExpiry++;
-      } else if (ms < 0) {
-        // ms === -2: key expired between SCAN and PTTL — skip
-        continue;
       } else if (ms < 3_600_000) {
         dist.expiresWithin1h++;
       } else if (ms < 86_400_000) {

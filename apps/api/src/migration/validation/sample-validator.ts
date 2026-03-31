@@ -36,8 +36,7 @@ export async function validateSample(
     const sourceType = sourceTypes[i];
 
     if (sourceType === 'none') {
-      // Key expired between SCAN and TYPE
-      matched++;
+      // Key expired between SCAN and TYPE — skip, don't count toward any outcome
       continue;
     }
 
@@ -71,7 +70,7 @@ export async function validateSample(
   }
 
   return {
-    sampledKeys: keys.length,
+    sampledKeys: matched + missing + typeMismatches + valueMismatches,
     matched,
     missing,
     typeMismatches,
