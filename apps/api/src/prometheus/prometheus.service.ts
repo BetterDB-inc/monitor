@@ -21,7 +21,8 @@ import {
   MultiConnectionPoller,
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
-import { ThroughputForecastingService } from '../throughput-forecasting/throughput-forecasting.service';
+import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
+import { ALL_METRIC_KINDS } from '@betterdb/shared';
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
@@ -155,8 +156,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private anomalyDetectionBufferMean: Gauge;
   private anomalyDetectionBufferStdDev: Gauge;
 
-  // Throughput Forecasting Metrics
-  private throughputTimeToLimitSeconds: Gauge;
+  // Metric Forecasting
+  private metricForecastTimeToLimitSeconds: Gauge;
 
   constructor(
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
@@ -174,7 +175,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     @Inject(WEBHOOK_EVENTS_ENTERPRISE_SERVICE)
     private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
     @Optional()
-    private readonly throughputForecastingService?: ThroughputForecastingService,
+    private readonly metricForecastingService?: MetricForecastingService,
   ) {
     super(connectionRegistry);
     this.pollIntervalMs = this.configService.get<number>('PROMETHEUS_POLL_INTERVAL_MS', 5000);
@@ -544,10 +545,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       ['metric_type'],
     );
 
-    // Throughput Forecasting
-    this.throughputTimeToLimitSeconds = this.createGauge(
-      'throughput_time_to_limit_seconds',
-      'Projected seconds until ops/sec reaches configured ceiling. Only exported when a ceiling is configured.',
+    // Metric Forecasting
+    this.metricForecastTimeToLimitSeconds = this.createGauge(
+      'metric_forecast_time_to_limit_seconds',
+      'Projected seconds until metric reaches configured ceiling.',
+      ['metric_kind'],
     );
   }
 
@@ -582,22 +584,30 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     await this.updateClientMetrics(connectionId, connLabel, state);
     await this.updateSlowlogMetrics(connectionId, connLabel, state);
     await this.updateCommandlogMetrics(connectionId, connLabel, state);
-    await this.updateThroughputMetrics(connectionId, connLabel);
+    await this.updateMetricForecastMetrics(connectionId, connLabel);
   }
 
-  private async updateThroughputMetrics(connectionId: string, connLabel: string): Promise<void> {
-    if (!this.throughputForecastingService) {
-      return;
-    }
-    try {
-      const forecast = await this.throughputForecastingService.getForecast(connectionId);
-      if (forecast.opsCeiling !== null && !forecast.insufficientData && forecast.enabled) {
-        const value = forecast.timeToLimitMs !== null ? forecast.timeToLimitMs / 1000 : -1;
-        this.throughputTimeToLimitSeconds.labels(connLabel).set(value);
+  private async updateMetricForecastMetrics(
+    connectionId: string,
+    connLabel: string,
+  ): Promise<void> {
+    if (!this.metricForecastingService) return;
+
+    // Only export metrics for metric kinds that already have settings configured.
+    // Avoids auto-provisioning settings rows as a side effect of Prometheus scraping.
+    for (const metricKind of ALL_METRIC_KINDS) {
+      try {
+        const settings = await this.storage.getMetricForecastSettings(connectionId, metricKind);
+        if (!settings || !settings.enabled) continue;
+
+        const forecast = await this.metricForecastingService.getForecast(connectionId, metricKind);
+        if (forecast.ceiling !== null && !forecast.insufficientData && forecast.enabled) {
+          const value = forecast.timeToLimitMs !== null ? forecast.timeToLimitMs / 1000 : -1;
+          this.metricForecastTimeToLimitSeconds.labels(connLabel, metricKind).set(value);
+        }
+      } catch {
+        // Silently skip if forecasting unavailable for this metric kind
       }
-    } catch {
-      this.logger.warn(`Failed to update throughput metrics for connection ${connectionId}`);
-      // Silently skip if forecasting unavailable
     }
   }
 

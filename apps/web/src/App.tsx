@@ -28,11 +28,10 @@ import { ClusterDashboard } from './pages/ClusterDashboard';
 import { Settings } from './pages/Settings';
 import { Webhooks } from './pages/Webhooks';
 import { VectorSearch } from './pages/VectorSearch';
-import { ThroughputForecasting } from './pages/ThroughputForecasting';
+import { MetricForecasting } from './pages/MetricForecasting';
 import { Members } from './pages/Members';
 import { workspaceApi, CloudUser } from './api/workspace';
 import { Feature } from '@betterdb/shared';
-import { settingsApi } from './api/settings';
 
 function App() {
   return (
@@ -98,15 +97,8 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
   const location = useLocation();
   const { hasVectorSearch } = useCapabilities();
   const [showFeedback, setShowFeedback] = useState(false);
-  const [throughputForecastingEnabled, setThroughputForecastingEnabled] = useState(true);
   useIdleTracker();
   useNavigationTracker();
-
-  useEffect(() => {
-    settingsApi.getSettings()
-      .then((res) => setThroughputForecastingEnabled(res.settings.throughputForecastingEnabled ?? true))
-      .catch(() => {});
-  }, [location.pathname]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -139,11 +131,9 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
           <NavItem to="/cluster" active={location.pathname === '/cluster'}>
             Cluster
           </NavItem>
-          {throughputForecastingEnabled && (
-            <NavItem to="/throughput" active={location.pathname === '/throughput'}>
-              Throughput Forecast
-            </NavItem>
-          )}
+          <NavItem to="/forecasting" active={location.pathname === '/forecasting'}>
+            Forecasting
+          </NavItem>
           <NavItem
             to="/anomalies"
             active={location.pathname === '/anomalies'}
@@ -224,7 +214,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
             <Route path="/key-analytics" element={<NoConnectionsGuard><KeyAnalytics /></NoConnectionsGuard>} />
             <Route path="/vector-search" element={<NoConnectionsGuard><VectorSearch /></NoConnectionsGuard>} />
             <Route path="/cluster" element={<NoConnectionsGuard><ClusterDashboard /></NoConnectionsGuard>} />
-            <Route path="/throughput" element={<NoConnectionsGuard><ThroughputForecasting /></NoConnectionsGuard>} />
+            <Route path="/forecasting" element={<NoConnectionsGuard><MetricForecasting /></NoConnectionsGuard>} />
             <Route path="/audit" element={<NoConnectionsGuard><AuditTrail /></NoConnectionsGuard>} />
             <Route path="/helper" element={<NoConnectionsGuard><AiAssistant /></NoConnectionsGuard>} />
             <Route path="/webhooks" element={<NoConnectionsGuard><Webhooks /></NoConnectionsGuard>} />

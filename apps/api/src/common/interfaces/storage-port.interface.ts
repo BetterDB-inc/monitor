@@ -29,7 +29,7 @@ export type {
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
 } from '@betterdb/shared';
-export type { ThroughputSettings } from '@betterdb/shared';
+export type { MetricForecastSettings, MetricKind } from '@betterdb/shared';
 import type {
   AppSettings,
   AuditQueryOptions,
@@ -46,7 +46,8 @@ import type {
   SettingsUpdateRequest,
   StoredAclEntry,
   StoredClientSnapshot,
-  ThroughputSettings,
+  MetricForecastSettings,
+  MetricKind,
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
   Webhook,
@@ -439,9 +440,12 @@ export interface StoragePort {
   revokeAgentToken(id: string): Promise<void>;
   updateAgentTokenLastUsed(id: string): Promise<void>;
 
-  // Throughput Forecasting Settings
-  getThroughputSettings(connectionId: string): Promise<ThroughputSettings | null>;
-  saveThroughputSettings(settings: ThroughputSettings): Promise<ThroughputSettings>;
-  deleteThroughputSettings(connectionId: string): Promise<boolean>;
-  getActiveThroughputSettings(): Promise<ThroughputSettings[]>;
+  // Metric Forecasting Settings
+  getMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<MetricForecastSettings | null>;
+  saveMetricForecastSettings(settings: MetricForecastSettings): Promise<MetricForecastSettings>;
+  deleteMetricForecastSettings(connectionId: string, metricKind: MetricKind): Promise<boolean>;
+  getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]>;
 }

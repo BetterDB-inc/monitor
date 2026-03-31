@@ -6,15 +6,18 @@ import {
   OnModuleInit,
   Optional,
 } from '@nestjs/common';
-import type { StoragePort } from '../common/interfaces/storage-port.interface';
+import { StoragePort, WebhookEventType } from '../common/interfaces/storage-port.interface';
 import { SettingsService } from '../settings/settings.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type {
-  ThroughputForecast,
-  ThroughputSettings,
-  ThroughputSettingsUpdate,
+  MetricForecast,
+  MetricForecastSettings,
+  MetricForecastSettingsUpdate,
+  MetricKind,
 } from '@betterdb/shared';
 import { WEBHOOK_EVENTS_PRO_SERVICE, type IWebhookEventsProService } from '@betterdb/shared';
+import { METRIC_EXTRACTORS } from './metric-extractors';
+import { CEILING_RESOLVERS } from './ceiling-resolvers';
 
 const MIN_DATA_POINTS = 3;
 const MIN_TIME_SPAN_MS = 30 * 60_000; // 30 minutes
@@ -23,9 +26,9 @@ const CACHE_TTL_MS = 60_000;
 const ALERT_CHECK_INTERVAL_MS = 60_000;
 
 @Injectable()
-export class ThroughputForecastingService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(ThroughputForecastingService.name);
-  private forecastCache = new Map<string, { forecast: ThroughputForecast; computedAt: number }>();
+export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(MetricForecastingService.name);
+  private forecastCache = new Map<string, { forecast: MetricForecast; computedAt: number }>();
   private alertInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -39,36 +42,37 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
 
   onModuleInit(): void {
     if (this.webhookEventsProService) {
-      this.logger.log('Enabling throughput forecasting webhook alerts');
+      this.logger.log('Enabling metric forecasting webhook alerts');
       this.alertInterval = setInterval(() => this.checkAlerts(), ALERT_CHECK_INTERVAL_MS);
     }
   }
 
   onModuleDestroy(): void {
     if (this.alertInterval) {
-      this.logger.log('Disabling throughput forecasting webhook alerts');
       clearInterval(this.alertInterval);
       this.alertInterval = null;
     }
   }
 
-  async getForecast(connectionId: string): Promise<ThroughputForecast> {
+  async getForecast(connectionId: string, metricKind: MetricKind): Promise<MetricForecast> {
+    const cacheKey = `${connectionId}:${metricKind}`;
+
     // Check cache
-    const cached = this.forecastCache.get(connectionId);
+    const cached = this.forecastCache.get(cacheKey);
     if (cached && Date.now() - cached.computedAt < CACHE_TTL_MS) {
       return cached.forecast;
     }
 
     // Check global toggle
     const globalSettings = this.settingsService.getCachedSettings();
-    if (!globalSettings.throughputForecastingEnabled) {
-      return this.buildDisabledForecast(connectionId);
+    if (!globalSettings.metricForecastingEnabled) {
+      return this.buildDisabledForecast(connectionId, metricKind);
     }
 
     // Check per-connection settings
-    const settings = await this.getOrCreateSettings(connectionId);
+    const settings = await this.getOrCreateSettings(connectionId, metricKind);
     if (!settings.enabled) {
-      return this.buildDisabledForecast(connectionId);
+      return this.buildDisabledForecast(connectionId, metricKind);
     }
 
     // Query snapshots
@@ -82,18 +86,21 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
     // Reverse to ascending (query returns DESC)
     const sorted = [...snapshots].reverse();
 
+    // Extract metric values
+    const extractor = METRIC_EXTRACTORS[metricKind];
+    const latestValue = sorted.length > 0 ? extractor(sorted[sorted.length - 1]) : 0;
+
     // Check sufficient data
-    const latestOps = sorted.length > 0 ? sorted[sorted.length - 1].opsPerSec : 0;
     if (sorted.length < MIN_DATA_POINTS) {
-      return this.buildInsufficientForecast(connectionId, settings, latestOps);
+      return this.buildInsufficientForecast(connectionId, metricKind, settings, latestValue);
     }
     const timeSpan = sorted[sorted.length - 1].timestamp - sorted[0].timestamp;
     if (timeSpan < MIN_TIME_SPAN_MS) {
-      return this.buildInsufficientForecast(connectionId, settings, latestOps);
+      return this.buildInsufficientForecast(connectionId, metricKind, settings, latestValue);
     }
 
-    // Linear regression
-    const points = sorted.map((s) => ({ x: s.timestamp, y: s.opsPerSec }));
+    // Linear regression on extracted metric
+    const points = sorted.map((s) => ({ x: s.timestamp, y: extractor(s) }));
     const { slope, intercept } = this.linearRegression(points);
 
     // Compute metrics
@@ -101,8 +108,8 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
     const windowEnd = sorted[sorted.length - 1].timestamp;
     const predictedStart = slope * windowStart + intercept;
     const predictedEnd = slope * windowEnd + intercept;
-    const currentOpsPerSec = latestOps;
-    const growthRate = slope * 3_600_000; // ops/sec per hour
+    const currentValue = latestValue;
+    const growthRate = slope * 3_600_000; // units per hour
     const growthPercent =
       predictedStart !== 0 ? ((predictedEnd - predictedStart) / Math.abs(predictedStart)) * 100 : 0;
 
@@ -113,9 +120,14 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
           ? 'falling'
           : 'stable';
 
+    // Resolve ceiling
+    const latestSnapshot = sorted[sorted.length - 1];
+    const resolvedCeiling = CEILING_RESOLVERS[metricKind](settings, latestSnapshot);
+
     const baseForecast = {
       connectionId,
-      currentOpsPerSec,
+      metricKind,
+      currentValue,
       growthRate,
       growthPercent,
       trendDirection,
@@ -125,14 +137,14 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
       insufficientData: false,
     };
 
-    let forecast: ThroughputForecast;
+    let forecast: MetricForecast;
 
-    if (settings.opsCeiling === null) {
+    if (resolvedCeiling === null) {
       // Trend mode
       forecast = {
         ...baseForecast,
         mode: 'trend',
-        opsCeiling: null,
+        ceiling: null,
         timeToLimitMs: null,
         timeToLimitHuman: this.formatTrendSummary(
           growthPercent,
@@ -141,14 +153,13 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
         ),
       };
     } else {
-      // Forecast mode
-      const currentPredicted = slope * now + intercept;
-
-      if (currentPredicted >= settings.opsCeiling) {
+      // Forecast mode — use actual current value, not regression estimate,
+      // so fast spikes are detected immediately instead of lagging behind the trend line.
+      if (currentValue >= resolvedCeiling) {
         forecast = {
           ...baseForecast,
           mode: 'forecast',
-          opsCeiling: settings.opsCeiling,
+          ceiling: resolvedCeiling,
           timeToLimitMs: 0,
           timeToLimitHuman: 'Ceiling already exceeded',
         };
@@ -156,16 +167,16 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
         forecast = {
           ...baseForecast,
           mode: 'forecast',
-          opsCeiling: settings.opsCeiling,
+          ceiling: resolvedCeiling,
           timeToLimitMs: null,
           timeToLimitHuman: 'Not projected to reach ceiling',
         };
       } else {
-        const timeToLimitMs = (settings.opsCeiling - currentPredicted) / slope;
+        const timeToLimitMs = (resolvedCeiling - currentValue) / slope;
         forecast = {
           ...baseForecast,
           mode: 'forecast',
-          opsCeiling: settings.opsCeiling,
+          ceiling: resolvedCeiling,
           timeToLimitMs,
           timeToLimitHuman: this.formatTimeToLimit(timeToLimitMs),
         };
@@ -173,55 +184,62 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
     }
 
     // Cache
-    this.forecastCache.set(connectionId, { forecast, computedAt: Date.now() });
+    this.forecastCache.set(cacheKey, { forecast, computedAt: Date.now() });
     return forecast;
   }
 
-  async getSettings(connectionId: string): Promise<ThroughputSettings> {
-    return this.getOrCreateSettings(connectionId);
+  async getSettings(connectionId: string, metricKind: MetricKind): Promise<MetricForecastSettings> {
+    return this.getOrCreateSettings(connectionId, metricKind);
   }
 
   async updateSettings(
     connectionId: string,
-    updates: ThroughputSettingsUpdate,
-  ): Promise<ThroughputSettings> {
-    const current = await this.getOrCreateSettings(connectionId);
-    const merged: ThroughputSettings = {
+    metricKind: MetricKind,
+    updates: MetricForecastSettingsUpdate,
+  ): Promise<MetricForecastSettings> {
+    const current = await this.getOrCreateSettings(connectionId, metricKind);
+    const merged: MetricForecastSettings = {
       ...current,
       ...updates,
       connectionId,
+      metricKind,
       updatedAt: Date.now(),
     };
-    const saved = await this.storage.saveThroughputSettings(merged);
-    this.forecastCache.delete(connectionId);
+    const saved = await this.storage.saveMetricForecastSettings(merged);
+    this.forecastCache.delete(`${connectionId}:${metricKind}`);
     return saved;
   }
 
-  private async getOrCreateSettings(connectionId: string): Promise<ThroughputSettings> {
-    const existing = await this.storage.getThroughputSettings(connectionId);
+  private async getOrCreateSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<MetricForecastSettings> {
+    const existing = await this.storage.getMetricForecastSettings(connectionId, metricKind);
     if (existing) return existing;
 
     const globalSettings = this.settingsService.getCachedSettings();
-    if (!globalSettings.throughputForecastingEnabled) {
+    if (!globalSettings.metricForecastingEnabled) {
       return {
         connectionId,
+        metricKind,
         enabled: false,
-        opsCeiling: null,
-        rollingWindowMs: globalSettings.throughputForecastingDefaultRollingWindowMs,
-        alertThresholdMs: globalSettings.throughputForecastingDefaultAlertThresholdMs,
+        ceiling: null,
+        rollingWindowMs: globalSettings.metricForecastingDefaultRollingWindowMs,
+        alertThresholdMs: globalSettings.metricForecastingDefaultAlertThresholdMs,
         updatedAt: Date.now(),
       };
     }
 
-    const newSettings: ThroughputSettings = {
+    const newSettings: MetricForecastSettings = {
       connectionId,
+      metricKind,
       enabled: true,
-      opsCeiling: null,
-      rollingWindowMs: globalSettings.throughputForecastingDefaultRollingWindowMs,
-      alertThresholdMs: globalSettings.throughputForecastingDefaultAlertThresholdMs,
+      ceiling: null,
+      rollingWindowMs: globalSettings.metricForecastingDefaultRollingWindowMs,
+      alertThresholdMs: globalSettings.metricForecastingDefaultAlertThresholdMs,
       updatedAt: Date.now(),
     };
-    return this.storage.saveThroughputSettings(newSettings);
+    return this.storage.saveMetricForecastSettings(newSettings);
   }
 
   private linearRegression(points: { x: number; y: number }[]): {
@@ -261,17 +279,18 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
     return `${sign}${growthPercent.toFixed(1)}% over ${windowHours}h, ${direction}`;
   }
 
-  private buildDisabledForecast(connectionId: string): ThroughputForecast {
+  private buildDisabledForecast(connectionId: string, metricKind: MetricKind): MetricForecast {
     return {
       connectionId,
+      metricKind,
       mode: 'trend',
-      currentOpsPerSec: 0,
+      currentValue: 0,
       growthRate: 0,
       growthPercent: 0,
       trendDirection: 'stable',
       dataPointCount: 0,
       windowMs: 0,
-      opsCeiling: null,
+      ceiling: null,
       timeToLimitMs: null,
       timeToLimitHuman: '',
       enabled: false,
@@ -281,19 +300,21 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
 
   private buildInsufficientForecast(
     connectionId: string,
-    settings: ThroughputSettings,
-    currentOpsPerSec: number,
-  ): ThroughputForecast {
+    metricKind: MetricKind,
+    settings: MetricForecastSettings,
+    currentValue: number,
+  ): MetricForecast {
     return {
       connectionId,
+      metricKind,
       mode: 'trend',
-      currentOpsPerSec,
+      currentValue,
       growthRate: 0,
       growthPercent: 0,
       trendDirection: 'stable',
       dataPointCount: 0,
       windowMs: settings.rollingWindowMs,
-      opsCeiling: settings.opsCeiling,
+      ceiling: settings.ceiling,
       timeToLimitMs: null,
       timeToLimitHuman: '',
       enabled: true,
@@ -304,37 +325,45 @@ export class ThroughputForecastingService implements OnModuleInit, OnModuleDestr
   }
 
   private async checkAlerts(): Promise<void> {
-    if (!this.webhookEventsProService) return;
-
-    const globalSettings = this.settingsService.getCachedSettings();
-    if (!globalSettings.throughputForecastingEnabled) return;
+    if (!this.webhookEventsProService) {
+      this.logger.warn('WebhookEventsProService not initialized');
+      return;
+    }
 
     try {
-      const activeSettings = await this.storage.getActiveThroughputSettings();
+      const activeSettings = await this.storage.getActiveMetricForecastSettings();
       for (const settings of activeSettings) {
-        const forecast = await this.getForecast(settings.connectionId);
-        if (
-          forecast.timeToLimitMs !== null &&
-          forecast.timeToLimitMs > 0 &&
-          forecast.opsCeiling !== null
-        ) {
+        try {
+          const forecast = await this.getForecast(settings.connectionId, settings.metricKind);
+          this.logger.log(
+            `[checkAlerts] ${WebhookEventType.METRIC_FORECAST_LIMIT} ${settings.connectionId}:${settings.metricKind} — ` +
+              `current=${forecast.currentValue}, ceiling=${forecast.ceiling}, ` +
+              `timeToLimit=${forecast.timeToLimitMs}, threshold=${settings.alertThresholdMs}, ` +
+              `trend=${forecast.trendDirection}`,
+          );
           const config = this.connectionRegistry.getConfig(settings.connectionId);
-          if (config) {
-            await this.webhookEventsProService.dispatchThroughputLimit({
-              currentOpsPerSec: forecast.currentOpsPerSec,
-              opsCeiling: forecast.opsCeiling,
-              timeToLimitMs: forecast.timeToLimitMs,
-              threshold: settings.alertThresholdMs,
-              growthRate: forecast.growthRate,
-              timestamp: Date.now(),
-              instance: { host: config.host, port: config.port },
-              connectionId: settings.connectionId,
-            });
-          }
+          await this.webhookEventsProService.dispatchMetricForecastLimit({
+            event: WebhookEventType.METRIC_FORECAST_LIMIT,
+            metricKind: settings.metricKind,
+            currentValue: forecast.currentValue,
+            ceiling: forecast.ceiling,
+            timeToLimitMs: forecast.timeToLimitMs ?? Infinity,
+            threshold: settings.alertThresholdMs,
+            growthRate: forecast.growthRate,
+            timestamp: Date.now(),
+            instance: config ? { host: config.host, port: config.port } : undefined,
+            connectionId: settings.connectionId,
+          });
+        } catch (error) {
+          this.logger.error(
+            `Alert check failed for ${settings.connectionId}:${settings.metricKind}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          );
         }
       }
-    } catch (err) {
-      this.logger.warn(`Alert check failed: ${err instanceof Error ? err.message : err}`);
+    } catch (error) {
+      this.logger.error(
+        `Alert check iteration failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
     }
   }
 }

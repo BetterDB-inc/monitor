@@ -34,7 +34,12 @@ import {
   HotKeyQueryOptions,
   DatabaseConnectionConfig,
 } from '../../common/interfaces/storage-port.interface';
-import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions, ThroughputSettings } from '@betterdb/shared';
+import type {
+  VectorIndexSnapshot,
+  VectorIndexSnapshotQueryOptions,
+  MetricForecastSettings,
+  MetricKind,
+} from '@betterdb/shared';
 
 export class MemoryAdapter implements StoragePort {
   private aclEntries: StoredAclEntry[] = [];
@@ -47,7 +52,7 @@ export class MemoryAdapter implements StoragePort {
   private latencyHistograms: StoredLatencyHistogram[] = [];
   private memorySnapshots: StoredMemorySnapshot[] = [];
   private vectorIndexSnapshots: VectorIndexSnapshot[] = [];
-  private throughputSettings: Map<string, ThroughputSettings> = new Map();
+  private metricForecastSettings: Map<string, MetricForecastSettings> = new Map();
   private settings: AppSettings | null = null;
   private webhooks: Map<string, Webhook> = new Map();
   private deliveries: Map<string, WebhookDelivery> = new Map();
@@ -724,16 +729,16 @@ export class MemoryAdapter implements StoragePort {
     if (updates.anomalyPrometheusIntervalMs !== undefined) {
       validUpdates.anomalyPrometheusIntervalMs = updates.anomalyPrometheusIntervalMs;
     }
-    if (updates.throughputForecastingEnabled !== undefined) {
-      validUpdates.throughputForecastingEnabled = updates.throughputForecastingEnabled;
+    if (updates.metricForecastingEnabled !== undefined) {
+      validUpdates.metricForecastingEnabled = updates.metricForecastingEnabled;
     }
-    if (updates.throughputForecastingDefaultRollingWindowMs !== undefined) {
-      validUpdates.throughputForecastingDefaultRollingWindowMs =
-        updates.throughputForecastingDefaultRollingWindowMs;
+    if (updates.metricForecastingDefaultRollingWindowMs !== undefined) {
+      validUpdates.metricForecastingDefaultRollingWindowMs =
+        updates.metricForecastingDefaultRollingWindowMs;
     }
-    if (updates.throughputForecastingDefaultAlertThresholdMs !== undefined) {
-      validUpdates.throughputForecastingDefaultAlertThresholdMs =
-        updates.throughputForecastingDefaultAlertThresholdMs;
+    if (updates.metricForecastingDefaultAlertThresholdMs !== undefined) {
+      validUpdates.metricForecastingDefaultAlertThresholdMs =
+        updates.metricForecastingDefaultAlertThresholdMs;
     }
 
     this.settings = {
@@ -1348,25 +1353,39 @@ export class MemoryAdapter implements StoragePort {
     }
   }
 
-  // Throughput Forecasting Settings
-  async getThroughputSettings(
-    connectionId: string,
-  ): Promise<ThroughputSettings | null> {
-    return this.throughputSettings.get(connectionId) ?? null;
+  // Metric Forecasting Settings
+
+  private metricForecastKey(connectionId: string, metricKind: MetricKind): string {
+    return `${connectionId}:${metricKind}`;
   }
 
-  async saveThroughputSettings(
-    settings: ThroughputSettings,
-  ): Promise<ThroughputSettings> {
-    this.throughputSettings.set(settings.connectionId, settings);
+  async getMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<MetricForecastSettings | null> {
+    return this.metricForecastSettings.get(this.metricForecastKey(connectionId, metricKind)) ?? null;
+  }
+
+  async saveMetricForecastSettings(
+    settings: MetricForecastSettings,
+  ): Promise<MetricForecastSettings> {
+    this.metricForecastSettings.set(
+      this.metricForecastKey(settings.connectionId, settings.metricKind),
+      settings,
+    );
     return { ...settings };
   }
 
-  async deleteThroughputSettings(connectionId: string): Promise<boolean> {
-    return this.throughputSettings.delete(connectionId);
+  async deleteMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<boolean> {
+    return this.metricForecastSettings.delete(this.metricForecastKey(connectionId, metricKind));
   }
 
-  async getActiveThroughputSettings(): Promise<ThroughputSettings[]> {
-    return [...this.throughputSettings.values()].filter((s) => s.enabled && s.opsCeiling !== null);
+  async getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]> {
+    return [...this.metricForecastSettings.values()].filter(
+      (s) => s.enabled && s.ceiling !== null,
+    );
   }
 }

@@ -4,14 +4,16 @@ import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.servi
 import { WebhookEventType } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
 
-describe('WebhookEventsProService - dispatchThroughputLimit', () => {
+describe('WebhookEventsProService - dispatchMetricForecastLimit', () => {
   let service: WebhookEventsProService;
   let webhookDispatcher: { dispatchThresholdAlert: jest.Mock };
   let licenseService: { getLicenseTier: jest.Mock };
 
   const testData = {
-    currentOpsPerSec: 50_000,
-    opsCeiling: 80_000,
+    event: 'metric_forecast.limit',
+    metricKind: 'opsPerSec',
+    currentValue: 50_000,
+    ceiling: 80_000,
     timeToLimitMs: 7_200_000, // 2 hours
     threshold: 7_200_000,
     growthRate: 10_000,
@@ -42,31 +44,34 @@ describe('WebhookEventsProService - dispatchThroughputLimit', () => {
   // ── Slice 11: Webhook Dispatch (Pro) ──
 
   it('11a: dispatches with correct parameters when Pro licensed', async () => {
-    await service.dispatchThroughputLimit(testData);
+    await service.dispatchMetricForecastLimit(testData);
 
     expect(webhookDispatcher.dispatchThresholdAlert).toHaveBeenCalledTimes(1);
 
     const [eventType, alertKey, value, threshold, isAbove] =
       webhookDispatcher.dispatchThresholdAlert.mock.calls[0];
 
-    expect(eventType).toBe(WebhookEventType.THROUGHPUT_LIMIT);
+    expect(eventType).toBe(WebhookEventType.METRIC_FORECAST_LIMIT);
     expect(isAbove).toBe(false);
     expect(value).toBe(7_200_000);
     expect(threshold).toBe(7_200_000);
   });
 
-  it('11b: payload contains human-readable message', async () => {
-    await service.dispatchThroughputLimit(testData);
+  it('11b: payload contains human-readable message and metric fields', async () => {
+    await service.dispatchMetricForecastLimit(testData);
 
     const payload = webhookDispatcher.dispatchThresholdAlert.mock.calls[0][5];
-    expect(payload.message).toContain('~2h');
+    expect(payload.message).toContain('~2.0h');
+    expect(payload.metricKind).toBe('opsPerSec');
+    expect(payload.currentValue).toBe(50_000);
+    expect(payload.ceiling).toBe(80_000);
   });
 
-  it('11c: alert key includes connectionId', async () => {
-    await service.dispatchThroughputLimit(testData);
+  it('11c: alert key includes connectionId and metricKind', async () => {
+    await service.dispatchMetricForecastLimit(testData);
 
     const alertKey = webhookDispatcher.dispatchThresholdAlert.mock.calls[0][1];
-    expect(alertKey).toBe('throughput_limit:conn-42');
+    expect(alertKey).toBe('metric_forecast_limit:conn-42:opsPerSec');
   });
 
   // ── Slice 12: Webhook Skips (Community) ──
@@ -74,7 +79,7 @@ describe('WebhookEventsProService - dispatchThroughputLimit', () => {
   it('12a: skips dispatch when Community tier', async () => {
     licenseService.getLicenseTier.mockReturnValue('community');
 
-    await service.dispatchThroughputLimit(testData);
+    await service.dispatchMetricForecastLimit(testData);
 
     expect(webhookDispatcher.dispatchThresholdAlert).not.toHaveBeenCalled();
   });

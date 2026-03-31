@@ -6,9 +6,7 @@ import { useConnection } from '../hooks/useConnection';
 import { AppSettings, SettingsUpdateRequest } from '@betterdb/shared';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
-import { ThroughputForecastingSettingsSection } from '../components/pages/settings/throughput-forecasting-settings-section';
-
-type SettingsCategory = 'audit' | 'clientAnalytics' | 'anomaly' | 'throughputForecasting' | 'mcpTokens';
+type SettingsCategory = 'audit' | 'clientAnalytics' | 'anomaly' | 'mcpTokens';
 
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
@@ -155,7 +153,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     { id: 'audit', label: 'Audit Trail' },
     { id: 'clientAnalytics', label: 'Client Analytics' },
     { id: 'anomaly', label: 'Anomaly Detection' },
-    { id: 'throughputForecasting', label: 'Throughput Forecasting' },
     ...(isCloudMode ? [{ id: 'mcpTokens' as const, label: 'MCP Tokens' }] : []),
   ];
 
@@ -266,30 +263,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                   />
                 </div>
               </div>
-            )}
-
-            {activeCategory === 'throughputForecasting' && (
-              <ThroughputForecastingSettingsSection
-                throughputForecastingEnabled={Boolean(formData.throughputForecastingEnabled)}
-                throughputForecastingDefaultRollingWindowMs={
-                  formData.throughputForecastingDefaultRollingWindowMs || 21600000
-                }
-                throughputForecastingDefaultAlertThresholdMs={
-                  formData.throughputForecastingDefaultAlertThresholdMs || 7200000
-                }
-                onToggleEnabled={() =>
-                  handleInputChange(
-                    'throughputForecastingEnabled',
-                    !formData.throughputForecastingEnabled,
-                  )
-                }
-                onRollingWindowChange={(value) =>
-                  handleInputChange('throughputForecastingDefaultRollingWindowMs', value)
-                }
-                onAlertThresholdChange={(value) =>
-                  handleInputChange('throughputForecastingDefaultAlertThresholdMs', value)
-                }
-              />
             )}
 
             {activeCategory === 'mcpTokens' && (

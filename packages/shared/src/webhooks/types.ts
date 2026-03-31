@@ -15,7 +15,7 @@ export enum WebhookEventType {
   CLUSTER_FAILOVER = 'cluster.failover',
   AUDIT_POLICY_VIOLATION = 'audit.policy.violation',
   COMPLIANCE_ALERT = 'compliance.alert',
-  THROUGHPUT_LIMIT = 'throughput.limit',
+  METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
 }
 
 // Injection tokens for proprietary webhook services
@@ -38,7 +38,7 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.CLUSTER_FAILOVER,
   WebhookEventType.LATENCY_SPIKE,
   WebhookEventType.CONNECTION_SPIKE,
-  WebhookEventType.THROUGHPUT_LIMIT,
+  WebhookEventType.METRIC_FORECAST_LIMIT,
 ];
 
 export const ENTERPRISE_EVENTS: WebhookEventType[] = [
@@ -75,7 +75,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.CLUSTER_FAILOVER]: Tier.pro,
   [WebhookEventType.LATENCY_SPIKE]: Tier.pro,
   [WebhookEventType.CONNECTION_SPIKE]: Tier.pro,
-  [WebhookEventType.THROUGHPUT_LIMIT]: Tier.pro,
+  [WebhookEventType.METRIC_FORECAST_LIMIT]: Tier.pro,
 
   // Enterprise tier events
   [WebhookEventType.AUDIT_POLICY_VIOLATION]: Tier.enterprise,
@@ -313,15 +313,17 @@ export interface IWebhookEventsProService {
     connectionId?: string;
   }): Promise<void>;
 
-  dispatchThroughputLimit(data: {
-    currentOpsPerSec: number;
-    opsCeiling: number;
+  dispatchMetricForecastLimit(data: {
+    event: string;
+    metricKind: string;
+    currentValue: number;
+    ceiling: number | null;
     timeToLimitMs: number;
     threshold: number;
     growthRate: number;
     timestamp: number;
-    instance: WebhookInstanceInfo;
-    connectionId?: string;
+    instance?: { host: string; port: number };
+    connectionId: string;
   }): Promise<void>;
 }
 

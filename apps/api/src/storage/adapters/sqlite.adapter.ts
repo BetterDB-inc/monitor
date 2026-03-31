@@ -34,27 +34,32 @@ import {
   LatencySnapshotQueryOptions,
   StoredMemorySnapshot,
   MemorySnapshotQueryOptions,
-  ThroughputSettings,
   DatabaseConnectionConfig,
   HotKeyEntry,
   HotKeyQueryOptions,
   StoredLatencyHistogram,
 } from '../../common/interfaces/storage-port.interface';
-import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions } from '@betterdb/shared';
+import type {
+  VectorIndexSnapshot,
+  VectorIndexSnapshotQueryOptions,
+  MetricForecastSettings,
+  MetricKind,
+} from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 
 export interface SqliteAdapterConfig {
   filepath: string;
 }
 
-type ThroughputSettingsRow = {
+type MetricForecastSettingsRow = {
   connection_id: string;
+  metric_kind: string;
   enabled: number;
-  ops_ceiling: number | null;
+  ceiling: number | null;
   rolling_window_ms: number;
   alert_threshold_ms: number;
   updated_at: number;
-} | null;
+};
 
 export class SqliteAdapter implements StoragePort {
   private db: Database.Database | null = null;
@@ -1055,13 +1060,15 @@ export class SqliteAdapter implements StoragePort {
         created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
       );
 
-      CREATE TABLE IF NOT EXISTS throughput_settings (
-        connection_id TEXT PRIMARY KEY,
+      CREATE TABLE IF NOT EXISTS metric_forecast_settings (
+        connection_id TEXT NOT NULL,
+        metric_kind TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
-        ops_ceiling INTEGER,
+        ceiling REAL,
         rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (connection_id, metric_kind)
       );
 
       CREATE TABLE IF NOT EXISTS webhooks (
@@ -1982,9 +1989,9 @@ export class SqliteAdapter implements StoragePort {
       settings.anomalyPollIntervalMs,
       settings.anomalyCacheTtlMs,
       settings.anomalyPrometheusIntervalMs,
-      settings.throughputForecastingEnabled ? 1 : 0,
-      settings.throughputForecastingDefaultRollingWindowMs,
-      settings.throughputForecastingDefaultAlertThresholdMs,
+      settings.metricForecastingEnabled ? 1 : 0,
+      settings.metricForecastingDefaultRollingWindowMs,
+      settings.metricForecastingDefaultAlertThresholdMs,
       now,
       settings.createdAt || now,
     );
@@ -3260,38 +3267,45 @@ export class SqliteAdapter implements StoragePort {
     this.db.prepare('UPDATE agent_tokens SET last_used_at = ? WHERE id = ?').run(Date.now(), id);
   }
 
-  // Throughput Forecasting Settings
-  async getThroughputSettings(connectionId: string): Promise<ThroughputSettings | null> {
-    if (!this.db) {
-      throw new Error('Database not initialized');
-    }
-    const row = this.db
-      .prepare('SELECT * FROM throughput_settings WHERE connection_id = ?')
-      .get(connectionId) as unknown as ThroughputSettingsRow;
+  // Metric Forecasting Settings
 
-    if (!row) {
-      return null;
-    }
+  private mapMetricForecastRow(row: MetricForecastSettingsRow): MetricForecastSettings {
     return {
       connectionId: row.connection_id,
+      metricKind: row.metric_kind as MetricKind,
       enabled: !!row.enabled,
-      opsCeiling: row.ops_ceiling ?? null,
+      ceiling: row.ceiling ?? null,
       rollingWindowMs: row.rolling_window_ms,
       alertThresholdMs: row.alert_threshold_ms,
       updatedAt: row.updated_at,
     };
   }
 
-  async saveThroughputSettings(settings: ThroughputSettings): Promise<ThroughputSettings> {
+  async getMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<MetricForecastSettings | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare('SELECT * FROM metric_forecast_settings WHERE connection_id = ? AND metric_kind = ?')
+      .get(connectionId, metricKind) as unknown as MetricForecastSettingsRow;
+    if (!row) return null;
+    return this.mapMetricForecastRow(row);
+  }
+
+  async saveMetricForecastSettings(
+    settings: MetricForecastSettings,
+  ): Promise<MetricForecastSettings> {
     if (!this.db) throw new Error('Database not initialized');
     this.db
       .prepare(
         `
-      INSERT INTO throughput_settings (connection_id, enabled, ops_ceiling, rolling_window_ms, alert_threshold_ms, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(connection_id) DO UPDATE SET
+      INSERT INTO metric_forecast_settings
+        (connection_id, metric_kind, enabled, ceiling, rolling_window_ms, alert_threshold_ms, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(connection_id, metric_kind) DO UPDATE SET
         enabled = excluded.enabled,
-        ops_ceiling = excluded.ops_ceiling,
+        ceiling = excluded.ceiling,
         rolling_window_ms = excluded.rolling_window_ms,
         alert_threshold_ms = excluded.alert_threshold_ms,
         updated_at = excluded.updated_at
@@ -3299,8 +3313,9 @@ export class SqliteAdapter implements StoragePort {
       )
       .run(
         settings.connectionId,
+        settings.metricKind,
         settings.enabled ? 1 : 0,
-        settings.opsCeiling,
+        settings.ceiling,
         settings.rollingWindowMs,
         settings.alertThresholdMs,
         settings.updatedAt,
@@ -3308,29 +3323,24 @@ export class SqliteAdapter implements StoragePort {
     return { ...settings };
   }
 
-  async deleteThroughputSettings(connectionId: string): Promise<boolean> {
+  async deleteMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<boolean> {
     if (!this.db) throw new Error('Database not initialized');
     const result = this.db
-      .prepare('DELETE FROM throughput_settings WHERE connection_id = ?')
-      .run(connectionId);
+      .prepare('DELETE FROM metric_forecast_settings WHERE connection_id = ? AND metric_kind = ?')
+      .run(connectionId, metricKind);
     return result.changes > 0;
   }
 
-  async getActiveThroughputSettings(): Promise<ThroughputSettings[]> {
+  async getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]> {
     if (!this.db) throw new Error('Database not initialized');
     const rows = this.db
-      .prepare('SELECT * FROM throughput_settings WHERE enabled = 1 AND ops_ceiling IS NOT NULL')
-      .all() as ThroughputSettingsRow[];
-    if (!rows || rows.length === 0) {
-      return [];
-    }
-    return rows.map((row) => ({
-      connectionId: row!.connection_id,
-      enabled: !!row!.enabled,
-      opsCeiling: row!.ops_ceiling,
-      rollingWindowMs: row!.rolling_window_ms,
-      alertThresholdMs: row!.alert_threshold_ms,
-      updatedAt: row!.updated_at,
-    }));
+      .prepare(
+        'SELECT * FROM metric_forecast_settings WHERE enabled = 1 AND ceiling IS NOT NULL',
+      )
+      .all() as MetricForecastSettingsRow[];
+    return rows.map((row) => this.mapMetricForecastRow(row));
   }
 }
