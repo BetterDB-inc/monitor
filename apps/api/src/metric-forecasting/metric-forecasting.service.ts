@@ -6,7 +6,7 @@ import {
   OnModuleInit,
   Optional,
 } from '@nestjs/common';
-import { StoragePort, WebhookEventType } from '../common/interfaces/storage-port.interface';
+import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { SettingsService } from '../settings/settings.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type {
@@ -15,7 +15,11 @@ import type {
   MetricForecastSettingsUpdate,
   MetricKind,
 } from '@betterdb/shared';
-import { WEBHOOK_EVENTS_PRO_SERVICE, type IWebhookEventsProService } from '@betterdb/shared';
+import {
+  WEBHOOK_EVENTS_PRO_SERVICE,
+  WebhookEventType,
+  type IWebhookEventsProService,
+} from '@betterdb/shared';
 import { METRIC_EXTRACTORS } from './metric-extractors';
 import { CEILING_RESOLVERS } from './ceiling-resolvers';
 
