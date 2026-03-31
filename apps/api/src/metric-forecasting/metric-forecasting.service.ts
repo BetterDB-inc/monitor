@@ -111,9 +111,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
     const currentValue = latestValue;
     const growthRate = slope * 3_600_000; // units per hour
     const growthPercent =
-      predictedStart !== 0
-        ? ((predictedEnd - predictedStart) / Math.abs(predictedStart)) * 100
-        : 0;
+      predictedStart !== 0 ? ((predictedEnd - predictedStart) / Math.abs(predictedStart)) * 100 : 0;
 
     const trendDirection: 'rising' | 'falling' | 'stable' =
       growthPercent > TREND_THRESHOLD_PERCENT
@@ -190,10 +188,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
     return forecast;
   }
 
-  async getSettings(
-    connectionId: string,
-    metricKind: MetricKind,
-  ): Promise<MetricForecastSettings> {
+  async getSettings(connectionId: string, metricKind: MetricKind): Promise<MetricForecastSettings> {
     return this.getOrCreateSettings(connectionId, metricKind);
   }
 
@@ -337,10 +332,21 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
       for (const settings of activeSettings) {
         try {
           const forecast = await this.getForecast(settings.connectionId, settings.metricKind);
+          this.logger.log(
+            `[checkAlerts] ${settings.connectionId}:${settings.metricKind} — ` +
+              `current=${forecast.currentValue}, ceiling=${forecast.ceiling}, ` +
+              `timeToLimit=${forecast.timeToLimitMs}, threshold=${settings.alertThresholdMs}, ` +
+              `trend=${forecast.trendDirection}`,
+          );
           if (
             forecast.timeToLimitMs !== null &&
             forecast.timeToLimitMs <= settings.alertThresholdMs
           ) {
+            this.logger.log(
+              `[checkAlerts] ALERT triggered for ${settings.connectionId}:${settings.metricKind} — ` +
+                `timeToLimit=${forecast.timeToLimitMs}ms <= threshold=${settings.alertThresholdMs}ms, ` +
+                `dispatching metric_forecast.limit webhook`,
+            );
             const config = this.connectionRegistry.getConfig(settings.connectionId);
             await this.webhookEventsProService.dispatchMetricForecastLimit({
               event: 'metric_forecast.limit',
