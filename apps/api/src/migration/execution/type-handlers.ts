@@ -72,29 +72,19 @@ async function migrateHash(source: Valkey, target: Valkey, key: string): Promise
   // Delete target key first to avoid merging with stale data
   await target.del(key);
 
-  if (len <= LARGE_KEY_THRESHOLD) {
-    // Small hash: single HGETALL
-    const data = await source.hgetallBuffer(key);
-    if (!data || Object.keys(data).length === 0) return;
+  // Use HSCAN for all sizes so binary field names are preserved as Buffers
+  // (hgetallBuffer returns Record<string, Buffer> which coerces field names to UTF-8)
+  let cursor = '0';
+  do {
+    const [next, fields] = await source.hscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
+    cursor = String(next);
+    if (fields.length === 0) continue;
     const args: (string | Buffer | number)[] = [key];
-    for (const [field, val] of Object.entries(data)) {
-      args.push(field, val as Buffer);
+    for (let i = 0; i < fields.length; i += 2) {
+      args.push(fields[i], fields[i + 1]);
     }
     await target.call('HSET', ...args);
-  } else {
-    // Large hash: HSCAN
-    let cursor = '0';
-    do {
-      const [next, fields] = await source.hscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
-      cursor = String(next);
-      if (fields.length === 0) continue;
-      const args: (string | Buffer | number)[] = [key];
-      for (let i = 0; i < fields.length; i += 2) {
-        args.push(fields[i], fields[i + 1]);
-      }
-      await target.call('HSET', ...args);
-    } while (cursor !== '0');
-  }
+  } while (cursor !== '0');
 }
 
 // ── List ──
@@ -203,5 +193,8 @@ async function migrateTtl(source: Valkey, target: Valkey, key: string): Promise<
   const pttl = await source.pttl(key);
   if (pttl > 0) {
     await target.pexpire(key, pttl);
+  } else if (pttl === -2) {
+    // Key expired between copy and TTL check — remove ghost copy from target
+    await target.del(key);
   }
 }

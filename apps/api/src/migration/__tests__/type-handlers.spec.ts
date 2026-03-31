@@ -66,24 +66,15 @@ describe('type-handlers / migrateKey', () => {
   });
 
   describe('hash', () => {
-    it('should use HGETALL for small hashes', async () => {
+    it('should use HSCAN and preserve binary field names', async () => {
       source.hlen.mockResolvedValue(5);
 
       const result = await migrateKey(source, target, 'hash:1', 'hash');
 
       expect(result.ok).toBe(true);
-      expect(source.hgetallBuffer).toHaveBeenCalledWith('hash:1');
-      expect(target.del).toHaveBeenCalledWith('hash:1');
-      expect(target.call).toHaveBeenCalledWith('HSET', 'hash:1', 'f1', expect.any(Buffer), 'f2', expect.any(Buffer));
-    });
-
-    it('should use HSCAN for large hashes (>10K fields)', async () => {
-      source.hlen.mockResolvedValue(15_000);
-
-      const result = await migrateKey(source, target, 'hash:big', 'hash');
-
-      expect(result.ok).toBe(true);
       expect(source.hscanBuffer).toHaveBeenCalled();
+      expect(target.del).toHaveBeenCalledWith('hash:1');
+      expect(target.call).toHaveBeenCalledWith('HSET', 'hash:1', expect.any(Buffer), expect.any(Buffer));
     });
   });
 
@@ -174,6 +165,15 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(target.pexpire).not.toHaveBeenCalled();
+    });
+
+    it('should delete ghost key from target when source TTL is -2 (expired)', async () => {
+      source.pttl.mockResolvedValue(-2);
+
+      const result = await migrateKey(source, target, 'str:expired', 'string');
+
+      expect(result.ok).toBe(true);
+      expect(target.del).toHaveBeenCalledWith('str:expired');
     });
   });
 

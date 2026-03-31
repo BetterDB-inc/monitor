@@ -272,7 +272,7 @@ export class MigrationExecutionService {
 function sanitizeLogLine(line: string): string {
   let sanitized = line;
   // 1. Quoted passwords: password = "secret" or password:"secret"
-  sanitized = sanitized.replace(/password\s*[=:]\s*"[^"]*"/gi, (match) => {
+  sanitized = sanitized.replace(/password\s*[=:]\s*"(?:[^"\\]|\\.)*"/gi, (match) => {
     const eqIdx = match.search(/[=:]/);
     return match.slice(0, eqIdx + 1) + ' "***"';
   });

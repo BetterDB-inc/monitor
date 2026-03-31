@@ -208,12 +208,12 @@ export class MigrationValidationService {
     const job = this.jobs.get(id);
     if (!job) return false;
 
-    if (job.status === 'completed' || job.status === 'failed') {
+    if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
       return true; // Already terminal
     }
 
     job.cancelled = true;
-    job.status = 'failed';
+    job.status = 'cancelled';
     job.error = 'Cancelled by user';
     job.completedAt = Date.now();
     return true;
