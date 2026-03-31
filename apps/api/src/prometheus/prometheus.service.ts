@@ -598,11 +598,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     for (const metricKind of ALL_METRIC_KINDS) {
       try {
         const settings = await this.storage.getMetricForecastSettings(connectionId, metricKind);
-        if (!settings || !settings.enabled) continue;
+        if (!settings || !settings.enabled) {
+          this.metricForecastTimeToLimitSeconds.remove(connLabel, metricKind);
+          continue;
+        }
 
         const forecast = await this.metricForecastingService.getForecast(connectionId, metricKind);
-        if (forecast.ceiling !== null && !forecast.insufficientData && forecast.enabled) {
-          const value = forecast.timeToLimitMs !== null ? forecast.timeToLimitMs / 1000 : -1;
+        if (forecast.ceiling === null || !forecast.enabled) {
+          this.metricForecastTimeToLimitSeconds.remove(connLabel, metricKind);
+          continue;
+        }
+
+        if (!forecast.insufficientData) {
+          const value =
+            forecast.timeToLimitMs !== null ? forecast.timeToLimitMs / 1000 : Infinity;
           this.metricForecastTimeToLimitSeconds.labels(connLabel, metricKind).set(value);
         }
       } catch {

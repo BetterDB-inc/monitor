@@ -1,11 +1,11 @@
 import { Controller, Get, Put, Body, Param } from '@nestjs/common';
 import { MetricForecastingService } from './metric-forecasting.service';
 import { MetricKindValidationPipe } from './pipes/metric-kind-validation.pipe';
+import { UpdateMetricForecastSettingsDto } from './dto/update-metric-forecast-settings.dto';
 import { ConnectionId } from '../common/decorators/connection-id.decorator';
 import type {
   MetricForecast,
   MetricForecastSettings,
-  MetricForecastSettingsUpdate,
   MetricKind,
 } from '@betterdb/shared';
 
@@ -33,7 +33,7 @@ export class MetricForecastingController {
   async updateSettings(
     @Param('metricKind', MetricKindValidationPipe) metricKind: MetricKind,
     @ConnectionId() connectionId?: string,
-    @Body() updates?: MetricForecastSettingsUpdate,
+    @Body() updates?: UpdateMetricForecastSettingsDto,
   ): Promise<MetricForecastSettings> {
     return this.service.updateSettings(connectionId || 'env-default', metricKind, updates || {});
   }

@@ -65,9 +65,15 @@ export function MetricSettingsPanel({
             step={meta.valueFormatter === 'ratio' ? '0.1' : '1'}
             value={settings.ceiling ?? ''}
             placeholder={meta.defaultCeiling !== null ? String(meta.defaultCeiling) : 'No ceiling'}
-            onChange={(e) =>
-              onUpdate({ ceiling: e.target.value ? parseFloat(e.target.value) : null })
-            }
+            onChange={(e) => {
+              const raw = e.target.value;
+              if (!raw) {
+                onUpdate({ ceiling: null });
+                return;
+              }
+              const parsed = parseFloat(raw);
+              onUpdate({ ceiling: isNaN(parsed) || parsed <= 0 ? null : parsed });
+            }}
             className="w-full px-3 py-2 border rounded-md"
           />
         </div>

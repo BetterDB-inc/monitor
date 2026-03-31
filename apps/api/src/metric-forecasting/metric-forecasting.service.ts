@@ -254,20 +254,27 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
     if (n === 0) return { slope: 0, intercept: 0 };
     if (n === 1) return { slope: 0, intercept: points[0].y };
 
+    // Normalize x values to avoid catastrophic floating-point cancellation
+    // when x values are large epoch timestamps (~1.7e12).
+    const x0 = points[0].x;
+
     let sumX = 0,
       sumY = 0,
       sumXY = 0,
       sumX2 = 0;
     for (const p of points) {
-      sumX += p.x;
+      const xNorm = p.x - x0;
+      sumX += xNorm;
       sumY += p.y;
-      sumXY += p.x * p.y;
-      sumX2 += p.x * p.x;
+      sumXY += xNorm * p.y;
+      sumX2 += xNorm * xNorm;
     }
     const denom = n * sumX2 - sumX * sumX;
     if (denom === 0) return { slope: 0, intercept: sumY / n };
     const slope = (n * sumXY - sumX * sumY) / denom;
-    const intercept = (sumY - slope * sumX) / n;
+    // Compute intercept in normalized space, then adjust back to original timestamps
+    const interceptNorm = (sumY - slope * sumX) / n;
+    const intercept = interceptNorm - slope * x0;
     return { slope, intercept };
   }
 
@@ -339,7 +346,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
       for (const settings of activeSettings) {
         try {
           const forecast = await this.getForecast(settings.connectionId, settings.metricKind);
-          this.logger.log(
+          this.logger.debug(
             `[checkAlerts] ${WebhookEventType.METRIC_FORECAST_LIMIT} ${settings.connectionId}:${settings.metricKind} — ` +
               `current=${forecast.currentValue}, ceiling=${forecast.ceiling}, ` +
               `timeToLimit=${forecast.timeToLimitMs}, threshold=${settings.alertThresholdMs}, ` +
