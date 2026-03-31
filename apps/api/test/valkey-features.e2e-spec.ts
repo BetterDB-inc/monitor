@@ -6,10 +6,10 @@ describe('Valkey-Specific Features (E2E)', () => {
 
   // These tests are specific to Valkey and should only run against Valkey instances
   // Use TEST_DB_HOST and TEST_DB_PORT to override defaults
-  // Default to Valkey on 6380 (from docker-compose.yml)
+  // Default to Valkey on 6390 (from docker-compose.test.yml)
   const DB_CONFIG = {
     host: process.env.TEST_DB_HOST || 'localhost',
-    port: parseInt(process.env.TEST_DB_PORT || '6380', 10),
+    port: parseInt(process.env.TEST_DB_PORT || '6390', 10),
     username: process.env.TEST_DB_USERNAME || 'default',
     password: process.env.TEST_DB_PASSWORD || 'devpassword',
   };

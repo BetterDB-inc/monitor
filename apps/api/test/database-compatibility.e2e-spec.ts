@@ -6,10 +6,10 @@ describe('Database Compatibility (E2E)', () => {
 
   // Common tests that work with both Redis and Valkey
   // Use TEST_DB_HOST and TEST_DB_PORT to override defaults
-  // Default to Redis on 6382 (from docker-compose.yml)
+  // Default to Redis on 6392 (from docker-compose.test.yml)
   const DB_CONFIG = {
     host: process.env.TEST_DB_HOST || 'localhost',
-    port: parseInt(process.env.TEST_DB_PORT || '6382', 10),
+    port: parseInt(process.env.TEST_DB_PORT || '6392', 10),
     username: process.env.TEST_DB_USERNAME || 'default',
     password: process.env.TEST_DB_PASSWORD || 'devpassword',
   };
