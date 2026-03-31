@@ -1,5 +1,6 @@
-import { Controller, Get, Param, Query, HttpException, HttpStatus, UseGuards, Optional, Inject, BadRequestException, PipeTransform, Injectable, Logger } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, HttpException, HttpStatus, UseGuards, Optional, Inject, BadRequestException, PipeTransform, Injectable, Logger } from '@nestjs/common';
 import { ANOMALY_SERVICE } from '@betterdb/shared';
+import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { AgentTokenGuard } from '../common/guards/agent-token.guard';
 import { MetricsService } from '../metrics/metrics.service';
@@ -51,6 +52,8 @@ export class McpController {
   private readonly logger = new Logger(McpController.name);
   private readonly anomalyService: any;
 
+  private readonly telemetryService: UsageTelemetryService | null;
+
   constructor(
     private readonly registry: ConnectionRegistry,
     private readonly metricsService: MetricsService,
@@ -60,8 +63,10 @@ export class McpController {
     private readonly clusterMetricsService: ClusterMetricsService,
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
     @Optional() @Inject(ANOMALY_SERVICE) anomalyService?: any,
+    @Optional() telemetryService?: UsageTelemetryService,
   ) {
     this.anomalyService = anomalyService ?? null;
+    this.telemetryService = telemetryService ?? null;
   }
 
   @Get('instances')
@@ -421,5 +426,27 @@ export class McpController {
       this.logger.error(`Failed to get health for ${id}`, error instanceof Error ? error.stack : error);
       throw new HttpException('Failed to get health', HttpStatus.INTERNAL_SERVER_ERROR);
     }
+  }
+
+  @Post('telemetry')
+  async postTelemetry(
+    @Body() body: { events?: Array<{ toolName: string; success: boolean; durationMs: number; timestamp?: number; error?: string }> },
+  ) {
+    if (!this.telemetryService) {
+      return { ok: true };
+    }
+    const events = body?.events;
+    if (!Array.isArray(events) || events.length === 0 || events.length > 100) {
+      throw new BadRequestException('events must be an array of 1–100 items');
+    }
+    await Promise.all(events.map(event =>
+      this.telemetryService!.trackMcpToolCall({
+        toolName: event.toolName,
+        success: event.success,
+        durationMs: event.durationMs,
+        error: event.error,
+      }),
+    ));
+    return { ok: true };
   }
 }
