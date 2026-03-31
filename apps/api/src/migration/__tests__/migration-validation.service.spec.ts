@@ -162,7 +162,7 @@ describe('MigrationValidationService', () => {
       expect(result).toBe(true);
 
       const validation = service.getValidation(id);
-      expect(validation!.status).toBe('failed');
+      expect(validation!.status).toBe('cancelled');
       expect(validation!.error).toBe('Cancelled by user');
     });
 
