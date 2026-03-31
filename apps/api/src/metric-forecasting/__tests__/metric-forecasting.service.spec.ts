@@ -633,7 +633,7 @@ describe('MetricForecastingService', () => {
       );
     });
 
-    it('does not dispatch when time-to-limit exceeds threshold', async () => {
+    it('dispatches with safe values for hysteresis recovery when time-to-limit exceeds threshold', async () => {
       const now = Date.now();
       await storage.saveMemorySnapshots(
         generateSnapshots({
@@ -652,7 +652,9 @@ describe('MetricForecastingService', () => {
 
       await (service as any).checkAlerts();
 
-      expect(webhookService.dispatchMetricForecastLimit).not.toHaveBeenCalled();
+      expect(webhookService.dispatchMetricForecastLimit).toHaveBeenCalledTimes(1);
+      const call = webhookService.dispatchMetricForecastLimit.mock.calls[0][0];
+      expect(call.timeToLimitMs).toBeGreaterThan(1_800_000);
     });
 
     it('does not dispatch for disabled settings', async () => {

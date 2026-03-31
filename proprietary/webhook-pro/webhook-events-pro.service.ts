@@ -31,7 +31,9 @@ export class WebhookEventsProService implements OnModuleInit {
     if (this.isEnabled()) {
       this.logger.log('Webhook Pro events service initialized - PRO tier events enabled');
     } else {
-      this.logger.log('Webhook Pro events service initialized - PRO tier events disabled (requires license)');
+      this.logger.log(
+        'Webhook Pro events service initialized - PRO tier events disabled (requires license)',
+      );
     }
   }
 
@@ -72,7 +74,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -107,7 +109,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -142,7 +144,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -180,7 +182,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -215,7 +217,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -250,7 +252,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -271,7 +273,7 @@ export class WebhookEventsProService implements OnModuleInit {
     connectionId: string;
   }): Promise<void> {
     if (!this.isEnabled()) {
-      this.logger.debug('Metric forecast limit event skipped - requires PRO license');
+      this.logger.log('Metric forecast limit event skipped - requires PRO license');
       return;
     }
 

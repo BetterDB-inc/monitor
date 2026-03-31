@@ -6,7 +6,7 @@ import {
   OnModuleInit,
   Optional,
 } from '@nestjs/common';
-import type { StoragePort } from '../common/interfaces/storage-port.interface';
+import { StoragePort, WebhookEventType } from '../common/interfaces/storage-port.interface';
 import { SettingsService } from '../settings/settings.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type {
@@ -325,7 +325,10 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async checkAlerts(): Promise<void> {
-    if (!this.webhookEventsProService) return;
+    if (!this.webhookEventsProService) {
+      this.logger.warn('WebhookEventsProService not initialized');
+      return;
+    }
 
     try {
       const activeSettings = await this.storage.getActiveMetricForecastSettings();
@@ -333,34 +336,24 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
         try {
           const forecast = await this.getForecast(settings.connectionId, settings.metricKind);
           this.logger.log(
-            `[checkAlerts] ${settings.connectionId}:${settings.metricKind} — ` +
+            `[checkAlerts] ${WebhookEventType.METRIC_FORECAST_LIMIT} ${settings.connectionId}:${settings.metricKind} — ` +
               `current=${forecast.currentValue}, ceiling=${forecast.ceiling}, ` +
               `timeToLimit=${forecast.timeToLimitMs}, threshold=${settings.alertThresholdMs}, ` +
               `trend=${forecast.trendDirection}`,
           );
-          if (
-            forecast.timeToLimitMs !== null &&
-            forecast.timeToLimitMs <= settings.alertThresholdMs
-          ) {
-            this.logger.log(
-              `[checkAlerts] ALERT triggered for ${settings.connectionId}:${settings.metricKind} — ` +
-                `timeToLimit=${forecast.timeToLimitMs}ms <= threshold=${settings.alertThresholdMs}ms, ` +
-                `dispatching metric_forecast.limit webhook`,
-            );
-            const config = this.connectionRegistry.getConfig(settings.connectionId);
-            await this.webhookEventsProService.dispatchMetricForecastLimit({
-              event: 'metric_forecast.limit',
-              metricKind: settings.metricKind,
-              currentValue: forecast.currentValue,
-              ceiling: forecast.ceiling,
-              timeToLimitMs: forecast.timeToLimitMs,
-              threshold: settings.alertThresholdMs,
-              growthRate: forecast.growthRate,
-              timestamp: Date.now(),
-              instance: config ? { host: config.host, port: config.port } : undefined,
-              connectionId: settings.connectionId,
-            });
-          }
+          const config = this.connectionRegistry.getConfig(settings.connectionId);
+          await this.webhookEventsProService.dispatchMetricForecastLimit({
+            event: WebhookEventType.METRIC_FORECAST_LIMIT,
+            metricKind: settings.metricKind,
+            currentValue: forecast.currentValue,
+            ceiling: forecast.ceiling,
+            timeToLimitMs: forecast.timeToLimitMs ?? Infinity,
+            threshold: settings.alertThresholdMs,
+            growthRate: forecast.growthRate,
+            timestamp: Date.now(),
+            instance: config ? { host: config.host, port: config.port } : undefined,
+            connectionId: settings.connectionId,
+          });
         } catch (error) {
           this.logger.error(
             `Alert check failed for ${settings.connectionId}:${settings.metricKind}: ${error instanceof Error ? error.message : 'Unknown error'}`,
