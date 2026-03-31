@@ -152,7 +152,7 @@ async function migrateSet(source: Valkey, target: Valkey, key: string): Promise<
       const members = await source.smembersBuffer(key);
       if (members.length === 0) {
         try { await target.del(tmp); } catch { /* best-effort cleanup */ }
-        return true;
+        return false; // key expired between SCARD and SMEMBERS
       }
       await target.call('SADD', tmp, ...members);
     } else {
@@ -186,7 +186,7 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
       const raw = await source.callBuffer('ZRANGE', key, '0', '-1', 'WITHSCORES') as Buffer[];
       if (!raw || raw.length === 0) {
         try { await target.del(tmp); } catch { /* best-effort cleanup */ }
-        return true;
+        return false; // key expired between ZCARD and ZRANGE
       }
       // raw is [member, score, member, score, ...] as Buffers
       const pipeline = target.pipeline();

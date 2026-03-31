@@ -137,7 +137,11 @@ async function batchType(client: Valkey, keys: string[]): Promise<string[]> {
       pipeline.type(key);
     }
     const pipelineResults = await pipeline.exec();
-    for (const [err, val] of (pipelineResults ?? [])) {
+    if (!pipelineResults) {
+      for (let j = 0; j < batch.length; j++) results.push('none');
+      continue;
+    }
+    for (const [err, val] of pipelineResults) {
       results.push(err ? 'none' : String(val));
     }
   }

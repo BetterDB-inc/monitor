@@ -17,7 +17,7 @@ export async function compareKeyCounts(
 
   const discrepancy = targetKeys - sourceKeys;
   const discrepancyPercent = sourceKeys === 0
-    ? 0
+    ? (targetKeys > 0 ? 100 : 0)
     : Math.abs(discrepancy / sourceKeys) * 100;
 
   const result: KeyCountComparison = {
@@ -26,6 +26,12 @@ export async function compareKeyCounts(
     discrepancy,
     discrepancyPercent: Math.round(discrepancyPercent * 100) / 100,
   };
+
+  // Flag when source is empty but target has stale keys
+  if (sourceKeys === 0 && targetKeys > 0) {
+    result.warning =
+      'Source has 0 keys but target has data. Target may contain stale keys from a previous migration or other writes.';
+  }
 
   // Risk #4: DBSIZE counts all databases, SCAN only covers db0 by default.
   // If source is standalone but target is cluster, key count may be misleading.
