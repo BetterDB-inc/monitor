@@ -162,10 +162,11 @@ export class MigrationService {
         clusterMasterCount = masters.length;
 
         for (const master of masters) {
-          // Parse address: 'host:port@clusterport'
+          // Parse address: 'host:port@clusterport' (host may be IPv6)
           const addrPart = master.address?.split('@')[0] ?? '';
-          const [host, portStr] = addrPart.split(':');
-          const port = parseInt(portStr, 10);
+          const lastColon = addrPart.lastIndexOf(':');
+          const host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
+          const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
           if (!host || isNaN(port)) continue;
 
           const client = new Valkey({

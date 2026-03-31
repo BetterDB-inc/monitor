@@ -41,7 +41,11 @@ export async function detectHfe(
     if (!results) continue;
     for (let j = 0; j < batch.length; j++) {
       const [err, len] = results[j] ?? [];
-      if (err || Number(len) > MAX_HASH_FIELDS) {
+      if (err) {
+        // Pipeline error (key expired, permission denied, etc.) — skip without counting as oversized
+        continue;
+      }
+      if (Number(len) > MAX_HASH_FIELDS) {
         result.hfeOversizedHashesSkipped++;
       } else {
         validKeys.push(batch[j]);

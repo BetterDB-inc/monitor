@@ -173,10 +173,11 @@ function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: numb
     const parts = line.split(' ');
     const flags = parts[2] ?? '';
     if (!flags.includes('master')) continue;
-    // address format: host:port@clusterport
+    // address format: host:port@clusterport (host may be IPv6, e.g. ::1:6379@16379)
     const addrPart = (parts[1] ?? '').split('@')[0];
-    const [host, portStr] = addrPart.split(':');
-    const port = parseInt(portStr, 10);
+    const lastColon = addrPart.lastIndexOf(':');
+    const host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
+    const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
     if (host && !isNaN(port)) {
       results.push({ host, port });
     }

@@ -73,7 +73,8 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.hgetallBuffer).toHaveBeenCalledWith('hash:1');
-      expect(target.call).toHaveBeenCalledWith('HSET', 'hash:1', expect.any(String), expect.any(String), expect.any(String), expect.any(String));
+      expect(target.del).toHaveBeenCalledWith('hash:1');
+      expect(target.call).toHaveBeenCalledWith('HSET', 'hash:1', 'f1', expect.any(Buffer), 'f2', expect.any(Buffer));
     });
 
     it('should use HSCAN for large hashes (>10K fields)', async () => {
@@ -92,7 +93,7 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.lrangeBuffer).toHaveBeenCalled();
-      expect(target.call).toHaveBeenCalledWith('RPUSH', 'list:1', 'a', 'b');
+      expect(target.call).toHaveBeenCalledWith('RPUSH', 'list:1', expect.any(Buffer), expect.any(Buffer));
     });
 
     it('should delete target key first to avoid appending', async () => {
@@ -111,7 +112,8 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.smembersBuffer).toHaveBeenCalledWith('set:1');
-      expect(target.call).toHaveBeenCalledWith('SADD', 'set:1', 'm1', 'm2');
+      expect(target.del).toHaveBeenCalledWith('set:1');
+      expect(target.call).toHaveBeenCalledWith('SADD', 'set:1', expect.any(Buffer), expect.any(Buffer));
     });
 
     it('should use SSCAN for large sets (>10K members)', async () => {
@@ -131,6 +133,7 @@ describe('type-handlers / migrateKey', () => {
       const result = await migrateKey(source, target, 'zset:1', 'zset');
 
       expect(result.ok).toBe(true);
+      expect(target.del).toHaveBeenCalledWith('zset:1');
       expect(source.call).toHaveBeenCalledWith('ZRANGE', 'zset:1', '0', '-1', 'WITHSCORES');
     });
 
