@@ -63,14 +63,14 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
         this.configService.get('ANOMALY_PROMETHEUS_INTERVAL_MS', '30000'),
         10,
       ),
-      throughputForecastingEnabled:
-        this.configService.get('THROUGHPUT_FORECASTING_ENABLED', 'true') === 'true',
-      throughputForecastingDefaultRollingWindowMs: parseInt(
-        this.configService.get('THROUGHPUT_FORECASTING_DEFAULT_ROLLING_WINDOW_MS', '21600000'),
+      metricForecastingEnabled:
+        this.configService.get('METRIC_FORECASTING_ENABLED', 'true') === 'true',
+      metricForecastingDefaultRollingWindowMs: parseInt(
+        this.configService.get('METRIC_FORECASTING_DEFAULT_ROLLING_WINDOW_MS', '21600000'),
         10,
       ),
-      throughputForecastingDefaultAlertThresholdMs: parseInt(
-        this.configService.get('THROUGHPUT_FORECASTING_DEFAULT_ALERT_THRESHOLD_MS', '7200000'),
+      metricForecastingDefaultAlertThresholdMs: parseInt(
+        this.configService.get('METRIC_FORECASTING_DEFAULT_ALERT_THRESHOLD_MS', '7200000'),
         10,
       ),
       createdAt: now,

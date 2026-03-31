@@ -9,9 +9,9 @@ export interface AppSettings {
   anomalyCacheTtlMs: number;
   anomalyPrometheusIntervalMs: number;
 
-  throughputForecastingEnabled: boolean;
-  throughputForecastingDefaultRollingWindowMs: number;
-  throughputForecastingDefaultAlertThresholdMs: number;
+  metricForecastingEnabled: boolean;
+  metricForecastingDefaultRollingWindowMs: number;
+  metricForecastingDefaultAlertThresholdMs: number;
 
   updatedAt: number;
   createdAt: number;

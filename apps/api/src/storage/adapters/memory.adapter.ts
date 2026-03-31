@@ -729,16 +729,16 @@ export class MemoryAdapter implements StoragePort {
     if (updates.anomalyPrometheusIntervalMs !== undefined) {
       validUpdates.anomalyPrometheusIntervalMs = updates.anomalyPrometheusIntervalMs;
     }
-    if (updates.throughputForecastingEnabled !== undefined) {
-      validUpdates.throughputForecastingEnabled = updates.throughputForecastingEnabled;
+    if (updates.metricForecastingEnabled !== undefined) {
+      validUpdates.metricForecastingEnabled = updates.metricForecastingEnabled;
     }
-    if (updates.throughputForecastingDefaultRollingWindowMs !== undefined) {
-      validUpdates.throughputForecastingDefaultRollingWindowMs =
-        updates.throughputForecastingDefaultRollingWindowMs;
+    if (updates.metricForecastingDefaultRollingWindowMs !== undefined) {
+      validUpdates.metricForecastingDefaultRollingWindowMs =
+        updates.metricForecastingDefaultRollingWindowMs;
     }
-    if (updates.throughputForecastingDefaultAlertThresholdMs !== undefined) {
-      validUpdates.throughputForecastingDefaultAlertThresholdMs =
-        updates.throughputForecastingDefaultAlertThresholdMs;
+    if (updates.metricForecastingDefaultAlertThresholdMs !== undefined) {
+      validUpdates.metricForecastingDefaultAlertThresholdMs =
+        updates.metricForecastingDefaultAlertThresholdMs;
     }
 
     this.settings = {

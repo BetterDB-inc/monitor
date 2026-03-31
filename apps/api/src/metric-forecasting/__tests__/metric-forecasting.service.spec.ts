@@ -16,9 +16,9 @@ function mockGlobalSettings(overrides?: Partial<AppSettings>): AppSettings {
     anomalyPollIntervalMs: 1000,
     anomalyCacheTtlMs: 3600000,
     anomalyPrometheusIntervalMs: 30000,
-    throughputForecastingEnabled: true,
-    throughputForecastingDefaultRollingWindowMs: 21600000,
-    throughputForecastingDefaultAlertThresholdMs: 7200000,
+    metricForecastingEnabled: true,
+    metricForecastingDefaultRollingWindowMs: 21600000,
+    metricForecastingDefaultAlertThresholdMs: 7200000,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     ...overrides,
@@ -309,7 +309,7 @@ describe('MetricForecastingService', () => {
   describe('disabled', () => {
     it('globally disabled returns enabled=false', async () => {
       settingsService.getCachedSettings.mockReturnValue(
-        mockGlobalSettings({ throughputForecastingEnabled: false }),
+        mockGlobalSettings({ metricForecastingEnabled: false }),
       );
       const forecast = await service.getForecast('conn-1', 'usedMemory');
       expect(forecast.enabled).toBe(false);

@@ -266,9 +266,9 @@ export class RowMappers {
       anomalyPollIntervalMs: row.anomaly_poll_interval_ms,
       anomalyCacheTtlMs: row.anomaly_cache_ttl_ms,
       anomalyPrometheusIntervalMs: row.anomaly_prometheus_interval_ms,
-      throughputForecastingEnabled: !!row.throughput_forecasting_enabled,
-      throughputForecastingDefaultRollingWindowMs: row.throughput_forecasting_default_rolling_window_ms,
-      throughputForecastingDefaultAlertThresholdMs: row.throughput_forecasting_default_alert_threshold_ms,
+      metricForecastingEnabled: !!row.throughput_forecasting_enabled,
+      metricForecastingDefaultRollingWindowMs: row.throughput_forecasting_default_rolling_window_ms,
+      metricForecastingDefaultAlertThresholdMs: row.throughput_forecasting_default_alert_threshold_ms,
       updatedAt: typeof row.updated_at === 'string' ? parseInt(row.updated_at, 10) : row.updated_at,
       createdAt: typeof row.created_at === 'string' ? parseInt(row.created_at, 10) : row.created_at,
     };

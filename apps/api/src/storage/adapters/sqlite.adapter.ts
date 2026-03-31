@@ -1989,9 +1989,9 @@ export class SqliteAdapter implements StoragePort {
       settings.anomalyPollIntervalMs,
       settings.anomalyCacheTtlMs,
       settings.anomalyPrometheusIntervalMs,
-      settings.throughputForecastingEnabled ? 1 : 0,
-      settings.throughputForecastingDefaultRollingWindowMs,
-      settings.throughputForecastingDefaultAlertThresholdMs,
+      settings.metricForecastingEnabled ? 1 : 0,
+      settings.metricForecastingDefaultRollingWindowMs,
+      settings.metricForecastingDefaultAlertThresholdMs,
       now,
       settings.createdAt || now,
     );

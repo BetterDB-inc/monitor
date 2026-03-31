@@ -65,7 +65,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
 
     // Check global toggle
     const globalSettings = this.settingsService.getCachedSettings();
-    if (!globalSettings.throughputForecastingEnabled) {
+    if (!globalSettings.metricForecastingEnabled) {
       return this.buildDisabledForecast(connectionId, metricKind);
     }
 
@@ -223,14 +223,14 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
     if (existing) return existing;
 
     const globalSettings = this.settingsService.getCachedSettings();
-    if (!globalSettings.throughputForecastingEnabled) {
+    if (!globalSettings.metricForecastingEnabled) {
       return {
         connectionId,
         metricKind,
         enabled: false,
         ceiling: null,
-        rollingWindowMs: globalSettings.throughputForecastingDefaultRollingWindowMs,
-        alertThresholdMs: globalSettings.throughputForecastingDefaultAlertThresholdMs,
+        rollingWindowMs: globalSettings.metricForecastingDefaultRollingWindowMs,
+        alertThresholdMs: globalSettings.metricForecastingDefaultAlertThresholdMs,
         updatedAt: Date.now(),
       };
     }
@@ -240,8 +240,8 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
       metricKind,
       enabled: true,
       ceiling: null,
-      rollingWindowMs: globalSettings.throughputForecastingDefaultRollingWindowMs,
-      alertThresholdMs: globalSettings.throughputForecastingDefaultAlertThresholdMs,
+      rollingWindowMs: globalSettings.metricForecastingDefaultRollingWindowMs,
+      alertThresholdMs: globalSettings.metricForecastingDefaultAlertThresholdMs,
       updatedAt: Date.now(),
     };
     return this.storage.saveMetricForecastSettings(newSettings);
