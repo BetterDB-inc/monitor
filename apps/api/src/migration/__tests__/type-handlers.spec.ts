@@ -12,10 +12,21 @@ function createMockSource(overrides: Record<string, jest.Mock> = {}) {
     smembersBuffer: jest.fn().mockResolvedValue([Buffer.from('m1'), Buffer.from('m2')]),
     sscanBuffer: jest.fn().mockResolvedValue(['0', [Buffer.from('m1')]]),
     zcard: jest.fn().mockResolvedValue(2),
-    zscan: jest.fn().mockResolvedValue(['0', ['m1', '1', 'm2', '2']]),
-    xrange: jest.fn().mockResolvedValue([['1-0', ['field', 'value']]]),
     pttl: jest.fn().mockResolvedValue(-1),
     call: jest.fn().mockResolvedValue(['m1', '1', 'm2', '2']),
+    // callBuffer returns Buffers for binary-safe zset/stream migration
+    callBuffer: jest.fn().mockImplementation((cmd: string) => {
+      if (cmd === 'ZRANGE') {
+        return Promise.resolve([Buffer.from('m1'), Buffer.from('1'), Buffer.from('m2'), Buffer.from('2')]);
+      }
+      if (cmd === 'ZSCAN') {
+        return Promise.resolve([Buffer.from('0'), [Buffer.from('m1'), Buffer.from('1')]]);
+      }
+      if (cmd === 'XRANGE') {
+        return Promise.resolve([[Buffer.from('1-0'), [Buffer.from('field'), Buffer.from('value')]]]);
+      }
+      return Promise.resolve(null);
+    }),
     pipeline: jest.fn().mockReturnValue({
       zadd: jest.fn().mockReturnThis(),
       exec: jest.fn().mockResolvedValue([]),
@@ -30,6 +41,7 @@ function createMockTarget() {
     del: jest.fn().mockResolvedValue(1),
     pexpire: jest.fn().mockResolvedValue(1),
     call: jest.fn().mockResolvedValue('OK'),
+    callBuffer: jest.fn().mockResolvedValue(Buffer.from('OK')),
     pipeline: jest.fn().mockReturnValue({
       zadd: jest.fn().mockReturnThis(),
       exec: jest.fn().mockResolvedValue([]),
@@ -117,33 +129,35 @@ describe('type-handlers / migrateKey', () => {
   });
 
   describe('zset', () => {
-    it('should use ZRANGE WITHSCORES for small sorted sets', async () => {
+    it('should use callBuffer ZRANGE WITHSCORES for small sorted sets (binary-safe)', async () => {
       source.zcard.mockResolvedValue(5);
 
       const result = await migrateKey(source, target, 'zset:1', 'zset');
 
       expect(result.ok).toBe(true);
       expect(target.del).toHaveBeenCalledWith('zset:1');
-      expect(source.call).toHaveBeenCalledWith('ZRANGE', 'zset:1', '0', '-1', 'WITHSCORES');
+      expect(source.callBuffer).toHaveBeenCalledWith('ZRANGE', 'zset:1', '0', '-1', 'WITHSCORES');
     });
 
-    it('should use ZSCAN for large sorted sets (>10K members)', async () => {
+    it('should use callBuffer ZSCAN for large sorted sets (>10K members)', async () => {
       source.zcard.mockResolvedValue(15_000);
 
       const result = await migrateKey(source, target, 'zset:big', 'zset');
 
       expect(result.ok).toBe(true);
-      expect(source.zscan).toHaveBeenCalled();
+      expect(source.callBuffer).toHaveBeenCalledWith('ZSCAN', 'zset:big', '0', 'COUNT', '1000');
     });
   });
 
   describe('stream', () => {
-    it('should XRANGE and XADD with preserved IDs', async () => {
+    it('should use callBuffer XRANGE and XADD with preserved binary data', async () => {
       const result = await migrateKey(source, target, 'stream:1', 'stream');
 
       expect(result.ok).toBe(true);
-      expect(source.xrange).toHaveBeenCalled();
-      expect(target.call).toHaveBeenCalledWith('XADD', 'stream:1', '1-0', 'field', 'value');
+      expect(source.callBuffer).toHaveBeenCalledWith('XRANGE', 'stream:1', '-', '+', 'COUNT', '1000');
+      expect(target.callBuffer).toHaveBeenCalledWith(
+        'XADD', 'stream:1', '1-0', Buffer.from('field'), Buffer.from('value'),
+      );
     });
   });
 

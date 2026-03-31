@@ -158,23 +158,28 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
   await target.del(key);
 
   if (card <= LARGE_KEY_THRESHOLD) {
-    const data = await source.call('ZRANGE', key, '0', '-1', 'WITHSCORES') as string[];
-    if (!data || data.length === 0) return true; // del already ran
-    // data is [member, score, member, score, ...]
+    // Use callBuffer to preserve binary member data (call() decodes as UTF-8)
+    const raw = await source.callBuffer('ZRANGE', key, '0', '-1', 'WITHSCORES') as Buffer[];
+    if (!raw || raw.length === 0) return true; // del already ran
+    // raw is [member, score, member, score, ...] as Buffers
     const pipeline = target.pipeline();
-    for (let i = 0; i < data.length; i += 2) {
-      pipeline.zadd(key, data[i + 1], data[i]);
+    for (let i = 0; i < raw.length; i += 2) {
+      // Score is always ASCII-safe, member stays as Buffer
+      pipeline.zadd(key, raw[i + 1].toString(), raw[i]);
     }
     await pipeline.exec();
   } else {
+    // zscanBuffer not available — use callBuffer for ZSCAN to preserve binary members
     let cursor = '0';
     do {
-      const [next, entries] = await source.zscan(key, cursor, 'COUNT', SCAN_BATCH);
-      cursor = next;
-      if (entries.length === 0) continue;
+      const result = await source.callBuffer('ZSCAN', key, cursor, 'COUNT', String(SCAN_BATCH)) as [Buffer, Buffer[]];
+      cursor = result[0].toString();
+      const entries = result[1];
+      if (!entries || entries.length === 0) continue;
+      // entries is [member, score, member, score, ...] as Buffers
       const pipeline = target.pipeline();
       for (let i = 0; i < entries.length; i += 2) {
-        pipeline.zadd(key, entries[i + 1], entries[i]);
+        pipeline.zadd(key, entries[i + 1].toString(), entries[i]);
       }
       await pipeline.exec();
     } while (cursor !== '0');
@@ -193,18 +198,24 @@ async function migrateStream(source: Valkey, target: Valkey, key: string): Promi
   let wrote = false;
 
   while (hasMore) {
-    const entries = await source.xrange(key, lastId === '-' ? '-' : `(${lastId}`, '+', 'COUNT', STREAM_CHUNK);
-    if (!entries || entries.length === 0) {
+    const start = lastId === '-' ? '-' : `(${lastId}`;
+    // Use callBuffer to preserve binary field names and values
+    const raw = await source.callBuffer(
+      'XRANGE', key, start, '+', 'COUNT', String(STREAM_CHUNK),
+    ) as Buffer[][];
+    if (!raw || raw.length === 0) {
       hasMore = false;
       break;
     }
-    for (const [id, fields] of entries) {
-      // XADD with explicit ID to preserve ordering
-      await target.call('XADD', key, id, ...fields);
+    for (const entry of raw) {
+      // entry[0] = stream ID (always ASCII), entry[1] = [field, value, field, value, ...]
+      const id = entry[0].toString();
+      const fields = entry[1] as unknown as Buffer[];
+      await target.callBuffer('XADD', key, id, ...fields);
       lastId = id;
       wrote = true;
     }
-    if (entries.length < STREAM_CHUNK) {
+    if (raw.length < STREAM_CHUNK) {
       hasMore = false;
     }
   }
