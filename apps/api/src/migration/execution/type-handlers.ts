@@ -27,6 +27,7 @@ export async function migrateKey(
     let wrote: boolean;
     switch (type) {
       case 'string':
+        // String handles TTL atomically via SET PX
         wrote = await migrateString(source, target, key);
         break;
       case 'hash':
@@ -47,8 +48,8 @@ export async function migrateKey(
       default:
         return { key, type, ok: false, error: `Unsupported type: ${type}` };
     }
-    // Only set TTL if data was actually written to avoid deleting pre-existing target keys
-    if (wrote) {
+    // String handles TTL atomically; compound types need a separate PEXPIRE
+    if (wrote && type !== 'string') {
       await migrateTtl(source, target, key);
     }
     return { key, type, ok: true };
@@ -61,9 +62,21 @@ export async function migrateKey(
 // ── String ──
 
 async function migrateString(source: Valkey, target: Valkey, key: string): Promise<boolean> {
-  const value = await source.getBuffer(key);
+  const [value, pttl] = await Promise.all([
+    source.getBuffer(key),
+    source.pttl(key),
+  ]);
   if (value === null) return false; // key expired/deleted between SCAN and GET
-  await target.set(key, value);
+  if (pttl > 0) {
+    // Atomic SET with PX — no window where key exists without TTL
+    await target.set(key, value, 'PX', pttl);
+  } else if (pttl === -2) {
+    // Key expired between GET and PTTL — remove any ghost copy
+    await target.del(key);
+    return false;
+  } else {
+    await target.set(key, value);
+  }
   return true;
 }
 

@@ -55,14 +55,12 @@ describe('type-handlers / migrateKey', () => {
       expect(target.set).toHaveBeenCalledWith('str:1', expect.any(Buffer));
     });
 
-    it('should handle deleted key gracefully and skip TTL', async () => {
+    it('should handle deleted key gracefully and skip write', async () => {
       source.getBuffer.mockResolvedValue(null);
       const result = await migrateKey(source, target, 'gone', 'string');
 
       expect(result.ok).toBe(true);
       expect(target.set).not.toHaveBeenCalled();
-      // migrateTtl should be skipped when no data was written
-      expect(source.pttl).not.toHaveBeenCalled();
     });
   });
 
@@ -150,13 +148,23 @@ describe('type-handlers / migrateKey', () => {
   });
 
   describe('TTL preservation', () => {
-    it('should call pexpire on target when source TTL > 0', async () => {
+    it('should use atomic SET PX for strings when source TTL > 0', async () => {
       source.pttl.mockResolvedValue(60000);
 
       const result = await migrateKey(source, target, 'str:ttl', 'string');
 
       expect(result.ok).toBe(true);
-      expect(target.pexpire).toHaveBeenCalledWith('str:ttl', 60000);
+      expect(target.set).toHaveBeenCalledWith('str:ttl', expect.any(Buffer), 'PX', 60000);
+      expect(target.pexpire).not.toHaveBeenCalled();
+    });
+
+    it('should call pexpire for compound types when source TTL > 0', async () => {
+      source.pttl.mockResolvedValue(60000);
+
+      const result = await migrateKey(source, target, 'hash:ttl', 'hash');
+
+      expect(result.ok).toBe(true);
+      expect(target.pexpire).toHaveBeenCalledWith('hash:ttl', 60000);
     });
 
     it('should not call pexpire when source TTL is -1', async () => {
@@ -168,7 +176,7 @@ describe('type-handlers / migrateKey', () => {
       expect(target.pexpire).not.toHaveBeenCalled();
     });
 
-    it('should delete ghost key from target when source TTL is -2 (expired)', async () => {
+    it('should return ok: false for string when source TTL is -2 (expired)', async () => {
       source.pttl.mockResolvedValue(-2);
 
       const result = await migrateKey(source, target, 'str:expired', 'string');

@@ -79,16 +79,14 @@ ENV STORAGE_TYPE=memory
 # Install RedisShake binary for migration execution (with checksum verification)
 ARG TARGETARCH
 ARG REDISSHAKE_VERSION=4.6.0
-RUN apk add --no-cache wget && \
-    REDISSHAKE_SHA256_AMD64="6ccab1ff2ba3c200950f8ada811f0c6fe6e2f5e6bd3b8e92b4d9444dc0aff4df" && \
+RUN REDISSHAKE_SHA256_AMD64="6ccab1ff2ba3c200950f8ada811f0c6fe6e2f5e6bd3b8e92b4d9444dc0aff4df" && \
     REDISSHAKE_SHA256_ARM64="653298efa83ef3d495ae2ec21b40c773f36eb15e507f8b3f2931660509d09690" && \
     if [ "${TARGETARCH}" = "amd64" ]; then EXPECTED_SHA256="${REDISSHAKE_SHA256_AMD64}"; else EXPECTED_SHA256="${REDISSHAKE_SHA256_ARM64}"; fi && \
     wget -qO /tmp/redis-shake.tar.gz "https://github.com/tair-opensource/RedisShake/releases/download/v${REDISSHAKE_VERSION}/redis-shake-v${REDISSHAKE_VERSION}-linux-${TARGETARCH}.tar.gz" && \
     echo "${EXPECTED_SHA256}  /tmp/redis-shake.tar.gz" | sha256sum -c - && \
     tar -xzf /tmp/redis-shake.tar.gz --strip-components=0 -C /usr/local/bin ./redis-shake && \
     chmod +x /usr/local/bin/redis-shake && \
-    rm /tmp/redis-shake.tar.gz && \
-    apk del wget
+    rm /tmp/redis-shake.tar.gz
 
 # Create non-root user for security (Docker Scout compliance)
 RUN addgroup --system --gid 1001 nodejs && \

@@ -72,6 +72,7 @@ export class MigrationExecutionService {
       progress: null,
       process: null,
       tomlPath: null,
+      pidPath: null,
     };
     // 6. Evict old jobs before inserting the new one
     this.evictOldJobs();
@@ -106,6 +107,13 @@ export class MigrationExecutionService {
       });
       job.process = proc;
       job.status = 'running';
+
+      // Write PID file for orphan detection on server restart
+      const pidPath = join(os.tmpdir(), `${job.id}.pid`);
+      try {
+        writeFileSync(pidPath, String(proc.pid), { encoding: 'utf-8', mode: 0o600 });
+        job.pidPath = pidPath;
+      } catch { /* non-fatal — orphan detection is best-effort */ }
 
       const handleData = (chunk: Buffer) => {
         const lines = chunk.toString().split('\n');
@@ -152,15 +160,16 @@ export class MigrationExecutionService {
       if (!job.completedAt) {
         job.completedAt = Date.now();
       }
-      if (job.tomlPath) {
-        try {
-          if (existsSync(job.tomlPath)) {
-            unlinkSync(job.tomlPath);
-          }
-        } catch { /* ignore cleanup errors */ }
+      for (const path of [job.tomlPath, job.pidPath]) {
+        if (path) {
+          try {
+            if (existsSync(path)) unlinkSync(path);
+          } catch { /* ignore cleanup errors */ }
+        }
       }
       job.process = null;
       job.tomlPath = null;
+      job.pidPath = null;
     }
   }
 

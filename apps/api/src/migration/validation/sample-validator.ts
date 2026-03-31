@@ -227,8 +227,8 @@ async function compareHash(source: Valkey, target: Valkey, key: string): Promise
   }
 
   const [sourceData, targetData] = await Promise.all([
-    source.hgetall(key),
-    target.hgetall(key),
+    source.hgetallBuffer(key),
+    target.hgetallBuffer(key),
   ]);
 
   const sourceFields = Object.keys(sourceData).sort();
@@ -238,13 +238,15 @@ async function compareHash(source: Valkey, target: Valkey, key: string): Promise
     return `field count differs (source: ${sourceFields.length}, target: ${targetFields.length})`;
   }
 
-  // Compare first 10 sorted fields
+  // Compare first 10 sorted fields (binary-safe via Buffer.equals)
   const checkCount = Math.min(10, sourceFields.length);
   for (let i = 0; i < checkCount; i++) {
     if (sourceFields[i] !== targetFields[i]) {
       return `field names differ at index ${i}`;
     }
-    if (sourceData[sourceFields[i]] !== targetData[targetFields[i]]) {
+    const srcVal = sourceData[sourceFields[i]];
+    const tgtVal = targetData[targetFields[i]];
+    if (!srcVal || !tgtVal || !srcVal.equals(tgtVal)) {
       return `field "${sourceFields[i]}" value differs`;
     }
   }

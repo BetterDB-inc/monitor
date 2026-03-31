@@ -165,8 +165,12 @@ export class MigrationService {
           // Parse address: 'host:port@clusterport' (host may be IPv6)
           const addrPart = master.address?.split('@')[0] ?? '';
           const lastColon = addrPart.lastIndexOf(':');
-          const host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
+          let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
           const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
+          // Strip IPv6 brackets — iovalkey expects bare addresses
+          if (host.startsWith('[') && host.endsWith(']')) {
+            host = host.slice(1, -1);
+          }
           if (!host || isNaN(port)) continue;
 
           const client = new Valkey({
