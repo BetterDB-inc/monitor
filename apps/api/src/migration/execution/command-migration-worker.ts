@@ -175,6 +175,7 @@ function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: numb
     const parts = line.split(' ');
     const flags = parts[2] ?? '';
     if (!flags.includes('master')) continue;
+    if (flags.includes('fail') || flags.includes('noaddr')) continue;
     // address format: host:port@clusterport (host may be IPv6, e.g. [::1]:6379@16379)
     const addrPart = (parts[1] ?? '').split('@')[0];
     const lastColon = addrPart.lastIndexOf(':');

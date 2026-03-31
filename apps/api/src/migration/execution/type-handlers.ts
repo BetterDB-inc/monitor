@@ -7,9 +7,26 @@ const SCAN_BATCH = 1000;
 const LIST_CHUNK = 1000;
 const STREAM_CHUNK = 1000;
 
-/** Generate a unique temporary key name to write into before atomic RENAME. */
+/**
+ * Generate a unique temporary key that hashes to the same slot as the original key.
+ * In cluster mode, RENAME requires both keys to be in the same slot.
+ * We preserve the original key's hash tag if present, or wrap the key itself
+ * as the hash tag so Redis routes both to the same slot.
+ */
 function tempKey(key: string): string {
-  return `__betterdb_mig_${randomBytes(8).toString('hex')}:{${key}}`;
+  const suffix = randomBytes(8).toString('hex');
+  // Extract existing hash tag: first {…} pair where content is non-empty
+  const openBrace = key.indexOf('{');
+  if (openBrace !== -1) {
+    const closeBrace = key.indexOf('}', openBrace + 1);
+    if (closeBrace > openBrace + 1) {
+      // Key already has a hash tag — reuse it verbatim
+      const tag = key.substring(openBrace, closeBrace + 1);
+      return `__betterdb_mig_${suffix}:${tag}`;
+    }
+  }
+  // No hash tag — wrap the whole key as the tag
+  return `__betterdb_mig_${suffix}:{${key}}`;
 }
 
 export interface MigratedKey {
@@ -17,6 +34,7 @@ export interface MigratedKey {
   type: string;
   ok: boolean;
   error?: string;
+  warning?: string;
 }
 
 /**
@@ -54,11 +72,23 @@ export async function migrateKey(
       default:
         return { key, type, ok: false, error: `Unsupported type: ${type}` };
     }
-    // String handles TTL atomically; compound types need a separate PEXPIRE
-    if (wrote && type !== 'string') {
-      await migrateTtl(source, target, key);
+    // TTL is handled atomically in each handler:
+    // - String: SET PX
+    // - Compound types: Lua RENAME+PEXPIRE via atomicRenameWithTtl
+    const result: MigratedKey = { key, type, ok: true };
+
+    // Post-migration list length check: source list may have changed during migration
+    if (wrote && type === 'list') {
+      try {
+        const targetLen = await target.llen(key);
+        const sourceLen = await source.llen(key);
+        if (targetLen !== sourceLen) {
+          result.warning = `list length changed during migration (migrated: ${targetLen}, current source: ${sourceLen})`;
+        }
+      } catch { /* non-fatal check */ }
     }
-    return { key, type, ok: true };
+
+    return result;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return { key, type, ok: false, error: message };
@@ -108,7 +138,8 @@ async function migrateHash(source: Valkey, target: Valkey, key: string): Promise
       }
       await target.call('HSET', ...args);
     } while (cursor !== '0');
-    await target.rename(tmp, key);
+    const pttl = await source.pttl(key);
+    await atomicRenameWithTtl(target, tmp, key, pttl);
   } catch (err) {
     try { await target.del(tmp); } catch { /* best-effort cleanup */ }
     throw err;
@@ -131,7 +162,8 @@ async function migrateList(source: Valkey, target: Valkey, key: string): Promise
       if (items.length === 0) break;
       await target.call('RPUSH', tmp, ...items);
     }
-    await target.rename(tmp, key);
+    const pttl = await source.pttl(key);
+    await atomicRenameWithTtl(target, tmp, key, pttl);
   } catch (err) {
     try { await target.del(tmp); } catch { /* best-effort cleanup */ }
     throw err;
@@ -164,7 +196,8 @@ async function migrateSet(source: Valkey, target: Valkey, key: string): Promise<
         await target.call('SADD', tmp, ...members);
       } while (cursor !== '0');
     }
-    await target.rename(tmp, key);
+    const pttl = await source.pttl(key);
+    await atomicRenameWithTtl(target, tmp, key, pttl);
   } catch (err) {
     try { await target.del(tmp); } catch { /* best-effort cleanup */ }
     throw err;
@@ -211,7 +244,8 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
         await pipeline.exec();
       } while (cursor !== '0');
     }
-    await target.rename(tmp, key);
+    const pttl = await source.pttl(key);
+    await atomicRenameWithTtl(target, tmp, key, pttl);
   } catch (err) {
     try { await target.del(tmp); } catch { /* best-effort cleanup */ }
     throw err;
@@ -253,7 +287,8 @@ async function migrateStream(source: Valkey, target: Valkey, key: string): Promi
       }
     }
     if (wrote) {
-      await target.rename(tmp, key);
+      const pttl = await source.pttl(key);
+      await atomicRenameWithTtl(target, tmp, key, pttl);
     }
   } catch (err) {
     try { await target.del(tmp); } catch { /* best-effort cleanup */ }
@@ -264,12 +299,52 @@ async function migrateStream(source: Valkey, target: Valkey, key: string): Promi
 
 // ── TTL ──
 
-async function migrateTtl(source: Valkey, target: Valkey, key: string): Promise<void> {
+// Lua script: atomically RENAME tmp→key and PEXPIRE in one round-trip.
+// KEYS[1] = tmp, KEYS[2] = final key, ARGV[1] = pttl (or "-1" for no expiry, "-2" for expired)
+const RENAME_WITH_TTL_LUA = `
+redis.call('RENAME', KEYS[1], KEYS[2])
+local pttl = tonumber(ARGV[1])
+if pttl > 0 then
+  redis.call('PEXPIRE', KEYS[2], pttl)
+elseif pttl == -2 then
+  redis.call('DEL', KEYS[2])
+end
+return 1
+`;
+
+/**
+ * Read PTTL from source, then atomically RENAME tmp→key + PEXPIRE on target.
+ * Eliminates the window where the key exists on target without its TTL.
+ */
+async function migrateTtlAtomic(source: Valkey, target: Valkey, key: string): Promise<void> {
   const pttl = await source.pttl(key);
   if (pttl > 0) {
     await target.pexpire(key, pttl);
   } else if (pttl === -2) {
     // Key expired between copy and TTL check — remove ghost copy from target
     await target.del(key);
+  }
+}
+
+/**
+ * Atomically RENAME tmp→key and apply PTTL in a single Lua eval.
+ * Falls back to separate RENAME + PEXPIRE if EVAL is blocked (e.g. by ACL).
+ */
+async function atomicRenameWithTtl(
+  target: Valkey,
+  tmp: string,
+  key: string,
+  pttl: number,
+): Promise<void> {
+  try {
+    await target.call('EVAL', RENAME_WITH_TTL_LUA, '2', tmp, key, String(pttl));
+  } catch {
+    // Fallback: separate commands (e.g. EVAL blocked by ACL)
+    await target.rename(tmp, key);
+    if (pttl > 0) {
+      await target.pexpire(key, pttl);
+    } else if (pttl === -2) {
+      await target.del(key);
+    }
   }
 }

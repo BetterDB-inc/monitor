@@ -15,7 +15,7 @@ export class MigrationService {
   private readonly logger = new Logger(MigrationService.name);
   private jobs = new Map<string, AnalysisJob>();
   private readonly MAX_JOBS = 20;
-  private readonly STUCK_JOB_TTL_MS = 30 * 60 * 1000;
+  private readonly STUCK_JOB_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -53,8 +53,9 @@ export class MigrationService {
     const job = this.jobs.get(id);
     if (!job) return undefined;
     if (this.isJobStuck(job)) {
-      this.jobs.delete(id);
-      return undefined;
+      this.logger.warn(`Analysis ${id} exceeded stuck-job TTL — cancelling`);
+      this.cancelJob(id);
+      // Return the job with its cancelled/failed status rather than 404
     }
     return {
       ...job.result,
@@ -63,7 +64,7 @@ export class MigrationService {
       progress: job.progress,
       createdAt: job.createdAt,
       completedAt: job.completedAt,
-      error: job.error,
+      error: job.error ?? (job.status === 'cancelled' ? 'Analysis timed out' : undefined),
     } as MigrationAnalysisResult;
   }
 
@@ -453,9 +454,11 @@ export class MigrationService {
   private evictOldJobs(): void {
     if (this.jobs.size < this.MAX_JOBS) return;
 
-    // First: evict stuck running jobs
+    // First: cancel and evict stuck running jobs
     for (const [id, job] of this.jobs) {
       if (this.isJobStuck(job)) {
+        this.logger.warn(`Evicting stuck analysis ${id}`);
+        this.cancelJob(id);
         this.jobs.delete(id);
       }
     }

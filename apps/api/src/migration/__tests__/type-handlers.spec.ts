@@ -40,6 +40,7 @@ function createMockTarget() {
     set: jest.fn().mockResolvedValue('OK'),
     del: jest.fn().mockResolvedValue(1),
     rename: jest.fn().mockResolvedValue('OK'),
+    llen: jest.fn().mockResolvedValue(2),
     pexpire: jest.fn().mockResolvedValue(1),
     call: jest.fn().mockResolvedValue('OK'),
     callBuffer: jest.fn().mockResolvedValue(Buffer.from('OK')),
@@ -87,7 +88,7 @@ describe('type-handlers / migrateKey', () => {
       expect(source.hscanBuffer).toHaveBeenCalled();
       // Writes to temp key then renames atomically
       expect(target.call).toHaveBeenCalledWith('HSET', expect.stringContaining('__betterdb_mig_'), expect.any(Buffer), expect.any(Buffer));
-      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'hash:1');
+      expect(target.call).toHaveBeenCalledWith('EVAL', expect.any(String), '2', expect.stringContaining('__betterdb_mig_'), 'hash:1', '-1');
     });
   });
 
@@ -98,7 +99,7 @@ describe('type-handlers / migrateKey', () => {
       expect(result.ok).toBe(true);
       expect(source.lrangeBuffer).toHaveBeenCalled();
       expect(target.call).toHaveBeenCalledWith('RPUSH', expect.stringContaining('__betterdb_mig_'), expect.any(Buffer), expect.any(Buffer));
-      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'list:1');
+      expect(target.call).toHaveBeenCalledWith('EVAL', expect.any(String), '2', expect.stringContaining('__betterdb_mig_'), 'list:1', '-1');
     });
   });
 
@@ -111,7 +112,7 @@ describe('type-handlers / migrateKey', () => {
       expect(result.ok).toBe(true);
       expect(source.smembersBuffer).toHaveBeenCalledWith('set:1');
       expect(target.call).toHaveBeenCalledWith('SADD', expect.stringContaining('__betterdb_mig_'), expect.any(Buffer), expect.any(Buffer));
-      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'set:1');
+      expect(target.call).toHaveBeenCalledWith('EVAL', expect.any(String), '2', expect.stringContaining('__betterdb_mig_'), 'set:1', '-1');
     });
 
     it('should use SSCAN for large sets (>10K members)', async () => {
@@ -121,7 +122,7 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.sscanBuffer).toHaveBeenCalled();
-      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'set:big');
+      expect(target.call).toHaveBeenCalledWith('EVAL', expect.any(String), '2', expect.stringContaining('__betterdb_mig_'), 'set:big', '-1');
     });
   });
 
@@ -133,7 +134,7 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.callBuffer).toHaveBeenCalledWith('ZRANGE', 'zset:1', '0', '-1', 'WITHSCORES');
-      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'zset:1');
+      expect(target.call).toHaveBeenCalledWith('EVAL', expect.any(String), '2', expect.stringContaining('__betterdb_mig_'), 'zset:1', '-1');
     });
 
     it('should use callBuffer ZSCAN for large sorted sets (>10K members)', async () => {
@@ -143,7 +144,7 @@ describe('type-handlers / migrateKey', () => {
 
       expect(result.ok).toBe(true);
       expect(source.callBuffer).toHaveBeenCalledWith('ZSCAN', 'zset:big', '0', 'COUNT', '1000');
-      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'zset:big');
+      expect(target.call).toHaveBeenCalledWith('EVAL', expect.any(String), '2', expect.stringContaining('__betterdb_mig_'), 'zset:big', '-1');
     });
   });
 
@@ -156,7 +157,7 @@ describe('type-handlers / migrateKey', () => {
       expect(target.callBuffer).toHaveBeenCalledWith(
         'XADD', expect.stringContaining('__betterdb_mig_'), '1-0', Buffer.from('field'), Buffer.from('value'),
       );
-      expect(target.rename).toHaveBeenCalledWith(expect.stringContaining('__betterdb_mig_'), 'stream:1');
+      expect(target.call).toHaveBeenCalledWith('EVAL', expect.any(String), '2', expect.stringContaining('__betterdb_mig_'), 'stream:1', '-1');
     });
   });
 
@@ -171,13 +172,17 @@ describe('type-handlers / migrateKey', () => {
       expect(target.pexpire).not.toHaveBeenCalled();
     });
 
-    it('should call pexpire for compound types when source TTL > 0', async () => {
+    it('should apply TTL atomically via Lua EVAL for compound types when source TTL > 0', async () => {
       source.pttl.mockResolvedValue(60000);
 
       const result = await migrateKey(source, target, 'hash:ttl', 'hash');
 
       expect(result.ok).toBe(true);
-      expect(target.pexpire).toHaveBeenCalledWith('hash:ttl', 60000);
+      // TTL is passed to Lua EVAL as the ARGV[1] parameter
+      expect(target.call).toHaveBeenCalledWith(
+        'EVAL', expect.any(String), '2',
+        expect.stringContaining('__betterdb_mig_'), 'hash:ttl', '60000',
+      );
     });
 
     it('should not call pexpire when source TTL is -1', async () => {
