@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, Inject, Logger, NotFoundException, BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import Valkey from 'iovalkey';
 import type {
@@ -50,6 +50,13 @@ export class MigrationValidationService {
     if (req.analysisId) {
       const job = this.migrationService.getJob(req.analysisId);
       if (job && job.status === 'completed') {
+        // Verify the analysis belongs to the same source/target pair
+        if (
+          (job.sourceConnectionId && job.sourceConnectionId !== req.sourceConnectionId) ||
+          (job.targetConnectionId && job.targetConnectionId !== req.targetConnectionId)
+        ) {
+          throw new BadRequestException('Analysis does not match the provided source/target connections');
+        }
         analysisResult = job;
       }
     }
@@ -253,7 +260,9 @@ export class MigrationValidationService {
     }
 
     if (this.jobs.size >= this.MAX_JOBS) {
-      this.logger.warn(`Validation job limit reached (${this.MAX_JOBS}). Cannot evict running jobs.`);
+      throw new ServiceUnavailableException(
+        `Validation job limit reached (${this.MAX_JOBS}). All slots occupied by running jobs — try again later.`,
+      );
     }
   }
 }

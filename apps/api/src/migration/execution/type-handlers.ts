@@ -10,22 +10,28 @@ const STREAM_CHUNK = 1000;
 /**
  * Generate a unique temporary key that hashes to the same slot as the original key.
  * In cluster mode, RENAME requires both keys to be in the same slot.
- * We preserve the original key's hash tag if present, or wrap the key itself
- * as the hash tag so Redis routes both to the same slot.
+ *
+ * Returns null for keys that contain braces but have no valid hash tag (e.g.
+ * `user:{}:1`). Valkey hashes the full key name for these, and we can't
+ * construct a temp key in the same slot without embedding `}` which would
+ * create a different hash tag. Callers must write directly to the final key
+ * when null is returned.
  */
-function tempKey(key: string): string {
+function tempKey(key: string): string | null {
   const suffix = randomBytes(8).toString('hex');
-  // Extract existing hash tag: first {…} pair where content is non-empty
   const openBrace = key.indexOf('{');
   if (openBrace !== -1) {
     const closeBrace = key.indexOf('}', openBrace + 1);
     if (closeBrace > openBrace + 1) {
-      // Key already has a hash tag — reuse it verbatim
+      // Key has a valid hash tag — reuse it so temp key lands in the same slot
       const tag = key.substring(openBrace, closeBrace + 1);
       return `__betterdb_mig_${suffix}:${tag}`;
     }
+    // Braces present but no valid tag (empty `{}` or unclosed `{`).
+    // Cannot safely construct a same-slot temp key.
+    return null;
   }
-  // No hash tag — wrap the whole key as the tag
+  // No braces — wrap the whole key as the tag
   return `__betterdb_mig_${suffix}:{${key}}`;
 }
 
@@ -123,26 +129,33 @@ async function migrateHash(source: Valkey, target: Valkey, key: string): Promise
   const len = await source.hlen(key);
   if (len === 0) return false;
 
-  // Write to a temp key then atomically RENAME to avoid data loss on crash
   const tmp = tempKey(key);
+  const writeKey = tmp ?? key;
+
   try {
+    // DEL the target when writing directly (no temp key)
+    if (!tmp) await target.del(key);
+
     // Use HSCAN for all sizes so binary field names are preserved as Buffers
-    // (hgetallBuffer returns Record<string, Buffer> which coerces field names to UTF-8)
     let cursor = '0';
     do {
       const [next, fields] = await source.hscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
       cursor = String(next);
       if (fields.length === 0) continue;
-      const args: (string | Buffer | number)[] = [tmp];
+      const args: (string | Buffer | number)[] = [writeKey];
       for (let i = 0; i < fields.length; i += 2) {
         args.push(fields[i], fields[i + 1]);
       }
       await target.call('HSET', ...args);
     } while (cursor !== '0');
     const pttl = await source.pttl(key);
-    await atomicRenameWithTtl(target, tmp, key, pttl);
+    if (tmp) {
+      await atomicRenameWithTtl(target, tmp, key, pttl);
+    } else {
+      await applyTtl(target, key, pttl);
+    }
   } catch (err) {
-    try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+    if (tmp) { try { await target.del(tmp); } catch { /* best-effort cleanup */ } }
     throw err;
   }
   return true;
@@ -154,19 +167,26 @@ async function migrateList(source: Valkey, target: Valkey, key: string): Promise
   const len = await source.llen(key);
   if (len === 0) return false;
 
-  // Write to a temp key then atomically RENAME to avoid data loss on crash
   const tmp = tempKey(key);
+  const writeKey = tmp ?? key;
+
   try {
+    if (!tmp) await target.del(key);
+
     for (let start = 0; start < len; start += LIST_CHUNK) {
       const end = Math.min(start + LIST_CHUNK - 1, len - 1);
       const items = await source.lrangeBuffer(key, start, end);
       if (items.length === 0) break;
-      await target.call('RPUSH', tmp, ...items);
+      await target.call('RPUSH', writeKey, ...items);
     }
     const pttl = await source.pttl(key);
-    await atomicRenameWithTtl(target, tmp, key, pttl);
+    if (tmp) {
+      await atomicRenameWithTtl(target, tmp, key, pttl);
+    } else {
+      await applyTtl(target, key, pttl);
+    }
   } catch (err) {
-    try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+    if (tmp) { try { await target.del(tmp); } catch { /* best-effort cleanup */ } }
     throw err;
   }
   return true;
@@ -178,29 +198,36 @@ async function migrateSet(source: Valkey, target: Valkey, key: string): Promise<
   const card = await source.scard(key);
   if (card === 0) return false;
 
-  // Write to a temp key then atomically RENAME to avoid data loss on crash
   const tmp = tempKey(key);
+  const writeKey = tmp ?? key;
+
   try {
+    if (!tmp) await target.del(key);
+
     if (card <= LARGE_KEY_THRESHOLD) {
       const members = await source.smembersBuffer(key);
       if (members.length === 0) {
-        try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+        if (tmp) { try { await target.del(tmp); } catch { /* best-effort cleanup */ } }
         return false; // key expired between SCARD and SMEMBERS
       }
-      await target.call('SADD', tmp, ...members);
+      await target.call('SADD', writeKey, ...members);
     } else {
       let cursor = '0';
       do {
         const [next, members] = await source.sscanBuffer(key, cursor, 'COUNT', SCAN_BATCH);
         cursor = String(next);
         if (members.length === 0) continue;
-        await target.call('SADD', tmp, ...members);
+        await target.call('SADD', writeKey, ...members);
       } while (cursor !== '0');
     }
     const pttl = await source.pttl(key);
-    await atomicRenameWithTtl(target, tmp, key, pttl);
+    if (tmp) {
+      await atomicRenameWithTtl(target, tmp, key, pttl);
+    } else {
+      await applyTtl(target, key, pttl);
+    }
   } catch (err) {
-    try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+    if (tmp) { try { await target.del(tmp); } catch { /* best-effort cleanup */ } }
     throw err;
   }
   return true;
@@ -212,21 +239,24 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
   const card = await source.zcard(key);
   if (card === 0) return false;
 
-  // Write to a temp key then atomically RENAME to avoid data loss on crash
   const tmp = tempKey(key);
+  const writeKey = tmp ?? key;
+
   try {
+    if (!tmp) await target.del(key);
+
     if (card <= LARGE_KEY_THRESHOLD) {
       // Use callBuffer to preserve binary member data (call() decodes as UTF-8)
       const raw = await source.callBuffer('ZRANGE', key, '0', '-1', 'WITHSCORES') as Buffer[];
       if (!raw || raw.length === 0) {
-        try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+        if (tmp) { try { await target.del(tmp); } catch { /* best-effort cleanup */ } }
         return false; // key expired between ZCARD and ZRANGE
       }
       // raw is [member, score, member, score, ...] as Buffers
       const pipeline = target.pipeline();
       for (let i = 0; i < raw.length; i += 2) {
         // Score is always ASCII-safe, member stays as Buffer
-        pipeline.zadd(tmp, raw[i + 1].toString(), raw[i]);
+        pipeline.zadd(writeKey, raw[i + 1].toString(), raw[i]);
       }
       await pipeline.exec();
     } else {
@@ -240,15 +270,19 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
         // entries is [member, score, member, score, ...] as Buffers
         const pipeline = target.pipeline();
         for (let i = 0; i < entries.length; i += 2) {
-          pipeline.zadd(tmp, entries[i + 1].toString(), entries[i]);
+          pipeline.zadd(writeKey, entries[i + 1].toString(), entries[i]);
         }
         await pipeline.exec();
       } while (cursor !== '0');
     }
     const pttl = await source.pttl(key);
-    await atomicRenameWithTtl(target, tmp, key, pttl);
+    if (tmp) {
+      await atomicRenameWithTtl(target, tmp, key, pttl);
+    } else {
+      await applyTtl(target, key, pttl);
+    }
   } catch (err) {
-    try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+    if (tmp) { try { await target.del(tmp); } catch { /* best-effort cleanup */ } }
     throw err;
   }
   return true;
@@ -257,11 +291,13 @@ async function migrateZset(source: Valkey, target: Valkey, key: string): Promise
 // ── Stream ──
 
 async function migrateStream(source: Valkey, target: Valkey, key: string): Promise<boolean> {
-  // Write to a temp key then atomically RENAME to avoid data loss on crash
   const tmp = tempKey(key);
+  const writeKey = tmp ?? key;
   let wrote = false;
 
   try {
+    if (!tmp) await target.del(key);
+
     let lastId = '-';
     let hasMore = true;
 
@@ -279,7 +315,7 @@ async function migrateStream(source: Valkey, target: Valkey, key: string): Promi
         // entry[0] = stream ID (always ASCII), entry[1] = [field, value, field, value, ...]
         const id = entry[0].toString();
         const fields = entry[1] as unknown as Buffer[];
-        await target.callBuffer('XADD', tmp, id, ...fields);
+        await target.callBuffer('XADD', writeKey, id, ...fields);
         lastId = id;
         wrote = true;
       }
@@ -289,10 +325,14 @@ async function migrateStream(source: Valkey, target: Valkey, key: string): Promi
     }
     if (wrote) {
       const pttl = await source.pttl(key);
-      await atomicRenameWithTtl(target, tmp, key, pttl);
+      if (tmp) {
+        await atomicRenameWithTtl(target, tmp, key, pttl);
+      } else {
+        await applyTtl(target, key, pttl);
+      }
     }
   } catch (err) {
-    try { await target.del(tmp); } catch { /* best-effort cleanup */ }
+    if (tmp) { try { await target.del(tmp); } catch { /* best-effort cleanup */ } }
     throw err;
   }
   return wrote;
@@ -313,6 +353,15 @@ end
 return 1
 `;
 
+
+/** Apply TTL directly to a key (used when temp-key RENAME is not possible). */
+async function applyTtl(target: Valkey, key: string, pttl: number): Promise<void> {
+  if (pttl > 0) {
+    await target.pexpire(key, pttl);
+  } else if (pttl === -2 || pttl === 0) {
+    await target.del(key);
+  }
+}
 
 /**
  * Atomically RENAME tmp→key and apply PTTL in a single Lua eval.
