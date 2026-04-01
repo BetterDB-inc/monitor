@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
 import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
-import { WebhookEventType } from '@betterdb/shared';
+import { WebhookEventType, type MetricKind } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
 
 /**
@@ -261,8 +261,8 @@ export class WebhookEventsProService implements OnModuleInit {
    * Called when projected time-to-limit drops below configured threshold
    */
   async dispatchMetricForecastLimit(data: {
-    event: string;
-    metricKind: string;
+    event: WebhookEventType;
+    metricKind: MetricKind;
     currentValue: number;
     ceiling: number | null;
     timeToLimitMs: number;
@@ -281,7 +281,7 @@ export class WebhookEventsProService implements OnModuleInit {
     const timeHours = (data.timeToLimitMs / 3_600_000).toFixed(1);
 
     await this.webhookDispatcher.dispatchThresholdAlert(
-      WebhookEventType.METRIC_FORECAST_LIMIT,
+      data.event,
       `metric_forecast_limit:${data.connectionId}:${data.metricKind}`,
       data.timeToLimitMs,
       data.threshold,

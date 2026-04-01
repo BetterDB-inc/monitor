@@ -10,8 +10,8 @@ describe('WebhookEventsProService - dispatchMetricForecastLimit', () => {
   let licenseService: { getLicenseTier: jest.Mock };
 
   const testData = {
-    event: 'metric_forecast.limit',
-    metricKind: 'opsPerSec',
+    event: WebhookEventType.METRIC_FORECAST_LIMIT,
+    metricKind: 'opsPerSec' as const,
     currentValue: 50_000,
     ceiling: 80_000,
     timeToLimitMs: 7_200_000, // 2 hours
@@ -48,7 +48,7 @@ describe('WebhookEventsProService - dispatchMetricForecastLimit', () => {
 
     expect(webhookDispatcher.dispatchThresholdAlert).toHaveBeenCalledTimes(1);
 
-    const [eventType, alertKey, value, threshold, isAbove] =
+    const [eventType, _alertKey, value, threshold, isAbove] =
       webhookDispatcher.dispatchThresholdAlert.mock.calls[0];
 
     expect(eventType).toBe(WebhookEventType.METRIC_FORECAST_LIMIT);

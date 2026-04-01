@@ -123,7 +123,11 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
     const currentValue = latestValue;
     const growthRate = slope * 3_600_000; // units per hour
     const growthPercent =
-      predictedStart !== 0 ? ((predictedEnd - predictedStart) / Math.abs(predictedStart)) * 100 : 0;
+      predictedStart !== 0
+        ? ((predictedEnd - predictedStart) / Math.abs(predictedStart)) * 100
+        : predictedEnd !== 0
+          ? 100 // growing from zero — treat as significant rise
+          : 0;
 
     const trendDirection: 'rising' | 'falling' | 'stable' =
       growthPercent > TREND_THRESHOLD_PERCENT

@@ -51,6 +51,7 @@ export function MetricForecasting() {
       : 'opsPerSec';
 
   const pendingCallback = useRef<(() => Promise<void>) | null>(null);
+  const pendingUpdates = useRef<MetricForecastSettingsUpdate>({});
 
   const flushPendingSave = useCallback(() => {
     if (debounceTimeout.current) {
@@ -105,6 +106,7 @@ export function MetricForecasting() {
 
   const updateSetting = (updates: MetricForecastSettingsUpdate) => {
     if (debounceTimeout.current) clearTimeout(debounceTimeout.current);
+    pendingUpdates.current = { ...pendingUpdates.current, ...updates };
 
     queryClient.setQueryData(
       ['metric-forecast-settings', connectionId, activeTab],
@@ -114,8 +116,10 @@ export function MetricForecasting() {
     const saveTab = activeTab;
     const doSave = async () => {
       pendingCallback.current = null;
+      const toSave = pendingUpdates.current;
+      pendingUpdates.current = {};
       try {
-        const updated = await metricForecastingApi.updateSettings(saveTab, updates);
+        const updated = await metricForecastingApi.updateSettings(saveTab, toSave);
         queryClient.setQueryData(['metric-forecast-settings', connectionId, saveTab], updated);
         setSaveStatus('saved');
         await queryClient.invalidateQueries({
