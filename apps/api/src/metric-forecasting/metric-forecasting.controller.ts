@@ -3,6 +3,7 @@ import { MetricForecastingService } from './metric-forecasting.service';
 import { MetricKindValidationPipe } from './pipes/metric-kind-validation.pipe';
 import { UpdateMetricForecastSettingsDto } from './dto/update-metric-forecast-settings.dto';
 import { ConnectionId } from '../common/decorators/connection-id.decorator';
+import { ENV_DEFAULT_ID } from '../connections/connection-registry.service';
 import type {
   MetricForecast,
   MetricForecastSettings,
@@ -18,7 +19,7 @@ export class MetricForecastingController {
     @Param('metricKind', MetricKindValidationPipe) metricKind: MetricKind,
     @ConnectionId() connectionId?: string,
   ): Promise<MetricForecast> {
-    return this.service.getForecast(connectionId || 'env-default', metricKind);
+    return this.service.getForecast(connectionId || ENV_DEFAULT_ID, metricKind);
   }
 
   @Get(':metricKind/settings')
@@ -26,7 +27,7 @@ export class MetricForecastingController {
     @Param('metricKind', MetricKindValidationPipe) metricKind: MetricKind,
     @ConnectionId() connectionId?: string,
   ): Promise<MetricForecastSettings> {
-    return this.service.getSettings(connectionId || 'env-default', metricKind);
+    return this.service.getSettings(connectionId || ENV_DEFAULT_ID, metricKind);
   }
 
   @Put(':metricKind/settings')
@@ -35,6 +36,6 @@ export class MetricForecastingController {
     @ConnectionId() connectionId?: string,
     @Body() updates?: UpdateMetricForecastSettingsDto,
   ): Promise<MetricForecastSettings> {
-    return this.service.updateSettings(connectionId || 'env-default', metricKind, updates || {});
+    return this.service.updateSettings(connectionId || ENV_DEFAULT_ID, metricKind, updates || {});
   }
 }
