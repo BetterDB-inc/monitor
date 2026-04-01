@@ -30,13 +30,25 @@ import {
   LatencySnapshotQueryOptions,
   StoredMemorySnapshot,
   MemorySnapshotQueryOptions,
+  HotKeyEntry,
+  HotKeyQueryOptions,
+  StoredLatencyHistogram,
+  DatabaseConnectionConfig,
 } from '../../common/interfaces/storage-port.interface';
-import type { VectorIndexSnapshot, VectorIndexSnapshotQueryOptions } from '@betterdb/shared';
+import type {
+  VectorIndexSnapshot,
+  VectorIndexSnapshotQueryOptions,
+  MetricForecastSettings,
+  MetricKind,
+} from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
+
+// TODO: Split into domain-specific repositories (acl, webhooks, anomaly, slowlog, etc.)
+// and turn PostgresAdapter into a thin facade that delegates to them.
 
 export interface PostgresAdapterConfig {
   connectionString: string;
-  schema?: string;  // PostgreSQL schema for tenant isolation
+  schema?: string; // PostgreSQL schema for tenant isolation
 }
 
 export class PostgresAdapter implements StoragePort {
@@ -44,7 +56,7 @@ export class PostgresAdapter implements StoragePort {
   private ready: boolean = false;
   private readonly mappers = new RowMappers(PostgresDialect);
 
-  constructor(private config: PostgresAdapterConfig) { }
+  constructor(private config: PostgresAdapterConfig) {}
 
   async initialize(): Promise<void> {
     try {
@@ -64,7 +76,7 @@ export class PostgresAdapter implements StoragePort {
         if (sslCa.startsWith('http://')) {
           throw new Error(
             'Fetching SSL CA certificate over insecure HTTP is not allowed. ' +
-            'Use HTTPS or provide a local file path instead.'
+              'Use HTTPS or provide a local file path instead.',
           );
         }
 
@@ -72,17 +84,17 @@ export class PostgresAdapter implements StoragePort {
           // Whitelist of trusted domains for official SSL certificate authorities
           // Only specific official certificate distribution endpoints, not general cloud storage
           const trustedDomains = [
-            'truststore.pki.rds.amazonaws.com',        // AWS RDS official CA bundle
-            'storage.googleapis.com/cloud-sql-ca',     // GCP Cloud SQL official path (must check full path)
-            'dl.cacerts.digicert.com',                 // DigiCert CA certificates (used by Azure)
-            'cacerts.digicert.com',                    // DigiCert CA certificates alternate
+            'truststore.pki.rds.amazonaws.com', // AWS RDS official CA bundle
+            'storage.googleapis.com/cloud-sql-ca', // GCP Cloud SQL official path (must check full path)
+            'dl.cacerts.digicert.com', // DigiCert CA certificates (used by Azure)
+            'cacerts.digicert.com', // DigiCert CA certificates alternate
           ];
 
           const url = new URL(sslCa);
 
           // Check domain with proper boundary to prevent subdomain spoofing
           // For path-specific validation (like GCS), also check the path
-          const isTrustedDomain = trustedDomains.some(domain => {
+          const isTrustedDomain = trustedDomains.some((domain) => {
             // Exact hostname match
             if (url.hostname === domain) {
               return true;
@@ -96,8 +108,10 @@ export class PostgresAdapter implements StoragePort {
             // Special case for GCS: must have specific path prefix with trailing slash
             // This prevents /cloud-sql-ca-evil/ from matching
             if (domain === 'storage.googleapis.com/cloud-sql-ca') {
-              return url.hostname === 'storage.googleapis.com' &&
-                url.pathname.startsWith('/cloud-sql-ca/');
+              return (
+                url.hostname === 'storage.googleapis.com' &&
+                url.pathname.startsWith('/cloud-sql-ca/')
+              );
             }
 
             return false;
@@ -106,8 +120,8 @@ export class PostgresAdapter implements StoragePort {
           if (!isTrustedDomain) {
             throw new Error(
               `SSL certificate fetching blocked: ${url.hostname} is not in the trusted domains list. ` +
-              `Trusted domains: ${trustedDomains.join(', ')}. ` +
-              `Use a local file path or a trusted cloud provider URL.`
+                `Trusted domains: ${trustedDomains.join(', ')}. ` +
+                `Use a local file path or a trusted cloud provider URL.`,
             );
           }
 
@@ -121,7 +135,7 @@ export class PostgresAdapter implements StoragePort {
 
             const response = await fetch(sslCa, {
               signal: controller.signal,
-              redirect: 'error' // Prevent redirect bypass of domain whitelist
+              redirect: 'error', // Prevent redirect bypass of domain whitelist
             });
             clearTimeout(timeoutId);
 
@@ -357,7 +371,11 @@ export class PostgresAdapter implements StoragePort {
     return result.rows.map((row) => this.mappers.mapAclEntryRow(row));
   }
 
-  async getAuditStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AuditStats> {
+  async getAuditStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<AuditStats> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
@@ -421,9 +439,9 @@ export class PostgresAdapter implements StoragePort {
     const timeRange =
       timeRangeResult.rows[0].earliest !== null && timeRangeResult.rows[0].latest !== null
         ? {
-          earliest: parseInt(timeRangeResult.rows[0].earliest),
-          latest: parseInt(timeRangeResult.rows[0].latest),
-        }
+            earliest: parseInt(timeRangeResult.rows[0].earliest),
+            latest: parseInt(timeRangeResult.rows[0].latest),
+          }
         : null;
 
     return {
@@ -443,7 +461,7 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM acl_audit WHERE captured_at < $1 AND connection_id = $2',
-        [olderThanTimestamp, connectionId]
+        [olderThanTimestamp, connectionId],
       );
       return result.rowCount || 0;
     }
@@ -509,7 +527,9 @@ export class PostgresAdapter implements StoragePort {
     return clients.length;
   }
 
-  async getClientSnapshots(options: ClientSnapshotQueryOptions = {}): Promise<StoredClientSnapshot[]> {
+  async getClientSnapshots(
+    options: ClientSnapshotQueryOptions = {},
+  ): Promise<StoredClientSnapshot[]> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
@@ -632,7 +652,11 @@ export class PostgresAdapter implements StoragePort {
     return Array.from(pointsMap.values()).sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  async getClientAnalyticsStats(startTime?: number, endTime?: number, connectionId?: string): Promise<ClientAnalyticsStats> {
+  async getClientAnalyticsStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<ClientAnalyticsStats> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
@@ -665,9 +689,12 @@ export class PostgresAdapter implements StoragePort {
     );
     const latestTimestamp = latestResult.rows[0].latest;
 
-    const currentConditions = latestTimestamp ? [...conditions, `captured_at = $${paramIndex++}`] : conditions;
+    const currentConditions = latestTimestamp
+      ? [...conditions, `captured_at = $${paramIndex++}`]
+      : conditions;
     const currentParams = latestTimestamp ? [...params, latestTimestamp] : params;
-    const currentWhereClause = currentConditions.length > 0 ? `WHERE ${currentConditions.join(' AND ')}` : '';
+    const currentWhereClause =
+      currentConditions.length > 0 ? `WHERE ${currentConditions.join(' AND ')}` : '';
 
     const currentConnectionsResult = await this.pool.query(
       `SELECT COUNT(*) as count FROM client_snapshots ${currentWhereClause}`,
@@ -791,7 +818,10 @@ export class PostgresAdapter implements StoragePort {
       params,
     );
 
-    const connectionsByUserAndName: Record<string, { user: string; name: string; current: number; peak: number; avgAge: number }> = {};
+    const connectionsByUserAndName: Record<
+      string,
+      { user: string; name: string; current: number; peak: number; avgAge: number }
+    > = {};
 
     for (const row of byUserAndNameResult.rows) {
       const key = `${row.user_name}:${row.name}`;
@@ -836,9 +866,9 @@ export class PostgresAdapter implements StoragePort {
     const timeRange =
       timeRangeResult.rows[0].earliest !== null && timeRangeResult.rows[0].latest !== null
         ? {
-          earliest: parseInt(timeRangeResult.rows[0].earliest),
-          latest: parseInt(timeRangeResult.rows[0].latest),
-        }
+            earliest: parseInt(timeRangeResult.rows[0].earliest),
+            latest: parseInt(timeRangeResult.rows[0].latest),
+          }
         : null;
 
     return {
@@ -911,7 +941,10 @@ export class PostgresAdapter implements StoragePort {
     return result.rows.map((row) => this.mappers.mapClientRow(row));
   }
 
-  async pruneOldClientSnapshots(olderThanTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldClientSnapshots(
+    olderThanTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
@@ -919,7 +952,7 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM client_snapshots WHERE captured_at < $1 AND connection_id = $2',
-        [olderThanTimestamp, connectionId]
+        [olderThanTimestamp, connectionId],
       );
       return result.rowCount || 0;
     }
@@ -1126,8 +1159,27 @@ export class PostgresAdapter implements StoragePort {
         anomaly_poll_interval_ms INTEGER NOT NULL DEFAULT 1000,
         anomaly_cache_ttl_ms INTEGER NOT NULL DEFAULT 3600000,
         anomaly_prometheus_interval_ms INTEGER NOT NULL DEFAULT 30000,
+        throughput_forecasting_enabled BOOLEAN NOT NULL DEFAULT true,
+        throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
+        throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
         updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
         created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
+      );
+
+      -- Migration: add throughput-forecasting columns if they don't exist
+      ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_enabled BOOLEAN NOT NULL DEFAULT true;
+      ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000;
+      ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000;
+
+      CREATE TABLE IF NOT EXISTS metric_forecast_settings (
+        connection_id TEXT NOT NULL,
+        metric_kind TEXT NOT NULL,
+        enabled BOOLEAN NOT NULL DEFAULT true,
+        ceiling DOUBLE PRECISION,
+        rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
+        alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY (connection_id, metric_kind)
       );
 
       CREATE TABLE IF NOT EXISTS webhooks (
@@ -1439,7 +1491,7 @@ export class PostgresAdapter implements StoragePort {
         event.sourceHost || null,
         event.sourcePort || null,
         connectionId,
-      ]
+      ],
     );
 
     return event.id;
@@ -1496,7 +1548,7 @@ export class PostgresAdapter implements StoragePort {
         resolved = EXCLUDED.resolved,
         resolved_at = EXCLUDED.resolved_at,
         duration_ms = EXCLUDED.duration_ms`,
-      values
+      values,
     );
 
     return result.rowCount ?? 0;
@@ -1549,13 +1601,17 @@ export class PostgresAdapter implements StoragePort {
       ${whereClause}
       ORDER BY timestamp DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     return result.rows.map((row) => this.mappers.mapAnomalyEventRow(row));
   }
 
-  async getAnomalyStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AnomalyStats> {
+  async getAnomalyStats(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<AnomalyStats> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -1579,30 +1635,31 @@ export class PostgresAdapter implements StoragePort {
 
     const totalResult = await this.pool.query(
       `SELECT COUNT(*) as total FROM anomaly_events ${whereClause}`,
-      params
+      params,
     );
 
     const severityResult = await this.pool.query(
       `SELECT severity, COUNT(*) as count FROM anomaly_events ${whereClause} GROUP BY severity`,
-      params
+      params,
     );
 
     const metricResult = await this.pool.query(
       `SELECT metric_type, COUNT(*) as count FROM anomaly_events ${whereClause} GROUP BY metric_type`,
-      params
+      params,
     );
 
     const unresolvedConditions = [...conditions];
     if (unresolvedConditions.length > 0) {
       unresolvedConditions.push(`resolved = false`);
     }
-    const unresolvedWhereClause = unresolvedConditions.length > 0
-      ? `WHERE ${unresolvedConditions.join(' AND ')}`
-      : 'WHERE resolved = false';
+    const unresolvedWhereClause =
+      unresolvedConditions.length > 0
+        ? `WHERE ${unresolvedConditions.join(' AND ')}`
+        : 'WHERE resolved = false';
 
     const unresolvedResult = await this.pool.query(
       `SELECT COUNT(*) as count FROM anomaly_events ${unresolvedWhereClause}`,
-      params
+      params,
     );
 
     const bySeverity: Record<string, number> = {};
@@ -1631,7 +1688,7 @@ export class PostgresAdapter implements StoragePort {
       `UPDATE anomaly_events
        SET resolved = true, resolved_at = $2, duration_ms = $2 - timestamp
        WHERE id = $1 AND resolved = false`,
-      [id, resolvedAt]
+      [id, resolvedAt],
     );
 
     return (result.rowCount ?? 0) > 0;
@@ -1643,15 +1700,14 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM anomaly_events WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM anomaly_events WHERE timestamp < $1',
-      [cutoffTimestamp]
-    );
+    const result = await this.pool.query('DELETE FROM anomaly_events WHERE timestamp < $1', [
+      cutoffTimestamp,
+    ]);
 
     return result.rowCount ?? 0;
   }
@@ -1681,7 +1737,7 @@ export class PostgresAdapter implements StoragePort {
         group.sourceHost || null,
         group.sourcePort || null,
         connectionId,
-      ]
+      ],
     );
 
     return group.correlationId;
@@ -1728,7 +1784,7 @@ export class PostgresAdapter implements StoragePort {
       ${whereClause}
       ORDER BY timestamp DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     return result.rows.map((row) => this.mappers.mapCorrelatedGroupRow(row));
@@ -1740,20 +1796,23 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM correlated_anomaly_groups WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
     const result = await this.pool.query(
       'DELETE FROM correlated_anomaly_groups WHERE timestamp < $1',
-      [cutoffTimestamp]
+      [cutoffTimestamp],
     );
 
     return result.rowCount ?? 0;
   }
 
-  async saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[], connectionId: string): Promise<number> {
+  async saveKeyPatternSnapshots(
+    snapshots: KeyPatternSnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     if (!this.pool || snapshots.length === 0) return 0;
 
     const values: string[] = [];
@@ -1761,7 +1820,9 @@ export class PostgresAdapter implements StoragePort {
     let paramIndex = 1;
 
     for (const snapshot of snapshots) {
-      values.push(`($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`);
+      values.push(
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
+      );
       params.push(
         snapshot.id,
         snapshot.timestamp,
@@ -1785,7 +1846,8 @@ export class PostgresAdapter implements StoragePort {
       );
     }
 
-    await this.pool.query(`
+    await this.pool.query(
+      `
       INSERT INTO key_pattern_snapshots (
         id, timestamp, pattern, key_count, sampled_key_count,
         keys_with_ttl, keys_expiring_soon, total_memory_bytes,
@@ -1793,12 +1855,16 @@ export class PostgresAdapter implements StoragePort {
         hot_key_count, cold_key_count, avg_idle_time_seconds,
         stale_key_count, avg_ttl_seconds, min_ttl_seconds, max_ttl_seconds, connection_id
       ) VALUES ${values.join(', ')}
-    `, params);
+    `,
+      params,
+    );
 
     return snapshots.length;
   }
 
-  async getKeyPatternSnapshots(options: KeyPatternQueryOptions = {}): Promise<KeyPatternSnapshot[]> {
+  async getKeyPatternSnapshots(
+    options: KeyPatternQueryOptions = {},
+  ): Promise<KeyPatternSnapshot[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -1826,17 +1892,24 @@ export class PostgresAdapter implements StoragePort {
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
-    const result = await this.pool.query(`
+    const result = await this.pool.query(
+      `
       SELECT * FROM key_pattern_snapshots
       ${whereClause}
       ORDER BY timestamp DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
-    `, [...params, limit, offset]);
+    `,
+      [...params, limit, offset],
+    );
 
     return result.rows.map((row) => this.mappers.mapKeyPatternSnapshotRow(row));
   }
 
-  async getKeyAnalyticsSummary(startTime?: number, endTime?: number, connectionId?: string): Promise<KeyAnalyticsSummary | null> {
+  async getKeyAnalyticsSummary(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<KeyAnalyticsSummary | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -1858,25 +1931,33 @@ export class PostgresAdapter implements StoragePort {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const latestSnapshotsResult = await this.pool.query(`
+    const latestSnapshotsResult = await this.pool.query(
+      `
       SELECT pattern, MAX(timestamp) as latest_timestamp
       FROM key_pattern_snapshots
       ${whereClause}
       GROUP BY pattern
-    `, params);
+    `,
+      params,
+    );
 
     if (latestSnapshotsResult.rows.length === 0) return null;
 
-    const patternConditions = latestSnapshotsResult.rows.map(() => '(pattern = ? AND timestamp = ?)').join(' OR ');
+    const patternConditions = latestSnapshotsResult.rows
+      .map(() => '(pattern = ? AND timestamp = ?)')
+      .join(' OR ');
     const patternParams: any[] = [];
     for (const row of latestSnapshotsResult.rows) {
       patternParams.push(row.pattern, row.latest_timestamp);
     }
 
     let pIdx = 1;
-    const patternPlaceholders = latestSnapshotsResult.rows.map(() => `(pattern = $${pIdx++} AND timestamp = $${pIdx++})`).join(' OR ');
+    const patternPlaceholders = latestSnapshotsResult.rows
+      .map(() => `(pattern = $${pIdx++} AND timestamp = $${pIdx++})`)
+      .join(' OR ');
 
-    const summaryResult = await this.pool.query(`
+    const summaryResult = await this.pool.query(
+      `
       SELECT
         COUNT(DISTINCT pattern) as total_patterns,
         SUM(key_count) as total_keys,
@@ -1887,15 +1968,20 @@ export class PostgresAdapter implements StoragePort {
         SUM(keys_expiring_soon) as keys_expiring_soon
       FROM key_pattern_snapshots
       WHERE ${patternPlaceholders}
-    `, patternParams);
+    `,
+      patternParams,
+    );
 
     const summary = summaryResult.rows[0];
 
-    const patternRowsResult = await this.pool.query(`
+    const patternRowsResult = await this.pool.query(
+      `
       SELECT pattern, key_count, total_memory_bytes, avg_memory_bytes, stale_key_count, hot_key_count, cold_key_count
       FROM key_pattern_snapshots
       WHERE ${patternPlaceholders}
-    `, patternParams);
+    `,
+      patternParams,
+    );
 
     const byPattern: Record<string, any> = {};
     for (const row of patternRowsResult.rows) {
@@ -1909,14 +1995,21 @@ export class PostgresAdapter implements StoragePort {
       };
     }
 
-    const timeRangeResult = await this.pool.query(`
+    const timeRangeResult = await this.pool.query(
+      `
       SELECT MIN(timestamp) as earliest, MAX(timestamp) as latest
       FROM key_pattern_snapshots ${whereClause}
-    `, params);
+    `,
+      params,
+    );
 
-    const timeRange = timeRangeResult.rows[0].earliest !== null && timeRangeResult.rows[0].latest !== null
-      ? { earliest: parseInt(timeRangeResult.rows[0].earliest), latest: parseInt(timeRangeResult.rows[0].latest) }
-      : null;
+    const timeRange =
+      timeRangeResult.rows[0].earliest !== null && timeRangeResult.rows[0].latest !== null
+        ? {
+            earliest: parseInt(timeRangeResult.rows[0].earliest),
+            latest: parseInt(timeRangeResult.rows[0].latest),
+          }
+        : null;
 
     return {
       totalPatterns: parseInt(summary.total_patterns) || 0,
@@ -1931,12 +2024,19 @@ export class PostgresAdapter implements StoragePort {
     };
   }
 
-  async getKeyPatternTrends(pattern: string, startTime: number, endTime: number, connectionId?: string): Promise<Array<{
-    timestamp: number;
-    keyCount: number;
-    memoryBytes: number;
-    staleCount: number;
-  }>> {
+  async getKeyPatternTrends(
+    pattern: string,
+    startTime: number,
+    endTime: number,
+    connectionId?: string,
+  ): Promise<
+    Array<{
+      timestamp: number;
+      keyCount: number;
+      memoryBytes: number;
+      staleCount: number;
+    }>
+  > {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions = ['pattern = $1', 'timestamp >= $2', 'timestamp <= $3'];
@@ -1947,14 +2047,17 @@ export class PostgresAdapter implements StoragePort {
       params.push(connectionId);
     }
 
-    const result = await this.pool.query(`
+    const result = await this.pool.query(
+      `
       SELECT timestamp, key_count, total_memory_bytes, stale_key_count
       FROM key_pattern_snapshots
       WHERE ${conditions.join(' AND ')}
       ORDER BY timestamp ASC
-    `, params);
+    `,
+      params,
+    );
 
-    return result.rows.map(row => ({
+    return result.rows.map((row) => ({
       timestamp: parseInt(row.timestamp),
       keyCount: row.key_count,
       memoryBytes: parseInt(row.total_memory_bytes),
@@ -1962,26 +2065,28 @@ export class PostgresAdapter implements StoragePort {
     }));
   }
 
-  async pruneOldKeyPatternSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldKeyPatternSnapshots(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM key_pattern_snapshots WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM key_pattern_snapshots WHERE timestamp < $1',
-      [cutoffTimestamp]
-    );
+    const result = await this.pool.query('DELETE FROM key_pattern_snapshots WHERE timestamp < $1', [
+      cutoffTimestamp,
+    ]);
 
     return result.rowCount ?? 0;
   }
 
-  async saveHotKeys(entries: import('../../common/interfaces/storage-port.interface').HotKeyEntry[], connectionId: string): Promise<number> {
+  async saveHotKeys(entries: HotKeyEntry[], connectionId: string): Promise<number> {
     if (!this.pool || entries.length === 0) return 0;
 
     const values: string[] = [];
@@ -1989,7 +2094,9 @@ export class PostgresAdapter implements StoragePort {
     let paramIndex = 1;
 
     for (const entry of entries) {
-      values.push(`($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`);
+      values.push(
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
+      );
       params.push(
         entry.id,
         entry.keyName,
@@ -2004,17 +2111,20 @@ export class PostgresAdapter implements StoragePort {
       );
     }
 
-    await this.pool.query(`
+    await this.pool.query(
+      `
       INSERT INTO hot_key_stats (
         id, key_name, connection_id, captured_at, signal_type,
         freq_score, idle_seconds, memory_bytes, ttl, rank
       ) VALUES ${values.join(', ')}
-    `, params);
+    `,
+      params,
+    );
 
     return entries.length;
   }
 
-  async getHotKeys(options: import('../../common/interfaces/storage-port.interface').HotKeyQueryOptions = {}): Promise<import('../../common/interfaces/storage-port.interface').HotKeyEntry[]> {
+  async getHotKeys(options: HotKeyQueryOptions = {}): Promise<HotKeyEntry[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2056,14 +2166,17 @@ export class PostgresAdapter implements StoragePort {
     const limit = options.limit ?? 50;
     const offset = options.offset ?? 0;
 
-    const result = await this.pool.query(`
+    const result = await this.pool.query(
+      `
       SELECT id, key_name, connection_id, captured_at, signal_type,
              freq_score, idle_seconds, memory_bytes, ttl, rank
       FROM hot_key_stats
       ${whereClause}
       ORDER BY captured_at DESC, rank ASC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
-    `, [...params, limit, offset]);
+    `,
+      [...params, limit, offset],
+    );
 
     return result.rows.map((row: any) => ({
       id: row.id,
@@ -2085,15 +2198,14 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM hot_key_stats WHERE captured_at < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM hot_key_stats WHERE captured_at < $1',
-      [cutoffTimestamp]
-    );
+    const result = await this.pool.query('DELETE FROM hot_key_stats WHERE captured_at < $1', [
+      cutoffTimestamp,
+    ]);
     return result.rowCount ?? 0;
   }
 
@@ -2117,14 +2229,18 @@ export class PostgresAdapter implements StoragePort {
       `INSERT INTO app_settings (
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
+        throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
         updated_at, created_at
-      ) VALUES (1, $1, $2, $3, $4, $5, $6, $7)
+      ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = EXCLUDED.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = EXCLUDED.client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms = EXCLUDED.anomaly_poll_interval_ms,
         anomaly_cache_ttl_ms = EXCLUDED.anomaly_cache_ttl_ms,
         anomaly_prometheus_interval_ms = EXCLUDED.anomaly_prometheus_interval_ms,
+        throughput_forecasting_enabled = EXCLUDED.throughput_forecasting_enabled,
+        throughput_forecasting_default_rolling_window_ms = EXCLUDED.throughput_forecasting_default_rolling_window_ms,
+        throughput_forecasting_default_alert_threshold_ms = EXCLUDED.throughput_forecasting_default_alert_threshold_ms,
         updated_at = EXCLUDED.updated_at`,
       [
         settings.auditPollIntervalMs,
@@ -2132,9 +2248,12 @@ export class PostgresAdapter implements StoragePort {
         settings.anomalyPollIntervalMs,
         settings.anomalyCacheTtlMs,
         settings.anomalyPrometheusIntervalMs,
+        settings.metricForecastingEnabled,
+        settings.metricForecastingDefaultRollingWindowMs,
+        settings.metricForecastingDefaultAlertThresholdMs,
         now,
-        settings.createdAt || now
-      ]
+        settings.createdAt || now,
+      ],
     );
 
     const saved = await this.getSettings();
@@ -2180,7 +2299,7 @@ export class PostgresAdapter implements StoragePort {
         webhook.alertConfig ? JSON.stringify(webhook.alertConfig) : null,
         webhook.thresholds ? JSON.stringify(webhook.thresholds) : null,
         webhook.connectionId || null,
-      ]
+      ],
     );
 
     return this.mappers.mapWebhookRow(result.rows[0]);
@@ -2201,13 +2320,15 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'SELECT * FROM webhooks WHERE connection_id = $1 OR connection_id IS NULL ORDER BY created_at DESC',
-        [connectionId]
+        [connectionId],
       );
       return result.rows.map((row) => this.mappers.mapWebhookRow(row));
     }
 
     // No connectionId provided - only return global webhooks (not scoped to any connection)
-    const result = await this.pool.query('SELECT * FROM webhooks WHERE connection_id IS NULL ORDER BY created_at DESC');
+    const result = await this.pool.query(
+      'SELECT * FROM webhooks WHERE connection_id IS NULL ORDER BY created_at DESC',
+    );
     return result.rows.map((row) => this.mappers.mapWebhookRow(row));
   }
 
@@ -2218,7 +2339,7 @@ export class PostgresAdapter implements StoragePort {
       // Return webhooks scoped to this connection OR global webhooks (no connectionId)
       const result = await this.pool.query(
         'SELECT * FROM webhooks WHERE enabled = true AND $1 = ANY(events) AND (connection_id = $2 OR connection_id IS NULL)',
-        [event, connectionId]
+        [event, connectionId],
       );
       return result.rows.map((row) => this.mappers.mapWebhookRow(row));
     }
@@ -2226,13 +2347,16 @@ export class PostgresAdapter implements StoragePort {
     // No connectionId provided - only return global webhooks (not scoped to any connection)
     const result = await this.pool.query(
       'SELECT * FROM webhooks WHERE enabled = true AND $1 = ANY(events) AND connection_id IS NULL',
-      [event]
+      [event],
     );
 
     return result.rows.map((row) => this.mappers.mapWebhookRow(row));
   }
 
-  async updateWebhook(id: string, updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>): Promise<Webhook | null> {
+  async updateWebhook(
+    id: string,
+    updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<Webhook | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const setClauses: string[] = [];
@@ -2293,7 +2417,7 @@ export class PostgresAdapter implements StoragePort {
 
     const result = await this.pool.query(
       `UPDATE webhooks SET ${setClauses.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
-      params
+      params,
     );
 
     if (result.rows.length === 0) return null;
@@ -2308,7 +2432,9 @@ export class PostgresAdapter implements StoragePort {
     return (result.rowCount ?? 0) > 0;
   }
 
-  async createDelivery(delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>): Promise<WebhookDelivery> {
+  async createDelivery(
+    delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>,
+  ): Promise<WebhookDelivery> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const result = await this.pool.query(
@@ -2330,7 +2456,7 @@ export class PostgresAdapter implements StoragePort {
         delivery.completedAt ? new Date(delivery.completedAt) : null,
         delivery.durationMs || null,
         delivery.connectionId || null,
-      ]
+      ],
     );
 
     return this.mappers.mapDeliveryRow(result.rows[0]);
@@ -2345,18 +2471,25 @@ export class PostgresAdapter implements StoragePort {
     return this.mappers.mapDeliveryRow(result.rows[0]);
   }
 
-  async getDeliveriesByWebhook(webhookId: string, limit: number = 50, offset: number = 0): Promise<WebhookDelivery[]> {
+  async getDeliveriesByWebhook(
+    webhookId: string,
+    limit: number = 50,
+    offset: number = 0,
+  ): Promise<WebhookDelivery[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const result = await this.pool.query(
       'SELECT * FROM webhook_deliveries WHERE webhook_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3',
-      [webhookId, limit, offset]
+      [webhookId, limit, offset],
     );
 
     return result.rows.map((row) => this.mappers.mapDeliveryRow(row));
   }
 
-  async updateDelivery(id: string, updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>): Promise<boolean> {
+  async updateDelivery(
+    id: string,
+    updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>,
+  ): Promise<boolean> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const setClauses: string[] = [];
@@ -2398,13 +2531,16 @@ export class PostgresAdapter implements StoragePort {
 
     const result = await this.pool.query(
       `UPDATE webhook_deliveries SET ${setClauses.join(', ')} WHERE id = $${paramIndex}`,
-      params
+      params,
     );
 
     return (result.rowCount ?? 0) > 0;
   }
 
-  async getRetriableDeliveries(limit: number = 100, connectionId?: string): Promise<WebhookDelivery[]> {
+  async getRetriableDeliveries(
+    limit: number = 100,
+    connectionId?: string,
+  ): Promise<WebhookDelivery[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
@@ -2416,7 +2552,7 @@ export class PostgresAdapter implements StoragePort {
          ORDER BY next_retry_at ASC
          LIMIT $1
          FOR UPDATE SKIP LOCKED`,
-        [limit, connectionId]
+        [limit, connectionId],
       );
       return result.rows.map((row) => this.mappers.mapDeliveryRow(row));
     }
@@ -2428,7 +2564,7 @@ export class PostgresAdapter implements StoragePort {
        ORDER BY next_retry_at ASC
        LIMIT $1
        FOR UPDATE SKIP LOCKED`,
-      [limit]
+      [limit],
     );
 
     return result.rows.map((row) => this.mappers.mapDeliveryRow(row));
@@ -2440,14 +2576,14 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM webhook_deliveries WHERE EXTRACT(EPOCH FROM created_at) * 1000 < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
     const result = await this.pool.query(
       'DELETE FROM webhook_deliveries WHERE EXTRACT(EPOCH FROM created_at) * 1000 < $1',
-      [cutoffTimestamp]
+      [cutoffTimestamp],
     );
 
     return result.rowCount ?? 0;
@@ -2470,7 +2606,7 @@ export class PostgresAdapter implements StoragePort {
         entry.id,
         entry.timestamp,
         entry.duration,
-        entry.command,  // PostgreSQL will accept string[] for TEXT[]
+        entry.command, // PostgreSQL will accept string[] for TEXT[]
         entry.clientAddress || '',
         entry.clientName || '',
         entry.capturedAt,
@@ -2537,7 +2673,7 @@ export class PostgresAdapter implements StoragePort {
       ${whereClause}
       ORDER BY timestamp DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     return result.rows.map((row) => this.mappers.mapSlowLogEntryRow(row));
@@ -2549,15 +2685,13 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = $1',
-        [connectionId]
+        [connectionId],
       );
       const maxId = result.rows[0]?.max_id;
       return maxId !== null && maxId !== undefined ? Number(maxId) : null;
     }
 
-    const result = await this.pool.query(
-      'SELECT MAX(slowlog_id) as max_id FROM slow_log_entries'
-    );
+    const result = await this.pool.query('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries');
 
     const maxId = result.rows[0]?.max_id;
     return maxId !== null && maxId !== undefined ? Number(maxId) : null;
@@ -2569,21 +2703,23 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM slow_log_entries WHERE captured_at < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM slow_log_entries WHERE captured_at < $1',
-      [cutoffTimestamp]
-    );
+    const result = await this.pool.query('DELETE FROM slow_log_entries WHERE captured_at < $1', [
+      cutoffTimestamp,
+    ]);
 
     return result.rowCount ?? 0;
   }
 
   // Command Log Methods (Valkey-specific)
-  async saveCommandLogEntries(entries: StoredCommandLogEntry[], connectionId: string): Promise<number> {
+  async saveCommandLogEntries(
+    entries: StoredCommandLogEntry[],
+    connectionId: string,
+  ): Promise<number> {
     if (!this.pool || entries.length === 0) return 0;
 
     const values: any[] = [];
@@ -2623,7 +2759,9 @@ export class PostgresAdapter implements StoragePort {
     return result.rowCount ?? 0;
   }
 
-  async getCommandLogEntries(options: CommandLogQueryOptions = {}): Promise<StoredCommandLogEntry[]> {
+  async getCommandLogEntries(
+    options: CommandLogQueryOptions = {},
+  ): Promise<StoredCommandLogEntry[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2671,7 +2809,7 @@ export class PostgresAdapter implements StoragePort {
       ${whereClause}
       ORDER BY timestamp DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     return result.rows.map((row) => this.mappers.mapCommandLogEntryRow(row));
@@ -2683,7 +2821,7 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = $1 AND connection_id = $2',
-        [type, connectionId]
+        [type, connectionId],
       );
       const maxId = result.rows[0]?.max_id;
       return maxId !== null && maxId !== undefined ? Number(maxId) : null;
@@ -2691,7 +2829,7 @@ export class PostgresAdapter implements StoragePort {
 
     const result = await this.pool.query(
       'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = $1',
-      [type]
+      [type],
     );
 
     const maxId = result.rows[0]?.max_id;
@@ -2704,21 +2842,23 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM command_log_entries WHERE captured_at < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM command_log_entries WHERE captured_at < $1',
-      [cutoffTimestamp]
-    );
+    const result = await this.pool.query('DELETE FROM command_log_entries WHERE captured_at < $1', [
+      cutoffTimestamp,
+    ]);
 
     return result.rowCount ?? 0;
   }
 
   // Latency Snapshot Methods
-  async saveLatencySnapshots(snapshots: StoredLatencySnapshot[], connectionId: string): Promise<number> {
+  async saveLatencySnapshots(
+    snapshots: StoredLatencySnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     if (!this.pool || snapshots.length === 0) return 0;
 
     const values: any[] = [];
@@ -2749,7 +2889,9 @@ export class PostgresAdapter implements StoragePort {
     return result.rowCount ?? 0;
   }
 
-  async getLatencySnapshots(options: LatencySnapshotQueryOptions = {}): Promise<StoredLatencySnapshot[]> {
+  async getLatencySnapshots(
+    options: LatencySnapshotQueryOptions = {},
+  ): Promise<StoredLatencySnapshot[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2799,20 +2941,22 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM latency_snapshots WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM latency_snapshots WHERE timestamp < $1',
-      [cutoffTimestamp]
-    );
+    const result = await this.pool.query('DELETE FROM latency_snapshots WHERE timestamp < $1', [
+      cutoffTimestamp,
+    ]);
     return result.rowCount ?? 0;
   }
 
   // Latency Histogram Methods
-  async saveLatencyHistogram(histogram: import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram, connectionId: string): Promise<number> {
+  async saveLatencyHistogram(
+    histogram: StoredLatencyHistogram,
+    connectionId: string,
+  ): Promise<number> {
     if (!this.pool) return 0;
 
     const result = await this.pool.query(
@@ -2823,7 +2967,9 @@ export class PostgresAdapter implements StoragePort {
     return result.rowCount ?? 0;
   }
 
-  async getLatencyHistograms(options: { connectionId?: string; startTime?: number; endTime?: number; limit?: number } = {}): Promise<import('../../common/interfaces/storage-port.interface').StoredLatencyHistogram[]> {
+  async getLatencyHistograms(
+    options: { connectionId?: string; startTime?: number; endTime?: number; limit?: number } = {},
+  ): Promise<StoredLatencyHistogram[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2859,7 +3005,10 @@ export class PostgresAdapter implements StoragePort {
     return result.rows.map((row: any) => ({
       id: row.id,
       timestamp: Number(row.timestamp),
-      data: typeof row.histogram_data === 'string' ? JSON.parse(row.histogram_data) : row.histogram_data,
+      data:
+        typeof row.histogram_data === 'string'
+          ? JSON.parse(row.histogram_data)
+          : row.histogram_data,
       connectionId: row.connection_id,
     }));
   }
@@ -2870,20 +3019,22 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM latency_histograms WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM latency_histograms WHERE timestamp < $1',
-      [cutoffTimestamp]
-    );
+    const result = await this.pool.query('DELETE FROM latency_histograms WHERE timestamp < $1', [
+      cutoffTimestamp,
+    ]);
     return result.rowCount ?? 0;
   }
 
   // Memory Snapshot Methods
-  async saveMemorySnapshots(snapshots: StoredMemorySnapshot[], connectionId: string): Promise<number> {
+  async saveMemorySnapshots(
+    snapshots: StoredMemorySnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     if (!this.pool || snapshots.length === 0) return 0;
 
     const values: any[] = [];
@@ -2927,7 +3078,9 @@ export class PostgresAdapter implements StoragePort {
     return result.rowCount ?? 0;
   }
 
-  async getMemorySnapshots(options: MemorySnapshotQueryOptions = {}): Promise<StoredMemorySnapshot[]> {
+  async getMemorySnapshots(
+    options: MemorySnapshotQueryOptions = {},
+  ): Promise<StoredMemorySnapshot[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2987,20 +3140,22 @@ export class PostgresAdapter implements StoragePort {
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM memory_snapshots WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
-    const result = await this.pool.query(
-      'DELETE FROM memory_snapshots WHERE timestamp < $1',
-      [cutoffTimestamp]
-    );
+    const result = await this.pool.query('DELETE FROM memory_snapshots WHERE timestamp < $1', [
+      cutoffTimestamp,
+    ]);
     return result.rowCount ?? 0;
   }
 
   // Vector Index Snapshot Methods
-  async saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number> {
+  async saveVectorIndexSnapshots(
+    snapshots: VectorIndexSnapshot[],
+    connectionId: string,
+  ): Promise<number> {
     if (!this.pool || snapshots.length === 0) return 0;
 
     const values: any[] = [];
@@ -3008,7 +3163,9 @@ export class PostgresAdapter implements StoragePort {
     let paramIndex = 1;
 
     for (const snapshot of snapshots) {
-      placeholders.push(`($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`);
+      placeholders.push(
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
+      );
       values.push(
         snapshot.id,
         snapshot.timestamp,
@@ -3029,7 +3186,9 @@ export class PostgresAdapter implements StoragePort {
     return result.rowCount ?? 0;
   }
 
-  async getVectorIndexSnapshots(options: VectorIndexSnapshotQueryOptions = {}): Promise<VectorIndexSnapshot[]> {
+  async getVectorIndexSnapshots(
+    options: VectorIndexSnapshotQueryOptions = {},
+  ): Promise<VectorIndexSnapshot[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -3076,29 +3235,33 @@ export class PostgresAdapter implements StoragePort {
     }));
   }
 
-  async pruneOldVectorIndexSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldVectorIndexSnapshots(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
       const result = await this.pool.query(
         'DELETE FROM vector_index_snapshots WHERE timestamp < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId]
+        [cutoffTimestamp, connectionId],
       );
       return result.rowCount ?? 0;
     }
 
     const result = await this.pool.query(
       'DELETE FROM vector_index_snapshots WHERE timestamp < $1',
-      [cutoffTimestamp]
+      [cutoffTimestamp],
     );
     return result.rowCount ?? 0;
   }
 
   // Connection Management Methods
-  async saveConnection(config: import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig): Promise<void> {
+  async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
 
-    await this.pool.query(`
+    await this.pool.query(
+      `
       INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, is_default, created_at, updated_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       ON CONFLICT(id) DO UPDATE SET
@@ -3112,28 +3275,30 @@ export class PostgresAdapter implements StoragePort {
         tls = EXCLUDED.tls,
         is_default = EXCLUDED.is_default,
         updated_at = EXCLUDED.updated_at
-    `, [
-      config.id,
-      config.name,
-      config.host,
-      config.port,
-      config.username || null,
-      config.password || null,
-      config.passwordEncrypted || false,
-      config.dbIndex || 0,
-      config.tls || false,
-      config.isDefault || false,
-      config.createdAt,
-      config.updatedAt || null,
-    ]);
+    `,
+      [
+        config.id,
+        config.name,
+        config.host,
+        config.port,
+        config.username || null,
+        config.password || null,
+        config.passwordEncrypted || false,
+        config.dbIndex || 0,
+        config.tls || false,
+        config.isDefault || false,
+        config.createdAt,
+        config.updatedAt || null,
+      ],
+    );
   }
 
-  async getConnections(): Promise<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig[]> {
+  async getConnections(): Promise<DatabaseConnectionConfig[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const result = await this.pool.query('SELECT * FROM connections ORDER BY created_at ASC');
 
-    return result.rows.map(row => ({
+    return result.rows.map((row) => ({
       id: row.id,
       name: row.name,
       host: row.host,
@@ -3149,7 +3314,7 @@ export class PostgresAdapter implements StoragePort {
     }));
   }
 
-  async getConnection(id: string): Promise<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig | null> {
+  async getConnection(id: string): Promise<DatabaseConnectionConfig | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const result = await this.pool.query('SELECT * FROM connections WHERE id = $1', [id]);
@@ -3177,7 +3342,7 @@ export class PostgresAdapter implements StoragePort {
     await this.pool.query('DELETE FROM connections WHERE id = $1', [id]);
   }
 
-  async updateConnection(id: string, updates: Partial<import('../../common/interfaces/storage-port.interface').DatabaseConnectionConfig>): Promise<void> {
+  async updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const setClauses: string[] = [];
@@ -3225,13 +3390,22 @@ export class PostgresAdapter implements StoragePort {
 
     await this.pool.query(
       `UPDATE connections SET ${setClauses.join(', ')} WHERE id = $${paramIndex}`,
-      params
+      params,
     );
   }
 
   // Agent Token Methods
 
-  async saveAgentToken(token: { id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }): Promise<void> {
+  async saveAgentToken(token: {
+    id: string;
+    name: string;
+    type: 'agent' | 'mcp';
+    tokenHash: string;
+    createdAt: number;
+    expiresAt: number;
+    revokedAt: number | null;
+    lastUsedAt: number | null;
+  }): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
     await this.pool.query(
       `INSERT INTO agent_tokens (id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at)
@@ -3243,11 +3417,31 @@ export class PostgresAdapter implements StoragePort {
          expires_at = EXCLUDED.expires_at,
          revoked_at = EXCLUDED.revoked_at,
          last_used_at = EXCLUDED.last_used_at`,
-      [token.id, token.name, token.type, token.tokenHash, token.createdAt, token.expiresAt, token.revokedAt, token.lastUsedAt]
+      [
+        token.id,
+        token.name,
+        token.type,
+        token.tokenHash,
+        token.createdAt,
+        token.expiresAt,
+        token.revokedAt,
+        token.lastUsedAt,
+      ],
     );
   }
 
-  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<Array<{ id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null }>> {
+  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<
+    Array<{
+      id: string;
+      name: string;
+      type: 'agent' | 'mcp';
+      tokenHash: string;
+      createdAt: number;
+      expiresAt: number;
+      revokedAt: number | null;
+      lastUsedAt: number | null;
+    }>
+  > {
     if (!this.pool) throw new Error('Database not initialized');
     const query = type
       ? `SELECT id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at
@@ -3267,12 +3461,21 @@ export class PostgresAdapter implements StoragePort {
     }));
   }
 
-  async getAgentTokenByHash(hash: string): Promise<{ id: string; name: string; type: 'agent' | 'mcp'; tokenHash: string; createdAt: number; expiresAt: number; revokedAt: number | null; lastUsedAt: number | null } | null> {
+  async getAgentTokenByHash(hash: string): Promise<{
+    id: string;
+    name: string;
+    type: 'agent' | 'mcp';
+    tokenHash: string;
+    createdAt: number;
+    expiresAt: number;
+    revokedAt: number | null;
+    lastUsedAt: number | null;
+  } | null> {
     if (!this.pool) throw new Error('Database not initialized');
     const result = await this.pool.query(
       `SELECT id, name, type, token_hash, created_at, expires_at, revoked_at, last_used_at
        FROM agent_tokens WHERE token_hash = $1`,
-      [hash]
+      [hash],
     );
     if (result.rows.length === 0) return null;
     const row = result.rows[0];
@@ -3290,17 +3493,93 @@ export class PostgresAdapter implements StoragePort {
 
   async revokeAgentToken(id: string): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
-    await this.pool.query(
-      `UPDATE agent_tokens SET revoked_at = $1 WHERE id = $2`,
-      [Date.now(), id]
-    );
+    await this.pool.query(`UPDATE agent_tokens SET revoked_at = $1 WHERE id = $2`, [
+      Date.now(),
+      id,
+    ]);
   }
 
   async updateAgentTokenLastUsed(id: string): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
-    await this.pool.query(
-      `UPDATE agent_tokens SET last_used_at = $1 WHERE id = $2`,
-      [Date.now(), id]
+    await this.pool.query(`UPDATE agent_tokens SET last_used_at = $1 WHERE id = $2`, [
+      Date.now(),
+      id,
+    ]);
+  }
+
+  // Metric Forecasting Settings
+
+  private mapMetricForecastRow(row: any): MetricForecastSettings {
+    return {
+      connectionId: row.connection_id,
+      metricKind: row.metric_kind as MetricKind,
+      enabled: row.enabled,
+      ceiling: row.ceiling ?? null,
+      rollingWindowMs: row.rolling_window_ms,
+      alertThresholdMs: row.alert_threshold_ms,
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  async getMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<MetricForecastSettings | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT * FROM metric_forecast_settings WHERE connection_id = $1 AND metric_kind = $2',
+      [connectionId, metricKind],
     );
+    if (result.rows.length === 0) return null;
+    return this.mapMetricForecastRow(result.rows[0]);
+  }
+
+  async saveMetricForecastSettings(
+    settings: MetricForecastSettings,
+  ): Promise<MetricForecastSettings> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `
+      INSERT INTO metric_forecast_settings
+        (connection_id, metric_kind, enabled, ceiling, rolling_window_ms, alert_threshold_ms, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT(connection_id, metric_kind) DO UPDATE SET
+        enabled = EXCLUDED.enabled,
+        ceiling = EXCLUDED.ceiling,
+        rolling_window_ms = EXCLUDED.rolling_window_ms,
+        alert_threshold_ms = EXCLUDED.alert_threshold_ms,
+        updated_at = EXCLUDED.updated_at
+    `,
+      [
+        settings.connectionId,
+        settings.metricKind,
+        settings.enabled,
+        settings.ceiling,
+        settings.rollingWindowMs,
+        settings.alertThresholdMs,
+        settings.updatedAt,
+      ],
+    );
+    return { ...settings };
+  }
+
+  async deleteMetricForecastSettings(
+    connectionId: string,
+    metricKind: MetricKind,
+  ): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'DELETE FROM metric_forecast_settings WHERE connection_id = $1 AND metric_kind = $2',
+      [connectionId, metricKind],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT * FROM metric_forecast_settings WHERE enabled = true',
+    );
+    return result.rows.map((row: any) => this.mapMetricForecastRow(row));
   }
 }

@@ -5,8 +5,8 @@ if (!process.env.DB_HOST) {
 }
 
 if (!process.env.DB_PORT) {
-  // Default to Valkey port from docker-compose (6380 mapped to host)
-  process.env.DB_PORT = process.env.TEST_DB_PORT || '6380';
+  // Default to Valkey port from docker-compose.test.yml (6390 mapped to host)
+  process.env.DB_PORT = process.env.TEST_DB_PORT || '6390';
 }
 
 if (!process.env.DB_PASSWORD) {

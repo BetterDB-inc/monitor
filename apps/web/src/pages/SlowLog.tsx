@@ -1,16 +1,19 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useCapabilities } from '../hooks/useCapabilities';
 import { useConnection } from '../hooks/useConnection';
+import { useStoredSlowLog } from '../hooks/useStoredSlowLog';
+import { useStoredCommandLog, COMMAND_LOG_PAGE_SIZE } from '../hooks/useStoredCommandLog';
+import { useStoredCommandLogPatterns } from '../hooks/useStoredCommandLogPatterns';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { SlowLogTable } from '../components/metrics/SlowLogTable';
 import { CommandLogTable } from '../components/metrics/CommandLogTable';
 import { SlowLogPatternAnalysisView } from '../components/metrics/SlowLogPatternAnalysis';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { UnavailableOverlay } from '../components/UnavailableOverlay';
-import type { CommandLogType, SlowLogEntry, CommandLogEntry } from '../types/metrics';
+import type { CommandLogType } from '../types/metrics';
 
 function getTabFromParams(params: URLSearchParams): CommandLogType {
   const tab = params.get('tab');
@@ -42,7 +45,7 @@ export function SlowLog() {
   const [viewMode, setViewMode] = useState<'table' | 'patterns'>('table');
 
   // Pagination state (only for stored/filtered data)
-  const PAGE_SIZE = 100;
+  const PAGE_SIZE = COMMAND_LOG_PAGE_SIZE;
   const [page, setPage] = useState(0);
 
   // Time filter state — initialise from URL ?start=&end= (epoch ms)
@@ -94,27 +97,12 @@ export function SlowLog() {
   });
 
   // Stored slow log (with time filter)
-  const [storedSlowLog, setStoredSlowLog] = useState<SlowLogEntry[] | null>(null);
-
-  useEffect(() => {
-    if (!isTimeFiltered || hasCommandLog) {
-      setStoredSlowLog(null);
-      return;
-    }
-
-    let cancelled = false;
-    metricsApi.getStoredSlowLog({ startTime, endTime, limit: 100 })
-      .then(data => {
-        if (!cancelled) {
-          setStoredSlowLog(data);
-        }
-      })
-      .catch(err => {
-        console.error('Failed to fetch stored slow log:', err);
-      });
-
-    return () => { cancelled = true; };
-  }, [startTime, endTime, isTimeFiltered, hasCommandLog, currentConnection?.id]);
+  const { data: storedSlowLog } = useStoredSlowLog({
+    connectionId: currentConnection?.id,
+    startTime,
+    endTime,
+    enabled: isTimeFiltered && !hasCommandLog,
+  });
 
   // Use stored data when filtered, live data otherwise
   const slowLog = isTimeFiltered ? storedSlowLog : liveSlowLog;
@@ -143,55 +131,21 @@ export function SlowLog() {
   });
 
   // Stored command log (with time filter and pagination)
-  const [storedCommandLog, setStoredCommandLog] = useState<{
-    slow: CommandLogEntry[] | null;
-    'large-request': CommandLogEntry[] | null;
-    'large-reply': CommandLogEntry[] | null;
-  }>({ slow: null, 'large-request': null, 'large-reply': null });
-  const [hasMoreEntries, setHasMoreEntries] = useState(false);
-
-  useEffect(() => {
-    if (!isTimeFiltered || !hasCommandLog) {
-      setStoredCommandLog({ slow: null, 'large-request': null, 'large-reply': null });
-      setHasMoreEntries(false);
-      return;
-    }
-
-    let cancelled = false;
-    const offset = page * PAGE_SIZE;
-
-    // Fetch only the active tab with pagination
-    metricsApi.getStoredCommandLog({
-      startTime,
-      endTime,
-      type: activeTab,
-      limit: PAGE_SIZE + 1, // Fetch one extra to check if there are more
-      offset,
-    }).then((entries) => {
-      if (!cancelled) {
-        // Check if there are more entries
-        const hasMore = entries.length > PAGE_SIZE;
-        setHasMoreEntries(hasMore);
-
-        // Only keep PAGE_SIZE entries
-        const trimmedEntries = hasMore ? entries.slice(0, PAGE_SIZE) : entries;
-
-        setStoredCommandLog(prev => ({
-          ...prev,
-          [activeTab]: trimmedEntries,
-        }));
-      }
-    }).catch(err => {
-      console.error('Failed to fetch stored command log:', err);
-    });
-
-    return () => { cancelled = true; };
-  }, [startTime, endTime, isTimeFiltered, hasCommandLog, activeTab, page, currentConnection?.id]);
+  const { data: storedCommandLogResult } = useStoredCommandLog({
+    connectionId: currentConnection?.id,
+    startTime,
+    endTime,
+    activeTab,
+    page,
+    enabled: isTimeFiltered && hasCommandLog,
+  });
+  const storedCommandLogEntries = storedCommandLogResult?.entries ?? null;
+  const hasMoreEntries = storedCommandLogResult?.hasMore ?? false;
 
   // Use stored data when filtered, live data otherwise
-  const commandLogSlow = isTimeFiltered ? storedCommandLog.slow : liveCommandLogSlow;
-  const commandLogLargeRequest = isTimeFiltered ? storedCommandLog['large-request'] : liveCommandLogLargeRequest;
-  const commandLogLargeReply = isTimeFiltered ? storedCommandLog['large-reply'] : liveCommandLogLargeReply;
+  const commandLogSlow = isTimeFiltered ? (activeTab === 'slow' ? storedCommandLogEntries : null) : liveCommandLogSlow;
+  const commandLogLargeRequest = isTimeFiltered ? (activeTab === 'large-request' ? storedCommandLogEntries : null) : liveCommandLogLargeRequest;
+  const commandLogLargeReply = isTimeFiltered ? (activeTab === 'large-reply' ? storedCommandLogEntries : null) : liveCommandLogLargeReply;
 
   // Pattern analysis (less frequent polling since it's analytical)
   // Live pattern analysis (no time filter)
@@ -211,27 +165,13 @@ export function SlowLog() {
   });
 
   // Stored pattern analysis (with time filter)
-  const [storedCommandLogPatternAnalysis, setStoredCommandLogPatternAnalysis] = useState<any>(null);
-
-  useEffect(() => {
-    if (!isTimeFiltered || !hasCommandLog || viewMode !== 'patterns') {
-      setStoredCommandLogPatternAnalysis(null);
-      return;
-    }
-
-    let cancelled = false;
-    metricsApi.getStoredCommandLogPatternAnalysis({ startTime, endTime, type: activeTab, limit: 500 })
-      .then(data => {
-        if (!cancelled) {
-          setStoredCommandLogPatternAnalysis(data);
-        }
-      })
-      .catch(err => {
-        console.error('Failed to fetch stored command log pattern analysis:', err);
-      });
-
-    return () => { cancelled = true; };
-  }, [startTime, endTime, isTimeFiltered, hasCommandLog, viewMode, activeTab, currentConnection?.id]);
+  const { data: storedCommandLogPatternAnalysis } = useStoredCommandLogPatterns({
+    connectionId: currentConnection?.id,
+    startTime,
+    endTime,
+    activeTab,
+    enabled: isTimeFiltered && hasCommandLog && viewMode === 'patterns',
+  });
 
   // Use stored data when filtered, live data otherwise
   const slowLogPatternAnalysis = liveSlowLogPatternAnalysis;

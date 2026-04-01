@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { licenseApi, type LicenseStatus } from '../api/license';
 import { Feature } from '@betterdb/shared';
 
@@ -15,17 +16,14 @@ export function useLicense() {
 }
 
 export function useLicenseStatus() {
-  const [license, setLicense] = useState<LicenseStatus | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
+  const { data, isLoading, error } = useQuery<LicenseStatus, Error>({
+    queryKey: ['license-status'],
+    queryFn: () => licenseApi.getStatus(),
+  });
 
-  useEffect(() => {
-    licenseApi
-      .getStatus()
-      .then(setLicense)
-      .catch(setError)
-      .finally(() => setLoading(false));
-  }, []);
-
-  return { license, loading, error };
+  return {
+    license: data ?? null,
+    loading: isLoading,
+    error: error ?? null,
+  };
 }

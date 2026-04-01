@@ -1,11 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { settingsApi } from '../api/settings';
-import { agentTokensApi, TokenListItem, GeneratedToken } from '../api/agent-tokens';
+import { agentTokensApi, GeneratedToken } from '../api/agent-tokens';
+import { useMcpTokens } from '../hooks/useMcpTokens';
 import { useConnection } from '../hooks/useConnection';
 import { AppSettings, SettingsUpdateRequest } from '@betterdb/shared';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
-
 type SettingsCategory = 'audit' | 'clientAnalytics' | 'anomaly' | 'mcpTokens';
 
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
@@ -20,31 +20,18 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [hasChanges, setHasChanges] = useState(false);
 
   // MCP Tokens state (must be before any early returns)
-  const [mcpTokens, setMcpTokens] = useState<TokenListItem[]>([]);
+  const { tokens: mcpTokens, invalidate: invalidateMcpTokens } = useMcpTokens(
+    isCloudMode && activeCategory === 'mcpTokens',
+  );
   const [mcpTokenName, setMcpTokenName] = useState('');
   const [mcpGenerating, setMcpGenerating] = useState(false);
   const [mcpGeneratedToken, setMcpGeneratedToken] = useState<GeneratedToken | null>(null);
   const [mcpCopied, setMcpCopied] = useState(false);
   const [mcpError, setMcpError] = useState<string | null>(null);
 
-  const loadMcpTokens = useCallback(async () => {
-    try {
-      const tokens = await agentTokensApi.list('mcp');
-      setMcpTokens(tokens);
-    } catch {
-      // Token API not available in community mode
-    }
-  }, []);
-
   useEffect(() => {
     loadSettings();
   }, [currentConnection?.id]);
-
-  useEffect(() => {
-    if (isCloudMode && activeCategory === 'mcpTokens') {
-      loadMcpTokens();
-    }
-  }, [isCloudMode, activeCategory, loadMcpTokens]);
 
   const loadSettings = async () => {
     try {
@@ -139,7 +126,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       const result = await agentTokensApi.generate(mcpTokenName.trim(), 'mcp');
       setMcpGeneratedToken(result);
       setMcpTokenName('');
-      await loadMcpTokens();
+      await invalidateMcpTokens();
     } catch (err) {
       setMcpError(err instanceof Error ? err.message : 'Failed to generate token');
     } finally {
@@ -150,7 +137,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const handleMcpRevoke = async (id: string) => {
     try {
       await agentTokensApi.revoke(id);
-      await loadMcpTokens();
+      await invalidateMcpTokens();
     } catch (err) {
       setMcpError(err instanceof Error ? err.message : 'Failed to revoke token');
     }

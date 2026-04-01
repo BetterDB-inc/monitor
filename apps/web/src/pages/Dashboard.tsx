@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { metricsApi } from '../api/metrics';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
+import { useStoredMemorySnapshots } from '../hooks/useStoredMemorySnapshots';
 import { ConnectionCard } from '../components/dashboard/ConnectionCard';
 import { OverviewCards } from '../components/dashboard/OverviewCards';
 import { MemoryChart } from '../components/dashboard/MemoryChart';
@@ -12,7 +13,6 @@ import { deriveStoredIoDeltas } from '../components/dashboard/io-threads.utils';
 import { EventTimeline } from '../components/dashboard/EventTimeline';
 import { CapabilitiesBadges } from '../components/dashboard/CapabilitiesBadges';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
-import type { StoredMemorySnapshot } from '../types/metrics';
 
 export function Dashboard() {
   const { currentConnection } = useConnection();
@@ -44,22 +44,12 @@ export function Dashboard() {
   const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
   const isTimeFiltered = startTime !== undefined && endTime !== undefined;
 
-  const [storedMemorySnapshots, setStoredMemorySnapshots] = useState<StoredMemorySnapshot[] | null>(null);
-
-  useEffect(() => {
-    if (!isTimeFiltered) {
-      setStoredMemorySnapshots(null);
-      return;
-    }
-
-    setStoredMemorySnapshots(null);
-    let cancelled = false;
-    metricsApi.getStoredMemorySnapshots({ startTime, endTime, limit: 500 })
-      .then(data => { if (!cancelled) setStoredMemorySnapshots(data); })
-      .catch(err => { console.error('Failed to fetch stored memory snapshots:', err); });
-
-    return () => { cancelled = true; };
-  }, [startTime, endTime, isTimeFiltered, currentConnection?.id]);
+  const { data: storedMemorySnapshots } = useStoredMemorySnapshots({
+    connectionId: currentConnection?.id,
+    startTime,
+    endTime,
+    enabled: isTimeFiltered,
+  });
 
   const sortedStoredSnapshots = storedMemorySnapshots
     ? [...storedMemorySnapshots].sort((a, b) => a.timestamp - b.timestamp)

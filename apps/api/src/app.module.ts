@@ -19,6 +19,7 @@ import { VectorSearchModule } from './vector-search/vector-search.module';
 import { MigrationModule } from './migration/migration.module';
 import { CloudAuthModule } from './auth/cloud-auth.module';
 import { McpModule } from './mcp/mcp.module';
+import { MetricForecastingModule } from './metric-forecasting/metric-forecasting.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -121,6 +122,7 @@ const baseImports = [
   McpModule,
   VectorSearchModule,
   MigrationModule,
+  MetricForecastingModule,
 ];
 
 const proprietaryImports = [

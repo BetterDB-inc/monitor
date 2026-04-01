@@ -6,6 +6,7 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
 import { SlowLogAnalyticsModule } from '../slowlog-analytics/slowlog-analytics.module';
 import { CommandLogAnalyticsModule } from '../commandlog-analytics/commandlog-analytics.module';
 import { HealthModule } from '../health/health.module';
+import { MetricForecastingModule } from '../metric-forecasting/metric-forecasting.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { HealthModule } from '../health/health.module';
     SlowLogAnalyticsModule,
     CommandLogAnalyticsModule,
     forwardRef(() => HealthModule),
+    MetricForecastingModule,
   ],
   controllers: [PrometheusController],
   providers: [PrometheusService],

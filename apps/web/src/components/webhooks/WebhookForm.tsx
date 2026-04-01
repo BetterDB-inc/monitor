@@ -64,6 +64,7 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'acl.violation': 'ACL Violation',
   'acl.modified': 'ACL Modified',
   'config.changed': 'Config Changed',
+  'metric_forecast.limit': 'Metric Forecast Limit',
 };
 
 // Tier display names

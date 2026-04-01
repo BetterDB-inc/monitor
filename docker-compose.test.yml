@@ -1,0 +1,56 @@
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: betterdb-test-valkey
+    ports:
+      - "6390:6379"
+    command: >
+      valkey-server
+      --requirepass devpassword
+      --slowlog-log-slower-than 0
+      --commandlog-request-larger-than 100
+      --commandlog-reply-larger-than 100
+      --commandlog-slow-execution-max-len 128
+      --commandlog-large-request-max-len 128
+      --commandlog-large-reply-max-len 128
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  redis:
+    image: redis:8-alpine
+    container_name: betterdb-test-redis
+    ports:
+      - "6392:6379"
+    command: >
+      redis-server
+      --requirepass devpassword
+      --appendonly yes
+      --slowlog-log-slower-than 10000
+      --slowlog-max-len 128
+      --latency-monitor-threshold 100
+      --acllog-max-len 128
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devpassword", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: betterdb-test-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: betterdb
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: betterdb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U betterdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    tmpfs:
+      - /var/lib/postgresql/data

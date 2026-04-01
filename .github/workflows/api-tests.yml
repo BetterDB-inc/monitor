@@ -52,8 +52,8 @@ jobs:
         if: failure()
         run: |
           echo "=== Valkey Logs ==="
-          docker logs betterdb-monitor-valkey 2>&1 | tail -50 || echo "Container not found"
+          docker logs betterdb-test-valkey 2>&1 | tail -50 || echo "Container not found"
           echo "=== Redis Logs ==="
-          docker logs betterdb-monitor-redis 2>&1 | tail -50 || echo "Container not found"
+          docker logs betterdb-test-redis 2>&1 | tail -50 || echo "Container not found"
           echo "=== PostgreSQL Logs ==="
-          docker logs betterdb-monitor-postgres 2>&1 | tail -50 || echo "Container not found"
+          docker logs betterdb-test-postgres 2>&1 | tail -50 || echo "Container not found"

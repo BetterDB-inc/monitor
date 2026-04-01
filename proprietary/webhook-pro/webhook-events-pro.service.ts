@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
 import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
-import { WebhookEventType } from '@betterdb/shared';
+import { WebhookEventType, type MetricKind } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
 
 /**
@@ -31,7 +31,9 @@ export class WebhookEventsProService implements OnModuleInit {
     if (this.isEnabled()) {
       this.logger.log('Webhook Pro events service initialized - PRO tier events enabled');
     } else {
-      this.logger.log('Webhook Pro events service initialized - PRO tier events disabled (requires license)');
+      this.logger.log(
+        'Webhook Pro events service initialized - PRO tier events disabled (requires license)',
+      );
     }
   }
 
@@ -72,7 +74,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -107,7 +109,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -142,7 +144,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -180,7 +182,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -215,7 +217,7 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -250,7 +252,51 @@ export class WebhookEventsProService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
+    );
+  }
+
+  /**
+   * Dispatch metric forecast limit event (PRO+)
+   * Called when projected time-to-limit drops below configured threshold
+   */
+  async dispatchMetricForecastLimit(data: {
+    event: WebhookEventType;
+    metricKind: MetricKind;
+    currentValue: number;
+    ceiling: number | null;
+    timeToLimitMs: number;
+    threshold: number;
+    growthRate: number;
+    timestamp: number;
+    instance?: { host: string; port: number };
+    connectionId: string;
+  }): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.log('Metric forecast limit event skipped - requires PRO license');
+      return;
+    }
+
+    const ceilingLabel = data.ceiling != null ? data.ceiling : 'unknown';
+    const timeHours = (data.timeToLimitMs / 3_600_000).toFixed(1);
+
+    await this.webhookDispatcher.dispatchThresholdAlert(
+      data.event,
+      `metric_forecast_limit:${data.connectionId}:${data.metricKind}`,
+      data.timeToLimitMs,
+      data.threshold,
+      false, // isAbove = false: fire when timeToLimit drops BELOW threshold
+      {
+        metricKind: data.metricKind,
+        currentValue: data.currentValue,
+        ceiling: data.ceiling,
+        timeToLimitMs: data.timeToLimitMs,
+        growthRate: data.growthRate,
+        message: `${data.metricKind} projected to reach ceiling (${ceilingLabel}) in ~${timeHours}h at current growth rate`,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
     );
   }
 }

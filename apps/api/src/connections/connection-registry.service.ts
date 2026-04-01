@@ -9,7 +9,8 @@ import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 
-const ENV_DEFAULT_ID = 'env-default';
+// TODO: Export and use across the codebase instead of hardcoded 'env-default' strings
+export const ENV_DEFAULT_ID = 'env-default';
 
 @Injectable()
 export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
