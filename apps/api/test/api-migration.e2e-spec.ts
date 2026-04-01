@@ -5,7 +5,7 @@ import { createTestApp } from './test-utils';
 
 /**
  * E2E tests for the /migration API endpoints.
- * Requires Valkey on 6380 (Docker) available.
+ * Requires Valkey available on DB_PORT (default 6390 from docker-compose.test.yml).
  */
 describe('Migration API (e2e)', () => {
   let app: NestFastifyApplication;
@@ -13,12 +13,13 @@ describe('Migration API (e2e)', () => {
   let targetConnectionId: string;
   let createdConnectionIds: string[] = [];
 
+  const dbPort = Number(process.env.DB_PORT) || 6390;
+  const dbPassword = process.env.DB_PASSWORD || 'devpassword';
+
   beforeAll(async () => {
     app = await createTestApp();
 
-    // Seed a handful of test keys on port 6380
-    const dbPassword = process.env.DB_PASSWORD || 'devpassword';
-    const seedClient = new Valkey({ host: 'localhost', port: 6380, password: dbPassword, lazyConnect: true });
+    const seedClient = new Valkey({ host: 'localhost', port: dbPort, password: dbPassword, lazyConnect: true });
     try {
       await seedClient.connect();
       await seedClient.set('migration:test:string', 'hello');
@@ -30,10 +31,10 @@ describe('Migration API (e2e)', () => {
       await seedClient.quit();
     }
 
-    // Create two connections both pointing to 6380
+    // Create two connections both pointing to the test Valkey instance
     const res1 = await request(app.getHttpServer())
       .post('/connections')
-      .send({ name: 'Migration Source', host: 'localhost', port: 6380, password: dbPassword });
+      .send({ name: 'Migration Source', host: 'localhost', port: dbPort, password: dbPassword });
     if (res1.status === 200 || res1.status === 201) {
       sourceConnectionId = res1.body.id;
       createdConnectionIds.push(sourceConnectionId);
@@ -41,7 +42,7 @@ describe('Migration API (e2e)', () => {
 
     const res2 = await request(app.getHttpServer())
       .post('/connections')
-      .send({ name: 'Migration Target', host: 'localhost', port: 6380, password: dbPassword });
+      .send({ name: 'Migration Target', host: 'localhost', port: dbPort, password: dbPassword });
     if (res2.status === 200 || res2.status === 201) {
       targetConnectionId = res2.body.id;
       createdConnectionIds.push(targetConnectionId);
@@ -50,7 +51,7 @@ describe('Migration API (e2e)', () => {
 
   afterAll(async () => {
     // Clean up test keys
-    const cleanupClient = new Valkey({ host: 'localhost', port: 6380, password: process.env.DB_PASSWORD || 'devpassword', lazyConnect: true });
+    const cleanupClient = new Valkey({ host: 'localhost', port: dbPort, password: dbPassword, lazyConnect: true });
     try {
       await cleanupClient.connect();
       await cleanupClient.del(
