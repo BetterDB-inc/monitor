@@ -58,7 +58,7 @@ export function MetricForecasting() {
       debounceTimeout.current = undefined;
     }
     if (pendingCallback.current) {
-      pendingCallback.current();
+      void pendingCallback.current();
       pendingCallback.current = null;
     }
   }, []);
