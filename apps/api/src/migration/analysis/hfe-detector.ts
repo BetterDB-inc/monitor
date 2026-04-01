@@ -119,8 +119,8 @@ export async function detectHfe(
 
     if (hfePositiveKeys > 0) {
       result.hfeDetected = true;
-      result.hfeKeyCount = validKeys.length > 0
-        ? Math.round((hfePositiveKeys / validKeys.length) * totalEstimatedHashKeys)
+      result.hfeKeyCount = candidates.length > 0
+        ? Math.round((hfePositiveKeys / candidates.length) * totalEstimatedHashKeys)
         : 0;
     }
   } catch {

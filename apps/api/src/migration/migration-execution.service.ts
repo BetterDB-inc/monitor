@@ -302,7 +302,7 @@ function sanitizeLogLine(line: string): string {
   );
   // 2. Unquoted sensitive fields (skip already-redacted quoted ones)
   sanitized = sanitized.replace(
-    new RegExp(`(${SENSITIVE_KEYS.source})\\s*[=:]\\s*(?!["*])\\S.*`, 'gi'),
+    new RegExp(`(${SENSITIVE_KEYS.source})\\s*[=:]\\s*(?!["*])\\S+`, 'gi'),
     (match) => {
       const eqIdx = match.search(/[=:]/);
       return match.slice(0, eqIdx + 1) + ' ***';

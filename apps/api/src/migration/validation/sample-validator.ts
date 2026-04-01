@@ -243,9 +243,8 @@ async function compareHash(source: Valkey, target: Valkey, key: string): Promise
   sourceEntries.sort((a, b) => a.field.compare(b.field));
   targetEntries.sort((a, b) => a.field.compare(b.field));
 
-  // Compare first 10 sorted fields (fully binary-safe)
-  const checkCount = Math.min(10, sourceEntries.length);
-  for (let i = 0; i < checkCount; i++) {
+  // Compare all sorted fields (fully binary-safe)
+  for (let i = 0; i < sourceEntries.length; i++) {
     if (!sourceEntries[i].field.equals(targetEntries[i].field)) {
       return `field names differ at index ${i}`;
     }

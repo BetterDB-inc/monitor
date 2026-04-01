@@ -106,11 +106,12 @@ async function migrateString(source: Valkey, target: Valkey, key: string): Promi
   if (pttl > 0) {
     // Atomic SET with PX — no window where key exists without TTL
     await target.set(key, value, 'PX', pttl);
-  } else if (pttl === -2) {
-    // Key expired between GET and PTTL — remove any ghost copy
+  } else if (pttl === -2 || pttl === 0) {
+    // pttl -2: expired between GET and PTTL; pttl 0: sub-ms remaining — treat as expired
     await target.del(key);
     return false;
   } else {
+    // pttl -1: no expiry (persistent key)
     await target.set(key, value);
   }
   return true;
@@ -306,7 +307,7 @@ redis.call('RENAME', KEYS[1], KEYS[2])
 local pttl = tonumber(ARGV[1])
 if pttl > 0 then
   redis.call('PEXPIRE', KEYS[2], pttl)
-elseif pttl == -2 then
+elseif pttl == -2 or pttl == 0 then
   redis.call('DEL', KEYS[2])
 end
 return 1
@@ -325,12 +326,17 @@ async function atomicRenameWithTtl(
 ): Promise<void> {
   try {
     await target.call('EVAL', RENAME_WITH_TTL_LUA, '2', tmp, key, String(pttl));
-  } catch {
-    // Fallback: separate commands (e.g. EVAL blocked by ACL)
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Only fall back for NOSCRIPT / unknown-command / ACL-denied errors.
+    // Transient errors (OOM, timeouts) should propagate.
+    if (!/NOSCRIPT|unknown command|DENIED|NOPERM/i.test(msg)) {
+      throw err;
+    }
     await target.rename(tmp, key);
     if (pttl > 0) {
       await target.pexpire(key, pttl);
-    } else if (pttl === -2) {
+    } else if (pttl === -2 || pttl === 0) {
       await target.del(key);
     }
   }
