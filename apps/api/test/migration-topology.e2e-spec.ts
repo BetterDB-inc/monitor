@@ -129,6 +129,32 @@ async function verifyKeys(client: Valkey, prefix: string): Promise<void> {
   expect(zset).toEqual(['z1', 'z2']);
 }
 
+// ── Analysis runner ─────────────────────────────────────────────────
+
+async function runAnalysis(
+  app: NestFastifyApplication,
+  sourceId: string,
+  targetId: string,
+): Promise<any> {
+  const startRes = await request(app.getHttpServer())
+    .post('/migration/analysis')
+    .send({ sourceConnectionId: sourceId, targetConnectionId: targetId, scanSampleSize: 1000 });
+
+  expect([200, 201]).toContain(startRes.status);
+
+  const analysisId = startRes.body.id;
+
+  let result: any;
+  for (let i = 0; i < 60; i++) {
+    const poll = await request(app.getHttpServer()).get(`/migration/analysis/${analysisId}`);
+    expect(poll.status).toBe(200);
+    result = poll.body;
+    if (result.status === 'completed' || result.status === 'failed') break;
+    await sleep(500);
+  }
+  return result;
+}
+
 // ── Migration runner ────────────────────────────────────────────────
 
 async function runMigration(
@@ -140,7 +166,7 @@ async function runMigration(
     .post('/migration/execution')
     .send({ sourceConnectionId: sourceId, targetConnectionId: targetId, mode: 'command' });
 
-  if (startRes.status === 403) return 'skipped';
+  if (startRes.status === 402 || startRes.status === 403) return 'skipped';
   expect([200, 201]).toContain(startRes.status);
 
   const execId = startRes.body.id;
@@ -148,7 +174,7 @@ async function runMigration(
   let result: any;
   for (let i = 0; i < 120; i++) {
     const poll = await request(app.getHttpServer()).get(`/migration/execution/${execId}`);
-    if (poll.status === 403) return 'skipped';
+    if (poll.status === 402 || poll.status === 403) return 'skipped';
     result = poll.body;
     if (result.status === 'completed' || result.status === 'failed') break;
     await sleep(500);
@@ -294,5 +320,50 @@ async function runMigration(
   it('cluster → cluster', async () => {
     if (licenseLocked) return;
     await scenario('srcCL', 'tgtCL', 'mig:cl', TGT_CLUSTER_PORT, true);
+  }, 60_000);
+
+  // ── Compatibility analysis ──
+
+  it('analysis: cluster → standalone should report a blocking incompatibility', async () => {
+    const srcId = connIds['srcCL'];
+    const tgtId = connIds['tgtSA'];
+    if (!srcId || !tgtId) throw new Error('Connections not registered');
+
+    const result = await runAnalysis(app, srcId, tgtId);
+
+    expect(result.status).toBe('completed');
+    expect(result.incompatibilities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: 'blocking',
+          category: 'cluster_topology',
+        }),
+      ]),
+    );
+    expect(result.blockingCount).toBeGreaterThanOrEqual(1);
+  }, 60_000);
+
+  it('analysis: standalone → cluster should report a warning incompatibility', async () => {
+    const srcId = connIds['srcSA'];
+    const tgtId = connIds['tgtCL'];
+    if (!srcId || !tgtId) throw new Error('Connections not registered');
+
+    const result = await runAnalysis(app, srcId, tgtId);
+
+    expect(result.status).toBe('completed');
+    expect(result.incompatibilities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: 'warning',
+          category: 'cluster_topology',
+        }),
+      ]),
+    );
+    expect(result.warningCount).toBeGreaterThanOrEqual(1);
+    // Should NOT be blocking — migration is still possible
+    const clusterBlocking = (result.incompatibilities ?? []).filter(
+      (i: any) => i.category === 'cluster_topology' && i.severity === 'blocking',
+    );
+    expect(clusterBlocking).toHaveLength(0);
   }, 60_000);
 });
