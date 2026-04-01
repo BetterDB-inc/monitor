@@ -187,7 +187,6 @@ async function runMigration(
 (RUN ? describe : describe.skip)('Migration Topology E2E', () => {
   let app: NestFastifyApplication;
   const connIds: Record<string, string> = {};
-  let licenseLocked = false;
 
   beforeAll(async () => {
     // 1. Start topology containers (clean slate)
@@ -228,10 +227,16 @@ async function runMigration(
     await seedKeys(cl, 'mig:cl');
     await cl.quit();
 
-    // 6. Boot NestJS app (default DB comes from global-setup on port 6380)
+    // 7. Boot NestJS app with Pro license so execution endpoints are unlocked
+    process.env.BETTERDB_LICENSE_KEY = 'test-topology-key';
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ valid: true, tier: 'pro', expiresAt: null }),
+    } as Response);
+
     app = await createTestApp();
 
-    // 7. Register four connections via the API
+    // 8. Register four connections via the API
     const defs = [
       { key: 'srcSA', name: 'Topo Source Standalone', port: SRC_STANDALONE_PORT },
       { key: 'tgtSA', name: 'Topo Target Standalone', port: TGT_STANDALONE_PORT },
@@ -254,6 +259,10 @@ async function runMigration(
       try { await request(app.getHttpServer()).delete(`/connections/${id}`); } catch { /* ok */ }
     }
     if (app) await app.close();
+
+    // Restore license env / mocks
+    delete process.env.BETTERDB_LICENSE_KEY;
+    jest.restoreAllMocks();
 
     // Tear down Docker topology
     try { compose('down --remove-orphans --volumes'); } catch { /* ok */ }
@@ -281,10 +290,8 @@ async function runMigration(
 
     // Run the migration
     const result = await runMigration(app, srcId, tgtId);
-    if (result === 'skipped') {
-      licenseLocked = true;
-      return;
-    }
+    expect(result).not.toBe('skipped');
+    if (result === 'skipped') return; // type guard
 
     expect(result.status).toBe('completed');
     expect(result.keysTransferred).toBeGreaterThanOrEqual(10);
@@ -302,23 +309,17 @@ async function runMigration(
 
   it('standalone → standalone', async () => {
     await scenario('srcSA', 'tgtSA', 'mig:sa', TGT_STANDALONE_PORT, false);
-    if (licenseLocked) {
-      console.warn('Execution requires Pro license — remaining topology tests will be skipped');
-    }
   }, 60_000);
 
   it('standalone → cluster', async () => {
-    if (licenseLocked) return;
     await scenario('srcSA', 'tgtCL', 'mig:sa', TGT_CLUSTER_PORT, true);
   }, 60_000);
 
   it('cluster → standalone', async () => {
-    if (licenseLocked) return;
     await scenario('srcCL', 'tgtSA', 'mig:cl', TGT_STANDALONE_PORT, false);
   }, 60_000);
 
   it('cluster → cluster', async () => {
-    if (licenseLocked) return;
     await scenario('srcCL', 'tgtCL', 'mig:cl', TGT_CLUSTER_PORT, true);
   }, 60_000);
 
