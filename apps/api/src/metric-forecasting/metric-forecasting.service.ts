@@ -36,6 +36,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
   private forecastCache = new Map<string, { forecast: MetricForecast; computedAt: number }>();
   private alertInterval: ReturnType<typeof setInterval> | null = null;
   private pruneInterval: ReturnType<typeof setInterval> | null = null;
+  private alertCheckRunning = false;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -367,6 +368,8 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn('WebhookEventsProService not initialized');
       return;
     }
+    if (this.alertCheckRunning) return;
+    this.alertCheckRunning = true;
 
     this.pruneCache();
 
@@ -406,6 +409,8 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(
         `Alert check iteration failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
+    } finally {
+      this.alertCheckRunning = false;
     }
   }
 }
