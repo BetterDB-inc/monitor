@@ -218,9 +218,12 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
     updates: MetricForecastSettingsUpdate,
   ): Promise<MetricForecastSettings> {
     const current = await this.getOrCreateSettings(connectionId, metricKind);
+    const defined = Object.fromEntries(
+      Object.entries(updates).filter(([, v]) => v !== undefined),
+    );
     const merged: MetricForecastSettings = {
       ...current,
-      ...updates,
+      ...defined,
       connectionId,
       metricKind,
       updatedAt: Date.now(),
