@@ -50,10 +50,11 @@ export function MetricChart({
       const lastVal = chartData[chartData.length - 1].value;
       const intercept = lastVal - slopePerMs * lastTime;
 
-      trendData.push({ time: firstTime, trend: slopePerMs * firstTime + intercept, label: formatTime(firstTime) });
-      trendData.push({ time: lastTime, trend: slopePerMs * lastTime + intercept, label: formatTime(lastTime) });
+      const trendAt = (t: number) => Math.max(0, slopePerMs * t + intercept);
+      trendData.push({ time: firstTime, trend: trendAt(firstTime), label: formatTime(firstTime) });
+      trendData.push({ time: lastTime, trend: trendAt(lastTime), label: formatTime(lastTime) });
       if (endTime > lastTime) {
-        trendData.push({ time: endTime, trend: slopePerMs * endTime + intercept, label: formatTime(endTime) });
+        trendData.push({ time: endTime, trend: trendAt(endTime), label: formatTime(endTime) });
       }
     }
 

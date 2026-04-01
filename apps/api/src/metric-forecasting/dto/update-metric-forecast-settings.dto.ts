@@ -8,7 +8,7 @@ export class UpdateMetricForecastSettingsDto {
   @IsOptional()
   @ValidateIf((_obj, value) => value !== null)
   @IsNumber()
-  @Min(1)
+  @Min(0.01)
   ceiling?: number | null;
 
   @IsOptional()

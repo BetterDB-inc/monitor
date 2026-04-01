@@ -104,11 +104,15 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
 
     // Check sufficient data
     if (sorted.length < MIN_DATA_POINTS) {
-      return this.buildInsufficientForecast(connectionId, metricKind, settings, latestValue);
+      return this.buildInsufficientForecast(
+        connectionId, metricKind, settings, latestValue, sorted.length,
+      );
     }
     const timeSpan = sorted[sorted.length - 1].timestamp - sorted[0].timestamp;
     if (timeSpan < MIN_TIME_SPAN_MS) {
-      return this.buildInsufficientForecast(connectionId, metricKind, settings, latestValue);
+      return this.buildInsufficientForecast(
+        connectionId, metricKind, settings, latestValue, sorted.length,
+      );
     }
 
     // Linear regression on extracted metric
@@ -326,6 +330,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
     metricKind: MetricKind,
     settings: MetricForecastSettings,
     currentValue: number,
+    dataPointCount = 0,
   ): MetricForecast {
     return {
       connectionId,
@@ -335,7 +340,7 @@ export class MetricForecastingService implements OnModuleInit, OnModuleDestroy {
       growthRate: 0,
       growthPercent: 0,
       trendDirection: 'stable',
-      dataPointCount: 0,
+      dataPointCount,
       windowMs: settings.rollingWindowMs,
       ceiling: settings.ceiling,
       timeToLimitMs: null,
