@@ -32,10 +32,6 @@ export class TelemetryClientFactory {
           return new NoopTelemetryClientAdapter();
         }
         const host = this.configService.get<string>('POSTHOG_HOST');
-        // TODO(#73): Replace stub with real posthog-node implementation
-        this.logger.warn(
-          'PostHog adapter is not yet implemented (#73). Events will be discarded.',
-        );
         return new PosthogTelemetryClientAdapter(apiKey, host);
       }
 

@@ -123,6 +123,9 @@ importers:
       pg:
         specifier: ^8.20.0
         version: 8.20.0
+      posthog-node:
+        specifier: ^5.28.11
+        version: 5.28.11(rxjs@7.8.2)
       prom-client:
         specifier: ^15.1.3
         version: 15.1.3
@@ -1404,6 +1407,7 @@ packages:
   '@lancedb/lancedb@0.23.0':
     resolution: {integrity: sha512-aYrIoEG24AC+wILCL57Ius/Y4yU+xFHDPKLvmjzzN4byAjzeIGF0TC86S5RBt4Ji+dxS7yIWV5Q/gE5/fybIFQ==}
     engines: {node: '>= 18'}
+    cpu: [x64, arm64]
     os: [darwin, linux, win32]
     peerDependencies:
       apache-arrow: '>=15.0.0 <=18.1.0'
@@ -2046,6 +2050,9 @@ packages:
     resolution: {integrity: sha512-6TyEnHgd6SArQO8UO2OMTxshln3QMWBtPGrOCgs3wVEmQmwyuNtB10IZMfmYDE0riwNR1cu4q+pPcxMVtaG3TA==}
     engines: {node: '>=18'}
     hasBin: true
+
+  '@posthog/core@1.24.6':
+    resolution: {integrity: sha512-9WkcRKqmXSWIJcca6m3VwA9YbFd4HiG2hKEtDq6FcwEHlvfDhQQUZ5/sJZ47Fw8OtyNMHQ6rW4+COttk4Bg5NQ==}
 
   '@prisma/adapter-pg@7.5.0':
     resolution: {integrity: sha512-EJx7OLULahcC3IjJgdx2qRDNCT+ToY2v66UkeETMCLhNOTgqVzRzYvOEphY7Zp0eHyzfkC33Edd/qqeadf9R4A==}
@@ -5708,6 +5715,15 @@ packages:
     resolution: {integrity: sha512-Jtc2612XINuBjIl/QTWsV5UvE8UHuNblcO3vVADSrKsrc6RqGX6lOW1cEo3CM2v0XG4Nat8nI+YM7/f26VxXLw==}
     engines: {node: '>=12'}
 
+  posthog-node@5.28.11:
+    resolution: {integrity: sha512-H4FOiqKUBO8SVXyXlU5tyifeS11hyTGVwBirFPR5rPtw8X6OFs5xVLx38YL7ZBLjaa9u8is+nIWXKBwWsZ2vlw==}
+    engines: {node: ^20.20.0 || >=22.22.0}
+    peerDependencies:
+      rxjs: ^7.0.0
+    peerDependenciesMeta:
+      rxjs:
+        optional: true
+
   prebuild-install@7.1.3:
     resolution: {integrity: sha512-8Mf2cbV7x1cXPUILADGI3wuhfqWvtiLA1iclTDbFRZkgRQS0NqsPZphna9V+HyTEadheuPmjaJMsbzKQFOzLug==}
     engines: {node: '>=10'}
@@ -8330,6 +8346,8 @@ snapshots:
   '@playwright/test@1.57.0':
     dependencies:
       playwright: 1.57.0
+
+  '@posthog/core@1.24.6': {}
 
   '@prisma/adapter-pg@7.5.0':
     dependencies:
@@ -12199,6 +12217,12 @@ snapshots:
   postgres-range@1.1.4: {}
 
   postgres@3.4.7: {}
+
+  posthog-node@5.28.11(rxjs@7.8.2):
+    dependencies:
+      '@posthog/core': 1.24.6
+    optionalDependencies:
+      rxjs: 7.8.2
 
   prebuild-install@7.1.3:
     dependencies:

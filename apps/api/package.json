@@ -68,6 +68,7 @@
     "lru-cache": "^11.2.7",
     "ollama": "^0.6.3",
     "pg": "^8.20.0",
+    "posthog-node": "^5.28.11",
     "prom-client": "^15.1.3",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
