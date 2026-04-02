@@ -1,7 +1,9 @@
 import { Controller, Post, Get, Body, BadRequestException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { LicenseService } from '@proprietary/licenses';
+import { FrontendTelemetryEvent } from '@betterdb/shared';
 import { UsageTelemetryService } from './usage-telemetry.service';
+import { TelemetryEventDto } from './dto/telemetry-event.dto';
 
 interface TelemetryConfig {
   instanceId: string;
@@ -10,9 +12,6 @@ interface TelemetryConfig {
   posthogApiKey?: string;
   posthogHost?: string;
 }
-
-const ALLOWED_EVENT_TYPES = ['interaction_after_idle', 'page_view', 'connection_switch'] as const;
-type AllowedEventType = (typeof ALLOWED_EVENT_TYPES)[number];
 
 @Controller('telemetry')
 export class TelemetryController {
@@ -46,36 +45,45 @@ export class TelemetryController {
   }
 
   @Post('event')
-  async trackEvent(
-    @Body() body: { eventType: string; payload: Record<string, unknown> },
-  ): Promise<{ ok: true }> {
-    if (!ALLOWED_EVENT_TYPES.includes(body.eventType as AllowedEventType)) {
-      throw new BadRequestException(`Invalid eventType: ${body.eventType}`);
-    }
-
-    if (body.eventType === 'interaction_after_idle') {
-      const idleDurationMs = body.payload?.idleDurationMs;
-      if (typeof idleDurationMs !== 'number') {
-        throw new BadRequestException('payload.idleDurationMs must be a number');
-      }
-      await this.usageTelemetry.trackInteractionAfterIdle(idleDurationMs);
-    } else if (body.eventType === 'page_view') {
-      const path = body.payload?.path;
-      if (typeof path !== 'string') {
-        throw new BadRequestException('payload.path must be a string');
-      }
-      await this.usageTelemetry.trackPageView(path);
-    } else if (body.eventType === 'connection_switch') {
-      const totalConnections = body.payload?.totalConnections;
-      if (typeof totalConnections !== 'number') {
-        throw new BadRequestException('payload.totalConnections must be a number');
-      }
-      const dbType = typeof body.payload?.dbType === 'string' ? body.payload.dbType : 'unknown';
-      const dbVersion =
-        typeof body.payload?.dbVersion === 'string' ? body.payload.dbVersion : 'unknown';
-      await this.usageTelemetry.trackDbSwitch(totalConnections, dbType, dbVersion);
+  async trackEvent(@Body() body: TelemetryEventDto): Promise<{ ok: true }> {
+    switch (body.eventType as FrontendTelemetryEvent) {
+      case 'interaction_after_idle':
+        await this.handleInteractionAfterIdle(body.payload);
+        break;
+      case 'page_view':
+        await this.handlePageView(body.payload);
+        break;
+      case 'connection_switch':
+        await this.handleConnectionSwitch(body.payload);
+        break;
     }
 
     return { ok: true };
+  }
+
+  private async handleInteractionAfterIdle(payload: Record<string, unknown>): Promise<void> {
+    const idleDurationMs = payload?.idleDurationMs;
+    if (typeof idleDurationMs !== 'number') {
+      throw new BadRequestException('payload.idleDurationMs must be a number');
+    }
+    await this.usageTelemetry.trackInteractionAfterIdle(idleDurationMs);
+  }
+
+  private async handlePageView(payload: Record<string, unknown>): Promise<void> {
+    const path = payload?.path;
+    if (typeof path !== 'string') {
+      throw new BadRequestException('payload.path must be a string');
+    }
+    await this.usageTelemetry.trackPageView(path);
+  }
+
+  private async handleConnectionSwitch(payload: Record<string, unknown>): Promise<void> {
+    const totalConnections = payload?.totalConnections;
+    if (typeof totalConnections !== 'number') {
+      throw new BadRequestException('payload.totalConnections must be a number');
+    }
+    const dbType = typeof payload?.dbType === 'string' ? payload.dbType : 'unknown';
+    const dbVersion = typeof payload?.dbVersion === 'string' ? payload.dbVersion : 'unknown';
+    await this.usageTelemetry.trackDbSwitch(totalConnections, dbType, dbVersion);
   }
 }

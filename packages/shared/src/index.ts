@@ -15,3 +15,4 @@ export * from './webhooks/index';
 export * from './types/vector-index-snapshots';
 export * from './types/migration';
 export * from './types/metric-forecasting.types';
+export * from './types/telemetry';
