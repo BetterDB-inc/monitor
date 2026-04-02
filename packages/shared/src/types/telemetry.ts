@@ -5,14 +5,3 @@ export const FRONTEND_TELEMETRY_EVENTS = [
 ] as const;
 
 export type FrontendTelemetryEvent = (typeof FRONTEND_TELEMETRY_EVENTS)[number];
-
-export const BACKEND_TELEMETRY_EVENTS = [
-  'app_start',
-  'db_connect',
-  'db_switch',
-  'mcp_tool_call',
-] as const;
-
-export type BackendTelemetryEvent = (typeof BACKEND_TELEMETRY_EVENTS)[number];
-
-export type TelemetryEventType = FrontendTelemetryEvent | BackendTelemetryEvent;
