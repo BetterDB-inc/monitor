@@ -49,7 +49,10 @@ export const envSchema = z.object({
   LICENSE_CACHE_TTL_MS: z.coerce.number().int().min(60000).optional(),
   LICENSE_MAX_STALE_MS: z.coerce.number().int().min(60000).optional(),
   LICENSE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).optional(),
-  BETTERDB_TELEMETRY: z.string().transform(v => v !== 'false').optional(),
+  BETTERDB_TELEMETRY: z.string().optional(),
+  TELEMETRY_PROVIDER: z.enum(['http', 'posthog', 'noop']).default('posthog'),
+  POSTHOG_API_KEY: z.string().optional(),
+  POSTHOG_HOST: z.string().url().optional(),
 
   // Version check configuration
   VERSION_CHECK_INTERVAL_MS: z.coerce.number().int().min(60000).default(3600000),
