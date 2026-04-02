@@ -256,9 +256,6 @@ importers:
       recharts:
         specifier: ^3.8.0
         version: 3.8.1(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react-is@19.2.0)(react@19.2.4)(redux@5.0.1)
-      shadcn:
-        specifier: ^4.1.2
-        version: 4.1.2(@cfworker/json-schema@4.1.1)(@types/node@22.19.15)(typescript@5.9.3)
       tailwind-merge:
         specifier: ^3.5.0
         version: 3.5.0
@@ -317,6 +314,9 @@ importers:
       react-grab:
         specifier: ^0.1.28
         version: 0.1.29(@types/react@19.2.14)(react@19.2.4)
+      shadcn:
+        specifier: ^4.1.2
+        version: 4.1.2(@cfworker/json-schema@4.1.1)(@types/node@22.19.15)(typescript@5.9.3)
       tailwindcss:
         specifier: ^4.2.2
         version: 4.2.2
