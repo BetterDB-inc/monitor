@@ -33,8 +33,12 @@ function createClient(config: TelemetryConfig): TelemetryClient {
       if (!apiKey) {
         return clientsMap.get('http')!;
       }
-      clientsMap.set('posthog', new PosthogTelemetryClient(apiKey, host));
-      return clientsMap.get('posthog')!;
+      const client = new PosthogTelemetryClient(apiKey, host);
+      if (config.instanceId) {
+        client.identify(config.instanceId, { provider: config.provider });
+      }
+      clientsMap.set('posthog', client);
+      return client;
     }
     case 'http':
     default:
