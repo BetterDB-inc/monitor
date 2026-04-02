@@ -352,7 +352,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                 )}
               </div>
 
-              <div className="flex items-center justify-between pt-3 border-t bg-muted/30 -mx-6 -mb-6 px-6 py-3 rounded-b-lg">
+              <div className="flex items-center justify-between pt-3 border-t bg-muted/30 -mx-4 -mb-4 px-4 py-3 rounded-b-xl">
                 <button
                   onClick={handleTestConnection}
                   disabled={testing || !formData.host}
@@ -448,7 +448,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             ))}
           </div>
 
-          <div className="flex items-center justify-between pt-3 border-t bg-muted/30 -mx-6 -mb-6 px-6 py-3 rounded-b-lg">
+          <div className="flex items-center justify-between pt-3 border-t bg-muted/30 -mx-4 -mb-4 px-4 py-3 rounded-b-xl">
             <button
               onClick={() => {
                 setShowManageDialog(false);
