@@ -50,12 +50,12 @@ const CHARGE_STRENGTH = -300;
 const DEFAULT_CONTAINER_WIDTH = 800;
 const CONTAINER_HEIGHT = 600;
 
-const MASTER_COLOR = 'hsl(var(--chart-1))';
-const REPLICA_COLOR = 'hsl(var(--chart-5))';
-const UNHEALTHY_COLOR = 'hsl(var(--destructive))';
-const LINK_COLOR = 'hsl(var(--muted-foreground))';
-const TEXT_COLOR = 'hsl(var(--muted-foreground))';
-const NODE_STROKE_COLOR = 'hsl(var(--background))';
+const MASTER_COLOR = 'var(--chart-1)';
+const REPLICA_COLOR = 'var(--chart-5)';
+const UNHEALTHY_COLOR = 'var(--destructive)';
+const LINK_COLOR = 'var(--muted-foreground)';
+const TEXT_COLOR = 'var(--muted-foreground)';
+const NODE_STROKE_COLOR = 'var(--background)';
 
 export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTopologyGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
@@ -369,10 +369,10 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
               Cluster Topology Graph
             </CardTitle>
             <div className="flex items-center gap-2">
-              <Badge variant="outline" className="bg-[hsl(var(--chart-1))]/10 text-[hsl(var(--chart-1))] border-[hsl(var(--chart-1))]/20">
+              <Badge variant="outline" className="bg-[var(--chart-1)]/10 text-[var(--chart-1)] border-[var(--chart-1)]/20">
                 {masterCount} Masters
               </Badge>
-              <Badge variant="outline" className="bg-[hsl(var(--chart-5))]/10 text-[hsl(var(--chart-5))] border-[hsl(var(--chart-5))]/20">
+              <Badge variant="outline" className="bg-[var(--chart-5)]/10 text-[var(--chart-5)] border-[var(--chart-5)]/20">
                 {replicaCount} Replicas
               </Badge>
             </div>
@@ -385,15 +385,15 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <div className="flex items-center gap-1">
-                <div className="w-3 h-3 rounded-full bg-[hsl(var(--chart-1))]"></div>
+                <div className="w-3 h-3 rounded-full bg-[var(--chart-1)]"></div>
                 <span>Master</span>
               </div>
               <div className="flex items-center gap-1">
-                <div className="w-3 h-3 rounded-full bg-[hsl(var(--chart-5))]"></div>
+                <div className="w-3 h-3 rounded-full bg-[var(--chart-5)]"></div>
                 <span>Replica</span>
               </div>
               <div className="flex items-center gap-1">
-                <div className="w-3 h-3 rounded-full bg-[hsl(var(--destructive))]"></div>
+                <div className="w-3 h-3 rounded-full bg-[var(--destructive)]"></div>
                 <span>Unhealthy</span>
               </div>
             </div>

@@ -142,8 +142,8 @@ export function ClusterDashboard() {
         <Card>
           <CardContent className="pt-6">
             <div className="flex flex-col items-center justify-center py-12 text-center">
-              <Info className="w-16 h-16 text-red-500 mb-4 opacity-50" />
-              <h3 className="text-xl font-semibold mb-2 text-red-500">Error Loading Cluster</h3>
+              <Info className="w-16 h-16 text-destructive mb-4 opacity-50" />
+              <h3 className="text-xl font-semibold mb-2 text-destructive">Error Loading Cluster</h3>
               <p className="text-muted-foreground max-w-md">
                 {error instanceof Error ? error.message : 'An unknown error occurred'}
               </p>

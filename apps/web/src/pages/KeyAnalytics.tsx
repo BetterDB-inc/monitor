@@ -33,7 +33,7 @@ function getRankDelta(currentRank: number, keyName: string, prevKeys: HotKeyEntr
   if (!prev) return { label: 'NEW', className: 'text-emerald-600 font-semibold' };
   const delta = prev.rank - currentRank;
   if (delta > 0) return { label: `\u2191${delta}`, className: 'text-emerald-600' };
-  if (delta < 0) return { label: `\u2193${Math.abs(delta)}`, className: 'text-red-500' };
+  if (delta < 0) return { label: `\u2193${Math.abs(delta)}`, className: 'text-destructive' };
   return { label: '\u2014', className: 'text-muted-foreground' };
 }
 
@@ -87,7 +87,7 @@ function formatTtl(ttl?: number): string {
   return formatTime(ttl);
 }
 
-const COLORS = ['hsl(var(--primary))', 'hsl(var(--secondary))', '#82ca9d', '#ffc658', '#ff8042', '#8884d8'];
+const COLORS = ['var(--primary)', 'var(--secondary)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-1)'];
 
 export function KeyAnalytics() {
   const { currentConnection } = useConnection();
@@ -335,7 +335,7 @@ export function KeyAnalytics() {
                   <CardTitle className="text-sm">Expiring Soon</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold text-red-600">
+                  <div className="text-2xl font-bold text-destructive">
                     {summary ? formatNumber(summary.keysExpiringSoon) : '0'}
                   </div>
                   <div className="text-xs text-muted-foreground mt-1">TTL &lt; 1 hour</div>
@@ -363,7 +363,7 @@ export function KeyAnalytics() {
                             String(item.payload?.fullName ?? ''),
                           ]}
                         />
-                        <Bar dataKey="value" fill="hsl(var(--primary))" />
+                        <Bar dataKey="value" fill="var(--primary)" />
                       </BarChart>
                     </ResponsiveContainer>
                   ) : (
@@ -555,7 +555,7 @@ export function KeyAnalytics() {
                         </div>
                         <div>
                           <div className="text-xs text-muted-foreground">Expiring Soon</div>
-                          <div className="text-lg font-bold text-red-600">
+                          <div className="text-lg font-bold text-destructive">
                             {formatNumber(pattern.keysExpiringSoon)}
                           </div>
                         </div>
@@ -582,13 +582,13 @@ export function KeyAnalytics() {
                               </div>
                               <div>
                                 <div className="text-xs text-muted-foreground">Hot Keys</div>
-                                <div className="text-lg font-bold text-red-600">
+                                <div className="text-lg font-bold text-destructive">
                                   {formatNumber(pattern.hotKeyCount || 0)}
                                 </div>
                               </div>
                               <div>
                                 <div className="text-xs text-muted-foreground">Cold Keys</div>
-                                <div className="text-lg font-bold text-blue-600">
+                                <div className="text-lg font-bold text-primary">
                                   {formatNumber(pattern.coldKeyCount || 0)}
                                 </div>
                               </div>
@@ -752,7 +752,7 @@ export function KeyAnalytics() {
                                 <span
                                   className={`font-medium ${
                                     (entry.idleSeconds ?? 0) < 60
-                                      ? 'text-red-500'
+                                      ? 'text-destructive'
                                       : (entry.idleSeconds ?? 0) < 3600
                                         ? 'text-amber-500'
                                         : 'text-muted-foreground'

@@ -186,7 +186,7 @@ export function MigrationPage() {
       />
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4">
+        <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-4">
           {error}
           <button onClick={() => setError(null)} className="ml-2 underline">Dismiss</button>
         </div>
@@ -241,7 +241,7 @@ export function MigrationPage() {
 
             {/* Issue 8: prominent blocking warning */}
             {blockingCount > 0 && (
-              <div className="bg-red-50 border border-red-300 text-red-700 rounded-lg p-4 flex items-start gap-3">
+              <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-4 flex items-start gap-3">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5 mt-0.5 flex-shrink-0">
                   <path fillRule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.499-2.599 4.499H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.004zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clipRule="evenodd" />
                 </svg>
@@ -431,7 +431,7 @@ export function MigrationPage() {
             </dl>
 
             {blockingCount > 0 && (
-              <div className="bg-red-50 border border-red-300 text-red-700 rounded-lg p-3 text-sm">
+              <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-3 text-sm">
                 <strong>Warning:</strong> {blockingCount} blocking issue{blockingCount !== 1 ? 's' : ''} detected.
                 Proceeding may cause data loss or incompatibility.
               </div>
@@ -480,7 +480,7 @@ export function MigrationPage() {
                     <span className="text-muted-foreground ml-2">
                       &middot; {(entry.totalKeys ?? 0).toLocaleString()} keys
                       {(entry.blockingCount ?? 0) > 0 && (
-                        <span className="text-red-600 ml-1">&middot; {entry.blockingCount} blocking</span>
+                        <span className="text-destructive ml-1">&middot; {entry.blockingCount} blocking</span>
                       )}
                     </span>
                   </span>

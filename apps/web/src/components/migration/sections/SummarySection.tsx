@@ -17,8 +17,8 @@ function DbBadge({ dbType, dbVersion, connectionName }: {
   const colorClass = dbType === 'valkey'
     ? 'bg-teal-100 text-teal-700'
     : dbType === 'redis'
-      ? 'bg-red-100 text-red-700'
-      : 'bg-gray-100 text-gray-700';
+      ? 'bg-muted text-foreground'
+      : 'bg-muted text-foreground';
 
   return (
     <div className="flex items-center gap-2">

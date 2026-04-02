@@ -12,11 +12,11 @@ interface InsightCalloutProps {
 
 const styles = {
   error: {
-    border: 'border-l-red-500',
-    bg: 'bg-red-50 dark:bg-red-950/20',
-    title: 'text-red-800 dark:text-red-300',
-    text: 'text-red-700 dark:text-red-400',
-    link: 'text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300',
+    border: 'border-l-destructive',
+    bg: 'bg-destructive/5 dark:bg-destructive/10',
+    title: 'text-destructive',
+    text: 'text-destructive/80',
+    link: 'text-destructive hover:underline',
     Icon: AlertCircle,
   },
   warning: {
@@ -28,11 +28,11 @@ const styles = {
     Icon: AlertTriangle,
   },
   info: {
-    border: 'border-l-blue-500',
-    bg: 'bg-blue-50 dark:bg-blue-950/20',
-    title: 'text-blue-800 dark:text-blue-300',
-    text: 'text-blue-700 dark:text-blue-400',
-    link: 'text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300',
+    border: 'border-l-primary',
+    bg: 'bg-primary/5 dark:bg-primary/10',
+    title: 'text-primary',
+    text: 'text-primary/80',
+    link: 'text-primary hover:underline',
     Icon: Info,
   },
 };

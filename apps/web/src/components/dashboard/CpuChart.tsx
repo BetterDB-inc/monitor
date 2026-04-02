@@ -43,7 +43,7 @@ export function CpuChart({ data }: Props) {
               type="monotone"
               dataKey="sys"
               name="System"
-              stroke="#ef4444"
+              stroke="var(--chart-1)"
               strokeWidth={2}
               dot={false}
             />
@@ -51,7 +51,7 @@ export function CpuChart({ data }: Props) {
               type="monotone"
               dataKey="user"
               name="User"
-              stroke="#3b82f6"
+              stroke="var(--chart-2)"
               strokeWidth={2}
               dot={false}
             />

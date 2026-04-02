@@ -246,7 +246,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
               className="w-full px-3 py-2 border rounded-md"
               placeholder="wh_secret_abc123"
             />
-            <p className="text-xs text-gray-500 mt-1">
+            <p className="text-xs text-muted-foreground mt-1">
               Used for HMAC signature verification (X-Webhook-Signature header)
             </p>
           </div>
@@ -268,7 +268,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
           <div>
             <label className="block text-sm font-medium mb-2">Events to Subscribe *</label>
             {loadingTier ? (
-              <div className="border rounded-md p-4 text-center text-sm text-gray-500">
+              <div className="border rounded-md p-4 text-center text-sm text-muted-foreground">
                 Loading available events...
               </div>
             ) : (
@@ -280,7 +280,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                     return (
                       <div key={tier}>
                         <div className="flex items-center justify-between mb-2">
-                          <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+                          <h4 className="text-xs font-semibold text-foreground uppercase tracking-wide">
                             {TIER_DISPLAY[tier]} Tier
                           </h4>
                           {!tierAllowed && (
@@ -299,8 +299,8 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                                 key={event}
                                 className={`flex items-center space-x-2 p-2 rounded ${
                                   isAllowed
-                                    ? 'cursor-pointer hover:bg-gray-50'
-                                    : 'cursor-not-allowed opacity-60 bg-gray-50'
+                                    ? 'cursor-pointer hover:bg-muted'
+                                    : 'cursor-not-allowed opacity-60 bg-muted'
                                 }`}
                               >
                                 <input
@@ -315,7 +315,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                                 </span>
                                 {!isAllowed && (
                                   <svg
-                                    className="w-4 h-4 text-gray-400"
+                                    className="w-4 h-4 text-muted-foreground"
                                     fill="currentColor"
                                     viewBox="0 0 20 20"
                                   >
@@ -337,8 +337,8 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
 
                 {/* Upgrade CTA */}
                 {userTier !== Tier.enterprise && (
-                  <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-md">
-                    <p className="text-sm text-blue-900">
+                  <div className="mt-4 p-3 bg-primary/5 border border-primary/20 rounded-md">
+                    <p className="text-sm text-primary">
                       {userTier === Tier.community && (
                         <>
                           <strong>Unlock more events:</strong> Upgrade to Pro for advanced monitoring events or Enterprise for compliance and audit events.
@@ -355,7 +355,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
               </div>
             )}
             {formData.events.length === 0 && (
-              <p className="text-xs text-red-500 mt-1">Please select at least one event</p>
+              <p className="text-xs text-destructive mt-1">Please select at least one event</p>
             )}
           </div>
 
@@ -366,7 +366,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
               <button
                 type="button"
                 onClick={addHeader}
-                className="text-sm text-blue-600 hover:text-blue-700"
+                className="text-sm text-primary hover:text-primary/90"
               >
                 + Add Header
               </button>
@@ -391,7 +391,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                   <button
                     type="button"
                     onClick={() => removeHeader(index)}
-                    className="px-3 py-2 text-sm text-red-600 border border-red-600 rounded hover:bg-red-50"
+                    className="px-3 py-2 text-sm text-destructive border border-destructive rounded hover:bg-destructive/10"
                   >
                     Remove
                   </button>
@@ -405,7 +405,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
             <label className="block text-sm font-medium mb-2">Retry Policy</label>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Max Retries</label>
+                <label className="block text-xs text-muted-foreground mb-1">Max Retries</label>
                 <input
                   type="number"
                   min="0"
@@ -421,7 +421,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Backoff Multiplier</label>
+                <label className="block text-xs text-muted-foreground mb-1">Backoff Multiplier</label>
                 <input
                   type="number"
                   min="1"
@@ -438,7 +438,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Initial Delay (ms)</label>
+                <label className="block text-xs text-muted-foreground mb-1">Initial Delay (ms)</label>
                 <input
                   type="number"
                   min="100"
@@ -455,7 +455,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Max Delay (ms)</label>
+                <label className="block text-xs text-muted-foreground mb-1">Max Delay (ms)</label>
                 <input
                   type="number"
                   min="1000"
@@ -476,17 +476,17 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
 
           {/* Advanced Configuration */}
           <details className="mt-6">
-            <summary className="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900">
+            <summary className="cursor-pointer text-sm font-medium text-foreground hover:text-foreground">
               Advanced Configuration
             </summary>
 
-            <div className="mt-4 space-y-6 pl-4 border-l-2 border-gray-200">
+            <div className="mt-4 space-y-6 pl-4 border-l-2 border-border">
               {/* Delivery Settings */}
               <div>
-                <h4 className="text-sm font-medium text-gray-700 mb-2">Delivery Settings</h4>
+                <h4 className="text-sm font-medium text-foreground mb-2">Delivery Settings</h4>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs text-gray-500 mb-1">
+                    <label className="block text-xs text-muted-foreground mb-1">
                       Request Timeout (ms)
                     </label>
                     <input
@@ -506,11 +506,11 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                       }
                       className="w-full px-3 py-2 border rounded-md text-sm"
                     />
-                    <p className="text-xs text-gray-400 mt-1">Default: 30000ms</p>
+                    <p className="text-xs text-muted-foreground mt-1">Default: 30000ms</p>
                   </div>
 
                   <div>
-                    <label className="block text-xs text-gray-500 mb-1">
+                    <label className="block text-xs text-muted-foreground mb-1">
                       Max Response Body (bytes)
                     </label>
                     <input
@@ -530,16 +530,16 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                       }
                       className="w-full px-3 py-2 border rounded-md text-sm"
                     />
-                    <p className="text-xs text-gray-400 mt-1">Default: 10000 bytes</p>
+                    <p className="text-xs text-muted-foreground mt-1">Default: 10000 bytes</p>
                   </div>
                 </div>
               </div>
 
               {/* Alert Settings */}
               <div>
-                <h4 className="text-sm font-medium text-gray-700 mb-2">Alert Settings</h4>
+                <h4 className="text-sm font-medium text-foreground mb-2">Alert Settings</h4>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">
+                  <label className="block text-xs text-muted-foreground mb-1">
                     Hysteresis Factor
                   </label>
                   <input
@@ -560,7 +560,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                     }
                     className="w-full max-w-xs px-3 py-2 border rounded-md text-sm"
                   />
-                  <p className="text-xs text-gray-400 mt-1">
+                  <p className="text-xs text-muted-foreground mt-1">
                     Recovery threshold = trigger threshold x factor. Default: 0.9 (10% margin)
                   </p>
                 </div>
@@ -569,14 +569,14 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
               {/* Thresholds - only show relevant ones based on subscribed events */}
               {hasThresholdEvents(formData.events) && (
                 <div>
-                  <h4 className="text-sm font-medium text-gray-700 mb-2">Alert Thresholds</h4>
-                  <p className="text-xs text-gray-500 mb-3">
+                  <h4 className="text-sm font-medium text-foreground mb-2">Alert Thresholds</h4>
+                  <p className="text-xs text-muted-foreground mb-3">
                     Override default thresholds for subscribed events. Leave blank for defaults.
                   </p>
                   <div className="grid grid-cols-2 gap-4">
                     {formData.events?.includes(WebhookEventTypeEnum.MEMORY_CRITICAL) && (
                       <div>
-                        <label className="block text-xs text-gray-500 mb-1">
+                        <label className="block text-xs text-muted-foreground mb-1">
                           Memory Critical (%)
                         </label>
                         <input
@@ -593,7 +593,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
 
                     {formData.events?.includes(WebhookEventTypeEnum.CONNECTION_CRITICAL) && (
                       <div>
-                        <label className="block text-xs text-gray-500 mb-1">
+                        <label className="block text-xs text-muted-foreground mb-1">
                           Connection Critical (%)
                         </label>
                         <input
@@ -610,7 +610,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
 
                     {formData.events?.includes(WebhookEventTypeEnum.COMPLIANCE_ALERT) && (
                       <div>
-                        <label className="block text-xs text-gray-500 mb-1">
+                        <label className="block text-xs text-muted-foreground mb-1">
                           Compliance Memory (%)
                         </label>
                         <input
@@ -627,7 +627,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
 
                     {formData.events?.includes(WebhookEventTypeEnum.SLOWLOG_THRESHOLD) && (
                       <div>
-                        <label className="block text-xs text-gray-500 mb-1">
+                        <label className="block text-xs text-muted-foreground mb-1">
                           Slowlog Count
                         </label>
                         <input
@@ -643,7 +643,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
 
                     {formData.events?.includes(WebhookEventTypeEnum.REPLICATION_LAG) && (
                       <div>
-                        <label className="block text-xs text-gray-500 mb-1">
+                        <label className="block text-xs text-muted-foreground mb-1">
                           Replication Lag (seconds)
                         </label>
                         <input
@@ -659,7 +659,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
 
                     {formData.events?.includes(WebhookEventTypeEnum.LATENCY_SPIKE) && (
                       <div>
-                        <label className="block text-xs text-gray-500 mb-1">
+                        <label className="block text-xs text-muted-foreground mb-1">
                           Latency Spike (ms)
                         </label>
                         <input
@@ -670,13 +670,13 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                           onChange={(e) => updateThreshold('latencySpikeMs', e.target.value)}
                           className="w-full px-3 py-2 border rounded-md text-sm"
                         />
-                        <p className="text-xs text-gray-400 mt-1">0 = auto baseline</p>
+                        <p className="text-xs text-muted-foreground mt-1">0 = auto baseline</p>
                       </div>
                     )}
 
                     {formData.events?.includes(WebhookEventTypeEnum.CONNECTION_SPIKE) && (
                       <div>
-                        <label className="block text-xs text-gray-500 mb-1">
+                        <label className="block text-xs text-muted-foreground mb-1">
                           Connection Spike Count
                         </label>
                         <input
@@ -687,7 +687,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                           onChange={(e) => updateThreshold('connectionSpikeCount', e.target.value)}
                           className="w-full px-3 py-2 border rounded-md text-sm"
                         />
-                        <p className="text-xs text-gray-400 mt-1">0 = auto baseline</p>
+                        <p className="text-xs text-muted-foreground mt-1">0 = auto baseline</p>
                       </div>
                     )}
                   </div>
@@ -702,7 +702,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
           <button
             type="submit"
             disabled={submitting || formData.events.length === 0}
-            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+            className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
           >
             {submitting ? 'Saving...' : webhook ? 'Update Webhook' : 'Create Webhook'}
           </button>
@@ -710,7 +710,7 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
             type="button"
             onClick={onCancel}
             disabled={submitting}
-            className="px-4 py-2 border rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-4 py-2 border rounded-md hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Cancel
           </button>

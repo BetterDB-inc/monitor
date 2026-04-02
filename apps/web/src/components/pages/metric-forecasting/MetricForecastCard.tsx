@@ -3,9 +3,9 @@ import { Card } from '../../ui/card';
 import { formatMetricValue, formatGrowthRate } from './formatters';
 
 const TREND_COLORS = {
-  rising: 'text-red-600 dark:text-red-400',
+  rising: 'text-destructive',
   falling: 'text-green-600 dark:text-green-400',
-  stable: 'text-blue-600 dark:text-blue-400',
+  stable: 'text-primary',
 } as const;
 
 export function MetricForecastCard({

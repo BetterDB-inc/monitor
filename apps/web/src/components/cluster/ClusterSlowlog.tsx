@@ -40,7 +40,7 @@ export function ClusterSlowlog() {
     return (
       <Card>
         <CardContent className="p-6">
-          <div className="text-center text-red-500">Error loading slowlog: {error.message}</div>
+          <div className="text-center text-destructive">Error loading slowlog: {error.message}</div>
         </CardContent>
       </Card>
     );
@@ -128,7 +128,7 @@ export function ClusterSlowlog() {
               {filteredAndSortedEntries.map((entry) => {
                 const durationColor =
                   entry.duration > VERY_SLOW_QUERY_THRESHOLD_US
-                    ? 'text-red-500'
+                    ? 'text-destructive'
                     : entry.duration > SLOW_QUERY_THRESHOLD_US
                     ? 'text-yellow-500'
                     : 'text-muted-foreground';

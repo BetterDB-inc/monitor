@@ -19,7 +19,7 @@ export function SlotMigrations({ migrations }: SlotMigrationsProps) {
             Slot Migrations
           </CardTitle>
           {activeMigrations.length > 0 && (
-            <Badge variant="outline" className="bg-blue-500/10 text-blue-500 border-blue-500/20">
+            <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20">
               {activeMigrations.length} Active
             </Badge>
           )}
@@ -37,11 +37,11 @@ export function SlotMigrations({ migrations }: SlotMigrationsProps) {
           <div className="space-y-4">
             {activeMigrations.map((migration) => {
               const stateColor = migration.state === 'migrating'
-                ? 'text-blue-500'
+                ? 'text-primary'
                 : 'text-purple-500';
 
               const stateBg = migration.state === 'migrating'
-                ? 'bg-blue-500/10'
+                ? 'bg-primary/10'
                 : 'bg-purple-500/10';
 
               return (
@@ -91,7 +91,7 @@ export function SlotMigrations({ migrations }: SlotMigrationsProps) {
             <div className="pt-3 border-t text-xs text-muted-foreground">
               <div className="space-y-1">
                 <div>
-                  <strong className="text-blue-500">Migrating:</strong> Keys are being moved from source to target
+                  <strong className="text-primary">Migrating:</strong> Keys are being moved from source to target
                 </div>
                 <div>
                   <strong className="text-purple-500">Importing:</strong> Keys are being received at target

@@ -37,13 +37,13 @@ function highlightText(text: string): ReactNode[] {
 
     if (isWarning) {
       parts.push(
-        <span key={key++} className="text-red-600 font-semibold">
+        <span key={key++} className="text-destructive font-semibold">
           {firstMatch[0]}
         </span>
       );
     } else {
       parts.push(
-        <code key={key++} className="bg-blue-100 text-blue-700 px-1 rounded">
+        <code key={key++} className="bg-primary/10 text-primary px-1 rounded">
           {firstMatch[0]}
         </code>
       );
@@ -58,14 +58,14 @@ function highlightText(text: string): ReactNode[] {
 export function DoctorCard({ title, report, isLoading }: DoctorCardProps) {
   if (isLoading) {
     return (
-      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 animate-pulse">
+      <div className="rounded-lg border border-border bg-muted p-4 animate-pulse">
         <div className="flex items-center gap-2">
-          <div className="h-5 w-5 bg-gray-300 rounded"></div>
-          <div className="h-5 w-32 bg-gray-300 rounded"></div>
+          <div className="h-5 w-5 bg-muted-foreground/20 rounded"></div>
+          <div className="h-5 w-32 bg-muted-foreground/20 rounded"></div>
         </div>
         <div className="mt-2 space-y-2">
-          <div className="h-4 bg-gray-300 rounded w-3/4"></div>
-          <div className="h-4 bg-gray-300 rounded w-1/2"></div>
+          <div className="h-4 bg-muted-foreground/20 rounded w-3/4"></div>
+          <div className="h-4 bg-muted-foreground/20 rounded w-1/2"></div>
         </div>
       </div>
     );
@@ -94,7 +94,7 @@ export function DoctorCard({ title, report, isLoading }: DoctorCardProps) {
         <AlertTriangle className="h-5 w-5" />
         <span className="font-medium">{title}</span>
       </div>
-      <pre className="mt-2 whitespace-pre-wrap text-sm text-gray-700 font-mono overflow-x-auto">
+      <pre className="mt-2 whitespace-pre-wrap text-sm text-foreground font-mono overflow-x-auto">
         {highlightText(report)}
       </pre>
     </div>

@@ -106,7 +106,7 @@ export function Members({ cloudUser }: MembersProps) {
       <h1 className="text-3xl font-bold">Team</h1>
 
       {error && (
-        <div className="p-3 rounded-md bg-red-50 text-red-700 border border-red-200 text-sm">
+        <div className="p-3 rounded-md bg-destructive/5 text-destructive border border-destructive/20 text-sm">
           {error}
         </div>
       )}
@@ -149,7 +149,7 @@ export function Members({ cloudUser }: MembersProps) {
             <button
               type="submit"
               disabled={inviting || !inviteEmail.trim()}
-              className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-sm"
+              className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed text-sm"
             >
               {inviting ? 'Sending...' : 'Invite'}
             </button>
@@ -187,7 +187,7 @@ export function Members({ cloudUser }: MembersProps) {
                     {member.id !== cloudUser.userId && !member.isOwner && (
                       <button
                         onClick={() => handleRemoveMember(member.id, member.email)}
-                        className="text-sm text-red-600 hover:text-red-800"
+                        className="text-sm text-destructive hover:text-destructive/80"
                       >
                         Remove
                       </button>
@@ -244,7 +244,7 @@ export function Members({ cloudUser }: MembersProps) {
                     {invitation.status === 'pending' && (
                       <button
                         onClick={() => handleRevoke(invitation.id)}
-                        className="text-sm text-red-600 hover:text-red-800"
+                        className="text-sm text-destructive hover:text-destructive/80"
                       >
                         Revoke
                       </button>

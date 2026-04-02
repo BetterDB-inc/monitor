@@ -113,7 +113,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-lg text-gray-500">Loading settings...</div>
+        <div className="text-lg text-muted-foreground">Loading settings...</div>
       </div>
     );
   }
@@ -161,7 +161,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Settings</h1>
-          <p className="text-sm text-gray-500 mt-1">Configure application settings</p>
+          <p className="text-sm text-muted-foreground mt-1">Configure application settings</p>
         </div>
         <div className="flex items-center gap-2">
           <Badge variant="secondary">Source: {source}</Badge>
@@ -177,8 +177,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
               onClick={() => setActiveCategory(category.id)}
               className={`w-full text-left px-4 py-3 rounded-lg transition-colors ${
                 activeCategory === category.id
-                  ? 'bg-blue-100 text-blue-900 font-medium'
-                  : 'hover:bg-gray-100'
+                  ? 'bg-primary/10 text-primary font-medium'
+                  : 'hover:bg-muted'
               }`}
             >
               {category.label}
@@ -191,7 +191,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
             {activeCategory === 'audit' && (
               <div className="space-y-4">
                 <h2 className="text-xl font-semibold mb-4">Audit Trail</h2>
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-muted-foreground">
                   These settings take effect within 30 seconds without requiring a restart.
                 </p>
 
@@ -210,7 +210,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
             {activeCategory === 'clientAnalytics' && (
               <div className="space-y-4">
                 <h2 className="text-xl font-semibold mb-4">Client Analytics</h2>
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-muted-foreground">
                   These settings take effect within 30 seconds without requiring a restart.
                 </p>
 
@@ -229,7 +229,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
             {activeCategory === 'anomaly' && (
               <div className="space-y-4">
                 <h2 className="text-xl font-semibold mb-4">Anomaly Detection</h2>
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-muted-foreground">
                   These settings take effect within 30 seconds without requiring a restart.
                 </p>
 
@@ -268,12 +268,12 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
             {activeCategory === 'mcpTokens' && (
               <div className="space-y-4">
                 <h2 className="text-xl font-semibold mb-4">MCP Tokens</h2>
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-muted-foreground">
                   Generate tokens for MCP (Model Context Protocol) clients like Claude Code to access your database observability data.
                 </p>
 
                 {mcpError && (
-                  <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-md p-2">
+                  <div className="text-sm text-destructive bg-destructive/5 border border-destructive/20 rounded-md p-2">
                     {mcpError}
                   </div>
                 )}
@@ -288,13 +288,13 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                         value={mcpTokenName}
                         onChange={(e) => setMcpTokenName(e.target.value)}
                         placeholder="Token name (e.g., claude-code)"
-                        className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                         onKeyDown={(e) => e.key === 'Enter' && handleMcpGenerate()}
                       />
                       <button
                         onClick={handleMcpGenerate}
                         disabled={mcpGenerating || !mcpTokenName.trim()}
-                        className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                        className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed"
                       >
                         {mcpGenerating ? 'Generating...' : 'Generate'}
                       </button>
@@ -314,7 +314,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       </code>
                       <button
                         onClick={() => copyMcpToken(mcpGeneratedToken.token)}
-                        className="px-3 py-1 text-xs border rounded hover:bg-gray-50 flex-shrink-0"
+                        className="px-3 py-1 text-xs border rounded hover:bg-muted flex-shrink-0"
                       >
                         {mcpCopied ? 'Copied!' : 'Copy'}
                       </button>
@@ -339,7 +339,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
 
                     <button
                       onClick={() => setMcpGeneratedToken(null)}
-                      className="mt-3 text-xs text-blue-600 hover:underline"
+                      className="mt-3 text-xs text-primary hover:underline"
                     >
                       I've saved the token
                     </button>
@@ -360,14 +360,14 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                           >
                             <div className="min-w-0">
                               <div className="font-medium truncate">{token.name}</div>
-                              <div className="text-xs text-gray-500">
+                              <div className="text-xs text-muted-foreground">
                                 Created {new Date(token.createdAt).toLocaleDateString()}
                                 {token.lastUsedAt && ` · Last used ${new Date(token.lastUsedAt).toLocaleDateString()}`}
                               </div>
                             </div>
                             <div className="flex items-center gap-2 flex-shrink-0">
                               {token.revokedAt ? (
-                                <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded">
+                                <span className="text-xs px-1.5 py-0.5 bg-destructive/10 text-destructive rounded">
                                   Revoked
                                 </span>
                               ) : !isActive ? (
@@ -381,7 +381,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                                   </span>
                                   <button
                                     onClick={() => handleMcpRevoke(token.id)}
-                                    className="text-xs px-2 py-1 border border-red-300 text-red-600 rounded hover:bg-red-50"
+                                    className="text-xs px-2 py-1 border border-destructive/20 text-destructive rounded hover:bg-destructive/10"
                                   >
                                     Revoke
                                   </button>
@@ -402,21 +402,21 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                 <button
                   onClick={handleSave}
                   disabled={!hasChanges || saving}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                  className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed"
                 >
                   {saving ? 'Saving...' : 'Save Changes'}
                 </button>
                 <button
                   onClick={handleCancel}
                   disabled={!hasChanges || saving}
-                  className="px-4 py-2 border rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-4 py-2 border rounded-md hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleReset}
                   disabled={saving}
-                  className="ml-auto px-4 py-2 text-red-600 border border-red-600 rounded-md hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="ml-auto px-4 py-2 text-destructive border border-destructive rounded-md hover:bg-destructive/10 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Reset to Defaults
                 </button>

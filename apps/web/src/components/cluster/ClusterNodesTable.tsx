@@ -96,11 +96,11 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
   const getRoleBadge = (node: ClusterNode) => {
     if (node.flags.includes('master')) {
       return (
-        <Badge className="bg-blue-500/10 text-blue-500 border-0">Master</Badge>
+        <Badge className="bg-primary/10 text-primary border-0">Master</Badge>
       );
     }
     return (
-      <Badge className="bg-gray-500/10 text-gray-500 border-0">Replica</Badge>
+      <Badge className="bg-muted text-muted-foreground border-0">Replica</Badge>
     );
   };
 
@@ -111,7 +111,7 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
       );
     }
     return (
-      <Badge className="bg-red-500/10 text-red-500 border-0">Disconnected</Badge>
+      <Badge className="bg-destructive/10 text-destructive border-0">Disconnected</Badge>
     );
   };
 
@@ -206,7 +206,7 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
                         <Server className="w-4 h-4 text-muted-foreground" />
                         {node.address}
                         {node.flags.includes('myself') && (
-                          <Badge className="bg-blue-500/10 text-blue-500 border-0 text-[10px]">
+                          <Badge className="bg-primary/10 text-primary border-0 text-[10px]">
                             MYSELF
                           </Badge>
                         )}

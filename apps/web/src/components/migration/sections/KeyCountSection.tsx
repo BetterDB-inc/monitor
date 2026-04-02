@@ -17,7 +17,7 @@ export function KeyCountSection({ keyCount }: Props) {
       ? 'text-green-700'
       : discrepancyPercent <= 5
         ? 'text-amber-700'
-        : 'text-red-700';
+        : 'text-destructive';
 
   const sign = discrepancy >= 0 ? '+' : '';
 
