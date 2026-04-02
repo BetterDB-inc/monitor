@@ -1,10 +1,11 @@
-import { Module, OnModuleDestroy, Inject, Logger } from '@nestjs/common';
+import { Global, Module, OnModuleDestroy, Inject, Logger } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TelemetryController } from './telemetry.controller';
 import { UsageTelemetryService } from './usage-telemetry.service';
 import { TelemetryClientFactory } from './telemetry-client.factory';
 import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
 
+@Global()
 @Module({
   imports: [ConfigModule],
   controllers: [TelemetryController],
@@ -19,7 +20,7 @@ import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
     },
     UsageTelemetryService,
   ],
-  exports: [UsageTelemetryService],
+  exports: ['TELEMETRY_CLIENT', UsageTelemetryService],
 })
 export class TelemetryModule implements OnModuleDestroy {
   private readonly logger = new Logger(TelemetryModule.name);

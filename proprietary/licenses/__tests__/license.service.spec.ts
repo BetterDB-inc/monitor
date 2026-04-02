@@ -1,10 +1,18 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { LicenseService } from '../license.service';
+import { TelemetryPort } from '@app/common/interfaces/telemetry-port.interface';
+
+const createMockTelemetryClient = (): jest.Mocked<TelemetryPort> => ({
+  capture: jest.fn(),
+  identify: jest.fn(),
+  shutdown: jest.fn().mockResolvedValue(undefined),
+});
 
 describe('LicenseService', () => {
   let service: LicenseService;
   let mockFetch: jest.SpyInstance;
+  let mockTelemetryClient: jest.Mocked<TelemetryPort>;
 
   const originalEnv = process.env;
 
@@ -18,6 +26,7 @@ describe('LicenseService', () => {
   beforeEach(async () => {
     jest.resetModules();
     process.env = { ...originalEnv };
+    mockTelemetryClient = createMockTelemetryClient();
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -27,6 +36,10 @@ describe('LicenseService', () => {
           useValue: {
             get: jest.fn(),
           },
+        },
+        {
+          provide: 'TELEMETRY_CLIENT',
+          useValue: mockTelemetryClient,
         },
       ],
     }).compile();
@@ -183,6 +196,101 @@ describe('LicenseService', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(body.eventType).toBe('startup_error');
+    });
+  });
+
+  describe('heartbeat telemetry via adapter', () => {
+    let heartbeatService: LicenseService;
+    let heartbeatMock: jest.Mocked<TelemetryPort>;
+
+    beforeEach(async () => {
+      delete process.env.BETTERDB_LICENSE_KEY;
+      delete process.env.BETTERDB_TELEMETRY;
+      heartbeatMock = createMockTelemetryClient();
+
+      const module = await Test.createTestingModule({
+        providers: [
+          LicenseService,
+          { provide: ConfigService, useValue: { get: jest.fn() } },
+          { provide: 'TELEMETRY_CLIENT', useValue: heartbeatMock },
+        ],
+      }).compile();
+      heartbeatService = module.get<LicenseService>(LicenseService);
+    });
+
+    afterEach(() => {
+      heartbeatService.onModuleDestroy();
+    });
+
+    it('should delegate heartbeat to telemetry adapter via capture()', () => {
+      const stats = { version: 'unknown', uptime: 42 };
+      (heartbeatService as any).sendHeartbeat(stats);
+
+      expect(heartbeatMock.capture).toHaveBeenCalledTimes(1);
+      expect(heartbeatMock.capture).toHaveBeenCalledWith({
+        distinctId: expect.any(String),
+        event: 'telemetry_ping',
+        properties: expect.objectContaining({
+          tier: 'community',
+          deploymentMode: 'self-hosted',
+          version: 'unknown',
+          uptime: 42,
+        }),
+      });
+    });
+
+    it('should not call adapter when telemetry is disabled', async () => {
+      process.env.BETTERDB_TELEMETRY = 'false';
+
+      const module = await Test.createTestingModule({
+        providers: [
+          LicenseService,
+          { provide: ConfigService, useValue: { get: jest.fn() } },
+          { provide: 'TELEMETRY_CLIENT', useValue: heartbeatMock },
+        ],
+      }).compile();
+      const telemetryOffService = module.get<LicenseService>(LicenseService);
+
+      (telemetryOffService as any).sendHeartbeat({ version: 'test' });
+
+      expect(heartbeatMock.capture).not.toHaveBeenCalled();
+    });
+
+    it('should not throw when telemetry client is not injected', async () => {
+      const module = await Test.createTestingModule({
+        providers: [
+          LicenseService,
+          { provide: ConfigService, useValue: { get: jest.fn() } },
+        ],
+      }).compile();
+      const noClientService = module.get<LicenseService>(LicenseService);
+
+      expect(() => (noClientService as any).sendHeartbeat({ version: 'test' })).not.toThrow();
+    });
+  });
+
+  describe('version info via validateLicense', () => {
+    it('should store version info from entitlement response', async () => {
+      mockFetch.mockResolvedValue(createMockResponse({
+        valid: true,
+        tier: 'community',
+        expiresAt: null,
+        latestVersion: '0.5.0',
+        releaseUrl: 'https://example.com/v0.5.0',
+      }));
+
+      await service.validateLicense();
+
+      const info = service.getVersionInfo();
+      expect(info.latest).toBe('0.5.0');
+      expect(info.releaseUrl).toBe('https://example.com/v0.5.0');
+    });
+
+    it('should not throw when entitlement fetch fails', async () => {
+      mockFetch.mockRejectedValue(new Error('Network error'));
+
+      const result = await service.validateLicense();
+      expect(result.tier).toBe('community');
     });
   });
 
