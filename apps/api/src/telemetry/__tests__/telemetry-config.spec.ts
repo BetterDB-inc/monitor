@@ -78,16 +78,24 @@ describe('GET /telemetry/config', () => {
     expect(config).not.toHaveProperty('posthogHost');
   });
 
-  it('should return telemetryEnabled false when BETTERDB_TELEMETRY is false', () => {
+  it('should return telemetryEnabled false when BETTERDB_TELEMETRY is boolean false', () => {
     const configService = createMockConfigService({
       TELEMETRY_PROVIDER: 'noop',
       BETTERDB_TELEMETRY: false,
     });
 
     const controller = createController(configService);
-    const config = controller.getConfig();
+    expect(controller.getConfig().telemetryEnabled).toBe(false);
+  });
 
-    expect(config.telemetryEnabled).toBe(false);
+  it('should return telemetryEnabled false when BETTERDB_TELEMETRY is string "false"', () => {
+    const configService = createMockConfigService({
+      TELEMETRY_PROVIDER: 'noop',
+      BETTERDB_TELEMETRY: 'false',
+    });
+
+    const controller = createController(configService);
+    expect(controller.getConfig().telemetryEnabled).toBe(false);
   });
 
   it('should return empty instanceId when licenseService is absent', () => {

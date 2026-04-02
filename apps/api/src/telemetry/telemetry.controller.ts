@@ -25,7 +25,8 @@ export class TelemetryController {
   @Get('config')
   getConfig(): TelemetryConfig {
     const provider = this.configService.get<string>('TELEMETRY_PROVIDER', 'posthog');
-    const telemetryEnabled = this.configService.get('BETTERDB_TELEMETRY') !== false;
+    const rawTelemetry = this.configService.get('BETTERDB_TELEMETRY');
+    const telemetryEnabled = rawTelemetry !== false && rawTelemetry !== 'false';
     const instanceId = this.licenseService?.getInstanceId() ?? '';
 
     const config: TelemetryConfig = {
