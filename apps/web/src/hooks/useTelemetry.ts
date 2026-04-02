@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { fetchApi } from '../api/client';
 import type { TelemetryClient } from '../telemetry/telemetry-client.interface';
 import { ApiTelemetryClient } from '../telemetry/clients/api-telemetry-client';
@@ -30,32 +31,27 @@ function createClient(config: TelemetryConfig): TelemetryClient {
   }
 }
 
-async function loadTelemetryClient(): Promise<TelemetryClient> {
-  try {
-    const config = await fetchApi<TelemetryConfig>('/telemetry/config');
-    const client = createClient(config);
-    if (config.instanceId) {
-      client.identify(config.instanceId, { provider: config.provider });
-    }
-    return client;
-  } catch {
-    return new ApiTelemetryClient();
-  }
-}
-
-const clientPromise = loadTelemetryClient();
+const noopClient = new NoopTelemetryClient();
+const fallbackClient = new ApiTelemetryClient();
 
 export function useTelemetry(): TelemetryState {
-  const [state, setState] = useState<TelemetryState>({
-    client: new NoopTelemetryClient(),
-    ready: false,
+  const { data: config, isSuccess, isError } = useQuery<TelemetryConfig>({
+    queryKey: ['telemetry-config'],
+    queryFn: () => fetchApi<TelemetryConfig>('/telemetry/config'),
+    staleTime: Infinity,
+    retry: false,
   });
 
-  useEffect(() => {
-    clientPromise.then((client) => {
-      setState({ client, ready: true });
-    });
-  }, []);
+  const client = useMemo(() => {
+    if (isError) return fallbackClient;
+    if (!config) return noopClient;
 
-  return state;
+    const newClient = createClient(config);
+    if (config.instanceId) {
+      newClient.identify(config.instanceId, { provider: config.provider });
+    }
+    return newClient;
+  }, [config, isError]);
+
+  return { client, ready: isSuccess || isError };
 }

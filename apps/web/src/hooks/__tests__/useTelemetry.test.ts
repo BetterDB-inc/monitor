@@ -1,23 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { waitFor } from '@testing-library/react';
+import { renderHookWithQuery } from '../../test/test-utils';
 
 vi.mock('../../api/client', () => ({
   fetchApi: vi.fn(),
 }));
 
 import { fetchApi } from '../../api/client';
+import { useTelemetry } from '../useTelemetry';
 
 const mockFetchApi = vi.mocked(fetchApi);
 
 describe('useTelemetry', () => {
-  beforeEach(async () => {
+  beforeEach(() => {
     vi.clearAllMocks();
-    vi.resetModules();
   });
-
-  async function importHook(): Promise<typeof import('../useTelemetry')> {
-    return vi.importActual('../useTelemetry') as Promise<typeof import('../useTelemetry')>;
-  }
 
   it('should resolve to ApiTelemetryClient for http provider', async () => {
     mockFetchApi.mockResolvedValue({
@@ -26,8 +23,7 @@ describe('useTelemetry', () => {
       provider: 'http',
     });
 
-    const { useTelemetry } = await importHook();
-    const { result } = renderHook(() => useTelemetry());
+    const { result } = renderHookWithQuery(() => useTelemetry());
 
     await waitFor(() => {
       expect(result.current.ready).toBe(true);
@@ -43,8 +39,7 @@ describe('useTelemetry', () => {
       provider: 'posthog',
     });
 
-    const { useTelemetry } = await importHook();
-    const { result } = renderHook(() => useTelemetry());
+    const { result } = renderHookWithQuery(() => useTelemetry());
 
     await waitFor(() => {
       expect(result.current.ready).toBe(true);
@@ -56,8 +51,7 @@ describe('useTelemetry', () => {
   it('should fall back to ApiTelemetryClient when config fetch fails', async () => {
     mockFetchApi.mockRejectedValue(new Error('network error'));
 
-    const { useTelemetry } = await importHook();
-    const { result } = renderHook(() => useTelemetry());
+    const { result } = renderHookWithQuery(() => useTelemetry());
 
     await waitFor(() => {
       expect(result.current.ready).toBe(true);
@@ -73,8 +67,7 @@ describe('useTelemetry', () => {
       provider: 'noop',
     });
 
-    const { useTelemetry } = await importHook();
-    const { result } = renderHook(() => useTelemetry());
+    const { result } = renderHookWithQuery(() => useTelemetry());
 
     await waitFor(() => {
       expect(result.current.ready).toBe(true);
