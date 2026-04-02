@@ -1,9 +1,10 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import { compare, valid as validSemver } from 'semver';
 import { Tier, Feature, TIER_FEATURES, EntitlementResponse } from './types';
 import type { VersionInfo } from '@betterdb/shared';
+import { TelemetryPort } from '@app/common/interfaces/telemetry-port.interface';
 
 interface CachedEntitlement {
   response: EntitlementResponse;
@@ -33,7 +34,10 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   private releaseUrl: string | null = null;
   private versionCheckedAt: number | null = null;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    @Inject('TELEMETRY_CLIENT') @Optional() private readonly telemetryClient?: TelemetryPort,
+  ) {
     this.currentVersion =
       process.env.APP_VERSION || process.env.npm_package_version || 'unknown';
     this.licenseKey = process.env.BETTERDB_LICENSE_KEY || null;
@@ -73,7 +77,10 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     if (this.telemetryEnabled) {
       this.heartbeatTimer = setInterval(() => {
         this.collectStats().then(stats => {
-          this.sendTelemetry('telemetry_ping', stats);
+          this.sendHeartbeat(stats);
+        });
+        this.validateLicense().catch(() => {
+          // Version check is best-effort
         });
       }, this.versionCheckIntervalMs);
       this.logger.log(`Telemetry heartbeat scheduled every ${this.versionCheckIntervalMs}ms`);
@@ -175,47 +182,27 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async sendTelemetry(eventType: string, data: Record<string, unknown> = {}): Promise<void> {
-    if (!this.telemetryEnabled) {
+  private sendHeartbeat(data: Record<string, unknown> = {}): void {
+    if (!this.telemetryEnabled || !this.telemetryClient) {
       return;
     }
 
-    const payload = {
-      instanceId: this.instanceId,
-      eventType,
-      tier: this.getLicenseTier(),
-      deploymentMode: process.env.CLOUD_MODE === 'true' ? 'cloud' as const : 'self-hosted' as const,
-      ...data,
-    };
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-
     try {
-      const response = await fetch(this.entitlementUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
+      this.telemetryClient.capture({
+        distinctId: this.instanceId,
+        event: 'telemetry_ping',
+        properties: {
+          tier: this.getLicenseTier(),
+          deploymentMode:
+            process.env.CLOUD_MODE === 'true' ? 'cloud' : 'self-hosted',
+          ...data,
+        },
       });
-
-      // Store version info from telemetry response
-      if (response.ok) {
-        try {
-          const data = await response.json();
-          if (data.latestVersion) {
-            this.setLatestVersion(data.latestVersion, data.releaseUrl);
-          }
-        } catch {
-          // No JSON in response - ignore
-        }
-      }
     } catch {
       // Telemetry is best-effort, don't log failures
-    } finally {
-      clearTimeout(timeout);
     }
   }
+
 
   private getCommunityEntitlement(error?: string): EntitlementResponse {
     return {
