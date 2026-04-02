@@ -1,4 +1,5 @@
 import { useState, useEffect, ReactNode } from 'react';
+import { useTelemetry } from '../hooks/useTelemetry';
 
 interface ServerStartupGuardProps {
   children: ReactNode;
@@ -21,6 +22,7 @@ export function ServerStartupGuard({ children }: ServerStartupGuardProps) {
   const [serverReady, setServerReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const { ready: telemetryReady } = useTelemetry();
 
   useEffect(() => {
     let retries = 0;
@@ -98,7 +100,7 @@ export function ServerStartupGuard({ children }: ServerStartupGuardProps) {
     );
   }
 
-  if (!serverReady) {
+  if (!serverReady || !telemetryReady) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center">
