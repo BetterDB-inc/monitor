@@ -1,6 +1,6 @@
 import type { MetricForecastSettings, MetricForecastSettingsUpdate, MetricKindMeta } from '@betterdb/shared';
 import { Card } from '../../ui/card';
-import { Toggle } from '../../ui/toggle';
+import { Switch } from '../../ui/switch';
 
 const WINDOW_PRESETS = [
   { label: '1h', value: 3600000 },
@@ -34,15 +34,15 @@ export function MetricSettingsPanel({
         <h2 className="text-lg font-semibold">Instance Settings</h2>
         <div className="flex items-center gap-2">
           {saveStatus === 'saved' && <span className="text-sm text-green-600">Saved</span>}
-          {saveStatus === 'error' && <span className="text-sm text-red-600">Error saving</span>}
+          {saveStatus === 'error' && <span className="text-sm text-destructive">Error saving</span>}
         </div>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="flex items-center gap-3">
           <label className="block text-sm font-medium">Enabled</label>
-          <Toggle
+          <Switch
             checked={settings.enabled}
-            onChange={() => onUpdate({ enabled: !settings.enabled })}
+            onCheckedChange={(checked) => onUpdate({ enabled: checked })}
           />
         </div>
         <div>

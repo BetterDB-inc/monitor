@@ -175,7 +175,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
             </NavItem>
           )}
         </nav>
-        <div className="px-3 pb-4 border-t border-gray-200 pt-2 space-y-1">
+        <div className="px-3 pb-4 border-t border-border pt-2 space-y-1">
           <a
             href="https://docs.betterdb.com"
             target="_blank"

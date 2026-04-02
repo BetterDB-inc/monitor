@@ -1,7 +1,7 @@
 import type { MigrationAnalysisResult } from '@betterdb/shared';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
-const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#6b7280'];
+const COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-warning)', 'var(--destructive)', 'var(--chart-3)', 'var(--chart-info)', 'var(--muted-foreground)'];
 const TYPE_NAMES = ['string', 'hash', 'list', 'set', 'zset', 'stream', 'other'] as const;
 
 function formatBytes(bytes: number): string {

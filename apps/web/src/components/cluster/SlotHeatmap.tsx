@@ -50,6 +50,26 @@ export function SlotHeatmap({ slotStats, nodes, hasSlotStats }: SlotHeatmapProps
     // Scale context to account for device pixel ratio
     ctx.scale(pixelRatio, pixelRatio);
 
+    // Resolve --primary CSS variable to RGB for canvas rendering
+    const rootStyles = getComputedStyle(document.documentElement);
+    const primaryRaw = rootStyles.getPropertyValue('--primary').trim();
+    const tempEl = document.createElement('div');
+    tempEl.style.color = primaryRaw;
+    document.body.appendChild(tempEl);
+    const resolved = getComputedStyle(tempEl).color;
+    document.body.removeChild(tempEl);
+    const rgbMatch = resolved.match(/(\d+)/g);
+    const [r, g, b] = rgbMatch ? rgbMatch.map(Number) : [20, 184, 166];
+
+    // Resolve --muted CSS variable for empty slot color
+    const mutedRaw = rootStyles.getPropertyValue('--muted').trim();
+    const mutedEl = document.createElement('div');
+    mutedEl.style.color = mutedRaw;
+    document.body.appendChild(mutedEl);
+    const mutedResolved = getComputedStyle(mutedEl).color;
+    document.body.removeChild(mutedEl);
+    const mutedColor = mutedResolved || '#f3f4f6';
+
     // Find max key count for normalization
     const maxKeys = Math.max(
       ...Object.values(slotStats).map((s) => s.key_count),
@@ -68,11 +88,11 @@ export function SlotHeatmap({ slotStats, nodes, hasSlotStats }: SlotHeatmapProps
       if (stats && stats.key_count > 0) {
         // Normalize intensity (0.1 to 1.0 range for visibility)
         const intensity = 0.1 + (stats.key_count / maxKeys) * 0.9;
-        // Blue color scale
-        ctx.fillStyle = `rgba(59, 130, 246, ${intensity})`;
+        // Primary color scale
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${intensity})`;
       } else {
-        // Gray for empty slots
-        ctx.fillStyle = '#f3f4f6';
+        // Muted for empty slots
+        ctx.fillStyle = mutedColor;
       }
 
       // Draw cell with small gap for visibility
@@ -200,27 +220,27 @@ export function SlotHeatmap({ slotStats, nodes, hasSlotStats }: SlotHeatmapProps
             <span className="text-muted-foreground">Key density:</span>
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1">
-                <div className="w-4 h-4 rounded" style={{ backgroundColor: '#f3f4f6' }} />
+                <div className="w-4 h-4 rounded" style={{ backgroundColor: 'var(--muted)' }} />
                 <span className="text-xs">Empty</span>
               </div>
               <div className="flex items-center gap-1">
                 <div
                   className="w-4 h-4 rounded"
-                  style={{ backgroundColor: 'rgba(59, 130, 246, 0.3)' }}
+                  style={{ backgroundColor: 'color-mix(in oklch, var(--primary) 30%, transparent)' }}
                 />
                 <span className="text-xs">Low</span>
               </div>
               <div className="flex items-center gap-1">
                 <div
                   className="w-4 h-4 rounded"
-                  style={{ backgroundColor: 'rgba(59, 130, 246, 0.6)' }}
+                  style={{ backgroundColor: 'color-mix(in oklch, var(--primary) 60%, transparent)' }}
                 />
                 <span className="text-xs">Medium</span>
               </div>
               <div className="flex items-center gap-1">
                 <div
                   className="w-4 h-4 rounded"
-                  style={{ backgroundColor: 'rgba(59, 130, 246, 1)' }}
+                  style={{ backgroundColor: 'var(--primary)' }}
                 />
                 <span className="text-xs">High</span>
               </div>

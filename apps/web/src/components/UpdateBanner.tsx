@@ -13,7 +13,7 @@ export function UpdateBanner() {
   }
 
   return (
-    <div className="bg-blue-600 text-white px-4 py-2 text-sm flex items-center justify-between">
+    <div className="bg-primary text-white px-4 py-2 text-sm flex items-center justify-between">
       <div className="flex items-center gap-2">
         <span className="font-medium">Update available:</span>
         <span>

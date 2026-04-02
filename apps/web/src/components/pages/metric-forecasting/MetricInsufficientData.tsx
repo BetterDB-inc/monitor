@@ -11,7 +11,7 @@ export function MetricInsufficientData({
 }) {
   return (
     <Card className="p-6">
-      <p className="text-center text-blue-600 dark:text-blue-400">
+      <p className="text-center text-primary">
         {forecast.insufficientDataMessage}
       </p>
       <p className="text-center text-2xl font-bold mt-4">

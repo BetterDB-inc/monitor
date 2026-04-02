@@ -19,9 +19,9 @@ const TOP_COMMANDS_LIMIT = 10;
 const CHART_HEIGHT = { sm: 300, md: 400 };
 
 const COLORS = {
-  p50: '#82ca9d',
-  p95: '#8884d8',
-  p99: '#ffc658',
+  p50: 'var(--chart-1)',
+  p95: 'var(--chart-2)',
+  p99: 'var(--chart-3)',
 };
 
 const GRADIENT_STOPS = { startOffset: '5%', endOffset: '95%', startOpacity: 0.3, endOpacity: 0.1 };

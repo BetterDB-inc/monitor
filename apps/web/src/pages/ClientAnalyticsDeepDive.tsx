@@ -46,7 +46,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
 }
 
-const CHART_COLORS = ['hsl(var(--primary))', '#8884d8', '#82ca9d', '#ffc658', '#ff8042', '#a4de6c', '#d0ed57', '#ffa07a'];
+const CHART_COLORS = ['var(--primary)', 'var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-5)', 'var(--chart-warning)', 'var(--chart-info)'];
 
 export function ClientAnalyticsDeepDive() {
   const { currentConnection } = useConnection();
@@ -240,12 +240,12 @@ export function ClientAnalyticsDeepDive() {
             <CardTitle className="text-sm">Critical Buffers</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-red-600">{summaryData.bufferCritical}</div>
+            <div className="text-2xl font-bold text-destructive">{summaryData.bufferCritical}</div>
             <div className="text-xs text-muted-foreground mt-1">Needs attention</div>
           </CardContent>
         </Card>
 
-        <Card className={anomalySummary?.bySeverity?.critical > 0 ? 'border-red-500/50' : anomalySummary?.bySeverity?.warning > 0 ? 'border-yellow-500/50' : ''}>
+        <Card className={anomalySummary?.bySeverity?.critical > 0 ? 'border-destructive/50' : anomalySummary?.bySeverity?.warning > 0 ? 'border-yellow-500/50' : ''}>
           <CardHeader>
             <CardTitle className="text-sm">Anomalies Detected</CardTitle>
           </CardHeader>
@@ -253,7 +253,7 @@ export function ClientAnalyticsDeepDive() {
             <div className="text-2xl font-bold">{anomalySummary?.totalEvents ?? 0}</div>
             <div className="flex gap-2 mt-1 text-xs">
               {anomalySummary?.bySeverity?.critical > 0 && (
-                <span className="text-red-500">{anomalySummary.bySeverity.critical} critical</span>
+                <span className="text-destructive">{anomalySummary.bySeverity.critical} critical</span>
               )}
               {anomalySummary?.bySeverity?.warning > 0 && (
                 <span className="text-yellow-500">{anomalySummary.bySeverity.warning} warning</span>
@@ -298,16 +298,16 @@ export function ClientAnalyticsDeepDive() {
                 <Area
                   type="monotone"
                   dataKey="connections"
-                  stroke="hsl(var(--primary))"
-                  fill="hsl(var(--primary))"
+                  stroke="var(--primary)"
+                  fill="var(--primary)"
                   fillOpacity={0.3}
                   name="Total Connections"
                 />
                 <Area
                   type="monotone"
                   dataKey="uniqueClients"
-                  stroke="#82ca9d"
-                  fill="#82ca9d"
+                  stroke="var(--chart-2)"
+                  fill="var(--chart-2)"
                   fillOpacity={0.2}
                   name="Unique Clients"
                 />
@@ -352,7 +352,7 @@ export function ClientAnalyticsDeepDive() {
                         labelLine={false}
                         label={({ name, percent }) => `${name} (${((percent || 0) * 100).toFixed(0)}%)`}
                         outerRadius={100}
-                        fill="hsl(var(--primary))"
+                        fill="var(--primary)"
                         dataKey="value"
                       >
                         {commandPieData.map((_, index) => (

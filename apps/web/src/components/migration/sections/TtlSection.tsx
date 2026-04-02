@@ -18,11 +18,11 @@ export function TtlSection({ job }: Props) {
   }
 
   const data = [
-    { name: 'No Expiry', value: ttl.noExpiry, color: '#6b7280' },
-    { name: '< 1 hour', value: ttl.expiresWithin1h, color: '#f59e0b' },
-    { name: '< 24 hours', value: ttl.expiresWithin24h, color: '#3b82f6' },
-    { name: '< 7 days', value: ttl.expiresWithin7d, color: '#10b981' },
-    { name: '> 7 days', value: ttl.expiresAfter7d, color: '#8b5cf6' },
+    { name: 'No Expiry', value: ttl.noExpiry, color: 'var(--muted-foreground)' },
+    { name: '< 1 hour', value: ttl.expiresWithin1h, color: 'var(--chart-warning)' },
+    { name: '< 24 hours', value: ttl.expiresWithin24h, color: 'var(--chart-1)' },
+    { name: '< 7 days', value: ttl.expiresWithin7d, color: 'var(--chart-2)' },
+    { name: '> 7 days', value: ttl.expiresAfter7d, color: 'var(--chart-3)' },
   ];
 
   return (

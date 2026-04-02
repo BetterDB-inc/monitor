@@ -23,11 +23,11 @@ function StatusBadge({ status }: { status: string }) {
     case 'completed':
       return <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Completed</span>;
     case 'failed':
-      return <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">Failed</span>;
+      return <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-destructive/10 text-destructive">Failed</span>;
     case 'cancelled':
       return <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">Cancelled</span>;
     default:
-      return <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">{status}</span>;
+      return <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-muted text-foreground">{status}</span>;
   }
 }
 
@@ -109,7 +109,7 @@ export function ExecutionPanel({ executionId, onStopped }: Props) {
         {execution.status === 'running' && (
           <button
             onClick={handleStop}
-            className="px-3 py-1.5 text-sm border border-red-300 text-red-700 rounded-md hover:bg-red-50"
+            className="px-3 py-1.5 text-sm border border-destructive/20 text-destructive rounded-md hover:bg-destructive/10"
           >
             Stop Migration
           </button>
@@ -134,7 +134,7 @@ export function ExecutionPanel({ executionId, onStopped }: Props) {
 
       {/* Status banners */}
       {execution.status === 'failed' && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 text-sm">
+        <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-4 text-sm">
           {execution.error ?? 'Migration failed'}
         </div>
       )}

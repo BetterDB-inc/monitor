@@ -14,7 +14,7 @@ export function WebhookList({ webhooks, onEdit, onDelete, onTest, onViewDeliveri
   if (webhooks.length === 0) {
     return (
       <Card className="p-8 text-center">
-        <div className="text-gray-500">
+        <div className="text-muted-foreground">
           <p className="text-lg font-medium mb-2">No webhooks configured</p>
           <p className="text-sm">Create your first webhook to get started with real-time notifications.</p>
         </div>
@@ -35,7 +35,7 @@ export function WebhookList({ webhooks, onEdit, onDelete, onTest, onViewDeliveri
                 </Badge>
               </div>
 
-              <div className="space-y-2 text-sm text-gray-600">
+              <div className="space-y-2 text-sm text-muted-foreground">
                 <div>
                   <span className="font-medium">URL:</span> {webhook.url}
                 </div>
@@ -64,25 +64,25 @@ export function WebhookList({ webhooks, onEdit, onDelete, onTest, onViewDeliveri
             <div className="flex items-center gap-2">
               <button
                 onClick={() => onTest(webhook)}
-                className="px-3 py-1.5 text-sm border border-blue-600 text-blue-600 rounded hover:bg-blue-50 transition-colors"
+                className="px-3 py-1.5 text-sm border border-primary text-primary rounded hover:bg-primary/10 transition-colors"
               >
                 Test
               </button>
               <button
                 onClick={() => onViewDeliveries(webhook)}
-                className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
+                className="px-3 py-1.5 text-sm border border-border rounded hover:bg-muted transition-colors"
               >
                 Deliveries
               </button>
               <button
                 onClick={() => onEdit(webhook)}
-                className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
+                className="px-3 py-1.5 text-sm border border-border rounded hover:bg-muted transition-colors"
               >
                 Edit
               </button>
               <button
                 onClick={() => onDelete(webhook)}
-                className="px-3 py-1.5 text-sm border border-red-600 text-red-600 rounded hover:bg-red-50 transition-colors"
+                className="px-3 py-1.5 text-sm border border-destructive text-destructive rounded hover:bg-destructive/10 transition-colors"
               >
                 Delete
               </button>

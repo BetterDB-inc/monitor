@@ -34,7 +34,7 @@ export function OpsChart({ data }: Props) {
             <Line
               type="monotone"
               dataKey="ops"
-              stroke="#8884d8"
+              stroke="var(--chart-1)"
               strokeWidth={2}
               dot={false}
             />

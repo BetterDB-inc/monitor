@@ -99,7 +99,7 @@ export function Webhooks() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-lg text-gray-500">Loading webhooks...</div>
+        <div className="text-lg text-muted-foreground">Loading webhooks...</div>
       </div>
     );
   }
@@ -110,14 +110,14 @@ export function Webhooks() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Webhooks</h1>
-          <p className="text-sm text-gray-500 mt-1">
+          <p className="text-sm text-muted-foreground mt-1">
             Configure webhooks to receive real-time notifications for events
           </p>
         </div>
         {view === 'list' && (
           <button
             onClick={() => setView('create')}
-            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+            className="px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
           >
             Create Webhook
           </button>
@@ -140,7 +140,7 @@ export function Webhooks() {
                       className={
                         testResult.statusCode >= 200 && testResult.statusCode < 300
                           ? 'text-green-600'
-                          : 'text-red-600'
+                          : 'text-destructive'
                       }
                     >
                       {testResult.statusCode}
@@ -153,7 +153,7 @@ export function Webhooks() {
                 {testResult.responseBody && (
                   <div>
                     <span className="font-medium">Response:</span>
-                    <pre className="mt-1 p-2 bg-gray-50 border rounded text-xs overflow-x-auto">
+                    <pre className="mt-1 p-2 bg-muted border rounded text-xs overflow-x-auto">
                       {testResult.responseBody}
                     </pre>
                   </div>
@@ -161,14 +161,14 @@ export function Webhooks() {
                 {testResult.error && (
                   <div>
                     <span className="font-medium">Error:</span>{' '}
-                    <span className="text-red-600">{testResult.error}</span>
+                    <span className="text-destructive">{testResult.error}</span>
                   </div>
                 )}
               </div>
             </div>
             <button
               onClick={() => setTestResult(null)}
-              className="text-gray-400 hover:text-gray-600"
+              className="text-muted-foreground hover:text-foreground"
             >
               ✕
             </button>
@@ -207,7 +207,7 @@ export function Webhooks() {
       {view === 'list' && webhooks.length === 0 && (
         <Card className="p-6">
           <h3 className="text-lg font-semibold mb-2">Getting Started with Webhooks</h3>
-          <div className="text-sm text-gray-600 space-y-2">
+          <div className="text-sm text-muted-foreground space-y-2">
             <p>
               Webhooks allow you to receive real-time HTTP notifications when events occur in your
               BetterDB instance.

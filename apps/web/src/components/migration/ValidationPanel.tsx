@@ -98,7 +98,7 @@ export function ValidationPanel({ validationId, onComplete }: Props) {
         </div>
       )}
       {validation.status === 'failed' && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 text-sm">
+        <div className="bg-destructive/5 border border-destructive/20 text-destructive rounded-lg p-4 text-sm">
           {validation.error ?? 'Validation failed'}
         </div>
       )}

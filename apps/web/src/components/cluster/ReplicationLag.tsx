@@ -38,8 +38,8 @@ export function ReplicationLag({ nodes, nodeStats }: ReplicationLagProps) {
       case 'slight-lag':
         return {
           icon: AlertTriangle,
-          color: 'text-blue-500',
-          bg: 'bg-blue-500/10',
+          color: 'text-primary',
+          bg: 'bg-primary/10',
           label: 'Slight Lag',
         };
       case 'lagging':
@@ -52,8 +52,8 @@ export function ReplicationLag({ nodes, nodeStats }: ReplicationLagProps) {
       case 'disconnected':
         return {
           icon: XCircle,
-          color: 'text-red-500',
-          bg: 'bg-red-500/10',
+          color: 'text-destructive',
+          bg: 'bg-destructive/10',
           label: 'Disconnected',
         };
     }
@@ -86,7 +86,7 @@ export function ReplicationLag({ nodes, nodeStats }: ReplicationLagProps) {
       <CardContent className="space-y-6">
         {/* Info banner for basic stats */}
         {!hasDetailedStats && (
-          <div className="px-4 py-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-sm text-blue-700 dark:text-blue-400">
+          <div className="px-4 py-3 bg-primary/10 border border-primary/20 rounded-lg text-sm text-primary">
             <div className="flex items-center gap-2">
               <Info className="w-4 h-4 flex-shrink-0" />
               <div>
@@ -123,7 +123,7 @@ export function ReplicationLag({ nodes, nodeStats }: ReplicationLagProps) {
               <div key={masterId} className="space-y-2">
                 {/* Master Node */}
                 <div className="flex items-center gap-2 font-medium">
-                  <GitBranch className="w-4 h-4 text-blue-500" />
+                  <GitBranch className="w-4 h-4 text-primary" />
                   <span className="text-sm">Master: {masterAddress}</span>
                   <Badge variant="outline" className="text-xs">primary</Badge>
                 </div>
@@ -170,7 +170,7 @@ export function ReplicationLag({ nodes, nodeStats }: ReplicationLagProps) {
                                 </div>
                               </>
                             ) : (
-                              <div className="text-red-500 font-medium">
+                              <div className="text-destructive font-medium">
                                 Link Down
                               </div>
                             )}
@@ -184,7 +184,7 @@ export function ReplicationLag({ nodes, nodeStats }: ReplicationLagProps) {
                           </div>
                         )}
                         {replica.status === 'disconnected' && (
-                          <div className="mt-2 text-xs text-red-600">
+                          <div className="mt-2 text-xs text-destructive">
                             ⚠️ Replica link is down. Check network connectivity and replication configuration.
                           </div>
                         )}
