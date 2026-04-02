@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
-import { useTelemetry } from '../telemetry/TelemetryConfigProvider';
+import { useTelemetry } from './useTelemetry';
 
 export function useNavigationTracker(): void {
   const location = useLocation();

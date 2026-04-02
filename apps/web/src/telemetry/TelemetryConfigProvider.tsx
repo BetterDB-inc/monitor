@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useEffect, useState, type ReactNode } from 'react';
 import { fetchApi } from '../api/client';
 import type { TelemetryClient } from './telemetry-client.interface';
 import { ApiTelemetryClient } from './clients/api-telemetry-client';
@@ -10,7 +10,7 @@ interface TelemetryConfig {
   provider: string;
 }
 
-const TelemetryContext = createContext<TelemetryClient>(new NoopTelemetryClient());
+export const TelemetryContext = createContext<TelemetryClient>(new NoopTelemetryClient());
 
 function createClient(config: TelemetryConfig): TelemetryClient {
   if (!config.telemetryEnabled || config.provider === 'noop') {
@@ -51,8 +51,4 @@ export function TelemetryConfigProvider({ children }: { children: ReactNode }): 
   if (!ready) return null;
 
   return <TelemetryContext value={client}>{children}</TelemetryContext>;
-}
-
-export function useTelemetry(): TelemetryClient {
-  return useContext(TelemetryContext);
 }

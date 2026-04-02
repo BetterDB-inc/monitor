@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { useTelemetry } from '../telemetry/TelemetryConfigProvider';
+import { useTelemetry } from './useTelemetry';
 
 const IDLE_THRESHOLD_MS = 5 * 60 * 1000;
 const THROTTLE_MS = 30_000;

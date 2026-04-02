@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { TelemetryConfigProvider, useTelemetry } from '../TelemetryConfigProvider';
+import { TelemetryConfigProvider } from '../TelemetryConfigProvider';
+import { useTelemetry } from '../../hooks/useTelemetry';
 import { ApiTelemetryClient } from '../clients/api-telemetry-client';
 import { NoopTelemetryClient } from '../clients/noop-telemetry-client';
 
