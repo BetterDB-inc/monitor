@@ -47,6 +47,8 @@ export class TelemetryController {
       case 'connection_switch':
         await this.handleConnectionSwitch(body.payload);
         break;
+      default:
+        throw new BadRequestException(`Unhandled eventType: ${body.eventType}`);
     }
 
     return { ok: true };
