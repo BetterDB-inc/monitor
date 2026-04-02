@@ -12,7 +12,7 @@ interface TelemetryConfig {
 }
 
 const ALLOWED_EVENT_TYPES = ['interaction_after_idle', 'page_view', 'connection_switch'] as const;
-type AllowedEventType = typeof ALLOWED_EVENT_TYPES[number];
+type AllowedEventType = (typeof ALLOWED_EVENT_TYPES)[number];
 
 @Controller('telemetry')
 export class TelemetryController {
@@ -25,8 +25,8 @@ export class TelemetryController {
   @Get('config')
   getConfig(): TelemetryConfig {
     const provider = this.configService.get<string>('TELEMETRY_PROVIDER', 'posthog');
-    const rawTelemetry = this.configService.get('BETTERDB_TELEMETRY');
-    const telemetryEnabled = rawTelemetry !== false && rawTelemetry !== 'false';
+    const rawTelemetryConfig = this.configService.get('BETTERDB_TELEMETRY');
+    const telemetryEnabled = rawTelemetryConfig !== false && rawTelemetryConfig !== 'false';
     const instanceId = this.licenseService?.getInstanceId() ?? '';
 
     const config: TelemetryConfig = {
@@ -71,7 +71,8 @@ export class TelemetryController {
         throw new BadRequestException('payload.totalConnections must be a number');
       }
       const dbType = typeof body.payload?.dbType === 'string' ? body.payload.dbType : 'unknown';
-      const dbVersion = typeof body.payload?.dbVersion === 'string' ? body.payload.dbVersion : 'unknown';
+      const dbVersion =
+        typeof body.payload?.dbVersion === 'string' ? body.payload.dbVersion : 'unknown';
       await this.usageTelemetry.trackDbSwitch(totalConnections, dbType, dbVersion);
     }
 
