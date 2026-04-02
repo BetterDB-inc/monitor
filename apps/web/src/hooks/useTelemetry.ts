@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchApi } from '../api/client';
 import type { TelemetryClient } from '../telemetry/telemetry-client.interface';
@@ -37,8 +37,15 @@ function createClient(config: TelemetryConfig): TelemetryClient {
   }
 }
 
+let sharedClient: TelemetryClient | null = null;
+let identifiedInstanceId: string | null = null;
 const noopClient = new NoopTelemetryClient();
-const fallbackClient = new ApiTelemetryClient();
+
+/** @internal test-only */
+export function _resetTelemetryClient(): void {
+  sharedClient = null;
+  identifiedInstanceId = null;
+}
 
 export function useTelemetry(): TelemetryState {
   const {
@@ -51,20 +58,29 @@ export function useTelemetry(): TelemetryState {
     staleTime: 30 * 60 * 1000,
   });
 
-  const client = useMemo(() => {
-    if (isError) return fallbackClient;
-    if (!config) return noopClient;
-    const newClient = createClient(config);
-    return newClient;
-  }, [config, isError]);
+  const [client, setClient] = useState<TelemetryClient>(sharedClient ?? noopClient);
+
   useEffect(() => {
-    if (config?.instanceId) {
-      client.identify(config.instanceId, { provider: config.provider });
+    if (sharedClient) {
+      setClient(sharedClient);
+      return;
     }
-    return () => {
-      client.shutdown();
-    };
-  }, [client, config?.instanceId, config?.provider]);
+
+    if (isError) {
+      sharedClient = new ApiTelemetryClient();
+      setClient(sharedClient);
+      return;
+    }
+
+    if (config) {
+      sharedClient = createClient(config);
+      if (config.instanceId && identifiedInstanceId !== config.instanceId) {
+        sharedClient.identify(config.instanceId, { provider: config.provider });
+        identifiedInstanceId = config.instanceId;
+      }
+      setClient(sharedClient);
+    }
+  }, [config, isError]);
 
   return { client, ready: isSuccess || isError };
 }

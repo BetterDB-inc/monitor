@@ -7,13 +7,14 @@ vi.mock('../../api/client', () => ({
 }));
 
 import { fetchApi } from '../../api/client';
-import { useTelemetry } from '../useTelemetry';
+import { useTelemetry, _resetTelemetryClient } from '../useTelemetry';
 
 const mockFetchApi = vi.mocked(fetchApi);
 
 describe('useTelemetry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetTelemetryClient();
   });
 
   it('should resolve to ApiTelemetryClient for http provider', async () => {
