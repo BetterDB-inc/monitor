@@ -1,12 +1,48 @@
-import { Controller, Post, Body, BadRequestException } from '@nestjs/common';
+import { Controller, Post, Get, Body, BadRequestException, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { LicenseService } from '@proprietary/licenses';
 import { UsageTelemetryService } from './usage-telemetry.service';
+
+interface TelemetryConfig {
+  instanceId: string;
+  telemetryEnabled: boolean;
+  provider: string;
+  posthogApiKey?: string;
+  posthogHost?: string;
+}
 
 const ALLOWED_EVENT_TYPES = ['interaction_after_idle', 'page_view', 'connection_switch'] as const;
 type AllowedEventType = typeof ALLOWED_EVENT_TYPES[number];
 
 @Controller('telemetry')
 export class TelemetryController {
-  constructor(private readonly usageTelemetry: UsageTelemetryService) {}
+  constructor(
+    private readonly usageTelemetry: UsageTelemetryService,
+    private readonly configService: ConfigService,
+    @Optional() private readonly licenseService?: LicenseService,
+  ) {}
+
+  @Get('config')
+  getConfig(): TelemetryConfig {
+    const provider = this.configService.get<string>('TELEMETRY_PROVIDER', 'posthog');
+    const telemetryEnabled = this.configService.get('BETTERDB_TELEMETRY') !== false;
+    const instanceId = this.licenseService?.getInstanceId() ?? '';
+
+    const config: TelemetryConfig = {
+      instanceId,
+      telemetryEnabled,
+      provider,
+    };
+
+    if (provider === 'posthog') {
+      const apiKey = this.configService.get<string>('POSTHOG_API_KEY');
+      const host = this.configService.get<string>('POSTHOG_HOST');
+      if (apiKey) config.posthogApiKey = apiKey;
+      if (host) config.posthogHost = host;
+    }
+
+    return config;
+  }
 
   @Post('event')
   async trackEvent(
