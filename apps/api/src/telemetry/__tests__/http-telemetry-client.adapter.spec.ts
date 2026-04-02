@@ -43,12 +43,15 @@ describe('HttpTelemetryClientAdapter', () => {
     expect(signal).toBeInstanceOf(AbortSignal);
   });
 
-  it('should swallow fetch errors silently', () => {
+  it('should swallow fetch errors silently', async () => {
     fetchSpy.mockRejectedValue(new Error('network failure'));
 
-    expect(() =>
-      adapter.capture({ distinctId: 'inst-123', event: 'app_start' }),
-    ).not.toThrow();
+    adapter.capture({ distinctId: 'inst-123', event: 'app_start' });
+
+    // Drain microtask queue so the rejection + .catch() handler execute
+    await Promise.resolve();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it('should not call fetch on identify', () => {
@@ -56,7 +59,21 @@ describe('HttpTelemetryClientAdapter', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('should resolve shutdown without side effects', async () => {
+  it('should abort in-flight requests on shutdown', async () => {
+    // Make fetch hang (never resolve)
+    fetchSpy.mockReturnValue(new Promise(() => {}));
+
+    adapter.capture({ distinctId: 'inst-123', event: 'app_start' });
+
+    const signal = fetchSpy.mock.calls[0][1].signal as AbortSignal;
+    expect(signal.aborted).toBe(false);
+
+    await adapter.shutdown();
+
+    expect(signal.aborted).toBe(true);
+  });
+
+  it('should resolve shutdown without side effects when no requests pending', async () => {
     await expect(adapter.shutdown()).resolves.toBeUndefined();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
