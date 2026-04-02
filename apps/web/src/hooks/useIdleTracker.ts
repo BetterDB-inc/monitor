@@ -1,28 +1,23 @@
 import { useEffect, useRef } from 'react';
-import { fetchApi } from '../api/client';
+import { useTelemetry } from '../telemetry/TelemetryConfigProvider';
 
 const IDLE_THRESHOLD_MS = 5 * 60 * 1000;
 const THROTTLE_MS = 30_000;
 
-export function useIdleTracker() {
+export function useIdleTracker(): void {
   const lastInteractionTime = useRef(Date.now());
   const lastThrottleUpdate = useRef(Date.now());
+  const telemetry = useTelemetry();
 
   useEffect(() => {
-    const handler = () => {
+    const handler = (): void => {
       const now = Date.now();
       const idleDuration = now - lastInteractionTime.current;
 
       if (idleDuration >= IDLE_THRESHOLD_MS) {
         lastInteractionTime.current = now;
         lastThrottleUpdate.current = now;
-        fetchApi('/telemetry/event', {
-          method: 'POST',
-          body: JSON.stringify({
-            eventType: 'interaction_after_idle',
-            payload: { idleDurationMs: idleDuration },
-          }),
-        }).catch(() => {});
+        telemetry.capture('interaction_after_idle', { idleDurationMs: idleDuration });
       } else if (now - lastThrottleUpdate.current >= THROTTLE_MS) {
         lastInteractionTime.current = now;
         lastThrottleUpdate.current = now;
@@ -39,5 +34,5 @@ export function useIdleTracker() {
         document.removeEventListener(event, handler);
       }
     };
-  }, []);
+  }, [telemetry]);
 }

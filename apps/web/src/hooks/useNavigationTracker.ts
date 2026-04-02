@@ -1,21 +1,16 @@
 import { useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
-import { fetchApi } from '../api/client';
+import { useTelemetry } from '../telemetry/TelemetryConfigProvider';
 
-export function useNavigationTracker() {
+export function useNavigationTracker(): void {
   const location = useLocation();
   const previousPath = useRef<string | null>(null);
+  const telemetry = useTelemetry();
 
   useEffect(() => {
     if (previousPath.current !== null && previousPath.current !== location.pathname) {
-      fetchApi('/telemetry/event', {
-        method: 'POST',
-        body: JSON.stringify({
-          eventType: 'page_view',
-          payload: { path: location.pathname },
-        }),
-      }).catch(() => {});
+      telemetry.capture('page_view', { path: location.pathname });
     }
     previousPath.current = location.pathname;
-  }, [location.pathname]);
+  }, [location.pathname, telemetry]);
 }
