@@ -1,14 +1,20 @@
 import { TelemetryPort, TelemetryEvent } from '../../common/interfaces/telemetry-port.interface';
 
+interface PendingRequest {
+  controller: AbortController;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export class HttpTelemetryClientAdapter implements TelemetryPort {
-  private readonly pendingControllers = new Set<AbortController>();
+  private readonly pending = new Set<PendingRequest>();
 
   constructor(private readonly telemetryUrl: string) {}
 
   capture(event: TelemetryEvent): void {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
-    this.pendingControllers.add(controller);
+    const entry: PendingRequest = { controller, timer };
+    this.pending.add(entry);
 
     fetch(this.telemetryUrl, {
       method: 'POST',
@@ -21,16 +27,17 @@ export class HttpTelemetryClientAdapter implements TelemetryPort {
       })
       .finally(() => {
         clearTimeout(timer);
-        this.pendingControllers.delete(controller);
+        this.pending.delete(entry);
       });
   }
 
   identify(_distinctId: string, _properties: Record<string, unknown>): void {}
 
   async shutdown(): Promise<void> {
-    for (const controller of this.pendingControllers) {
+    for (const { controller, timer } of this.pending) {
+      clearTimeout(timer);
       controller.abort();
     }
-    this.pendingControllers.clear();
+    this.pending.clear();
   }
 }
