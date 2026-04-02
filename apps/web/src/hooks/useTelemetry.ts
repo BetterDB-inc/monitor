@@ -38,8 +38,7 @@ export function useTelemetry(): TelemetryState {
   const { data: config, isSuccess, isError } = useQuery<TelemetryConfig>({
     queryKey: ['telemetry-config'],
     queryFn: () => fetchApi<TelemetryConfig>('/telemetry/config'),
-    staleTime: Infinity,
-    retry: false,
+    staleTime: 30 * 60 * 1000,
   });
 
   const client = useMemo(() => {
