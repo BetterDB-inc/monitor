@@ -19,7 +19,7 @@ import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
     },
     UsageTelemetryService,
   ],
-  exports: [UsageTelemetryService],
+  exports: ['TELEMETRY_CLIENT', UsageTelemetryService],
 })
 export class TelemetryModule implements OnModuleDestroy {
   private readonly logger = new Logger(TelemetryModule.name);
