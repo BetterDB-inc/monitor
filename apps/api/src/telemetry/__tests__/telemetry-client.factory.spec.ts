@@ -43,14 +43,15 @@ describe('TelemetryClientFactory', () => {
     warnSpy.mockRestore();
   });
 
-  it('should default to posthog provider when TELEMETRY_PROVIDER is not set', () => {
+  it('should fall back to noop with warning when no env vars are set (default is posthog, but key is missing)', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
     const config = createConfigService({});
     const factory = new TelemetryClientFactory(config);
     const adapter = factory.createTelemetryClient();
-    // Without POSTHOG_API_KEY, falls back to noop with warning
     expect(adapter).toBeInstanceOf(NoopTelemetryClientAdapter);
-    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('POSTHOG_API_KEY'),
+    );
     warnSpy.mockRestore();
   });
 });
