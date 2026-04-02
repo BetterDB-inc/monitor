@@ -4,6 +4,7 @@ import { fetchApi } from '../api/client';
 import type { TelemetryClient } from '../telemetry/telemetry-client.interface';
 import { ApiTelemetryClient } from '../telemetry/clients/api-telemetry-client';
 import { NoopTelemetryClient } from '../telemetry/clients/noop-telemetry-client';
+import { PosthogTelemetryClient } from '../telemetry/clients/posthog-telemetry-client';
 
 interface TelemetryConfig {
   instanceId: string;
@@ -22,9 +23,14 @@ function createClient(config: TelemetryConfig): TelemetryClient {
   }
 
   switch (config.provider) {
-    case 'posthog':
-      // PosthogTelemetryClient will be added in #76
-      return new ApiTelemetryClient();
+    case 'posthog': {
+      const apiKey = import.meta.env.VITE_POSTHOG_API_KEY;
+      const host = import.meta.env.VITE_POSTHOG_HOST;
+      if (!apiKey) {
+        return new ApiTelemetryClient();
+      }
+      return new PosthogTelemetryClient(apiKey, host);
+    }
     case 'http':
     default:
       return new ApiTelemetryClient();
