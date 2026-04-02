@@ -1,10 +1,19 @@
 import { TelemetryPort, TelemetryEvent } from '../../common/interfaces/telemetry-port.interface';
 
-// TODO(#72): Replace stubs with real HTTP fetch implementation
 export class HttpTelemetryClientAdapter implements TelemetryPort {
   constructor(private readonly telemetryUrl: string) {}
 
-  capture(_event: TelemetryEvent): void {}
+  capture(event: TelemetryEvent): void {
+    fetch(this.telemetryUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(event),
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => {
+      // fire-and-forget
+    });
+  }
+
   identify(_distinctId: string, _properties: Record<string, unknown>): void {}
   async shutdown(): Promise<void> {}
 }
