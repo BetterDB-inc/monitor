@@ -50,25 +50,25 @@ export function SlotHeatmap({ slotStats, nodes, hasSlotStats }: SlotHeatmapProps
     // Scale context to account for device pixel ratio
     ctx.scale(pixelRatio, pixelRatio);
 
-    // Resolve --primary CSS variable to RGB for canvas rendering
+    // Resolve CSS variable to RGB by forcing the browser to serialize as rgb()
     const rootStyles = getComputedStyle(document.documentElement);
-    const primaryRaw = rootStyles.getPropertyValue('--primary').trim();
-    const tempEl = document.createElement('div');
-    tempEl.style.color = primaryRaw;
-    document.body.appendChild(tempEl);
-    const resolved = getComputedStyle(tempEl).color;
-    document.body.removeChild(tempEl);
-    const rgbMatch = resolved.match(/(\d+)/g);
-    const [r, g, b] = rgbMatch ? rgbMatch.map(Number) : [20, 184, 166];
 
-    // Resolve --muted CSS variable for empty slot color
-    const mutedRaw = rootStyles.getPropertyValue('--muted').trim();
-    const mutedEl = document.createElement('div');
-    mutedEl.style.color = mutedRaw;
-    document.body.appendChild(mutedEl);
-    const mutedResolved = getComputedStyle(mutedEl).color;
-    document.body.removeChild(mutedEl);
-    const mutedColor = mutedResolved || '#f3f4f6';
+    function resolveToRgb(cssVar: string, fallback: [number, number, number]): [number, number, number] {
+      const raw = rootStyles.getPropertyValue(cssVar).trim();
+      if (!raw) return fallback;
+      const el = document.createElement('div');
+      el.style.color = raw;
+      document.body.appendChild(el);
+      const resolved = getComputedStyle(el).color;
+      document.body.removeChild(el);
+      // Match rgb(r, g, b) or rgba(r, g, b, a) — only capture the 3 color channels
+      const match = resolved.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : fallback;
+    }
+
+    const [r, g, b] = resolveToRgb('--primary', [20, 184, 166]);
+    const [mr, mg, mb] = resolveToRgb('--muted', [243, 244, 246]);
+    const mutedColor = `rgb(${mr}, ${mg}, ${mb})`;
 
     // Find max key count for normalization
     const maxKeys = Math.max(
