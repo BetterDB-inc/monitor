@@ -1,11 +1,11 @@
 import { TelemetryPort } from '../../common/interfaces/telemetry-port.interface';
-import { NoopTelemetryAdapter } from '../adapters/noop-telemetry.adapter';
+import { NoopTelemetryClientAdapter } from '../adapters/noop-telemetry-client.adapter';
 
-describe('NoopTelemetryAdapter', () => {
+describe('NoopTelemetryClientAdapter', () => {
   let adapter: TelemetryPort;
 
   beforeEach(() => {
-    adapter = new NoopTelemetryAdapter();
+    adapter = new NoopTelemetryClientAdapter();
   });
 
   it('should implement capture without side effects', () => {

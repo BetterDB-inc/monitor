@@ -1,6 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { TelemetryClientFactory } from '../telemetry-client.factory';
-import { NoopTelemetryAdapter } from '../adapters/noop-telemetry.adapter';
+import { NoopTelemetryClientAdapter } from '../adapters/noop-telemetry-client.adapter';
 
 function createConfigService(
   env: Record<string, string | boolean | undefined> = {},
@@ -17,7 +17,7 @@ describe('TelemetryClientFactory', () => {
     const config = createConfigService({ TELEMETRY_PROVIDER: 'noop' });
     const factory = new TelemetryClientFactory(config);
     const adapter = factory.createTelemetryClient();
-    expect(adapter).toBeInstanceOf(NoopTelemetryAdapter);
+    expect(adapter).toBeInstanceOf(NoopTelemetryClientAdapter);
   });
 
   it('should return NoopAdapter when BETTERDB_TELEMETRY is false regardless of provider', () => {
@@ -28,7 +28,7 @@ describe('TelemetryClientFactory', () => {
     });
     const factory = new TelemetryClientFactory(config);
     const adapter = factory.createTelemetryClient();
-    expect(adapter).toBeInstanceOf(NoopTelemetryAdapter);
+    expect(adapter).toBeInstanceOf(NoopTelemetryClientAdapter);
   });
 
   it('should fall back to NoopAdapter with warning when posthog is selected but POSTHOG_API_KEY is missing', () => {
@@ -36,7 +36,7 @@ describe('TelemetryClientFactory', () => {
     const config = createConfigService({ TELEMETRY_PROVIDER: 'posthog' });
     const factory = new TelemetryClientFactory(config);
     const adapter = factory.createTelemetryClient();
-    expect(adapter).toBeInstanceOf(NoopTelemetryAdapter);
+    expect(adapter).toBeInstanceOf(NoopTelemetryClientAdapter);
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('POSTHOG_API_KEY'),
     );
@@ -49,7 +49,7 @@ describe('TelemetryClientFactory', () => {
     const factory = new TelemetryClientFactory(config);
     const adapter = factory.createTelemetryClient();
     // Without POSTHOG_API_KEY, falls back to noop with warning
-    expect(adapter).toBeInstanceOf(NoopTelemetryAdapter);
+    expect(adapter).toBeInstanceOf(NoopTelemetryClientAdapter);
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
   });
