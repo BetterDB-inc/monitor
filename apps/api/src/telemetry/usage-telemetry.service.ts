@@ -44,16 +44,17 @@ export class UsageTelemetryService implements OnModuleInit {
   }
 
   private sendEvent(eventType: string, payload?: Record<string, unknown>): void {
+    if (!this.instanceId) return;
     this.telemetryClient.capture({
       distinctId: this.instanceId,
       event: eventType,
       properties: {
+        ...payload,
         version: this.version,
         tier: this.tier,
         deploymentMode: this.deploymentMode,
         workspaceName: this.workspaceName,
         timestamp: Date.now(),
-        ...payload,
       },
     });
   }
