@@ -1,13 +1,31 @@
+import { PostHog } from 'posthog-node';
 import { TelemetryPort, TelemetryEvent } from '../../common/interfaces/telemetry-port.interface';
 
-// TODO(#73): Replace stubs with real posthog-node implementation
 export class PosthogTelemetryClientAdapter implements TelemetryPort {
-  constructor(
-    private readonly apiKey: string,
-    private readonly host?: string,
-  ) {}
+  private readonly client: PostHog;
 
-  capture(_event: TelemetryEvent): void {}
-  identify(_distinctId: string, _properties: Record<string, unknown>): void {}
-  async shutdown(): Promise<void> {}
+  constructor(apiKey: string, host?: string) {
+    this.client = new PostHog(apiKey, {
+      ...(host ? { host } : {}),
+    });
+  }
+
+  capture(event: TelemetryEvent): void {
+    this.client.capture({
+      distinctId: event.distinctId,
+      event: event.event,
+      properties: event.properties,
+    });
+  }
+
+  identify(distinctId: string, properties: Record<string, unknown>): void {
+    this.client.identify({
+      distinctId,
+      properties,
+    });
+  }
+
+  async shutdown(): Promise<void> {
+    await this.client.shutdown();
+  }
 }
