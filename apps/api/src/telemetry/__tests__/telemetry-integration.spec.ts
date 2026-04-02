@@ -24,7 +24,7 @@ describe('Telemetry Integration', () => {
     mockAdapter = createMockAdapter();
     const module: TestingModule = await Test.createTestingModule({
       imports: [
-        ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
+        await ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
         TelemetryModule,
       ],
     })
