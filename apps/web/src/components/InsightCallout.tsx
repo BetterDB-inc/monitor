@@ -16,7 +16,7 @@ const styles = {
     bg: 'bg-destructive/5 dark:bg-destructive/10',
     title: 'text-destructive',
     text: 'text-destructive/80',
-    link: 'text-destructive hover:text-destructive/80',
+    link: 'text-destructive hover:underline',
     Icon: AlertCircle,
   },
   warning: {
@@ -32,7 +32,7 @@ const styles = {
     bg: 'bg-primary/5 dark:bg-primary/10',
     title: 'text-primary',
     text: 'text-primary/80',
-    link: 'text-primary hover:text-primary/80',
+    link: 'text-primary hover:underline',
     Icon: Info,
   },
 };
