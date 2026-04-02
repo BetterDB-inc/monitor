@@ -37,11 +37,9 @@ function createController(
 }
 
 describe('GET /telemetry/config', () => {
-  it('should return telemetry config with posthog provider and API key', () => {
+  it('should return telemetry config with instanceId and provider', () => {
     const configService = createMockConfigService({
       TELEMETRY_PROVIDER: 'posthog',
-      POSTHOG_API_KEY: 'phc_test_key',
-      POSTHOG_HOST: 'https://ph.example.com',
       BETTERDB_TELEMETRY: true,
     });
     const licenseService = {
@@ -55,25 +53,20 @@ describe('GET /telemetry/config', () => {
       instanceId: 'test-instance-id',
       telemetryEnabled: true,
       provider: 'posthog',
-      posthogApiKey: 'phc_test_key',
-      posthogHost: 'https://ph.example.com',
     });
   });
 
-  it('should omit posthog fields when provider is not posthog', () => {
+  it('should not expose posthog API key or host', () => {
     const configService = createMockConfigService({
-      TELEMETRY_PROVIDER: 'http',
+      TELEMETRY_PROVIDER: 'posthog',
+      POSTHOG_API_KEY: 'phc_secret',
+      POSTHOG_HOST: 'https://ph.example.com',
       BETTERDB_TELEMETRY: true,
     });
 
     const controller = createController(configService);
     const config = controller.getConfig();
 
-    expect(config).toEqual({
-      instanceId: '',
-      telemetryEnabled: true,
-      provider: 'http',
-    });
     expect(config).not.toHaveProperty('posthogApiKey');
     expect(config).not.toHaveProperty('posthogHost');
   });

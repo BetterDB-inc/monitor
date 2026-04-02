@@ -9,8 +9,6 @@ interface TelemetryConfig {
   instanceId: string;
   telemetryEnabled: boolean;
   provider: string;
-  posthogApiKey?: string;
-  posthogHost?: string;
 }
 
 @Controller('telemetry')
@@ -33,13 +31,6 @@ export class TelemetryController {
       telemetryEnabled,
       provider,
     };
-
-    if (provider === 'posthog') {
-      const apiKey = this.configService.get<string>('POSTHOG_API_KEY');
-      const host = this.configService.get<string>('POSTHOG_HOST');
-      if (apiKey) config.posthogApiKey = apiKey;
-      if (host) config.posthogHost = host;
-    }
 
     return config;
   }
