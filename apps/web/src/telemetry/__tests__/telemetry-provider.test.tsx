@@ -24,11 +24,11 @@ describe('TelemetryConfigProvider', () => {
     vi.clearAllMocks();
   });
 
-  it('should provide ApiTelemetryClient when provider is "api"', async () => {
+  it('should provide ApiTelemetryClient when provider is "http"', async () => {
     mockFetchApi.mockResolvedValue({
       instanceId: 'inst-123',
       telemetryEnabled: true,
-      provider: 'api',
+      provider: 'http',
     });
 
     const { result } = renderHook(() => useTelemetry(), { wrapper: createWrapper() });

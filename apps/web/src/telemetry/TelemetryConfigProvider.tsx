@@ -21,7 +21,6 @@ function createClient(config: TelemetryConfig): TelemetryClient {
     case 'posthog':
       // PosthogTelemetryClient will be added in #76
       return new ApiTelemetryClient();
-    case 'api':
     case 'http':
     default:
       return new ApiTelemetryClient();
