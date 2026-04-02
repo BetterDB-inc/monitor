@@ -7,7 +7,7 @@ const THROTTLE_MS = 30_000;
 export function useIdleTracker(): void {
   const lastInteractionTime = useRef(Date.now());
   const lastThrottleUpdate = useRef(Date.now());
-  const telemetry = useTelemetry();
+  const { client } = useTelemetry();
 
   useEffect(() => {
     const handler = (): void => {
@@ -17,7 +17,7 @@ export function useIdleTracker(): void {
       if (idleDuration >= IDLE_THRESHOLD_MS) {
         lastInteractionTime.current = now;
         lastThrottleUpdate.current = now;
-        telemetry.capture('interaction_after_idle', { idleDurationMs: idleDuration });
+        client.capture('interaction_after_idle', { idleDurationMs: idleDuration });
       } else if (now - lastThrottleUpdate.current >= THROTTLE_MS) {
         lastInteractionTime.current = now;
         lastThrottleUpdate.current = now;
@@ -34,5 +34,5 @@ export function useIdleTracker(): void {
         document.removeEventListener(event, handler);
       }
     };
-  }, [telemetry]);
+  }, [client]);
 }

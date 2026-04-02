@@ -33,14 +33,11 @@ import { MetricForecasting } from './pages/MetricForecasting';
 import { Members } from './pages/Members';
 import { workspaceApi, CloudUser } from './api/workspace';
 import { Feature } from '@betterdb/shared';
-import { TelemetryConfigProvider } from './telemetry/TelemetryConfigProvider';
 
 function App() {
   return (
     <ServerStartupGuard>
-      <TelemetryConfigProvider>
-        <AppContent />
-      </TelemetryConfigProvider>
+      <AppContent />
     </ServerStartupGuard>
   );
 }
