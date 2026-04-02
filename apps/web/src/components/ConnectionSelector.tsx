@@ -362,7 +362,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                 </button>
                 <div className="flex gap-2">
                   <button
-                    onClick={() => setShowAddDialog(false)}
+                    onClick={() => {
+                      setShowAddDialog(false);
+                      setFormData(defaultFormData);
+                      setTestResult(null);
+                    }}
                     className="px-4 py-2 text-sm border rounded-md hover:bg-muted"
                   >
                     Cancel
@@ -381,6 +385,8 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             <AgentTab
               onClose={() => {
                 setShowAddDialog(false);
+                setFormData(defaultFormData);
+                setTestResult(null);
                 setAddTab('direct');
               }}
               onAgentConnected={refreshConnections}
