@@ -145,6 +145,8 @@ describe('useTheme', () => {
     });
 
     expect(document.documentElement.classList.contains('dark')).toBe(true);
+    // resolvedTheme must also update so components re-render
+    expect(result.current.resolvedTheme).toBe('dark');
   });
 
   it('ignores system preference changes when theme is explicitly set', () => {

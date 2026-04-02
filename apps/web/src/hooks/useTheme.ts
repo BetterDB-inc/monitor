@@ -32,16 +32,17 @@ function getStoredTheme(): Theme {
 
 export function useTheme() {
   const [theme, setThemeState] = useState<Theme>(getStoredTheme);
-
-  const resolvedTheme = resolveTheme(theme);
+  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(getStoredTheme()));
 
   const setTheme = useCallback((newTheme: Theme) => {
+    const resolved = resolveTheme(newTheme);
     setThemeState(newTheme);
+    setResolvedTheme(resolved);
     localStorage.setItem(STORAGE_KEY, newTheme);
-    applyTheme(resolveTheme(newTheme));
+    applyTheme(resolved);
   }, []);
 
-  // Apply theme on mount and when theme changes
+  // Apply theme on mount and when resolvedTheme changes
   useEffect(() => {
     applyTheme(resolvedTheme);
   }, [resolvedTheme]);
@@ -52,7 +53,9 @@ export function useTheme() {
 
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
     const handler = (e: MediaQueryListEvent) => {
-      applyTheme(e.matches ? 'dark' : 'light');
+      const newResolved = e.matches ? 'dark' : 'light';
+      setResolvedTheme(newResolved);
+      applyTheme(newResolved);
     };
 
     mediaQuery.addEventListener('change', handler);
