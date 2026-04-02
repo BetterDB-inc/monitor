@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
 import { NoopTelemetryClientAdapter } from './adapters/noop-telemetry-client.adapter';
+import { HttpTelemetryClientAdapter } from './adapters/http-telemetry-client.adapter';
+import { PosthogTelemetryClientAdapter } from './adapters/posthog-telemetry-client.adapter';
 
 @Injectable()
 export class TelemetryClientFactory {
@@ -27,13 +29,18 @@ export class TelemetryClientFactory {
           );
           return new NoopTelemetryClientAdapter();
         }
-        // PosthogTelemetryAdapter will be added in issue #73
-        return new NoopTelemetryClientAdapter();
+        const host = this.configService.get<string>('POSTHOG_HOST');
+        return new PosthogTelemetryClientAdapter(apiKey, host);
       }
 
-      case 'http':
-        // HttpTelemetryAdapter will be added in issue #72
-        return new NoopTelemetryClientAdapter();
+      case 'http': {
+        const entitlementUrl =
+          this.configService.get<string>('ENTITLEMENT_URL') ||
+          'https://betterdb.com/api/v1/entitlements';
+        const url = new URL(entitlementUrl);
+        url.pathname = url.pathname.replace(/\/entitlements$/, '/telemetry');
+        return new HttpTelemetryClientAdapter(url.toString());
+      }
 
       default:
         console.warn(`Unknown TELEMETRY_PROVIDER "${provider}". Falling back to noop telemetry.`);

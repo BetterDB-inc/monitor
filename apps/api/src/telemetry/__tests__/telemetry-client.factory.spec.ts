@@ -1,6 +1,8 @@
 import { ConfigService } from '@nestjs/config';
 import { TelemetryClientFactory } from '../telemetry-client.factory';
 import { NoopTelemetryClientAdapter } from '../adapters/noop-telemetry-client.adapter';
+import { HttpTelemetryClientAdapter } from '../adapters/http-telemetry-client.adapter';
+import { PosthogTelemetryClientAdapter } from '../adapters/posthog-telemetry-client.adapter';
 
 function createConfigService(
   env: Record<string, string | boolean | undefined> = {},
@@ -13,44 +15,55 @@ function createConfigService(
 }
 
 describe('TelemetryClientFactory', () => {
-  it('should return NoopAdapter for TELEMETRY_PROVIDER=noop', () => {
+  it('should return NoopTelemetryClientAdapter for TELEMETRY_PROVIDER=noop', () => {
     const config = createConfigService({ TELEMETRY_PROVIDER: 'noop' });
     const factory = new TelemetryClientFactory(config);
-    const adapter = factory.createTelemetryClient();
-    expect(adapter).toBeInstanceOf(NoopTelemetryClientAdapter);
+    expect(factory.createTelemetryClient()).toBeInstanceOf(NoopTelemetryClientAdapter);
   });
 
-  it('should return NoopAdapter when BETTERDB_TELEMETRY is false regardless of provider', () => {
+  it('should return HttpTelemetryClientAdapter for TELEMETRY_PROVIDER=http', () => {
+    const config = createConfigService({ TELEMETRY_PROVIDER: 'http' });
+    const factory = new TelemetryClientFactory(config);
+    expect(factory.createTelemetryClient()).toBeInstanceOf(HttpTelemetryClientAdapter);
+  });
+
+  it('should return PosthogTelemetryClientAdapter for TELEMETRY_PROVIDER=posthog with API key', () => {
+    const config = createConfigService({
+      TELEMETRY_PROVIDER: 'posthog',
+      POSTHOG_API_KEY: 'phc_test',
+    });
+    const factory = new TelemetryClientFactory(config);
+    expect(factory.createTelemetryClient()).toBeInstanceOf(PosthogTelemetryClientAdapter);
+  });
+
+  it('should return NoopTelemetryClientAdapter when BETTERDB_TELEMETRY is false regardless of provider', () => {
     const config = createConfigService({
       TELEMETRY_PROVIDER: 'posthog',
       BETTERDB_TELEMETRY: false,
       POSTHOG_API_KEY: 'phc_test',
     });
     const factory = new TelemetryClientFactory(config);
-    const adapter = factory.createTelemetryClient();
-    expect(adapter).toBeInstanceOf(NoopTelemetryClientAdapter);
+    expect(factory.createTelemetryClient()).toBeInstanceOf(NoopTelemetryClientAdapter);
   });
 
-  it('should fall back to NoopAdapter with warning when posthog is selected but POSTHOG_API_KEY is missing', () => {
+  it('should fall back to NoopTelemetryClientAdapter with warning when posthog key is missing', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
     const config = createConfigService({ TELEMETRY_PROVIDER: 'posthog' });
     const factory = new TelemetryClientFactory(config);
-    const adapter = factory.createTelemetryClient();
-    expect(adapter).toBeInstanceOf(NoopTelemetryClientAdapter);
+    expect(factory.createTelemetryClient()).toBeInstanceOf(NoopTelemetryClientAdapter);
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('POSTHOG_API_KEY'),
     );
     warnSpy.mockRestore();
   });
 
-  it('should fall back to noop with warning when no env vars are set (default is posthog, but key is missing)', () => {
+  it('should fall back to NoopTelemetryClientAdapter with warning for unknown provider', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
-    const config = createConfigService({});
+    const config = createConfigService({ TELEMETRY_PROVIDER: 'datadog' });
     const factory = new TelemetryClientFactory(config);
-    const adapter = factory.createTelemetryClient();
-    expect(adapter).toBeInstanceOf(NoopTelemetryClientAdapter);
+    expect(factory.createTelemetryClient()).toBeInstanceOf(NoopTelemetryClientAdapter);
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('POSTHOG_API_KEY'),
+      expect.stringContaining('Unknown TELEMETRY_PROVIDER'),
     );
     warnSpy.mockRestore();
   });
