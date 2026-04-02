@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { NoopTelemetryClient } from '../clients/noop-telemetry-client';
 import { ApiTelemetryClient } from '../clients/api-telemetry-client';
 
 vi.mock('../../api/client', () => ({
@@ -9,23 +8,6 @@ vi.mock('../../api/client', () => ({
 import { fetchApi } from '../../api/client';
 
 const mockFetchApi = vi.mocked(fetchApi);
-
-describe('NoopTelemetryClient', () => {
-  it('should implement capture without side effects', () => {
-    const client = new NoopTelemetryClient();
-    expect(() => client.capture('app_start')).not.toThrow();
-  });
-
-  it('should implement identify without side effects', () => {
-    const client = new NoopTelemetryClient();
-    expect(() => client.identify('id', {})).not.toThrow();
-  });
-
-  it('should implement shutdown without side effects', () => {
-    const client = new NoopTelemetryClient();
-    expect(() => client.shutdown()).not.toThrow();
-  });
-});
 
 describe('ApiTelemetryClient', () => {
   beforeEach(() => {

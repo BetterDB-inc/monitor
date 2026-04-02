@@ -7,14 +7,13 @@ vi.mock('../../api/client', () => ({
 }));
 
 import { fetchApi } from '../../api/client';
-import { useTelemetry, _resetTelemetryClient } from '../useTelemetry';
+import { useTelemetry } from '../useTelemetry';
 
 const mockFetchApi = vi.mocked(fetchApi);
 
 describe('useTelemetry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    _resetTelemetryClient();
   });
 
   it('should resolve to ApiTelemetryClient for http provider', async () => {
@@ -33,7 +32,7 @@ describe('useTelemetry', () => {
     expect(result.current.client.constructor.name).toBe('ApiTelemetryClient');
   });
 
-  it('should return NoopTelemetryClient when telemetryEnabled is false', async () => {
+  it('should return ApiTelemetryClient when telemetryEnabled is false', async () => {
     mockFetchApi.mockResolvedValue({
       instanceId: 'inst-123',
       telemetryEnabled: false,
@@ -46,10 +45,10 @@ describe('useTelemetry', () => {
       expect(result.current.ready).toBe(true);
     });
 
-    expect(result.current.client.constructor.name).toBe('NoopTelemetryClient');
+    expect(result.current.client.constructor.name).toBe('ApiTelemetryClient');
   });
 
-  it('should fall back to ApiTelemetryClient when config fetch fails', async () => {
+  it('should return ApiTelemetryClient when config fetch fails', async () => {
     mockFetchApi.mockRejectedValue(new Error('network error'));
 
     const { result } = renderHookWithQuery(() => useTelemetry());
@@ -61,11 +60,11 @@ describe('useTelemetry', () => {
     expect(result.current.client.constructor.name).toBe('ApiTelemetryClient');
   });
 
-  it('should return NoopTelemetryClient for noop provider', async () => {
+  it('should return ApiTelemetryClient for unknown provider', async () => {
     mockFetchApi.mockResolvedValue({
       instanceId: 'inst-123',
       telemetryEnabled: true,
-      provider: 'noop',
+      provider: 'unknown',
     });
 
     const { result } = renderHookWithQuery(() => useTelemetry());
@@ -74,6 +73,6 @@ describe('useTelemetry', () => {
       expect(result.current.ready).toBe(true);
     });
 
-    expect(result.current.client.constructor.name).toBe('NoopTelemetryClient');
+    expect(result.current.client.constructor.name).toBe('ApiTelemetryClient');
   });
 });
