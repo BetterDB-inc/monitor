@@ -8,8 +8,8 @@ export class TelemetryClientFactory {
   constructor(private configService: ConfigService) {}
 
   createTelemetryClient(): TelemetryPort {
-    const telemetryEnabled = this.configService.get<string>('BETTERDB_TELEMETRY');
-    if (telemetryEnabled === 'false') {
+    const telemetryEnabled = this.configService.get<boolean>('BETTERDB_TELEMETRY');
+    if (telemetryEnabled === false) {
       return new NoopTelemetryAdapter();
     }
 

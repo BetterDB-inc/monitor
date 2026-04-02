@@ -2,9 +2,13 @@ import { ConfigService } from '@nestjs/config';
 import { TelemetryClientFactory } from '../telemetry-client.factory';
 import { NoopTelemetryAdapter } from '../adapters/noop-telemetry.adapter';
 
-function createConfigService(env: Record<string, string | undefined> = {}): ConfigService {
+function createConfigService(
+  env: Record<string, string | boolean | undefined> = {},
+): ConfigService {
   return {
-    get: jest.fn((key: string, defaultValue?: string) => env[key] ?? defaultValue),
+    get: jest.fn(
+      (key: string, defaultValue?: string | boolean) => env[key] ?? defaultValue,
+    ),
   } as unknown as ConfigService;
 }
 
@@ -19,7 +23,7 @@ describe('TelemetryClientFactory', () => {
   it('should return NoopAdapter when BETTERDB_TELEMETRY is false regardless of provider', () => {
     const config = createConfigService({
       TELEMETRY_PROVIDER: 'posthog',
-      BETTERDB_TELEMETRY: 'false',
+      BETTERDB_TELEMETRY: false,
       POSTHOG_API_KEY: 'phc_test',
     });
     const factory = new TelemetryClientFactory(config);
