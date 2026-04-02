@@ -1,4 +1,4 @@
-import posthog from 'posthog-js';
+import posthog, { type PostHog } from 'posthog-js';
 import type { TelemetryClient } from '../telemetry-client.interface';
 
 const EVENT_MAP: Record<string, string> = {
@@ -6,23 +6,26 @@ const EVENT_MAP: Record<string, string> = {
 };
 
 export class PosthogTelemetryClient implements TelemetryClient {
+  private readonly client: PostHog;
+
   constructor(apiKey: string, host?: string) {
-    posthog.init(apiKey, {
+    this.client = posthog.init(apiKey, {
       api_host: host ?? 'https://us.i.posthog.com',
+      defaults: '2026-01-30',
       capture_pageview: false,
       capture_pageleave: false,
-    });
+    })!;
   }
 
   capture(event: string, properties?: Record<string, unknown>): void {
-    posthog.capture(EVENT_MAP[event] ?? event, properties);
+    this.client.capture(EVENT_MAP[event] ?? event, properties);
   }
 
   identify(distinctId: string, properties: Record<string, unknown>): void {
-    posthog.identify(distinctId, properties);
+    this.client.identify(distinctId, properties);
   }
 
   shutdown(): void {
-    posthog.reset();
+    this.client.reset();
   }
 }

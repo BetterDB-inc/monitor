@@ -1,11 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('posthog-js', () => ({
-  default: {
-    init: vi.fn(),
+const { mockInstance } = vi.hoisted(() => ({
+  mockInstance: {
     capture: vi.fn(),
     identify: vi.fn(),
     reset: vi.fn(),
+  },
+}));
+
+vi.mock('posthog-js', () => ({
+  default: {
+    init: vi.fn().mockReturnValue(mockInstance),
   },
 }));
 
@@ -13,13 +18,11 @@ import posthog from 'posthog-js';
 import { PosthogTelemetryClient } from '../clients/posthog-telemetry-client';
 
 const mockInit = vi.mocked(posthog.init);
-const mockCapture = vi.mocked(posthog.capture);
-const mockIdentify = vi.mocked(posthog.identify);
-const mockReset = vi.mocked(posthog.reset);
 
 describe('PosthogTelemetryClient', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockInit.mockReturnValue(mockInstance as never);
   });
 
   it('should initialize posthog with API key and host', () => {
@@ -34,27 +37,27 @@ describe('PosthogTelemetryClient', () => {
     const client = new PosthogTelemetryClient('phc_key');
     client.capture('page_view', { path: '/dashboard' });
 
-    expect(mockCapture).toHaveBeenCalledWith('$pageview', { path: '/dashboard' });
+    expect(mockInstance.capture).toHaveBeenCalledWith('$pageview', { path: '/dashboard' });
   });
 
   it('should pass other events through unchanged', () => {
     const client = new PosthogTelemetryClient('phc_key');
     client.capture('interaction_after_idle', { idleDurationMs: 300000 });
 
-    expect(mockCapture).toHaveBeenCalledWith('interaction_after_idle', { idleDurationMs: 300000 });
+    expect(mockInstance.capture).toHaveBeenCalledWith('interaction_after_idle', { idleDurationMs: 300000 });
   });
 
   it('should delegate identify to posthog.identify', () => {
     const client = new PosthogTelemetryClient('phc_key');
     client.identify('inst-123', { tier: 'pro', version: '0.12.0' });
 
-    expect(mockIdentify).toHaveBeenCalledWith('inst-123', { tier: 'pro', version: '0.12.0' });
+    expect(mockInstance.identify).toHaveBeenCalledWith('inst-123', { tier: 'pro', version: '0.12.0' });
   });
 
-  it('should call posthog.reset on shutdown', () => {
+  it('should call reset on shutdown', () => {
     const client = new PosthogTelemetryClient('phc_key');
     client.shutdown();
 
-    expect(mockReset).toHaveBeenCalled();
+    expect(mockInstance.reset).toHaveBeenCalled();
   });
 });
