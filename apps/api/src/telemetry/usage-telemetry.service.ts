@@ -6,10 +6,10 @@ import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
 @Injectable()
 export class UsageTelemetryService implements OnModuleInit {
   private instanceId: string;
-  private version: string;
+  private readonly version: string;
   private tier: string;
-  private deploymentMode: string;
-  private workspaceName: string | undefined;
+  private readonly deploymentMode: string;
+  private readonly workspaceName: string | undefined;
 
   constructor(
     @Inject('TELEMETRY_CLIENT') private readonly telemetryClient: TelemetryPort,
