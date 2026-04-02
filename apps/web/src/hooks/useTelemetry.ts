@@ -30,41 +30,29 @@ function createClient(config: TelemetryConfig): TelemetryClient {
   }
 }
 
-let cachedClient: TelemetryClient | null = null;
-let configPromise: Promise<TelemetryClient> | null = null;
-
-function loadTelemetryClient(): Promise<TelemetryClient> {
-  if (!configPromise) {
-    configPromise = fetchApi<TelemetryConfig>('/telemetry/config')
-      .then((config) => {
-        const client = createClient(config);
-        if (config.instanceId) {
-          client.identify(config.instanceId, { provider: config.provider });
-        }
-        cachedClient = client;
-        return client;
-      })
-      .catch(() => {
-        cachedClient = new ApiTelemetryClient();
-        return cachedClient;
-      });
+async function loadTelemetryClient(): Promise<TelemetryClient> {
+  try {
+    const config = await fetchApi<TelemetryConfig>('/telemetry/config');
+    const client = createClient(config);
+    if (config.instanceId) {
+      client.identify(config.instanceId, { provider: config.provider });
+    }
+    return client;
+  } catch {
+    return new ApiTelemetryClient();
   }
-  return configPromise;
 }
+
+const clientPromise = loadTelemetryClient();
 
 export function useTelemetry(): TelemetryState {
   const [state, setState] = useState<TelemetryState>({
-    client: cachedClient ?? new NoopTelemetryClient(),
-    ready: cachedClient !== null,
+    client: new NoopTelemetryClient(),
+    ready: false,
   });
 
   useEffect(() => {
-    if (cachedClient) {
-      setState({ client: cachedClient, ready: true });
-      return;
-    }
-
-    loadTelemetryClient().then((client) => {
+    clientPromise.then((client) => {
       setState({ client, ready: true });
     });
   }, []);
