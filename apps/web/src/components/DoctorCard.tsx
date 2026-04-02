@@ -60,12 +60,12 @@ export function DoctorCard({ title, report, isLoading }: DoctorCardProps) {
     return (
       <div className="rounded-lg border border-border bg-muted p-4 animate-pulse">
         <div className="flex items-center gap-2">
-          <div className="h-5 w-5 bg-muted rounded"></div>
-          <div className="h-5 w-32 bg-muted rounded"></div>
+          <div className="h-5 w-5 bg-muted-foreground/20 rounded"></div>
+          <div className="h-5 w-32 bg-muted-foreground/20 rounded"></div>
         </div>
         <div className="mt-2 space-y-2">
-          <div className="h-4 bg-muted rounded w-3/4"></div>
-          <div className="h-4 bg-muted rounded w-1/2"></div>
+          <div className="h-4 bg-muted-foreground/20 rounded w-3/4"></div>
+          <div className="h-4 bg-muted-foreground/20 rounded w-1/2"></div>
         </div>
       </div>
     );
