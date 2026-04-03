@@ -141,27 +141,30 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
     }
   }, [entries.length]);
 
-  const handleResizeStart = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    isDraggingRef.current = true;
-    const startY = e.clientY;
-    const startHeight = panelHeight;
+  const handleResizeStart = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      isDraggingRef.current = true;
+      const startY = e.clientY;
+      const startHeight = panelHeight;
 
-    const onMove = (ev: PointerEvent): void => {
-      const maxHeight = Math.round(window.innerHeight * MAX_PANEL_HEIGHT_RATIO);
-      const delta = startY - ev.clientY;
-      setPanelHeight(Math.max(MIN_PANEL_HEIGHT, Math.min(maxHeight, startHeight + delta)));
-    };
+      const onMove = (ev: PointerEvent): void => {
+        const maxHeight = Math.round(window.innerHeight * MAX_PANEL_HEIGHT_RATIO);
+        const delta = startY - ev.clientY;
+        setPanelHeight(Math.max(MIN_PANEL_HEIGHT, Math.min(maxHeight, startHeight + delta)));
+      };
 
-    const onUp = (): void => {
-      isDraggingRef.current = false;
-      document.removeEventListener('pointermove', onMove);
-      document.removeEventListener('pointerup', onUp);
-    };
+      const onUp = (): void => {
+        isDraggingRef.current = false;
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+      };
 
-    document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onUp);
-  }, [panelHeight]);
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+    },
+    [panelHeight],
+  );
 
   // Auto-focus input when panel opens
   useEffect(() => {
@@ -256,15 +259,15 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
         {isOpen && (
           <div
             onPointerDown={handleResizeStart}
-            className="flex h-2 cursor-ns-resize items-center justify-center border-t hover:bg-primary/20 active:bg-primary/30"
+            className="flex h-1 cursor-ns-resize items-center justify-center border-t hover:bg-primary/20 active:bg-primary/30"
           >
-            <div className="h-0.5 w-8 rounded-full bg-border" />
+            <div className="h-0.5 w-8  bg-border" />
           </div>
         )}
         <CollapsibleTrigger asChild>
           <button
             className={cn(
-              'flex w-full items-center gap-2 px-4 py-2 text-sm font-medium',
+              'flex w-full items-center gap-2 px-4 py-2 text-sm font-medium bg-accent/50',
               'hover:bg-muted transition-colors',
             )}
           >
@@ -288,35 +291,40 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
             <div
               ref={scrollRef}
               onScroll={handleScroll}
-              className="flex-1 overflow-y-auto bg-zinc-900 p-3 font-mono text-xs text-zinc-300"
+              className="flex-1 overflow-y-auto bg-accent p-3 font-mono text-xs text-accent-foreground"
             >
               {entries.length === 0 && (
-                <div className="text-zinc-500">
+                <div className="text-accent-foreground/70">
                   Type &quot;help&quot; to see available commands. Press Ctrl+` to toggle.
                 </div>
               )}
               {entries.map((entry) => {
                 if (isSystemMessage(entry)) {
                   return (
-                    <div key={entry.id} className="whitespace-pre-wrap break-all text-zinc-400">
+                    <div
+                      key={entry.id}
+                      className="whitespace-pre-wrap break-all text-accent-foreground/70"
+                    >
                       {entry.message}
                     </div>
                   );
                 }
                 return (
                   <div key={entry.id} className="mb-1">
-                    <div className="text-zinc-500">
+                    <div className="pb-2 font-bold text-accent-foreground/70">
                       {'> '}
-                      <span className="text-zinc-200">{entry.command}</span>
+                      <span>{entry.command}</span>
                       {entry.durationMs > 0 && (
-                        <span className="ml-2 text-zinc-600">({entry.durationMs}ms)</span>
+                        <span className="ml-2 text-accent-foreground/80">
+                          ({entry.durationMs}ms)
+                        </span>
                       )}
                     </div>
                     <div
-                      className={cn(
-                        'whitespace-pre-wrap break-all',
-                        entry.resultType === 'error' ? 'text-red-400' : 'text-zinc-300',
-                      )}
+                      className={cn('whitespace-pre-wrap break-all', {
+                        'text-destructive-foreground': entry.resultType === 'error',
+                        'text-accent-foreground/70': entry.resultType !== 'error',
+                      })}
                     >
                       {entry.result}
                     </div>
@@ -328,8 +336,8 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
             <Separator />
 
             {/* Input */}
-            <div className="flex items-center bg-zinc-900 px-3 py-2">
-              <span className="font-mono text-xs text-zinc-500 mr-2">&gt;</span>
+            <div className="flex items-center px-3 py-2">
+              <span className="font-mono text-xs  mr-2">&gt;</span>
               <input
                 ref={inputRef}
                 type="text"
@@ -337,7 +345,7 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder={isConnected ? 'Enter command...' : 'Connecting...'}
-                className="flex-1 bg-transparent font-mono text-xs text-zinc-200 outline-none placeholder:text-zinc-600"
+                className="flex-1  font-mono text-xs  outline-none "
                 spellCheck={false}
                 autoComplete="off"
               />

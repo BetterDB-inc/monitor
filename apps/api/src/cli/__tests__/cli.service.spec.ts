@@ -93,7 +93,7 @@ describe('CliService', () => {
 
   describe('response formatting', () => {
     it.each([
-      ['string', 'PONG', '"PONG"', 'string'],
+      ['string', 'PONG', 'PONG', 'string'],
       ['integer', 42, '(integer) 42', 'integer'],
       ['nil', null, '(nil)', 'nil'],
       ['empty array', [], '(empty array)', 'empty-array'],
@@ -115,8 +115,8 @@ describe('CliService', () => {
       const result = await service.execute('SLOWLOG GET');
       const text = (result as { result: string }).result;
       expect(result).toMatchObject({ type: 'result', resultType: 'array' });
-      expect(text).toContain('1) "entry1"');
-      expect(text).toContain('3) "entry3"');
+      expect(text).toContain('1) entry1');
+      expect(text).toContain('3) entry3');
     });
 
     it('should format nested array responses', async () => {
@@ -124,8 +124,8 @@ describe('CliService', () => {
       const result = await service.execute('LATENCY LATEST');
       const text = (result as { result: string }).result;
       expect(result).toMatchObject({ type: 'result', resultType: 'array' });
-      expect(text).toContain('"a"');
-      expect(text).toContain('"d"');
+      expect(text).toContain('a');
+      expect(text).toContain('d');
     });
 
     it('should format Valkey errors', async () => {

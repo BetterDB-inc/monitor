@@ -186,21 +186,11 @@ export class CliService implements OnModuleDestroy {
     }
 
     if (Buffer.isBuffer(value)) {
-      return {
-        type: 'result',
-        result: `"${value.toString()}"`,
-        resultType: 'string',
-        durationMs,
-      };
+      return { type: 'result', result: value.toString(), resultType: 'string', durationMs };
     }
 
     if (typeof value === 'string') {
-      return {
-        type: 'result',
-        result: `"${value}"`,
-        resultType: 'string',
-        durationMs,
-      };
+      return { type: 'result', result: value, resultType: 'string', durationMs };
     }
 
     if (Array.isArray(value)) {
@@ -218,7 +208,7 @@ export class CliService implements OnModuleDestroy {
     // Fallback
     return {
       type: 'result',
-      result: `"${String(value)}"`,
+      result: String(value),
       resultType: 'string',
       durationMs,
     };
@@ -241,7 +231,7 @@ export class CliService implements OnModuleDestroy {
         if (typeof item === 'number') {
           return `${prefix}(integer) ${item}`;
         }
-        return `${prefix}"${String(item)}"`;
+        return `${prefix}${String(item)}`;
       })
       .join('\n');
   }
