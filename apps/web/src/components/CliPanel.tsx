@@ -53,10 +53,11 @@ Keyboard shortcuts:
 
 interface CliPanelProps {
   isOpen: boolean;
+  onToggle: () => void;
   onClose: () => void;
 }
 
-export function CliPanel({ isOpen, onClose }: CliPanelProps) {
+export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
   const [entries, setEntries] = useState<CliEntry[]>([]);
   const [input, setInput] = useState('');
   const pendingQueueRef = useRef<string[]>([]);
@@ -227,7 +228,7 @@ export function CliPanel({ isOpen, onClose }: CliPanelProps) {
   );
 
   return (
-    <Collapsible open={isOpen} onOpenChange={(open) => !open && onClose()}>
+    <Collapsible open={isOpen} onOpenChange={onToggle}>
       <div className="fixed bottom-0 left-64 right-0 z-30 border-t bg-card shadow-lg">
         <CollapsibleTrigger asChild>
           <button

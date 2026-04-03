@@ -265,7 +265,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
           </Routes>
         </div>
       </main>
-      <CliPanel isOpen={cliPanel.isOpen} onClose={cliPanel.close} />
+      <CliPanel isOpen={cliPanel.isOpen} onToggle={cliPanel.toggle} onClose={cliPanel.close} />
       <style>{`
         @media print {
           aside, .print\\:hidden, nav { display: none !important; }
