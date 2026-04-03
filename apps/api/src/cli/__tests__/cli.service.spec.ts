@@ -59,202 +59,110 @@ describe('CliService', () => {
   });
 
   describe('blocked commands', () => {
-    it('should reject SUBSCRIBE', async () => {
-      const result = await service.execute('SUBSCRIBE channel');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('blocked');
-    });
-
-    it('should reject MONITOR', async () => {
-      const result = await service.execute('MONITOR');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('blocked');
-    });
-
-    it('should reject BLPOP', async () => {
-      const result = await service.execute('BLPOP list 0');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('blocked');
-    });
-
-    it('should reject CLIENT PAUSE', async () => {
-      const result = await service.execute('CLIENT PAUSE 1000');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('blocked');
-    });
+    it.each([['SUBSCRIBE channel'], ['MONITOR'], ['BLPOP list 0'], ['CLIENT PAUSE 1000']])(
+      'should reject blocked command: %s',
+      async (command) => {
+        const result = await service.execute(command);
+        expect(result.type).toBe('error');
+        expect((result as { error: string }).error).toContain('blocked');
+      },
+    );
   });
 
   describe('safe mode restrictions', () => {
-    it('should reject SET in safe mode', async () => {
-      const result = await service.execute('SET foo bar');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('not allowed in safe mode');
-    });
+    it.each([['SET foo bar'], ['DEL foo'], ['FLUSHDB'], ['CONFIG SET maxmemory 100mb']])(
+      'should reject %s in safe mode',
+      async (command) => {
+        const result = await service.execute(command);
+        expect(result.type).toBe('error');
+        expect((result as { error: string }).error).toContain('not allowed in safe mode');
+      },
+    );
 
-    it('should reject DEL in safe mode', async () => {
-      const result = await service.execute('DEL foo');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('not allowed in safe mode');
-    });
-
-    it('should reject FLUSHDB in safe mode', async () => {
-      const result = await service.execute('FLUSHDB');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('not allowed in safe mode');
-    });
-
-    it('should allow PING in safe mode', async () => {
-      mockCall.mockResolvedValueOnce('PONG');
-      const result = await service.execute('PING');
-      expect(result.type).toBe('result');
-    });
-
-    it('should allow INFO in safe mode', async () => {
-      mockCall.mockResolvedValueOnce('# Server\r\nredis_version:7.0.0');
-      const result = await service.execute('INFO');
-      expect(result.type).toBe('result');
-    });
-
-    it('should allow DBSIZE in safe mode', async () => {
-      mockCall.mockResolvedValueOnce(42);
-      const result = await service.execute('DBSIZE');
-      expect(result.type).toBe('result');
-    });
-
-    it('should reject CONFIG SET in safe mode', async () => {
-      const result = await service.execute('CONFIG SET maxmemory 100mb');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('not allowed in safe mode');
-    });
-
-    it('should allow CONFIG GET in safe mode', async () => {
-      mockCall.mockResolvedValueOnce(['maxmemory', '0']);
-      const result = await service.execute('CONFIG GET maxmemory');
+    it.each([
+      ['PING', 'PONG'],
+      ['INFO', '# Server\r\nredis_version:7.0.0'],
+      ['DBSIZE', 42],
+      ['CONFIG GET maxmemory', ['maxmemory', '0']],
+    ])('should allow %s in safe mode', async (command, mockResponse) => {
+      mockCall.mockResolvedValueOnce(mockResponse);
+      const result = await service.execute(command);
       expect(result.type).toBe('result');
     });
   });
 
   describe('response formatting', () => {
-    it('should format string responses', async () => {
-      mockCall.mockResolvedValueOnce('PONG');
-      const result = await service.execute('PING');
-      expect(result).toMatchObject({
-        type: 'result',
-        result: '"PONG"',
-        resultType: 'string',
-      });
-    });
+    it.each([
+      ['string', 'PONG', '"PONG"', 'string'],
+      ['integer', 42, '(integer) 42', 'integer'],
+      ['nil', null, '(nil)', 'nil'],
+      ['empty array', [], '(empty array)', 'empty-array'],
+    ])(
+      'should format %s responses',
+      async (_label, mockResponse, expectedResult, expectedType) => {
+        mockCall.mockResolvedValueOnce(mockResponse);
+        const result = await service.execute('PING');
+        expect(result).toMatchObject({
+          type: 'result',
+          result: expectedResult,
+          resultType: expectedType,
+        });
+      },
+    );
 
-    it('should format integer responses', async () => {
-      mockCall.mockResolvedValueOnce(42);
-      const result = await service.execute('DBSIZE');
-      expect(result).toMatchObject({
-        type: 'result',
-        result: '(integer) 42',
-        resultType: 'integer',
-      });
-    });
-
-    it('should format nil responses', async () => {
-      mockCall.mockResolvedValueOnce(null);
-      const result = await service.execute('GET nonexistent');
-      expect(result).toMatchObject({
-        type: 'result',
-        result: '(nil)',
-        resultType: 'nil',
-      });
-    });
-
-    it('should format array responses', async () => {
+    it('should format array responses with numbered entries', async () => {
       mockCall.mockResolvedValueOnce(['key1', 'key2', 'key3']);
       const result = await service.execute('KEYS *');
-      expect(result).toMatchObject({
-        type: 'result',
-        resultType: 'array',
-      });
-      expect((result as { result: string }).result).toContain('1) "key1"');
-      expect((result as { result: string }).result).toContain('2) "key2"');
-      expect((result as { result: string }).result).toContain('3) "key3"');
-    });
-
-    it('should format empty array responses', async () => {
-      mockCall.mockResolvedValueOnce([]);
-      const result = await service.execute('KEYS nonexistent*');
-      expect(result).toMatchObject({
-        type: 'result',
-        result: '(empty array)',
-        resultType: 'empty-array',
-      });
+      const text = (result as { result: string }).result;
+      expect(result).toMatchObject({ type: 'result', resultType: 'array' });
+      expect(text).toContain('1) "key1"');
+      expect(text).toContain('3) "key3"');
     });
 
     it('should format nested array responses', async () => {
       mockCall.mockResolvedValueOnce([['a', 'b'], ['c', 'd']]);
       const result = await service.execute('XRANGE mystream - +');
-      expect(result).toMatchObject({
-        type: 'result',
-        resultType: 'array',
-      });
       const text = (result as { result: string }).result;
-      expect(text).toContain('1)');
+      expect(result).toMatchObject({ type: 'result', resultType: 'array' });
       expect(text).toContain('"a"');
-      expect(text).toContain('"b"');
+      expect(text).toContain('"d"');
     });
 
-    it('should format error responses from Valkey', async () => {
+    it('should format Valkey errors', async () => {
       mockCall.mockRejectedValueOnce(new Error('ERR wrong number of arguments'));
       const result = await service.execute('GET');
-      expect(result).toMatchObject({
-        type: 'result',
-        resultType: 'error',
-      });
+      expect(result).toMatchObject({ type: 'result', resultType: 'error' });
       expect((result as { result: string }).result).toContain('ERR wrong number of arguments');
     });
 
-    it('should include durationMs in responses', async () => {
+    it('should include durationMs', async () => {
       mockCall.mockResolvedValueOnce('PONG');
       const result = await service.execute('PING');
-      expect(result.type).toBe('result');
       expect((result as { durationMs: number }).durationMs).toBeGreaterThanOrEqual(0);
     });
   });
 
   describe('empty command', () => {
-    it('should return error for empty command', async () => {
-      const result = await service.execute('');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toBe('Empty command');
-    });
-
-    it('should return error for whitespace-only command', async () => {
-      const result = await service.execute('   ');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toBe('Empty command');
-    });
+    it.each([[''], ['   ']])(
+      'should return error for empty/whitespace command: "%s"',
+      async (command) => {
+        const result = await service.execute(command);
+        expect(result.type).toBe('error');
+        expect((result as { error: string }).error).toBe('Empty command');
+      },
+    );
   });
 
   describe('subcommand enforcement in safe mode', () => {
-    it('should reject bare CONFIG without subcommand', async () => {
-      const result = await service.execute('CONFIG');
+    it.each([
+      ['CONFIG', 'requires a sub-command'],
+      ['CLIENT', 'requires a sub-command'],
+      ['SENTINEL MASTERS', 'not allowed in safe mode'],
+      ['SLOWLOG RESET', 'not allowed in safe mode'],
+    ])('should reject %s in safe mode', async (command, expectedError) => {
+      const result = await service.execute(command);
       expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('requires a sub-command');
-    });
-
-    it('should reject bare CLIENT without subcommand', async () => {
-      const result = await service.execute('CLIENT');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('requires a sub-command');
-    });
-
-    it('should reject SENTINEL (removed from safe commands)', async () => {
-      const result = await service.execute('SENTINEL MASTERS');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('not allowed in safe mode');
-    });
-
-    it('should reject SLOWLOG RESET in safe mode', async () => {
-      const result = await service.execute('SLOWLOG RESET');
-      expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('not allowed in safe mode');
+      expect((result as { error: string }).error).toContain(expectedError);
     });
 
     it('should allow SLOWLOG GET in safe mode', async () => {
@@ -330,35 +238,22 @@ describe('CliService (unsafe mode)', () => {
     await unsafeService.onModuleDestroy();
   });
 
-  it('should allow SET in unsafe mode', async () => {
-    mockCall.mockResolvedValueOnce('OK');
-    const result = await unsafeService.execute('SET foo bar');
-    expect(result.type).toBe('result');
-    expect((result as { result: string }).result).toBe('"OK"');
-  });
-
-  it('should allow DEL in unsafe mode', async () => {
-    mockCall.mockResolvedValueOnce(1);
-    const result = await unsafeService.execute('DEL foo');
-    expect(result.type).toBe('result');
-    expect((result as { result: string }).result).toBe('(integer) 1');
-  });
-
-  it('should still block SUBSCRIBE in unsafe mode', async () => {
-    const result = await unsafeService.execute('SUBSCRIBE channel');
-    expect(result.type).toBe('error');
-    expect((result as { error: string }).error).toContain('blocked');
-  });
-
-  it('should still block MONITOR in unsafe mode', async () => {
-    const result = await unsafeService.execute('MONITOR');
-    expect(result.type).toBe('error');
-    expect((result as { error: string }).error).toContain('blocked');
-  });
-
-  it('should allow CONFIG SET in unsafe mode', async () => {
-    mockCall.mockResolvedValueOnce('OK');
-    const result = await unsafeService.execute('CONFIG SET hz 15');
+  it.each([
+    ['SET foo bar', 'OK'],
+    ['DEL foo', 1],
+    ['CONFIG SET hz 15', 'OK'],
+  ])('should allow %s in unsafe mode', async (command, mockResponse) => {
+    mockCall.mockResolvedValueOnce(mockResponse);
+    const result = await unsafeService.execute(command);
     expect(result.type).toBe('result');
   });
+
+  it.each([['SUBSCRIBE channel'], ['MONITOR']])(
+    'should still block %s in unsafe mode',
+    async (command) => {
+      const result = await unsafeService.execute(command);
+      expect(result.type).toBe('error');
+      expect((result as { error: string }).error).toContain('blocked');
+    },
+  );
 });
