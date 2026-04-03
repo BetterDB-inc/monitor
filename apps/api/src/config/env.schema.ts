@@ -75,7 +75,8 @@ export const envSchema = z
     BETTERDB_UNSAFE_CLI: z
       .string()
       .default('false')
-      .transform((v) => v === 'true'),
+      .transform((v) => v === 'true')
+      .describe('Allow all CLI commands'),
 
     // Version check configuration
     VERSION_CHECK_INTERVAL_MS: z.coerce.number().int().min(60000).default(3600000),

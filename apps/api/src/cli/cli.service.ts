@@ -16,6 +16,7 @@ export class CliService implements OnModuleDestroy {
   private readonly logger = new Logger(CliService.name);
   private readonly clients = new Map<string, DatabasePort>();
   private readonly unsafeMode: boolean;
+  private static readonly MAX_RESPONSE_SIZE = 512 * 1024; // 512 KB
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -29,10 +30,13 @@ export class CliService implements OnModuleDestroy {
 
   async onModuleDestroy(): Promise<void> {
     const promises = [...this.clients.entries()].map(([id, client]) =>
-      client.disconnect()
+      client
+        .disconnect()
         .then(() => this.logger.log(`CLI client disconnected: ${id}`))
         .catch((err: unknown) =>
-          this.logger.error(`Error disconnecting CLI client ${id}: ${err instanceof Error ? err.message : err}`),
+          this.logger.error(
+            `Error disconnecting CLI client ${id}: ${err instanceof Error ? err.message : err}`,
+          ),
         ),
     );
     await Promise.allSettled(promises);
@@ -109,14 +113,11 @@ export class CliService implements OnModuleDestroy {
     }
   }
 
-
   private async getOrCreateClient(connectionId?: string): Promise<DatabasePort> {
     const config = this.connectionRegistry.getConfig(connectionId);
     if (!config) {
       throw new Error(
-        connectionId
-          ? `Connection '${connectionId}' not found`
-          : 'No default connection available',
+        connectionId ? `Connection '${connectionId}' not found` : 'No default connection available',
       );
     }
 
@@ -169,8 +170,6 @@ export class CliService implements OnModuleDestroy {
 
     return null;
   }
-
-  private static readonly MAX_RESPONSE_SIZE = 512 * 1024; // 512 KB
 
   private formatResult(value: unknown, durationMs: number): CliResultMessage {
     if (value === null || value === undefined) {
