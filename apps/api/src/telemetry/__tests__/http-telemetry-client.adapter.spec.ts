@@ -13,11 +13,11 @@ describe('HttpTelemetryClientAdapter', () => {
     fetchSpy.mockRestore();
   });
 
-  it('should POST event with correct URL, method, headers, and body', () => {
+  it('should POST event remapped to the legacy HTTP format', () => {
     adapter.capture({
       distinctId: 'inst-123',
       event: 'app_start',
-      properties: { version: '0.12.0', tier: 'community' },
+      properties: { version: '0.12.0', tier: 'community', deploymentMode: 'self-hosted', timestamp: 1000 },
     });
 
     expect(fetchSpy).toHaveBeenCalledWith(
@@ -29,11 +29,32 @@ describe('HttpTelemetryClientAdapter', () => {
     );
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body).toMatchObject({
-      distinctId: 'inst-123',
-      event: 'app_start',
-      properties: { version: '0.12.0', tier: 'community' },
+    expect(body).toEqual({
+      instanceId: 'inst-123',
+      eventType: 'app_start',
+      version: '0.12.0',
+      tier: 'community',
+      deploymentMode: 'self-hosted',
+      timestamp: 1000,
     });
+  });
+
+  it('should include extra properties as payload', () => {
+    adapter.capture({
+      distinctId: 'inst-123',
+      event: 'db_connect',
+      properties: {
+        version: '0.12.0',
+        tier: 'community',
+        deploymentMode: 'self-hosted',
+        timestamp: 1000,
+        connectionType: 'standalone',
+        success: true,
+      },
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.payload).toEqual({ connectionType: 'standalone', success: true });
   });
 
   it('should use a 5s timeout signal', () => {

@@ -67,19 +67,19 @@ describe('TelemetryClientFactory', () => {
     expect(factory.createTelemetryClient()).toBeInstanceOf(NoopTelemetryClientAdapter);
   });
 
-  it('should fall back to NoopTelemetryClientAdapter and warn when posthog key is missing', () => {
+  it('should fall back to HttpTelemetryClientAdapter and warn when posthog key is missing', () => {
     const config = createConfigService({ TELEMETRY_PROVIDER: 'posthog' });
     const factory = new TelemetryClientFactory(config);
-    expect(factory.createTelemetryClient()).toBeInstanceOf(NoopTelemetryClientAdapter);
+    expect(factory.createTelemetryClient()).toBeInstanceOf(HttpTelemetryClientAdapter);
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('POSTHOG_API_KEY'),
     );
   });
 
-  it('should fall back to NoopTelemetryClientAdapter and warn for unknown provider', () => {
+  it('should fall back to HttpTelemetryClientAdapter and warn for unknown provider', () => {
     const config = createConfigService({ TELEMETRY_PROVIDER: 'datadog' });
     const factory = new TelemetryClientFactory(config);
-    expect(factory.createTelemetryClient()).toBeInstanceOf(NoopTelemetryClientAdapter);
+    expect(factory.createTelemetryClient()).toBeInstanceOf(HttpTelemetryClientAdapter);
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('Unknown TELEMETRY_PROVIDER'),
     );

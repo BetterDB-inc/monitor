@@ -27,36 +27,39 @@ export class TelemetryClientFactory {
         const apiKey = this.configService.get<string>('POSTHOG_API_KEY');
         if (!apiKey) {
           this.logger.warn(
-            'TELEMETRY_PROVIDER is "posthog" but POSTHOG_API_KEY is not set. Falling back to noop telemetry.',
+            'POSTHOG_API_KEY is not set. Falling back to HTTP telemetry.',
           );
-          return new NoopTelemetryClientAdapter();
+          return this.createHttpClient();
         }
         const host = this.configService.get<string>('POSTHOG_HOST');
         return new PosthogTelemetryClientAdapter(apiKey, host);
       }
 
-      case 'http': {
-        const entitlementUrl =
-          this.configService.get<string>('ENTITLEMENT_URL') ||
-          'https://betterdb.com/api/v1/entitlements';
-        const url = new URL(entitlementUrl);
-        const telemetryPath = url.pathname.replace(/\/entitlements$/, '/telemetry');
-        if (telemetryPath === url.pathname) {
-          this.logger.warn(
-            `ENTITLEMENT_URL path "${url.pathname}" does not end with "/entitlements". ` +
-              'Cannot derive telemetry endpoint. Falling back to noop telemetry.',
-          );
-          return new NoopTelemetryClientAdapter();
-        }
-        url.pathname = telemetryPath;
-        return new HttpTelemetryClientAdapter(url.toString());
-      }
+      case 'http':
+        return this.createHttpClient();
 
       default:
         this.logger.warn(
-          `Unknown TELEMETRY_PROVIDER value. Falling back to noop telemetry.`,
+          `Unknown TELEMETRY_PROVIDER value. Falling back to HTTP telemetry.`,
         );
-        return new NoopTelemetryClientAdapter();
+        return this.createHttpClient();
     }
+  }
+
+  private createHttpClient(): TelemetryPort {
+    const entitlementUrl =
+      this.configService.get<string>('ENTITLEMENT_URL') ||
+      'https://betterdb.com/api/v1/entitlements';
+    const url = new URL(entitlementUrl);
+    const telemetryPath = url.pathname.replace(/\/entitlements$/, '/telemetry');
+    if (telemetryPath === url.pathname) {
+      this.logger.warn(
+        `ENTITLEMENT_URL path "${url.pathname}" does not end with "/entitlements". ` +
+          'Cannot derive telemetry endpoint. Falling back to noop telemetry.',
+      );
+      return new NoopTelemetryClientAdapter();
+    }
+    url.pathname = telemetryPath;
+    return new HttpTelemetryClientAdapter(url.toString());
   }
 }

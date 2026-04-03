@@ -16,10 +16,24 @@ export class HttpTelemetryClientAdapter implements TelemetryPort {
     const entry: PendingRequest = { controller, timer };
     this.pending.add(entry);
 
+    const { version, tier, deploymentMode, workspaceName, timestamp, ...payload } =
+      event.properties || {};
+
+    const body = {
+      instanceId: event.distinctId,
+      eventType: event.event,
+      version,
+      tier,
+      deploymentMode,
+      workspaceName,
+      timestamp,
+      payload: Object.keys(payload).length > 0 ? payload : undefined,
+    };
+
     fetch(this.telemetryUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(event),
+      body: JSON.stringify(body),
       signal: controller.signal,
     })
       .catch(() => {
