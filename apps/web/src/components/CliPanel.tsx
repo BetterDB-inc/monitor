@@ -324,7 +324,6 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
                       className={cn('whitespace-pre-wrap break-all p-1 pr-8 rounded', {
                         'text-destructive-foreground bg-destructive/90 ':
                           entry.resultType === 'error',
-                        'text-success-foreground/70 bg-success': entry.resultType !== 'error',
                       })}
                     >
                       {entry.result}
