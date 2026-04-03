@@ -1,11 +1,28 @@
-import { Injectable, Inject, Optional, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Inject,
+  Optional,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { HealthResponse, DetailedHealthResponse, WebhookEventType, ANOMALY_SERVICE, IAnomalyService, AllConnectionsHealthResponse } from '@betterdb/shared';
+import {
+  HealthResponse,
+  DetailedHealthResponse,
+  WebhookEventType,
+  ANOMALY_SERVICE,
+  IAnomalyService,
+  AllConnectionsHealthResponse,
+} from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { LicenseService } from '@proprietary/licenses';
-import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import {
+  MultiConnectionPoller,
+  ConnectionContext,
+} from '../common/services/multi-connection-poller';
 
 @Injectable()
 export class HealthService extends MultiConnectionPoller implements OnModuleInit, OnModuleDestroy {
@@ -50,7 +67,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     this.logger.debug(`Cleaned up health state for removed connection: ${connectionId}`);
   }
 
-  onModuleInit() {
+  onModuleInit(): void {
     // Delay initial poll to let connections fully initialize
     // This prevents false "down" states on startup
     this.startupTimeout = setTimeout(() => {
@@ -111,7 +128,12 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
       const isConnected = client.isConnected();
 
       if (!isConnected) {
-        await this.handleInstanceDown(targetId, config.host, config.port, 'Not connected to database');
+        await this.handleInstanceDown(
+          targetId,
+          config.host,
+          config.port,
+          'Not connected to database',
+        );
         return {
           status: 'disconnected',
           database: {
@@ -206,11 +228,11 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
       });
     }
 
-    const allConnected = results.every(r => r.status === 'connected');
-    const anyConnected = results.some(r => r.status === 'connected');
+    const allConnected = results.every((r) => r.status === 'connected');
+    const anyConnected = results.some((r) => r.status === 'connected');
 
     return {
-      overallStatus: allConnected ? 'healthy' : (anyConnected ? 'degraded' : 'unhealthy'),
+      overallStatus: allConnected ? 'healthy' : anyConnected ? 'degraded' : 'unhealthy',
       connections: results,
       timestamp: Date.now(),
     };
@@ -219,20 +241,29 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
   /**
    * Handle instance going down - dispatch webhook if state changed
    */
-  private async handleInstanceDown(connectionId: string, host: string, port: number, reason: string): Promise<void> {
+  private async handleInstanceDown(
+    connectionId: string,
+    host: string,
+    port: number,
+    reason: string,
+  ): Promise<void> {
     const wasUp = this.instanceUpStates.get(connectionId) !== false;
     if (wasUp && this.webhookDispatcher) {
       this.logger.warn(`Instance went down (${connectionId}): ${reason}`);
       this.instanceUpStates.set(connectionId, false);
       try {
-        await this.webhookDispatcher.dispatchHealthChange(WebhookEventType.INSTANCE_DOWN, {
-          detectedAt: new Date().toISOString(),
-          reason,
-          host,
-          port,
+        await this.webhookDispatcher.dispatchHealthChange(
+          WebhookEventType.INSTANCE_DOWN,
+          {
+            detectedAt: new Date().toISOString(),
+            reason,
+            host,
+            port,
+            connectionId,
+            message: `Database instance unreachable: ${reason}`,
+          },
           connectionId,
-          message: `Database instance unreachable: ${reason}`,
-        }, connectionId);
+        );
       } catch (err) {
         this.logger.error('Failed to dispatch instance.down webhook', err);
       }
@@ -248,13 +279,17 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
       this.logger.log(`Instance recovered (${connectionId})`);
       this.instanceUpStates.set(connectionId, true);
       try {
-        await this.webhookDispatcher.dispatchHealthChange(WebhookEventType.INSTANCE_UP, {
-          recoveredAt: new Date().toISOString(),
-          host,
-          port,
+        await this.webhookDispatcher.dispatchHealthChange(
+          WebhookEventType.INSTANCE_UP,
+          {
+            recoveredAt: new Date().toISOString(),
+            host,
+            port,
+            connectionId,
+            message: 'Database instance recovered',
+          },
           connectionId,
-          message: 'Database instance recovered',
-        }, connectionId);
+        );
       } catch (err) {
         this.logger.error('Failed to dispatch instance.up webhook', err);
       }

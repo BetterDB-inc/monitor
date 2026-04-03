@@ -40,8 +40,6 @@ export interface UnifiedDatabaseAdapterConfig {
   username: string;
   password: string;
   connectionName?: string;
-  tls?: boolean;
-  dbIndex?: number;
 }
 
 export class UnifiedDatabaseAdapter implements DatabasePort {
@@ -56,8 +54,6 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       port: config.port,
       username: config.username,
       password: config.password,
-      db: config.dbIndex ?? 0,
-      tls: config.tls ? {} : undefined,
       lazyConnect: true,
       enableOfflineQueue: false,
       connectionName: config.connectionName ?? 'BetterDB-Monitor',
