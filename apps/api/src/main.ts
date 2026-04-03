@@ -180,16 +180,19 @@ async function bootstrap(): Promise<void> {
     const cliGateway = app.get(CliGateway);
     const httpServer = app.getHttpServer();
 
-    let agentGateway: { handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void } | null = null;
-    if (process.env.CLOUD_MODE) {
-      try {
-        const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
-        agentGateway = app.get(AgentGateway);
-        console.log('[Agent] WebSocket gateway resolved');
-      } catch {
-        console.warn('[Agent] Failed to resolve WebSocket gateway — module not available');
-      }
-    }
+    const agentGateway = process.env.CLOUD_MODE
+      ? (() => {
+          try {
+            const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
+            const gw = app.get(AgentGateway);
+            console.log('[Agent] WebSocket gateway resolved');
+            return gw as { handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void };
+          } catch {
+            console.warn('[Agent] Failed to resolve WebSocket gateway — module not available');
+            return null;
+          }
+        })()
+      : null;
 
     httpServer.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
       const url = new URL(request.url || '', `http://${request.headers.host}`);
