@@ -43,7 +43,7 @@ function highlightText(text: string): ReactNode[] {
       );
     } else {
       parts.push(
-        <code key={key++} className="bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-1 rounded">
+        <code key={key++} className="bg-primary/10 text-primary px-1 rounded">
           {firstMatch[0]}
         </code>
       );
