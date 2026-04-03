@@ -34,11 +34,15 @@ export class UsageTelemetryService implements OnModuleInit {
     this.instanceId = this.licenseService.getInstanceId();
     this.tier = this.licenseService.getLicenseTier();
 
-    this.telemetryClient.identify(this.instanceId, {
-      version: this.version,
-      tier: this.tier,
-      deploymentMode: this.deploymentMode,
-    });
+    try {
+      this.telemetryClient.identify(this.instanceId, {
+        version: this.version,
+        tier: this.tier,
+        deploymentMode: this.deploymentMode,
+      });
+    } catch {
+      // fire-and-forget — telemetry must never crash the app
+    }
 
     await this.trackAppStart();
   }

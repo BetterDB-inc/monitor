@@ -13,7 +13,11 @@ export class TelemetryClientFactory {
 
   createTelemetryClient(): TelemetryPort {
     const telemetryEnabled = this.configService.get('BETTERDB_TELEMETRY');
-    if (telemetryEnabled === false || telemetryEnabled === 'false') {
+    if (
+      telemetryEnabled === false ||
+      (typeof telemetryEnabled === 'string' &&
+        ['false', '0', 'no', 'off'].includes(telemetryEnabled.toLowerCase()))
+    ) {
       return new NoopTelemetryClientAdapter();
     }
 

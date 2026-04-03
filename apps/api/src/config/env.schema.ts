@@ -65,7 +65,7 @@ export const envSchema = z
     LICENSE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).optional(),
     BETTERDB_TELEMETRY: z
       .string()
-      .transform((v) => v !== 'false')
+      .transform((v) => !['false', '0', 'no', 'off'].includes(v.toLowerCase()))
       .optional(),
     TELEMETRY_PROVIDER: z.enum(['http', 'posthog', 'noop']).default('posthog'),
     POSTHOG_API_KEY: z.string().optional(),
