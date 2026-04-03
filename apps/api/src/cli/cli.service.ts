@@ -130,6 +130,7 @@ export class CliService implements OnModuleDestroy {
   private readonly logger = new Logger(CliService.name);
   private readonly clients = new Map<string, Valkey>();
   private readonly clientRefCounts = new Map<string, number>();
+  private readonly connecting = new Map<string, Promise<Valkey>>();
   private readonly unsafeMode: boolean;
 
   constructor(
@@ -317,27 +318,42 @@ export class CliService implements OnModuleDestroy {
       return existing;
     }
 
+    // Prevent duplicate connections from concurrent messages
+    const inflight = this.connecting.get(key);
+    if (inflight) {
+      return inflight;
+    }
+
     // Clean up stale client if exists
     if (existing) {
       existing.quit().catch(() => {});
       this.clients.delete(key);
     }
 
-    const client = new Valkey({
-      host: config.host,
-      port: config.port,
-      username: config.username || 'default',
-      password: config.password || undefined,
-      db: config.dbIndex ?? 0,
-      connectionName: 'BetterDB-CLI',
-      lazyConnect: true,
-      enableReadyCheck: true,
-      retryStrategy: (): null => null, // Don't auto-retry — let the user retry manually
-    });
+    const connectPromise = (async (): Promise<Valkey> => {
+      const client = new Valkey({
+        host: config.host,
+        port: config.port,
+        username: config.username || 'default',
+        password: config.password || undefined,
+        db: config.dbIndex ?? 0,
+        connectionName: 'BetterDB-CLI',
+        lazyConnect: true,
+        enableReadyCheck: true,
+        retryStrategy: (): null => null,
+      });
 
-    await client.connect();
-    this.clients.set(key, client);
-    return client;
+      await client.connect();
+      this.clients.set(key, client);
+      return client;
+    })();
+
+    this.connecting.set(key, connectPromise);
+    try {
+      return await connectPromise;
+    } finally {
+      this.connecting.delete(key);
+    }
   }
 
   private static readonly MAX_RESPONSE_SIZE = 512 * 1024; // 512 KB

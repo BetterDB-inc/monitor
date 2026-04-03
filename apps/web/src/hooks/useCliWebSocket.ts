@@ -95,6 +95,7 @@ export function useCliWebSocket({ connectionId, enabled, onMessage }: UseCliWebS
   // Reconnect when connectionId changes
   useEffect(() => {
     if (enabled && wsRef.current) {
+      setIsConnected(false);
       wsRef.current.onclose = null;
       wsRef.current.close();
       wsRef.current = null;
