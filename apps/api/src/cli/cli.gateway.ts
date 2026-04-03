@@ -50,7 +50,10 @@ export class CliGateway implements OnModuleDestroy {
   }
 
   private handleConnection(ws: WebSocket): void {
-    ws.on('message', async (data: Buffer | string) => {
+    // Serialize command execution per client to guarantee FIFO response order
+    let execChain = Promise.resolve();
+
+    ws.on('message', (data: Buffer | string) => {
       // Rate limiting: token bucket
       if (!this.consumeToken(ws)) {
         const errorMsg: CliServerMessage = {
@@ -86,8 +89,14 @@ export class CliGateway implements OnModuleDestroy {
         this.cliService.addClientRef(message.connectionId);
       }
 
-      const result = await this.cliService.execute(message.command, message.connectionId);
-      ws.send(JSON.stringify(result));
+      execChain = execChain.then(async () => {
+        const result = await this.cliService.execute(message.command, message.connectionId);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(result));
+        }
+      }).catch(() => {
+        // Ensure chain never rejects — errors are handled inside execute()
+      });
     });
 
     ws.on('close', () => {
@@ -122,7 +131,9 @@ export class CliGateway implements OnModuleDestroy {
   private getCookie(request: IncomingMessage, name: string): string | undefined {
     const cookies = request.headers.cookie || '';
     const match = cookies.split(';').find((c) => c.trim().startsWith(`${name}=`));
-    return match?.split('=')[1]?.trim();
+    const eqIdx = match?.indexOf('=');
+    if (!match || eqIdx === undefined || eqIdx === -1) return undefined;
+    return match.slice(eqIdx + 1).trim();
   }
 
   private validateSession(token: string, secret: string, tenantSchema: string): boolean {
