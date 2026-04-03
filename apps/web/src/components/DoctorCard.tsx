@@ -37,13 +37,13 @@ function highlightText(text: string): ReactNode[] {
 
     if (isWarning) {
       parts.push(
-        <span key={key++} className="text-destructive font-semibold">
+        <span key={key++} className="text-red-600 dark:text-red-400 font-semibold">
           {firstMatch[0]}
         </span>
       );
     } else {
       parts.push(
-        <code key={key++} className="bg-primary/10 text-primary px-1 rounded">
+        <code key={key++} className="bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-1 rounded">
           {firstMatch[0]}
         </code>
       );
@@ -58,14 +58,14 @@ function highlightText(text: string): ReactNode[] {
 export function DoctorCard({ title, report, isLoading }: DoctorCardProps) {
   if (isLoading) {
     return (
-      <div className="rounded-lg border border-border bg-muted p-4 animate-pulse">
+      <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 p-4 animate-pulse">
         <div className="flex items-center gap-2">
-          <div className="h-5 w-5 bg-muted-foreground/20 rounded"></div>
-          <div className="h-5 w-32 bg-muted-foreground/20 rounded"></div>
+          <div className="h-5 w-5 bg-gray-300 dark:bg-gray-600 rounded"></div>
+          <div className="h-5 w-32 bg-gray-300 dark:bg-gray-600 rounded"></div>
         </div>
         <div className="mt-2 space-y-2">
-          <div className="h-4 bg-muted-foreground/20 rounded w-3/4"></div>
-          <div className="h-4 bg-muted-foreground/20 rounded w-1/2"></div>
+          <div className="h-4 bg-gray-300 dark:bg-gray-600 rounded w-3/4"></div>
+          <div className="h-4 bg-gray-300 dark:bg-gray-600 rounded w-1/2"></div>
         </div>
       </div>
     );
@@ -78,23 +78,23 @@ export function DoctorCard({ title, report, isLoading }: DoctorCardProps) {
 
   if (isEmpty) {
     return (
-      <div className="rounded-lg border border-green-200 bg-green-50 p-4">
-        <div className="flex items-center gap-2 text-green-700">
+      <div className="rounded-lg border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/20 p-4">
+        <div className="flex items-center gap-2 text-green-700 dark:text-green-300">
           <CheckCircle className="h-5 w-5" />
           <span className="font-medium">{title}</span>
         </div>
-        <p className="mt-1 text-sm text-green-600">No issues detected</p>
+        <p className="mt-1 text-sm text-green-600 dark:text-green-400">No issues detected</p>
       </div>
     );
   }
 
   return (
-    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-      <div className="flex items-center gap-2 text-amber-700 mb-2">
+    <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/20 p-4">
+      <div className="flex items-center gap-2 text-amber-700 dark:text-amber-300 mb-2">
         <AlertTriangle className="h-5 w-5" />
         <span className="font-medium">{title}</span>
       </div>
-      <pre className="mt-2 whitespace-pre-wrap text-sm text-foreground font-mono overflow-x-auto">
+      <pre className="mt-2 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300 font-mono overflow-x-auto">
         {highlightText(report)}
       </pre>
     </div>
