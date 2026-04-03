@@ -71,6 +71,12 @@ export const envSchema = z
     POSTHOG_API_KEY: z.string().optional(),
     POSTHOG_HOST: z.url().optional(),
 
+    // CLI configuration
+    BETTERDB_UNSAFE_CLI: z
+      .string()
+      .default('false')
+      .transform((v) => v === 'true'),
+
     // Version check configuration
     VERSION_CHECK_INTERVAL_MS: z.coerce.number().int().min(60000).default(3600000),
 

@@ -1,4 +1,5 @@
 import { Injectable, Inject, Optional, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { HealthResponse, DetailedHealthResponse, WebhookEventType, ANOMALY_SERVICE, IAnomalyService, AllConnectionsHealthResponse } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
@@ -18,6 +19,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
   constructor(
     connectionRegistry: ConnectionRegistry,
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
+    private readonly configService: ConfigService,
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
     @Optional() @Inject(ANOMALY_SERVICE) private readonly anomalyService?: IAnomalyService,
     @Optional() private readonly licenseService?: LicenseService,
@@ -157,6 +159,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
         },
         capabilities,
         runtimeCapabilities: this.runtimeCapabilityTracker.getCapabilities(targetId),
+        unsafeCliEnabled: this.configService.get<boolean>('BETTERDB_UNSAFE_CLI') === true,
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';

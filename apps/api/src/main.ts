@@ -2,16 +2,26 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
+import { IncomingMessage } from 'http';
+import { Socket } from 'net';
 import { join } from 'path';
 import { readFileSync } from 'fs';
 import fastifyStatic from '@fastify/static';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
 import { categorizeError } from './common/utils/error-categorizer';
+import { CliGateway } from './cli/cli.gateway';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
   validateEnv();
+
+  if (process.env.BETTERDB_UNSAFE_CLI === 'true') {
+    console.warn(
+      '[CLI] WARNING: Unsafe CLI mode enabled. All Valkey commands are permitted via the CLI.\n' +
+      '         Do not expose this instance publicly.',
+    );
+  }
 
   const isProduction = process.env.NODE_ENV === 'production';
 
@@ -165,27 +175,37 @@ async function bootstrap(): Promise<void> {
   const document = SwaggerModule.createDocument(app as unknown as INestApplication, config);
   SwaggerModule.setup('docs', app as unknown as INestApplication, document);
 
-  // Register WebSocket upgrade handler for agent connections (cloud mode only)
-  if (process.env.CLOUD_MODE) {
-    try {
-      const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
-      const agentGateway = app.get(AgentGateway);
-      const httpServer = app.getHttpServer();
+  // Register unified WebSocket upgrade handler for CLI and agent connections
+  {
+    const cliGateway = app.get(CliGateway);
+    const httpServer = app.getHttpServer();
 
-      httpServer.on('upgrade', (request: any, socket: any, head: any) => {
-        const url = new URL(request.url || '', `http://${request.headers.host}`);
-        if (url.pathname === '/agent/ws' || url.pathname === '/api/agent/ws') {
-          agentGateway.handleUpgrade(request, socket, head);
-        } else {
-          // Not an agent WebSocket — destroy to prevent hanging
-          socket.destroy();
-        }
-      });
-
-      console.log('[Agent] WebSocket upgrade handler registered');
-    } catch {
-      console.warn('[Agent] Failed to register WebSocket handler — module not available');
+    let agentGateway: { handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void } | null = null;
+    if (process.env.CLOUD_MODE) {
+      try {
+        const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
+        agentGateway = app.get(AgentGateway);
+        console.log('[Agent] WebSocket gateway resolved');
+      } catch {
+        console.warn('[Agent] Failed to resolve WebSocket gateway — module not available');
+      }
     }
+
+    httpServer.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
+      const url = new URL(request.url || '', `http://${request.headers.host}`);
+      if (url.pathname === '/cli/ws' || url.pathname === '/api/cli/ws') {
+        cliGateway.handleUpgrade(request, socket, head);
+      } else if (
+        agentGateway &&
+        (url.pathname === '/agent/ws' || url.pathname === '/api/agent/ws')
+      ) {
+        agentGateway.handleUpgrade(request, socket, head);
+      } else {
+        socket.destroy();
+      }
+    });
+
+    console.log('[CLI] WebSocket upgrade handler registered');
   }
 
   const port = process.env.PORT || 3001;

@@ -32,6 +32,7 @@ export interface HealthResponse {
   };
   capabilities: DatabaseCapabilities | null;
   runtimeCapabilities?: RuntimeCapabilities | null;
+  unsafeCliEnabled?: boolean;
   error?: string;
   message?: string;
 }
