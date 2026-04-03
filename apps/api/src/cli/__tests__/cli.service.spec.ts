@@ -3,19 +3,16 @@ import { ConfigService } from '@nestjs/config';
 import { CliService } from '../cli.service';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 
-// Mock iovalkey
 const mockCall = jest.fn();
-const mockQuit = jest.fn().mockResolvedValue(undefined);
-const mockConnect = jest.fn().mockResolvedValue(undefined);
 
-jest.mock('iovalkey', () => {
-  return jest.fn().mockImplementation(() => ({
-    call: mockCall,
-    quit: mockQuit,
-    connect: mockConnect,
-    status: 'ready',
-  }));
-});
+function createMockAdapter() {
+  return {
+    connect: jest.fn().mockResolvedValue(undefined),
+    disconnect: jest.fn().mockResolvedValue(undefined),
+    isConnected: jest.fn().mockReturnValue(true),
+    getClient: jest.fn().mockReturnValue({ call: mockCall }),
+  };
+}
 
 describe('CliService', () => {
   let service: CliService;
@@ -32,6 +29,7 @@ describe('CliService', () => {
 
   const mockConnectionRegistry = {
     getConfig: jest.fn().mockReturnValue(mockConfig),
+    createAdapter: jest.fn().mockImplementation(() => createMockAdapter()),
   };
 
   beforeEach(async () => {
@@ -266,15 +264,24 @@ describe('CliService', () => {
     });
   });
 
-  describe('credential status check', () => {
-    it('should return error for connections with decryption failure', async () => {
-      mockConnectionRegistry.getConfig.mockReturnValueOnce({
-        ...mockConfig,
-        credentialStatus: 'decryption_failed',
+  describe('connection errors', () => {
+    it('should return error when connection is not found', async () => {
+      mockConnectionRegistry.getConfig.mockReturnValueOnce(null);
+      const result = await service.execute('PING');
+      expect(result.type).toBe('error');
+      expect((result as { error: string }).error).toContain('No default connection available');
+    });
+
+    it('should return error when adapter connect fails', async () => {
+      mockConnectionRegistry.createAdapter.mockReturnValueOnce({
+        connect: jest.fn().mockRejectedValue(new Error('NOAUTH')),
+        disconnect: jest.fn(),
+        isConnected: jest.fn().mockReturnValue(false),
+        getClient: jest.fn(),
       });
       const result = await service.execute('PING');
       expect(result.type).toBe('error');
-      expect((result as { error: string }).error).toContain('decryption failed');
+      expect((result as { error: string }).error).toContain('NOAUTH');
     });
   });
 });
@@ -294,6 +301,7 @@ describe('CliService (unsafe mode)', () => {
 
   const mockConnectionRegistry = {
     getConfig: jest.fn().mockReturnValue(mockConfig),
+    createAdapter: jest.fn().mockImplementation(() => createMockAdapter()),
   };
 
   beforeEach(async () => {

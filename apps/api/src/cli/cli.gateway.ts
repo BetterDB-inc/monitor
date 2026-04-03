@@ -11,7 +11,6 @@ const MAX_COMMANDS_PER_SECOND = 50;
 export class CliGateway implements OnModuleDestroy {
   private readonly logger = new Logger(CliGateway.name);
   private readonly wss: WebSocketServer;
-  private readonly clientConnections = new Map<WebSocket, string>();
   private readonly rateLimiters = new Map<WebSocket, { tokens: number; lastRefill: number }>();
 
   constructor(private readonly cliService: CliService) {
@@ -68,12 +67,6 @@ export class CliGateway implements OnModuleDestroy {
         return;
       }
 
-      // Track which connectionId this WS client uses (for ref-counting on disconnect)
-      if (message.connectionId && !this.clientConnections.has(ws)) {
-        this.clientConnections.set(ws, message.connectionId);
-        this.cliService.addClientRef(message.connectionId);
-      }
-
       execChain = execChain.then(async () => {
         const result = await this.cliService.execute(message.command, message.connectionId);
         if (ws.readyState === WebSocket.OPEN) {
@@ -85,11 +78,6 @@ export class CliGateway implements OnModuleDestroy {
     });
 
     ws.on('close', () => {
-      const connectionId = this.clientConnections.get(ws);
-      if (connectionId) {
-        this.cliService.releaseClientRef(connectionId);
-        this.clientConnections.delete(ws);
-      }
       this.rateLimiters.delete(ws);
       this.logger.log('CLI WebSocket client disconnected');
     });

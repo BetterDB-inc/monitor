@@ -241,12 +241,15 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private createAdapter(config: DatabaseConnectionConfig): DatabasePort {
+  createAdapter(config: DatabaseConnectionConfig, connectionName?: string): DatabasePort {
     return new UnifiedDatabaseAdapter({
       host: config.host,
       port: config.port,
       username: config.username || 'default',
       password: config.password || '',
+      dbIndex: config.dbIndex,
+      tls: config.tls,
+      connectionName,
     });
   }
 

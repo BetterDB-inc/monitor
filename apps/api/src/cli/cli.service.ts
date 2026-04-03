@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
+import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { parseCommandLine } from './command-parser';
 import { CliResultMessage, CliErrorMessage } from './cli.types';
 
@@ -128,9 +128,7 @@ const BLOCKED_SUBCOMMANDS: Record<string, Set<string>> = {
 @Injectable()
 export class CliService implements OnModuleDestroy {
   private readonly logger = new Logger(CliService.name);
-  private readonly clients = new Map<string, Valkey>();
-  private readonly clientRefCounts = new Map<string, number>();
-  private readonly connecting = new Map<string, Promise<Valkey>>();
+  private readonly clients = new Map<string, DatabasePort>();
   private readonly unsafeMode: boolean;
 
   constructor(
@@ -144,20 +142,14 @@ export class CliService implements OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
-    const disconnectPromises: Promise<void>[] = [];
-    for (const [id, client] of this.clients) {
-      disconnectPromises.push(
-        client
-          .quit()
-          .then(() => this.logger.log(`CLI client disconnected: ${id}`))
-          .catch((err: unknown) =>
-            this.logger.error(
-              `Error disconnecting CLI client ${id}: ${err instanceof Error ? err.message : err}`,
-            ),
-          ),
-      );
-    }
-    await Promise.allSettled(disconnectPromises);
+    const promises = [...this.clients.entries()].map(([id, client]) =>
+      client.disconnect()
+        .then(() => this.logger.log(`CLI client disconnected: ${id}`))
+        .catch((err: unknown) =>
+          this.logger.error(`Error disconnecting CLI client ${id}: ${err instanceof Error ? err.message : err}`),
+        ),
+    );
+    await Promise.allSettled(promises);
     this.clients.clear();
   }
 
@@ -188,16 +180,15 @@ export class CliService implements OnModuleDestroy {
       }
     }
 
-    // Get or create a dedicated CLI client
-    let client: Valkey;
+    let client;
     try {
-      client = await this.getOrCreateClient(connectionId);
+      const adapter = await this.getOrCreateClient(connectionId);
+      client = adapter.getClient();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      return { type: 'error', error: `Connection failed: ${msg}` };
+      return { type: 'error', error: msg };
     }
 
-    // Execute command with timeout
     const COMMAND_TIMEOUT_MS = 30_000;
     const start = performance.now();
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
@@ -232,32 +223,31 @@ export class CliService implements OnModuleDestroy {
     }
   }
 
-  /**
-   * Increment reference count for a connection's CLI client.
-   */
-  addClientRef(connectionId: string): void {
-    this.clientRefCounts.set(connectionId, (this.clientRefCounts.get(connectionId) ?? 0) + 1);
-  }
 
-  /**
-   * Decrement reference count and disconnect only when no WS clients remain.
-   */
-  releaseClientRef(connectionId: string): void {
-    const count = (this.clientRefCounts.get(connectionId) ?? 1) - 1;
-    if (count <= 0) {
-      this.clientRefCounts.delete(connectionId);
-      const client = this.clients.get(connectionId);
-      if (client) {
-        client.quit().catch((err: unknown) => {
-          this.logger.warn(
-            `Error quitting CLI client ${connectionId}: ${err instanceof Error ? err.message : err}`,
-          );
-        });
-        this.clients.delete(connectionId);
-      }
-    } else {
-      this.clientRefCounts.set(connectionId, count);
+  private async getOrCreateClient(connectionId?: string): Promise<DatabasePort> {
+    const config = this.connectionRegistry.getConfig(connectionId);
+    if (!config) {
+      throw new Error(
+        connectionId
+          ? `Connection '${connectionId}' not found`
+          : 'No default connection available',
+      );
     }
+
+    const existing = this.clients.get(config.id);
+    if (existing && existing.isConnected()) {
+      return existing;
+    }
+
+    if (existing) {
+      existing.disconnect().catch(() => {});
+      this.clients.delete(config.id);
+    }
+
+    const adapter = this.connectionRegistry.createAdapter(config, 'BetterDB-CLI');
+    await adapter.connect();
+    this.clients.set(config.id, adapter);
+    return adapter;
   }
 
   private checkBlocked(command: string, subCommand?: string): string | null {
@@ -293,68 +283,6 @@ export class CliService implements OnModuleDestroy {
     }
 
     return null;
-  }
-
-  private async getOrCreateClient(connectionId?: string): Promise<Valkey> {
-    const config = this.connectionRegistry.getConfig(connectionId);
-    if (!config) {
-      throw new Error(
-        connectionId
-          ? `Connection '${connectionId}' not found`
-          : 'No default connection available',
-      );
-    }
-
-    if (config.credentialStatus === 'decryption_failed') {
-      throw new Error(
-        `Cannot connect: password decryption failed for "${config.name}". ` +
-        'Fix ENCRYPTION_KEY and restart the server.',
-      );
-    }
-
-    const key = config.id;
-    const existing = this.clients.get(key);
-    if (existing && existing.status === 'ready') {
-      return existing;
-    }
-
-    // Prevent duplicate connections from concurrent messages
-    const inflight = this.connecting.get(key);
-    if (inflight) {
-      return inflight;
-    }
-
-    // Clean up stale client if exists
-    if (existing) {
-      existing.quit().catch(() => {});
-      this.clients.delete(key);
-    }
-
-    const connectPromise = (async (): Promise<Valkey> => {
-      const client = new Valkey({
-        host: config.host,
-        port: config.port,
-        username: config.username || 'default',
-        password: config.password || undefined,
-        db: config.dbIndex ?? 0,
-        tls: config.tls ? {} : undefined,
-        connectionName: 'BetterDB-CLI',
-        lazyConnect: true,
-        enableReadyCheck: true,
-        retryStrategy: (): null => null,
-      });
-
-      await client.connect();
-      this.clients.set(key, client);
-      return client;
-    })();
-
-    this.connecting.set(key, connectPromise);
-    try {
-      return await connectPromise;
-    } finally {
-      this.connecting.delete(key);
-    }
   }
 
   private static readonly MAX_RESPONSE_SIZE = 512 * 1024; // 512 KB
