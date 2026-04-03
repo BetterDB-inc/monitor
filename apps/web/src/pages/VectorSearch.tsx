@@ -301,7 +301,7 @@ function TrendChartPanel({ snapshots, indexName, hoursLabel, onClose }: { snapsh
             <XAxis dataKey="time" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
             <YAxis tick={{ fontSize: 10 }} width={50} tickFormatter={v => v.toLocaleString()} />
             <Tooltip formatter={(v) => [Number(v).toLocaleString(), 'Documents']} />
-            <Line type="monotone" dataKey="docs" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="docs" stroke="var(--primary)" strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -314,7 +314,7 @@ function TrendChartPanel({ snapshots, indexName, hoursLabel, onClose }: { snapsh
               <XAxis dataKey="time" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
               <YAxis tick={{ fontSize: 10 }} width={50} tickFormatter={v => `${v.toFixed(1)}`} />
               <Tooltip formatter={(v) => [`${Number(v).toFixed(2)} MB`, 'Memory']} />
-              <Area type="monotone" dataKey="memory" stroke="hsl(var(--primary))" fill="hsl(var(--primary))" fillOpacity={0.1} strokeWidth={2} />
+              <Area type="monotone" dataKey="memory" stroke="var(--primary)" fill="var(--primary)" fillOpacity={0.1} strokeWidth={2} />
             </AreaChart>
           </ResponsiveContainer>
         </div>

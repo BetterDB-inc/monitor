@@ -11,11 +11,13 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      '@': path.resolve(__dirname, './src'),
       '@betterdb/shared': path.resolve(__dirname, '../../packages/shared/src/index.ts'),
       '@betterdb/shared/license': path.resolve(__dirname, '../../packages/shared/src/license/index.ts'),
     },
   },
   test: {
     environment: 'happy-dom',
+    setupFiles: ['./src/test/setup.ts'],
   },
 });

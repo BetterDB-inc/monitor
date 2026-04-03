@@ -11,9 +11,9 @@ const SEVERITY_ICON_MAP: Record<Incompatibility['severity'], {
   icon: typeof XCircle;
   color: string;
 }> = {
-  blocking: { icon: XCircle, color: 'text-red-600' },
+  blocking: { icon: XCircle, color: 'text-destructive' },
   warning: { icon: AlertTriangle, color: 'text-amber-600' },
-  info: { icon: Info, color: 'text-blue-600' },
+  info: { icon: Info, color: 'text-primary' },
 };
 
 interface Props {
@@ -39,8 +39,8 @@ export function VerdictSection({ job }: Props) {
   let bannerMessage: string;
 
   if (blockingCount > 0) {
-    bannerBg = 'bg-red-50 border-red-200';
-    bannerText = 'text-red-800';
+    bannerBg = 'bg-destructive/10 border-destructive/20';
+    bannerText = 'text-destructive';
     BannerIcon = XCircle;
     bannerMessage = `${blockingCount} blocking issue(s) — resolve before migrating.`;
   } else if (warningCount > 0) {

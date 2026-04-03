@@ -68,21 +68,21 @@ interface AnomalySummary {
 }
 
 const SEVERITY_CONFIG = {
-  critical: { color: 'text-red-500', bg: 'bg-red-500/10', border: 'border-red-500', icon: AlertCircle },
+  critical: { color: 'text-destructive', bg: 'bg-destructive/10', border: 'border-destructive', icon: AlertCircle },
   warning: { color: 'text-yellow-500', bg: 'bg-yellow-500/10', border: 'border-yellow-500', icon: AlertTriangle },
-  info: { color: 'text-blue-500', bg: 'bg-blue-500/10', border: 'border-blue-500', icon: Info },
+  info: { color: 'text-primary', bg: 'bg-primary/10', border: 'border-primary', icon: Info },
 };
 
 const PATTERN_CONFIG: Record<string, { icon: typeof Activity; label: string; color: string }> = {
-  traffic_burst: { icon: TrendingUp, label: 'Traffic Burst', color: '#3b82f6' },
-  batch_job: { icon: Database, label: 'Batch Job', color: '#8b5cf6' },
-  memory_pressure: { icon: HardDrive, label: 'Memory Pressure', color: '#ef4444' },
-  slow_queries: { icon: Clock, label: 'Slow Queries', color: '#f59e0b' },
-  auth_attack: { icon: Shield, label: 'Auth Anomaly', color: '#dc2626' },
-  connection_leak: { icon: Users, label: 'Connection Leak', color: '#f97316' },
-  cache_thrashing: { icon: Zap, label: 'Cache Thrashing', color: '#eab308' },
-  node_failover: { icon: AlertOctagon, label: 'Node Failover', color: '#dc2626' },
-  unknown: { icon: Activity, label: 'Unknown', color: '#6b7280' },
+  traffic_burst: { icon: TrendingUp, label: 'Traffic Burst', color: 'var(--chart-1)' },
+  batch_job: { icon: Database, label: 'Batch Job', color: 'var(--chart-2)' },
+  memory_pressure: { icon: HardDrive, label: 'Memory Pressure', color: 'var(--destructive)' },
+  slow_queries: { icon: Clock, label: 'Slow Queries', color: 'var(--chart-warning)' },
+  auth_attack: { icon: Shield, label: 'Auth Anomaly', color: 'var(--destructive)' },
+  connection_leak: { icon: Users, label: 'Connection Leak', color: 'var(--chart-3)' },
+  cache_thrashing: { icon: Zap, label: 'Cache Thrashing', color: 'var(--chart-warning)' },
+  node_failover: { icon: AlertOctagon, label: 'Node Failover', color: 'var(--destructive)' },
+  unknown: { icon: Activity, label: 'Unknown', color: 'var(--muted-foreground)' },
 };
 
 const METRIC_LABELS: Record<string, string> = {
@@ -223,15 +223,15 @@ export function AnomalyDashboard() {
           </CardContent>
         </Card>
 
-        <Card className={summary?.bySeverity?.critical ? 'border-red-500/50' : ''}>
+        <Card className={summary?.bySeverity?.critical ? 'border-destructive/50' : ''}>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-red-500" />
+              <AlertCircle className="w-4 h-4 text-destructive" />
               Critical
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-red-500">{summary?.bySeverity?.critical ?? 0}</div>
+            <div className="text-3xl font-bold text-destructive">{summary?.bySeverity?.critical ?? 0}</div>
             <p className="text-xs text-muted-foreground mt-1">require attention</p>
           </CardContent>
         </Card>
@@ -278,9 +278,9 @@ export function AnomalyDashboard() {
                   <XAxis dataKey="time" tick={{ fontSize: 10 }} />
                   <YAxis tick={{ fontSize: 10 }} />
                   <Tooltip />
-                  <Area type="monotone" dataKey="critical" stackId="1" stroke="#ef4444" fill="#ef4444" fillOpacity={0.6} />
-                  <Area type="monotone" dataKey="warning" stackId="1" stroke="#eab308" fill="#eab308" fillOpacity={0.6} />
-                  <Area type="monotone" dataKey="info" stackId="1" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.6} />
+                  <Area type="monotone" dataKey="critical" stackId="1" stroke="var(--destructive)" fill="var(--destructive)" fillOpacity={0.6} />
+                  <Area type="monotone" dataKey="warning" stackId="1" stroke="var(--chart-warning)" fill="var(--chart-warning)" fillOpacity={0.6} />
+                  <Area type="monotone" dataKey="info" stackId="1" stroke="var(--chart-info)" fill="var(--chart-info)" fillOpacity={0.6} />
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
@@ -304,7 +304,7 @@ export function AnomalyDashboard() {
                   <XAxis type="number" tick={{ fontSize: 10 }} />
                   <YAxis type="category" dataKey="metric" tick={{ fontSize: 10 }} width={80} />
                   <Tooltip />
-                  <Bar dataKey="count" fill="hsl(var(--primary))" radius={[0, 4, 4, 0]} />
+                  <Bar dataKey="count" fill="var(--primary)" radius={[0, 4, 4, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             ) : (
@@ -382,9 +382,9 @@ export function AnomalyDashboard() {
                             >
                               <div className="flex items-center gap-2">
                                 {anomaly.anomalyType === 'spike' ? (
-                                  <TrendingUp className="w-4 h-4 text-red-500" />
+                                  <TrendingUp className="w-4 h-4 text-destructive" />
                                 ) : (
-                                  <TrendingDown className="w-4 h-4 text-blue-500" />
+                                  <TrendingDown className="w-4 h-4 text-primary" />
                                 )}
                                 <span className="font-medium">{METRIC_LABELS[anomaly.metricType] || anomaly.metricType}</span>
                               </div>

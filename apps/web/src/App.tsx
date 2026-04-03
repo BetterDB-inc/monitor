@@ -12,6 +12,7 @@ import { useNavigationTracker } from './hooks/useNavigationTracker';
 import { UpgradePrompt } from './components/UpgradePrompt';
 import { UpdateBanner } from './components/UpdateBanner';
 import { ConnectionSelector } from './components/ConnectionSelector';
+import { ModeToggle } from './components/ModeToggle';
 import { NoConnectionsGuard } from './components/NoConnectionsGuard';
 import { ServerStartupGuard } from './components/ServerStartupGuard';
 import { Dashboard } from './pages/Dashboard';
@@ -175,7 +176,8 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
             </NavItem>
           )}
         </nav>
-        <div className="px-3 pb-4 border-t border-gray-200 pt-2 space-y-1">
+        <div className="px-3 pb-4 border-t border-border pt-2 space-y-1">
+          <ModeToggle />
           <a
             href="https://docs.betterdb.com"
             target="_blank"

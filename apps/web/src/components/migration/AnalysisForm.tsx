@@ -94,7 +94,7 @@ export function AnalysisForm({ onStart }: Props) {
         <select
           value={targetConnectionId}
           onChange={e => setTargetConnectionId(e.target.value)}
-          className={`w-full border rounded-md px-3 py-2 text-sm bg-background${sameConnection ? ' border-red-400' : ''}`}
+          className={`w-full border rounded-md px-3 py-2 text-sm bg-background${sameConnection ? ' border-destructive' : ''}`}
           required
         >
           <option value="">Select a connection...</option>
@@ -110,7 +110,7 @@ export function AnalysisForm({ onStart }: Props) {
           ))}
         </select>
         {sameConnection && (
-          <p className="text-sm text-red-600 mt-1">
+          <p className="text-sm text-destructive mt-1">
             Source and target must be different connections
           </p>
         )}
@@ -155,7 +155,7 @@ export function AnalysisForm({ onStart }: Props) {
       </div>
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
+        <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-3 text-sm">
           {error}
         </div>
       )}

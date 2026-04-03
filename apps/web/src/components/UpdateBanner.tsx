@@ -13,7 +13,7 @@ export function UpdateBanner() {
   }
 
   return (
-    <div className="bg-blue-600 text-white px-4 py-2 text-sm flex items-center justify-between">
+    <div className="bg-primary text-primary-foreground px-4 py-2 text-sm flex items-center justify-between">
       <div className="flex items-center gap-2">
         <span className="font-medium">Update available:</span>
         <span>
@@ -32,7 +32,7 @@ export function UpdateBanner() {
       </div>
       <button
         onClick={dismiss}
-        className="text-white/80 hover:text-white px-2 py-1 rounded hover:bg-white/10"
+        className="text-primary-foreground/80 hover:text-primary-foreground px-2 py-1 rounded hover:bg-primary-foreground/10"
         aria-label="Dismiss update notification"
       >
         Dismiss

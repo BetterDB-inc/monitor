@@ -53,9 +53,9 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
   };
 
   const getNodeBorderColor = (node: ClusterNode): string => {
-    if (node.flags.includes('fail')) return 'border-red-500';
+    if (node.flags.includes('fail')) return 'border-destructive';
     if (node.flags.includes('pfail')) return 'border-yellow-500';
-    if (node.flags.includes('myself')) return 'border-blue-500';
+    if (node.flags.includes('myself')) return 'border-primary';
     if (node.linkState === 'connected' && !node.flags.includes('fail')) {
       return 'border-green-500';
     }
@@ -63,9 +63,9 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
   };
 
   const getNodeBgColor = (node: ClusterNode): string => {
-    if (node.flags.includes('fail')) return 'bg-red-500/5';
+    if (node.flags.includes('fail')) return 'bg-destructive/5';
     if (node.flags.includes('pfail')) return 'bg-yellow-500/5';
-    if (node.flags.includes('myself')) return 'bg-blue-500/5';
+    if (node.flags.includes('myself')) return 'bg-primary/5';
     return '';
   };
 
@@ -86,7 +86,7 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
               <Server className="w-4 h-4 text-muted-foreground flex-shrink-0" />
               <span className="font-mono text-sm truncate">{node.address}</span>
               {node.flags.includes('myself') && (
-                <Badge className="bg-blue-500/10 text-blue-500 border-0 text-[10px]">
+                <Badge className="bg-primary/10 text-primary border-0 text-[10px]">
                   MYSELF
                 </Badge>
               )}
@@ -105,13 +105,13 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
                 className={`text-[10px] ${
                   node.linkState === 'connected'
                     ? 'bg-green-500/10 text-green-500'
-                    : 'bg-red-500/10 text-red-500'
+                    : 'bg-destructive/10 text-destructive'
                 } border-0`}
               >
                 {node.linkState}
               </Badge>
               {node.flags.includes('fail') && (
-                <Badge className="bg-red-500/10 text-red-500 border-0 text-[10px]">
+                <Badge className="bg-destructive/10 text-destructive border-0 text-[10px]">
                   FAIL
                 </Badge>
               )}
