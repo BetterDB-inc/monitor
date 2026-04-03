@@ -39,22 +39,22 @@ describe('PosthogTelemetryClientAdapter', () => {
     adapter.capture({
       distinctId: 'inst-123',
       event: 'app_start',
-      properties: { version: '0.12.0' },
+      properties: { version: '0.13.0' },
     });
 
     expect(mockCapture).toHaveBeenCalledWith({
       distinctId: 'inst-123',
       event: 'app_start',
-      properties: { version: '0.12.0' },
+      properties: { version: '0.13.0' },
     });
   });
 
   it('should delegate identify to posthog.identify', () => {
-    adapter.identify('inst-123', { tier: 'pro', version: '0.12.0' });
+    adapter.identify('inst-123', { tier: 'pro', version: '0.13.0' });
 
     expect(mockIdentify).toHaveBeenCalledWith({
       distinctId: 'inst-123',
-      properties: { tier: 'pro', version: '0.12.0' },
+      properties: { tier: 'pro', version: '0.13.0' },
     });
   });
 
