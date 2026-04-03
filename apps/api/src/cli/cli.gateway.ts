@@ -27,21 +27,6 @@ export class CliGateway implements OnModuleDestroy {
   }
 
   handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
-    // In cloud mode, validate session cookie before accepting the WebSocket connection
-    if (process.env.CLOUD_MODE) {
-      const sessionSecret = process.env.SESSION_SECRET;
-      const tenantSchema = process.env.DB_SCHEMA;
-      if (sessionSecret && tenantSchema) {
-        const cookie = this.getCookie(request, 'betterdb_session');
-        if (!cookie || !this.validateSession(cookie, sessionSecret, tenantSchema)) {
-          this.logger.warn('CLI WebSocket upgrade rejected: invalid or missing session');
-          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-          socket.destroy();
-          return;
-        }
-      }
-    }
-
     this.wss.handleUpgrade(request, socket, head, (ws) => {
       this.logger.log('CLI WebSocket client connected');
       this.rateLimiters.set(ws, { tokens: MAX_COMMANDS_PER_SECOND, lastRefill: Date.now() });
@@ -126,26 +111,5 @@ export class CliGateway implements OnModuleDestroy {
     if (bucket.tokens < 1) return false;
     bucket.tokens -= 1;
     return true;
-  }
-
-  private getCookie(request: IncomingMessage, name: string): string | undefined {
-    const cookies = request.headers.cookie || '';
-    const match = cookies.split(';').find((c) => c.trim().startsWith(`${name}=`));
-    const eqIdx = match?.indexOf('=');
-    if (!match || eqIdx === undefined || eqIdx === -1) return undefined;
-    return match.slice(eqIdx + 1).trim();
-  }
-
-  private validateSession(token: string, secret: string, tenantSchema: string): boolean {
-    try {
-      // Dynamic import avoided — jwt is only needed in cloud mode
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const jwt = require('jsonwebtoken');
-      const payload = jwt.verify(token, secret, { algorithms: ['HS256'] });
-      const expectedSchema = `tenant_${payload.subdomain.replace(/-/g, '_')}`;
-      return expectedSchema === tenantSchema;
-    } catch {
-      return false;
-    }
   }
 }
