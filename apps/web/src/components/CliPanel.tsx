@@ -3,7 +3,6 @@ import { Terminal, Trash2, X, ChevronUp, ChevronDown } from 'lucide-react';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { useCliHistory } from '@/hooks/useCliHistory';
 import { useCliWebSocket, type CliServerMessage } from '@/hooks/useCliWebSocket';
@@ -251,14 +250,6 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
           <div className="flex h-[30vh] min-h-[200px] max-h-[50vh] flex-col">
             {/* Header */}
             <div className="flex items-center gap-2 px-4 py-1.5">
-              {currentConnection && (
-                <Badge variant="secondary" className="text-xs">
-                  {currentConnection.name}
-                </Badge>
-              )}
-              <span className="text-xs text-muted-foreground">
-                {isConnected ? 'Connected' : 'Disconnected'}
-              </span>
               <div className="ml-auto flex items-center gap-1">
                 <Button variant="ghost" size="icon-xs" onClick={clearOutput} title="Clear output">
                   <Trash2 className="h-3.5 w-3.5" />

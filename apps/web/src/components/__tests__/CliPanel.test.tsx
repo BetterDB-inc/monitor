@@ -37,10 +37,9 @@ describe('CliPanel', () => {
     expect(screen.getByText('CLI')).toBeInTheDocument();
   });
 
-  it('shows input and header when expanded', () => {
+  it('shows input when expanded', () => {
     render(<CliPanel isOpen={true} onToggle={vi.fn()} onClose={vi.fn()} />);
     expect(screen.getByPlaceholderText('Connecting...')).toBeInTheDocument();
-    expect(screen.getByText('Test Connection')).toBeInTheDocument();
   });
 
   it('calls onClose when close button is clicked', async () => {
