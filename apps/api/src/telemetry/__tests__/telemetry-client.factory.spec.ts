@@ -70,7 +70,7 @@ describe('TelemetryClientFactory', () => {
     },
   );
 
-  it('should fall back to HttpTelemetryClientAdapter and warn when posthog key is missing', () => {
+  it('should fall back to HttpTelemetryClientAdapter when POSTHOG_API_KEY is not set and default is unsubstituted', () => {
     const config = createConfigService({ TELEMETRY_PROVIDER: 'posthog' });
     const factory = new TelemetryClientFactory(config);
     expect(factory.createTelemetryClient()).toBeInstanceOf(HttpTelemetryClientAdapter);

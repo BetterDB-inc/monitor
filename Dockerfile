@@ -29,6 +29,12 @@ COPY proprietary ./proprietary
 # Create symlink for proprietary node_modules (symlinks don't copy properly)
 RUN ln -sf ../apps/api/node_modules proprietary/node_modules
 
+# PostHog telemetry token (baked into frontend at build time)
+ARG VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
+ARG VITE_PUBLIC_POSTHOG_HOST=https://eu.i.posthog.com
+ENV VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=$VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
+ENV VITE_PUBLIC_POSTHOG_HOST=$VITE_PUBLIC_POSTHOG_HOST
+
 # Build only api, web, and shared (exclude entitlement)
 RUN pnpm --filter api --filter web --filter @betterdb/shared build
 
@@ -70,6 +76,12 @@ COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 # Create symlink for @proprietary path alias to work at runtime
 RUN mkdir -p /app/node_modules/@proprietary && \
     ln -s /app/apps/api/dist/proprietary/* /app/node_modules/@proprietary/
+
+# PostHog telemetry (backend, runtime)
+ARG POSTHOG_API_KEY
+ARG POSTHOG_HOST=https://eu.i.posthog.com
+ENV POSTHOG_API_KEY=$POSTHOG_API_KEY
+ENV POSTHOG_HOST=$POSTHOG_HOST
 
 # Set environment defaults (only non-database config)
 ENV NODE_ENV=production

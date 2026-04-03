@@ -5,6 +5,9 @@ import { NoopTelemetryClientAdapter } from './adapters/noop-telemetry-client.ada
 import { HttpTelemetryClientAdapter } from './adapters/http-telemetry-client.adapter';
 import { PosthogTelemetryClientAdapter } from './adapters/posthog-telemetry-client.adapter';
 
+const DEFAULT_POSTHOG_API_KEY = '__BETTERDB_POSTHOG_API_KEY__';
+const DEFAULT_POSTHOG_HOST = '__BETTERDB_POSTHOG_HOST__';
+
 @Injectable()
 export class TelemetryClientFactory {
   private readonly logger = new Logger(TelemetryClientFactory.name);
@@ -28,14 +31,18 @@ export class TelemetryClientFactory {
         return new NoopTelemetryClientAdapter();
 
       case 'posthog': {
-        const apiKey = this.configService.get<string>('POSTHOG_API_KEY');
+        const apiKey =
+          this.configService.get<string>('POSTHOG_API_KEY') ||
+          (DEFAULT_POSTHOG_API_KEY.startsWith('__') ? '' : DEFAULT_POSTHOG_API_KEY);
         if (!apiKey) {
           this.logger.warn(
             'POSTHOG_API_KEY is not set. Falling back to HTTP telemetry.',
           );
           return this.createHttpClient();
         }
-        const host = this.configService.get<string>('POSTHOG_HOST');
+        const host =
+          this.configService.get<string>('POSTHOG_HOST') ||
+          (DEFAULT_POSTHOG_HOST.startsWith('__') ? undefined : DEFAULT_POSTHOG_HOST);
         return new PosthogTelemetryClientAdapter(apiKey, host);
       }
 

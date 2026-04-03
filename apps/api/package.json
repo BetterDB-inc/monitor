@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "ts-node -r tsconfig-paths/register src/main.ts",
-    "build": "nest build",
+    "build": "nest build && node scripts/inject-telemetry-defaults.mjs",
     "start": "node dist/main",
     "start:dev": "ts-node -r tsconfig-paths/register src/main.ts",
     "start:prod": "node dist/main",
