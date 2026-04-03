@@ -57,15 +57,18 @@ describe('TelemetryClientFactory', () => {
     expect(factory.createTelemetryClient()).toBeInstanceOf(NoopTelemetryClientAdapter);
   });
 
-  it('should return NoopTelemetryClientAdapter when BETTERDB_TELEMETRY is string "false"', () => {
-    const config = createConfigService({
-      TELEMETRY_PROVIDER: 'posthog',
-      BETTERDB_TELEMETRY: 'false',
-      POSTHOG_API_KEY: 'phc_test',
-    });
-    const factory = new TelemetryClientFactory(config);
-    expect(factory.createTelemetryClient()).toBeInstanceOf(NoopTelemetryClientAdapter);
-  });
+  it.each(['false', '0', 'no', 'off', 'FALSE', 'Off'])(
+    'should return NoopTelemetryClientAdapter when BETTERDB_TELEMETRY is "%s"',
+    (value) => {
+      const config = createConfigService({
+        TELEMETRY_PROVIDER: 'posthog',
+        BETTERDB_TELEMETRY: value,
+        POSTHOG_API_KEY: 'phc_test',
+      });
+      const factory = new TelemetryClientFactory(config);
+      expect(factory.createTelemetryClient()).toBeInstanceOf(NoopTelemetryClientAdapter);
+    },
+  );
 
   it('should fall back to HttpTelemetryClientAdapter and warn when posthog key is missing', () => {
     const config = createConfigService({ TELEMETRY_PROVIDER: 'posthog' });

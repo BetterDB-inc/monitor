@@ -93,7 +93,7 @@ export function MetricChart({
           <Line
             type="monotone"
             dataKey="value"
-            stroke="#6366f1"
+            stroke="var(--primary)"
             strokeWidth={2}
             dot={false}
             connectNulls={false}
@@ -102,7 +102,7 @@ export function MetricChart({
           <Line
             type="linear"
             dataKey="trend"
-            stroke="#f59e0b"
+            stroke="var(--chart-warning)"
             strokeWidth={2}
             strokeDasharray="5 5"
             dot={false}
@@ -112,13 +112,13 @@ export function MetricChart({
           {forecast.ceiling !== null && (
             <ReferenceLine
               y={forecast.ceiling}
-              stroke="#ef4444"
+              stroke="var(--destructive)"
               strokeDasharray="8 4"
               label={{
                 value: `Ceiling: ${fmt(forecast.ceiling)}`,
                 position: 'right',
                 fontSize: 11,
-                fill: '#ef4444',
+                fill: 'var(--destructive)',
               }}
             />
           )}

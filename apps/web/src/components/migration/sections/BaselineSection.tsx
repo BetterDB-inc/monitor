@@ -56,7 +56,7 @@ function StatusBadge({ status }: { status: BaselineMetricStatus }) {
     case 'degraded':
       return <span className="px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-800">degraded</span>;
     case 'unavailable':
-      return <span className="px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-500">unavailable</span>;
+      return <span className="px-1.5 py-0.5 rounded text-xs bg-muted text-muted-foreground">unavailable</span>;
   }
 }
 

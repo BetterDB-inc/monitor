@@ -38,10 +38,10 @@ export function SampleValidationSection({ sample }: Props) {
           </span>
         </span>
         {sample.missing > 0 && (
-          <span className="text-red-700">{sample.missing} missing</span>
+          <span className="text-destructive">{sample.missing} missing</span>
         )}
         {sample.typeMismatches > 0 && (
-          <span className="text-red-700">{sample.typeMismatches} type mismatch{sample.typeMismatches !== 1 ? 'es' : ''}</span>
+          <span className="text-destructive">{sample.typeMismatches} type mismatch{sample.typeMismatches !== 1 ? 'es' : ''}</span>
         )}
         {sample.valueMismatches > 0 && (
           <span className="text-amber-700">{sample.valueMismatches} value mismatch{sample.valueMismatches !== 1 ? 'es' : ''}</span>

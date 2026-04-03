@@ -102,7 +102,7 @@ export function NodeStatsComparison({ nodeStats }: NodeStatsComparisonProps) {
                   <div className="w-full bg-muted rounded-full h-2">
                     <div
                       className={`h-2 rounded-full transition-all ${
-                        imbalanced ? 'bg-yellow-500' : 'bg-blue-500'
+                        imbalanced ? 'bg-yellow-500' : 'bg-primary'
                       }`}
                       style={{ width: `${Math.min(percentage, 100)}%` }}
                     />

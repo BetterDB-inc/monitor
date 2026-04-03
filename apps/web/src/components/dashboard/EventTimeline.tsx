@@ -66,8 +66,8 @@ interface Props {
 
 
 const tooltipStyle: React.CSSProperties = {
-  backgroundColor: 'hsl(var(--card))',
-  border: '1px solid hsl(var(--border))',
+  backgroundColor: 'var(--card)',
+  border: '1px solid var(--border)',
   borderRadius: 6,
   padding: '6px 10px',
   fontSize: 12,
@@ -92,7 +92,7 @@ function LaneTooltip({ active, payload, fields }: {
 
   return (
     <div style={tooltipStyle}>
-      <div style={{ marginBottom: 4, color: 'hsl(var(--muted-foreground))' }}>{data.label}</div>
+      <div style={{ marginBottom: 4, color: 'var(--muted-foreground)' }}>{data.label}</div>
       {entries.map(e => (
         <div key={e.key}>{e.label}: {e.format ? e.format(e.value) : e.value}</div>
       ))}
@@ -433,8 +433,8 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
               bottom: 0,
               pointerEvents: 'none',
               zIndex: 5,
-              background: 'hsl(var(--primary) / 0.12)',
-              border: '1px solid hsl(var(--primary) / 0.4)',
+              background: 'color-mix(in oklch, var(--primary) 12%, transparent)',
+              border: '1px solid color-mix(in oklch, var(--primary) 40%, transparent)',
               borderRadius: 2,
             }}
           />
@@ -455,8 +455,8 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
                     { key: 'memMb', label: 'Memory', format: v => `${v.toFixed(1)} MB` },
                   ]} />}
                 />
-                <Area yAxisId="ops" type="monotone" dataKey="ops" stroke="#8884d8" fill="#8884d8" fillOpacity={0.3} name="ops" />
-                <Line yAxisId="mem" type="monotone" dataKey="memMb" stroke="#82ca9d" dot={false} strokeWidth={1.5} name="memMb" />
+                <Area yAxisId="ops" type="monotone" dataKey="ops" stroke="var(--chart-1)" fill="var(--chart-1)" fillOpacity={0.3} name="ops" />
+                <Line yAxisId="mem" type="monotone" dataKey="memMb" stroke="var(--chart-2)" dot={false} strokeWidth={1.5} name="memMb" />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -479,9 +479,9 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
                     <Cell
                       key={i}
                       fill={
-                        b.slowMaxDuration >= 500_000 ? '#E24B4A'
-                          : b.slowMaxDuration >= 100_000 ? '#EF9F27'
-                          : '#8884d8'
+                        b.slowMaxDuration >= 500_000 ? 'var(--destructive)'
+                          : b.slowMaxDuration >= 100_000 ? 'var(--chart-warning)'
+                          : 'var(--chart-1)'
                       }
                     />
                   ))}
@@ -512,7 +512,7 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
                   barSize={12}
                   onClick={onAnomalyClick}
                   cursor="pointer"
-                  fill="#E24B4A"
+                  fill="var(--destructive)"
                   stroke="none"
                 />
                 <Bar
@@ -521,7 +521,7 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
                   barSize={12}
                   onClick={onAnomalyClick}
                   cursor="pointer"
-                  fill="#EF9F27"
+                  fill="var(--chart-warning)"
                   stroke="none"
                 />
               </ComposedChart>
@@ -555,7 +555,7 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
                   barSize={8}
                   onClick={onLatencyClick}
                   cursor="pointer"
-                  fill="#8884d8"
+                  fill="var(--chart-1)"
                   stroke="none"
                 />
               </ComposedChart>
@@ -612,7 +612,7 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
                       <span className={`inline-block w-2 h-2 rounded-full ${
                         item.duration >= 500_000 ? 'bg-red-500'
                           : item.duration >= 100_000 ? 'bg-amber-500'
-                          : 'bg-blue-500'
+                          : 'bg-primary'
                       }`} />
                     </td>
                     <td className="py-1.5 pr-3 whitespace-nowrap font-medium tabular-nums">
@@ -648,7 +648,7 @@ export function EventTimeline({ startTime: propStart, endTime: propEnd }: Props)
                 {selectedEvent.type === 'latency' && selectedEvent.items.map((item, i) => (
                   <tr key={i}>
                     <td className="py-1.5 pr-3 w-1">
-                      <span className="inline-block w-2 h-2 rounded-full bg-blue-500" />
+                      <span className="inline-block w-2 h-2 rounded-full bg-primary" />
                     </td>
                     <td className="py-1.5 pr-3 whitespace-nowrap font-medium tabular-nums">
                       {(item.maxLatency / 1000).toFixed(1)}ms

@@ -27,9 +27,9 @@ export function ClusterHealthCard({ health, masterCount, replicaCount }: Cluster
     },
     failing: {
       icon: XCircle,
-      color: 'text-red-500',
-      bg: 'bg-red-500/10',
-      border: 'border-red-500',
+      color: 'text-destructive',
+      bg: 'bg-destructive/10',
+      border: 'border-destructive',
       label: 'Failing',
     },
   };
@@ -95,8 +95,8 @@ export function ClusterHealthCard({ health, masterCount, replicaCount }: Cluster
           <div className="pt-3 border-t space-y-2">
             {health.slotsFail > 0 && (
               <div className="flex items-center justify-between text-sm">
-                <span className="text-red-500">Failed Slots</span>
-                <span className="font-medium text-red-500">{health.slotsFail}</span>
+                <span className="text-destructive">Failed Slots</span>
+                <span className="font-medium text-destructive">{health.slotsFail}</span>
               </div>
             )}
             {health.slotsPfail > 0 && (

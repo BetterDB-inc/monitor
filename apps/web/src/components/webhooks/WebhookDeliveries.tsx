@@ -68,12 +68,12 @@ export function WebhookDeliveries({ webhook, onClose }: WebhookDeliveriesProps) 
           <h2 className="text-xl font-semibold">Delivery History: {webhook.name}</h2>
           <button
             onClick={onClose}
-            className="px-4 py-2 border rounded-md hover:bg-gray-50"
+            className="px-4 py-2 border rounded-md hover:bg-muted"
           >
             Close
           </button>
         </div>
-        <div className="text-center py-8 text-gray-500">Loading deliveries...</div>
+        <div className="text-center py-8 text-muted-foreground">Loading deliveries...</div>
       </Card>
     );
   }
@@ -83,18 +83,18 @@ export function WebhookDeliveries({ webhook, onClose }: WebhookDeliveriesProps) 
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-xl font-semibold">Delivery History: {webhook.name}</h2>
-          <p className="text-sm text-gray-500 mt-1">Showing last 100 deliveries</p>
+          <p className="text-sm text-muted-foreground mt-1">Showing last 100 deliveries</p>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={loadDeliveries}
-            className="px-4 py-2 border rounded-md hover:bg-gray-50"
+            className="px-4 py-2 border rounded-md hover:bg-muted"
           >
             Refresh
           </button>
           <button
             onClick={onClose}
-            className="px-4 py-2 border rounded-md hover:bg-gray-50"
+            className="px-4 py-2 border rounded-md hover:bg-muted"
           >
             Close
           </button>
@@ -102,7 +102,7 @@ export function WebhookDeliveries({ webhook, onClose }: WebhookDeliveriesProps) 
       </div>
 
       {deliveries.length === 0 ? (
-        <div className="text-center py-8 text-gray-500">
+        <div className="text-center py-8 text-muted-foreground">
           No deliveries found for this webhook.
         </div>
       ) : (
@@ -131,13 +131,13 @@ export function WebhookDeliveries({ webhook, onClose }: WebhookDeliveriesProps) 
                         className={`font-mono ${
                           delivery.statusCode >= 200 && delivery.statusCode < 300
                             ? 'text-green-600'
-                            : 'text-red-600'
+                            : 'text-destructive'
                         }`}
                       >
                         {delivery.statusCode}
                       </span>
                     ) : (
-                      <span className="text-gray-400">-</span>
+                      <span className="text-muted-foreground">-</span>
                     )}
                   </TableCell>
                   <TableCell>{delivery.attempts}</TableCell>
@@ -155,7 +155,7 @@ export function WebhookDeliveries({ webhook, onClose }: WebhookDeliveriesProps) 
                       <button
                         onClick={() => handleRetry(delivery.id)}
                         disabled={retrying === delivery.id}
-                        className="text-sm text-blue-600 hover:text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="text-sm text-primary hover:text-primary/80 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {retrying === delivery.id ? 'Retrying...' : 'Retry'}
                       </button>
@@ -172,7 +172,7 @@ export function WebhookDeliveries({ webhook, onClose }: WebhookDeliveriesProps) 
       {deliveries.length > 0 && (
         <div className="mt-6 space-y-4">
           <h3 className="text-lg font-semibold">Latest Delivery Details</h3>
-          <div className="bg-gray-50 rounded-md p-4 space-y-2 text-sm">
+          <div className="bg-muted rounded-md p-4 space-y-2 text-sm">
             <div>
               <span className="font-medium">Delivery ID:</span> {deliveries[0].id}
             </div>

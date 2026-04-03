@@ -247,7 +247,7 @@ export function AuditTrail() {
                         <span
                           className={`px-2 py-1 rounded text-xs ${
                             entry.reason === 'auth'
-                              ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+                              ? 'bg-primary/10 text-primary'
                               : entry.reason === 'command'
                               ? 'bg-destructive/10 text-destructive'
                               : 'bg-muted'

@@ -217,8 +217,8 @@ export function ClientAnalytics() {
                 <Area
                   type="monotone"
                   dataKey="connections"
-                  stroke="hsl(var(--primary))"
-                  fill="hsl(var(--primary))"
+                  stroke="var(--primary)"
+                  fill="var(--primary)"
                   fillOpacity={0.3}
                 />
               </AreaChart>

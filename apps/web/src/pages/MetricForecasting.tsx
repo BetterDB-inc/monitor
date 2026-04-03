@@ -153,8 +153,8 @@ export function MetricForecasting() {
             onClick={() => setActiveTab(kind)}
             className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
               activeTab === kind
-                ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
-                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-gray-300'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted'
             }`}
           >
             {TAB_LABELS[kind]}
