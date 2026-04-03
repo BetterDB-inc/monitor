@@ -1,4 +1,4 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
@@ -17,9 +17,9 @@ async function bootstrap(): Promise<void> {
   validateEnv();
 
   if (process.env.BETTERDB_UNSAFE_CLI === 'true') {
-    console.warn(
-      '[CLI] WARNING: Unsafe CLI mode enabled. All Valkey commands are permitted via the CLI.\n' +
-      '         Do not expose this instance publicly.',
+    new Logger('CLI').warn(
+      'Unsafe CLI mode enabled. All Valkey commands are permitted via the CLI. ' +
+      'Do not expose this instance publicly.',
     );
   }
 
@@ -205,7 +205,7 @@ async function bootstrap(): Promise<void> {
       }
     });
 
-    console.log('[CLI] WebSocket upgrade handler registered');
+    new Logger('CLI').log('WebSocket upgrade handler registered');
   }
 
   const port = process.env.PORT || 3001;
