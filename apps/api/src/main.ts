@@ -19,7 +19,7 @@ async function bootstrap(): Promise<void> {
   if (process.env.BETTERDB_UNSAFE_CLI === 'true') {
     new Logger('CLI').warn(
       'Unsafe CLI mode enabled. All Valkey commands are permitted via the CLI. ' +
-      'Do not expose this instance publicly.',
+        'Do not expose this instance publicly.',
     );
   }
 
@@ -29,7 +29,7 @@ async function bootstrap(): Promise<void> {
 
   // Compute publicPath once to avoid divergence between SPA fallback and static file serving
   const publicPath = isProduction
-    ? (process.env.BETTERDB_STATIC_DIR || join(__dirname, '..', '..', '..', '..', 'public'))
+    ? process.env.BETTERDB_STATIC_DIR || join(__dirname, '..', '..', '..', '..', 'public')
     : null;
 
   // In production, register SPA fallback at Fastify level BEFORE NestJS routes
@@ -37,7 +37,8 @@ async function bootstrap(): Promise<void> {
   if (isProduction && publicPath) {
     const indexPath = join(publicPath, 'index.html');
     const indexHtml = readFileSync(indexPath, 'utf-8');
-    const STATIC_EXTENSIONS = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|json|xml|txt)$/i;
+    const STATIC_EXTENSIONS =
+      /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|json|xml|txt)$/i;
 
     const fastifyInstance = fastifyAdapter.getInstance();
 
@@ -69,21 +70,23 @@ async function bootstrap(): Promise<void> {
 
         // Serve index.html for SPA client-side routes
         reply.type('text/html').send(indexHtml);
-      }
+      },
     });
   }
 
   // Type assertion required due to NestJS/Fastify adapter version mismatch during transition
-  const app = await (NestFactory.create as Function)(
+  const app = (await (NestFactory.create as Function)(
     AppModule,
     fastifyAdapter,
-  ) as NestFastifyApplication;
+  )) as NestFastifyApplication;
 
   // Register cloud auth middleware at Fastify level BEFORE any other middleware
   // This ensures it runs before static file serving
   if (process.env.CLOUD_MODE) {
     try {
-      const { CloudAuthMiddleware } = require('../../../proprietary/cloud-auth/cloud-auth.middleware');
+      const {
+        CloudAuthMiddleware,
+      } = require('../../../proprietary/cloud-auth/cloud-auth.middleware');
       const middleware = new CloudAuthMiddleware();
       app.use((req: any, res: any, next: () => void) => middleware.use(req, res, next));
       console.log('[CloudAuth] Middleware registered at Fastify level');
@@ -124,11 +127,13 @@ async function bootstrap(): Promise<void> {
   });
 
   // Enable validation pipes globally
-  app.useGlobalPipes(new ValidationPipe({
-    whitelist: true,
-    forbidNonWhitelisted: true,
-    transform: true,
-  }));
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
 
   if (isProduction && publicPath) {
     // Set global prefix for API routes
@@ -186,7 +191,9 @@ async function bootstrap(): Promise<void> {
             const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
             const gw = app.get(AgentGateway);
             console.log('[Agent] WebSocket gateway resolved');
-            return gw as { handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void };
+            return gw as {
+              handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void;
+            };
           } catch {
             console.warn('[Agent] Failed to resolve WebSocket gateway — module not available');
             return null;
@@ -227,11 +234,17 @@ async function bootstrap(): Promise<void> {
       const connectionErrors = registry.getStartupConnectionErrors();
       for (const connErr of connectionErrors) {
         const category = categorizeError(new Error(connErr.error));
-        console.error(`[Startup Error] ${category}: ${connErr.name} (${connErr.host}:${connErr.port}) — ${connErr.error}`);
-        licenseService.sendStartupError(
-          `${connErr.name} (${connErr.host}:${connErr.port}): ${connErr.error}`,
-          category,
-        ).catch(() => { /* best-effort */ });
+        console.error(
+          `[Startup Error] ${category}: ${connErr.name} (${connErr.host}:${connErr.port}) — ${connErr.error}`,
+        );
+        licenseService
+          .sendStartupError(
+            `${connErr.name} (${connErr.host}:${connErr.port}): ${connErr.error}`,
+            category,
+          )
+          .catch(() => {
+            /* best-effort */
+          });
       }
     } catch {
       // ConnectionRegistry not available — skip

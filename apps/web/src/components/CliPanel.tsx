@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Terminal, Trash2, X, ChevronUp, ChevronDown } from 'lucide-react';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Separator } from '@/components/ui/separator';
@@ -76,12 +76,12 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
     });
   }, []);
 
-  const handleServerMessage = useCallback(
-    (msg: CliServerMessage) => {
-      const command = pendingQueueRef.current.shift();
-      if (!command) return;
+  const handleServerMessage = useCallback((msg: CliServerMessage) => {
+    const command = pendingQueueRef.current.shift();
+    if (!command) return;
 
-      const entry: CliOutputEntry = msg.type === 'error'
+    const entry: CliOutputEntry =
+      msg.type === 'error'
         ? {
             id: nextId(),
             command,
@@ -99,14 +99,12 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
             timestamp: Date.now(),
           };
 
-      setEntries((prev) => {
-        const next = [...prev, entry];
-        if (next.length > MAX_ENTRIES) return next.slice(next.length - MAX_ENTRIES);
-        return next;
-      });
-    },
-    [],
-  );
+    setEntries((prev) => {
+      const next = [...prev, entry];
+      if (next.length > MAX_ENTRIES) return next.slice(next.length - MAX_ENTRIES);
+      return next;
+    });
+  }, []);
 
   const { send, isConnected } = useCliWebSocket({
     connectionId: currentConnection?.id ?? null,
@@ -168,9 +166,7 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
         if (hist.length === 0) {
           addSystemMessage('(empty history)');
         } else {
-          addSystemMessage(
-            hist.map((h, i) => `  ${String(i + 1).padStart(3)} ${h}`).join('\n'),
-          );
+          addSystemMessage(hist.map((h, i) => `  ${String(i + 1).padStart(3)} ${h}`).join('\n'));
         }
         return true;
       }
@@ -264,12 +260,7 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
                 {isConnected ? 'Connected' : 'Disconnected'}
               </span>
               <div className="ml-auto flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={clearOutput}
-                  title="Clear output"
-                >
+                <Button variant="ghost" size="icon-xs" onClick={clearOutput} title="Clear output">
                   <Trash2 className="h-3.5 w-3.5" />
                 </Button>
                 <Button variant="ghost" size="icon-xs" onClick={onClose} title="Close CLI">
@@ -286,39 +277,39 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
               onScroll={handleScroll}
               className="flex-1 overflow-y-auto bg-zinc-900 p-3 font-mono text-xs text-zinc-300"
             >
-                {entries.length === 0 && (
-                  <div className="text-zinc-500">
-                    Type &quot;help&quot; to see available commands. Press Ctrl+` to toggle.
-                  </div>
-                )}
-                {entries.map((entry) => {
-                  if (isSystemMessage(entry)) {
-                    return (
-                      <div key={entry.id} className="whitespace-pre-wrap break-all text-zinc-400">
-                        {entry.message}
-                      </div>
-                    );
-                  }
+              {entries.length === 0 && (
+                <div className="text-zinc-500">
+                  Type &quot;help&quot; to see available commands. Press Ctrl+` to toggle.
+                </div>
+              )}
+              {entries.map((entry) => {
+                if (isSystemMessage(entry)) {
                   return (
-                    <div key={entry.id} className="mb-1">
-                      <div className="text-zinc-500">
-                        {'> '}
-                        <span className="text-zinc-200">{entry.command}</span>
-                        {entry.durationMs > 0 && (
-                          <span className="ml-2 text-zinc-600">({entry.durationMs}ms)</span>
-                        )}
-                      </div>
-                      <div
-                        className={cn(
-                          'whitespace-pre-wrap break-all',
-                          entry.resultType === 'error' ? 'text-red-400' : 'text-zinc-300',
-                        )}
-                      >
-                        {entry.result}
-                      </div>
+                    <div key={entry.id} className="whitespace-pre-wrap break-all text-zinc-400">
+                      {entry.message}
                     </div>
                   );
-                })}
+                }
+                return (
+                  <div key={entry.id} className="mb-1">
+                    <div className="text-zinc-500">
+                      {'> '}
+                      <span className="text-zinc-200">{entry.command}</span>
+                      {entry.durationMs > 0 && (
+                        <span className="ml-2 text-zinc-600">({entry.durationMs}ms)</span>
+                      )}
+                    </div>
+                    <div
+                      className={cn(
+                        'whitespace-pre-wrap break-all',
+                        entry.resultType === 'error' ? 'text-red-400' : 'text-zinc-300',
+                      )}
+                    >
+                      {entry.result}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
 
             <Separator />
