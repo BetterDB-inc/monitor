@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Terminal, Trash2, X, ChevronUp, ChevronDown } from 'lucide-react';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -60,7 +59,7 @@ interface CliPanelProps {
 export function CliPanel({ isOpen, onClose }: CliPanelProps) {
   const [entries, setEntries] = useState<CliEntry[]>([]);
   const [input, setInput] = useState('');
-  const pendingCommandRef = useRef<string | null>(null);
+  const pendingQueueRef = useRef<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
@@ -78,9 +77,8 @@ export function CliPanel({ isOpen, onClose }: CliPanelProps) {
 
   const handleServerMessage = useCallback(
     (msg: CliServerMessage) => {
-      const command = pendingCommandRef.current;
+      const command = pendingQueueRef.current.shift();
       if (!command) return;
-      pendingCommandRef.current = null;
 
       const entry: CliOutputEntry = msg.type === 'error'
         ? {
@@ -118,10 +116,10 @@ export function CliPanel({ isOpen, onClose }: CliPanelProps) {
   // Clear pending command if connection drops mid-flight
   const prevConnectedRef = useRef(false);
   useEffect(() => {
-    if (prevConnectedRef.current && !isConnected && pendingCommandRef.current) {
-      const lostCommand = pendingCommandRef.current;
-      pendingCommandRef.current = null;
-      addSystemMessage(`(error) Connection lost while waiting for response to: ${lostCommand}`);
+    if (prevConnectedRef.current && !isConnected && pendingQueueRef.current.length > 0) {
+      const lost = pendingQueueRef.current.length;
+      pendingQueueRef.current = [];
+      addSystemMessage(`(error) Connection lost — ${lost} pending command(s) may have been lost`);
     }
     prevConnectedRef.current = isConnected;
   }, [isConnected, addSystemMessage]);
@@ -199,7 +197,7 @@ export function CliPanel({ isOpen, onClose }: CliPanelProps) {
       return;
     }
 
-    pendingCommandRef.current = trimmed;
+    pendingQueueRef.current.push(trimmed);
     send(trimmed);
   }, [input, cliHistory, handleBuiltinCommand, isConnected, addSystemMessage, send]);
 
@@ -282,12 +280,11 @@ export function CliPanel({ isOpen, onClose }: CliPanelProps) {
             <Separator />
 
             {/* Output */}
-            <ScrollArea className="flex-1">
-              <div
-                ref={scrollRef}
-                onScroll={handleScroll}
-                className="h-full overflow-y-auto bg-zinc-900 p-3 font-mono text-xs text-zinc-300"
-              >
+            <div
+              ref={scrollRef}
+              onScroll={handleScroll}
+              className="flex-1 overflow-y-auto bg-zinc-900 p-3 font-mono text-xs text-zinc-300"
+            >
                 {entries.length === 0 && (
                   <div className="text-zinc-500">
                     Type &quot;help&quot; to see available commands. Press Ctrl+` to toggle.
@@ -321,8 +318,7 @@ export function CliPanel({ isOpen, onClose }: CliPanelProps) {
                     </div>
                   );
                 })}
-              </div>
-            </ScrollArea>
+            </div>
 
             <Separator />
 

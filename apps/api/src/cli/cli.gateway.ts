@@ -80,9 +80,10 @@ export class CliGateway implements OnModuleDestroy {
         return;
       }
 
-      // Track which connectionId this WS client uses (for cleanup on disconnect)
-      if (message.connectionId) {
+      // Track which connectionId this WS client uses (for ref-counting on disconnect)
+      if (message.connectionId && !this.clientConnections.has(ws)) {
         this.clientConnections.set(ws, message.connectionId);
+        this.cliService.addClientRef(message.connectionId);
       }
 
       const result = await this.cliService.execute(message.command, message.connectionId);
@@ -92,7 +93,7 @@ export class CliGateway implements OnModuleDestroy {
     ws.on('close', () => {
       const connectionId = this.clientConnections.get(ws);
       if (connectionId) {
-        this.cliService.disconnectClient(connectionId);
+        this.cliService.releaseClientRef(connectionId);
         this.clientConnections.delete(ws);
       }
       this.rateLimiters.delete(ws);

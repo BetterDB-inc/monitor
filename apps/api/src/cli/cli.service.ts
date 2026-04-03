@@ -129,6 +129,7 @@ const BLOCKED_SUBCOMMANDS: Record<string, Set<string>> = {
 export class CliService implements OnModuleDestroy {
   private readonly logger = new Logger(CliService.name);
   private readonly clients = new Map<string, Valkey>();
+  private readonly clientRefCounts = new Map<string, number>();
   private readonly unsafeMode: boolean;
 
   constructor(
@@ -231,17 +232,30 @@ export class CliService implements OnModuleDestroy {
   }
 
   /**
-   * Disconnect and remove a specific CLI client (e.g., on WebSocket close).
+   * Increment reference count for a connection's CLI client.
    */
-  disconnectClient(connectionId: string): void {
-    const client = this.clients.get(connectionId);
-    if (client) {
-      client.quit().catch((err: unknown) => {
-        this.logger.warn(
-          `Error quitting CLI client ${connectionId}: ${err instanceof Error ? err.message : err}`,
-        );
-      });
-      this.clients.delete(connectionId);
+  addClientRef(connectionId: string): void {
+    this.clientRefCounts.set(connectionId, (this.clientRefCounts.get(connectionId) ?? 0) + 1);
+  }
+
+  /**
+   * Decrement reference count and disconnect only when no WS clients remain.
+   */
+  releaseClientRef(connectionId: string): void {
+    const count = (this.clientRefCounts.get(connectionId) ?? 1) - 1;
+    if (count <= 0) {
+      this.clientRefCounts.delete(connectionId);
+      const client = this.clients.get(connectionId);
+      if (client) {
+        client.quit().catch((err: unknown) => {
+          this.logger.warn(
+            `Error quitting CLI client ${connectionId}: ${err instanceof Error ? err.message : err}`,
+          );
+        });
+        this.clients.delete(connectionId);
+      }
+    } else {
+      this.clientRefCounts.set(connectionId, count);
     }
   }
 
