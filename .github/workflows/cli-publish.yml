@@ -135,7 +135,14 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd packages/cli
-          npm publish ./betterdb-monitor-$VERSION.tgz --provenance --access public
+          npm publish ./betterdb-monitor-$VERSION.tgz --provenance --access public --tag latest
+
+      - name: Ensure latest dist-tag
+        if: ${{ github.event_name == 'push' || inputs.publish_npm }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm dist-tag add @betterdb/monitor@$VERSION latest
 
       - name: Create GitHub Release
         if: ${{ github.event_name == 'push' || inputs.create_release }}
