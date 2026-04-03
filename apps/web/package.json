@@ -27,7 +27,6 @@
     "react": "^19.2.4",
     "react-day-picker": "^9.14.0",
     "react-dom": "^19.2.4",
-    "react-resizable-panels": "^4.9.0",
     "react-router-dom": "^7.13.2",
     "react-tooltip": "^5.30.0",
     "recharts": "^3.8.0",
