@@ -321,9 +321,10 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
                       )}
                     </div>
                     <div
-                      className={cn('whitespace-pre-wrap break-all', {
-                        'text-destructive-foreground': entry.resultType === 'error',
-                        'text-accent-foreground/70': entry.resultType !== 'error',
+                      className={cn('whitespace-pre-wrap break-all p-1 rounded', {
+                        'text-destructive-foreground bg-destructive/90 ':
+                          entry.resultType === 'error',
+                        'text-success-foreground/70 bg-success': entry.resultType !== 'error',
                       })}
                     >
                       {entry.result}
