@@ -337,6 +337,7 @@ export class CliService implements OnModuleDestroy {
         username: config.username || 'default',
         password: config.password || undefined,
         db: config.dbIndex ?? 0,
+        tls: config.tls ? {} : undefined,
         connectionName: 'BetterDB-CLI',
         lazyConnect: true,
         enableReadyCheck: true,
