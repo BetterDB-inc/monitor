@@ -55,13 +55,19 @@ interface CliPanelProps {
   onClose: () => void;
 }
 
+const MIN_PANEL_HEIGHT = 200;
+const MAX_PANEL_HEIGHT_RATIO = 0.7;
+const DEFAULT_PANEL_HEIGHT = Math.round(window.innerHeight * 0.3);
+
 export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
   const [entries, setEntries] = useState<CliEntry[]>([]);
   const [input, setInput] = useState('');
+  const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_HEIGHT);
   const pendingQueueRef = useRef<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
+  const isDraggingRef = useRef(false);
 
   const { currentConnection } = useConnection();
   const cliHistory = useCliHistory();
@@ -134,6 +140,28 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
       el.scrollTop = el.scrollHeight;
     }
   }, [entries.length]);
+
+  const handleResizeStart = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    const startY = e.clientY;
+    const startHeight = panelHeight;
+
+    const onMove = (ev: PointerEvent): void => {
+      const maxHeight = Math.round(window.innerHeight * MAX_PANEL_HEIGHT_RATIO);
+      const delta = startY - ev.clientY;
+      setPanelHeight(Math.max(MIN_PANEL_HEIGHT, Math.min(maxHeight, startHeight + delta)));
+    };
+
+    const onUp = (): void => {
+      isDraggingRef.current = false;
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+    };
+
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+  }, [panelHeight]);
 
   // Auto-focus input when panel opens
   useEffect(() => {
@@ -223,7 +251,14 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
 
   return (
     <Collapsible open={isOpen} onOpenChange={onToggle}>
-      <div className="fixed bottom-0 left-64 right-0 z-30 border-t bg-card shadow-lg">
+      <div className="fixed bottom-0 left-64 right-0 z-30 bg-card shadow-lg">
+        {/* Drag handle for resizing */}
+        {isOpen && (
+          <div
+            onPointerDown={handleResizeStart}
+            className="h-1 cursor-ns-resize border-t hover:bg-primary/20 active:bg-primary/30"
+          />
+        )}
         <CollapsibleTrigger asChild>
           <button
             className={cn(
@@ -246,7 +281,7 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
         </CollapsibleTrigger>
 
         <CollapsibleContent>
-          <div className="flex h-[30vh] min-h-[200px] max-h-[50vh] flex-col">
+          <div className="flex flex-col" style={{ height: panelHeight }}>
             {/* Output */}
             <div
               ref={scrollRef}
