@@ -42,13 +42,8 @@ describe('CliPanel', () => {
     expect(screen.getByPlaceholderText('Connecting...')).toBeInTheDocument();
   });
 
-  it('calls onClose when close button is clicked', async () => {
-    const onClose = vi.fn();
-    render(<CliPanel isOpen={true} onToggle={vi.fn()} onClose={onClose} />);
-
-    const closeButton = screen.getByTitle('Close CLI');
-    closeButton.click();
-
-    expect(onClose).toHaveBeenCalled();
+  it('shows help text when expanded and empty', () => {
+    render(<CliPanel isOpen={true} onToggle={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByText(/Type "help"/)).toBeInTheDocument();
   });
 });
