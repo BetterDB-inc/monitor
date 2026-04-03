@@ -1,37 +1,6 @@
 import Valkey from 'iovalkey';
 import type { KeyAnalyticsOptions, KeyPatternData } from '@betterdb/shared';
-import { extractPattern } from '@betterdb/shared';
-
-const ALLOWED_COMMANDS: Set<string> = new Set([
-  'PING', 'INFO', 'DBSIZE',
-  'SLOWLOG', 'COMMANDLOG',
-  'LATENCY',
-  'CLIENT',
-  'ACL',
-  'CONFIG',
-  'CLUSTER',
-  'MEMORY',
-  'COMMAND',
-  'ROLE',
-  'LASTSAVE',
-  'COLLECT_KEY_ANALYTICS',
-  'FT',
-  'HGETFIELD_BUFFER',
-]);
-
-// Subcommands that are explicitly allowed for each command
-const ALLOWED_SUBCOMMANDS: Record<string, Set<string>> = {
-  CONFIG: new Set(['GET']),
-  CLIENT: new Set(['LIST', 'INFO', 'GETNAME']),
-  ACL: new Set(['LOG', 'LIST', 'WHOAMI', 'USERS']),
-  SLOWLOG: new Set(['GET', 'LEN', 'RESET']),
-  COMMANDLOG: new Set(['GET', 'LEN', 'RESET']),
-  LATENCY: new Set(['LATEST', 'HISTORY', 'HISTOGRAM', 'RESET', 'DOCTOR']),
-  CLUSTER: new Set(['INFO', 'SLOTS', 'SLOT-STATS', 'NODES']),
-  MEMORY: new Set(['DOCTOR', 'STATS']),
-  COMMAND: new Set(['COUNT', 'DOCS']),
-  FT: new Set(['_LIST', 'INFO', 'SEARCH']),
-};
+import { extractPattern, ALLOWED_COMMANDS, ALLOWED_SUBCOMMANDS } from '@betterdb/shared';
 
 export class CommandExecutor {
   constructor(private readonly client: Valkey) {}
@@ -55,7 +24,11 @@ export class CommandExecutor {
     return true;
   }
 
-  async execute(cmd: string, args?: string[], binaryArgs?: Record<string, Buffer>): Promise<unknown> {
+  async execute(
+    cmd: string,
+    args?: string[],
+    binaryArgs?: Record<string, Buffer>,
+  ): Promise<unknown> {
     const upperCmd = cmd.toUpperCase();
 
     if (!this.isAllowed(upperCmd, args)) {
@@ -68,9 +41,7 @@ export class CommandExecutor {
     }
 
     if (upperCmd === 'INFO') {
-      return args && args.length > 0
-        ? this.client.info(args.join(' '))
-        : this.client.info();
+      return args && args.length > 0 ? this.client.info(args.join(' ')) : this.client.info();
     }
 
     if (upperCmd === 'DBSIZE') {
@@ -173,18 +144,25 @@ export class CommandExecutor {
 
           stats.count++;
 
-          const mem = (memResult && !memResult[0] && memResult[1] != null) ? memResult[1] as number : null;
+          const mem =
+            memResult && !memResult[0] && memResult[1] != null ? (memResult[1] as number) : null;
           if (mem !== null) {
             stats.totalMemory += mem;
             if (mem > stats.maxMemory) stats.maxMemory = mem;
           }
 
-          const idle = (idleResult && !idleResult[0] && idleResult[1] != null) ? idleResult[1] as number : null;
+          const idle =
+            idleResult && !idleResult[0] && idleResult[1] != null
+              ? (idleResult[1] as number)
+              : null;
           if (idle !== null) {
             stats.totalIdleTime += idle;
           }
 
-          const freq = (freqResult && !freqResult[0] && freqResult[1] != null) ? freqResult[1] as number : null;
+          const freq =
+            freqResult && !freqResult[0] && freqResult[1] != null
+              ? (freqResult[1] as number)
+              : null;
           if (freq !== null) {
             stats.accessFrequencies.push(freq);
           }

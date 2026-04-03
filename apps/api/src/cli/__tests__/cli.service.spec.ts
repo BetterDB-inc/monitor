@@ -111,17 +111,17 @@ describe('CliService', () => {
     );
 
     it('should format array responses with numbered entries', async () => {
-      mockCall.mockResolvedValueOnce(['key1', 'key2', 'key3']);
-      const result = await service.execute('KEYS *');
+      mockCall.mockResolvedValueOnce(['entry1', 'entry2', 'entry3']);
+      const result = await service.execute('SLOWLOG GET');
       const text = (result as { result: string }).result;
       expect(result).toMatchObject({ type: 'result', resultType: 'array' });
-      expect(text).toContain('1) "key1"');
-      expect(text).toContain('3) "key3"');
+      expect(text).toContain('1) "entry1"');
+      expect(text).toContain('3) "entry3"');
     });
 
     it('should format nested array responses', async () => {
       mockCall.mockResolvedValueOnce([['a', 'b'], ['c', 'd']]);
-      const result = await service.execute('XRANGE mystream - +');
+      const result = await service.execute('LATENCY LATEST');
       const text = (result as { result: string }).result;
       expect(result).toMatchObject({ type: 'result', resultType: 'array' });
       expect(text).toContain('"a"');
@@ -130,7 +130,7 @@ describe('CliService', () => {
 
     it('should format Valkey errors', async () => {
       mockCall.mockRejectedValueOnce(new Error('ERR wrong number of arguments'));
-      const result = await service.execute('GET');
+      const result = await service.execute('PING');
       expect(result).toMatchObject({ type: 'result', resultType: 'error' });
       expect((result as { result: string }).result).toContain('ERR wrong number of arguments');
     });
@@ -158,7 +158,7 @@ describe('CliService', () => {
       ['CONFIG', 'requires a sub-command'],
       ['CLIENT', 'requires a sub-command'],
       ['SENTINEL MASTERS', 'not allowed in safe mode'],
-      ['SLOWLOG RESET', 'not allowed in safe mode'],
+      ['CONFIG SET maxmemory 100mb', 'not allowed in safe mode'],
     ])('should reject %s in safe mode', async (command, expectedError) => {
       const result = await service.execute(command);
       expect(result.type).toBe('error');

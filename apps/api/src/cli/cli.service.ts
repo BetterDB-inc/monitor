@@ -1,129 +1,15 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import {
+  ALLOWED_COMMANDS,
+  ALLOWED_SUBCOMMANDS,
+  BLOCKED_COMMANDS,
+  BLOCKED_SUBCOMMANDS,
+} from '@betterdb/shared';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { parseCommandLine } from './command-parser';
 import { CliResultMessage, CliErrorMessage } from './cli.types';
-
-/**
- * Read-only commands allowed in safe mode (BETTERDB_UNSAFE_CLI !== 'true').
- * Mirrors the agent allowlist for consistency.
- */
-const SAFE_COMMANDS = new Set([
-  'PING',
-  'ECHO',
-  'INFO',
-  'DBSIZE',
-  'TIME',
-  'LASTSAVE',
-  'EXISTS',
-  'TYPE',
-  'TTL',
-  'PTTL',
-  'GET',
-  'MGET',
-  'STRLEN',
-  'GETRANGE',
-  'KEYS',
-  'SCAN',
-  'RANDOMKEY',
-  'OBJECT',
-  'HGET',
-  'HMGET',
-  'HGETALL',
-  'HKEYS',
-  'HVALS',
-  'HLEN',
-  'HEXISTS',
-  'HSCAN',
-  'LLEN',
-  'LRANGE',
-  'LINDEX',
-  'LPOS',
-  'SCARD',
-  'SISMEMBER',
-  'SMISMEMBER',
-  'SMEMBERS',
-  'SRANDMEMBER',
-  'SSCAN',
-  'SUNION',
-  'SINTER',
-  'SDIFF',
-  'ZCARD',
-  'ZSCORE',
-  'ZMSCORE',
-  'ZRANGE',
-  'ZRANGEBYSCORE',
-  'ZRANGEBYLEX',
-  'ZREVRANGE',
-  'ZREVRANGEBYSCORE',
-  'ZREVRANGEBYLEX',
-  'ZRANK',
-  'ZREVRANK',
-  'ZCOUNT',
-  'ZLEXCOUNT',
-  'ZSCAN',
-  'XLEN',
-  'XRANGE',
-  'XREVRANGE',
-  'XINFO',
-  'XPENDING',
-  'MEMORY',
-  'CLIENT',
-  'CONFIG',
-  'SLOWLOG',
-  'LATENCY',
-  'COMMAND',
-  'ACL',
-  'CLUSTER',
-]);
-
-/**
- * Sub-commands allowed in safe mode for multi-word commands.
- */
-const SAFE_SUBCOMMANDS: Record<string, Set<string>> = {
-  CLIENT: new Set(['LIST', 'GETNAME', 'ID', 'INFO']),
-  CONFIG: new Set(['GET']),
-  SLOWLOG: new Set(['GET', 'LEN']),
-  LATENCY: new Set(['LATEST', 'HISTORY']),
-  COMMAND: new Set(['COUNT', 'INFO', 'LIST', 'DOCS']),
-  ACL: new Set(['LIST', 'GETUSER', 'WHOAMI', 'CAT']),
-  CLUSTER: new Set(['INFO', 'NODES', 'SLOTS', 'MYID', 'KEYSLOT']),
-  MEMORY: new Set(['USAGE', 'DOCTOR', 'STATS']),
-  OBJECT: new Set(['ENCODING', 'REFCOUNT', 'IDLETIME', 'HELP', 'FREQ']),
-  XINFO: new Set(['STREAM', 'GROUPS', 'CONSUMERS']),
-};
-
-/**
- * Commands that are always blocked regardless of mode.
- * These are blocking, streaming, or dangerous commands.
- */
-const BLOCKED_COMMANDS = new Set([
-  'SUBSCRIBE',
-  'PSUBSCRIBE',
-  'SSUBSCRIBE',
-  'BLPOP',
-  'BRPOP',
-  'BRPOPLPUSH',
-  'BLMOVE',
-  'BLMPOP',
-  'BZPOPMIN',
-  'BZPOPMAX',
-  'BZMPOP',
-  'XREAD',
-  'XREADGROUP',
-  'WAIT',
-  'WAITAOF',
-  'MONITOR',
-  'DEBUG',
-]);
-
-/**
- * Subcommands that are always blocked regardless of mode.
- */
-const BLOCKED_SUBCOMMANDS: Record<string, Set<string>> = {
-  CLIENT: new Set(['PAUSE']),
-};
 
 @Injectable()
 export class CliService implements OnModuleDestroy {
@@ -261,15 +147,14 @@ export class CliService implements OnModuleDestroy {
   }
 
   private checkSafeMode(command: string, subCommand?: string): string | null {
-    if (!SAFE_COMMANDS.has(command)) {
+    if (!ALLOWED_COMMANDS.has(command)) {
       return (
         `Command ${command} is not allowed in safe mode. ` +
         'Set BETTERDB_UNSAFE_CLI=true to enable all commands.'
       );
     }
 
-    // If the command has sub-command restrictions, validate
-    const allowedSubs = SAFE_SUBCOMMANDS[command];
+    const allowedSubs = ALLOWED_SUBCOMMANDS[command];
     if (allowedSubs) {
       if (!subCommand) {
         return `Command ${command} requires a sub-command in safe mode (e.g., ${command} ${[...allowedSubs][0]}).`;
