@@ -256,8 +256,10 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
         {isOpen && (
           <div
             onPointerDown={handleResizeStart}
-            className="h-1 cursor-ns-resize border-t hover:bg-primary/20 active:bg-primary/30"
-          />
+            className="flex h-2 cursor-ns-resize items-center justify-center border-t hover:bg-primary/20 active:bg-primary/30"
+          >
+            <div className="h-0.5 w-8 rounded-full bg-border" />
+          </div>
         )}
         <CollapsibleTrigger asChild>
           <button

@@ -27,6 +27,7 @@
     "react": "^19.2.4",
     "react-day-picker": "^9.14.0",
     "react-dom": "^19.2.4",
+    "react-resizable-panels": "^4.9.0",
     "react-router-dom": "^7.13.2",
     "react-tooltip": "^5.30.0",
     "recharts": "^3.8.0",
@@ -51,11 +52,11 @@
     "globals": "^17.4.0",
     "happy-dom": "^20.8.9",
     "react-grab": "^0.1.28",
+    "shadcn": "^4.1.2",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.2",
     "vite": "^8.0.2",
-    "vitest": "^4.1.1",
-    "shadcn": "^4.1.2"
+    "vitest": "^4.1.1"
   }
 }
