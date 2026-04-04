@@ -20,6 +20,13 @@ async function bootstrap() {
   const port = config.get('PORT', 3001);
   const host = config.get('HOST', '0.0.0.0');
 
+  const corsOrigins = config.get('CORS_ORIGINS', 'https://betterdb.com,http://localhost:3001');
+  app.enableCors({
+    origin: corsOrigins.split(',').map((o: string) => o.trim()),
+    methods: ['POST'],
+    allowedHeaders: ['Content-Type'],
+  });
+
   await app.listen(port, host);
   logger.log(`Entitlement server running on http://${host}:${port}`);
 }

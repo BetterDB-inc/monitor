@@ -189,6 +189,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
             </NavItem>
           )}
         </nav>
+        <CommunityBanner />
         <div className="px-3 pb-4 border-t border-border pt-2 space-y-1">
           <ModeToggle />
           <a
@@ -284,25 +285,26 @@ interface NavItemProps {
 }
 
 function NavItem({ children, active, to, requiredFeature }: NavItemProps) {
-  const { hasFeature, tier } = useLicense();
+  const { hasFeature } = useLicense();
 
   const isLocked = requiredFeature && !hasFeature(requiredFeature);
   const tooltipText = isLocked
-    ? `This feature requires a Pro or Enterprise license. Current tier: ${tier}`
+    ? 'Register free to unlock this feature'
     : undefined;
 
   if (isLocked) {
     return (
-      <div
+      <Link
+        to="/settings"
         data-tooltip-id="license-tooltip"
         data-tooltip-content={tooltipText}
-        className="block w-full rounded-md px-3 py-2 text-sm opacity-50 cursor-not-allowed flex items-center justify-between"
+        className="block w-full rounded-md px-3 py-2 text-sm opacity-50 hover:opacity-75 transition-opacity flex items-center justify-between"
       >
         <span>{children}</span>
-        <span className="text-[10px] px-1.5 py-0.5 bg-yellow-500 text-yellow-950 rounded font-medium">
-          Pro+
+        <span className="text-[10px] px-1.5 py-0.5 bg-green-600 text-white rounded font-medium">
+          Free
         </span>
-      </div>
+      </Link>
     );
   }
 
@@ -316,6 +318,40 @@ function NavItem({ children, active, to, requiredFeature }: NavItemProps) {
     >
       {children}
     </Link>
+  );
+}
+
+function CommunityBanner() {
+  const { tier } = useLicense();
+  const [dismissed, setDismissed] = useState(() =>
+    sessionStorage.getItem('community-banner-dismissed') === 'true',
+  );
+
+  if (tier !== 'community' || dismissed) return null;
+
+  const handleDismiss = () => {
+    setDismissed(true);
+    sessionStorage.setItem('community-banner-dismissed', 'true');
+  };
+
+  return (
+    <div className="mx-3 mb-2 p-2.5 bg-primary/5 border border-primary/20 rounded-lg text-xs">
+      <div className="flex items-start justify-between gap-1">
+        <div>
+          <span className="text-foreground">Running on Community.</span>{' '}
+          <Link to="/settings" className="text-primary hover:underline font-medium">
+            Register free to unlock all Enterprise features.
+          </Link>
+        </div>
+        <button
+          onClick={handleDismiss}
+          className="text-muted-foreground hover:text-foreground flex-shrink-0 mt-0.5"
+          aria-label="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+    </div>
   );
 }
 

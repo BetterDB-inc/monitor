@@ -1,4 +1,4 @@
-import { Controller, Get, Post, HttpCode } from '@nestjs/common';
+import { Controller, Get, Post, Body, HttpCode, BadRequestException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiOkResponse } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { LicenseService } from './license.service';
@@ -59,6 +59,28 @@ export class LicenseController {
       tier: info.tier,
       valid: info.valid,
       refreshedAt: new Date().toISOString(),
+    };
+  }
+
+  @Post('license/activate')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @ApiTags('license')
+  @ApiOperation({ summary: 'Activate a license key' })
+  @HttpCode(200)
+  async activate(@Body() body: { key: string }) {
+    if (!body.key || typeof body.key !== 'string' || body.key.trim().length < 10) {
+      throw new BadRequestException('A valid license key is required');
+    }
+
+    const info = await this.license.activateLicenseKey(body.key.trim());
+    const features = TIER_FEATURES[info.tier];
+    return {
+      tier: info.tier,
+      valid: info.valid,
+      features,
+      expiresAt: info.expiresAt,
+      customer: info.customer,
+      activatedAt: new Date().toISOString(),
     };
   }
 }
