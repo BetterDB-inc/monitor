@@ -341,12 +341,12 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
                     <p className="text-sm text-primary">
                       {userTier === Tier.community && (
                         <>
-                          <strong>Unlock more events:</strong> Upgrade to Pro for advanced monitoring events or Enterprise for compliance and audit events.
+                          <strong>Unlock more events:</strong> Register free to unlock all monitoring, compliance, and audit events.
                         </>
                       )}
                       {userTier === Tier.pro && (
                         <>
-                          <strong>Unlock Enterprise events:</strong> Upgrade to Enterprise for compliance alerts, audit policy violations, and more.
+                          <strong>Unlock Enterprise events:</strong> Register free to unlock compliance alerts, audit policy violations, and more.
                         </>
                       )}
                     </p>

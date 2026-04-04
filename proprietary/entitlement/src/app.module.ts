@@ -12,6 +12,8 @@ import { ProvisioningModule } from './provisioning/provisioning.module';
 import { UserModule } from './user/user.module';
 import { AuthModule } from './auth/auth.module';
 import { InvitationModule } from './invitation/invitation.module';
+import { RegistrationModule } from './registration/registration.module';
+import { EmailModule } from './email/email.module';
 
 @Module({
   imports: [
@@ -33,6 +35,8 @@ import { InvitationModule } from './invitation/invitation.module';
     UserModule,
     AuthModule,
     InvitationModule,
+    EmailModule,
+    RegistrationModule,
   ],
   providers: [
     {
