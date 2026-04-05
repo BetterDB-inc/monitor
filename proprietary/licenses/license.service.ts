@@ -232,7 +232,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     // Persist to disk so it survives restarts
     try {
       mkdirSync(join(process.cwd(), 'data'), { recursive: true });
-      writeFileSync(LICENSE_KEY_FILE, key, 'utf-8');
+      writeFileSync(LICENSE_KEY_FILE, key, { encoding: 'utf-8', mode: 0o600 });
       this.logger.log('License key persisted to disk');
     } catch (error) {
       this.logger.warn(`Failed to persist license key: ${(error as Error).message}`);
@@ -240,7 +240,6 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
 
     // Update in-memory state
     this.licenseKey = key;
-    process.env.BETTERDB_LICENSE_KEY = key;
 
     // Clear cache and re-validate
     return this.refreshLicense();

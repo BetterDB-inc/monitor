@@ -14,38 +14,70 @@ export class RegistrationService {
   ) {}
 
   async register(emailAddress: string): Promise<{ message: string }> {
-    // Check for existing customer
-    const existing = await this.prisma.customer.findUnique({
-      where: { email: emailAddress },
-      include: { licenses: true },
-    });
+    let customer: Awaited<ReturnType<typeof this.admin.createCustomer>>;
+    let isNew = false;
 
-    if (existing) {
-      this.logger.log(`Existing customer re-registered: ${existing.id} (${emailAddress})`);
+    try {
+      // Check for existing customer
+      const existing = await this.prisma.customer.findUnique({
+        where: { email: emailAddress },
+        include: { licenses: true },
+      });
 
-      // Find their active enterprise license
-      const license = existing.licenses.find((l) => l.active && l.tier === 'enterprise');
-      if (license) {
-        // Resend the email with their existing key
-        await this.email.sendRegistrationEmail(emailAddress, license.key);
+      if (existing) {
+        customer = existing;
+      } else {
+        customer = await this.admin.createCustomer({ email: emailAddress });
+        isNew = true;
       }
+    } catch (error: any) {
+      // Handle TOCTOU race: concurrent insert for same email triggers P2002
+      if (error?.code === 'P2002') {
+        const existing = await this.prisma.customer.findUnique({
+          where: { email: emailAddress },
+          include: { licenses: true },
+        });
+        if (!existing) throw error; // Shouldn't happen, but be safe
+        customer = existing;
+      } else {
+        throw error;
+      }
+    }
+
+    if (isNew) {
+      // Create enterprise license — no expiry, unlimited instances
+      const license = await this.admin.createLicense({
+        customerId: customer.id,
+        tier: 'enterprise',
+      });
+
+      this.logger.log(`New registration: ${customer.id} (${emailAddress}) — license ${license.id}`);
+      await this.email.sendRegistrationEmail(emailAddress, license.key);
 
       return { message: 'Check your email for your license key' };
     }
 
-    // Create new customer
-    const customer = await this.admin.createCustomer({ email: emailAddress });
+    // Existing customer re-registering
+    this.logger.log(`Existing customer re-registered: ${customer.id} (${emailAddress})`);
 
-    // Create enterprise license — no expiry, unlimited instances
-    const license = await this.admin.createLicense({
+    const license = (customer as any).licenses?.find(
+      (l: any) => l.active && l.tier === 'enterprise',
+    );
+
+    if (license) {
+      // Resend the email with their existing key
+      await this.email.sendRegistrationEmail(emailAddress, license.key);
+      return { message: 'Check your email for your license key' };
+    }
+
+    // No active enterprise license — create a new one
+    const newLicense = await this.admin.createLicense({
       customerId: customer.id,
       tier: 'enterprise',
     });
 
-    this.logger.log(`New registration: ${customer.id} (${emailAddress}) — license ${license.id}`);
-
-    // Send the registration email
-    await this.email.sendRegistrationEmail(emailAddress, license.key);
+    this.logger.log(`Re-registration created new license: ${customer.id} (${emailAddress}) — license ${newLicense.id}`);
+    await this.email.sendRegistrationEmail(emailAddress, newLicense.key);
 
     return { message: 'Check your email for your license key' };
   }

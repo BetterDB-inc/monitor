@@ -23,7 +23,7 @@ async function bootstrap() {
   const corsOrigins = config.get('CORS_ORIGINS', 'https://betterdb.com,http://localhost:3001');
   app.enableCors({
     origin: corsOrigins.split(',').map((o: string) => o.trim()),
-    methods: ['POST'],
+    methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type'],
   });
 
