@@ -1,10 +1,8 @@
 import { useState } from 'react';
 import { Card } from './ui/card';
-import { PaymentRequiredError } from '../api/client';
 import { registrationApi } from '../api/registration';
 
 interface UpgradePromptProps {
-  error: PaymentRequiredError;
   onDismiss: () => void;
 }
 

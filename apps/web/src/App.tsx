@@ -83,7 +83,6 @@ function AppContent() {
                 <Tooltip id="info-tip" place="top" className="max-w-xs text-sm" style={{ zIndex: 50 }} />
                 {upgradePromptState.error && (
                   <UpgradePrompt
-                    error={upgradePromptState.error}
                     onDismiss={upgradePromptState.dismissUpgradePrompt}
                   />
                 )}
