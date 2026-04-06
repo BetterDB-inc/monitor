@@ -1,4 +1,4 @@
-const REGISTRATION_URL = import.meta.env.VITE_REGISTRATION_URL || 'http://localhost:3001/v1/registrations';
+const REGISTRATION_URL = import.meta.env.VITE_REGISTRATION_URL || 'http://localhost:3002/v1/registrations';
 
 export interface RegistrationResponse {
   message: string;
