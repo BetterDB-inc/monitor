@@ -17,7 +17,7 @@
     "@kubernetes/client-node": "^1.4.0",
     "@nestjs/common": "^11.1.17",
     "@nestjs/config": "^4.0.3",
-    "@nestjs/core": "^11.1.17",
+    "@nestjs/core": "^11.1.18",
     "@nestjs/platform-fastify": "^11.1.17",
     "@nestjs/throttler": "^6.5.0",
     "@prisma/adapter-pg": "^7.5.0",
