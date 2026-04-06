@@ -122,9 +122,17 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       return this.cache.response;
     }
 
+    const validationKey = this.licenseKey;
+
     try {
-      const response = await this.checkOnline();
-      this.cache = { response, cachedAt: Date.now() };
+      const response = await this.checkOnline(validationKey);
+
+      if (this.licenseKey === validationKey) {
+        this.cache = { response, cachedAt: Date.now() };
+      } else {
+        this.logger.debug('Discarding stale entitlement response after license key change');
+      }
+
       this.logger.log(`Entitlement validated: ${response.tier}`);
       return response;
     } catch (error) {
@@ -139,10 +147,10 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async checkOnline(): Promise<EntitlementResponse> {
+  private async checkOnline(licenseKeyOverride?: string | null): Promise<EntitlementResponse> {
     const isCloud = process.env.CLOUD_MODE === 'true';
     const payload: EntitlementRequest = {
-      licenseKey: this.licenseKey || '', // Empty string for keyless instances
+      licenseKey: licenseKeyOverride ?? this.licenseKey ?? '', // Empty string for keyless instances
       instanceId: this.instanceId,
       eventType: 'license_check',
       deploymentMode: isCloud ? 'cloud' : 'self-hosted',
@@ -227,11 +235,31 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Activate a license key at runtime: persist to disk, update in-memory state,
-   * and re-validate against the entitlement server.
+   * Activate a license key at runtime by validating first, then persisting only
+   * after successful validation so an existing valid key is never overwritten by
+   * a bad or unvalidated key.
    */
   async activateLicenseKey(key: string): Promise<EntitlementResponse> {
-    // Persist to disk so it survives restarts
+    let info: EntitlementResponse;
+    try {
+      // Validate against the candidate key without mutating shared state first.
+      info = await this.checkOnline(key);
+    } catch (error) {
+      this.logger.error(`Entitlement validation failed: ${(error as Error).message}`);
+      info = this.getCommunityEntitlement('Validation failed');
+    }
+
+    if (!info.valid) {
+      this.logger.warn(`License activation failed: ${info.error || 'unknown error'}`);
+      return info;
+    }
+
+    // Commit shared state only after candidate validation succeeds.
+    this.licenseKey = key;
+    this.cache = { response: info, cachedAt: Date.now() };
+    this.validationPromise = Promise.resolve(info);
+    this.isValidated = true;
+
     try {
       mkdirSync(join(__dirname, '..', '..', 'data'), { recursive: true });
       writeFileSync(LICENSE_KEY_FILE, key, { encoding: 'utf-8', mode: 0o600 });
@@ -240,11 +268,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Failed to persist license key: ${(error as Error).message}`);
     }
 
-    // Update in-memory state
-    this.licenseKey = key;
-
-    // Clear cache and re-validate
-    return this.refreshLicense();
+    return info;
   }
 
   private getCommunityEntitlement(error?: string): EntitlementResponse {

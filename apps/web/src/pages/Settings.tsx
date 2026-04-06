@@ -187,6 +187,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     try {
       await licenseApi.activate(activateKey.trim());
       setActivateKey('');
+      setShowChangeKey(false);
       // Refresh the license status so the UI updates immediately
       queryClient.invalidateQueries({ queryKey: ['license-status'] });
     } catch (err) {

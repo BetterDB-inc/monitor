@@ -23,6 +23,16 @@ describe('LicenseService', () => {
     json: jest.fn().mockResolvedValue(data),
   });
 
+  const createDeferred = <T>() => {
+    let resolve!: (value: T) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+
   beforeEach(async () => {
     jest.resetModules();
     process.env = { ...originalEnv };
@@ -291,6 +301,105 @@ describe('LicenseService', () => {
 
       const result = await service.validateLicense();
       expect(result.tier).toBe('community');
+    });
+  });
+
+  describe('activateLicenseKey', () => {
+    it('should keep previous key and entitlement when activation validation fails', async () => {
+      const previousEntitlement = {
+        valid: true,
+        tier: 'pro',
+        expiresAt: null,
+      } as any;
+
+      (service as any).licenseKey = 'valid-license-key-12345';
+      (service as any).cache = {
+        response: previousEntitlement,
+        cachedAt: Date.now(),
+      };
+      (service as any).validationPromise = Promise.resolve(previousEntitlement);
+      (service as any).isValidated = true;
+
+      mockFetch.mockRejectedValue(new Error('Network error'));
+
+      const result = await service.activateLicenseKey('new-invalid-key-987654321');
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe('Validation failed');
+      expect((service as any).licenseKey).toBe('valid-license-key-12345');
+      expect(service.getLicenseInfo()).toMatchObject(previousEntitlement);
+      expect(service.getLicenseTier()).toBe('pro');
+    });
+
+    it('should not expose candidate state while activation validation is pending', async () => {
+      const previousEntitlement = {
+        valid: true,
+        tier: 'pro',
+        expiresAt: null,
+      } as any;
+
+      const activationResponse = createDeferred<any>();
+      (service as any).licenseKey = 'valid-license-key-12345';
+      (service as any).cache = {
+        response: previousEntitlement,
+        cachedAt: Date.now(),
+      };
+      (service as any).validationPromise = Promise.resolve(previousEntitlement);
+      (service as any).isValidated = true;
+
+      mockFetch.mockImplementationOnce(() => activationResponse.promise);
+
+      const activationPromise = service.activateLicenseKey('candidate-key-999');
+      await flushPromises();
+
+      expect((service as any).licenseKey).toBe('valid-license-key-12345');
+      expect(service.getLicenseInfo()).toMatchObject(previousEntitlement);
+      expect(service.getLicenseTier()).toBe('pro');
+      expect((service as any).isValidated).toBe(true);
+
+      activationResponse.resolve(createMockResponse({
+        valid: false,
+        tier: 'community',
+        expiresAt: null,
+        error: 'Invalid key',
+      }));
+
+      const result = await activationPromise;
+      expect(result.valid).toBe(false);
+      expect((service as any).licenseKey).toBe('valid-license-key-12345');
+      expect(service.getLicenseTier()).toBe('pro');
+    });
+
+    it('should discard stale in-flight validation result after key changes', async () => {
+      const staleValidationResponse = createDeferred<any>();
+      (service as any).licenseKey = 'old-key-123';
+      (service as any).cache = null;
+
+      mockFetch.mockImplementationOnce(() => staleValidationResponse.promise);
+      const staleValidationPromise = service.validateLicense();
+      await flushPromises();
+
+      mockFetch.mockResolvedValueOnce(createMockResponse({
+        valid: true,
+        tier: 'enterprise',
+        expiresAt: null,
+      }));
+
+      const activationResult = await service.activateLicenseKey('new-key-456');
+      expect(activationResult.valid).toBe(true);
+      expect((service as any).licenseKey).toBe('new-key-456');
+      expect(service.getLicenseTier()).toBe('enterprise');
+
+      staleValidationResponse.resolve(createMockResponse({
+        valid: true,
+        tier: 'pro',
+        expiresAt: null,
+      }));
+      await staleValidationPromise;
+
+      expect((service as any).licenseKey).toBe('new-key-456');
+      expect(service.getLicenseTier()).toBe('enterprise');
+      expect(service.getLicenseInfo()).toMatchObject({ tier: 'enterprise' });
     });
   });
 

@@ -1,4 +1,12 @@
-import { Controller, Get, Post, Body, HttpCode, BadRequestException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  HttpCode,
+  BadRequestException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiOkResponse } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { LicenseService } from './license.service';
@@ -74,12 +82,31 @@ export class LicenseController {
 
     const info = await this.license.activateLicenseKey(body.key.trim());
     const features = TIER_FEATURES[info.tier];
+
+    if (!info.valid) {
+      const error = info.error || 'License activation failed';
+      const response = {
+        tier: info.tier,
+        valid: info.valid,
+        features,
+        expiresAt: info.expiresAt,
+        customer: info.customer,
+        error,
+      };
+
+      if (error === 'Validation failed') {
+        throw new ServiceUnavailableException(response);
+      }
+      throw new BadRequestException(response);
+    }
+
     return {
       tier: info.tier,
       valid: info.valid,
       features,
       expiresAt: info.expiresAt,
       customer: info.customer,
+      error: info.error,
       activatedAt: new Date().toISOString(),
     };
   }
