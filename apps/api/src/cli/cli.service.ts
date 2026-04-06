@@ -22,7 +22,7 @@ export class CliService implements OnModuleDestroy {
     private readonly connectionRegistry: ConnectionRegistry,
     private readonly configService: ConfigService,
   ) {
-    this.unsafeMode = this.configService.get<boolean>('BETTERDB_UNSAFE_CLI') === true;
+    this.unsafeMode = this.configService.get<string>('BETTERDB_UNSAFE_CLI') === 'true';
     if (this.unsafeMode) {
       this.logger.warn('CLI running in UNSAFE mode — all commands are allowed');
     }
