@@ -225,7 +225,7 @@ describe('CliService (unsafe mode)', () => {
         {
           provide: ConfigService,
           useValue: {
-            get: jest.fn().mockReturnValue(true),
+            get: jest.fn().mockReturnValue('true'),
           },
         },
       ],
