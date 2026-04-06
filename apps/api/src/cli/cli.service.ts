@@ -1,20 +1,14 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  ALLOWED_COMMANDS,
-  ALLOWED_SUBCOMMANDS,
-  BLOCKED_COMMANDS,
-  BLOCKED_SUBCOMMANDS,
-} from '@betterdb/shared';
+import { checkBlocked, checkSafeMode } from '@betterdb/shared';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
-import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { parseCommandLine } from './command-parser';
 import { CliResultMessage, CliErrorMessage } from './cli.types';
+import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 
 @Injectable()
-export class CliService implements OnModuleDestroy {
+export class CliService {
   private readonly logger = new Logger(CliService.name);
-  private readonly clients = new Map<string, DatabasePort>();
   private readonly unsafeMode: boolean;
   private static readonly MAX_RESPONSE_SIZE = 512 * 1024; // 512 KB
 
@@ -26,21 +20,6 @@ export class CliService implements OnModuleDestroy {
     if (this.unsafeMode) {
       this.logger.warn('CLI running in UNSAFE mode — all commands are allowed');
     }
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    const promises = [...this.clients.entries()].map(([id, client]) =>
-      client
-        .disconnect()
-        .then(() => this.logger.log(`CLI client disconnected: ${id}`))
-        .catch((err: unknown) =>
-          this.logger.error(
-            `Error disconnecting CLI client ${id}: ${err instanceof Error ? err.message : err}`,
-          ),
-        ),
-    );
-    await Promise.allSettled(promises);
-    this.clients.clear();
   }
 
   async execute(
@@ -56,24 +35,24 @@ export class CliService implements OnModuleDestroy {
     const restArgs = args.slice(1);
     const subCommand = restArgs.length > 0 ? restArgs[0].toUpperCase() : undefined;
 
-    // Check blocked commands
-    const blockError = this.checkBlocked(command, subCommand);
+    const blockError = checkBlocked(command, subCommand);
     if (blockError) {
       return { type: 'error', error: blockError };
     }
 
-    // Check safe mode restrictions
     if (!this.unsafeMode) {
-      const safeError = this.checkSafeMode(command, subCommand);
+      const safeError = checkSafeMode(command, subCommand);
       if (safeError) {
-        return { type: 'error', error: safeError };
+        return {
+          type: 'error',
+          error: safeError + ' Set BETTERDB_UNSAFE_CLI=true to enable all commands.',
+        };
       }
     }
 
-    let client;
+    let adapter: DatabasePort;
     try {
-      const adapter = await this.getOrCreateClient(connectionId);
-      client = adapter.getClient();
+      adapter = this.connectionRegistry.get(connectionId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return { type: 'error', error: msg };
@@ -83,7 +62,7 @@ export class CliService implements OnModuleDestroy {
     const start = performance.now();
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     try {
-      const resultPromise = client.call(command, ...restArgs);
+      const resultPromise = adapter.call(command, restArgs, { cli: true });
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutHandle = setTimeout(
           () => reject(new Error('Command timed out after 30s')),
@@ -111,64 +90,6 @@ export class CliService implements OnModuleDestroy {
     } finally {
       clearTimeout(timeoutHandle);
     }
-  }
-
-  private async getOrCreateClient(connectionId?: string): Promise<DatabasePort> {
-    const config = this.connectionRegistry.getConfig(connectionId);
-    if (!config) {
-      throw new Error(
-        connectionId ? `Connection '${connectionId}' not found` : 'No default connection available',
-      );
-    }
-
-    const existing = this.clients.get(config.id);
-    if (existing && existing.isConnected()) {
-      return existing;
-    }
-
-    if (existing) {
-      existing.disconnect().catch(() => {});
-      this.clients.delete(config.id);
-    }
-
-    const adapter = this.connectionRegistry.createAdapter(config, 'BetterDB-CLI');
-    await adapter.connect();
-    this.clients.set(config.id, adapter);
-    return adapter;
-  }
-
-  private checkBlocked(command: string, subCommand?: string): string | null {
-    if (BLOCKED_COMMANDS.has(command)) {
-      return `Command ${command} is blocked. It may block the connection or is dangerous.`;
-    }
-    if (subCommand && BLOCKED_SUBCOMMANDS[command]?.has(subCommand)) {
-      return `Command ${command} ${subCommand} is blocked.`;
-    }
-    return null;
-  }
-
-  private checkSafeMode(command: string, subCommand?: string): string | null {
-    if (!ALLOWED_COMMANDS.has(command)) {
-      return (
-        `Command ${command} is not allowed in safe mode. ` +
-        'Set BETTERDB_UNSAFE_CLI=true to enable all commands.'
-      );
-    }
-
-    const allowedSubs = ALLOWED_SUBCOMMANDS[command];
-    if (allowedSubs) {
-      if (!subCommand) {
-        return `Command ${command} requires a sub-command in safe mode (e.g., ${command} ${[...allowedSubs][0]}).`;
-      }
-      if (!allowedSubs.has(subCommand)) {
-        return (
-          `Command ${command} ${subCommand} is not allowed in safe mode. ` +
-          'Set BETTERDB_UNSAFE_CLI=true to enable all commands.'
-        );
-      }
-    }
-
-    return null;
   }
 
   private formatResult(value: unknown, durationMs: number): CliResultMessage {

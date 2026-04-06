@@ -1,26 +1,29 @@
 import Valkey from 'iovalkey';
 import type { KeyAnalyticsOptions, KeyPatternData } from '@betterdb/shared';
-import { extractPattern, ALLOWED_COMMANDS, ALLOWED_SUBCOMMANDS } from '@betterdb/shared';
+import { extractPattern, checkBlocked, checkSafeMode } from '@betterdb/shared';
 
 export class CommandExecutor {
-  constructor(private readonly client: Valkey) {}
+  private readonly unsafeMode: boolean;
+
+  constructor(
+    private readonly client: Valkey,
+    options?: { unsafeMode?: boolean },
+  ) {
+    this.unsafeMode = options?.unsafeMode ?? false;
+  }
 
   isAllowed(cmd: string, args?: string[]): boolean {
     const upperCmd = cmd.toUpperCase();
-    if (!ALLOWED_COMMANDS.has(upperCmd)) {
+    const subCommand = args?.[0]?.toUpperCase();
+
+    if (checkBlocked(upperCmd, subCommand)) {
       return false;
     }
 
-    const allowedSubs = ALLOWED_SUBCOMMANDS[upperCmd];
-    if (allowedSubs) {
-      if (!args || args.length === 0) {
-        return false;
-      }
-      const subCmd = args[0].toUpperCase();
-      return allowedSubs.has(subCmd);
+    if (!this.unsafeMode && checkSafeMode(upperCmd, subCommand)) {
+      return false;
     }
 
-    // Commands without subcommand restrictions
     return true;
   }
 

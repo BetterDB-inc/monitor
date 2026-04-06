@@ -742,6 +742,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
   }
 
+  async call(command: string, args: string[], _options?: { cli?: boolean }): Promise<unknown> {
+    return this.client.call(command, ...args);
+  }
+
   getClient(): Valkey {
     return this.client;
   }

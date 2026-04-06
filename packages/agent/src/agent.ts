@@ -12,11 +12,14 @@ export interface AgentConfig {
   valkeyPassword: string;
   valkeyTls: boolean;
   valkeyDb: number;
+  unsafeMode: boolean;
 }
 
 export class Agent {
-  private client: Valkey;
-  private executor: CommandExecutor;
+  private readonly client: Valkey;
+  private readonly executor: CommandExecutor;
+  private cliClient: Valkey | null = null;
+  private cliExecutor: CommandExecutor | null = null;
   private wsClient: WsClient;
   private valkeyConnected = false;
   private valkeyType: 'valkey' | 'redis' = 'valkey';
@@ -24,20 +27,28 @@ export class Agent {
   private isCluster = false;
   private capabilities: string[] = [];
 
-  constructor(private readonly config: AgentConfig) {
-    this.client = new Valkey({
-      host: config.valkeyHost,
-      port: config.valkeyPort,
-      username: config.valkeyUsername,
-      password: config.valkeyPassword,
-      tls: config.valkeyTls ? {} : undefined,
-      db: config.valkeyDb,
+  private createValkeyClient(connectionName: string): Valkey {
+    return new Valkey({
+      host: this.config.valkeyHost,
+      port: this.config.valkeyPort,
+      username: this.config.valkeyUsername,
+      password: this.config.valkeyPassword,
+      tls: this.config.valkeyTls ? {} : undefined,
+      db: this.config.valkeyDb,
       lazyConnect: true,
-      connectionName: 'BetterDB-Agent',
+      connectionName,
       retryStrategy: (times: number) => Math.min(times * 1000, 30000),
     });
+  }
 
-    this.executor = new CommandExecutor(this.client);
+  constructor(private readonly config: AgentConfig) {
+    this.client = this.createValkeyClient('BetterDB-Agent');
+
+    this.executor = new CommandExecutor(this.client, { unsafeMode: config.unsafeMode });
+
+    if (config.unsafeMode) {
+      console.warn('[Agent] WARNING: Unsafe mode enabled. All commands are permitted.');
+    }
 
     this.client.on('connect', () => {
       this.valkeyConnected = true;
@@ -78,6 +89,9 @@ export class Agent {
   async stop(): Promise<void> {
     console.log('[Agent] Shutting down...');
     this.wsClient.close();
+    if (this.cliClient) {
+      await this.cliClient.quit().catch(() => {});
+    }
     if (this.valkeyConnected) {
       await this.client.quit().catch(() => {});
     }
@@ -85,7 +99,7 @@ export class Agent {
   }
 
   private async detectCapabilities(): Promise<void> {
-    const infoStr = await this.client.info('server') as string;
+    const infoStr = (await this.client.info('server')) as string;
     const isValkey = infoStr.includes('valkey_version:');
     this.valkeyType = isValkey ? 'valkey' : 'redis';
 
@@ -96,15 +110,28 @@ export class Agent {
 
     // Check cluster
     try {
-      const clusterInfo = await this.client.call('CLUSTER', 'INFO') as string;
+      const clusterInfo = (await this.client.call('CLUSTER', 'INFO')) as string;
       this.isCluster = clusterInfo.includes('cluster_enabled:1');
     } catch {
       this.isCluster = false;
     }
 
     // Build capabilities list
-    this.capabilities = ['PING', 'INFO', 'DBSIZE', 'SLOWLOG', 'CLIENT', 'ACL',
-      'CONFIG', 'MEMORY', 'LATENCY', 'ROLE', 'LASTSAVE', 'COMMAND', 'KEY_ANALYTICS'];
+    this.capabilities = [
+      'PING',
+      'INFO',
+      'DBSIZE',
+      'SLOWLOG',
+      'CLIENT',
+      'ACL',
+      'CONFIG',
+      'MEMORY',
+      'LATENCY',
+      'ROLE',
+      'LASTSAVE',
+      'COMMAND',
+      'KEY_ANALYTICS',
+    ];
 
     if (isValkey) {
       const major = parseInt(this.valkeyVersion.split('.')[0] || '0', 10);
@@ -162,13 +189,28 @@ export class Agent {
     }
   }
 
+  private async getCliExecutor(): Promise<CommandExecutor> {
+    if (this.cliExecutor && this.cliClient) {
+      return this.cliExecutor;
+    }
+
+    this.cliClient = this.createValkeyClient('BetterDB-Agent-CLI');
+
+    await this.cliClient.connect();
+    this.cliExecutor = new CommandExecutor(this.cliClient, { unsafeMode: this.config.unsafeMode });
+    console.log('[Agent] CLI client connected');
+    return this.cliExecutor;
+  }
+
   private async handleCommand(msg: AgentCommandMessage): Promise<void> {
     if (!this.valkeyConnected) {
-      this.wsClient.send(JSON.stringify({
-        id: msg.id,
-        type: 'error',
-        error: 'Valkey connection unavailable',
-      }));
+      this.wsClient.send(
+        JSON.stringify({
+          id: msg.id,
+          type: 'error',
+          error: 'Valkey connection unavailable',
+        }),
+      );
       return;
     }
 
@@ -182,29 +224,36 @@ export class Agent {
         }
       }
 
-      const result = await this.executor.execute(msg.cmd, msg.args, binaryArgs);
+      const executor = msg.cli ? await this.getCliExecutor() : this.executor;
+      const result = await executor.execute(msg.cmd, msg.args, binaryArgs);
 
       // If result is a Buffer, encode as base64 and flag as binary
       if (Buffer.isBuffer(result)) {
-        this.wsClient.send(JSON.stringify({
-          id: msg.id,
-          type: 'response',
-          data: result.toString('base64'),
-          binary: true,
-        }));
+        this.wsClient.send(
+          JSON.stringify({
+            id: msg.id,
+            type: 'response',
+            data: result.toString('base64'),
+            binary: true,
+          }),
+        );
       } else {
-        this.wsClient.send(JSON.stringify({
-          id: msg.id,
-          type: 'response',
-          data: result,
-        }));
+        this.wsClient.send(
+          JSON.stringify({
+            id: msg.id,
+            type: 'response',
+            data: result,
+          }),
+        );
       }
     } catch (err: any) {
-      this.wsClient.send(JSON.stringify({
-        id: msg.id,
-        type: 'error',
-        error: err.message || 'Command execution failed',
-      }));
+      this.wsClient.send(
+        JSON.stringify({
+          id: msg.id,
+          type: 'error',
+          error: err.message || 'Command execution failed',
+        }),
+      );
     }
   }
 }

@@ -40,6 +40,7 @@ npx @betterdb/agent \
 | `VALKEY_USERNAME` / `--valkey-username` | `default` | ACL username |
 | `VALKEY_TLS` / `--valkey-tls` | `false` | Enable TLS (required for ElastiCache Serverless) |
 | `VALKEY_DB` / `--valkey-db` | `0` | Database number |
+| `BETTERDB_UNSAFE_CLI` / `--unsafe-cli` | `false` | Allow all commands (not just the read-only allowlist). Do not enable on publicly accessible instances. |
 
 ## Managed Services
 

@@ -83,5 +83,6 @@ export interface DatabasePort {
   getTagValues(indexName: string, fieldName: string): Promise<string[]>;
   getSearchConfig(pattern?: string): Promise<Record<string, string>>;
   profileSearch(indexName: string, query: string, limited?: boolean): Promise<ProfileResult>;
+  call(command: string, args: string[], options?: { cli?: boolean }): Promise<unknown>;
   getClient(): Valkey;
 }

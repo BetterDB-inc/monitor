@@ -54,3 +54,39 @@ export const BLOCKED_COMMANDS: ReadonlySet<string> = new Set([
 export const BLOCKED_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
   CLIENT: new Set(['PAUSE']),
 };
+
+/**
+ * Check if a command is always blocked (regardless of mode).
+ * Returns an error message string, or null if not blocked.
+ */
+export function checkBlocked(command: string, subCommand?: string): string | null {
+  if (BLOCKED_COMMANDS.has(command)) {
+    return `Command ${command} is blocked. It may block the connection or is dangerous.`;
+  }
+  if (subCommand && BLOCKED_SUBCOMMANDS[command]?.has(subCommand)) {
+    return `Command ${command} ${subCommand} is blocked.`;
+  }
+  return null;
+}
+
+/**
+ * Check if a command is allowed in safe (read-only) mode.
+ * Returns an error message string, or null if allowed.
+ */
+export function checkSafeMode(command: string, subCommand?: string): string | null {
+  if (!ALLOWED_COMMANDS.has(command)) {
+    return `Command ${command} is not allowed in safe mode.`;
+  }
+
+  const allowedSubs = ALLOWED_SUBCOMMANDS[command];
+  if (allowedSubs) {
+    if (!subCommand) {
+      return `Command ${command} requires a sub-command in safe mode (e.g., ${command} ${[...allowedSubs][0]}).`;
+    }
+    if (!allowedSubs.has(subCommand)) {
+      return `Command ${command} ${subCommand} is not allowed in safe mode.`;
+    }
+  }
+
+  return null;
+}
