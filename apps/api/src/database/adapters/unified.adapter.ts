@@ -39,6 +39,7 @@ export interface UnifiedDatabaseAdapterConfig {
   port: number;
   username: string;
   password: string;
+  connectionName?: string;
 }
 
 export class UnifiedDatabaseAdapter implements DatabasePort {
@@ -55,7 +56,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       password: config.password,
       lazyConnect: true,
       enableOfflineQueue: false,
-      connectionName: 'BetterDB-Monitor',
+      connectionName: config.connectionName ?? 'BetterDB-Monitor',
     });
 
     this.client.on('connect', () => {

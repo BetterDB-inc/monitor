@@ -1,17 +1,27 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
+import { IncomingMessage } from 'http';
+import { Socket } from 'net';
 import { join } from 'path';
 import { readFileSync } from 'fs';
 import fastifyStatic from '@fastify/static';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
 import { categorizeError } from './common/utils/error-categorizer';
+import { CliGateway } from './cli/cli.gateway';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
   validateEnv();
+
+  if (process.env.BETTERDB_UNSAFE_CLI === 'true') {
+    new Logger('CLI').warn(
+      'Unsafe CLI mode enabled. All Valkey commands are permitted via the CLI. ' +
+        'Do not expose this instance publicly.',
+    );
+  }
 
   const isProduction = process.env.NODE_ENV === 'production';
 
@@ -19,7 +29,7 @@ async function bootstrap(): Promise<void> {
 
   // Compute publicPath once to avoid divergence between SPA fallback and static file serving
   const publicPath = isProduction
-    ? (process.env.BETTERDB_STATIC_DIR || join(__dirname, '..', '..', '..', '..', 'public'))
+    ? process.env.BETTERDB_STATIC_DIR || join(__dirname, '..', '..', '..', '..', 'public')
     : null;
 
   // In production, register SPA fallback at Fastify level BEFORE NestJS routes
@@ -27,7 +37,8 @@ async function bootstrap(): Promise<void> {
   if (isProduction && publicPath) {
     const indexPath = join(publicPath, 'index.html');
     const indexHtml = readFileSync(indexPath, 'utf-8');
-    const STATIC_EXTENSIONS = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|json|xml|txt)$/i;
+    const STATIC_EXTENSIONS =
+      /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|json|xml|txt)$/i;
 
     const fastifyInstance = fastifyAdapter.getInstance();
 
@@ -59,21 +70,23 @@ async function bootstrap(): Promise<void> {
 
         // Serve index.html for SPA client-side routes
         reply.type('text/html').send(indexHtml);
-      }
+      },
     });
   }
 
   // Type assertion required due to NestJS/Fastify adapter version mismatch during transition
-  const app = await (NestFactory.create as Function)(
+  const app = (await (NestFactory.create as Function)(
     AppModule,
     fastifyAdapter,
-  ) as NestFastifyApplication;
+  )) as NestFastifyApplication;
 
   // Register cloud auth middleware at Fastify level BEFORE any other middleware
   // This ensures it runs before static file serving
   if (process.env.CLOUD_MODE) {
     try {
-      const { CloudAuthMiddleware } = require('../../../proprietary/cloud-auth/cloud-auth.middleware');
+      const {
+        CloudAuthMiddleware,
+      } = require('../../../proprietary/cloud-auth/cloud-auth.middleware');
       const middleware = new CloudAuthMiddleware();
       app.use((req: any, res: any, next: () => void) => middleware.use(req, res, next));
       console.log('[CloudAuth] Middleware registered at Fastify level');
@@ -114,11 +127,13 @@ async function bootstrap(): Promise<void> {
   });
 
   // Enable validation pipes globally
-  app.useGlobalPipes(new ValidationPipe({
-    whitelist: true,
-    forbidNonWhitelisted: true,
-    transform: true,
-  }));
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
 
   if (isProduction && publicPath) {
     // Set global prefix for API routes
@@ -165,27 +180,42 @@ async function bootstrap(): Promise<void> {
   const document = SwaggerModule.createDocument(app as unknown as INestApplication, config);
   SwaggerModule.setup('docs', app as unknown as INestApplication, document);
 
-  // Register WebSocket upgrade handler for agent connections (cloud mode only)
-  if (process.env.CLOUD_MODE) {
-    try {
-      const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
-      const agentGateway = app.get(AgentGateway);
-      const httpServer = app.getHttpServer();
+  // Register unified WebSocket upgrade handler for CLI and agent connections
+  {
+    const cliGateway = app.get(CliGateway);
+    const httpServer = app.getHttpServer();
 
-      httpServer.on('upgrade', (request: any, socket: any, head: any) => {
-        const url = new URL(request.url || '', `http://${request.headers.host}`);
-        if (url.pathname === '/agent/ws' || url.pathname === '/api/agent/ws') {
-          agentGateway.handleUpgrade(request, socket, head);
-        } else {
-          // Not an agent WebSocket — destroy to prevent hanging
-          socket.destroy();
-        }
-      });
+    const agentGateway = process.env.CLOUD_MODE
+      ? (() => {
+          try {
+            const { AgentGateway } = require('../../../proprietary/agent/agent-gateway');
+            const gw = app.get(AgentGateway);
+            console.log('[Agent] WebSocket gateway resolved');
+            return gw as {
+              handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void;
+            };
+          } catch {
+            console.warn('[Agent] Failed to resolve WebSocket gateway — module not available');
+            return null;
+          }
+        })()
+      : null;
 
-      console.log('[Agent] WebSocket upgrade handler registered');
-    } catch {
-      console.warn('[Agent] Failed to register WebSocket handler — module not available');
-    }
+    httpServer.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
+      const url = new URL(request.url || '', `http://${request.headers.host}`);
+      if (url.pathname === '/cli/ws' || url.pathname === '/api/cli/ws') {
+        cliGateway.handleUpgrade(request, socket, head);
+      } else if (
+        agentGateway &&
+        (url.pathname === '/agent/ws' || url.pathname === '/api/agent/ws')
+      ) {
+        agentGateway.handleUpgrade(request, socket, head);
+      } else {
+        socket.destroy();
+      }
+    });
+
+    new Logger('CLI').log('WebSocket upgrade handler registered');
   }
 
   const port = process.env.PORT || 3001;
@@ -204,11 +234,17 @@ async function bootstrap(): Promise<void> {
       const connectionErrors = registry.getStartupConnectionErrors();
       for (const connErr of connectionErrors) {
         const category = categorizeError(new Error(connErr.error));
-        console.error(`[Startup Error] ${category}: ${connErr.name} (${connErr.host}:${connErr.port}) — ${connErr.error}`);
-        licenseService.sendStartupError(
-          `${connErr.name} (${connErr.host}:${connErr.port}): ${connErr.error}`,
-          category,
-        ).catch(() => { /* best-effort */ });
+        console.error(
+          `[Startup Error] ${category}: ${connErr.name} (${connErr.host}:${connErr.port}) — ${connErr.error}`,
+        );
+        licenseService
+          .sendStartupError(
+            `${connErr.name} (${connErr.host}:${connErr.port}): ${connErr.error}`,
+            category,
+          )
+          .catch(() => {
+            /* best-effort */
+          });
       }
     } catch {
       // ConnectionRegistry not available — skip

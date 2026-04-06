@@ -1,6 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { Tooltip } from 'react-tooltip';
+import { Terminal } from 'lucide-react';
+import { TooltipProvider } from '@/components/ui/tooltip';
+import {
+  Tooltip as ShadcnTooltip,
+  TooltipTrigger,
+  TooltipContent,
+} from '@/components/ui/tooltip';
 import { metricsApi } from './api/metrics';
 import { CapabilitiesContext, CapabilitiesState, useCapabilities } from './hooks/useCapabilities';
 import { LicenseContext, useLicenseStatus, useLicense } from './hooks/useLicense';
@@ -9,12 +16,14 @@ import { ConnectionContext, useConnectionState } from './hooks/useConnection';
 import { VersionCheckContext, useVersionCheckState } from './hooks/useVersionCheck';
 import { useIdleTracker } from './hooks/useIdleTracker';
 import { useNavigationTracker } from './hooks/useNavigationTracker';
+import { useCliPanel } from './hooks/useCliPanel';
 import { UpgradePrompt } from './components/UpgradePrompt';
 import { UpdateBanner } from './components/UpdateBanner';
 import { ConnectionSelector } from './components/ConnectionSelector';
 import { ModeToggle } from './components/ModeToggle';
 import { NoConnectionsGuard } from './components/NoConnectionsGuard';
 import { ServerStartupGuard } from './components/ServerStartupGuard';
+import { CliPanel } from './components/CliPanel';
 import { Dashboard } from './pages/Dashboard';
 import { SlowLog } from './pages/SlowLog';
 import { Latency } from './pages/Latency';
@@ -34,6 +43,7 @@ import { MetricForecasting } from './pages/MetricForecasting';
 import { Members } from './pages/Members';
 import { workspaceApi, CloudUser } from './api/workspace';
 import { Feature } from '@betterdb/shared';
+import { cn } from '@/lib/utils';
 
 function App() {
   return (
@@ -73,25 +83,27 @@ function AppContent() {
 
   return (
     <BrowserRouter>
-      <ConnectionContext.Provider value={connectionState}>
-        <UpgradePromptContext.Provider value={upgradePromptState}>
-          <LicenseContext.Provider value={license}>
-            <CapabilitiesContext.Provider value={capabilitiesState}>
-              <VersionCheckContext.Provider value={versionCheckState}>
-                <AppLayout cloudUser={cloudUser} />
-                <Tooltip id="license-tooltip" />
-                <Tooltip id="info-tip" place="top" className="max-w-xs text-sm" style={{ zIndex: 50 }} />
-                {upgradePromptState.error && (
-                  <UpgradePrompt
-                    error={upgradePromptState.error}
-                    onDismiss={upgradePromptState.dismissUpgradePrompt}
-                  />
-                )}
-              </VersionCheckContext.Provider>
-            </CapabilitiesContext.Provider>
-          </LicenseContext.Provider>
-        </UpgradePromptContext.Provider>
-      </ConnectionContext.Provider>
+      <TooltipProvider>
+        <ConnectionContext.Provider value={connectionState}>
+          <UpgradePromptContext.Provider value={upgradePromptState}>
+            <LicenseContext.Provider value={license}>
+              <CapabilitiesContext.Provider value={capabilitiesState}>
+                <VersionCheckContext.Provider value={versionCheckState}>
+                  <AppLayout cloudUser={cloudUser} />
+                  <Tooltip id="license-tooltip" />
+                  <Tooltip id="info-tip" place="top" className="max-w-xs text-sm" style={{ zIndex: 50 }} />
+                  {upgradePromptState.error && (
+                    <UpgradePrompt
+                      error={upgradePromptState.error}
+                      onDismiss={upgradePromptState.dismissUpgradePrompt}
+                    />
+                  )}
+                </VersionCheckContext.Provider>
+              </CapabilitiesContext.Provider>
+            </LicenseContext.Provider>
+          </UpgradePromptContext.Provider>
+        </ConnectionContext.Provider>
+      </TooltipProvider>
     </BrowserRouter>
   );
 }
@@ -100,6 +112,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
   const location = useLocation();
   const { hasVectorSearch } = useCapabilities();
   const [showFeedback, setShowFeedback] = useState(false);
+  const cliPanel = useCliPanel();
   useIdleTracker();
   useNavigationTracker();
 
@@ -197,6 +210,25 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
               Team
             </NavItem>
           )}
+          <ShadcnTooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={cliPanel.toggle}
+                className={cn(
+                  'block w-full rounded-md px-3 py-2 text-sm transition-colors',
+                  cliPanel.isOpen
+                    ? 'bg-primary text-primary-foreground'
+                    : 'hover:bg-muted',
+                )}
+              >
+                <span className="flex items-center gap-2">
+                  <Terminal className="h-4 w-4" />
+                  CLI
+                </span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">Toggle CLI (Ctrl+`)</TooltipContent>
+          </ShadcnTooltip>
           <NavItem to="/settings" active={location.pathname === '/settings'}>
             Settings
           </NavItem>
@@ -233,6 +265,7 @@ function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
           </Routes>
         </div>
       </main>
+      <CliPanel isOpen={cliPanel.isOpen} onToggle={cliPanel.toggle} onClose={cliPanel.close} />
       <style>{`
         @media print {
           aside, .print\\:hidden, nav { display: none !important; }
