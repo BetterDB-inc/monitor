@@ -5,6 +5,7 @@ export interface AgentCommandMessage {
   cmd: string;
   args?: string[];
   binaryArgs?: Record<string, string>; // placeholder → base64-encoded binary
+  cli?: boolean; // true when command originates from the in-browser CLI
 }
 
 // Agent → Cloud

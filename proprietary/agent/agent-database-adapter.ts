@@ -1,6 +1,9 @@
 import { WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
-import { DatabasePort, DatabaseCapabilities } from '../../apps/api/src/common/interfaces/database-port.interface';
+import {
+  DatabasePort,
+  DatabaseCapabilities,
+} from '../../apps/api/src/common/interfaces/database-port.interface';
 import { InfoParser } from '../../apps/api/src/database/parsers/info.parser';
 import { MetricsParser } from '../../apps/api/src/database/parsers/metrics.parser';
 import { CLUSTER_TOTAL_SLOTS } from '../../apps/api/src/common/constants/cluster.constants';
@@ -27,9 +30,14 @@ import type {
   ProfileResult,
 } from '../../apps/api/src/common/types/metrics.types';
 import {
-  parseVectorIndexInfo, parseVectorSearchResponse, parseTextSearchResponse,
-  parseSearchConfig, parseProfileResponse,
-  sanitizeFilter, INDEX_NAME_RE, FIELD_NAME_RE,
+  parseVectorIndexInfo,
+  parseVectorSearchResponse,
+  parseTextSearchResponse,
+  parseSearchConfig,
+  parseProfileResponse,
+  sanitizeFilter,
+  INDEX_NAME_RE,
+  FIELD_NAME_RE,
 } from '../../apps/api/src/database/parsers/vector-index.parser';
 import type { AgentHelloMessage, KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 
@@ -87,11 +95,16 @@ export class AgentDatabaseAdapter implements DatabasePort {
     this._connected = true;
   }
 
-  private sendCommand(cmd: string, args?: string[]): Promise<unknown> {
-    return this.sendCommandWithBinary(cmd, args);
+  private sendCommand(cmd: string, args?: string[], options?: { cli?: boolean }): Promise<unknown> {
+    return this.sendCommandWithBinary(cmd, args, undefined, options);
   }
 
-  private sendCommandWithBinary(cmd: string, args?: string[], binaryArgs?: Record<string, string>): Promise<unknown> {
+  private sendCommandWithBinary(
+    cmd: string,
+    args?: string[],
+    binaryArgs?: Record<string, string>,
+    options?: { cli?: boolean },
+  ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this._connected || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('Agent connection is closed'));
@@ -109,6 +122,9 @@ export class AgentDatabaseAdapter implements DatabasePort {
       if (binaryArgs) {
         payload.binaryArgs = binaryArgs;
       }
+      if (options?.cli) {
+        payload.cli = true;
+      }
       this.ws.send(JSON.stringify(payload));
     });
   }
@@ -122,7 +138,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
   async disconnect(): Promise<void> {
     this._connected = false;
     // Clean up pending requests
-    for (const [id, pending] of this.pendingRequests) {
+    for (const [_id, pending] of this.pendingRequests) {
       clearTimeout(pending.timer);
       pending.reject(new Error('Agent disconnected'));
     }
@@ -167,18 +183,18 @@ export class AgentDatabaseAdapter implements DatabasePort {
     startTime?: number,
     endTime?: number,
   ): Promise<SlowLogEntry[]> {
-    const fetchCount = (excludeClientName || startTime || endTime) ? count * 5 : count;
+    const fetchCount = excludeClientName || startTime || endTime ? count * 5 : count;
     const raw = await this.sendCommand('SLOWLOG', ['GET', String(fetchCount)]);
     let entries = MetricsParser.parseSlowLog(raw as unknown[]);
 
     if (excludeClientName) {
-      entries = entries.filter(e => e.clientName !== excludeClientName);
+      entries = entries.filter((e) => e.clientName !== excludeClientName);
     }
     if (startTime) {
-      entries = entries.filter(e => e.timestamp >= startTime);
+      entries = entries.filter((e) => e.timestamp >= startTime);
     }
     if (endTime) {
-      entries = entries.filter(e => e.timestamp <= endTime);
+      entries = entries.filter((e) => e.timestamp <= endTime);
     }
 
     return entries.slice(0, count);
@@ -247,9 +263,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
   }
 
   async getLatencyHistogram(commands?: string[]): Promise<Record<string, LatencyHistogram>> {
-    const args = commands && commands.length > 0
-      ? ['HISTOGRAM', ...commands]
-      : ['HISTOGRAM'];
+    const args = commands && commands.length > 0 ? ['HISTOGRAM', ...commands] : ['HISTOGRAM'];
     const rawData = await this.sendCommand('LATENCY', args);
 
     const result: Record<string, LatencyHistogram> = {};
@@ -280,9 +294,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
         }
 
         result[commandName] = { calls, histogram };
-      } catch {
-        continue;
-      }
+      } catch {}
     }
 
     return result;
@@ -411,7 +423,11 @@ export class AgentDatabaseAdapter implements DatabasePort {
     }
     const validLimit = Math.max(1, Math.min(limit, CLUSTER_TOTAL_SLOTS));
     const raw = await this.sendCommand('CLUSTER', [
-      'SLOT-STATS', 'ORDERBY', orderBy, 'LIMIT', String(validLimit),
+      'SLOT-STATS',
+      'ORDERBY',
+      orderBy,
+      'LIMIT',
+      String(validLimit),
     ]);
     return MetricsParser.parseSlotStats(raw as unknown[]);
   }
@@ -452,14 +468,18 @@ export class AgentDatabaseAdapter implements DatabasePort {
 
   async getVectorIndexList(): Promise<string[]> {
     if (!this.capabilities.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+      throw new Error(
+        'Vector search is not available on this connection (Search module not loaded)',
+      );
     }
     return (await this.sendCommand('FT', ['_LIST'])) as string[];
   }
 
   async getVectorIndexInfo(indexName: string): Promise<VectorIndexInfo> {
     if (!this.capabilities.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+      throw new Error(
+        'Vector search is not available on this connection (Search module not loaded)',
+      );
     }
     if (!INDEX_NAME_RE.test(indexName)) {
       throw new Error(`Invalid index name: ${indexName}`);
@@ -476,7 +496,9 @@ export class AgentDatabaseAdapter implements DatabasePort {
     filter?: string,
   ): Promise<VectorSearchResult[]> {
     if (!this.capabilities.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+      throw new Error(
+        'Vector search is not available on this connection (Search module not loaded)',
+      );
     }
     if (!INDEX_NAME_RE.test(indexName)) {
       throw new Error(`Invalid index name: ${indexName}`);
@@ -490,15 +512,21 @@ export class AgentDatabaseAdapter implements DatabasePort {
     const raw = await this.sendCommandWithBinary(
       'FT',
       ['SEARCH', indexName, query, 'PARAMS', '2', 'vec', '__BINARY_VEC__', 'DIALECT', '2'],
-      { '__BINARY_VEC__': queryVector.toString('base64') },
+      { __BINARY_VEC__: queryVector.toString('base64') },
     );
     return parseVectorSearchResponse(raw as unknown[], vectorFieldName);
   }
 
-  async textSearch(indexName: string, query: string, offset = 0, limit = 20): Promise<TextSearchResult> {
+  async textSearch(
+    indexName: string,
+    query: string,
+    offset = 0,
+    limit = 20,
+  ): Promise<TextSearchResult> {
     if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
     if (!INDEX_NAME_RE.test(indexName)) throw new Error(`Invalid index name: ${indexName}`);
-    if (!query || query.length > 1024) throw new Error('Query is required and must be under 1024 characters');
+    if (!query || query.length > 1024)
+      throw new Error('Query is required and must be under 1024 characters');
     const clampedLimit = Math.min(Math.max(limit, 1), 100);
     const clampedOffset = Math.max(offset, 0);
     const args = ['SEARCH', indexName, query, 'LIMIT', String(clampedOffset), String(clampedLimit)];
@@ -528,7 +556,7 @@ export class AgentDatabaseAdapter implements DatabasePort {
         const values = new Set<string>();
         for (const doc of result.results) {
           const v = doc.fields[fieldName];
-          if (v) v.split(',').forEach(tag => values.add(tag.trim()));
+          if (v) v.split(',').forEach((tag) => values.add(tag.trim()));
         }
         return [...values].sort();
       } catch {
@@ -551,7 +579,8 @@ export class AgentDatabaseAdapter implements DatabasePort {
   async profileSearch(indexName: string, query: string, limited = false): Promise<ProfileResult> {
     if (!this.capabilities?.hasVectorSearch) throw new Error('Search module not loaded');
     if (!INDEX_NAME_RE.test(indexName)) throw new Error(`Invalid index name: ${indexName}`);
-    if (!query || query.length > 1024) throw new Error('Query is required and must be under 1024 characters');
+    if (!query || query.length > 1024)
+      throw new Error('Query is required and must be under 1024 characters');
     try {
       const args = ['PROFILE', indexName, 'SEARCH'];
       if (limited) args.push('LIMITED');
@@ -561,6 +590,10 @@ export class AgentDatabaseAdapter implements DatabasePort {
     } catch {
       throw new Error('Query profiling (FT.PROFILE) is not available on this server');
     }
+  }
+
+  async call(command: string, args: string[], options?: { cli?: boolean }): Promise<unknown> {
+    return this.sendCommand(command, args.length > 0 ? args : undefined, options);
   }
 
   getClient(): never {

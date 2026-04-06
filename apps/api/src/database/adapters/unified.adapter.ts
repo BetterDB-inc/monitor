@@ -39,6 +39,7 @@ export interface UnifiedDatabaseAdapterConfig {
   port: number;
   username: string;
   password: string;
+  connectionName?: string;
 }
 
 export class UnifiedDatabaseAdapter implements DatabasePort {
@@ -46,17 +47,24 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   private client: Valkey;
   private connected: boolean = false;
   private capabilities: DatabaseCapabilities | null = null;
+  private readonly config: UnifiedDatabaseAdapterConfig;
+  private cliClient: Valkey | null = null;
 
-  constructor(config: UnifiedDatabaseAdapterConfig) {
-    this.client = new Valkey({
-      host: config.host,
-      port: config.port,
-      username: config.username,
-      password: config.password,
+  private createValkeyClient(connectionName: string): Valkey {
+    return new Valkey({
+      host: this.config.host,
+      port: this.config.port,
+      username: this.config.username,
+      password: this.config.password,
       lazyConnect: true,
       enableOfflineQueue: false,
-      connectionName: 'BetterDB-Monitor',
+      connectionName,
     });
+  }
+
+  constructor(config: UnifiedDatabaseAdapterConfig) {
+    this.config = config;
+    this.client = this.createValkeyClient(config.connectionName ?? 'BetterDB-Monitor');
 
     this.client.on('connect', () => {
       this.connected = true;
@@ -88,6 +96,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   async disconnect(): Promise<void> {
+    if (this.cliClient) {
+      await this.cliClient.quit().catch(() => {});
+      this.cliClient = null;
+    }
     await this.client.quit();
     this.connected = false;
   }
@@ -739,6 +751,25 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // FT.PROFILE not available (e.g., Valkey Search)
       throw new Error('Query profiling (FT.PROFILE) is not available on this server');
     }
+  }
+
+  private async getCliClient(): Promise<Valkey> {
+    if (this.cliClient) {
+      return this.cliClient;
+    }
+
+    this.cliClient = this.createValkeyClient('BetterDB-CLI');
+    await this.cliClient.connect();
+    this.logger.log('CLI client connected');
+    return this.cliClient;
+  }
+
+  async call(command: string, args: string[], options?: { cli?: boolean }): Promise<unknown> {
+    if (options?.cli) {
+      const cli = await this.getCliClient();
+      return cli.call(command, ...args);
+    }
+    return this.client.call(command, ...args);
   }
 
   getClient(): Valkey {

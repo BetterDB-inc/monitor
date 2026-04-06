@@ -35,6 +35,7 @@ function parseArgs(): AgentConfig {
     valkeyPassword: parsed['valkey-password'] || process.env.VALKEY_PASSWORD || '',
     valkeyTls: (parsed['valkey-tls'] || process.env.VALKEY_TLS || 'false') === 'true',
     valkeyDb: parseInt(parsed['valkey-db'] || process.env.VALKEY_DB || '0', 10),
+    unsafeMode: (parsed['unsafe-cli'] || process.env.BETTERDB_UNSAFE_CLI || 'false') === 'true',
   };
 }
 
