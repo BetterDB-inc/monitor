@@ -2,9 +2,13 @@ import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional } f
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import { compare, valid as validSemver } from 'semver';
-import { Tier, Feature, TIER_FEATURES, EntitlementResponse } from './types';
+import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import { Tier, Feature, TIER_FEATURES, EntitlementResponse, EntitlementRequest } from './types';
 import type { VersionInfo } from '@betterdb/shared';
 import { TelemetryPort } from '@app/common/interfaces/telemetry-port.interface';
+
+const LICENSE_KEY_FILE = join(__dirname, '..', '..', 'data', 'license.key');
 
 interface CachedEntitlement {
   response: EntitlementResponse;
@@ -14,7 +18,7 @@ interface CachedEntitlement {
 @Injectable()
 export class LicenseService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(LicenseService.name);
-  private readonly licenseKey: string | null;
+  private licenseKey: string | null;
   private readonly entitlementUrl: string;
   private readonly cacheTtlMs: number;
   private readonly maxStaleCacheMs: number;
@@ -40,7 +44,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   ) {
     this.currentVersion =
       process.env.APP_VERSION || process.env.npm_package_version || 'unknown';
-    this.licenseKey = process.env.BETTERDB_LICENSE_KEY || null;
+    this.licenseKey = process.env.BETTERDB_LICENSE_KEY || this.loadPersistedKey();
     this.entitlementUrl = process.env.ENTITLEMENT_URL || 'https://betterdb.com/api/v1/entitlements';
     this.cacheTtlMs = parseInt(process.env.LICENSE_CACHE_TTL_MS || '3600000', 10);
     this.maxStaleCacheMs = parseInt(process.env.LICENSE_MAX_STALE_MS || '604800000', 10);
@@ -136,12 +140,14 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async checkOnline(): Promise<EntitlementResponse> {
-    const payload = {
+    const isCloud = process.env.CLOUD_MODE === 'true';
+    const payload: EntitlementRequest = {
       licenseKey: this.licenseKey || '', // Empty string for keyless instances
       instanceId: this.instanceId,
       eventType: 'license_check',
-      deploymentMode: process.env.CLOUD_MODE === 'true' ? 'cloud' as const : 'self-hosted' as const,
+      deploymentMode: isCloud ? 'cloud' : 'self-hosted',
       stats: await this.collectStats(),
+      ...(isCloud && process.env.DB_SCHEMA ? { tenantId: process.env.DB_SCHEMA } : {}),
     };
 
     const controller = new AbortController();
@@ -203,6 +209,43 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+
+  /**
+   * Load a previously persisted license key from disk.
+   */
+  private loadPersistedKey(): string | null {
+    try {
+      const key = readFileSync(LICENSE_KEY_FILE, 'utf-8').trim();
+      if (key) {
+        this.logger.log('Loaded license key from persisted file');
+        return key;
+      }
+    } catch {
+      // File doesn't exist yet — that's fine
+    }
+    return null;
+  }
+
+  /**
+   * Activate a license key at runtime: persist to disk, update in-memory state,
+   * and re-validate against the entitlement server.
+   */
+  async activateLicenseKey(key: string): Promise<EntitlementResponse> {
+    // Persist to disk so it survives restarts
+    try {
+      mkdirSync(join(__dirname, '..', '..', 'data'), { recursive: true });
+      writeFileSync(LICENSE_KEY_FILE, key, { encoding: 'utf-8', mode: 0o600 });
+      this.logger.log('License key persisted to disk');
+    } catch (error) {
+      this.logger.warn(`Failed to persist license key: ${(error as Error).message}`);
+    }
+
+    // Update in-memory state
+    this.licenseKey = key;
+
+    // Clear cache and re-validate
+    return this.refreshLicense();
+  }
 
   private getCommunityEntitlement(error?: string): EntitlementResponse {
     return {

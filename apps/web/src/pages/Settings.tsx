@@ -1,23 +1,39 @@
 import { useState, useEffect } from 'react';
 import { settingsApi } from '../api/settings';
 import { agentTokensApi, GeneratedToken } from '../api/agent-tokens';
+import { registrationApi } from '../api/registration';
+import { licenseApi } from '../api/license';
 import { useMcpTokens } from '../hooks/useMcpTokens';
 import { useConnection } from '../hooks/useConnection';
+import { useLicense } from '../hooks/useLicense';
 import { AppSettings, SettingsUpdateRequest } from '@betterdb/shared';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
-type SettingsCategory = 'audit' | 'clientAnalytics' | 'anomaly' | 'mcpTokens';
+import { useQueryClient } from '@tanstack/react-query';
+type SettingsCategory = 'license' | 'audit' | 'clientAnalytics' | 'anomaly' | 'mcpTokens';
 
 export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const { currentConnection } = useConnection();
+  const { tier, license } = useLicense();
+  const queryClient = useQueryClient();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [source, setSource] = useState<'database' | 'environment' | 'defaults'>('defaults');
   const [requiresRestart, setRequiresRestart] = useState(false);
-  const [activeCategory, setActiveCategory] = useState<SettingsCategory>('audit');
+  const [activeCategory, setActiveCategory] = useState<SettingsCategory>('license');
   const [formData, setFormData] = useState<Partial<AppSettings>>({});
   const [hasChanges, setHasChanges] = useState(false);
+
+  // Registration/license state
+  const [regEmail, setRegEmail] = useState('');
+  const [regSubmitting, setRegSubmitting] = useState(false);
+  const [regSuccess, setRegSuccess] = useState(false);
+  const [regError, setRegError] = useState<string | null>(null);
+  const [activateKey, setActivateKey] = useState('');
+  const [activating, setActivating] = useState(false);
+  const [activateError, setActivateError] = useState<string | null>(null);
+  const [showChangeKey, setShowChangeKey] = useState(false);
 
   // MCP Tokens state (must be before any early returns)
   const { tokens: mcpTokens, invalidate: invalidateMcpTokens } = useMcpTokens(
@@ -149,7 +165,39 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     setTimeout(() => setMcpCopied(false), 2000);
   };
 
+  const handleRegister = async () => {
+    if (!regEmail.trim()) return;
+    setRegSubmitting(true);
+    setRegError(null);
+    try {
+      await registrationApi.register(regEmail.trim());
+      setRegSuccess(true);
+      setRegEmail('');
+    } catch (err) {
+      setRegError(err instanceof Error ? err.message : 'Registration failed');
+    } finally {
+      setRegSubmitting(false);
+    }
+  };
+
+  const handleActivate = async () => {
+    if (!activateKey.trim()) return;
+    setActivating(true);
+    setActivateError(null);
+    try {
+      await licenseApi.activate(activateKey.trim());
+      setActivateKey('');
+      // Refresh the license status so the UI updates immediately
+      queryClient.invalidateQueries({ queryKey: ['license-status'] });
+    } catch (err) {
+      setActivateError(err instanceof Error ? err.message : 'Activation failed');
+    } finally {
+      setActivating(false);
+    }
+  };
+
   const categories: { id: SettingsCategory; label: string }[] = [
+    { id: 'license', label: 'License' },
     { id: 'audit', label: 'Audit Trail' },
     { id: 'clientAnalytics', label: 'Client Analytics' },
     { id: 'anomaly', label: 'Anomaly Detection' },
@@ -188,6 +236,152 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
 
         <div className="flex-1">
           <Card className="p-6">
+            {activeCategory === 'license' && (
+              <div className="space-y-6">
+                {tier === 'community' ? (
+                  <>
+                    <div>
+                      <h2 className="text-xl font-semibold">Unlock all features — free during early access</h2>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        Get access to every Pro and Enterprise feature at no cost, plus product updates, priority support, and extended free access even if pricing changes.
+                      </p>
+                    </div>
+
+                    {isCloudMode ? (
+                      <div className="bg-muted/50 border rounded-md p-4">
+                        <p className="text-sm">Your license is managed through your workspace account.</p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          If your features aren't active, contact your workspace administrator or reach out to support.
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        {regSuccess ? (
+                          <div className="bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 rounded-md p-4">
+                            <p className="text-sm font-medium text-green-800 dark:text-green-200">Check your email for your license key</p>
+                            <p className="text-xs text-green-600 dark:text-green-400 mt-1">
+                              Paste it below to activate.
+                            </p>
+                          </div>
+                        ) : (
+                          <div>
+                            <label className="block text-sm font-medium mb-1">Email address</label>
+                            <div className="flex gap-2">
+                              <input
+                                type="email"
+                                value={regEmail}
+                                onChange={(e) => setRegEmail(e.target.value)}
+                                placeholder="you@company.com"
+                                className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                                onKeyDown={(e) => e.key === 'Enter' && handleRegister()}
+                              />
+                              <button
+                                onClick={handleRegister}
+                                disabled={regSubmitting || !regEmail.trim()}
+                                className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed whitespace-nowrap"
+                              >
+                                {regSubmitting ? 'Sending...' : 'Get my free license key'}
+                              </button>
+                            </div>
+                            {regError && (
+                              <p className="text-sm text-destructive mt-1">{regError}</p>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="border-t pt-4">
+                          <label className="block text-sm font-medium mb-1">Already have a license key?</label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={activateKey}
+                              onChange={(e) => setActivateKey(e.target.value)}
+                              placeholder="btdb_..."
+                              className="flex-1 px-3 py-2 border rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+                              onKeyDown={(e) => e.key === 'Enter' && handleActivate()}
+                            />
+                            <button
+                              onClick={handleActivate}
+                              disabled={activating || !activateKey.trim()}
+                              className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
+                            >
+                              {activating ? 'Activating...' : 'Activate'}
+                            </button>
+                          </div>
+                          {activateError && (
+                            <p className="text-sm text-destructive mt-1">{activateError}</p>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-3">
+                      <h2 className="text-xl font-semibold">License</h2>
+                      <span className="text-xs px-2 py-1 bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded-full font-medium capitalize">
+                        {tier}
+                      </span>
+                    </div>
+
+                    {license?.customer?.email && (
+                      <div className="text-sm text-muted-foreground">
+                        Registered to <span className="font-medium text-foreground">{license.customer.email}</span>
+                      </div>
+                    )}
+
+                    <div className="bg-muted/50 border rounded-md p-4 text-sm">
+                      Early access — all features free. You'll get advance notice before anything changes.
+                    </div>
+
+                    {!isCloudMode && (
+                    <div className="border-t pt-4">
+                      {!showChangeKey ? (
+                        <button
+                          onClick={() => setShowChangeKey(true)}
+                          className="text-sm text-primary hover:underline cursor-pointer"
+                          type="button"
+                        >
+                          Change license key
+                        </button>
+                      ) : (
+                        <>
+                          <label className="block text-sm font-medium mb-1">New license key</label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={activateKey}
+                              onChange={(e) => setActivateKey(e.target.value)}
+                              placeholder="btdb_..."
+                              className="flex-1 px-3 py-2 border rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+                              onKeyDown={(e) => e.key === 'Enter' && handleActivate()}
+                            />
+                            <button
+                              onClick={handleActivate}
+                              disabled={activating || !activateKey.trim()}
+                              className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
+                            >
+                              {activating ? 'Activating...' : 'Activate'}
+                            </button>
+                            <button
+                              onClick={() => { setShowChangeKey(false); setActivateKey(''); setActivateError(null); }}
+                              className="px-3 py-2 text-sm border rounded-md hover:bg-muted"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                          {activateError && (
+                            <p className="text-sm text-destructive mt-1">{activateError}</p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
             {activeCategory === 'audit' && (
               <div className="space-y-4">
                 <h2 className="text-xl font-semibold mb-4">Audit Trail</h2>
@@ -294,7 +488,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       <button
                         onClick={handleMcpGenerate}
                         disabled={mcpGenerating || !mcpTokenName.trim()}
-                        className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed"
+                        className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
                       >
                         {mcpGenerating ? 'Generating...' : 'Generate'}
                       </button>
@@ -397,12 +591,12 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
               </div>
             )}
 
-            {activeCategory !== 'mcpTokens' && (
+            {activeCategory !== 'mcpTokens' && activeCategory !== 'license' && (
               <div className="flex items-center gap-3 mt-6 pt-6 border-t">
                 <button
                   onClick={handleSave}
                   disabled={!hasChanges || saving}
-                  className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed"
+                  className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
                 >
                   {saving ? 'Saving...' : 'Save Changes'}
                 </button>
