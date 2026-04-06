@@ -122,9 +122,17 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       return this.cache.response;
     }
 
+    const validationKey = this.licenseKey;
+
     try {
-      const response = await this.checkOnline();
-      this.cache = { response, cachedAt: Date.now() };
+      const response = await this.checkOnline(validationKey);
+
+      if (this.licenseKey === validationKey) {
+        this.cache = { response, cachedAt: Date.now() };
+      } else {
+        this.logger.debug('Discarding stale entitlement response after license key change');
+      }
+
       this.logger.log(`Entitlement validated: ${response.tier}`);
       return response;
     } catch (error) {
@@ -139,10 +147,10 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async checkOnline(): Promise<EntitlementResponse> {
+  private async checkOnline(licenseKeyOverride?: string | null): Promise<EntitlementResponse> {
     const isCloud = process.env.CLOUD_MODE === 'true';
     const payload: EntitlementRequest = {
-      licenseKey: this.licenseKey || '', // Empty string for keyless instances
+      licenseKey: licenseKeyOverride ?? this.licenseKey ?? '', // Empty string for keyless instances
       instanceId: this.instanceId,
       eventType: 'license_check',
       deploymentMode: isCloud ? 'cloud' : 'self-hosted',
@@ -232,27 +240,22 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
    * a bad or unvalidated key.
    */
   async activateLicenseKey(key: string): Promise<EntitlementResponse> {
-    const previousKey = this.licenseKey;
-    const previousCache = this.cache;
-    const previousValidationPromise = this.validationPromise;
-    const previousIsValidated = this.isValidated;
-
-    // Validate the candidate key first without committing state to disk.
-    this.licenseKey = key;
-    this.cache = null;
-    this.isValidated = false;
-    const info = await this.validateLicense();
+    let info: EntitlementResponse;
+    try {
+      // Validate against the candidate key without mutating shared state first.
+      info = await this.checkOnline(key);
+    } catch (error) {
+      this.logger.error(`Entitlement validation failed: ${(error as Error).message}`);
+      info = this.getCommunityEntitlement('Validation failed');
+    }
 
     if (!info.valid) {
       this.logger.warn(`License activation failed: ${info.error || 'unknown error'}`);
-      this.licenseKey = previousKey;
-      this.cache = previousCache;
-      this.validationPromise = previousValidationPromise;
-      this.isValidated = previousIsValidated;
       return info;
     }
 
-    // Keep validated entitlement state and persist key for restart durability.
+    // Commit shared state only after candidate validation succeeds.
+    this.licenseKey = key;
     this.cache = { response: info, cachedAt: Date.now() };
     this.validationPromise = Promise.resolve(info);
     this.isValidated = true;
