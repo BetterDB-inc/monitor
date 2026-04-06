@@ -28,6 +28,69 @@ export class EntitlementService {
     };
   }
 
+  /**
+   * Handle cloud instance requests - resolve license via tenant → customer → license.
+   */
+  async handleCloudInstance(req: EntitlementRequest): Promise<EntitlementResponse> {
+    const { tenantId, instanceId } = req;
+
+    if (!tenantId) {
+      this.logger.warn(`Cloud instance ${instanceId} missing tenantId`);
+      return { valid: true, tier: Tier.community, expiresAt: null };
+    }
+
+    // tenantId is the DB_SCHEMA value, e.g. "tenant_mysubdomain"
+    // Look up tenant by db_schema to find the linked customer and license
+    const tenant = await this.prisma.tenant.findFirst({
+      where: { dbSchema: tenantId },
+      include: {
+        customer: {
+          include: {
+            licenses: {
+              where: { active: true },
+              orderBy: { createdAt: 'desc' },
+              take: 1,
+            },
+          },
+        },
+      },
+    });
+
+    if (!tenant?.customer) {
+      this.logger.warn(`Cloud tenant ${tenantId} has no linked customer`);
+      return { valid: true, tier: Tier.community, expiresAt: null };
+    }
+
+    const license = tenant.customer.licenses[0];
+    if (!license) {
+      this.logger.warn(`Cloud tenant ${tenantId} customer has no active license`);
+      return { valid: true, tier: Tier.community, expiresAt: null };
+    }
+
+    if (license.expiresAt && new Date(license.expiresAt) < new Date()) {
+      this.logger.warn(`Cloud tenant ${tenantId} license expired`);
+      return {
+        valid: false,
+        tier: Tier.community,
+        expiresAt: license.expiresAt.toISOString(),
+        error: 'License has expired',
+      };
+    }
+
+    this.logger.log(`Cloud tenant ${tenantId} validated: ${license.tier}`);
+    const tier = parseTier(license.tier);
+    return {
+      valid: true,
+      tier,
+      expiresAt: license.expiresAt ? license.expiresAt.toISOString() : null,
+      customer: {
+        id: tenant.customer.id,
+        name: tenant.customer.name,
+        email: tenant.customer.email,
+      },
+    };
+  }
+
   async validateLicense(req: EntitlementRequest): Promise<EntitlementResponse> {
     const { licenseKey } = req;
 

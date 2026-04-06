@@ -81,6 +81,7 @@ export interface EntitlementResponse {
 
 export interface EntitlementRequest {
   licenseKey?: string;
+  tenantId?: string;
   instanceId: string;
   eventType: 'license_check' | 'telemetry_ping';
   stats?: Record<string, any>;
