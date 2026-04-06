@@ -4,11 +4,11 @@ import { createHash } from 'crypto';
 import { compare, valid as validSemver } from 'semver';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { Tier, Feature, TIER_FEATURES, EntitlementResponse } from './types';
+import { Tier, Feature, TIER_FEATURES, EntitlementResponse, EntitlementRequest } from './types';
 import type { VersionInfo } from '@betterdb/shared';
 import { TelemetryPort } from '@app/common/interfaces/telemetry-port.interface';
 
-const LICENSE_KEY_FILE = join(process.cwd(), 'data', 'license.key');
+const LICENSE_KEY_FILE = join(__dirname, '..', '..', 'data', 'license.key');
 
 interface CachedEntitlement {
   response: EntitlementResponse;
@@ -141,19 +141,14 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
 
   private async checkOnline(): Promise<EntitlementResponse> {
     const isCloud = process.env.CLOUD_MODE === 'true';
-    const payload: Record<string, any> = {
+    const payload: EntitlementRequest = {
       licenseKey: this.licenseKey || '', // Empty string for keyless instances
       instanceId: this.instanceId,
       eventType: 'license_check',
-      deploymentMode: isCloud ? 'cloud' as const : 'self-hosted' as const,
+      deploymentMode: isCloud ? 'cloud' : 'self-hosted',
       stats: await this.collectStats(),
+      ...(isCloud && process.env.DB_SCHEMA ? { tenantId: process.env.DB_SCHEMA } : {}),
     };
-
-    // In cloud mode, send tenantId so the entitlement service can resolve
-    // the license via tenant → customer → license without needing a key
-    if (isCloud && process.env.DB_SCHEMA) {
-      payload.tenantId = process.env.DB_SCHEMA;
-    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -238,7 +233,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   async activateLicenseKey(key: string): Promise<EntitlementResponse> {
     // Persist to disk so it survives restarts
     try {
-      mkdirSync(join(process.cwd(), 'data'), { recursive: true });
+      mkdirSync(join(__dirname, '..', '..', 'data'), { recursive: true });
       writeFileSync(LICENSE_KEY_FILE, key, { encoding: 'utf-8', mode: 0o600 });
       this.logger.log('License key persisted to disk');
     } catch (error) {

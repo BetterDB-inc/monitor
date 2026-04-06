@@ -5,9 +5,10 @@ import { registrationApi } from '../api/registration';
 interface UpgradePromptProps {
   onDismiss: () => void;
   isCloudMode?: boolean;
+  featureName?: string;
 }
 
-export function UpgradePrompt({ onDismiss, isCloudMode = false }: UpgradePromptProps) {
+export function UpgradePrompt({ onDismiss, isCloudMode = false, featureName }: UpgradePromptProps) {
   const [email, setEmail] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -33,7 +34,11 @@ export function UpgradePrompt({ onDismiss, isCloudMode = false }: UpgradePromptP
         <div className="flex items-start justify-between">
           <div>
             <h2 className="text-xl font-semibold">
-              {isCloudMode ? 'This feature requires an active license' : 'This feature is free with registration'}
+              {isCloudMode
+                ? 'This feature requires an active license'
+                : featureName
+                  ? `Unlock ${featureName} — free with registration`
+                  : 'This feature is free with registration'}
             </h2>
             <p className="text-sm text-muted-foreground mt-1">
               {isCloudMode
@@ -58,9 +63,9 @@ export function UpgradePrompt({ onDismiss, isCloudMode = false }: UpgradePromptP
             </p>
           </div>
         ) : success ? (
-          <div className="bg-green-50 border border-green-200 rounded-md p-4">
-            <p className="text-sm font-medium text-green-800">Check your email for your license key</p>
-            <p className="text-xs text-green-600 mt-1">
+          <div className="bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 rounded-md p-4">
+            <p className="text-sm font-medium text-green-800 dark:text-green-200">Check your email for your license key</p>
+            <p className="text-xs text-green-600 dark:text-green-400 mt-1">
               Activate it in Settings &gt; License to unlock all features.
             </p>
           </div>

@@ -1,7 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Customer, License } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminService } from '../admin/admin.service';
 import { EmailService } from '../email/email.service';
+
+type CustomerWithLicenses = Customer & { licenses: License[] };
 
 @Injectable()
 export class RegistrationService {
@@ -14,7 +17,7 @@ export class RegistrationService {
   ) {}
 
   async register(emailAddress: string): Promise<{ message: string }> {
-    let customer: Awaited<ReturnType<typeof this.admin.createCustomer>>;
+    let customer: CustomerWithLicenses;
     let isNew = false;
 
     try {
@@ -27,7 +30,8 @@ export class RegistrationService {
       if (existing) {
         customer = existing;
       } else {
-        customer = await this.admin.createCustomer({ email: emailAddress });
+        const created = await this.admin.createCustomer({ email: emailAddress });
+        customer = { ...created, licenses: [] };
         isNew = true;
       }
     } catch (error: any) {
@@ -60,8 +64,8 @@ export class RegistrationService {
     // Existing customer re-registering
     this.logger.log(`Existing customer re-registered: ${customer.id} (${emailAddress})`);
 
-    const license = (customer as any).licenses?.find(
-      (l: any) => l.active && l.tier === 'enterprise',
+    const license = customer.licenses.find(
+      (l) => l.active && l.tier === 'enterprise',
     );
 
     if (license) {

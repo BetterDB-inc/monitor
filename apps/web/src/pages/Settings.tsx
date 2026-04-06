@@ -257,9 +257,9 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                     ) : (
                       <>
                         {regSuccess ? (
-                          <div className="bg-green-50 border border-green-200 rounded-md p-4">
-                            <p className="text-sm font-medium text-green-800">Check your email for your license key</p>
-                            <p className="text-xs text-green-600 mt-1">
+                          <div className="bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 rounded-md p-4">
+                            <p className="text-sm font-medium text-green-800 dark:text-green-200">Check your email for your license key</p>
+                            <p className="text-xs text-green-600 dark:text-green-400 mt-1">
                               Paste it below to activate.
                             </p>
                           </div>
@@ -319,7 +319,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                   <>
                     <div className="flex items-center gap-3">
                       <h2 className="text-xl font-semibold">License</h2>
-                      <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full font-medium capitalize">
+                      <span className="text-xs px-2 py-1 bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded-full font-medium capitalize">
                         {tier}
                       </span>
                     </div>
