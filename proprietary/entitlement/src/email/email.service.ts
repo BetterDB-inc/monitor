@@ -42,7 +42,7 @@ BetterDB`;
 
     if (!this.apiKey) {
       this.logger.log(`[DEV] Would send registration email to ${to}`);
-      this.logger.debug(`[DEV] License key: ${licenseKey.slice(0, 8)}...`);
+      this.logger.log(`[DEV] License key: ${licenseKey}`);
       return;
     }
 
