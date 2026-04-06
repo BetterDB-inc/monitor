@@ -227,11 +227,36 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Activate a license key at runtime: persist to disk, update in-memory state,
-   * and re-validate against the entitlement server.
+   * Activate a license key at runtime by validating first, then persisting only
+   * after successful validation so an existing valid key is never overwritten by
+   * a bad or unvalidated key.
    */
   async activateLicenseKey(key: string): Promise<EntitlementResponse> {
-    // Persist to disk so it survives restarts
+    const previousKey = this.licenseKey;
+    const previousCache = this.cache;
+    const previousValidationPromise = this.validationPromise;
+    const previousIsValidated = this.isValidated;
+
+    // Validate the candidate key first without committing state to disk.
+    this.licenseKey = key;
+    this.cache = null;
+    this.isValidated = false;
+    const info = await this.validateLicense();
+
+    if (!info.valid) {
+      this.logger.warn(`License activation failed: ${info.error || 'unknown error'}`);
+      this.licenseKey = previousKey;
+      this.cache = previousCache;
+      this.validationPromise = previousValidationPromise;
+      this.isValidated = previousIsValidated;
+      return info;
+    }
+
+    // Keep validated entitlement state and persist key for restart durability.
+    this.cache = { response: info, cachedAt: Date.now() };
+    this.validationPromise = Promise.resolve(info);
+    this.isValidated = true;
+
     try {
       mkdirSync(join(__dirname, '..', '..', 'data'), { recursive: true });
       writeFileSync(LICENSE_KEY_FILE, key, { encoding: 'utf-8', mode: 0o600 });
@@ -240,11 +265,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Failed to persist license key: ${(error as Error).message}`);
     }
 
-    // Update in-memory state
-    this.licenseKey = key;
-
-    // Clear cache and re-validate
-    return this.refreshLicense();
+    return info;
   }
 
   private getCommunityEntitlement(error?: string): EntitlementResponse {

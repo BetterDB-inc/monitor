@@ -294,6 +294,34 @@ describe('LicenseService', () => {
     });
   });
 
+  describe('activateLicenseKey', () => {
+    it('should keep previous key and entitlement when activation validation fails', async () => {
+      const previousEntitlement = {
+        valid: true,
+        tier: 'pro',
+        expiresAt: null,
+      } as any;
+
+      (service as any).licenseKey = 'valid-license-key-12345';
+      (service as any).cache = {
+        response: previousEntitlement,
+        cachedAt: Date.now(),
+      };
+      (service as any).validationPromise = Promise.resolve(previousEntitlement);
+      (service as any).isValidated = true;
+
+      mockFetch.mockRejectedValue(new Error('Network error'));
+
+      const result = await service.activateLicenseKey('new-invalid-key-987654321');
+
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe('Validation failed');
+      expect((service as any).licenseKey).toBe('valid-license-key-12345');
+      expect(service.getLicenseInfo()).toMatchObject(previousEntitlement);
+      expect(service.getLicenseTier()).toBe('pro');
+    });
+  });
+
   describe('keyed validation', () => {
     let keyedService: LicenseService;
 
