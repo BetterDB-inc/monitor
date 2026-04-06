@@ -85,6 +85,7 @@ function AppContent() {
                   <UpgradePrompt
                     onDismiss={upgradePromptState.dismissUpgradePrompt}
                     isCloudMode={!!cloudUser}
+                    featureName={upgradePromptState.error.feature}
                   />
                 )}
               </VersionCheckContext.Provider>
