@@ -247,62 +247,73 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       </p>
                     </div>
 
-                    {regSuccess ? (
-                      <div className="bg-green-50 border border-green-200 rounded-md p-4">
-                        <p className="text-sm font-medium text-green-800">Check your email for your license key</p>
-                        <p className="text-xs text-green-600 mt-1">
-                          Paste it below to activate.
+                    {isCloudMode ? (
+                      <div className="bg-muted/50 border rounded-md p-4">
+                        <p className="text-sm">Your license is managed through your workspace account.</p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          If your features aren't active, contact your workspace administrator or reach out to support.
                         </p>
                       </div>
                     ) : (
-                      <div>
-                        <label className="block text-sm font-medium mb-1">Email address</label>
-                        <div className="flex gap-2">
-                          <input
-                            type="email"
-                            value={regEmail}
-                            onChange={(e) => setRegEmail(e.target.value)}
-                            placeholder="you@company.com"
-                            className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                            onKeyDown={(e) => e.key === 'Enter' && handleRegister()}
-                          />
-                          <button
-                            onClick={handleRegister}
-                            disabled={regSubmitting || !regEmail.trim()}
-                            className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed whitespace-nowrap"
-                          >
-                            {regSubmitting ? 'Sending...' : 'Get my free license key'}
-                          </button>
-                        </div>
-                        {regError && (
-                          <p className="text-sm text-destructive mt-1">{regError}</p>
+                      <>
+                        {regSuccess ? (
+                          <div className="bg-green-50 border border-green-200 rounded-md p-4">
+                            <p className="text-sm font-medium text-green-800">Check your email for your license key</p>
+                            <p className="text-xs text-green-600 mt-1">
+                              Paste it below to activate.
+                            </p>
+                          </div>
+                        ) : (
+                          <div>
+                            <label className="block text-sm font-medium mb-1">Email address</label>
+                            <div className="flex gap-2">
+                              <input
+                                type="email"
+                                value={regEmail}
+                                onChange={(e) => setRegEmail(e.target.value)}
+                                placeholder="you@company.com"
+                                className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                                onKeyDown={(e) => e.key === 'Enter' && handleRegister()}
+                              />
+                              <button
+                                onClick={handleRegister}
+                                disabled={regSubmitting || !regEmail.trim()}
+                                className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed whitespace-nowrap"
+                              >
+                                {regSubmitting ? 'Sending...' : 'Get my free license key'}
+                              </button>
+                            </div>
+                            {regError && (
+                              <p className="text-sm text-destructive mt-1">{regError}</p>
+                            )}
+                          </div>
                         )}
-                      </div>
-                    )}
 
-                    <div className="border-t pt-4">
-                      <label className="block text-sm font-medium mb-1">Already have a license key?</label>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={activateKey}
-                          onChange={(e) => setActivateKey(e.target.value)}
-                          placeholder="btdb_..."
-                          className="flex-1 px-3 py-2 border rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
-                          onKeyDown={(e) => e.key === 'Enter' && handleActivate()}
-                        />
-                        <button
-                          onClick={handleActivate}
-                          disabled={activating || !activateKey.trim()}
-                          className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
-                        >
-                          {activating ? 'Activating...' : 'Activate'}
-                        </button>
-                      </div>
-                      {activateError && (
-                        <p className="text-sm text-destructive mt-1">{activateError}</p>
-                      )}
-                    </div>
+                        <div className="border-t pt-4">
+                          <label className="block text-sm font-medium mb-1">Already have a license key?</label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={activateKey}
+                              onChange={(e) => setActivateKey(e.target.value)}
+                              placeholder="btdb_..."
+                              className="flex-1 px-3 py-2 border rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+                              onKeyDown={(e) => e.key === 'Enter' && handleActivate()}
+                            />
+                            <button
+                              onClick={handleActivate}
+                              disabled={activating || !activateKey.trim()}
+                              className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
+                            >
+                              {activating ? 'Activating...' : 'Activate'}
+                            </button>
+                          </div>
+                          {activateError && (
+                            <p className="text-sm text-destructive mt-1">{activateError}</p>
+                          )}
+                        </div>
+                      </>
+                    )}
                   </>
                 ) : (
                   <>
@@ -323,6 +334,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       Early access — all features free. You'll get advance notice before anything changes.
                     </div>
 
+                    {!isCloudMode && (
                     <div className="border-t pt-4">
                       {!showChangeKey ? (
                         <button
@@ -364,6 +376,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                         </>
                       )}
                     </div>
+                    )}
                   </>
                 )}
               </div>

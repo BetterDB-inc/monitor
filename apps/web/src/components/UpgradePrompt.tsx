@@ -4,9 +4,10 @@ import { registrationApi } from '../api/registration';
 
 interface UpgradePromptProps {
   onDismiss: () => void;
+  isCloudMode?: boolean;
 }
 
-export function UpgradePrompt({ onDismiss }: UpgradePromptProps) {
+export function UpgradePrompt({ onDismiss, isCloudMode = false }: UpgradePromptProps) {
   const [email, setEmail] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -31,9 +32,13 @@ export function UpgradePrompt({ onDismiss }: UpgradePromptProps) {
       <Card className="max-w-md p-6 space-y-4">
         <div className="flex items-start justify-between">
           <div>
-            <h2 className="text-xl font-semibold">This feature is free with registration</h2>
+            <h2 className="text-xl font-semibold">
+              {isCloudMode ? 'This feature requires an active license' : 'This feature is free with registration'}
+            </h2>
             <p className="text-sm text-muted-foreground mt-1">
-              Get access to all Enterprise features at no cost.
+              {isCloudMode
+                ? 'Your workspace license needs to be activated to access this feature.'
+                : 'Get access to all Enterprise features at no cost.'}
             </p>
           </div>
           <button
@@ -45,7 +50,14 @@ export function UpgradePrompt({ onDismiss }: UpgradePromptProps) {
           </button>
         </div>
 
-        {success ? (
+        {isCloudMode ? (
+          <div className="bg-muted/50 border rounded-md p-4">
+            <p className="text-sm">Your license is managed through your workspace account.</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              Contact your workspace administrator or reach out to support for help.
+            </p>
+          </div>
+        ) : success ? (
           <div className="bg-green-50 border border-green-200 rounded-md p-4">
             <p className="text-sm font-medium text-green-800">Check your email for your license key</p>
             <p className="text-xs text-green-600 mt-1">

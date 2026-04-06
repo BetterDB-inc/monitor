@@ -24,15 +24,18 @@ Here's your BetterDB Enterprise license key:
 
 ${licenseKey}
 
-To activate it, set this environment variable wherever you run BetterDB Monitor:
+SELF-HOSTED
+Set this environment variable wherever you run BetterDB Monitor:
 
   BETTERDB_LICENSE_KEY=${licenseKey}
 
-This unlocks all Enterprise features - anomaly detection, key analytics,
-alerting, migration tooling, webhooks, and more - at no cost.
+Or paste it in Settings > License > "Already have a license key?"
 
-Everything is free during our early access period. You'll get advance notice
-before anything changes.
+CLOUD
+No action needed — your license is automatically applied to your workspace.
+
+This unlocks every Pro and Enterprise feature at no cost during early access,
+plus extended free access even if pricing changes.
 
 Kristiyan
 BetterDB`;

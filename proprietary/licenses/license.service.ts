@@ -140,13 +140,20 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async checkOnline(): Promise<EntitlementResponse> {
-    const payload = {
+    const isCloud = process.env.CLOUD_MODE === 'true';
+    const payload: Record<string, any> = {
       licenseKey: this.licenseKey || '', // Empty string for keyless instances
       instanceId: this.instanceId,
       eventType: 'license_check',
-      deploymentMode: process.env.CLOUD_MODE === 'true' ? 'cloud' as const : 'self-hosted' as const,
+      deploymentMode: isCloud ? 'cloud' as const : 'self-hosted' as const,
       stats: await this.collectStats(),
     };
+
+    // In cloud mode, send tenantId so the entitlement service can resolve
+    // the license via tenant → customer → license without needing a key
+    if (isCloud && process.env.DB_SCHEMA) {
+      payload.tenantId = process.env.DB_SCHEMA;
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
