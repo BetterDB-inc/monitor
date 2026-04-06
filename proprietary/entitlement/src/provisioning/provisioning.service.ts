@@ -53,11 +53,15 @@ export class ProvisioningService {
     this.appDomain = this.config.get<string>('APP_DOMAIN', 'app.betterdb.com');
 
     // Load RDS config (used to build connection URL for schema Jobs)
-    this.rdsHost = this.config.getOrThrow<string>('RDS_HOST');
+    this.rdsHost = this.config.get<string>('RDS_HOST', 'localhost');
     this.rdsPort = this.config.get<number>('RDS_PORT', 5432);
-    this.rdsUser = this.config.getOrThrow<string>('RDS_USER');
-    this.rdsPassword = this.config.getOrThrow<string>('RDS_PASSWORD');
+    this.rdsUser = this.config.get<string>('RDS_USER', 'betterdb');
+    this.rdsPassword = this.config.get<string>('RDS_PASSWORD', '');
     this.rdsDatabase = this.config.get<string>('RDS_DATABASE', 'betterdb');
+
+    if (!this.config.get('RDS_HOST')) {
+      this.logger.warn('RDS_HOST not set - provisioning will not work');
+    }
 
     // Load auth public key (passed to tenant pods for JWT verification)
     this.authPublicKey = this.config.get<string>('AUTH_PUBLIC_KEY', '');

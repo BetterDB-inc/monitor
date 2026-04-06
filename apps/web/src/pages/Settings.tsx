@@ -33,6 +33,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [activateKey, setActivateKey] = useState('');
   const [activating, setActivating] = useState(false);
   const [activateError, setActivateError] = useState<string | null>(null);
+  const [showChangeKey, setShowChangeKey] = useState(false);
 
   // MCP Tokens state (must be before any early returns)
   const { tokens: mcpTokens, invalidate: invalidateMcpTokens } = useMcpTokens(
@@ -240,21 +241,10 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                 {tier === 'community' ? (
                   <>
                     <div>
-                      <h2 className="text-xl font-semibold">Unlock Enterprise features — free</h2>
+                      <h2 className="text-xl font-semibold">Unlock all features — free during early access</h2>
                       <p className="text-sm text-muted-foreground mt-1">
-                        Register to unlock all features at no cost during early access.
+                        Get access to every Pro and Enterprise feature at no cost, plus product updates, priority support, and extended free access even if pricing changes.
                       </p>
-                    </div>
-
-                    <div className="space-y-2">
-                      <p className="text-sm font-medium">What you get:</p>
-                      <ul className="text-sm text-muted-foreground space-y-1 ml-4 list-disc">
-                        <li>Anomaly detection</li>
-                        <li>Key analytics</li>
-                        <li>Alerting &amp; webhooks</li>
-                        <li>Migration tooling</li>
-                        <li>Metric forecasting</li>
-                      </ul>
                     </div>
 
                     {regSuccess ? (
@@ -279,7 +269,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                           <button
                             onClick={handleRegister}
                             disabled={regSubmitting || !regEmail.trim()}
-                            className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed whitespace-nowrap"
+                            className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed whitespace-nowrap"
                           >
                             {regSubmitting ? 'Sending...' : 'Get my free license key'}
                           </button>
@@ -304,7 +294,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                         <button
                           onClick={handleActivate}
                           disabled={activating || !activateKey.trim()}
-                          className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed"
+                          className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
                         >
                           {activating ? 'Activating...' : 'Activate'}
                         </button>
@@ -331,6 +321,48 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
 
                     <div className="bg-muted/50 border rounded-md p-4 text-sm">
                       Early access — all features free. You'll get advance notice before anything changes.
+                    </div>
+
+                    <div className="border-t pt-4">
+                      {!showChangeKey ? (
+                        <button
+                          onClick={() => setShowChangeKey(true)}
+                          className="text-sm text-primary hover:underline cursor-pointer"
+                          type="button"
+                        >
+                          Change license key
+                        </button>
+                      ) : (
+                        <>
+                          <label className="block text-sm font-medium mb-1">New license key</label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={activateKey}
+                              onChange={(e) => setActivateKey(e.target.value)}
+                              placeholder="btdb_..."
+                              className="flex-1 px-3 py-2 border rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+                              onKeyDown={(e) => e.key === 'Enter' && handleActivate()}
+                            />
+                            <button
+                              onClick={handleActivate}
+                              disabled={activating || !activateKey.trim()}
+                              className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
+                            >
+                              {activating ? 'Activating...' : 'Activate'}
+                            </button>
+                            <button
+                              onClick={() => { setShowChangeKey(false); setActivateKey(''); setActivateError(null); }}
+                              className="px-3 py-2 text-sm border rounded-md hover:bg-muted"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                          {activateError && (
+                            <p className="text-sm text-destructive mt-1">{activateError}</p>
+                          )}
+                        </>
+                      )}
                     </div>
                   </>
                 )}
@@ -443,7 +475,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       <button
                         onClick={handleMcpGenerate}
                         disabled={mcpGenerating || !mcpTokenName.trim()}
-                        className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed"
+                        className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
                       >
                         {mcpGenerating ? 'Generating...' : 'Generate'}
                       </button>
@@ -551,7 +583,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                 <button
                   onClick={handleSave}
                   disabled={!hasChanges || saving}
-                  className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed"
+                  className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
                 >
                   {saving ? 'Saving...' : 'Save Changes'}
                 </button>
