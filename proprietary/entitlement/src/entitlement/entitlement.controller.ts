@@ -11,6 +11,11 @@ export class EntitlementController {
 
   @Post()
   async validate(@Body() body: EntitlementRequest): Promise<EntitlementResponse> {
+    // Cloud instances: resolve license via tenant identity
+    if (body.deploymentMode === 'cloud' && body.tenantId && (!body.licenseKey || body.licenseKey === '')) {
+      return this.entitlement.handleCloudInstance(body);
+    }
+
     // If no license key provided, handle as keyless instance
     if (!body.licenseKey || body.licenseKey === '') {
       return this.entitlement.handleKeylessInstance(body);

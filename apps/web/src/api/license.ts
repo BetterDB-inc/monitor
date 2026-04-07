@@ -12,8 +12,19 @@ export interface LicenseStatus {
   };
 }
 
+export interface LicenseActivateResponse extends LicenseStatus {
+  activatedAt: string;
+}
+
 export const licenseApi = {
   async getStatus(): Promise<LicenseStatus> {
     return fetchApi<LicenseStatus>('/license/status');
+  },
+
+  async activate(key: string): Promise<LicenseActivateResponse> {
+    return fetchApi<LicenseActivateResponse>('/license/activate', {
+      method: 'POST',
+      body: JSON.stringify({ key }),
+    });
   },
 };

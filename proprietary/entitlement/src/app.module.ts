@@ -12,12 +12,14 @@ import { ProvisioningModule } from './provisioning/provisioning.module';
 import { UserModule } from './user/user.module';
 import { AuthModule } from './auth/auth.module';
 import { InvitationModule } from './invitation/invitation.module';
+import { RegistrationModule } from './registration/registration.module';
+import { EmailModule } from './email/email.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: '../../../.env',
+      envFilePath: ['.env', '../../../.env'],
     }),
     ThrottlerModule.forRoot([{
       ttl: 60000,
@@ -33,6 +35,8 @@ import { InvitationModule } from './invitation/invitation.module';
     UserModule,
     AuthModule,
     InvitationModule,
+    EmailModule,
+    RegistrationModule,
   ],
   providers: [
     {

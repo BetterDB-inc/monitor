@@ -2,9 +2,13 @@ import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional } f
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import { compare, valid as validSemver } from 'semver';
-import { Tier, Feature, TIER_FEATURES, EntitlementResponse } from './types';
+import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import { Tier, Feature, TIER_FEATURES, EntitlementResponse, EntitlementRequest } from './types';
 import type { VersionInfo } from '@betterdb/shared';
 import { TelemetryPort } from '@app/common/interfaces/telemetry-port.interface';
+
+const LICENSE_KEY_FILE = join(__dirname, '..', '..', 'data', 'license.key');
 
 interface CachedEntitlement {
   response: EntitlementResponse;
@@ -14,7 +18,7 @@ interface CachedEntitlement {
 @Injectable()
 export class LicenseService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(LicenseService.name);
-  private readonly licenseKey: string | null;
+  private licenseKey: string | null;
   private readonly entitlementUrl: string;
   private readonly cacheTtlMs: number;
   private readonly maxStaleCacheMs: number;
@@ -40,7 +44,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   ) {
     this.currentVersion =
       process.env.APP_VERSION || process.env.npm_package_version || 'unknown';
-    this.licenseKey = process.env.BETTERDB_LICENSE_KEY || null;
+    this.licenseKey = process.env.BETTERDB_LICENSE_KEY || this.loadPersistedKey();
     this.entitlementUrl = process.env.ENTITLEMENT_URL || 'https://betterdb.com/api/v1/entitlements';
     this.cacheTtlMs = parseInt(process.env.LICENSE_CACHE_TTL_MS || '3600000', 10);
     this.maxStaleCacheMs = parseInt(process.env.LICENSE_MAX_STALE_MS || '604800000', 10);
@@ -118,9 +122,17 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       return this.cache.response;
     }
 
+    const validationKey = this.licenseKey;
+
     try {
-      const response = await this.checkOnline();
-      this.cache = { response, cachedAt: Date.now() };
+      const response = await this.checkOnline(validationKey);
+
+      if (this.licenseKey === validationKey) {
+        this.cache = { response, cachedAt: Date.now() };
+      } else {
+        this.logger.debug('Discarding stale entitlement response after license key change');
+      }
+
       this.logger.log(`Entitlement validated: ${response.tier}`);
       return response;
     } catch (error) {
@@ -135,13 +147,15 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async checkOnline(): Promise<EntitlementResponse> {
-    const payload = {
-      licenseKey: this.licenseKey || '', // Empty string for keyless instances
+  private async checkOnline(licenseKeyOverride?: string | null): Promise<EntitlementResponse> {
+    const isCloud = process.env.CLOUD_MODE === 'true';
+    const payload: EntitlementRequest = {
+      licenseKey: licenseKeyOverride ?? this.licenseKey ?? '', // Empty string for keyless instances
       instanceId: this.instanceId,
       eventType: 'license_check',
-      deploymentMode: process.env.CLOUD_MODE === 'true' ? 'cloud' as const : 'self-hosted' as const,
+      deploymentMode: isCloud ? 'cloud' : 'self-hosted',
       stats: await this.collectStats(),
+      ...(isCloud && process.env.DB_SCHEMA ? { tenantId: process.env.DB_SCHEMA } : {}),
     };
 
     const controller = new AbortController();
@@ -203,6 +217,59 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+
+  /**
+   * Load a previously persisted license key from disk.
+   */
+  private loadPersistedKey(): string | null {
+    try {
+      const key = readFileSync(LICENSE_KEY_FILE, 'utf-8').trim();
+      if (key) {
+        this.logger.log('Loaded license key from persisted file');
+        return key;
+      }
+    } catch {
+      // File doesn't exist yet — that's fine
+    }
+    return null;
+  }
+
+  /**
+   * Activate a license key at runtime by validating first, then persisting only
+   * after successful validation so an existing valid key is never overwritten by
+   * a bad or unvalidated key.
+   */
+  async activateLicenseKey(key: string): Promise<EntitlementResponse> {
+    let info: EntitlementResponse;
+    try {
+      // Validate against the candidate key without mutating shared state first.
+      info = await this.checkOnline(key);
+    } catch (error) {
+      this.logger.error(`Entitlement validation failed: ${(error as Error).message}`);
+      info = this.getCommunityEntitlement('Validation failed');
+    }
+
+    if (!info.valid) {
+      this.logger.warn(`License activation failed: ${info.error || 'unknown error'}`);
+      return info;
+    }
+
+    // Commit shared state only after candidate validation succeeds.
+    this.licenseKey = key;
+    this.cache = { response: info, cachedAt: Date.now() };
+    this.validationPromise = Promise.resolve(info);
+    this.isValidated = true;
+
+    try {
+      mkdirSync(join(__dirname, '..', '..', 'data'), { recursive: true });
+      writeFileSync(LICENSE_KEY_FILE, key, { encoding: 'utf-8', mode: 0o600 });
+      this.logger.log('License key persisted to disk');
+    } catch (error) {
+      this.logger.warn(`Failed to persist license key: ${(error as Error).message}`);
+    }
+
+    return info;
+  }
 
   private getCommunityEntitlement(error?: string): EntitlementResponse {
     return {

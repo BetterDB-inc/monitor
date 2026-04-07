@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { ConfigService } from '@nestjs/config';
@@ -19,6 +20,13 @@ async function bootstrap() {
   const config = app.get(ConfigService);
   const port = config.get('PORT', 3001);
   const host = config.get('HOST', '0.0.0.0');
+
+  const corsOrigins = config.get('CORS_ORIGINS', 'https://betterdb.com');
+  app.enableCors({
+    origin: corsOrigins.split(',').map((o: string) => o.trim()),
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type'],
+  });
 
   await app.listen(port, host);
   logger.log(`Entitlement server running on http://${host}:${port}`);

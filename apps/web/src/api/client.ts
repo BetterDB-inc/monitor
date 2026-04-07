@@ -47,6 +47,84 @@ export class PaymentRequiredError extends Error {
   }
 }
 
+function getErrorMessageFromPayload(payload: unknown): string | null {
+  if (!payload) {
+    return null;
+  }
+
+  if (typeof payload === 'string') {
+    return payload.trim() || null;
+  }
+
+  if (Array.isArray(payload)) {
+    const nestedMessages = payload
+      .map(getErrorMessageFromPayload)
+      .filter((message): message is string => Boolean(message));
+
+    return nestedMessages.length > 0 ? nestedMessages.join(', ') : null;
+  }
+
+  if (typeof payload === 'object') {
+    const obj = payload as Record<string, unknown>;
+
+    const message = getErrorMessageFromPayload(obj.message);
+    if (message) {
+      return message;
+    }
+
+    const detail = getErrorMessageFromPayload(obj.detail);
+    if (detail) {
+      return detail;
+    }
+
+    const reason = getErrorMessageFromPayload(obj.reason);
+    if (reason) {
+      return reason;
+    }
+
+    const error = getErrorMessageFromPayload(obj.error);
+    if (error) {
+      return error;
+    }
+  }
+
+  return null;
+}
+
+function isPaymentRequiredPayload(payload: unknown): payload is {
+  message: string;
+  feature: string;
+  currentTier: string;
+  requiredTier: string;
+  upgradeUrl: string;
+} {
+  if (!payload || typeof payload !== 'object') {
+    return false;
+  }
+
+  const data = payload as Record<string, unknown>;
+  return (
+    typeof data.message === 'string' &&
+    typeof data.feature === 'string' &&
+    typeof data.currentTier === 'string' &&
+    typeof data.requiredTier === 'string' &&
+    typeof data.upgradeUrl === 'string'
+  );
+}
+
+async function parseErrorPayload(response: Response): Promise<unknown> {
+  const rawBody = await response.text();
+  if (!rawBody) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawBody);
+  } catch {
+    return rawBody;
+  }
+}
+
 export async function fetchApi<T>(
   endpoint: string,
   options?: RequestInit
@@ -71,11 +149,16 @@ export async function fetchApi<T>(
   });
 
   if (!response.ok) {
+    const errorPayload = await parseErrorPayload(response);
+
     if (response.status === 402) {
-      const errorData = await response.json();
-      throw new PaymentRequiredError(errorData);
+      if (isPaymentRequiredPayload(errorPayload)) {
+        throw new PaymentRequiredError(errorPayload);
+      }
     }
-    throw new Error(`API error: ${response.status} ${response.statusText}`);
+
+    const errorMessage = getErrorMessageFromPayload(errorPayload);
+    throw new Error(errorMessage || `API error: ${response.status} ${response.statusText}`);
   }
 
   return response.json();

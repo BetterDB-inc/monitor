@@ -51,11 +51,11 @@
     "globals": "^17.4.0",
     "happy-dom": "^20.8.9",
     "react-grab": "^0.1.28",
+    "shadcn": "^4.1.2",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.2",
     "vite": "^8.0.2",
-    "vitest": "^4.1.1",
-    "shadcn": "^4.1.2"
+    "vitest": "^4.1.1"
   }
 }
