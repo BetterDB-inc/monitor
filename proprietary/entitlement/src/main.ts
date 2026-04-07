@@ -21,7 +21,7 @@ async function bootstrap() {
   const port = config.get('PORT', 3001);
   const host = config.get('HOST', '0.0.0.0');
 
-  const corsOrigins = config.get('CORS_ORIGINS', 'https://betterdb.com,http://localhost:3001,http://localhost:5173');
+  const corsOrigins = config.get('CORS_ORIGINS', 'https://betterdb.com');
   app.enableCors({
     origin: corsOrigins.split(',').map((o: string) => o.trim()),
     methods: ['GET', 'POST'],
