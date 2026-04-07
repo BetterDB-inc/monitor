@@ -9,6 +9,8 @@ metadata:
     app.kubernetes.io/component: control-plane
 spec:
   replicas: 1
+  strategy: 
+    type: Recreate
   selector:
     matchLabels:
       app: entitlement
@@ -20,9 +22,8 @@ spec:
       serviceAccountName: entitlement
       containers:
         - name: entitlement
-          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v0.2.7
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v1.2.0
           imagePullPolicy: Always
-          trategy.type: Recreate
           ports:
             - containerPort: 3002
               protocol: TCP
@@ -45,7 +46,12 @@ spec:
             - name: APP_DOMAIN
               value: "app.betterdb.com"
             - name: DEFAULT_IMAGE_TAG
-              value: "v0.7.0"
+              value: "v0.14.0"
+            - name: RESEND_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: RESEND_API_KEY
             # Secrets from ConfigMap
             - name: ENTITLEMENT_DATABASE_URL
               valueFrom:

@@ -45,7 +45,10 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     this.currentVersion =
       process.env.APP_VERSION || process.env.npm_package_version || 'unknown';
     this.licenseKey = process.env.BETTERDB_LICENSE_KEY || this.loadPersistedKey();
-    this.entitlementUrl = process.env.ENTITLEMENT_URL || 'https://betterdb.com/api/v1/entitlements';
+    // Use the canonical www host directly: the apex betterdb.com 307-redirects
+    // to www, and Node's fetch doesn't always preserve POST bodies across
+    // cross-host redirects, which would silently break license validation.
+    this.entitlementUrl = process.env.ENTITLEMENT_URL || 'https://www.betterdb.com/api/v1/entitlements';
     this.cacheTtlMs = parseInt(process.env.LICENSE_CACHE_TTL_MS || '3600000', 10);
     this.maxStaleCacheMs = parseInt(process.env.LICENSE_MAX_STALE_MS || '604800000', 10);
     this.timeoutMs = parseInt(process.env.LICENSE_TIMEOUT_MS || '10000', 10);

@@ -1,4 +1,8 @@
-const REGISTRATION_URL = import.meta.env.VITE_REGISTRATION_URL || 'http://localhost:3002/v1/registrations';
+// Default to the canonical www host: the apex betterdb.com 307-redirects to www,
+// and browsers don't follow redirects on CORS preflights — so the apex would
+// silently break in-app registration. Set VITE_REGISTRATION_URL at build time
+// (or in dev) to point at a local entitlement service for testing.
+const REGISTRATION_URL = import.meta.env.VITE_REGISTRATION_URL || 'https://www.betterdb.com/api/register';
 
 export interface RegistrationResponse {
   message: string;

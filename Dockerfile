@@ -35,6 +35,12 @@ ARG VITE_PUBLIC_POSTHOG_HOST=https://eu.i.posthog.com
 ENV VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=$VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
 ENV VITE_PUBLIC_POSTHOG_HOST=$VITE_PUBLIC_POSTHOG_HOST
 
+# Registration proxy URL (baked into frontend at build time).
+# Defaults to the canonical www host so the in-app registration form on
+# self-hosted instances reaches the public website proxy out of the box.
+ARG VITE_REGISTRATION_URL=https://www.betterdb.com/api/register
+ENV VITE_REGISTRATION_URL=$VITE_REGISTRATION_URL
+
 # Build only api, web, and shared (exclude entitlement)
 RUN pnpm --filter api --filter web --filter @betterdb/shared build
 

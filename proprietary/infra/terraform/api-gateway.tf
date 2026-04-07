@@ -260,6 +260,18 @@ resource "aws_apigatewayv2_route" "workspace_token" {
   authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
 }
 
+# Public registration endpoint — kept behind the API key authorizer so it can
+# only be reached via the betterdb.com /api/register proxy (which holds the
+# server-side X-Api-Key). The entitlement service applies its own per-IP
+# throttling for additional abuse protection.
+resource "aws_apigatewayv2_route" "register" {
+  api_id             = aws_apigatewayv2_api.entitlement.id
+  route_key          = "POST /v1/registrations"
+  target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
+}
+
 # ============================================
 # Outputs
 # ============================================

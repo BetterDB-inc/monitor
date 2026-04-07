@@ -60,7 +60,7 @@ export class TelemetryClientFactory {
   private createHttpClient(): TelemetryPort {
     const entitlementUrl =
       this.configService.get<string>('ENTITLEMENT_URL') ||
-      'https://betterdb.com/api/v1/entitlements';
+      'https://www.betterdb.com/api/v1/entitlements';
     const url = new URL(entitlementUrl);
     const telemetryPath = url.pathname.replace(/\/entitlements$/, '/telemetry');
     if (telemetryPath === url.pathname) {
