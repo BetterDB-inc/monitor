@@ -36,12 +36,12 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
 
   return (
     <SidebarProvider>
-      <div className="min-h-screen bg-background">
+      <div className="min-h-screen bg-background w-full">
         <AppSidebar cloudUser={cloudUser} onFeedbackClick={() => setShowFeedback(true)} />
 
         {showFeedback && <FeedbackModal onClose={() => setShowFeedback(false)} />}
 
-        <main className="min-h-screen flex flex-col pl-0 transition-[padding] duration-200 ease-linear md:peer-data-[state=expanded]:pl-64">
+        <main className="min-h-screen  flex flex-col pl-0 transition-[padding] duration-200 ease-linear md:peer-data-[state=expanded]:pl-64">
           {!cloudUser && <UpdateBanner />}
           <div className="p-8 flex-1 flex flex-col">
             <Routes>
