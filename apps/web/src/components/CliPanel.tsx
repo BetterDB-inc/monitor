@@ -253,8 +253,8 @@ export function CliPanel({ isOpen, onToggle, onClose }: CliPanelProps) {
   );
 
   return (
-    <Collapsible open={isOpen} onOpenChange={onToggle}>
-      <div className="fixed bottom-0 left-64 right-0 z-30 bg-card shadow-lg">
+    <Collapsible asChild open={isOpen} onOpenChange={onToggle}>
+      <div className="fixed bottom-0 left-0 right-0 z-30 bg-card shadow-lg transition-[left] duration-200 ease-linear md:peer-data-[state=expanded]:left-64">
         {/* Drag handle for resizing */}
         {isOpen && (
           <div
