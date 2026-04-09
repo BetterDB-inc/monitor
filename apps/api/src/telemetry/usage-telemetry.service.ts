@@ -38,6 +38,7 @@ export class UsageTelemetryService implements OnModuleInit {
       this.telemetryClient.identify(this.instanceId, {
         version: this.version,
         tier: this.tier,
+        licenseKey: this.licenseService.getLicenseKey(),
         deploymentMode: this.deploymentMode,
       });
     } catch {
@@ -57,6 +58,7 @@ export class UsageTelemetryService implements OnModuleInit {
           ...payload,
           version: this.version,
           tier: this.tier,
+          licenseKey: this.licenseService?.getLicenseKey(),
           deploymentMode: this.deploymentMode,
           workspaceName: this.workspaceName,
           timestamp: Date.now(),

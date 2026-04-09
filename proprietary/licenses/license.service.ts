@@ -306,6 +306,10 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     return this.cache?.response || this.getCommunityEntitlement();
   }
 
+  getLicenseKey(): string | null {
+    return this.licenseKey;
+  }
+
   async refreshLicense(): Promise<EntitlementResponse> {
     this.cache = null;
     this.isValidated = false;
