@@ -200,7 +200,7 @@ describe('Migration API (e2e)', () => {
         });
 
       // Validation endpoint may require license (Pro tier)
-      if (startRes.status === 403) return; // Skip if license guard blocks it
+      if (startRes.status === 402 || startRes.status === 403) return; // Skip if license guard blocks it
 
       expect([200, 201]).toContain(startRes.status);
       expect(startRes.body).toHaveProperty('id');
@@ -213,7 +213,7 @@ describe('Migration API (e2e)', () => {
         const pollRes = await request(app.getHttpServer())
           .get(`/migration/validation/${validationId}`);
 
-        if (pollRes.status === 403) return; // Skip if license guard blocks
+        if (pollRes.status === 402 || pollRes.status === 403) return; // Skip if license guard blocks
         result = pollRes.body;
         if (result.status === 'completed' || result.status === 'failed') break;
         await new Promise(r => setTimeout(r, 500));
@@ -237,7 +237,7 @@ describe('Migration API (e2e)', () => {
           targetConnectionId,
         });
 
-      if (startRes.status === 403) return; // Skip if license guard blocks
+      if (startRes.status === 402 || startRes.status === 403) return; // Skip if license guard blocks
 
       if (startRes.status !== 200 && startRes.status !== 201) return;
 
@@ -246,7 +246,7 @@ describe('Migration API (e2e)', () => {
       const deleteRes = await request(app.getHttpServer())
         .delete(`/migration/validation/${validationId}`);
 
-      if (deleteRes.status === 403) return;
+      if (deleteRes.status === 402 || deleteRes.status === 403) return;
 
       expect(deleteRes.status).toBe(200);
     });
