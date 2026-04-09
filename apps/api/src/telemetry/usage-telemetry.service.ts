@@ -34,10 +34,12 @@ export class UsageTelemetryService implements OnModuleInit {
     this.instanceId = this.licenseService.getInstanceId();
     this.tier = this.licenseService.getLicenseTier();
 
+    const licenseKey = this.getLicenseKeySafely();
     try {
       this.telemetryClient.identify(this.instanceId, {
         version: this.version,
         tier: this.tier,
+        licenseKey,
         deploymentMode: this.deploymentMode,
       });
     } catch {
@@ -49,6 +51,7 @@ export class UsageTelemetryService implements OnModuleInit {
 
   private sendEvent(eventType: string, payload?: Record<string, unknown>): void {
     if (!this.instanceId) return;
+    const licenseKey = this.getLicenseKeySafely();
     try {
       this.telemetryClient.capture({
         distinctId: this.instanceId,
@@ -57,6 +60,7 @@ export class UsageTelemetryService implements OnModuleInit {
           ...payload,
           version: this.version,
           tier: this.tier,
+          licenseKey,
           deploymentMode: this.deploymentMode,
           workspaceName: this.workspaceName,
           timestamp: Date.now(),
@@ -64,6 +68,16 @@ export class UsageTelemetryService implements OnModuleInit {
       });
     } catch {
       // fire-and-forget — telemetry must never crash the app
+    }
+  }
+
+  private getLicenseKeySafely(): string | undefined {
+    const licenseService = this.licenseService as { getLicenseKey?: () => string } | undefined;
+    if (typeof licenseService?.getLicenseKey !== 'function') return undefined;
+    try {
+      return licenseService.getLicenseKey();
+    } catch {
+      return undefined;
     }
   }
 
