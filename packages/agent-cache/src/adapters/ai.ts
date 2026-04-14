@@ -115,11 +115,17 @@ export function createAgentCacheMiddleware(
 
       const result = await doGenerate();
 
-      // Cache the result
+      // Cache the result with token usage for cost tracking
       if (llmParams.messages.length > 0) {
         const response = extractResponseText(result);
         if (response) {
-          await cache.llm.store(llmParams, response).catch(() => {
+          // Extract token usage from result for cost tracking
+          const r = result as { usage?: { promptTokens?: number; completionTokens?: number } };
+          const tokens = r.usage?.promptTokens !== undefined && r.usage?.completionTokens !== undefined
+            ? { input: r.usage.promptTokens, output: r.usage.completionTokens }
+            : undefined;
+
+          await cache.llm.store(llmParams, response, tokens ? { tokens } : undefined).catch(() => {
             // Swallow store errors - caching should not break inference
           });
         }

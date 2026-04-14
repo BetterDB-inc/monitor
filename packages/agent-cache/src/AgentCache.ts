@@ -226,7 +226,8 @@ export class AgentCache {
       }
     } while (cursor !== '0');
 
-    // Reset in-memory session tracker and gauge to stay in sync with Valkey
+    // Reset in-memory state to stay in sync with Valkey
     this.session.resetTracker();
+    this.tool.resetPolicies();
   }
 }

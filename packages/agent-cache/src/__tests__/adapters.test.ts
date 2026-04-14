@@ -154,6 +154,7 @@ describe('Vercel AI SDK adapter', () => {
     expect(mockCache.llm.store).toHaveBeenCalledWith(
       expect.objectContaining({ model: 'gpt-4o' }),
       'Generated response',
+      { tokens: { input: 10, output: 20 } },
     );
   });
 });

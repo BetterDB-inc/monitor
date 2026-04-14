@@ -307,4 +307,12 @@ export class ToolCache {
       console.warn('[agent-cache] Failed to load tool policies from Valkey:', err);
     }
   }
+
+  /**
+   * Clear in-memory tool policies. Called by AgentCache.flush() to stay in sync
+   * after all Valkey keys (including __tool_policies) are deleted.
+   */
+  resetPolicies(): void {
+    this.policies.clear();
+  }
 }
