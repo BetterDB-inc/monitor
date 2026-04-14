@@ -95,6 +95,9 @@ export function createAgentCacheMiddleware(
   const extractModel = opts.extractModel ?? defaultExtractModel;
 
   return {
+    // Required literal by LanguageModelV3Middleware from @ai-sdk/provider.
+    // If the ai package bumps to a v4 spec, this must be updated alongside
+    // the peer dependency range in package.json ("ai": "^6.0.135").
     specificationVersion: 'v3',
 
     wrapGenerate: async ({ doGenerate, params }) => {

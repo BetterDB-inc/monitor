@@ -109,6 +109,22 @@ describe('ToolCache', () => {
       expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'tool:get_weather:hits', 1]);
     });
 
+    it('deletes corrupt entry and returns miss on invalid JSON', async () => {
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue('<<<corrupt>>>');
+      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      const result = await cache.check('get_weather', { city: 'Sofia' });
+
+      expect(result.hit).toBe(false);
+      expect(result.tier).toBe('tool');
+      expect(result.toolName).toBe('get_weather');
+      expect(client.del).toHaveBeenCalledWith(expect.stringContaining('test_ac:tool:get_weather:'));
+
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'tool:misses', 1]);
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'tool:get_weather:misses', 1]);
+    });
+
     it('records tier-level and per-tool miss via pipeline', async () => {
       (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 

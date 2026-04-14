@@ -16,7 +16,7 @@ export interface SessionStoreConfig {
 // Note: Eviction is O(n) but n is bounded at maxSize (default 10k entries).
 // For typical agent workloads this is acceptable (~1-2ms worst case).
 // A proper LRU with doubly-linked list would add complexity without meaningful benefit.
-class SessionTracker {
+export class SessionTracker {
   private readonly maxSize: number;
   private readonly seen: Map<string, number> = new Map();
 

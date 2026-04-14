@@ -75,7 +75,9 @@ export class LlmCache {
             // Corrupt cache entry - delete to self-heal, then treat as miss
             this.client.del(key).catch(() => {});
             try {
-              await this.client.hincrby(this.statsKey, 'llm:misses', 1);
+              const statsPipeline = this.client.pipeline();
+              statsPipeline.hincrby(this.statsKey, 'llm:misses', 1);
+              await statsPipeline.exec();
             } catch {
               // Stats update failure should not break the cache
             }
@@ -123,9 +125,11 @@ export class LlmCache {
           };
         }
 
-        // Record miss
+        // Record miss via pipeline for consistency with hit path and tool cache
         try {
-          await this.client.hincrby(this.statsKey, 'llm:misses', 1);
+          const statsPipeline = this.client.pipeline();
+          statsPipeline.hincrby(this.statsKey, 'llm:misses', 1);
+          await statsPipeline.exec();
         } catch {
           // Stats update failure should not break the cache
         }

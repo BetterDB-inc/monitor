@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { SessionStore } from '../tiers/SessionStore';
+import { SessionStore, SessionTracker } from '../tiers/SessionStore';
 import { AgentCacheUsageError } from '../errors';
 import type { Telemetry } from '../telemetry';
 import type { Valkey } from '../types';
@@ -266,6 +266,94 @@ describe('SessionStore', () => {
         'writes:cp-1|task-1|a|0': '"val-a"',
         'writes:cp-1|task-1|b|0': '"val-b"',
       });
+    });
+  });
+
+  describe('SessionTracker LRU eviction', () => {
+    it('evicts the oldest entry when at capacity and returns it', () => {
+      const tracker = new SessionTracker(3);
+
+      expect(tracker.add('a')).toEqual({ isNew: true, evicted: undefined });
+      expect(tracker.add('b')).toEqual({ isNew: true, evicted: undefined });
+      expect(tracker.add('c')).toEqual({ isNew: true, evicted: undefined });
+
+      // At capacity - adding 'd' should evict 'a' (oldest)
+      const result = tracker.add('d');
+      expect(result.isNew).toBe(true);
+      expect(result.evicted).toBe('a');
+    });
+
+    it('re-adding an existing entry updates LRU order and is not new', () => {
+      const tracker = new SessionTracker(3);
+      let now = 1000;
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+      now = 1000; tracker.add('a');
+      now = 2000; tracker.add('b');
+      now = 3000; tracker.add('c');
+
+      // Touch 'a' to make it most recent
+      now = 4000;
+      expect(tracker.add('a')).toEqual({ isNew: false });
+
+      // Now 'b' (timestamp 2000) is the oldest — should be evicted
+      now = 5000;
+      const result = tracker.add('d');
+      expect(result.isNew).toBe(true);
+      expect(result.evicted).toBe('b');
+
+      vi.restoreAllMocks();
+    });
+
+    it('remove() returns true for tracked and false for untracked', () => {
+      const tracker = new SessionTracker(3);
+      tracker.add('a');
+
+      expect(tracker.remove('a')).toBe(true);
+      expect(tracker.remove('a')).toBe(false);
+      expect(tracker.remove('never-added')).toBe(false);
+    });
+  });
+
+  describe('active_sessions gauge tracks eviction via set()', () => {
+    it('increments gauge on new thread, decrements on eviction', async () => {
+      const incFn = vi.fn();
+      const decFn = vi.fn();
+      const localTelemetry = {
+        tracer: {
+          startActiveSpan: vi.fn((_name: string, fn: (span: unknown) => unknown) => fn({
+            setAttribute: vi.fn(),
+            recordException: vi.fn(),
+            end: vi.fn(),
+          })),
+        },
+        metrics: {
+          requestsTotal: { labels: vi.fn(() => ({ inc: vi.fn() })) },
+          operationDuration: { labels: vi.fn(() => ({ observe: vi.fn() })) },
+          costSaved: { labels: vi.fn(() => ({ inc: vi.fn() })) },
+          storedBytes: { labels: vi.fn(() => ({ inc: vi.fn() })) },
+          activeSessions: { labels: vi.fn(() => ({ inc: incFn, dec: decFn })) },
+        },
+      } as unknown as Telemetry;
+
+      const localStore = new SessionStore({
+        client,
+        name: 'test_ac',
+        defaultTtl: 3600,
+        tierTtl: 1800,
+        telemetry: localTelemetry,
+        statsKey: 'test_ac:__stats',
+      });
+
+      (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
+
+      await localStore.set('t-1', 'f', 'v');
+      expect(incFn).toHaveBeenCalledTimes(1);
+      expect(decFn).not.toHaveBeenCalled();
+
+      // Same thread - no increment
+      await localStore.set('t-1', 'f2', 'v2');
+      expect(incFn).toHaveBeenCalledTimes(1);
     });
   });
 

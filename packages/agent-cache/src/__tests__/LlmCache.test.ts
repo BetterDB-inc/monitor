@@ -116,7 +116,23 @@ describe('LlmCache', () => {
       expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'llm:hits', 1]);
     });
 
-    it('records miss in stats', async () => {
+    it('deletes corrupt entry and returns miss on invalid JSON', async () => {
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue('not valid json{{{');
+      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      const result = await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      expect(result.hit).toBe(false);
+      expect(result.tier).toBe('llm');
+      expect(client.del).toHaveBeenCalledWith(expect.stringContaining('test_ac:llm:'));
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'llm:misses', 1]);
+    });
+
+    it('records miss in stats via pipeline', async () => {
       (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
       await cache.check({
@@ -124,7 +140,8 @@ describe('LlmCache', () => {
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'llm:misses', 1);
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'llm:misses', 1]);
     });
 
     it('tracks cost savings on hit when entry has cost via pipeline', async () => {
