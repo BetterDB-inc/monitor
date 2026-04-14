@@ -78,12 +78,13 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     config: RunnableConfig,
     checkpoint: Checkpoint,
     metadata: CheckpointMetadata,
-    newVersions: Record<string, number | string>,
+    _newVersions: Record<string, number | string>,
   ): Promise<RunnableConfig> {
     const threadId = config.configurable?.thread_id as string;
     const checkpointId = checkpoint.id;
 
-    // Store newVersions alongside the tuple for version tracking and conflict detection
+    // Note: newVersions is not stored - no current consumer needs it.
+    // If version-based conflict detection is needed, add it back with a concrete use case.
     const storedData = {
       config: {
         ...config,
@@ -91,7 +92,6 @@ export class BetterDBSaver extends BaseCheckpointSaver {
       },
       checkpoint,
       metadata,
-      newVersions, // Preserve for advanced workflows that need version-based filtering
     };
     const serialized = JSON.stringify(storedData);
 

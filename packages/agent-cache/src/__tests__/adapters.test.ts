@@ -338,6 +338,42 @@ describe('LangGraph adapter', () => {
     expect(results.length).toBe(2);
   });
 
+  it('list() respects before filter to start after specific checkpoint', async () => {
+    const mockCache = createMockAgentCache();
+    const checkpoints = {
+      'checkpoint:cp-1': JSON.stringify({
+        config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-1' } },
+        checkpoint: { id: 'cp-1', ts: '2024-01-01T00:00:00Z' },
+        metadata: {},
+      }),
+      'checkpoint:cp-2': JSON.stringify({
+        config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-2' } },
+        checkpoint: { id: 'cp-2', ts: '2024-01-02T00:00:00Z' },
+        metadata: {},
+      }),
+      'checkpoint:cp-3': JSON.stringify({
+        config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-3' } },
+        checkpoint: { id: 'cp-3', ts: '2024-01-03T00:00:00Z' },
+        metadata: {},
+      }),
+    };
+    (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue(checkpoints);
+
+    const saver = new BetterDBSaver({ cache: mockCache });
+    const results: any[] = [];
+
+    // Request checkpoints BEFORE cp-2 (should return cp-1 only, skipping cp-3 and cp-2)
+    for await (const tuple of saver.list(
+      { configurable: { thread_id: 'thread-1' } },
+      { before: { configurable: { checkpoint_id: 'cp-2' } } }
+    )) {
+      results.push(tuple);
+    }
+
+    expect(results.length).toBe(1);
+    expect(results[0].checkpoint.id).toBe('cp-1');
+  });
+
   it('putWrites() stores writes with taskId in key for deduplication', async () => {
     const mockCache = createMockAgentCache();
     (mockCache.session.set as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);

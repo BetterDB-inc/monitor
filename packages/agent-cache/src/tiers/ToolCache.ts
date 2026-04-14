@@ -19,6 +19,19 @@ function validateNoGlobChars(value: string, name: string): void {
   }
 }
 
+/**
+ * Validate that tool name doesn't contain colons, which are used as key delimiters.
+ * Tool names with colons would break stats parsing in AgentCache.stats().
+ */
+function validateToolName(toolName: string): void {
+  if (toolName.includes(':')) {
+    throw new AgentCacheUsageError(
+      `Tool name "${toolName}" contains colon (:). ` +
+      `Colons are not allowed in tool names as they are used as key delimiters.`
+    );
+  }
+}
+
 export interface ToolCacheConfig {
   client: Valkey;
   name: string;
@@ -61,6 +74,7 @@ export class ToolCache {
   }
 
   async check(toolName: string, args: unknown): Promise<ToolCacheResult> {
+    validateToolName(toolName);
     const startTime = Date.now();
 
     return this.telemetry.tracer.startActiveSpan('agent_cache.tool.check', async (span) => {
@@ -175,6 +189,7 @@ export class ToolCache {
   }
 
   async store(toolName: string, args: unknown, response: string, options?: ToolStoreOptions): Promise<string> {
+    validateToolName(toolName);
     const startTime = Date.now();
 
     return this.telemetry.tracer.startActiveSpan('agent_cache.tool.store', async (span) => {
@@ -236,6 +251,7 @@ export class ToolCache {
   }
 
   async setPolicy(toolName: string, policy: ToolPolicy): Promise<void> {
+    validateToolName(toolName);
     this.policies.set(toolName, policy);
 
     // Persist to Valkey

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ToolCache } from '../tiers/ToolCache';
+import { AgentCacheUsageError } from '../errors';
 import type { Telemetry } from '../telemetry';
 import type { Valkey } from '../types';
 
@@ -266,6 +267,27 @@ describe('ToolCache', () => {
 
       expect(cache.getPolicy('get_weather')).toEqual({ ttl: 120 });
       expect(cache.getPolicy('search')).toEqual({ ttl: 60 });
+    });
+  });
+
+  describe('tool name validation', () => {
+    it('rejects tool names containing colons in check()', async () => {
+      await expect(cache.check('my:tool', {})).rejects.toThrow(AgentCacheUsageError);
+      await expect(cache.check('namespace:tool:name', {})).rejects.toThrow(AgentCacheUsageError);
+    });
+
+    it('rejects tool names containing colons in store()', async () => {
+      await expect(cache.store('my:tool', {}, 'result')).rejects.toThrow(AgentCacheUsageError);
+    });
+
+    it('rejects tool names containing colons in setPolicy()', async () => {
+      await expect(cache.setPolicy('my:tool', { ttl: 300 })).rejects.toThrow(AgentCacheUsageError);
+    });
+
+    it('rejects glob metacharacters in invalidateByTool()', async () => {
+      await expect(cache.invalidateByTool('tool*')).rejects.toThrow(AgentCacheUsageError);
+      await expect(cache.invalidateByTool('tool?name')).rejects.toThrow(AgentCacheUsageError);
+      await expect(cache.invalidateByTool('tool[1]')).rejects.toThrow(AgentCacheUsageError);
     });
   });
 });

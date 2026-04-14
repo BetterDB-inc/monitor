@@ -14,6 +14,13 @@ import { SessionStore } from './tiers/SessionStore';
 import { createTelemetry } from './telemetry';
 import { ValkeyCommandError } from './errors';
 
+/**
+ * Escape glob metacharacters for use in SCAN MATCH patterns.
+ */
+function escapeGlobPattern(str: string): string {
+  return str.replace(/([*?[\]])/g, '\\$1');
+}
+
 export class AgentCache {
   public readonly llm: LlmCache;
   public readonly tool: ToolCache;
@@ -203,7 +210,8 @@ export class AgentCache {
   }
 
   async flush(): Promise<void> {
-    const pattern = `${this.name}:*`;
+    // Escape cache name in case it contains glob metacharacters
+    const pattern = `${escapeGlobPattern(this.name)}:*`;
     let cursor = '0';
 
     do {

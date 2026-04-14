@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SessionStore } from '../tiers/SessionStore';
+import { AgentCacheUsageError } from '../errors';
 import type { Telemetry } from '../telemetry';
 import type { Valkey } from '../types';
 
@@ -196,6 +197,12 @@ describe('SessionStore', () => {
         'test_ac:session:thread-1:user_name',
         'test_ac:session:thread-1:checkpoint:abc',
       );
+    });
+
+    it('rejects glob metacharacters to prevent mass deletion', async () => {
+      await expect(store.destroyThread('thread-*')).rejects.toThrow(AgentCacheUsageError);
+      await expect(store.destroyThread('thread?1')).rejects.toThrow(AgentCacheUsageError);
+      await expect(store.destroyThread('thread[1]')).rejects.toThrow(AgentCacheUsageError);
     });
   });
 
