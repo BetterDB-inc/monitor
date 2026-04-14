@@ -1,0 +1,147 @@
+# Publish @betterdb/agent-cache to npm
+#
+# Required secrets:
+#   NPM_TOKEN — npmjs.com automation token with publish access to @betterdb/agent-cache
+
+name: Publish Agent Cache
+
+on:
+  push:
+    tags:
+      - 'agent-cache-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.1.0)'
+        required: true
+        type: string
+      skip_npm:
+        description: 'Skip npm publish'
+        type: boolean
+        default: false
+
+jobs:
+  publish-npm:
+    if: ${{ !inputs.skip_npm }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
+          else
+            # agent-cache-v0.1.0 → 0.1.0
+            echo "version=${GITHUB_REF_NAME#agent-cache-v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update package.json version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd packages/agent-cache
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Build agent-cache
+        run: pnpm --filter @betterdb/agent-cache build
+
+      - name: Verify build
+        run: |
+          test -f packages/agent-cache/dist/index.js
+          test -f packages/agent-cache/dist/index.d.ts
+          test -f packages/agent-cache/dist/adapters/langchain.js
+          test -f packages/agent-cache/dist/adapters/ai.js
+          test -f packages/agent-cache/dist/adapters/langgraph.js
+
+      - name: Prepare for publishing
+        run: |
+          cd packages/agent-cache
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+            delete pkg.devDependencies;
+            fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: cd packages/agent-cache && npm publish --provenance --access public
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: agent-cache-v${{ steps.version.outputs.version }}
+          name: Agent Cache v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    needs: publish-npm
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_npm }}
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify npm package (with retry)
+        env:
+          VERSION: ${{ needs.publish-npm.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if npm view "@betterdb/agent-cache@$VERSION" version; then
+              echo "Package verified successfully"
+              exit 0
+            fi
+            echo "Attempt $i: package not yet available, retrying in 30s..."
+            sleep 30
+          done
+          echo "Package not available after 5 attempts"
+          exit 1
