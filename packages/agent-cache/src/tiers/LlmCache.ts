@@ -68,7 +68,24 @@ export class LlmCache {
           .observe(duration);
 
         if (raw) {
-          const entry: StoredLlmEntry = JSON.parse(raw);
+          let entry: StoredLlmEntry;
+          try {
+            entry = JSON.parse(raw);
+          } catch {
+            // Corrupt cache entry - treat as miss
+            try {
+              await this.client.hincrby(this.statsKey, 'llm:misses', 1);
+            } catch {
+              // Stats update failure should not break the cache
+            }
+            this.telemetry.metrics.requestsTotal
+              .labels(this.name, 'llm', 'miss', '')
+              .inc();
+            span.setAttribute('cache.hit', false);
+            span.setAttribute('cache.corrupt', true);
+            span.end();
+            return { hit: false, tier: 'llm' as const };
+          }
 
           // Record hit
           try {

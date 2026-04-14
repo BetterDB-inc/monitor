@@ -68,7 +68,25 @@ export class ToolCache {
           .observe(duration);
 
         if (raw) {
-          const entry: StoredToolEntry = JSON.parse(raw);
+          let entry: StoredToolEntry;
+          try {
+            entry = JSON.parse(raw);
+          } catch {
+            // Corrupt cache entry - treat as miss
+            try {
+              await this.client.hincrby(this.statsKey, 'tool:misses', 1);
+              await this.client.hincrby(this.statsKey, `tool:${toolName}:misses`, 1);
+            } catch {
+              // Stats update failure should not break the cache
+            }
+            this.telemetry.metrics.requestsTotal
+              .labels(this.name, 'tool', 'miss', toolName)
+              .inc();
+            span.setAttribute('cache.hit', false);
+            span.setAttribute('cache.corrupt', true);
+            span.end();
+            return { hit: false, tier: 'tool' as const, toolName };
+          }
 
           // Record tier-level and per-tool hit
           try {
@@ -280,8 +298,10 @@ export class ToolCache {
           }
         }
       }
-    } catch {
+    } catch (err) {
       // Non-blocking: failure to load policies should not break initialization
+      // Log warning so misconfiguration is visible
+      console.warn('[agent-cache] Failed to load tool policies from Valkey:', err);
     }
   }
 }

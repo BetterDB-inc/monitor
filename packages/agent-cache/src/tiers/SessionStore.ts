@@ -23,12 +23,19 @@ class SessionTracker {
     this.maxSize = maxSize;
   }
 
-  add(threadId: string): boolean {
+  /**
+   * Track a thread. Returns { isNew: true, evicted: string } if newly tracked
+   * (and optionally which thread was evicted to make room).
+   * Returns { isNew: false } if already tracked.
+   */
+  add(threadId: string): { isNew: boolean; evicted?: string } {
     if (this.seen.has(threadId)) {
       // Update access time for LRU
       this.seen.set(threadId, Date.now());
-      return false; // Already tracked
+      return { isNew: false };
     }
+
+    let evicted: string | undefined;
 
     // Evict oldest if at capacity (O(n) scan, bounded at maxSize)
     if (this.seen.size >= this.maxSize) {
@@ -42,11 +49,12 @@ class SessionTracker {
       }
       if (oldestKey) {
         this.seen.delete(oldestKey);
+        evicted = oldestKey;
       }
     }
 
     this.seen.set(threadId, Date.now());
-    return true; // Newly tracked
+    return { isNew: true, evicted };
   }
 
   remove(threadId: string): boolean {
@@ -162,11 +170,17 @@ export class SessionStore {
         }
 
         // Track active session (increment gauge on first write per thread)
-        const isNew = this.sessionTracker.add(threadId);
+        const { isNew, evicted } = this.sessionTracker.add(threadId);
         if (isNew) {
           this.telemetry.metrics.activeSessions
             .labels(this.name)
             .inc();
+        }
+        // Decrement gauge if a session was evicted to make room
+        if (evicted) {
+          this.telemetry.metrics.activeSessions
+            .labels(this.name)
+            .dec();
         }
 
         // Track stored bytes

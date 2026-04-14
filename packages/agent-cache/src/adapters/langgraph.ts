@@ -23,7 +23,7 @@ export interface BetterDBSaverOptions {
  * Storage layout in session tier:
  *   {name}:session:{thread_id}:checkpoint:{checkpoint_id} = JSON(CheckpointTuple)
  *   {name}:session:{thread_id}:checkpoint:latest = JSON(CheckpointTuple)
- *   {name}:session:{thread_id}:writes:{checkpoint_id}:{task_id}:{channel}:{idx} = JSON(value)
+ *   {name}:session:{thread_id}:writes:{checkpoint_id}|{task_id}|{channel}|{idx} = JSON(value)
  *
  * Known limitations:
  * - list() loads all checkpoint data for a thread into memory before filtering.
@@ -31,6 +31,9 @@ export interface BetterDBSaverOptions {
  *   even when limit: 1. For typical agent deployments (hundreds of checkpoints),
  *   this is acceptable. If you have millions of checkpoints per thread, consider
  *   using langgraph-checkpoint-redis with Redis 8+ instead.
+ * - getTuple() calls getAll() to fetch pending writes, which retrieves all session
+ *   fields for the thread and refreshes their TTL. This is wasteful for threads with
+ *   many checkpoints but acceptable for typical agent workloads.
  */
 export class BetterDBSaver extends BaseCheckpointSaver {
   private cache: AgentCache;
@@ -73,7 +76,7 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     config: RunnableConfig,
     checkpoint: Checkpoint,
     metadata: CheckpointMetadata,
-    newVersions: Record<string, number>,
+    newVersions: Record<string, number | string>,
   ): Promise<RunnableConfig> {
     const threadId = config.configurable?.thread_id as string;
     const checkpointId = checkpoint.id;
@@ -172,7 +175,8 @@ export class BetterDBSaver extends BaseCheckpointSaver {
   /**
    * Reconstruct CheckpointPendingWrite tuples from session fields matching
    * the key pattern: writes:{checkpointId}|{taskId}|{channel}|{idx}
-   * Uses | as delimiter to avoid ambiguity with colons in taskId or channel names.
+   * Uses | as delimiter. Parses by finding first | for taskId and last | for idx,
+   * allowing channel names to contain | characters.
    */
   private extractPendingWrites(
     all: Record<string, string>,
@@ -185,11 +189,17 @@ export class BetterDBSaver extends BaseCheckpointSaver {
       if (!field.startsWith(prefix)) continue;
 
       const rest = field.slice(prefix.length);
-      const parts = rest.split('|');
-      // Need exactly taskId, channel, idx
-      if (parts.length !== 3) continue;
 
-      const [taskId, channel] = parts;
+      // Find first | to extract taskId, last | to extract idx, middle is channel
+      const firstPipe = rest.indexOf('|');
+      const lastPipe = rest.lastIndexOf('|');
+
+      // Need at least two | characters (taskId|channel|idx)
+      if (firstPipe === -1 || lastPipe === -1 || firstPipe === lastPipe) continue;
+
+      const taskId = rest.slice(0, firstPipe);
+      const channel = rest.slice(firstPipe + 1, lastPipe);
+      // idx is after last pipe, we don't need to parse it
 
       try {
         const value = JSON.parse(rawValue);
