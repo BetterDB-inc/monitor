@@ -477,6 +477,46 @@ describe('LangGraph adapter', () => {
     );
   });
 
+  it('putWrites() throws AgentCacheUsageError when checkpoint_id is missing', async () => {
+    const mockCache = createMockAgentCache();
+    const saver = new BetterDBSaver({ cache: mockCache });
+
+    await expect(
+      saver.putWrites(
+        { configurable: { thread_id: 'thread-1' } },
+        [['channel', 'value']],
+        'task-1',
+      ),
+    ).rejects.toThrow('putWrites() requires both config.configurable.thread_id and config.configurable.checkpoint_id');
+  });
+
+  it('putWrites() throws AgentCacheUsageError when thread_id is missing', async () => {
+    const mockCache = createMockAgentCache();
+    const saver = new BetterDBSaver({ cache: mockCache });
+
+    await expect(
+      saver.putWrites(
+        { configurable: { checkpoint_id: 'cp-1' } },
+        [['channel', 'value']],
+        'task-1',
+      ),
+    ).rejects.toThrow('putWrites() requires both config.configurable.thread_id and config.configurable.checkpoint_id');
+  });
+
+  it('put() throws AgentCacheUsageError when thread_id is missing', async () => {
+    const mockCache = createMockAgentCache();
+    const saver = new BetterDBSaver({ cache: mockCache });
+
+    await expect(
+      saver.put(
+        { configurable: {} },
+        { id: 'cp-1', ts: '2024-01-01T00:00:00Z' } as any,
+        {},
+        {},
+      ),
+    ).rejects.toThrow('put() requires config.configurable.thread_id');
+  });
+
   it('deleteThread() calls session.destroyThread', async () => {
     const mockCache = createMockAgentCache();
     (mockCache.session.destroyThread as ReturnType<typeof vi.fn>).mockResolvedValue(5);

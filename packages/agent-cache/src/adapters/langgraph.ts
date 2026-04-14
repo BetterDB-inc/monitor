@@ -8,6 +8,7 @@ import type {
 } from '@langchain/langgraph-checkpoint';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import type { AgentCache } from '../AgentCache';
+import { AgentCacheUsageError } from '../errors';
 
 export interface BetterDBSaverOptions {
   /** A pre-configured AgentCache instance. */
@@ -81,7 +82,10 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     metadata: CheckpointMetadata,
     _newVersions: Record<string, number | string>,
   ): Promise<RunnableConfig> {
-    const threadId = config.configurable?.thread_id as string;
+    const threadId = config.configurable?.thread_id;
+    if (!threadId) {
+      throw new AgentCacheUsageError('put() requires config.configurable.thread_id');
+    }
     const checkpointId = checkpoint.id;
 
     // Note: newVersions is not stored - no current consumer needs it.
@@ -116,8 +120,13 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     writes: PendingWrite[],
     taskId: string,
   ): Promise<void> {
-    const threadId = config.configurable?.thread_id as string;
-    const checkpointId = config.configurable?.checkpoint_id as string;
+    const threadId = config.configurable?.thread_id;
+    const checkpointId = config.configurable?.checkpoint_id;
+    if (!threadId || !checkpointId) {
+      throw new AgentCacheUsageError(
+        'putWrites() requires both config.configurable.thread_id and config.configurable.checkpoint_id',
+      );
+    }
 
     // Include taskId in the storage key for deduplication per the LangGraph protocol.
     // URL-encode all components to safely handle any characters including the | delimiter.
