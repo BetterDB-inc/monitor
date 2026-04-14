@@ -154,8 +154,8 @@ export class AgentCache {
     }
 
     // Compute hit rates for per-tool stats
-    for (const toolStats of Object.values(perTool)) {
-      toolStats.hitRate = computeHitRate(toolStats.hits, toolStats.misses);
+    for (const perToolEntry of Object.values(perTool)) {
+      perToolEntry.hitRate = computeHitRate(perToolEntry.hits, perToolEntry.misses);
     }
 
     return {
