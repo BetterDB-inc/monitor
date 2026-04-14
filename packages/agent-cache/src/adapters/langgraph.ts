@@ -31,9 +31,11 @@ export interface BetterDBSaverOptions {
  *   even when limit: 1. For typical agent deployments (hundreds of checkpoints),
  *   this is acceptable. If you have millions of checkpoints per thread, consider
  *   using langgraph-checkpoint-redis with Redis 8+ instead.
- * - getTuple() calls getAll() to fetch pending writes, which retrieves all session
- *   fields for the thread and refreshes their TTL. This is wasteful for threads with
- *   many checkpoints but acceptable for typical agent workloads.
+ * - getTuple() and list() call getAll() to fetch pending writes, which retrieves all
+ *   session fields for the thread and refreshes their TTL as a side effect (sliding
+ *   window). This means calling list() extends the TTL of all checkpoints and writes
+ *   for that thread, even when only reading. This is wasteful for threads with many
+ *   checkpoints but acceptable for typical agent workloads.
  */
 export class BetterDBSaver extends BaseCheckpointSaver {
   private cache: AgentCache;
@@ -112,12 +114,13 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     const checkpointId = config.configurable?.checkpoint_id as string;
 
     // Include taskId in the storage key for deduplication per the LangGraph protocol.
-    // URL-encode taskId and channel to safely handle any characters including delimiters.
+    // URL-encode all components to safely handle any characters including the | delimiter.
+    const encodedCheckpointId = encodeURIComponent(checkpointId);
     for (let i = 0; i < writes.length; i++) {
       const [channel, value] = writes[i];
       const encodedTaskId = encodeURIComponent(taskId);
       const encodedChannel = encodeURIComponent(channel);
-      const field = `writes:${checkpointId}|${encodedTaskId}|${encodedChannel}|${i}`;
+      const field = `writes:${encodedCheckpointId}|${encodedTaskId}|${encodedChannel}|${i}`;
       await this.cache.session.set(threadId, field, JSON.stringify(value));
     }
   }
@@ -177,14 +180,15 @@ export class BetterDBSaver extends BaseCheckpointSaver {
 
   /**
    * Reconstruct CheckpointPendingWrite tuples from session fields matching
-   * the key pattern: writes:{checkpointId}|{encodedTaskId}|{encodedChannel}|{idx}
-   * TaskId and channel are URL-encoded to safely handle any characters.
+   * the key pattern: writes:{encodedCheckpointId}|{encodedTaskId}|{encodedChannel}|{idx}
+   * All components are URL-encoded to safely handle any characters including the | delimiter.
    */
   private extractPendingWrites(
     all: Record<string, string>,
     checkpointId: string,
   ): CheckpointPendingWrite[] {
-    const prefix = `writes:${checkpointId}|`;
+    // checkpointId is URL-encoded in the key
+    const prefix = `writes:${encodeURIComponent(checkpointId)}|`;
     const pendingWrites: CheckpointPendingWrite[] = [];
 
     for (const [field, rawValue] of Object.entries(all)) {

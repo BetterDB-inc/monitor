@@ -1,7 +1,23 @@
 import type { Valkey, ToolStoreOptions, ToolCacheResult, ToolPolicy } from '../types';
 import type { Telemetry } from '../telemetry';
-import { ValkeyCommandError } from '../errors';
+import { ValkeyCommandError, AgentCacheUsageError } from '../errors';
 import { toolCacheHash } from '../utils';
+
+// Glob metacharacters that need escaping in SCAN MATCH patterns
+const GLOB_METACHAR_PATTERN = /[*?[\]]/;
+
+/**
+ * Validate that a string doesn't contain glob metacharacters.
+ * Throws AgentCacheUsageError if it does.
+ */
+function validateNoGlobChars(value: string, name: string): void {
+  if (GLOB_METACHAR_PATTERN.test(value)) {
+    throw new AgentCacheUsageError(
+      `${name} contains glob metacharacters (*, ?, [, ]). ` +
+      `This is not allowed as it could match unintended keys.`
+    );
+  }
+}
 
 export interface ToolCacheConfig {
   client: Valkey;
@@ -235,6 +251,9 @@ export class ToolCache {
   }
 
   async invalidateByTool(toolName: string): Promise<number> {
+    // Reject glob metacharacters to prevent matching unintended keys
+    validateNoGlobChars(toolName, 'toolName');
+
     return this.telemetry.tracer.startActiveSpan('agent_cache.tool.invalidateByTool', async (span) => {
       try {
         span.setAttribute('cache.tool_name', toolName);
