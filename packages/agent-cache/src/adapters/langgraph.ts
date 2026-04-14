@@ -95,8 +95,10 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     };
     const serialized = JSON.stringify(storedData);
 
-    // Store specific checkpoint and update latest pointer atomically via Promise.all
-    // to prevent inconsistent state if process crashes between writes
+    // Store specific checkpoint and update latest pointer concurrently via Promise.all.
+    // Note: This is not transactionally atomic — if the process crashes mid-write, state
+    // may be inconsistent. True atomicity would require MULTI/EXEC, but we accept this
+    // trade-off to work on vanilla Valkey without transactions.
     await Promise.all([
       this.cache.session.set(threadId, `checkpoint:${checkpointId}`, serialized),
       this.cache.session.set(threadId, 'checkpoint:latest', serialized),
@@ -199,10 +201,13 @@ export class BetterDBSaver extends BaseCheckpointSaver {
 
     // Apply before filter
     const beforeId = options?.before?.configurable?.checkpoint_id;
-    // If before checkpoint doesn't exist in the list, default to yielding all (started=true)
-    // to avoid silently returning zero results when the checkpoint was evicted
-    const beforeExists = beforeId ? checkpoints.some(t => t.checkpoint?.id === beforeId) : false;
-    let started = !options?.before || !beforeExists;
+    // If before checkpoint is specified but doesn't exist, return empty per LangGraph protocol
+    // (before means "checkpoints older than this one" — if the reference doesn't exist, there's
+    // no valid older set to return)
+    if (beforeId && !checkpoints.some(t => t.checkpoint?.id === beforeId)) {
+      return;
+    }
+    let started = !options?.before;
     let yielded = 0;
     const limit = options?.limit ?? Infinity;
 
@@ -223,6 +228,7 @@ export class BetterDBSaver extends BaseCheckpointSaver {
    * Reconstruct CheckpointPendingWrite tuples from session fields matching
    * the key pattern: writes:{encodedCheckpointId}|{encodedTaskId}|{encodedChannel}|{idx}
    * All components are URL-encoded to safely handle any characters including the | delimiter.
+   * Results are sorted by idx to preserve write ordering within a checkpoint.
    */
   private extractPendingWrites(
     all: Record<string, string>,
@@ -230,7 +236,7 @@ export class BetterDBSaver extends BaseCheckpointSaver {
   ): CheckpointPendingWrite[] {
     // checkpointId is URL-encoded in the key
     const prefix = `writes:${encodeURIComponent(checkpointId)}|`;
-    const pendingWrites: CheckpointPendingWrite[] = [];
+    const pendingWrites: Array<{ idx: number; write: CheckpointPendingWrite }> = [];
 
     for (const [field, rawValue] of Object.entries(all)) {
       if (!field.startsWith(prefix)) continue;
@@ -243,16 +249,20 @@ export class BetterDBSaver extends BaseCheckpointSaver {
 
       const taskId = decodeURIComponent(parts[0]);
       const channel = decodeURIComponent(parts[1]);
+      const idx = parseInt(parts[2], 10);
 
       try {
         const value = JSON.parse(rawValue);
-        pendingWrites.push([taskId, channel, value]);
+        pendingWrites.push({ idx, write: [taskId, channel, value] });
       } catch {
         /* skip corrupt entries */
       }
     }
 
-    return pendingWrites;
+    // Sort by idx to preserve write ordering
+    pendingWrites.sort((a, b) => a.idx - b.idx);
+
+    return pendingWrites.map(p => p.write);
   }
 
   async deleteThread(threadId: string): Promise<void> {
