@@ -330,12 +330,12 @@ describe('LangGraph adapter', () => {
     );
     expect(mockCache.session.set).toHaveBeenCalledWith(
       'thread-1',
-      'checkpoint:latest',
+      '__checkpoint_latest',
       expect.any(String),
     );
   });
 
-  it('list() limit=1 fast path reads checkpoint:latest and uses scanFieldsByPrefix (not getAll)', async () => {
+  it('list() limit=1 fast path reads __checkpoint_latest and uses scanFieldsByPrefix (not getAll)', async () => {
     const mockCache = createMockAgentCache();
     const latestTuple = {
       config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-3' } },
@@ -358,7 +358,7 @@ describe('LangGraph adapter', () => {
     expect(results[0].checkpoint.id).toBe('cp-3');
     expect(results[0].pendingWrites).toEqual([['task-1', 'output', 'fast-result']]);
 
-    expect(mockCache.session.get).toHaveBeenCalledWith('thread-1', 'checkpoint:latest');
+    expect(mockCache.session.get).toHaveBeenCalledWith('thread-1', '__checkpoint_latest');
     expect(mockCache.session.scanFieldsByPrefix).toHaveBeenCalledWith('thread-1', 'writes:cp-3|');
     expect(mockCache.session.getAll).not.toHaveBeenCalled();
   });
@@ -376,7 +376,7 @@ describe('LangGraph adapter', () => {
         checkpoint: { id: 'cp-2', ts: '2024-01-02T00:00:00Z' },
         metadata: {},
       }),
-      'checkpoint:latest': JSON.stringify({
+      '__checkpoint_latest': JSON.stringify({
         config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-2' } },
         checkpoint: { id: 'cp-2', ts: '2024-01-02T00:00:00Z' },
         metadata: {},
@@ -397,6 +397,37 @@ describe('LangGraph adapter', () => {
     expect(results[0].pendingWrites).toEqual([['task-1', 'output', 'result']]);
     expect(results[1].checkpoint.id).toBe('cp-1');
     expect(results[1].pendingWrites).toBeUndefined();
+  });
+
+  it('list() includes checkpoint entries whose id is literally "latest"', async () => {
+    const mockCache = createMockAgentCache();
+    const checkpoints = {
+      'checkpoint:latest': JSON.stringify({
+        config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'latest' } },
+        checkpoint: { id: 'latest', ts: '2024-01-03T00:00:00Z' },
+        metadata: {},
+      }),
+      '__checkpoint_latest': JSON.stringify({
+        config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'latest' } },
+        checkpoint: { id: 'latest', ts: '2024-01-03T00:00:00Z' },
+        metadata: {},
+      }),
+      'checkpoint:cp-1': JSON.stringify({
+        config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-1' } },
+        checkpoint: { id: 'cp-1', ts: '2024-01-01T00:00:00Z' },
+        metadata: {},
+      }),
+    };
+    (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue(checkpoints);
+
+    const saver = new BetterDBSaver({ cache: mockCache });
+    const results: any[] = [];
+
+    for await (const tuple of saver.list({ configurable: { thread_id: 'thread-1' } })) {
+      results.push(tuple);
+    }
+
+    expect(results.map(tuple => tuple.checkpoint.id)).toEqual(['latest', 'cp-1']);
   });
 
   it('list() respects limit option', async () => {

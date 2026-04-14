@@ -23,7 +23,7 @@ export interface BetterDBSaverOptions {
  *
  * Storage layout in session tier:
  *   {name}:session:{thread_id}:checkpoint:{checkpoint_id} = JSON(CheckpointTuple)
- *   {name}:session:{thread_id}:checkpoint:latest = JSON(CheckpointTuple)
+ *   {name}:session:{thread_id}:__checkpoint_latest = JSON(CheckpointTuple)
  *   {name}:session:{thread_id}:writes:{checkpoint_id}|{task_id}|{channel}|{idx} = JSON(value)
  *
  * Known limitations:
@@ -38,6 +38,7 @@ export interface BetterDBSaverOptions {
  */
 export class BetterDBSaver extends BaseCheckpointSaver {
   private cache: AgentCache;
+  private static readonly LATEST_POINTER_FIELD = '__checkpoint_latest';
 
   constructor(opts: BetterDBSaverOptions) {
     super();
@@ -49,7 +50,7 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     if (!threadId) return undefined;
 
     const checkpointId = config.configurable?.checkpoint_id as string | undefined;
-    const field = checkpointId ? `checkpoint:${checkpointId}` : 'checkpoint:latest';
+    const field = checkpointId ? `checkpoint:${checkpointId}` : BetterDBSaver.LATEST_POINTER_FIELD;
 
     const data = await this.cache.session.get(threadId, field);
     if (!data) return undefined;
@@ -105,7 +106,7 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     // would reference a non-existent checkpoint. Sequential order ensures latest
     // only points to a checkpoint that already exists.
     await this.cache.session.set(threadId, `checkpoint:${checkpointId}`, serialized);
-    await this.cache.session.set(threadId, 'checkpoint:latest', serialized);
+    await this.cache.session.set(threadId, BetterDBSaver.LATEST_POINTER_FIELD, serialized);
 
     return {
       ...config,
@@ -149,11 +150,11 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     if (!threadId) return;
 
     // Fast path: limit=1 with no before filter is the common case (fetch latest).
-    // Short-circuit by reading checkpoint:latest directly to avoid parsing and sorting
+    // Short-circuit by reading the latest pointer directly to avoid parsing and sorting
     // all checkpoints. Uses scanFieldsByPrefix() for writes to avoid refreshing TTL on
     // unrelated session fields (getAll() has a sliding window side effect).
     if (options?.limit === 1 && !options?.before) {
-      const latestData = await this.cache.session.get(threadId, 'checkpoint:latest');
+      const latestData = await this.cache.session.get(threadId, BetterDBSaver.LATEST_POINTER_FIELD);
       if (latestData) {
         try {
           const tuple: CheckpointTuple = JSON.parse(latestData);
@@ -184,7 +185,7 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     for (const [field, value] of Object.entries(all)) {
       if (field.startsWith('writes:')) {
         writeFields[field] = value;
-      } else if (field.startsWith('checkpoint:') && field !== 'checkpoint:latest') {
+      } else if (field.startsWith('checkpoint:')) {
         try {
           const tuple: CheckpointTuple = JSON.parse(value);
           checkpoints.push(tuple);
