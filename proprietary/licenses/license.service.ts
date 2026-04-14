@@ -306,7 +306,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     return this.cache?.response || this.getCommunityEntitlement();
   }
 
-  getLicenseKey(): string | null {
+  private getLicenseKey(): string | null {
     return this.licenseKey;
   }
 

@@ -145,7 +145,6 @@ describe('Vercel AI SDK adapter', () => {
     await middleware.wrapGenerate!({
       doGenerate,
       params: {
-        // In Vercel AI SDK, model is a LanguageModelV1 object with modelId
         model: { modelId: 'gpt-4o', provider: 'openai' },
         prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
       },
@@ -155,6 +154,68 @@ describe('Vercel AI SDK adapter', () => {
     expect(mockCache.llm.store).toHaveBeenCalledWith(
       expect.objectContaining({ model: 'gpt-4o' }),
       'Generated response',
+      { tokens: { input: 10, output: 20 } },
+    );
+  });
+
+  it('middleware skips caching when response contains tool_call parts', async () => {
+    const mockCache = createMockAgentCache();
+    (mockCache.llm.check as ReturnType<typeof vi.fn>).mockResolvedValue({
+      hit: false,
+      tier: 'llm',
+    } as LlmCacheResult);
+
+    const middleware = createAgentCacheMiddleware({ cache: mockCache });
+    const doGenerate = vi.fn().mockResolvedValue({
+      content: [
+        { type: 'text', text: 'Let me check that.' },
+        { type: 'tool-call', toolCallId: 'call-1', toolName: 'get_weather', args: { city: 'Sofia' } },
+      ],
+      finishReason: 'tool-calls',
+      usage: { promptTokens: 10, completionTokens: 20 },
+    });
+
+    await middleware.wrapGenerate!({
+      doGenerate,
+      params: {
+        model: { modelId: 'gpt-4o', provider: 'openai' },
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'Weather in Sofia?' }] }],
+      },
+    });
+
+    expect(doGenerate).toHaveBeenCalled();
+    expect(mockCache.llm.store).not.toHaveBeenCalled();
+  });
+
+  it('middleware concatenates multiple text parts for caching', async () => {
+    const mockCache = createMockAgentCache();
+    (mockCache.llm.check as ReturnType<typeof vi.fn>).mockResolvedValue({
+      hit: false,
+      tier: 'llm',
+    } as LlmCacheResult);
+    (mockCache.llm.store as ReturnType<typeof vi.fn>).mockResolvedValue('key');
+
+    const middleware = createAgentCacheMiddleware({ cache: mockCache });
+    const doGenerate = vi.fn().mockResolvedValue({
+      content: [
+        { type: 'text', text: 'Part one. ' },
+        { type: 'text', text: 'Part two.' },
+      ],
+      finishReason: 'stop',
+      usage: { promptTokens: 10, completionTokens: 20 },
+    });
+
+    await middleware.wrapGenerate!({
+      doGenerate,
+      params: {
+        model: { modelId: 'gpt-4o', provider: 'openai' },
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+      },
+    });
+
+    expect(mockCache.llm.store).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'gpt-4o' }),
+      'Part one. Part two.',
       { tokens: { input: 10, output: 20 } },
     );
   });
@@ -269,6 +330,34 @@ describe('LangGraph adapter', () => {
       'checkpoint:latest',
       expect.any(String),
     );
+  });
+
+  it('list() limit=1 fast path reads checkpoint:latest and uses scanFieldsByPrefix (not getAll)', async () => {
+    const mockCache = createMockAgentCache();
+    const latestTuple = {
+      config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-3' } },
+      checkpoint: { id: 'cp-3', ts: '2024-01-03T00:00:00Z' },
+      metadata: {},
+    };
+    (mockCache.session.get as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify(latestTuple));
+    (mockCache.session.scanFieldsByPrefix as ReturnType<typeof vi.fn>).mockResolvedValue({
+      'writes:cp-3|task-1|output|0': JSON.stringify('fast-result'),
+    });
+
+    const saver = new BetterDBSaver({ cache: mockCache });
+    const results: any[] = [];
+
+    for await (const tuple of saver.list({ configurable: { thread_id: 'thread-1' } }, { limit: 1 })) {
+      results.push(tuple);
+    }
+
+    expect(results.length).toBe(1);
+    expect(results[0].checkpoint.id).toBe('cp-3');
+    expect(results[0].pendingWrites).toEqual([['task-1', 'output', 'fast-result']]);
+
+    expect(mockCache.session.get).toHaveBeenCalledWith('thread-1', 'checkpoint:latest');
+    expect(mockCache.session.scanFieldsByPrefix).toHaveBeenCalledWith('thread-1', 'writes:cp-3|');
+    expect(mockCache.session.getAll).not.toHaveBeenCalled();
   });
 
   it('list() returns checkpoints in reverse chronological order with pendingWrites', async () => {

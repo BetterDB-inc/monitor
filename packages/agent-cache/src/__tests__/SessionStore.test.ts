@@ -206,6 +206,69 @@ describe('SessionStore', () => {
     });
   });
 
+  describe('scanFieldsByPrefix()', () => {
+    it('returns matching fields stripped of key prefix', async () => {
+      (client.scan as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(['0', [
+          'test_ac:session:thread-1:writes:cp-1|task-1|output|0',
+          'test_ac:session:thread-1:writes:cp-1|task-1|state|1',
+        ]]);
+      (client.mget as ReturnType<typeof vi.fn>).mockResolvedValue(['"result"', '{"step":2}']);
+
+      const result = await store.scanFieldsByPrefix('thread-1', 'writes:cp-1|');
+
+      expect(client.scan).toHaveBeenCalledWith(
+        '0', 'MATCH', 'test_ac:session:thread-1:writes\\:cp\\-1\\|*', 'COUNT', 100,
+      );
+      expect(result).toEqual({
+        'writes:cp-1|task-1|output|0': '"result"',
+        'writes:cp-1|task-1|state|1': '{"step":2}',
+      });
+    });
+
+    it('returns empty object when no keys match', async () => {
+      (client.scan as ReturnType<typeof vi.fn>).mockResolvedValueOnce(['0', []]);
+
+      const result = await store.scanFieldsByPrefix('thread-1', 'writes:cp-nonexistent|');
+
+      expect(result).toEqual({});
+      expect(client.mget).not.toHaveBeenCalled();
+    });
+
+    it('does NOT refresh TTL on matched keys (unlike getAll)', async () => {
+      (client.scan as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(['0', [
+          'test_ac:session:thread-1:writes:cp-1|task-1|output|0',
+        ]]);
+      (client.mget as ReturnType<typeof vi.fn>).mockResolvedValue(['"result"']);
+
+      await store.scanFieldsByPrefix('thread-1', 'writes:cp-1|');
+
+      expect(client.expire).not.toHaveBeenCalled();
+    });
+
+    it('handles multi-page SCAN cursor', async () => {
+      (client.scan as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(['42', [
+          'test_ac:session:thread-1:writes:cp-1|task-1|a|0',
+        ]])
+        .mockResolvedValueOnce(['0', [
+          'test_ac:session:thread-1:writes:cp-1|task-1|b|0',
+        ]]);
+      (client.mget as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(['"val-a"'])
+        .mockResolvedValueOnce(['"val-b"']);
+
+      const result = await store.scanFieldsByPrefix('thread-1', 'writes:cp-1|');
+
+      expect(client.scan).toHaveBeenCalledTimes(2);
+      expect(result).toEqual({
+        'writes:cp-1|task-1|a|0': '"val-a"',
+        'writes:cp-1|task-1|b|0': '"val-b"',
+      });
+    });
+  });
+
   describe('touch()', () => {
     it('refreshes TTL on all thread keys', async () => {
       const mockPipeline = {

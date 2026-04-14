@@ -55,16 +55,21 @@ function extractLlmParams(params: unknown, extractModel: (params: unknown) => st
   };
 }
 
-function extractResponseText(result: unknown): string {
-  const r = result as { content?: Array<{ type: string; text?: string }> };
-  if (r.content && Array.isArray(r.content)) {
-    for (const part of r.content) {
-      if (part.type === 'text' && part.text) {
-        return part.text;
-      }
-    }
-  }
-  return '';
+interface ContentPart {
+  type: string;
+  text?: string;
+  [key: string]: unknown;
+}
+
+function isTextOnlyResponse(content: ContentPart[]): boolean {
+  return content.length > 0 && content.every((part) => part.type === 'text');
+}
+
+function extractTextFromContent(content: ContentPart[]): string {
+  return content
+    .filter((part) => part.type === 'text' && part.text)
+    .map((part) => part.text!)
+    .join('');
 }
 
 /**
@@ -119,19 +124,22 @@ export function createAgentCacheMiddleware(
 
       const result = await doGenerate();
 
-      // Cache the result with token usage for cost tracking
+      // Only cache text-only responses. Responses containing tool_call parts or
+      // other non-text content types are not cacheable -- tool calls depend on
+      // runtime state and caching them would break tool-calling workflows.
       if (llmParams.messages.length > 0) {
-        const response = extractResponseText(result);
-        if (response) {
-          // Extract token usage from result for cost tracking
-          const r = result as { usage?: { promptTokens?: number; completionTokens?: number } };
-          const tokens = r.usage?.promptTokens !== undefined && r.usage?.completionTokens !== undefined
-            ? { input: r.usage.promptTokens, output: r.usage.completionTokens }
-            : undefined;
+        const r = result as { content?: ContentPart[]; usage?: { promptTokens?: number; completionTokens?: number } };
+        if (r.content && Array.isArray(r.content) && isTextOnlyResponse(r.content)) {
+          const response = extractTextFromContent(r.content);
+          if (response) {
+            const tokens = r.usage?.promptTokens !== undefined && r.usage?.completionTokens !== undefined
+              ? { input: r.usage.promptTokens, output: r.usage.completionTokens }
+              : undefined;
 
-          await cache.llm.store(llmParams, response, tokens ? { tokens } : undefined).catch(() => {
-            // Swallow store errors - caching should not break inference
-          });
+            await cache.llm.store(llmParams, response, tokens ? { tokens } : undefined).catch(() => {
+              // Swallow store errors - caching should not break inference
+            });
+          }
         }
       }
 
