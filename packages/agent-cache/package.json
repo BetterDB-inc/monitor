@@ -1,0 +1,70 @@
+{
+  "name": "@betterdb/agent-cache",
+  "version": "0.1.0",
+  "description": "Multi-tier exact-match cache for AI agent workloads backed by Valkey. LLM responses, tool results, and session state with built-in OpenTelemetry and Prometheus instrumentation.",
+  "keywords": ["valkey", "redis", "agent", "cache", "llm", "opentelemetry", "prometheus", "langchain", "langgraph"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BetterDB-inc/monitor",
+    "directory": "packages/agent-cache"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./langchain": {
+      "import": "./dist/adapters/langchain.js",
+      "require": "./dist/adapters/langchain.js",
+      "types": "./dist/adapters/langchain.d.ts"
+    },
+    "./ai": {
+      "import": "./dist/adapters/ai.js",
+      "require": "./dist/adapters/ai.js",
+      "types": "./dist/adapters/ai.d.ts"
+    },
+    "./langgraph": {
+      "import": "./dist/adapters/langgraph.js",
+      "require": "./dist/adapters/langgraph.js",
+      "types": "./dist/adapters/langgraph.d.ts"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "prom-client": "^15.1.3"
+  },
+  "devDependencies": {
+    "@langchain/core": "^1.1.35",
+    "@langchain/langgraph-checkpoint": "^0.1.0",
+    "ai": "^6.0.135",
+    "@types/node": "^22.19.15",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "peerDependencies": {
+    "iovalkey": ">=0.3.0",
+    "@langchain/core": ">=0.3.0",
+    "@langchain/langgraph-checkpoint": ">=0.1.0",
+    "ai": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/core": { "optional": true },
+    "@langchain/langgraph-checkpoint": { "optional": true },
+    "ai": { "optional": true }
+  }
+}
