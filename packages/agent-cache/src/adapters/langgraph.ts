@@ -133,7 +133,8 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     if (!threadId) return;
 
     // Fast path: limit=1 with no before filter is the common case (fetch latest).
-    // Short-circuit by reading checkpoint:latest directly to avoid loading all session data.
+    // Short-circuit by reading checkpoint:latest directly to avoid parsing and sorting
+    // all checkpoints. Note: getAll() is still needed for pending writes reconstruction.
     if (options?.limit === 1 && !options?.before) {
       const latestData = await this.cache.session.get(threadId, 'checkpoint:latest');
       if (latestData) {

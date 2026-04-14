@@ -7,6 +7,13 @@ import { toolCacheHash } from '../utils';
 const GLOB_METACHAR_PATTERN = /[*?[\]]/;
 
 /**
+ * Escape glob metacharacters for use in SCAN MATCH patterns.
+ */
+function escapeGlobPattern(str: string): string {
+  return str.replace(/([*?[\]])/g, '\\$1');
+}
+
+/**
  * Validate that a string doesn't contain glob metacharacters.
  * Throws AgentCacheUsageError if it does.
  */
@@ -274,7 +281,8 @@ export class ToolCache {
       try {
         span.setAttribute('cache.tool_name', toolName);
 
-        const pattern = `${this.name}:tool:${toolName}:*`;
+        // Escape cache name in case it contains glob metacharacters
+        const pattern = `${escapeGlobPattern(this.name)}:tool:${toolName}:*`;
         let cursor = '0';
         let deletedCount = 0;
 

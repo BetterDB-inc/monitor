@@ -244,8 +244,8 @@ export class SessionStore {
       try {
         span.setAttribute('cache.thread_id', threadId);
 
-        // Escape glob chars to prevent threadId from matching unintended keys
-        const pattern = `${this.name}:session:${escapeGlobPattern(threadId)}:*`;
+        // Escape glob chars to prevent threadId or cache name from matching unintended keys
+        const pattern = `${escapeGlobPattern(this.name)}:session:${escapeGlobPattern(threadId)}:*`;
         const result: Record<string, string> = {};
         const keysToRefresh: string[] = [];
         let cursor = '0';
@@ -325,7 +325,8 @@ export class SessionStore {
       try {
         span.setAttribute('cache.thread_id', threadId);
 
-        const pattern = `${this.name}:session:${threadId}:*`;
+        // Escape cache name in case it contains glob metacharacters (threadId is validated above)
+        const pattern = `${escapeGlobPattern(this.name)}:session:${threadId}:*`;
         let cursor = '0';
         let deletedCount = 0;
 
@@ -388,8 +389,8 @@ export class SessionStore {
       try {
         span.setAttribute('cache.thread_id', threadId);
 
-        // Escape glob chars to prevent threadId from matching unintended keys
-        const pattern = `${this.name}:session:${escapeGlobPattern(threadId)}:*`;
+        // Escape glob chars to prevent threadId or cache name from matching unintended keys
+        const pattern = `${escapeGlobPattern(this.name)}:session:${escapeGlobPattern(threadId)}:*`;
         const ttl = this.tierTtl ?? this.defaultTtl;
 
         if (ttl === undefined) {
