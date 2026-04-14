@@ -6,11 +6,13 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 @Controller('v1/registrations')
 export class RegistrationController {
-  constructor(private readonly registration: RegistrationService) {}
+  constructor(private readonly registration: RegistrationService) { }
 
   @Post()
-  @Throttle({ default: { ttl: 3600000, limit: 3 } })
-  async register(@Body() body: { email: string }): Promise<{ message: string }> {
+  // @Throttle({ default: { ttl: 3600000, limit: 3 } })
+  async register(
+    @Body() body: { email: string },
+  ): Promise<{ message: string }> {
     if (!body.email || typeof body.email !== 'string') {
       throw new BadRequestException('Email is required');
     }

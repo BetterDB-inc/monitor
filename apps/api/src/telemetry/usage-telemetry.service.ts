@@ -81,7 +81,6 @@ export class UsageTelemetryService implements OnModuleInit {
     try {
       const fullKey = licenseService.getLicenseKey();
       if (!fullKey || fullKey.length < 4) return undefined;
-      // Only send last 4 chars for correlation - never expose full key
       return `...${fullKey.slice(-4)}`;
     } catch {
       return undefined;

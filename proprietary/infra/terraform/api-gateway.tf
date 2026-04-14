@@ -272,6 +272,19 @@ resource "aws_apigatewayv2_route" "register" {
   authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
 }
 
+# License validation endpoint — reached by self-hosted monitor instances via
+# the betterdb.com /api/v1/entitlements proxy. The proxy holds the X-Api-Key
+# so the route stays behind the same authorizer; monitors never see it.
+# Handles license_check, keyless, and cloud (tenantId) requests via the
+# entitlement service's branching logic.
+resource "aws_apigatewayv2_route" "entitlements" {
+  api_id             = aws_apigatewayv2_api.entitlement.id
+  route_key          = "POST /v1/entitlements"
+  target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
+}
+
 # ============================================
 # Outputs
 # ============================================
