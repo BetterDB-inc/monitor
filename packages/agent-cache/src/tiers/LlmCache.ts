@@ -3,6 +3,13 @@ import type { Telemetry } from '../telemetry';
 import { ValkeyCommandError } from '../errors';
 import { llmCacheHash } from '../utils';
 
+/**
+ * Escape glob metacharacters for use in SCAN MATCH patterns.
+ */
+function escapeGlobPattern(str: string): string {
+  return str.replace(/([*?[\]])/g, '\\$1');
+}
+
 export interface LlmCacheConfig {
   client: Valkey;
   name: string;
@@ -220,7 +227,8 @@ export class LlmCache {
       try {
         span.setAttribute('cache.model', model);
 
-        const pattern = `${this.name}:llm:*`;
+        // Escape cache name in case it contains glob metacharacters
+        const pattern = `${escapeGlobPattern(this.name)}:llm:*`;
         let cursor = '0';
         let deletedCount = 0;
 

@@ -132,6 +132,29 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     const threadId = config.configurable?.thread_id as string;
     if (!threadId) return;
 
+    // Fast path: limit=1 with no before filter is the common case (fetch latest).
+    // Short-circuit by reading checkpoint:latest directly to avoid loading all session data.
+    if (options?.limit === 1 && !options?.before) {
+      const latestData = await this.cache.session.get(threadId, 'checkpoint:latest');
+      if (latestData) {
+        try {
+          const tuple: CheckpointTuple = JSON.parse(latestData);
+          if (tuple.checkpoint?.id) {
+            // Only fetch writes for this specific checkpoint
+            const all = await this.cache.session.getAll(threadId);
+            const pendingWrites = this.extractPendingWrites(all, tuple.checkpoint.id);
+            if (pendingWrites.length > 0) {
+              tuple.pendingWrites = pendingWrites;
+            }
+          }
+          yield tuple;
+        } catch {
+          /* skip corrupt entry */
+        }
+      }
+      return;
+    }
+
     // Get all checkpoint fields via getAll, filter to checkpoint:* (not checkpoint:latest)
     const all = await this.cache.session.getAll(threadId);
     const checkpoints: CheckpointTuple[] = [];
@@ -153,10 +176,17 @@ export class BetterDBSaver extends BaseCheckpointSaver {
       }
     }
 
-    // Sort by checkpoint timestamp descending
+    // Sort by checkpoint timestamp descending.
+    // Parse timestamps to ensure correct ordering regardless of format.
     checkpoints.sort((a, b) => {
       const tsA = a.checkpoint?.ts ?? '';
       const tsB = b.checkpoint?.ts ?? '';
+      const dateA = new Date(tsA).getTime();
+      const dateB = new Date(tsB).getTime();
+      // If both parse to valid dates, compare numerically; otherwise fall back to string comparison
+      if (!isNaN(dateA) && !isNaN(dateB)) {
+        return dateB - dateA;
+      }
       return tsB.localeCompare(tsA);
     });
 

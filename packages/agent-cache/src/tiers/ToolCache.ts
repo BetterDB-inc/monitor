@@ -336,10 +336,9 @@ export class ToolCache {
           }
         }
       }
-    } catch (err) {
-      // Non-blocking: failure to load policies should not break initialization
-      // Log warning so misconfiguration is visible
-      console.warn('[agent-cache] Failed to load tool policies from Valkey:', err);
+    } catch {
+      // Non-blocking: failure to load policies should not break initialization.
+      // Silently swallow - libraries should not write to console.
     }
   }
 
