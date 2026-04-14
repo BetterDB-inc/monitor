@@ -100,7 +100,11 @@ export function createAgentCacheMiddleware(
         try {
           const cached = await cache.llm.check(llmParams);
           if (cached.hit && cached.response) {
-            // Return a minimal generate result
+            // Return a minimal generate result with required fields only.
+            // Intentionally omits: rawCall, rawResponse, response, request,
+            // providerMetadata — these describe the actual API call which didn't
+            // happen on a cache hit. AI SDK consumers (generateText, streamText)
+            // tolerate their absence; they're only used for debugging/logging.
             return {
               content: [{ type: 'text', text: cached.response }],
               finishReason: 'stop',

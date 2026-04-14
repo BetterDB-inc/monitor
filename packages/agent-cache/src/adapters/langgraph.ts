@@ -26,16 +26,14 @@ export interface BetterDBSaverOptions {
  *   {name}:session:{thread_id}:writes:{checkpoint_id}|{task_id}|{channel}|{idx} = JSON(value)
  *
  * Known limitations:
- * - list() loads all checkpoint data for a thread into memory before filtering.
+ * - list() (general path) loads all checkpoint data for a thread into memory before
+ *   filtering, which refreshes TTL on all fields via getAll()'s sliding window.
  *   For threads with thousands of large checkpoints, this causes memory pressure
  *   even when limit: 1. For typical agent deployments (hundreds of checkpoints),
  *   this is acceptable. If you have millions of checkpoints per thread, consider
  *   using langgraph-checkpoint-redis with Redis 8+ instead.
- * - getTuple() and list() call getAll() to fetch pending writes, which retrieves all
- *   session fields for the thread and refreshes their TTL as a side effect (sliding
- *   window). This means calling list() extends the TTL of all checkpoints and writes
- *   for that thread, even when only reading. This is wasteful for threads with many
- *   checkpoints but acceptable for typical agent workloads.
+ * - getTuple() and the list() limit=1 fast path use scanFieldsByPrefix() for targeted
+ *   pending writes lookup without refreshing TTL on unrelated session fields.
  */
 export class BetterDBSaver extends BaseCheckpointSaver {
   private cache: AgentCache;
@@ -64,8 +62,11 @@ export class BetterDBSaver extends BaseCheckpointSaver {
 
     const resolvedId = checkpointId ?? tuple.checkpoint?.id;
     if (resolvedId) {
-      const all = await this.cache.session.getAll(threadId);
-      const pendingWrites = this.extractPendingWrites(all, resolvedId);
+      const writeFields = await this.cache.session.scanFieldsByPrefix(
+        threadId,
+        `writes:${encodeURIComponent(resolvedId)}|`,
+      );
+      const pendingWrites = this.extractPendingWrites(writeFields, resolvedId);
       if (pendingWrites.length > 0) {
         tuple.pendingWrites = pendingWrites;
       }
@@ -142,16 +143,19 @@ export class BetterDBSaver extends BaseCheckpointSaver {
 
     // Fast path: limit=1 with no before filter is the common case (fetch latest).
     // Short-circuit by reading checkpoint:latest directly to avoid parsing and sorting
-    // all checkpoints. Note: getAll() is still needed for pending writes reconstruction.
+    // all checkpoints. Uses scanFieldsByPrefix() for writes to avoid refreshing TTL on
+    // unrelated session fields (getAll() has a sliding window side effect).
     if (options?.limit === 1 && !options?.before) {
       const latestData = await this.cache.session.get(threadId, 'checkpoint:latest');
       if (latestData) {
         try {
           const tuple: CheckpointTuple = JSON.parse(latestData);
           if (tuple.checkpoint?.id) {
-            // Only fetch writes for this specific checkpoint
-            const all = await this.cache.session.getAll(threadId);
-            const pendingWrites = this.extractPendingWrites(all, tuple.checkpoint.id);
+            const writeFields = await this.cache.session.scanFieldsByPrefix(
+              threadId,
+              `writes:${encodeURIComponent(tuple.checkpoint.id)}|`,
+            );
+            const pendingWrites = this.extractPendingWrites(writeFields, tuple.checkpoint.id);
             if (pendingWrites.length > 0) {
               tuple.pendingWrites = pendingWrites;
             }

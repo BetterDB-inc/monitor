@@ -283,6 +283,46 @@ export class SessionStore {
     });
   }
 
+  /**
+   * Scan for session fields matching a prefix within a thread.
+   * Unlike getAll(), this does NOT refresh TTL on matched keys (no sliding window side effect).
+   * Useful when callers only need a subset of fields and don't want to extend TTL on unrelated data.
+   */
+  async scanFieldsByPrefix(threadId: string, fieldPrefix: string): Promise<Record<string, string>> {
+    const pattern = `${escapeGlobPattern(this.name)}:session:${escapeGlobPattern(threadId)}:${escapeGlobPattern(fieldPrefix)}*`;
+    const result: Record<string, string> = {};
+    const keyPrefix = `${this.name}:session:${threadId}:`;
+    let cursor = '0';
+
+    do {
+      let scanResult: [string, string[]];
+      try {
+        scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      } catch (err) {
+        throw new ValkeyCommandError('SCAN', err);
+      }
+
+      cursor = scanResult[0];
+      const keys = scanResult[1];
+
+      if (keys.length > 0) {
+        try {
+          const values = await this.client.mget(...keys);
+          for (let i = 0; i < keys.length; i++) {
+            const value = values[i];
+            if (value !== null) {
+              result[keys[i].slice(keyPrefix.length)] = value;
+            }
+          }
+        } catch (err) {
+          throw new ValkeyCommandError('MGET', err);
+        }
+      }
+    } while (cursor !== '0');
+
+    return result;
+  }
+
   async delete(threadId: string, field: string): Promise<boolean> {
     const key = this.buildKey(threadId, field);
 

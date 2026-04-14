@@ -17,6 +17,7 @@ function createMockAgentCache(): AgentCache {
       get: vi.fn(),
       set: vi.fn(),
       getAll: vi.fn(),
+      scanFieldsByPrefix: vi.fn(),
       delete: vi.fn(),
       destroyThread: vi.fn(),
       touch: vi.fn(),
@@ -185,7 +186,7 @@ describe('LangGraph adapter', () => {
       metadata: {},
     };
     (mockCache.session.get as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify(tuple));
-    (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (mockCache.session.scanFieldsByPrefix as ReturnType<typeof vi.fn>).mockResolvedValue({});
 
     const saver = new BetterDBSaver({ cache: mockCache });
     const result = await saver.getTuple({ configurable: { thread_id: 'thread-1' } });
@@ -193,7 +194,7 @@ describe('LangGraph adapter', () => {
     expect(result).toEqual(tuple);
   });
 
-  it('getTuple() reconstructs pendingWrites from session writes keys', async () => {
+  it('getTuple() uses scanFieldsByPrefix instead of getAll to avoid TTL side effects', async () => {
     const mockCache = createMockAgentCache();
     const tuple = {
       config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-1' } },
@@ -201,10 +202,7 @@ describe('LangGraph adapter', () => {
       metadata: {},
     };
     (mockCache.session.get as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify(tuple));
-    // Note: key format is writes:{checkpointId}|{taskId}|{channel}|{idx} (using | delimiter)
-    (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
-      'checkpoint:cp-1': JSON.stringify(tuple),
-      'checkpoint:latest': JSON.stringify(tuple),
+    (mockCache.session.scanFieldsByPrefix as ReturnType<typeof vi.fn>).mockResolvedValue({
       'writes:cp-1|task-abc|messages|0': JSON.stringify({ role: 'assistant', content: 'Hi' }),
       'writes:cp-1|task-abc|state|1': JSON.stringify({ step: 2 }),
       'writes:cp-1|task-xyz|output|0': JSON.stringify('done'),
@@ -216,6 +214,10 @@ describe('LangGraph adapter', () => {
     expect(result).toBeDefined();
     expect(result!.pendingWrites).toBeDefined();
     expect(result!.pendingWrites).toHaveLength(3);
+
+    // Verify scanFieldsByPrefix was called (not getAll)
+    expect(mockCache.session.scanFieldsByPrefix).toHaveBeenCalledWith('thread-1', 'writes:cp-1|');
+    expect(mockCache.session.getAll).not.toHaveBeenCalled();
 
     const sorted = [...result!.pendingWrites!].sort((a, b) => `${a[0]}:${a[1]}`.localeCompare(`${b[0]}:${b[1]}`));
     expect(sorted).toEqual([
@@ -233,10 +235,8 @@ describe('LangGraph adapter', () => {
       metadata: {},
     };
     (mockCache.session.get as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify(tuple));
-    (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
-      'checkpoint:cp-2': JSON.stringify(tuple),
-      'writes:cp-1|task-old|channel|0': JSON.stringify('stale'),
-    });
+    // scanFieldsByPrefix with cp-2 prefix returns nothing (the stale write is for cp-1)
+    (mockCache.session.scanFieldsByPrefix as ReturnType<typeof vi.fn>).mockResolvedValue({});
 
     const saver = new BetterDBSaver({ cache: mockCache });
     const result = await saver.getTuple({ configurable: { thread_id: 'thread-1' } });
@@ -372,6 +372,35 @@ describe('LangGraph adapter', () => {
 
     expect(results.length).toBe(1);
     expect(results[0].checkpoint.id).toBe('cp-1');
+  });
+
+  it('list() with non-existent before checkpoint yields zero results', async () => {
+    const mockCache = createMockAgentCache();
+    const checkpoints = {
+      'checkpoint:cp-1': JSON.stringify({
+        config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-1' } },
+        checkpoint: { id: 'cp-1', ts: '2024-01-01T00:00:00Z' },
+        metadata: {},
+      }),
+      'checkpoint:cp-2': JSON.stringify({
+        config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-2' } },
+        checkpoint: { id: 'cp-2', ts: '2024-01-02T00:00:00Z' },
+        metadata: {},
+      }),
+    };
+    (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue(checkpoints);
+
+    const saver = new BetterDBSaver({ cache: mockCache });
+    const results: any[] = [];
+
+    for await (const tuple of saver.list(
+      { configurable: { thread_id: 'thread-1' } },
+      { before: { configurable: { checkpoint_id: 'non-existent-id' } } }
+    )) {
+      results.push(tuple);
+    }
+
+    expect(results.length).toBe(0);
   });
 
   it('putWrites() stores writes with taskId in key for deduplication', async () => {
