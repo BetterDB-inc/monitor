@@ -72,7 +72,8 @@ export class LlmCache {
           try {
             entry = JSON.parse(raw);
           } catch {
-            // Corrupt cache entry - treat as miss
+            // Corrupt cache entry - delete to self-heal, then treat as miss
+            this.client.del(key).catch(() => {});
             try {
               await this.client.hincrby(this.statsKey, 'llm:misses', 1);
             } catch {

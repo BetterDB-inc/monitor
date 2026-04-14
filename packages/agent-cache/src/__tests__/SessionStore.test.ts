@@ -218,7 +218,7 @@ describe('SessionStore', () => {
       const result = await store.scanFieldsByPrefix('thread-1', 'writes:cp-1|');
 
       expect(client.scan).toHaveBeenCalledWith(
-        '0', 'MATCH', 'test_ac:session:thread-1:writes\\:cp\\-1\\|*', 'COUNT', 100,
+        '0', 'MATCH', 'test_ac:session:thread-1:writes:cp-1|*', 'COUNT', 100,
       );
       expect(result).toEqual({
         'writes:cp-1|task-1|output|0': '"result"',

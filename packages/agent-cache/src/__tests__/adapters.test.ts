@@ -125,6 +125,9 @@ describe('Vercel AI SDK adapter', () => {
 
     expect(doGenerate).not.toHaveBeenCalled();
     expect((result as { content: Array<{ text: string }> }).content[0].text).toBe('Cached response');
+
+    const r = result as { providerMetadata?: { agentCache?: { hit: boolean } } };
+    expect(r.providerMetadata?.agentCache?.hit).toBe(true);
   });
 
   it('middleware calls doGenerate on miss and stores result', async () => {
