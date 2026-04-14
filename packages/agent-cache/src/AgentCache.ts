@@ -13,13 +13,7 @@ import { ToolCache } from './tiers/ToolCache';
 import { SessionStore } from './tiers/SessionStore';
 import { createTelemetry } from './telemetry';
 import { ValkeyCommandError } from './errors';
-
-/**
- * Escape glob metacharacters for use in SCAN MATCH patterns.
- */
-function escapeGlobPattern(str: string): string {
-  return str.replace(/([*?[\]])/g, '\\$1');
-}
+import { escapeGlobPattern } from './utils';
 
 export class AgentCache {
   public readonly llm: LlmCache;
@@ -29,11 +23,15 @@ export class AgentCache {
   private readonly client: Valkey;
   private readonly name: string;
   private readonly statsKey: string;
+  private readonly defaultTtl: number | undefined;
+  private readonly toolTierTtl: number | undefined;
 
   constructor(options: AgentCacheOptions) {
     this.client = options.client;
     this.name = options.name ?? 'betterdb_ac';
     this.statsKey = `${this.name}:__stats`;
+    this.defaultTtl = options.defaultTtl;
+    this.toolTierTtl = options.tierDefaults?.tool?.ttl;
 
     const telemetry = createTelemetry({
       prefix: options.telemetry?.metricsPrefix ?? 'agent_cache',
@@ -178,13 +176,16 @@ export class AgentCache {
       // Cost saved is already computed in perTool from the single HGETALL call (microdollars -> dollars)
       const costSaved = toolStats.costSavedMicros / 1_000_000;
 
-      // Generate recommendation based on hit rate
+      // Resolve effective TTL through full hierarchy: policy -> tierTtl -> defaultTtl
+      const policyTtl = this.tool.getPolicy(toolName)?.ttl;
+      const effectiveTtl = policyTtl ?? this.toolTierTtl ?? this.defaultTtl;
+
+      // Generate recommendation based on hit rate and effective TTL
       let recommendation: ToolRecommendation;
-      const ttl = this.tool.getPolicy(toolName)?.ttl;
 
       if (toolStats.hitRate > 0.8) {
-        // High hit rate - consider increasing TTL (unless already > 1 hour)
-        if (ttl !== undefined && ttl < 3600) {
+        // High hit rate - consider increasing TTL (unless already > 1 hour or no TTL)
+        if (effectiveTtl !== undefined && effectiveTtl < 3600) {
           recommendation = 'increase_ttl';
         } else {
           recommendation = 'optimal';

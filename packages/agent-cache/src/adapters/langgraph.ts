@@ -95,9 +95,12 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     };
     const serialized = JSON.stringify(storedData);
 
-    // Store specific checkpoint and update latest pointer
-    await this.cache.session.set(threadId, `checkpoint:${checkpointId}`, serialized);
-    await this.cache.session.set(threadId, 'checkpoint:latest', serialized);
+    // Store specific checkpoint and update latest pointer atomically via Promise.all
+    // to prevent inconsistent state if process crashes between writes
+    await Promise.all([
+      this.cache.session.set(threadId, `checkpoint:${checkpointId}`, serialized),
+      this.cache.session.set(threadId, 'checkpoint:latest', serialized),
+    ]);
 
     return {
       ...config,
@@ -115,14 +118,17 @@ export class BetterDBSaver extends BaseCheckpointSaver {
 
     // Include taskId in the storage key for deduplication per the LangGraph protocol.
     // URL-encode all components to safely handle any characters including the | delimiter.
+    // Use Promise.all to write all entries in parallel (single batch of round-trips).
     const encodedCheckpointId = encodeURIComponent(checkpointId);
-    for (let i = 0; i < writes.length; i++) {
-      const [channel, value] = writes[i];
-      const encodedTaskId = encodeURIComponent(taskId);
-      const encodedChannel = encodeURIComponent(channel);
-      const field = `writes:${encodedCheckpointId}|${encodedTaskId}|${encodedChannel}|${i}`;
-      await this.cache.session.set(threadId, field, JSON.stringify(value));
-    }
+    const encodedTaskId = encodeURIComponent(taskId);
+
+    await Promise.all(
+      writes.map(([channel, value], i) => {
+        const encodedChannel = encodeURIComponent(channel);
+        const field = `writes:${encodedCheckpointId}|${encodedTaskId}|${encodedChannel}|${i}`;
+        return this.cache.session.set(threadId, field, JSON.stringify(value));
+      })
+    );
   }
 
   async *list(
@@ -192,13 +198,17 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     });
 
     // Apply before filter
-    let started = !options?.before;
+    const beforeId = options?.before?.configurable?.checkpoint_id;
+    // If before checkpoint doesn't exist in the list, default to yielding all (started=true)
+    // to avoid silently returning zero results when the checkpoint was evicted
+    const beforeExists = beforeId ? checkpoints.some(t => t.checkpoint?.id === beforeId) : false;
+    let started = !options?.before || !beforeExists;
     let yielded = 0;
     const limit = options?.limit ?? Infinity;
 
     for (const tuple of checkpoints) {
       if (!started) {
-        if (tuple.checkpoint?.id === options?.before?.configurable?.checkpoint_id) {
+        if (tuple.checkpoint?.id === beforeId) {
           started = true;
         }
         continue;

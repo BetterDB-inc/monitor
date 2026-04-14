@@ -1,30 +1,7 @@
 import type { Valkey } from '../types';
 import type { Telemetry } from '../telemetry';
-import { ValkeyCommandError, AgentCacheUsageError } from '../errors';
-
-// Glob metacharacters that need escaping in SCAN MATCH patterns
-const GLOB_METACHAR_PATTERN = /[*?[\]]/;
-
-/**
- * Escape glob metacharacters for use in SCAN MATCH patterns.
- * Prevents threadId or field from matching unintended keys.
- */
-function escapeGlobPattern(str: string): string {
-  return str.replace(/([*?[\]])/g, '\\$1');
-}
-
-/**
- * Validate that a string doesn't contain glob metacharacters.
- * Throws AgentCacheUsageError if it does.
- */
-function validateNoGlobChars(value: string, name: string): void {
-  if (GLOB_METACHAR_PATTERN.test(value)) {
-    throw new AgentCacheUsageError(
-      `${name} contains glob metacharacters (*, ?, [, ]). ` +
-      `This is not allowed as it could match unintended keys.`
-    );
-  }
-}
+import { ValkeyCommandError } from '../errors';
+import { escapeGlobPattern, validateNoGlobChars } from '../utils';
 
 export interface SessionStoreConfig {
   client: Valkey;

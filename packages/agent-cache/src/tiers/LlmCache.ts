@@ -1,14 +1,7 @@
 import type { Valkey, LlmCacheParams, LlmStoreOptions, LlmCacheResult, ModelCost } from '../types';
 import type { Telemetry } from '../telemetry';
 import { ValkeyCommandError } from '../errors';
-import { llmCacheHash } from '../utils';
-
-/**
- * Escape glob metacharacters for use in SCAN MATCH patterns.
- */
-function escapeGlobPattern(str: string): string {
-  return str.replace(/([*?[\]])/g, '\\$1');
-}
+import { llmCacheHash, escapeGlobPattern } from '../utils';
 
 export interface LlmCacheConfig {
   client: Valkey;

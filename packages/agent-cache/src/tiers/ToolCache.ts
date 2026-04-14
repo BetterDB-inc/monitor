@@ -1,30 +1,7 @@
 import type { Valkey, ToolStoreOptions, ToolCacheResult, ToolPolicy } from '../types';
 import type { Telemetry } from '../telemetry';
 import { ValkeyCommandError, AgentCacheUsageError } from '../errors';
-import { toolCacheHash } from '../utils';
-
-// Glob metacharacters that need escaping in SCAN MATCH patterns
-const GLOB_METACHAR_PATTERN = /[*?[\]]/;
-
-/**
- * Escape glob metacharacters for use in SCAN MATCH patterns.
- */
-function escapeGlobPattern(str: string): string {
-  return str.replace(/([*?[\]])/g, '\\$1');
-}
-
-/**
- * Validate that a string doesn't contain glob metacharacters.
- * Throws AgentCacheUsageError if it does.
- */
-function validateNoGlobChars(value: string, name: string): void {
-  if (GLOB_METACHAR_PATTERN.test(value)) {
-    throw new AgentCacheUsageError(
-      `${name} contains glob metacharacters (*, ?, [, ]). ` +
-      `This is not allowed as it could match unintended keys.`
-    );
-  }
-}
+import { toolCacheHash, escapeGlobPattern, validateNoGlobChars } from '../utils';
 
 /**
  * Validate that tool name doesn't contain colons, which are used as key delimiters.
