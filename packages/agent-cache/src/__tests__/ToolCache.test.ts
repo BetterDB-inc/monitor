@@ -4,6 +4,7 @@ import type { Telemetry } from '../telemetry';
 import type { Valkey } from '../types';
 
 function createMockClient(): Valkey {
+  const hincrbyCalls: Array<[string, string, number]> = [];
   return {
     get: vi.fn(),
     set: vi.fn(),
@@ -13,6 +14,14 @@ function createMockClient(): Valkey {
     hgetall: vi.fn(),
     del: vi.fn(),
     scan: vi.fn(),
+    pipeline: vi.fn(() => ({
+      hincrby: vi.fn(function(this: unknown, key: string, field: string, val: number) {
+        hincrbyCalls.push([key, field, val]);
+        return this;
+      }),
+      exec: vi.fn().mockResolvedValue([]),
+    })),
+    _hincrbyCalls: hincrbyCalls,
   } as unknown as Valkey;
 }
 
@@ -82,7 +91,7 @@ describe('ToolCache', () => {
       expect(result.response).toBe('{"temp": 20}');
     });
 
-    it('records tier-level and per-tool hit', async () => {
+    it('records tier-level and per-tool hit via pipeline', async () => {
       const stored = JSON.stringify({
         response: '{}',
         toolName: 'get_weather',
@@ -93,20 +102,24 @@ describe('ToolCache', () => {
 
       await cache.check('get_weather', {});
 
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:hits', 1);
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:get_weather:hits', 1);
+      // Stats are now batched via pipeline
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'tool:hits', 1]);
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'tool:get_weather:hits', 1]);
     });
 
-    it('records tier-level and per-tool miss', async () => {
+    it('records tier-level and per-tool miss via pipeline', async () => {
       (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
       await cache.check('get_weather', {});
 
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:misses', 1);
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:get_weather:misses', 1);
+      // Stats are now batched via pipeline
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'tool:misses', 1]);
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'tool:get_weather:misses', 1]);
     });
 
-    it('tracks cost savings on hit when entry has cost', async () => {
+    it('tracks cost savings on hit when entry has cost via pipeline', async () => {
       const stored = JSON.stringify({
         response: '{"temp": 20}',
         toolName: 'expensive_api',
@@ -115,13 +128,13 @@ describe('ToolCache', () => {
         cost: 0.05, // $0.05
       });
       (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
-      (client.hincrby as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       await cache.check('expensive_api', {});
 
-      // Verify cost_saved_micros was incremented on hit ($0.05 = 50000 microdollars)
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'cost_saved_micros', 50000);
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:expensive_api:cost_saved_micros', 50000);
+      // Stats are now batched via pipeline - verify cost_saved_micros ($0.05 = 50000 microdollars)
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'cost_saved_micros', 50000]);
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'tool:expensive_api:cost_saved_micros', 50000]);
     });
 
     it('does not track cost savings on hit when entry has no cost', async () => {
@@ -136,10 +149,10 @@ describe('ToolCache', () => {
 
       await cache.check('get_weather', {});
 
-      // cost_saved_micros should not be called
-      const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
+      // cost_saved_micros should not be in pipeline calls
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
       const costSavedCalls = hincrbyCalls.filter(
-        (call: unknown[]) => (call[1] as string).includes('cost_saved_micros')
+        (call: [string, string, number]) => call[1].includes('cost_saved_micros')
       );
       expect(costSavedCalls.length).toBe(0);
     });

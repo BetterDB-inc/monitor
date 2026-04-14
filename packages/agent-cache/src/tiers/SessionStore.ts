@@ -60,6 +60,16 @@ class SessionTracker {
   remove(threadId: string): boolean {
     return this.seen.delete(threadId);
   }
+
+  /**
+   * Reset the tracker, clearing all tracked sessions.
+   * Returns the number of sessions that were being tracked.
+   */
+  reset(): number {
+    const count = this.seen.size;
+    this.seen.clear();
+    return count;
+  }
 }
 
 export class SessionStore {
@@ -329,6 +339,20 @@ export class SessionStore {
         throw err;
       }
     });
+  }
+
+  /**
+   * Reset the in-memory session tracker and decrement the gauge.
+   * Called by AgentCache.flush() to synchronize in-memory state with Valkey.
+   */
+  resetTracker(): void {
+    const count = this.sessionTracker.reset();
+    if (count > 0) {
+      // Reset gauge to 0 by decrementing by the tracked count
+      this.telemetry.metrics.activeSessions
+        .labels(this.name)
+        .dec(count);
+    }
   }
 
   async touch(threadId: string): Promise<void> {

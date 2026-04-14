@@ -87,22 +87,21 @@ export class LlmCache {
             return { hit: false, tier: 'llm' as const };
           }
 
-          // Record hit
+          // Record hit + cost savings in a single pipeline to reduce round-trips
           try {
-            await this.client.hincrby(this.statsKey, 'llm:hits', 1);
+            const statsPipeline = this.client.pipeline();
+            statsPipeline.hincrby(this.statsKey, 'llm:hits', 1);
+            if (entry.cost !== undefined) {
+              const costMicros = Math.round(entry.cost * 1_000_000);
+              statsPipeline.hincrby(this.statsKey, 'cost_saved_micros', costMicros);
+            }
+            await statsPipeline.exec();
           } catch {
             // Stats update failure should not break the cache
           }
 
-          // Track cost savings on hit (not at store time) - each hit represents one saved API call
+          // Track cost in Prometheus (outside pipeline since it's local)
           if (entry.cost !== undefined) {
-            const costMicros = Math.round(entry.cost * 1_000_000);
-            try {
-              await this.client.hincrby(this.statsKey, 'cost_saved_micros', costMicros);
-            } catch {
-              // Stats update failure should not break the cache
-            }
-
             this.telemetry.metrics.costSaved
               .labels(this.name, 'llm', entry.model, '')
               .inc(entry.cost);
@@ -192,8 +191,8 @@ export class LlmCache {
           throw new ValkeyCommandError('SET', err);
         }
 
-        // Track stored bytes
-        const byteLength = Buffer.byteLength(response, 'utf8');
+        // Track stored bytes (measure valueJson, not just response, since that's what's stored)
+        const byteLength = Buffer.byteLength(valueJson, 'utf8');
         this.telemetry.metrics.storedBytes
           .labels(this.name, 'llm')
           .inc(byteLength);

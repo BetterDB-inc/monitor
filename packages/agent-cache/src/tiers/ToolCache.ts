@@ -72,10 +72,12 @@ export class ToolCache {
           try {
             entry = JSON.parse(raw);
           } catch {
-            // Corrupt cache entry - treat as miss
+            // Corrupt cache entry - treat as miss (batch into pipeline)
             try {
-              await this.client.hincrby(this.statsKey, 'tool:misses', 1);
-              await this.client.hincrby(this.statsKey, `tool:${toolName}:misses`, 1);
+              const statsPipeline = this.client.pipeline();
+              statsPipeline.hincrby(this.statsKey, 'tool:misses', 1);
+              statsPipeline.hincrby(this.statsKey, `tool:${toolName}:misses`, 1);
+              await statsPipeline.exec();
             } catch {
               // Stats update failure should not break the cache
             }
@@ -88,24 +90,23 @@ export class ToolCache {
             return { hit: false, tier: 'tool' as const, toolName };
           }
 
-          // Record tier-level and per-tool hit
+          // Record tier-level and per-tool hit + cost savings in a single pipeline
           try {
-            await this.client.hincrby(this.statsKey, 'tool:hits', 1);
-            await this.client.hincrby(this.statsKey, `tool:${toolName}:hits`, 1);
+            const statsPipeline = this.client.pipeline();
+            statsPipeline.hincrby(this.statsKey, 'tool:hits', 1);
+            statsPipeline.hincrby(this.statsKey, `tool:${toolName}:hits`, 1);
+            if (entry.cost !== undefined) {
+              const costMicros = Math.round(entry.cost * 1_000_000);
+              statsPipeline.hincrby(this.statsKey, 'cost_saved_micros', costMicros);
+              statsPipeline.hincrby(this.statsKey, `tool:${toolName}:cost_saved_micros`, costMicros);
+            }
+            await statsPipeline.exec();
           } catch {
             // Stats update failure should not break the cache
           }
 
-          // Track cost savings on hit (not at store time) - each hit represents one saved API call
+          // Track cost in Prometheus (outside pipeline since it's local)
           if (entry.cost !== undefined) {
-            const costMicros = Math.round(entry.cost * 1_000_000);
-            try {
-              await this.client.hincrby(this.statsKey, 'cost_saved_micros', costMicros);
-              await this.client.hincrby(this.statsKey, `tool:${toolName}:cost_saved_micros`, costMicros);
-            } catch {
-              // Stats update failure should not break the cache
-            }
-
             this.telemetry.metrics.costSaved
               .labels(this.name, 'tool', '', toolName)
               .inc(entry.cost);
@@ -127,10 +128,12 @@ export class ToolCache {
           };
         }
 
-        // Record tier-level and per-tool miss
+        // Record tier-level and per-tool miss (batch into pipeline)
         try {
-          await this.client.hincrby(this.statsKey, 'tool:misses', 1);
-          await this.client.hincrby(this.statsKey, `tool:${toolName}:misses`, 1);
+          const statsPipeline = this.client.pipeline();
+          statsPipeline.hincrby(this.statsKey, 'tool:misses', 1);
+          statsPipeline.hincrby(this.statsKey, `tool:${toolName}:misses`, 1);
+          await statsPipeline.exec();
         } catch {
           // Stats update failure should not break the cache
         }
@@ -192,8 +195,8 @@ export class ToolCache {
           throw new ValkeyCommandError('SET', err);
         }
 
-        // Track stored bytes
-        const byteLength = Buffer.byteLength(response, 'utf8');
+        // Track stored bytes (measure valueJson, not just response, since that's what's stored)
+        const byteLength = Buffer.byteLength(valueJson, 'utf8');
         this.telemetry.metrics.storedBytes
           .labels(this.name, 'tool')
           .inc(byteLength);

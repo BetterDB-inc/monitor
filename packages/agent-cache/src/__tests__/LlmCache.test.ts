@@ -4,6 +4,7 @@ import type { Telemetry } from '../telemetry';
 import type { Valkey } from '../types';
 
 function createMockClient(): Valkey {
+  const hincrbyCalls: Array<[string, string, number]> = [];
   return {
     get: vi.fn(),
     set: vi.fn(),
@@ -13,8 +14,14 @@ function createMockClient(): Valkey {
     scan: vi.fn(),
     pipeline: vi.fn(() => ({
       get: vi.fn().mockReturnThis(),
+      hincrby: vi.fn(function(this: { _calls: Array<[string, string, number]> }, key: string, field: string, val: number) {
+        hincrbyCalls.push([key, field, val]);
+        return this;
+      }),
       exec: vi.fn().mockResolvedValue([]),
+      _hincrbyCalls: hincrbyCalls,
     })),
+    _hincrbyCalls: hincrbyCalls,
   } as unknown as Valkey;
 }
 
@@ -91,7 +98,7 @@ describe('LlmCache', () => {
       expect(result.key).toContain('test_ac:llm:');
     });
 
-    it('records hit in stats', async () => {
+    it('records hit in stats via pipeline', async () => {
       const stored = JSON.stringify({
         response: 'Hello there!',
         model: 'gpt-4o',
@@ -104,7 +111,9 @@ describe('LlmCache', () => {
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'llm:hits', 1);
+      // Stats are now batched via pipeline
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'llm:hits', 1]);
     });
 
     it('records miss in stats', async () => {
@@ -118,7 +127,7 @@ describe('LlmCache', () => {
       expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'llm:misses', 1);
     });
 
-    it('tracks cost savings on hit when entry has cost', async () => {
+    it('tracks cost savings on hit when entry has cost via pipeline', async () => {
       const stored = JSON.stringify({
         response: 'Hello there!',
         model: 'gpt-4o',
@@ -126,15 +135,15 @@ describe('LlmCache', () => {
         cost: 0.05, // $0.05
       });
       (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
-      (client.hincrby as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       await cache.check({
         model: 'gpt-4o',
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
-      // Verify cost_saved_micros was incremented on hit ($0.05 = 50000 microdollars)
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'cost_saved_micros', 50000);
+      // Stats are now batched via pipeline - verify cost_saved_micros ($0.05 = 50000 microdollars)
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'cost_saved_micros', 50000]);
     });
 
     it('does not track cost savings on hit when entry has no cost', async () => {
@@ -151,10 +160,10 @@ describe('LlmCache', () => {
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
-      // cost_saved_micros should not be called
-      const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
+      // cost_saved_micros should not be in pipeline calls
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
       const costSavedCalls = hincrbyCalls.filter(
-        (call: unknown[]) => call[1] === 'cost_saved_micros'
+        (call: [string, string, number]) => call[1] === 'cost_saved_micros'
       );
       expect(costSavedCalls.length).toBe(0);
     });
