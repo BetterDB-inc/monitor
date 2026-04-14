@@ -50,6 +50,7 @@
     "@langchain/langgraph-checkpoint": "^0.1.0",
     "ai": "^6.0.135",
     "@types/node": "^22.19.15",
+    "iovalkey": ">=0.3.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.1"
   },

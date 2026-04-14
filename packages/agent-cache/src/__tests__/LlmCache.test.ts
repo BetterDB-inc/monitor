@@ -117,6 +117,47 @@ describe('LlmCache', () => {
 
       expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'llm:misses', 1);
     });
+
+    it('tracks cost savings on hit when entry has cost', async () => {
+      const stored = JSON.stringify({
+        response: 'Hello there!',
+        model: 'gpt-4o',
+        storedAt: Date.now(),
+        cost: 0.05, // $0.05
+      });
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
+      (client.hincrby as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      // Verify cost_saved_cents was incremented on hit (5 cents)
+      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'cost_saved_cents', 5);
+    });
+
+    it('does not track cost savings on hit when entry has no cost', async () => {
+      const stored = JSON.stringify({
+        response: 'Hello there!',
+        model: 'gpt-4o',
+        storedAt: Date.now(),
+        // No cost field
+      });
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
+
+      await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      // cost_saved_cents should not be called
+      const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
+      const costSavedCalls = hincrbyCalls.filter(
+        (call: unknown[]) => call[1] === 'cost_saved_cents'
+      );
+      expect(costSavedCalls.length).toBe(0);
+    });
   });
 
   describe('store()', () => {
@@ -197,10 +238,8 @@ describe('LlmCache', () => {
       expect((client.set as ReturnType<typeof vi.fn>).mock.calls[0].length).toBe(2);
     });
 
-    it('calculates and stores cost when costTable and tokens provided', async () => {
+    it('stores cost in entry when costTable and tokens provided (but does not track yet)', async () => {
       (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
-      (client.expire as ReturnType<typeof vi.fn>).mockResolvedValue(1);
-      (client.hincrby as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       await cache.store(
         { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
@@ -208,12 +247,18 @@ describe('LlmCache', () => {
         { tokens: { input: 10, output: 20 } },
       );
 
-      // Verify cost_saved_cents was incremented
-      expect(client.hincrby).toHaveBeenCalledWith(
-        'test_ac:__stats',
-        'cost_saved_cents',
-        expect.any(Number),
+      // Verify cost is stored in the entry
+      const [, value] = (client.set as ReturnType<typeof vi.fn>).mock.calls[0];
+      const parsed = JSON.parse(value);
+      expect(parsed.cost).toBeDefined();
+      expect(parsed.cost).toBeGreaterThan(0);
+
+      // Verify cost_saved_cents is NOT incremented at store time
+      const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
+      const costSavedCalls = hincrbyCalls.filter(
+        (call: unknown[]) => call[1] === 'cost_saved_cents'
       );
+      expect(costSavedCalls.length).toBe(0);
     });
   });
 

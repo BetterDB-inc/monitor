@@ -77,6 +77,20 @@ export class LlmCache {
             // Stats update failure should not break the cache
           }
 
+          // Track cost savings on hit (not at store time) - each hit represents one saved API call
+          if (entry.cost !== undefined) {
+            const costCents = Math.round(entry.cost * 100);
+            try {
+              await this.client.hincrby(this.statsKey, 'cost_saved_cents', costCents);
+            } catch {
+              // Stats update failure should not break the cache
+            }
+
+            this.telemetry.metrics.costSaved
+              .labels(this.name, 'llm', entry.model, '')
+              .inc(entry.cost);
+          }
+
           this.telemetry.metrics.requestsTotal
             .labels(this.name, 'llm', 'hit', '')
             .inc();
@@ -136,25 +150,14 @@ export class LlmCache {
           tokens: options?.tokens,
         };
 
-        // Calculate cost if costTable and tokens are provided
+        // Calculate and store cost if costTable and tokens are provided
+        // Cost tracking happens at check() time on hit, not here at store() time
         if (this.costTable && options?.tokens) {
           const modelCost = this.costTable[params.model];
           if (modelCost) {
             const inputCost = (options.tokens.input / 1000) * modelCost.inputPer1k;
             const outputCost = (options.tokens.output / 1000) * modelCost.outputPer1k;
             entry.cost = inputCost + outputCost;
-
-            // Track cost saved in stats (cents)
-            const costCents = Math.round(entry.cost * 100);
-            try {
-              await this.client.hincrby(this.statsKey, 'cost_saved_cents', costCents);
-            } catch {
-              // Stats update failure should not break the cache
-            }
-
-            this.telemetry.metrics.costSaved
-              .labels(this.name, 'llm', params.model, '')
-              .inc(entry.cost);
           }
         }
 

@@ -11,7 +11,10 @@ export interface SessionStoreConfig {
   statsKey: string;
 }
 
-// Simple LRU tracker for active sessions (bounded to prevent memory leaks)
+// Simple LRU tracker for active sessions (bounded to prevent memory leaks).
+// Note: Eviction is O(n) but n is bounded at maxSize (default 10k entries).
+// For typical agent workloads this is acceptable (~1-2ms worst case).
+// A proper LRU with doubly-linked list would add complexity without meaningful benefit.
 class SessionTracker {
   private readonly maxSize: number;
   private readonly seen: Map<string, number> = new Map();
@@ -27,7 +30,7 @@ class SessionTracker {
       return false; // Already tracked
     }
 
-    // Evict oldest if at capacity
+    // Evict oldest if at capacity (O(n) scan, bounded at maxSize)
     if (this.seen.size >= this.maxSize) {
       let oldestKey: string | undefined;
       let oldestTime = Infinity;

@@ -78,6 +78,21 @@ export class ToolCache {
             // Stats update failure should not break the cache
           }
 
+          // Track cost savings on hit (not at store time) - each hit represents one saved API call
+          if (entry.cost !== undefined) {
+            const costCents = Math.round(entry.cost * 100);
+            try {
+              await this.client.hincrby(this.statsKey, 'cost_saved_cents', costCents);
+              await this.client.hincrby(this.statsKey, `tool:${toolName}:cost_saved_cents`, costCents);
+            } catch {
+              // Stats update failure should not break the cache
+            }
+
+            this.telemetry.metrics.costSaved
+              .labels(this.name, 'tool', '', toolName)
+              .inc(entry.cost);
+          }
+
           this.telemetry.metrics.requestsTotal
             .labels(this.name, 'tool', 'hit', toolName)
             .inc();
@@ -133,6 +148,7 @@ export class ToolCache {
         span.setAttribute('cache.key', key);
         span.setAttribute('cache.tool_name', toolName);
 
+        // Store cost in entry - cost tracking happens at check() time on hit, not here
         const entry: StoredToolEntry = {
           response,
           toolName,
@@ -140,21 +156,6 @@ export class ToolCache {
           storedAt: Date.now(),
           cost: options?.cost,
         };
-
-        // Track cost saved if provided
-        if (options?.cost !== undefined) {
-          const costCents = Math.round(options.cost * 100);
-          try {
-            await this.client.hincrby(this.statsKey, 'cost_saved_cents', costCents);
-            await this.client.hincrby(this.statsKey, `tool:${toolName}:cost_saved_cents`, costCents);
-          } catch {
-            // Stats update failure should not break the cache
-          }
-
-          this.telemetry.metrics.costSaved
-            .labels(this.name, 'tool', '', toolName)
-            .inc(options.cost);
-        }
 
         const valueJson = JSON.stringify(entry);
 

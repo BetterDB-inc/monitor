@@ -105,6 +105,44 @@ describe('ToolCache', () => {
       expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:misses', 1);
       expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:get_weather:misses', 1);
     });
+
+    it('tracks cost savings on hit when entry has cost', async () => {
+      const stored = JSON.stringify({
+        response: '{"temp": 20}',
+        toolName: 'expensive_api',
+        args: {},
+        storedAt: Date.now(),
+        cost: 0.05, // $0.05
+      });
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
+      (client.hincrby as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      await cache.check('expensive_api', {});
+
+      // Verify cost_saved_cents was incremented on hit (5 cents)
+      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'cost_saved_cents', 5);
+      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:expensive_api:cost_saved_cents', 5);
+    });
+
+    it('does not track cost savings on hit when entry has no cost', async () => {
+      const stored = JSON.stringify({
+        response: '{"temp": 20}',
+        toolName: 'get_weather',
+        args: {},
+        storedAt: Date.now(),
+        // No cost field
+      });
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
+
+      await cache.check('get_weather', {});
+
+      // cost_saved_cents should not be called
+      const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
+      const costSavedCalls = hincrbyCalls.filter(
+        (call: unknown[]) => (call[1] as string).includes('cost_saved_cents')
+      );
+      expect(costSavedCalls.length).toBe(0);
+    });
   });
 
   describe('store()', () => {
@@ -138,15 +176,22 @@ describe('ToolCache', () => {
       );
     });
 
-    it('records cost when provided', async () => {
+    it('stores cost in entry when provided (but does not track yet)', async () => {
       (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
-      (client.expire as ReturnType<typeof vi.fn>).mockResolvedValue(1);
-      (client.hincrby as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       await cache.store('expensive_api', {}, 'result', { cost: 0.05 });
 
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'cost_saved_cents', 5);
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:expensive_api:cost_saved_cents', 5);
+      // Verify cost is stored in the entry
+      const [, value] = (client.set as ReturnType<typeof vi.fn>).mock.calls[0];
+      const parsed = JSON.parse(value);
+      expect(parsed.cost).toBe(0.05);
+
+      // Verify cost_saved_cents is NOT incremented at store time
+      const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
+      const costSavedCalls = hincrbyCalls.filter(
+        (call: unknown[]) => call[1] === 'cost_saved_cents' || (call[1] as string).includes('cost_saved_cents')
+      );
+      expect(costSavedCalls.length).toBe(0);
     });
   });
 

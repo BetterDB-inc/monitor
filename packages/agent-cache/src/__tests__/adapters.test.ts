@@ -198,12 +198,13 @@ describe('LangGraph adapter', () => {
       metadata: {},
     };
     (mockCache.session.get as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify(tuple));
+    // Note: key format is writes:{checkpointId}|{taskId}|{channel}|{idx} (using | delimiter)
     (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
       'checkpoint:cp-1': JSON.stringify(tuple),
       'checkpoint:latest': JSON.stringify(tuple),
-      'writes:cp-1:task-abc:messages:0': JSON.stringify({ role: 'assistant', content: 'Hi' }),
-      'writes:cp-1:task-abc:state:1': JSON.stringify({ step: 2 }),
-      'writes:cp-1:task-xyz:output:0': JSON.stringify('done'),
+      'writes:cp-1|task-abc|messages|0': JSON.stringify({ role: 'assistant', content: 'Hi' }),
+      'writes:cp-1|task-abc|state|1': JSON.stringify({ step: 2 }),
+      'writes:cp-1|task-xyz|output|0': JSON.stringify('done'),
     });
 
     const saver = new BetterDBSaver({ cache: mockCache });
@@ -231,7 +232,7 @@ describe('LangGraph adapter', () => {
     (mockCache.session.get as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify(tuple));
     (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
       'checkpoint:cp-2': JSON.stringify(tuple),
-      'writes:cp-1:task-old:channel:0': JSON.stringify('stale'),
+      'writes:cp-1|task-old|channel|0': JSON.stringify('stale'),
     });
 
     const saver = new BetterDBSaver({ cache: mockCache });
@@ -285,7 +286,7 @@ describe('LangGraph adapter', () => {
         checkpoint: { id: 'cp-2', ts: '2024-01-02T00:00:00Z' },
         metadata: {},
       }),
-      'writes:cp-2:task-1:output:0': JSON.stringify('result'),
+      'writes:cp-2|task-1|output|0': JSON.stringify('result'),
     };
     (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue(checkpoints);
 
@@ -350,15 +351,15 @@ describe('LangGraph adapter', () => {
       'task-abc',
     );
 
-    // Verify taskId is included in the storage key
+    // Verify taskId is included in the storage key (using | delimiter)
     expect(mockCache.session.set).toHaveBeenCalledWith(
       'thread-1',
-      'writes:cp-1:task-abc:messages:0',
+      'writes:cp-1|task-abc|messages|0',
       JSON.stringify({ role: 'user', content: 'Hello' }),
     );
     expect(mockCache.session.set).toHaveBeenCalledWith(
       'thread-1',
-      'writes:cp-1:task-abc:state:1',
+      'writes:cp-1|task-abc|state|1',
       JSON.stringify({ step: 1 }),
     );
   });
@@ -395,15 +396,15 @@ describe('LangGraph adapter', () => {
       'task-2',
     );
 
-    // Different taskIds should result in different keys
+    // Different taskIds should result in different keys (using | delimiter)
     expect(mockCache.session.set).toHaveBeenCalledWith(
       'thread-1',
-      'writes:cp-1:task-1:channel:0',
+      'writes:cp-1|task-1|channel|0',
       JSON.stringify('value1'),
     );
     expect(mockCache.session.set).toHaveBeenCalledWith(
       'thread-1',
-      'writes:cp-1:task-2:channel:0',
+      'writes:cp-1|task-2|channel|0',
       JSON.stringify('value2'),
     );
   });

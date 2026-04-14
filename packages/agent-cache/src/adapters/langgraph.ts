@@ -108,9 +108,10 @@ export class BetterDBSaver extends BaseCheckpointSaver {
 
     // Include taskId in the storage key for deduplication per the LangGraph protocol.
     // This ensures writes from different tasks within the same checkpoint don't collide.
+    // Use | as delimiter between taskId and channel to avoid ambiguity if taskId contains colons.
     for (let i = 0; i < writes.length; i++) {
       const [channel, value] = writes[i];
-      const field = `writes:${checkpointId}:${taskId}:${channel}:${i}`;
+      const field = `writes:${checkpointId}|${taskId}|${channel}|${i}`;
       await this.cache.session.set(threadId, field, JSON.stringify(value));
     }
   }
@@ -170,25 +171,25 @@ export class BetterDBSaver extends BaseCheckpointSaver {
 
   /**
    * Reconstruct CheckpointPendingWrite tuples from session fields matching
-   * the key pattern: writes:{checkpointId}:{taskId}:{channel}:{idx}
+   * the key pattern: writes:{checkpointId}|{taskId}|{channel}|{idx}
+   * Uses | as delimiter to avoid ambiguity with colons in taskId or channel names.
    */
   private extractPendingWrites(
     all: Record<string, string>,
     checkpointId: string,
   ): CheckpointPendingWrite[] {
-    const prefix = `writes:${checkpointId}:`;
+    const prefix = `writes:${checkpointId}|`;
     const pendingWrites: CheckpointPendingWrite[] = [];
 
     for (const [field, rawValue] of Object.entries(all)) {
       if (!field.startsWith(prefix)) continue;
 
       const rest = field.slice(prefix.length);
-      const parts = rest.split(':');
-      // Need at least taskId, channel, idx
-      if (parts.length < 3) continue;
+      const parts = rest.split('|');
+      // Need exactly taskId, channel, idx
+      if (parts.length !== 3) continue;
 
-      const taskId = parts[0];
-      const channel = parts.slice(1, -1).join(':');
+      const [taskId, channel] = parts;
 
       try {
         const value = JSON.parse(rawValue);
