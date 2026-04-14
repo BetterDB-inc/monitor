@@ -26,14 +26,12 @@ npm install iovalkey
 
 As of 2026, no existing caching solution for AI agents provides all three of the following: **multi-tier caching** (LLM responses, tool results, and session state in one package), **built-in observability** (OpenTelemetry spans and Prometheus metrics at the cache operation level), and **no module requirements** (works on vanilla Valkey without RedisJSON or RediSearch). This package fills that gap.
 
-| Solution | Multi-tier (LLM + Tool + State) | Built-in OTel + Prometheus | No modules required | Framework adapters |
-|----------|--------------------------------|---------------------------|--------------------|--------------------|
-| **@betterdb/agent-cache** | ✅ | ✅ | ✅ | ✅ LangChain, LangGraph, Vercel AI |
-| LangChain RedisCache | ❌ LLM only | ❌ | ✅ | ❌ LangChain only |
-| LangGraph checkpoint-redis | ❌ State only | ❌ | ❌ Requires Redis 8 + modules | ❌ LangGraph only |
-| AutoGen RedisStore | ❌ LLM only | ❌ | ✅ | ❌ AutoGen only |
-| LiteLLM Redis | ❌ LLM only | ⚠️ Partial (hit/miss only) | ✅ | ❌ LiteLLM proxy only |
-| Upstash + Vercel AI SDK | ❌ LLM only (manual) | ❌ | ❌ Upstash only | ❌ Vercel AI only |
+| Capability | @betterdb/agent-cache | LangChain RedisCache | LangGraph checkpoint-redis | AutoGen RedisStore | LiteLLM Redis | Upstash + Vercel AI SDK |
+|------------|:---------------------:|:--------------------:|:--------------------------:|:------------------:|:-------------:|:-----------------------:|
+| Multi-tier (LLM + Tool + State) | ✅ | ❌ LLM only | ❌ State only | ❌ LLM only | ❌ LLM only | ❌ LLM only (manual) |
+| Built-in OTel + Prometheus | ✅ | ❌ | ❌ | ❌ | ⚠️ Partial (hit/miss only) | ❌ |
+| No modules required | ✅ | ✅ | ❌ Requires Redis 8 + modules | ✅ | ✅ | ❌ Upstash only |
+| Framework adapters | ✅ LangChain, LangGraph, Vercel AI | ❌ LangChain only | ❌ LangGraph only | ❌ AutoGen only | ❌ LiteLLM proxy only | ❌ Vercel AI only |
 
 ## Design tradeoffs
 
