@@ -102,6 +102,7 @@ export interface ToolStats {
   misses: number;
   hitRate: number;
   ttl: number | undefined;
+  costSavedCents: number;
 }
 
 export type ToolRecommendation = 'increase_ttl' | 'optimal' | 'decrease_ttl_or_disable';

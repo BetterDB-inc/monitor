@@ -22,7 +22,14 @@ export interface BetterDBSaverOptions {
  * Storage layout in session tier:
  *   {name}:session:{thread_id}:checkpoint:{checkpoint_id} = JSON(CheckpointTuple)
  *   {name}:session:{thread_id}:checkpoint:latest = JSON(CheckpointTuple)
- *   {name}:session:{thread_id}:writes:{checkpoint_id}:{channel}:{idx} = JSON(value)
+ *   {name}:session:{thread_id}:writes:{checkpoint_id}:{task_id}:{channel}:{idx} = JSON(value)
+ *
+ * Known limitations:
+ * - list() loads all checkpoint data for a thread into memory before filtering.
+ *   For threads with thousands of large checkpoints, this causes memory pressure
+ *   even when limit: 1. For typical agent deployments (hundreds of checkpoints),
+ *   this is acceptable. If you have millions of checkpoints per thread, consider
+ *   using langgraph-checkpoint-redis with Redis 8+ instead.
  */
 export class BetterDBSaver extends BaseCheckpointSaver {
   private cache: AgentCache;
@@ -86,9 +93,11 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     const threadId = config.configurable?.thread_id as string;
     const checkpointId = config.configurable?.checkpoint_id as string;
 
+    // Include taskId in the storage key for deduplication per the LangGraph protocol.
+    // This ensures writes from different tasks within the same checkpoint don't collide.
     for (let i = 0; i < writes.length; i++) {
       const [channel, value] = writes[i];
-      const field = `writes:${checkpointId}:${channel}:${i}`;
+      const field = `writes:${checkpointId}:${taskId}:${channel}:${i}`;
       await this.cache.session.set(threadId, field, JSON.stringify(value));
     }
   }

@@ -139,19 +139,16 @@ export class SessionStore {
         span.setAttribute('cache.thread_id', threadId);
         span.setAttribute('cache.field', field);
 
+        // Use SET with EX option for atomic set+expire to prevent orphaned keys
+        const effectiveTtl = ttl ?? this.tierTtl ?? this.defaultTtl;
         try {
-          await this.client.set(key, value);
+          if (effectiveTtl !== undefined) {
+            await this.client.set(key, value, 'EX', effectiveTtl);
+          } else {
+            await this.client.set(key, value);
+          }
         } catch (err) {
           throw new ValkeyCommandError('SET', err);
-        }
-
-        const effectiveTtl = ttl ?? this.tierTtl ?? this.defaultTtl;
-        if (effectiveTtl !== undefined) {
-          try {
-            await this.client.expire(key, effectiveTtl);
-          } catch (err) {
-            throw new ValkeyCommandError('EXPIRE', err);
-          }
         }
 
         // Record write

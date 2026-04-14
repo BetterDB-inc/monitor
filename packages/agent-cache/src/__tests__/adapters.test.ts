@@ -278,4 +278,88 @@ describe('LangGraph adapter', () => {
 
     expect(results.length).toBe(2);
   });
+
+  it('putWrites() stores writes with taskId in key for deduplication', async () => {
+    const mockCache = createMockAgentCache();
+    (mockCache.session.set as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+    const saver = new BetterDBSaver({ cache: mockCache });
+    const writes: [string, unknown][] = [
+      ['messages', { role: 'user', content: 'Hello' }],
+      ['state', { step: 1 }],
+    ];
+
+    await saver.putWrites(
+      { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-1' } },
+      writes,
+      'task-abc',
+    );
+
+    // Verify taskId is included in the storage key
+    expect(mockCache.session.set).toHaveBeenCalledWith(
+      'thread-1',
+      'writes:cp-1:task-abc:messages:0',
+      JSON.stringify({ role: 'user', content: 'Hello' }),
+    );
+    expect(mockCache.session.set).toHaveBeenCalledWith(
+      'thread-1',
+      'writes:cp-1:task-abc:state:1',
+      JSON.stringify({ step: 1 }),
+    );
+  });
+
+  it('putWrites() handles empty writes array', async () => {
+    const mockCache = createMockAgentCache();
+    (mockCache.session.set as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+    const saver = new BetterDBSaver({ cache: mockCache });
+
+    await saver.putWrites(
+      { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-1' } },
+      [],
+      'task-abc',
+    );
+
+    expect(mockCache.session.set).not.toHaveBeenCalled();
+  });
+
+  it('putWrites() with different taskIds stores separately', async () => {
+    const mockCache = createMockAgentCache();
+    (mockCache.session.set as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+    const saver = new BetterDBSaver({ cache: mockCache });
+
+    await saver.putWrites(
+      { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-1' } },
+      [['channel', 'value1']],
+      'task-1',
+    );
+    await saver.putWrites(
+      { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-1' } },
+      [['channel', 'value2']],
+      'task-2',
+    );
+
+    // Different taskIds should result in different keys
+    expect(mockCache.session.set).toHaveBeenCalledWith(
+      'thread-1',
+      'writes:cp-1:task-1:channel:0',
+      JSON.stringify('value1'),
+    );
+    expect(mockCache.session.set).toHaveBeenCalledWith(
+      'thread-1',
+      'writes:cp-1:task-2:channel:0',
+      JSON.stringify('value2'),
+    );
+  });
+
+  it('deleteThread() calls session.destroyThread', async () => {
+    const mockCache = createMockAgentCache();
+    (mockCache.session.destroyThread as ReturnType<typeof vi.fn>).mockResolvedValue(5);
+
+    const saver = new BetterDBSaver({ cache: mockCache });
+    await saver.deleteThread('thread-1');
+
+    expect(mockCache.session.destroyThread).toHaveBeenCalledWith('thread-1');
+  });
 });

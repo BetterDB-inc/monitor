@@ -134,6 +134,7 @@ export class AgentCache {
             misses: 0,
             hitRate: 0,
             ttl: this.tool.getPolicy(toolName)?.ttl,
+            costSavedCents: 0,
           };
         }
 
@@ -141,6 +142,8 @@ export class AgentCache {
           perTool[toolName].hits = numValue;
         } else if (statType === 'misses') {
           perTool[toolName].misses = numValue;
+        } else if (statType === 'cost_saved_cents') {
+          perTool[toolName].costSavedCents = numValue;
         }
       }
     }
@@ -160,19 +163,13 @@ export class AgentCache {
   }
 
   async toolEffectiveness(): Promise<ToolEffectivenessEntry[]> {
+    // Reuse data already fetched by stats() to avoid N+1 queries
     const stats = await this.stats();
     const entries: ToolEffectivenessEntry[] = [];
 
     for (const [toolName, toolStats] of Object.entries(stats.perTool)) {
-      // Get cost saved for this tool
-      let raw: Record<string, string>;
-      try {
-        raw = await this.client.hgetall(this.statsKey);
-      } catch {
-        raw = {};
-      }
-      const costSavedCents = parseInt(raw[`tool:${toolName}:cost_saved_cents`] || '0', 10);
-      const costSaved = costSavedCents / 100;
+      // Cost saved is already computed in perTool from the single HGETALL call
+      const costSaved = toolStats.costSavedCents / 100;
 
       // Generate recommendation based on hit rate
       let recommendation: ToolRecommendation;

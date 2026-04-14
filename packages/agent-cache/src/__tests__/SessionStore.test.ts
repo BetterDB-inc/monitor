@@ -87,30 +87,28 @@ describe('SessionStore', () => {
   });
 
   describe('set()', () => {
-    it('writes value and sets EXPIRE', async () => {
+    it('writes value with SET EX (atomic operation)', async () => {
       (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
-      (client.expire as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       await store.set('thread-1', 'last_intent', 'book_flight');
 
       expect(client.set).toHaveBeenCalledWith(
         'test_ac:session:thread-1:last_intent',
         'book_flight',
-      );
-      expect(client.expire).toHaveBeenCalledWith(
-        'test_ac:session:thread-1:last_intent',
+        'EX',
         1800,
       );
     });
 
-    it('uses custom TTL when provided', async () => {
+    it('uses custom TTL with SET EX when provided', async () => {
       (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
-      (client.expire as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       await store.set('thread-1', 'last_intent', 'book_flight', 900);
 
-      expect(client.expire).toHaveBeenCalledWith(
+      expect(client.set).toHaveBeenCalledWith(
         'test_ac:session:thread-1:last_intent',
+        'book_flight',
+        'EX',
         900,
       );
     });

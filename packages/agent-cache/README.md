@@ -331,7 +331,7 @@ Connect [BetterDB Monitor](https://github.com/BetterDB-inc/monitor) to the same 
 ## Known limitations
 
 - **Streaming responses:** Not cached by the Vercel AI SDK adapter. Accumulate the full response before caching.
-- **LangGraph `list()` performance:** SCAN-based, not indexed. Fine for typical checkpoint counts (hundreds to thousands), not for millions per thread.
+- **LangGraph `list()` memory usage:** The `list()` method loads all checkpoint data for a thread into memory before filtering and applying the limit. For typical agent deployments with hundreds of checkpoints per thread, this is acceptable. For threads with thousands of large checkpoints, this causes memory pressure even when requesting `limit: 1`. If you have millions of checkpoints per thread, consider using `langgraph-checkpoint-redis` with Redis 8+ instead.
 - **Session `getAll()`:** SCAN-based. Fine for dozens of fields, consider Redis HASH if you have thousands per thread.
 - **`active_sessions` gauge:** Approximate and does not survive process restarts.
 - **Cluster mode:** SCAN operations in session and tool invalidation only iterate the node they're sent to. Use the iovalkey cluster client's per-node scan for full coverage.

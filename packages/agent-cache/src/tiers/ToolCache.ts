@@ -158,21 +158,19 @@ export class ToolCache {
 
         const valueJson = JSON.stringify(entry);
 
-        try {
-          await this.client.set(key, valueJson);
-        } catch (err) {
-          throw new ValkeyCommandError('SET', err);
-        }
-
         // TTL resolution order: per-call -> policy -> tier -> default
         const policy = this.policies.get(toolName);
         const ttl = options?.ttl ?? policy?.ttl ?? this.tierTtl ?? this.defaultTtl;
-        if (ttl !== undefined) {
-          try {
-            await this.client.expire(key, ttl);
-          } catch (err) {
-            throw new ValkeyCommandError('EXPIRE', err);
+
+        // Use SET with EX option for atomic set+expire to prevent orphaned keys
+        try {
+          if (ttl !== undefined) {
+            await this.client.set(key, valueJson, 'EX', ttl);
+          } else {
+            await this.client.set(key, valueJson);
           }
+        } catch (err) {
+          throw new ValkeyCommandError('SET', err);
         }
 
         // Track stored bytes

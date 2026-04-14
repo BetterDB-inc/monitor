@@ -133,9 +133,8 @@ describe('LlmCache', () => {
       expect(parsed.model).toBe('gpt-4o');
     });
 
-    it('calls EXPIRE when TTL provided', async () => {
+    it('uses SET with EX when TTL provided (atomic operation)', async () => {
       (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
-      (client.expire as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       await cache.store(
         { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
@@ -143,26 +142,31 @@ describe('LlmCache', () => {
         { ttl: 1800 },
       );
 
-      expect(client.expire).toHaveBeenCalled();
-      const [, ttl] = (client.expire as ReturnType<typeof vi.fn>).mock.calls[0];
-      expect(ttl).toBe(1800);
+      expect(client.set).toHaveBeenCalledWith(
+        expect.stringContaining('test_ac:llm:'),
+        expect.any(String),
+        'EX',
+        1800,
+      );
     });
 
-    it('uses tier TTL when no per-call TTL', async () => {
+    it('uses tier TTL with SET EX when no per-call TTL', async () => {
       (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
-      (client.expire as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       await cache.store(
         { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
         'Hello there!',
       );
 
-      expect(client.expire).toHaveBeenCalled();
-      const [, ttl] = (client.expire as ReturnType<typeof vi.fn>).mock.calls[0];
-      expect(ttl).toBe(3600);
+      expect(client.set).toHaveBeenCalledWith(
+        expect.stringContaining('test_ac:llm:'),
+        expect.any(String),
+        'EX',
+        3600,
+      );
     });
 
-    it('skips EXPIRE when no TTL at any level', async () => {
+    it('calls SET without EX when no TTL at any level', async () => {
       const noTtlCache = new LlmCache({
         client,
         name: 'test_ac',
@@ -180,7 +184,13 @@ describe('LlmCache', () => {
         'Hello there!',
       );
 
-      expect(client.expire).not.toHaveBeenCalled();
+      // SET called without EX argument
+      expect(client.set).toHaveBeenCalledWith(
+        expect.stringContaining('test_ac:llm:'),
+        expect.any(String),
+      );
+      // Verify only 2 arguments (no EX)
+      expect((client.set as ReturnType<typeof vi.fn>).mock.calls[0].length).toBe(2);
     });
 
     it('calculates and stores cost when costTable and tokens provided', async () => {

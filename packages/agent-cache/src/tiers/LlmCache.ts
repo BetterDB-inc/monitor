@@ -160,20 +160,16 @@ export class LlmCache {
 
         const valueJson = JSON.stringify(entry);
 
+        // Use SET with EX option for atomic set+expire to prevent orphaned keys
+        const ttl = options?.ttl ?? this.tierTtl ?? this.defaultTtl;
         try {
-          await this.client.set(key, valueJson);
+          if (ttl !== undefined) {
+            await this.client.set(key, valueJson, 'EX', ttl);
+          } else {
+            await this.client.set(key, valueJson);
+          }
         } catch (err) {
           throw new ValkeyCommandError('SET', err);
-        }
-
-        // Set TTL if configured
-        const ttl = options?.ttl ?? this.tierTtl ?? this.defaultTtl;
-        if (ttl !== undefined) {
-          try {
-            await this.client.expire(key, ttl);
-          } catch (err) {
-            throw new ValkeyCommandError('EXPIRE', err);
-          }
         }
 
         // Track stored bytes

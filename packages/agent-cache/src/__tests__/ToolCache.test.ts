@@ -108,29 +108,34 @@ describe('ToolCache', () => {
   });
 
   describe('store()', () => {
-    it('uses per-tool policy TTL when set', async () => {
+    it('uses per-tool policy TTL with SET EX when set', async () => {
       (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
-      (client.expire as ReturnType<typeof vi.fn>).mockResolvedValue(1);
       (client.hset as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       await cache.setPolicy('get_weather', { ttl: 120 });
 
       await cache.store('get_weather', { city: 'Sofia' }, '{"temp": 20}');
 
-      expect(client.expire).toHaveBeenCalled();
-      const [, ttl] = (client.expire as ReturnType<typeof vi.fn>).mock.calls[0];
-      expect(ttl).toBe(120);
+      expect(client.set).toHaveBeenCalledWith(
+        expect.stringContaining('test_ac:tool:get_weather:'),
+        expect.any(String),
+        'EX',
+        120,
+      );
     });
 
-    it('falls back through TTL hierarchy: per-call -> policy -> tier -> default', async () => {
+    it('falls back through TTL hierarchy with SET EX: per-call -> policy -> tier -> default', async () => {
       (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
-      (client.expire as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       // No policy, no per-call TTL - should use tier TTL (300)
       await cache.store('search', {}, 'result');
 
-      const [, ttl] = (client.expire as ReturnType<typeof vi.fn>).mock.calls[0];
-      expect(ttl).toBe(300);
+      expect(client.set).toHaveBeenCalledWith(
+        expect.stringContaining('test_ac:tool:search:'),
+        expect.any(String),
+        'EX',
+        300,
+      );
     });
 
     it('records cost when provided', async () => {
