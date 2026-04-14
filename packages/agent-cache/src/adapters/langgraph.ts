@@ -3,6 +3,7 @@ import type {
   Checkpoint,
   CheckpointMetadata,
   CheckpointTuple,
+  CheckpointPendingWrite,
   PendingWrite,
 } from '@langchain/langgraph-checkpoint';
 import type { RunnableConfig } from '@langchain/core/runnables';
@@ -49,11 +50,23 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     const data = await this.cache.session.get(threadId, field);
     if (!data) return undefined;
 
+    let tuple: CheckpointTuple;
     try {
-      return JSON.parse(data);
+      tuple = JSON.parse(data);
     } catch {
       return undefined;
     }
+
+    const resolvedId = checkpointId ?? tuple.checkpoint?.id;
+    if (resolvedId) {
+      const all = await this.cache.session.getAll(threadId);
+      const pendingWrites = this.extractPendingWrites(all, resolvedId);
+      if (pendingWrites.length > 0) {
+        tuple.pendingWrites = pendingWrites;
+      }
+    }
+
+    return tuple;
   }
 
   async put(
@@ -116,7 +129,14 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     for (const [field, value] of Object.entries(all)) {
       if (field.startsWith('checkpoint:') && field !== 'checkpoint:latest') {
         try {
-          checkpoints.push(JSON.parse(value));
+          const tuple: CheckpointTuple = JSON.parse(value);
+          if (tuple.checkpoint?.id) {
+            const pendingWrites = this.extractPendingWrites(all, tuple.checkpoint.id);
+            if (pendingWrites.length > 0) {
+              tuple.pendingWrites = pendingWrites;
+            }
+          }
+          checkpoints.push(tuple);
         } catch {
           /* skip corrupt entries */
         }
@@ -146,6 +166,39 @@ export class BetterDBSaver extends BaseCheckpointSaver {
       yield tuple;
       yielded++;
     }
+  }
+
+  /**
+   * Reconstruct CheckpointPendingWrite tuples from session fields matching
+   * the key pattern: writes:{checkpointId}:{taskId}:{channel}:{idx}
+   */
+  private extractPendingWrites(
+    all: Record<string, string>,
+    checkpointId: string,
+  ): CheckpointPendingWrite[] {
+    const prefix = `writes:${checkpointId}:`;
+    const pendingWrites: CheckpointPendingWrite[] = [];
+
+    for (const [field, rawValue] of Object.entries(all)) {
+      if (!field.startsWith(prefix)) continue;
+
+      const rest = field.slice(prefix.length);
+      const parts = rest.split(':');
+      // Need at least taskId, channel, idx
+      if (parts.length < 3) continue;
+
+      const taskId = parts[0];
+      const channel = parts.slice(1, -1).join(':');
+
+      try {
+        const value = JSON.parse(rawValue);
+        pendingWrites.push([taskId, channel, value]);
+      } catch {
+        /* skip corrupt entries */
+      }
+    }
+
+    return pendingWrites;
   }
 
   async deleteThread(threadId: string): Promise<void> {

@@ -182,11 +182,63 @@ describe('LangGraph adapter', () => {
       metadata: {},
     };
     (mockCache.session.get as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify(tuple));
+    (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({});
 
     const saver = new BetterDBSaver({ cache: mockCache });
     const result = await saver.getTuple({ configurable: { thread_id: 'thread-1' } });
 
     expect(result).toEqual(tuple);
+  });
+
+  it('getTuple() reconstructs pendingWrites from session writes keys', async () => {
+    const mockCache = createMockAgentCache();
+    const tuple = {
+      config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-1' } },
+      checkpoint: { id: 'cp-1', ts: '2024-01-01T00:00:00Z' },
+      metadata: {},
+    };
+    (mockCache.session.get as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify(tuple));
+    (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
+      'checkpoint:cp-1': JSON.stringify(tuple),
+      'checkpoint:latest': JSON.stringify(tuple),
+      'writes:cp-1:task-abc:messages:0': JSON.stringify({ role: 'assistant', content: 'Hi' }),
+      'writes:cp-1:task-abc:state:1': JSON.stringify({ step: 2 }),
+      'writes:cp-1:task-xyz:output:0': JSON.stringify('done'),
+    });
+
+    const saver = new BetterDBSaver({ cache: mockCache });
+    const result = await saver.getTuple({ configurable: { thread_id: 'thread-1' } });
+
+    expect(result).toBeDefined();
+    expect(result!.pendingWrites).toBeDefined();
+    expect(result!.pendingWrites).toHaveLength(3);
+
+    const sorted = [...result!.pendingWrites!].sort((a, b) => `${a[0]}:${a[1]}`.localeCompare(`${b[0]}:${b[1]}`));
+    expect(sorted).toEqual([
+      ['task-abc', 'messages', { role: 'assistant', content: 'Hi' }],
+      ['task-abc', 'state', { step: 2 }],
+      ['task-xyz', 'output', 'done'],
+    ]);
+  });
+
+  it('getTuple() ignores writes for other checkpoints', async () => {
+    const mockCache = createMockAgentCache();
+    const tuple = {
+      config: { configurable: { thread_id: 'thread-1', checkpoint_id: 'cp-2' } },
+      checkpoint: { id: 'cp-2', ts: '2024-01-02T00:00:00Z' },
+      metadata: {},
+    };
+    (mockCache.session.get as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify(tuple));
+    (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
+      'checkpoint:cp-2': JSON.stringify(tuple),
+      'writes:cp-1:task-old:channel:0': JSON.stringify('stale'),
+    });
+
+    const saver = new BetterDBSaver({ cache: mockCache });
+    const result = await saver.getTuple({ configurable: { thread_id: 'thread-1' } });
+
+    expect(result).toBeDefined();
+    expect(result!.pendingWrites).toBeUndefined();
   });
 
   it('put() stores checkpoint and updates latest pointer', async () => {
@@ -215,7 +267,7 @@ describe('LangGraph adapter', () => {
     );
   });
 
-  it('list() returns checkpoints in reverse chronological order', async () => {
+  it('list() returns checkpoints in reverse chronological order with pendingWrites', async () => {
     const mockCache = createMockAgentCache();
     const checkpoints = {
       'checkpoint:cp-1': JSON.stringify({
@@ -233,6 +285,7 @@ describe('LangGraph adapter', () => {
         checkpoint: { id: 'cp-2', ts: '2024-01-02T00:00:00Z' },
         metadata: {},
       }),
+      'writes:cp-2:task-1:output:0': JSON.stringify('result'),
     };
     (mockCache.session.getAll as ReturnType<typeof vi.fn>).mockResolvedValue(checkpoints);
 
@@ -245,7 +298,9 @@ describe('LangGraph adapter', () => {
 
     expect(results.length).toBe(2);
     expect(results[0].checkpoint.id).toBe('cp-2'); // More recent first
+    expect(results[0].pendingWrites).toEqual([['task-1', 'output', 'result']]);
     expect(results[1].checkpoint.id).toBe('cp-1');
+    expect(results[1].pendingWrites).toBeUndefined();
   });
 
   it('list() respects limit option', async () => {
