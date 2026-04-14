@@ -102,7 +102,7 @@ export interface ToolStats {
   misses: number;
   hitRate: number;
   ttl: number | undefined;
-  costSavedCents: number;
+  costSavedMicros: number;
 }
 
 export type ToolRecommendation = 'increase_ttl' | 'optimal' | 'decrease_ttl_or_disable';
@@ -118,6 +118,6 @@ export interface AgentCacheStats {
   llm: TierStats;
   tool: TierStats;
   session: SessionStats;
-  costSavedCents: number;
+  costSavedMicros: number;
   perTool: Record<string, ToolStats>;
 }

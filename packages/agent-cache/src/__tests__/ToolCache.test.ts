@@ -119,9 +119,9 @@ describe('ToolCache', () => {
 
       await cache.check('expensive_api', {});
 
-      // Verify cost_saved_cents was incremented on hit (5 cents)
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'cost_saved_cents', 5);
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:expensive_api:cost_saved_cents', 5);
+      // Verify cost_saved_micros was incremented on hit ($0.05 = 50000 microdollars)
+      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'cost_saved_micros', 50000);
+      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'tool:expensive_api:cost_saved_micros', 50000);
     });
 
     it('does not track cost savings on hit when entry has no cost', async () => {
@@ -136,10 +136,10 @@ describe('ToolCache', () => {
 
       await cache.check('get_weather', {});
 
-      // cost_saved_cents should not be called
+      // cost_saved_micros should not be called
       const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
       const costSavedCalls = hincrbyCalls.filter(
-        (call: unknown[]) => (call[1] as string).includes('cost_saved_cents')
+        (call: unknown[]) => (call[1] as string).includes('cost_saved_micros')
       );
       expect(costSavedCalls.length).toBe(0);
     });
@@ -186,10 +186,10 @@ describe('ToolCache', () => {
       const parsed = JSON.parse(value);
       expect(parsed.cost).toBe(0.05);
 
-      // Verify cost_saved_cents is NOT incremented at store time
+      // Verify cost_saved_micros is NOT incremented at store time
       const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
       const costSavedCalls = hincrbyCalls.filter(
-        (call: unknown[]) => call[1] === 'cost_saved_cents' || (call[1] as string).includes('cost_saved_cents')
+        (call: unknown[]) => call[1] === 'cost_saved_micros' || (call[1] as string).includes('cost_saved_micros')
       );
       expect(costSavedCalls.length).toBe(0);
     });

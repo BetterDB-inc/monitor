@@ -81,15 +81,17 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     const threadId = config.configurable?.thread_id as string;
     const checkpointId = checkpoint.id;
 
-    const tuple: CheckpointTuple = {
+    // Store newVersions alongside the tuple for version tracking and conflict detection
+    const storedData = {
       config: {
         ...config,
         configurable: { ...config.configurable, checkpoint_id: checkpointId },
       },
       checkpoint,
       metadata,
+      newVersions, // Preserve for advanced workflows that need version-based filtering
     };
-    const serialized = JSON.stringify(tuple);
+    const serialized = JSON.stringify(storedData);
 
     // Store specific checkpoint and update latest pointer
     await this.cache.session.set(threadId, `checkpoint:${checkpointId}`, serialized);
@@ -110,11 +112,12 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     const checkpointId = config.configurable?.checkpoint_id as string;
 
     // Include taskId in the storage key for deduplication per the LangGraph protocol.
-    // This ensures writes from different tasks within the same checkpoint don't collide.
-    // Use | as delimiter between taskId and channel to avoid ambiguity if taskId contains colons.
+    // URL-encode taskId and channel to safely handle any characters including delimiters.
     for (let i = 0; i < writes.length; i++) {
       const [channel, value] = writes[i];
-      const field = `writes:${checkpointId}|${taskId}|${channel}|${i}`;
+      const encodedTaskId = encodeURIComponent(taskId);
+      const encodedChannel = encodeURIComponent(channel);
+      const field = `writes:${checkpointId}|${encodedTaskId}|${encodedChannel}|${i}`;
       await this.cache.session.set(threadId, field, JSON.stringify(value));
     }
   }
@@ -174,9 +177,8 @@ export class BetterDBSaver extends BaseCheckpointSaver {
 
   /**
    * Reconstruct CheckpointPendingWrite tuples from session fields matching
-   * the key pattern: writes:{checkpointId}|{taskId}|{channel}|{idx}
-   * Uses | as delimiter. Parses by finding first | for taskId and last | for idx,
-   * allowing channel names to contain | characters.
+   * the key pattern: writes:{checkpointId}|{encodedTaskId}|{encodedChannel}|{idx}
+   * TaskId and channel are URL-encoded to safely handle any characters.
    */
   private extractPendingWrites(
     all: Record<string, string>,
@@ -189,17 +191,13 @@ export class BetterDBSaver extends BaseCheckpointSaver {
       if (!field.startsWith(prefix)) continue;
 
       const rest = field.slice(prefix.length);
+      const parts = rest.split('|');
 
-      // Find first | to extract taskId, last | to extract idx, middle is channel
-      const firstPipe = rest.indexOf('|');
-      const lastPipe = rest.lastIndexOf('|');
+      // Expect exactly 3 parts: encodedTaskId, encodedChannel, idx
+      if (parts.length !== 3) continue;
 
-      // Need at least two | characters (taskId|channel|idx)
-      if (firstPipe === -1 || lastPipe === -1 || firstPipe === lastPipe) continue;
-
-      const taskId = rest.slice(0, firstPipe);
-      const channel = rest.slice(firstPipe + 1, lastPipe);
-      // idx is after last pipe, we don't need to parse it
+      const taskId = decodeURIComponent(parts[0]);
+      const channel = decodeURIComponent(parts[1]);
 
       try {
         const value = JSON.parse(rawValue);

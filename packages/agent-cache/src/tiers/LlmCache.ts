@@ -96,9 +96,9 @@ export class LlmCache {
 
           // Track cost savings on hit (not at store time) - each hit represents one saved API call
           if (entry.cost !== undefined) {
-            const costCents = Math.round(entry.cost * 100);
+            const costMicros = Math.round(entry.cost * 1_000_000);
             try {
-              await this.client.hincrby(this.statsKey, 'cost_saved_cents', costCents);
+              await this.client.hincrby(this.statsKey, 'cost_saved_micros', costMicros);
             } catch {
               // Stats update failure should not break the cache
             }

@@ -17,9 +17,14 @@ interface AiSdkMessage {
   content: unknown;
 }
 
+interface AiSdkModelV1 {
+  modelId?: string;
+  provider?: string;
+}
+
 interface AiSdkParams {
   prompt?: AiSdkMessage[];
-  model?: string;
+  model?: AiSdkModelV1;
   temperature?: number;
   topP?: number;
   maxTokens?: number;
@@ -27,7 +32,8 @@ interface AiSdkParams {
 
 function defaultExtractModel(params: unknown): string {
   const p = params as AiSdkParams;
-  return p.model ?? 'unknown';
+  // In Vercel AI SDK, params.model is a LanguageModelV1 object with modelId property
+  return p.model?.modelId ?? 'unknown';
 }
 
 function extractLlmParams(params: unknown, extractModel: (params: unknown) => string): LlmCacheParams {

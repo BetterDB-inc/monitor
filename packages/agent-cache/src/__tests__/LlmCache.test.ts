@@ -133,8 +133,8 @@ describe('LlmCache', () => {
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
-      // Verify cost_saved_cents was incremented on hit (5 cents)
-      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'cost_saved_cents', 5);
+      // Verify cost_saved_micros was incremented on hit ($0.05 = 50000 microdollars)
+      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'cost_saved_micros', 50000);
     });
 
     it('does not track cost savings on hit when entry has no cost', async () => {
@@ -151,10 +151,10 @@ describe('LlmCache', () => {
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
-      // cost_saved_cents should not be called
+      // cost_saved_micros should not be called
       const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
       const costSavedCalls = hincrbyCalls.filter(
-        (call: unknown[]) => call[1] === 'cost_saved_cents'
+        (call: unknown[]) => call[1] === 'cost_saved_micros'
       );
       expect(costSavedCalls.length).toBe(0);
     });
@@ -253,10 +253,10 @@ describe('LlmCache', () => {
       expect(parsed.cost).toBeDefined();
       expect(parsed.cost).toBeGreaterThan(0);
 
-      // Verify cost_saved_cents is NOT incremented at store time
+      // Verify cost_saved_micros is NOT incremented at store time
       const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
       const costSavedCalls = hincrbyCalls.filter(
-        (call: unknown[]) => call[1] === 'cost_saved_cents'
+        (call: unknown[]) => call[1] === 'cost_saved_micros'
       );
       expect(costSavedCalls.length).toBe(0);
     });

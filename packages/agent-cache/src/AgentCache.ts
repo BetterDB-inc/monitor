@@ -115,11 +115,11 @@ export class AgentCache {
     };
 
     // Cost saved
-    const costSavedCents = getInt('cost_saved_cents');
+    const costSavedMicros = getInt('cost_saved_micros');
 
     // Per-tool stats
     const perTool: Record<string, ToolStats> = {};
-    const toolPattern = /^tool:([^:]+):(hits|misses|cost_saved_cents)$/;
+    const toolPattern = /^tool:([^:]+):(hits|misses|cost_saved_micros)$/;
 
     for (const [key, value] of Object.entries(raw)) {
       const match = key.match(toolPattern);
@@ -134,7 +134,7 @@ export class AgentCache {
             misses: 0,
             hitRate: 0,
             ttl: this.tool.getPolicy(toolName)?.ttl,
-            costSavedCents: 0,
+            costSavedMicros: 0,
           };
         }
 
@@ -142,8 +142,8 @@ export class AgentCache {
           perTool[toolName].hits = numValue;
         } else if (statType === 'misses') {
           perTool[toolName].misses = numValue;
-        } else if (statType === 'cost_saved_cents') {
-          perTool[toolName].costSavedCents = numValue;
+        } else if (statType === 'cost_saved_micros') {
+          perTool[toolName].costSavedMicros = numValue;
         }
       }
     }
@@ -157,7 +157,7 @@ export class AgentCache {
       llm: llmStats,
       tool: toolStats,
       session: sessionStats,
-      costSavedCents,
+      costSavedMicros,
       perTool,
     };
   }
@@ -168,8 +168,8 @@ export class AgentCache {
     const entries: ToolEffectivenessEntry[] = [];
 
     for (const [toolName, toolStats] of Object.entries(stats.perTool)) {
-      // Cost saved is already computed in perTool from the single HGETALL call
-      const costSaved = toolStats.costSavedCents / 100;
+      // Cost saved is already computed in perTool from the single HGETALL call (microdollars -> dollars)
+      const costSaved = toolStats.costSavedMicros / 1_000_000;
 
       // Generate recommendation based on hit rate
       let recommendation: ToolRecommendation;

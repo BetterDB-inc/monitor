@@ -116,7 +116,8 @@ describe('Vercel AI SDK adapter', () => {
     const result = await middleware.wrapGenerate!({
       doGenerate,
       params: {
-        model: 'gpt-4o',
+        // In Vercel AI SDK, model is a LanguageModelV1 object with modelId
+        model: { modelId: 'gpt-4o', provider: 'openai' },
         prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
       },
     });
@@ -143,7 +144,8 @@ describe('Vercel AI SDK adapter', () => {
     await middleware.wrapGenerate!({
       doGenerate,
       params: {
-        model: 'gpt-4o',
+        // In Vercel AI SDK, model is a LanguageModelV1 object with modelId
+        model: { modelId: 'gpt-4o', provider: 'openai' },
         prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
       },
     });

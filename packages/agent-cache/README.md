@@ -222,7 +222,7 @@ const stats = await cache.stats();
 //   llm: { hits: 150, misses: 50, total: 200, hitRate: 0.75 },
 //   tool: { hits: 300, misses: 100, total: 400, hitRate: 0.75 },
 //   session: { reads: 1000, writes: 500 },
-//   costSavedCents: 1250,
+//   costSavedMicros: 12500000, // $12.50 in microdollars (1/1,000,000 of a dollar)
 //   perTool: {
 //     get_weather: { hits: 200, misses: 50, hitRate: 0.8, ttl: 300 },
 //     search: { hits: 100, misses: 50, hitRate: 0.67, ttl: undefined },
