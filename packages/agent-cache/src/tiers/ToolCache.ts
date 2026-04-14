@@ -86,8 +86,8 @@ export class ToolCache {
           try {
             entry = JSON.parse(raw);
           } catch {
-            // Corrupt cache entry - delete to self-heal, then treat as miss
-            this.client.del(key).catch(() => {});
+            // Corrupt cache entry - await delete to guarantee cleanup before returning miss
+            await this.client.del(key).catch(() => {});
             try {
               const statsPipeline = this.client.pipeline();
               statsPipeline.hincrby(this.statsKey, 'tool:misses', 1);

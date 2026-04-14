@@ -392,13 +392,12 @@ export class SessionStore {
    * Called by AgentCache.flush() to synchronize in-memory state with Valkey.
    */
   resetTracker(): void {
-    const count = this.sessionTracker.reset();
-    if (count > 0) {
-      // Reset gauge to 0 by decrementing by the tracked count
-      this.telemetry.metrics.activeSessions
-        .labels(this.name)
-        .dec(count);
-    }
+    this.sessionTracker.reset();
+    // Use set(0) rather than dec(count) — the gauge may have drifted from
+    // evictions or process restarts, and dec() doesn't clamp at zero.
+    this.telemetry.metrics.activeSessions
+      .labels(this.name)
+      .set(0);
   }
 
   async touch(threadId: string): Promise<void> {

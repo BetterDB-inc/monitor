@@ -34,7 +34,7 @@ function createMockTelemetry(): Telemetry {
       operationDuration: { labels: vi.fn(() => ({ observe: vi.fn() })) },
       costSaved: { labels: vi.fn(() => ({ inc: vi.fn() })) },
       storedBytes: { labels: vi.fn(() => ({ inc: vi.fn() })) },
-      activeSessions: { labels: vi.fn(() => ({ inc: vi.fn(), dec: vi.fn() })) },
+      activeSessions: { labels: vi.fn(() => ({ inc: vi.fn(), dec: vi.fn(), set: vi.fn() })) },
     },
   } as unknown as Telemetry;
 }
@@ -332,7 +332,7 @@ describe('SessionStore', () => {
           operationDuration: { labels: vi.fn(() => ({ observe: vi.fn() })) },
           costSaved: { labels: vi.fn(() => ({ inc: vi.fn() })) },
           storedBytes: { labels: vi.fn(() => ({ inc: vi.fn() })) },
-          activeSessions: { labels: vi.fn(() => ({ inc: incFn, dec: decFn })) },
+          activeSessions: { labels: vi.fn(() => ({ inc: incFn, dec: decFn, set: vi.fn() })) },
         },
       } as unknown as Telemetry;
 

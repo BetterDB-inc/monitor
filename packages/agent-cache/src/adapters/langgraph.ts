@@ -100,14 +100,12 @@ export class BetterDBSaver extends BaseCheckpointSaver {
     };
     const serialized = JSON.stringify(storedData);
 
-    // Store specific checkpoint and update latest pointer concurrently via Promise.all.
-    // Note: This is not transactionally atomic — if the process crashes mid-write, state
-    // may be inconsistent. True atomicity would require MULTI/EXEC, but we accept this
-    // trade-off to work on vanilla Valkey without transactions.
-    await Promise.all([
-      this.cache.session.set(threadId, `checkpoint:${checkpointId}`, serialized),
-      this.cache.session.set(threadId, 'checkpoint:latest', serialized),
-    ]);
+    // Write checkpoint first, then update latest pointer sequentially.
+    // If the latest write succeeds but checkpoint didn't, getTuple() and list(limit:1)
+    // would reference a non-existent checkpoint. Sequential order ensures latest
+    // only points to a checkpoint that already exists.
+    await this.cache.session.set(threadId, `checkpoint:${checkpointId}`, serialized);
+    await this.cache.session.set(threadId, 'checkpoint:latest', serialized);
 
     return {
       ...config,
@@ -177,23 +175,31 @@ export class BetterDBSaver extends BaseCheckpointSaver {
       return;
     }
 
-    // Get all checkpoint fields via getAll, filter to checkpoint:* (not checkpoint:latest)
+    // Get all session fields, then split into checkpoints and writes in a single pass.
+    // This avoids re-scanning the entire map per checkpoint in extractPendingWrites.
     const all = await this.cache.session.getAll(threadId);
+    const writeFields: Record<string, string> = {};
     const checkpoints: CheckpointTuple[] = [];
 
     for (const [field, value] of Object.entries(all)) {
-      if (field.startsWith('checkpoint:') && field !== 'checkpoint:latest') {
+      if (field.startsWith('writes:')) {
+        writeFields[field] = value;
+      } else if (field.startsWith('checkpoint:') && field !== 'checkpoint:latest') {
         try {
           const tuple: CheckpointTuple = JSON.parse(value);
-          if (tuple.checkpoint?.id) {
-            const pendingWrites = this.extractPendingWrites(all, tuple.checkpoint.id);
-            if (pendingWrites.length > 0) {
-              tuple.pendingWrites = pendingWrites;
-            }
-          }
           checkpoints.push(tuple);
         } catch {
           /* skip corrupt entries */
+        }
+      }
+    }
+
+    // Attach pending writes from the pre-filtered writes map
+    for (const tuple of checkpoints) {
+      if (tuple.checkpoint?.id) {
+        const pendingWrites = this.extractPendingWrites(writeFields, tuple.checkpoint.id);
+        if (pendingWrites.length > 0) {
+          tuple.pendingWrites = pendingWrites;
         }
       }
     }
@@ -257,7 +263,9 @@ export class BetterDBSaver extends BaseCheckpointSaver {
       const rest = field.slice(prefix.length);
       const parts = rest.split('|');
 
-      // Expect exactly 3 parts: encodedTaskId, encodedChannel, idx
+      // Expect exactly 3 parts: encodedTaskId, encodedChannel, idx.
+      // Safe to skip silently: all components are URL-encoded during putWrites(),
+      // so literal | cannot appear inside encoded values (%7C would be used instead).
       if (parts.length !== 3) continue;
 
       const taskId = decodeURIComponent(parts[0]);
