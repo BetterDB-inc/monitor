@@ -77,12 +77,29 @@ describe('SessionStore', () => {
       );
     });
 
-    it('records read in stats', async () => {
+    it('records read in stats on hit', async () => {
       (client.get as ReturnType<typeof vi.fn>).mockResolvedValue('book_flight');
 
       await store.get('thread-1', 'last_intent');
 
       expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'session:reads', 1);
+    });
+
+    it('records read in stats on miss (counts all read operations)', async () => {
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+      await store.get('thread-1', 'nonexistent');
+
+      // Reads should be counted even for misses
+      expect(client.hincrby).toHaveBeenCalledWith('test_ac:__stats', 'session:reads', 1);
+    });
+
+    it('does not refresh TTL on miss', async () => {
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+      await store.get('thread-1', 'nonexistent');
+
+      expect(client.expire).not.toHaveBeenCalled();
     });
   });
 

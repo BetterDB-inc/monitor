@@ -11,6 +11,10 @@ function createMockClient(): Valkey {
     hincrby: vi.fn(),
     del: vi.fn(),
     scan: vi.fn(),
+    pipeline: vi.fn(() => ({
+      get: vi.fn().mockReturnThis(),
+      exec: vi.fn().mockResolvedValue([]),
+    })),
   } as unknown as Valkey;
 }
 
@@ -214,24 +218,41 @@ describe('LlmCache', () => {
   });
 
   describe('invalidateByModel()', () => {
-    it('deletes only matching model entries', async () => {
+    it('deletes only matching model entries using batched pipeline', async () => {
       const entry1 = JSON.stringify({ response: 'A', model: 'gpt-4o', storedAt: Date.now() });
       const entry2 = JSON.stringify({ response: 'B', model: 'gpt-3.5', storedAt: Date.now() });
 
       (client.scan as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce(['0', ['test_ac:llm:abc', 'test_ac:llm:def']]);
 
-      (client.get as ReturnType<typeof vi.fn>)
-        .mockResolvedValueOnce(entry1)
-        .mockResolvedValueOnce(entry2);
+      // Mock pipeline for batched GET
+      const mockPipeline = {
+        get: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([
+          [null, entry1],
+          [null, entry2],
+        ]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>).mockReturnValue(mockPipeline);
 
       (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(1);
 
       const deleted = await cache.invalidateByModel('gpt-4o');
 
       expect(deleted).toBe(1);
+      // Should only delete the matching key (gpt-4o)
       expect(client.del).toHaveBeenCalledWith('test_ac:llm:abc');
       expect(client.del).not.toHaveBeenCalledWith('test_ac:llm:def');
+    });
+
+    it('handles empty SCAN results', async () => {
+      (client.scan as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(['0', []]);
+
+      const deleted = await cache.invalidateByModel('gpt-4o');
+
+      expect(deleted).toBe(0);
+      expect(client.del).not.toHaveBeenCalled();
     });
   });
 });

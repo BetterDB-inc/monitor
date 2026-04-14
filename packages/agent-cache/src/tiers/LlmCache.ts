@@ -216,18 +216,44 @@ export class LlmCache {
           cursor = scanResult[0];
           const keys = scanResult[1];
 
+          if (keys.length === 0) continue;
+
+          // Batch GET all keys in this SCAN page using pipeline
+          const getPipeline = this.client.pipeline();
           for (const key of keys) {
+            getPipeline.get(key);
+          }
+
+          let getResults: Array<[Error | null, string | null]>;
+          try {
+            getResults = await getPipeline.exec() as Array<[Error | null, string | null]>;
+          } catch (err) {
+            throw new ValkeyCommandError('GET (pipeline)', err);
+          }
+
+          // Collect keys that match the model
+          const keysToDelete: string[] = [];
+          for (let i = 0; i < keys.length; i++) {
+            const [err, raw] = getResults[i];
+            if (err || !raw) continue;
+
             try {
-              const raw = await this.client.get(key);
-              if (raw) {
-                const entry: StoredLlmEntry = JSON.parse(raw);
-                if (entry.model === model) {
-                  await this.client.del(key);
-                  deletedCount++;
-                }
+              const entry: StoredLlmEntry = JSON.parse(raw);
+              if (entry.model === model) {
+                keysToDelete.push(keys[i]);
               }
             } catch {
               // Skip corrupt entries
+            }
+          }
+
+          // Batch DEL matching keys
+          if (keysToDelete.length > 0) {
+            try {
+              const deleted = await this.client.del(...keysToDelete);
+              deletedCount += deleted;
+            } catch (err) {
+              throw new ValkeyCommandError('DEL', err);
             }
           }
         } while (cursor !== '0');

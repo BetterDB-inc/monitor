@@ -97,6 +97,13 @@ export class SessionStore {
           .labels(this.name, 'session', 'get')
           .observe(duration);
 
+        // Record read for all operations (hits and misses)
+        try {
+          await this.client.hincrby(this.statsKey, 'session:reads', 1);
+        } catch {
+          // Stats update failure should not break the cache
+        }
+
         if (value !== null) {
           // Refresh TTL (sliding window)
           const ttl = this.tierTtl ?? this.defaultTtl;
@@ -106,13 +113,6 @@ export class SessionStore {
             } catch {
               // TTL refresh failure should not break the read
             }
-          }
-
-          // Record read
-          try {
-            await this.client.hincrby(this.statsKey, 'session:reads', 1);
-          } catch {
-            // Stats update failure should not break the cache
           }
         }
 
