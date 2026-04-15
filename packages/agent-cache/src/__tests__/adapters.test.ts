@@ -50,7 +50,7 @@ describe('LangChain adapter', () => {
     expect(result).toBeNull();
   });
 
-  it('lookup() returns Generation[] on hit', async () => {
+  it('lookup() returns Generation[] with AIMessage on hit', async () => {
     const mockCache = createMockAgentCache();
     const generations = [{ text: 'Valkey is a key-value store.' }];
     (mockCache.llm.check as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -62,10 +62,12 @@ describe('LangChain adapter', () => {
     const adapter = new BetterDBLlmCache({ cache: mockCache });
     const result = await adapter.lookup('What is Valkey?', 'gpt-4o');
 
-    expect(result).toEqual(generations);
+    expect(result).toHaveLength(1);
+    expect(result![0].text).toBe('Valkey is a key-value store.');
+    expect((result![0] as { message: { content: string } }).message.content).toBe('Valkey is a key-value store.');
   });
 
-  it('lookup() returns plain text wrapped in Generation on hit with non-JSON response', async () => {
+  it('lookup() returns plain text wrapped in Generation with AIMessage on hit with non-JSON response', async () => {
     const mockCache = createMockAgentCache();
     (mockCache.llm.check as ReturnType<typeof vi.fn>).mockResolvedValue({
       hit: true,
@@ -76,7 +78,9 @@ describe('LangChain adapter', () => {
     const adapter = new BetterDBLlmCache({ cache: mockCache });
     const result = await adapter.lookup('What is Valkey?', 'gpt-4o');
 
-    expect(result).toEqual([{ text: 'Plain text response' }]);
+    expect(result).toHaveLength(1);
+    expect(result![0].text).toBe('Plain text response');
+    expect((result![0] as { message: { content: string } }).message.content).toBe('Plain text response');
   });
 
   it('update() calls llm.store with JSON-serialized generations', async () => {
@@ -91,6 +95,42 @@ describe('LangChain adapter', () => {
     expect(mockCache.llm.store).toHaveBeenCalledWith(
       { model: 'gpt-4o', messages: [{ role: 'user', content: 'What is Valkey?' }] },
       JSON.stringify(generations),
+      undefined,
+    );
+  });
+
+  it('update() extracts model name from JSON llm_string', async () => {
+    const mockCache = createMockAgentCache();
+    (mockCache.llm.store as ReturnType<typeof vi.fn>).mockResolvedValue('key');
+
+    const adapter = new BetterDBLlmCache({ cache: mockCache });
+    const llmString = JSON.stringify({ model_name: 'gpt-4o-mini', temperature: 0 });
+
+    await adapter.update('Hello', llmString, [{ text: 'Hi' }]);
+
+    expect(mockCache.llm.store).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'gpt-4o-mini' }),
+      expect.any(String),
+      undefined,
+    );
+  });
+
+  it('update() passes token counts from usage_metadata', async () => {
+    const mockCache = createMockAgentCache();
+    (mockCache.llm.store as ReturnType<typeof vi.fn>).mockResolvedValue('key');
+
+    const adapter = new BetterDBLlmCache({ cache: mockCache });
+    const generations = [{
+      text: 'Hello',
+      message: { usage_metadata: { input_tokens: 10, output_tokens: 5 } },
+    }];
+
+    await adapter.update('Hi', 'gpt-4o', generations as any);
+
+    expect(mockCache.llm.store).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(String),
+      { tokens: { input: 10, output: 5 } },
     );
   });
 });

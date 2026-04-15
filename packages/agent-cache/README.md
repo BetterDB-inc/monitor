@@ -257,9 +257,40 @@ import { ChatOpenAI } from '@langchain/openai';
 import { BetterDBLlmCache } from '@betterdb/agent-cache/langchain';
 
 const model = new ChatOpenAI({
-  model: 'gpt-4o',
+  model: 'gpt-4o-mini',
   cache: new BetterDBLlmCache({ cache }),
 });
+```
+
+See [`examples/langchain`](./examples/langchain) for a full working example. Sample output:
+
+```
+═══ Part 1: LLM Response Caching ═══
+Same prompt twice — second call returns from Valkey.
+
+User: What is the capital of Bulgaria?
+Assistant: The capital of Bulgaria is Sofia.
+  (1032ms)
+
+User: What is the capital of Bulgaria?
+Assistant: The capital of Bulgaria is Sofia.
+  (1ms)
+
+═══ Part 2: Tool Result Caching ═══
+Same tool calls twice — second call skips the API.
+
+  [tool cache MISS] get_weather("Sofia") — calling API
+  [tool cache MISS] get_weather("Berlin") — calling API
+  (first round done)
+
+  [tool cache HIT] get_weather("Sofia")
+  [tool cache HIT] get_weather("Berlin")
+  (second round done — both from cache)
+
+── Cache Stats ──
+LLM tier:   1 hits / 1 misses (50% hit rate)
+Tool tier:  2 hits / 2 misses (50% hit rate)
+Cost saved: $0.000006
 ```
 
 ### Vercel AI SDK
