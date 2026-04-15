@@ -22,7 +22,7 @@ let replaced = 0;
 
 for (const [placeholder, value] of Object.entries(replacements)) {
   if (value && source.includes(placeholder)) {
-    source = source.replace(placeholder, value);
+    source = source.replaceAll(placeholder, value);
     replaced++;
   }
 }

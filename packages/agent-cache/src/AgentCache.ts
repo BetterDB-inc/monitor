@@ -109,7 +109,7 @@ export class AgentCache {
   async stats(): Promise<AgentCacheStats> {
     let raw: Record<string, string>;
     try {
-      raw = await this.client.hgetall(this.statsKey);
+      raw = await this.client.hgetall(this.statsKey) ?? {};
     } catch (err) {
       throw new ValkeyCommandError('HGETALL', err);
     }
@@ -276,29 +276,33 @@ export class AgentCache {
     const pattern = `${escapeGlobPattern(this.name)}:*`;
     let cursor = '0';
 
-    do {
-      let scanResult: [string, string[]];
-      try {
-        scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-      } catch (err) {
-        throw new ValkeyCommandError('SCAN', err);
-      }
-
-      cursor = scanResult[0];
-      const keys = scanResult[1];
-
-      if (keys.length > 0) {
+    try {
+      do {
+        let scanResult: [string, string[]];
         try {
-          await this.client.del(...keys);
+          scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
         } catch (err) {
-          throw new ValkeyCommandError('DEL', err);
+          throw new ValkeyCommandError('SCAN', err);
         }
-      }
-    } while (cursor !== '0');
 
-    // Reset in-memory state to stay in sync with Valkey
-    this.session.resetTracker();
-    this.tool.resetPolicies();
-    this.analytics.capture('cache_flush');
+        cursor = scanResult[0];
+        const keys = scanResult[1];
+
+        if (keys.length > 0) {
+          try {
+            await this.client.del(...keys);
+          } catch (err) {
+            throw new ValkeyCommandError('DEL', err);
+          }
+        }
+      } while (cursor !== '0');
+    } finally {
+      // Always reset in-memory state even on partial failure — leaving stale
+      // sessions or policies after some keys were deleted would be worse than
+      // resetting eagerly and requiring a reload on the next operation.
+      this.session.resetTracker();
+      this.tool.resetPolicies();
+      this.analytics.capture('cache_flush');
+    }
   }
 }

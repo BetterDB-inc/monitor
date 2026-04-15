@@ -212,10 +212,13 @@ export class BetterDBSaver extends BaseCheckpointSaver {
       const tsB = b.checkpoint?.ts ?? '';
       const dateA = new Date(tsA).getTime();
       const dateB = new Date(tsB).getTime();
-      // If both parse to valid dates, compare numerically; otherwise fall back to string comparison
-      if (!isNaN(dateA) && !isNaN(dateB)) {
-        return dateB - dateA;
-      }
+      const validA = !isNaN(dateA);
+      const validB = !isNaN(dateB);
+      if (validA && validB) return dateB - dateA;
+      // Valid date sorts before invalid (put well-formed timestamps first)
+      if (validA) return -1;
+      if (validB) return 1;
+      // Both invalid — fall back to string comparison
       return tsB.localeCompare(tsA);
     });
 
