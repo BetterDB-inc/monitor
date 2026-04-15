@@ -22,3 +22,4 @@ export {
   AgentCacheUsageError,
   ValkeyCommandError,
 } from './errors';
+export type { Analytics } from './analytics';

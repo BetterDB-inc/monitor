@@ -12,6 +12,7 @@ import { LlmCache } from './tiers/LlmCache';
 import { ToolCache } from './tiers/ToolCache';
 import { SessionStore } from './tiers/SessionStore';
 import { createTelemetry } from './telemetry';
+import { createAnalytics, NOOP_ANALYTICS, type Analytics } from './analytics';
 import { ValkeyCommandError } from './errors';
 import { escapeGlobPattern } from './utils';
 
@@ -25,6 +26,9 @@ export class AgentCache {
   private readonly statsKey: string;
   private readonly defaultTtl: number | undefined;
   private readonly toolTierTtl: number | undefined;
+  private analytics: Analytics = NOOP_ANALYTICS;
+  private statsTimer: ReturnType<typeof setInterval> | undefined;
+  private shutdownCalled = false;
 
   constructor(options: AgentCacheOptions) {
     this.client = options.client;
@@ -71,6 +75,35 @@ export class AgentCache {
 
     // Fire-and-forget: load persisted tool policies from Valkey
     this.tool.loadPolicies().catch(() => {});
+
+    // Fire-and-forget: initialize product analytics
+    const analyticsOpts = options.analytics;
+    createAnalytics({
+      apiKey: analyticsOpts?.apiKey,
+      host: analyticsOpts?.host,
+      disabled: analyticsOpts?.disabled,
+    })
+      .then((a) => {
+        if (this.shutdownCalled) return;
+        this.analytics = a;
+        const configProps: Record<string, unknown> = {
+          defaultTtl: options.defaultTtl,
+          llmTtl: options.tierDefaults?.llm?.ttl,
+          toolTtl: options.tierDefaults?.tool?.ttl,
+          sessionTtl: options.tierDefaults?.session?.ttl,
+          hasCostTable: !!options.costTable,
+        };
+        return a.init(this.client, this.name, configProps);
+      })
+      .then(() => {
+        if (this.shutdownCalled) return;
+        const intervalMs = analyticsOpts?.statsIntervalMs ?? 300_000;
+        if (intervalMs > 0) {
+          this.statsTimer = setInterval(() => this.captureStatsSnapshot(), intervalMs);
+          this.statsTimer.unref();
+        }
+      })
+      .catch(() => {});
   }
 
   async stats(): Promise<AgentCacheStats> {
@@ -210,6 +243,34 @@ export class AgentCache {
     return entries;
   }
 
+  private captureStatsSnapshot(): void {
+    this.stats()
+      .then((s) => {
+        this.analytics.capture('stats_snapshot', {
+          llm_hits: s.llm.hits,
+          llm_misses: s.llm.misses,
+          llm_hit_rate: s.llm.hitRate,
+          tool_hits: s.tool.hits,
+          tool_misses: s.tool.misses,
+          tool_hit_rate: s.tool.hitRate,
+          session_reads: s.session.reads,
+          session_writes: s.session.writes,
+          cost_saved_micros: s.costSavedMicros,
+          tool_count: Object.keys(s.perTool).length,
+        });
+      })
+      .catch(() => {});
+  }
+
+  async shutdown(): Promise<void> {
+    this.shutdownCalled = true;
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = undefined;
+    }
+    await this.analytics.shutdown();
+  }
+
   async flush(): Promise<void> {
     // Escape cache name in case it contains glob metacharacters
     const pattern = `${escapeGlobPattern(this.name)}:*`;
@@ -238,5 +299,6 @@ export class AgentCache {
     // Reset in-memory state to stay in sync with Valkey
     this.session.resetTracker();
     this.tool.resetPolicies();
+    this.analytics.capture('cache_flush');
   }
 }

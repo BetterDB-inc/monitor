@@ -35,7 +35,7 @@
   },
   "files": ["dist", "README.md"],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/inject-telemetry-defaults.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -61,11 +61,13 @@
     "iovalkey": ">=0.3.0",
     "@langchain/core": ">=0.3.0",
     "@langchain/langgraph-checkpoint": ">=0.1.0",
-    "ai": "^6.0.135"
+    "ai": "^6.0.135",
+    "posthog-node": ">=4.0.0"
   },
   "peerDependenciesMeta": {
     "@langchain/core": { "optional": true },
     "@langchain/langgraph-checkpoint": { "optional": true },
-    "ai": { "optional": true }
+    "ai": { "optional": true },
+    "posthog-node": { "optional": true }
   }
 }
