@@ -5,14 +5,17 @@ export function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
 }
 
-// Glob metacharacters that need escaping in SCAN MATCH patterns
-const GLOB_METACHAR_PATTERN = /[*?[\]]/;
+// Glob metacharacters that need escaping in SCAN MATCH patterns.
+// Backslash is the escape character in Valkey/Redis glob patterns,
+// so it must also be escaped (and escaped first to avoid double-escaping).
+const GLOB_METACHAR_PATTERN = /[*?[\]\\]/;
 
 /**
  * Escape glob metacharacters for use in SCAN MATCH patterns.
+ * Backslash is escaped first so that subsequent replacements don't double-escape.
  */
 export function escapeGlobPattern(str: string): string {
-  return str.replace(/([*?[\]])/g, '\\$1');
+  return str.replace(/\\/g, '\\\\').replace(/([*?[\]])/g, '\\$1');
 }
 
 /**
@@ -22,7 +25,7 @@ export function escapeGlobPattern(str: string): string {
 export function validateNoGlobChars(value: string, name: string): void {
   if (GLOB_METACHAR_PATTERN.test(value)) {
     throw new AgentCacheUsageError(
-      `${name} contains glob metacharacters (*, ?, [, ]). ` +
+      `${name} contains glob metacharacters (*, ?, [, ], \\). ` +
       `This is not allowed as it could match unintended keys.`
     );
   }
