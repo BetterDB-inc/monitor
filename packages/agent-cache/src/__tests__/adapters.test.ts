@@ -142,7 +142,7 @@ describe('Vercel AI SDK adapter', () => {
     const doGenerate = vi.fn().mockResolvedValue({
       content: [{ type: 'text', text: 'Generated response' }],
       finishReason: 'stop',
-      usage: { promptTokens: 10, completionTokens: 20 },
+      usage: { inputTokens: { total: 10 }, outputTokens: { total: 20 } },
     });
 
     await middleware.wrapGenerate!({
@@ -175,7 +175,7 @@ describe('Vercel AI SDK adapter', () => {
         { type: 'tool-call', toolCallId: 'call-1', toolName: 'get_weather', args: { city: 'Sofia' } },
       ],
       finishReason: 'tool-calls',
-      usage: { promptTokens: 10, completionTokens: 20 },
+      usage: { inputTokens: { total: 10 }, outputTokens: { total: 20 } },
     });
 
     await middleware.wrapGenerate!({
@@ -205,7 +205,7 @@ describe('Vercel AI SDK adapter', () => {
         { type: 'text', text: 'Part two.' },
       ],
       finishReason: 'stop',
-      usage: { promptTokens: 10, completionTokens: 20 },
+      usage: { inputTokens: { total: 10 }, outputTokens: { total: 20 } },
     });
 
     await middleware.wrapGenerate!({

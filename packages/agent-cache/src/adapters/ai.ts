@@ -7,9 +7,9 @@ export interface AgentCacheMiddlewareOptions {
   cache: AgentCache;
   /**
    * Extract the model name from AI SDK params.
-   * Default: returns params.model or 'unknown'.
+   * Default: reads model.modelId (v6) or params.model.modelId (v5).
    */
-  extractModel?: (params: unknown) => string;
+  extractModel?: (params: unknown, model?: unknown) => string;
 }
 
 interface AiSdkMessage {
@@ -30,13 +30,16 @@ interface AiSdkParams {
   maxTokens?: number;
 }
 
-function defaultExtractModel(params: unknown): string {
+function defaultExtractModel(params: unknown, model?: unknown): string {
+  // In AI SDK v6 (provider spec v3), model is passed as a separate argument
+  const m = model as AiSdkModelV1 | undefined;
+  if (m?.modelId) return m.modelId;
+  // Fallback: older versions may include model in params
   const p = params as AiSdkParams;
-  // In Vercel AI SDK, params.model is a LanguageModelV1 object with modelId property
   return p.model?.modelId ?? 'unknown';
 }
 
-function extractLlmParams(params: unknown, extractModel: (params: unknown) => string): LlmCacheParams {
+function extractLlmParams(params: unknown, extractModel: (params: unknown, model?: unknown) => string, model?: unknown): LlmCacheParams {
   const p = params as AiSdkParams;
 
   const messages: Array<{ role: string; content: unknown }> = [];
@@ -47,7 +50,7 @@ function extractLlmParams(params: unknown, extractModel: (params: unknown) => st
   }
 
   return {
-    model: extractModel(params),
+    model: extractModel(params, model),
     messages,
     temperature: p.temperature,
     top_p: p.topP,
@@ -100,8 +103,8 @@ export function createAgentCacheMiddleware(
     // the peer dependency range in package.json ("ai": "^6.0.135").
     specificationVersion: 'v3',
 
-    wrapGenerate: async ({ doGenerate, params }) => {
-      const llmParams = extractLlmParams(params, extractModel);
+    wrapGenerate: async ({ doGenerate, params, model: modelRef }) => {
+      const llmParams = extractLlmParams(params, extractModel, modelRef);
 
       // Only cache if we have messages
       if (llmParams.messages.length > 0) {
@@ -118,7 +121,10 @@ export function createAgentCacheMiddleware(
             return {
               content: [{ type: 'text', text: cached.response }],
               finishReason: 'stop',
-              usage: { promptTokens: 0, completionTokens: 0 },
+              usage: {
+                inputTokens: { total: 0 },
+                outputTokens: { total: 0 },
+              },
               warnings: [],
               providerMetadata: { agentCache: { hit: true } },
             } as unknown as Awaited<ReturnType<typeof doGenerate>>;
@@ -134,12 +140,14 @@ export function createAgentCacheMiddleware(
       // other non-text content types are not cacheable -- tool calls depend on
       // runtime state and caching them would break tool-calling workflows.
       if (llmParams.messages.length > 0) {
-        const r = result as { content?: ContentPart[]; usage?: { promptTokens?: number; completionTokens?: number } };
+        const r = result as { content?: ContentPart[]; usage?: { inputTokens?: { total?: number }; outputTokens?: { total?: number } } };
         if (r.content && Array.isArray(r.content) && isTextOnlyResponse(r.content)) {
           const response = extractTextFromContent(r.content);
           if (response) {
-            const tokens = r.usage?.promptTokens !== undefined && r.usage?.completionTokens !== undefined
-              ? { input: r.usage.promptTokens, output: r.usage.completionTokens }
+            const inputTotal = r.usage?.inputTokens?.total;
+            const outputTotal = r.usage?.outputTokens?.total;
+            const tokens = inputTotal !== undefined && outputTotal !== undefined
+              ? { input: inputTotal, output: outputTotal }
               : undefined;
 
             await cache.llm.store(llmParams, response, tokens ? { tokens } : undefined).catch(() => {

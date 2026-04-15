@@ -266,16 +266,53 @@ const model = new ChatOpenAI({
 
 ```typescript
 import { wrapLanguageModel } from 'ai';
-import { openai } from '@ai-sdk/openai';
+import { createOpenAI } from '@ai-sdk/openai';
 import { createAgentCacheMiddleware } from '@betterdb/agent-cache/ai';
 
+const openai = createOpenAI({});
+
 const model = wrapLanguageModel({
-  model: openai('gpt-4o'),
+  model: openai.chat('gpt-4o-mini'),
   middleware: createAgentCacheMiddleware({ cache }),
 });
 ```
 
 Note: Streaming responses are not cached. The middleware only caches non-streaming `generate()` calls.
+
+See [`examples/vercel-ai-sdk`](./examples/vercel-ai-sdk) for a full working example. Sample output:
+
+```
+═══ Part 1: LLM Response Caching ═══
+Same prompt twice — second call returns from Valkey, zero tokens.
+
+User: What is the capital of Bulgaria?
+Assistant: The capital of Bulgaria is Sofia.
+  (1032ms | tokens: 14 in / 7 out)
+
+User: What is the capital of Bulgaria?
+Assistant: The capital of Bulgaria is Sofia.
+  (1ms | tokens: 0 in / 0 out)
+
+═══ Part 2: Tool Result Caching ═══
+Same tool calls twice — second call skips the API.
+
+User: What is the weather in Sofia and Berlin?
+  [tool cache MISS] get_weather("Sofia") — calling API
+  [tool cache MISS] get_weather("Berlin") — calling API
+Assistant: Sofia is 30°C, rainy. Berlin is 28°C, rainy.
+  (3016ms | tokens: 154 in / 32 out)
+
+User: What is the weather in Sofia and Berlin?
+  [tool cache HIT] get_weather("Sofia")
+  [tool cache HIT] get_weather("Berlin")
+Assistant: Sofia is 30°C, rainy. Berlin is 28°C, rainy.
+  (2933ms | tokens: 154 in / 31 out)
+
+── Cache Stats ──
+LLM tier:   1 hits / 5 misses (17% hit rate)
+Tool tier:  2 hits / 2 misses (50% hit rate)
+Cost saved: $0.000006
+```
 
 ### LangGraph
 
