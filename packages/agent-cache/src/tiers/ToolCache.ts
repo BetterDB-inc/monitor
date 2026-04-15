@@ -2,6 +2,7 @@ import type { Valkey, ToolStoreOptions, ToolCacheResult, ToolPolicy } from '../t
 import type { Telemetry } from '../telemetry';
 import { ValkeyCommandError, AgentCacheUsageError } from '../errors';
 import { toolCacheHash, escapeGlobPattern } from '../utils';
+import { clusterScan } from '../cluster';
 
 /**
  * Validate that tool name doesn't contain colons, which are used as key delimiters.
@@ -258,29 +259,16 @@ export class ToolCache {
 
         // Escape glob chars to match only this tool's keys during SCAN.
         const pattern = `${escapeGlobPattern(this.name)}:tool:${escapeGlobPattern(toolName)}:*`;
-        let cursor = '0';
         let deletedCount = 0;
 
-        do {
-          let scanResult: [string, string[]];
+        await clusterScan(this.client, pattern, async (keys, nodeClient) => {
           try {
-            scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+            const deleted = await nodeClient.del(...keys);
+            deletedCount += deleted;
           } catch (err) {
-            throw new ValkeyCommandError('SCAN', err);
+            throw new ValkeyCommandError('DEL', err);
           }
-
-          cursor = scanResult[0];
-          const keys = scanResult[1];
-
-          if (keys.length > 0) {
-            try {
-              const deleted = await this.client.del(...keys);
-              deletedCount += deleted;
-            } catch (err) {
-              throw new ValkeyCommandError('DEL', err);
-            }
-          }
-        } while (cursor !== '0');
+        });
 
         span.setAttribute('cache.deleted_count', deletedCount);
         span.end();

@@ -343,11 +343,11 @@ Cache statistics are stored as atomic counters in a single Valkey hash (`HINCRBY
 
 The `active_sessions` Prometheus gauge is approximate — it tracks threads seen via an in-memory LRU (bounded at 10k entries), incremented on first write, decremented on `destroyThread()`. It does not survive process restarts and may drift if threads expire via TTL without an explicit destroy. For accurate session counts, query Valkey directly with `SCAN`.
 
-## Known limitations
-
 ### Cluster mode
 
-SCAN operations in session and tool invalidation only iterate the node they are sent to. In a multi-node cluster, `destroyThread()`, `invalidateByTool()`, `invalidateByModel()`, and `flush()` may silently leave keys on other nodes. Use the iovalkey cluster client's per-node scan capability for full coverage. Cluster mode support is planned for a future release.
+Cluster support works by running SCAN on each master node sequentially and merging results. When an iovalkey `Cluster` client is passed, `destroyThread()`, `invalidateByModel()`, `invalidateByTool()`, `flush()`, `getAll()`, `touch()`, and `scanFieldsByPrefix()` automatically iterate all master nodes. The trade-off is N sequential SCAN loops (one per master) instead of 1. For typical deployments with 3–6 masters, this is negligible — the operations were already O(n) over all keys. No API or configuration changes are needed; pass a `Cluster` instance and everything works correctly.
+
+## Known limitations
 
 ### Streaming
 

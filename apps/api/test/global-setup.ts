@@ -8,6 +8,10 @@ const CONTAINER_NAMES = [
   'betterdb-test-valkey',
   'betterdb-test-redis',
   'betterdb-test-postgres',
+  'betterdb-test-cluster-1',
+  'betterdb-test-cluster-2',
+  'betterdb-test-cluster-3',
+  'betterdb-test-cluster-init',
 ];
 
 /**
@@ -56,9 +60,9 @@ export default async function globalSetup() {
     }
 
     // Start test Docker containers
-    console.log('   Starting valkey, redis, and postgres (test containers)...');
+    console.log('   Starting valkey, redis, postgres, and cluster (test containers)...');
     execSync(
-      `docker compose -p ${PROJECT_NAME} -f ${COMPOSE_FILE} up -d valkey redis postgres`,
+      `docker compose -p ${PROJECT_NAME} -f ${COMPOSE_FILE} up -d valkey redis postgres valkey-cluster-1 valkey-cluster-2 valkey-cluster-3 valkey-cluster-init`,
       {
         cwd: projectRoot,
         stdio: 'inherit',
@@ -130,6 +134,32 @@ export default async function globalSetup() {
 
     if (!redisReady) {
       throw new Error('Redis did not become ready within timeout');
+    }
+
+    // Wait for Valkey cluster to be fully formed
+    console.log('   Verifying Valkey cluster health...');
+    let clusterReady = false;
+    const clusterStartTime = Date.now();
+    while (!clusterReady && Date.now() - clusterStartTime < 30000) {
+      try {
+        const clusterInfo = execSync(
+          'docker exec betterdb-test-cluster-1 valkey-cli -p 6401 cluster info',
+          { encoding: 'utf-8' },
+        );
+        if (clusterInfo.includes('cluster_state:ok')) {
+          clusterReady = true;
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      } catch (error) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+
+    if (!clusterReady) {
+      console.warn('   Warning: Valkey cluster did not report cluster_state:ok within timeout (cluster tests will skip)');
+    } else {
+      console.log('   Valkey cluster is ready');
     }
 
     console.log('Docker containers are ready for testing\n');

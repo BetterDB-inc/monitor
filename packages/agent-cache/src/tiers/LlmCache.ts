@@ -2,6 +2,7 @@ import type { Valkey, LlmCacheParams, LlmStoreOptions, LlmCacheResult, ModelCost
 import type { Telemetry } from '../telemetry';
 import { ValkeyCommandError } from '../errors';
 import { llmCacheHash, escapeGlobPattern } from '../utils';
+import { clusterScan } from '../cluster';
 
 export interface LlmCacheConfig {
   client: Valkey;
@@ -227,24 +228,11 @@ export class LlmCache {
 
         // Escape cache name in case it contains glob metacharacters
         const pattern = `${escapeGlobPattern(this.name)}:llm:*`;
-        let cursor = '0';
         let deletedCount = 0;
 
-        do {
-          let scanResult: [string, string[]];
-          try {
-            scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-          } catch (err) {
-            throw new ValkeyCommandError('SCAN', err);
-          }
-
-          cursor = scanResult[0];
-          const keys = scanResult[1];
-
-          if (keys.length === 0) continue;
-
+        await clusterScan(this.client, pattern, async (keys, nodeClient) => {
           // Batch GET all keys in this SCAN page using pipeline
-          const getPipeline = this.client.pipeline();
+          const getPipeline = nodeClient.pipeline();
           for (const key of keys) {
             getPipeline.get(key);
           }
@@ -275,13 +263,13 @@ export class LlmCache {
           // Batch DEL matching keys
           if (keysToDelete.length > 0) {
             try {
-              const deleted = await this.client.del(...keysToDelete);
+              const deleted = await nodeClient.del(...keysToDelete);
               deletedCount += deleted;
             } catch (err) {
               throw new ValkeyCommandError('DEL', err);
             }
           }
-        } while (cursor !== '0');
+        });
 
         span.setAttribute('cache.deleted_count', deletedCount);
         span.end();
