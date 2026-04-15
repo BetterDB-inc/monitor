@@ -1,7 +1,7 @@
 import type { Valkey } from '../types';
 import type { Telemetry } from '../telemetry';
 import { ValkeyCommandError } from '../errors';
-import { escapeGlobPattern, validateNoGlobChars } from '../utils';
+import { escapeGlobPattern } from '../utils';
 
 export interface SessionStoreConfig {
   client: Valkey;
@@ -335,15 +335,12 @@ export class SessionStore {
   }
 
   async destroyThread(threadId: string): Promise<number> {
-    // Reject glob metacharacters for destructive operations to prevent accidental mass deletion
-    validateNoGlobChars(threadId, 'threadId');
-
     return this.telemetry.tracer.startActiveSpan('agent_cache.session.destroyThread', async (span) => {
       try {
         span.setAttribute('cache.thread_id', threadId);
 
-        // Escape cache name in case it contains glob metacharacters (threadId is validated above)
-        const pattern = `${escapeGlobPattern(this.name)}:session:${threadId}:*`;
+        // Escape glob chars to match only this thread's keys during SCAN.
+        const pattern = `${escapeGlobPattern(this.name)}:session:${escapeGlobPattern(threadId)}:*`;
         let cursor = '0';
         let deletedCount = 0;
 

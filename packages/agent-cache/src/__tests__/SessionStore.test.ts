@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SessionStore, SessionTracker } from '../tiers/SessionStore';
-import { AgentCacheUsageError } from '../errors';
 import type { Telemetry } from '../telemetry';
 import type { Valkey } from '../types';
 
@@ -199,10 +198,22 @@ describe('SessionStore', () => {
       );
     });
 
-    it('rejects glob metacharacters to prevent mass deletion', async () => {
-      await expect(store.destroyThread('thread-*')).rejects.toThrow(AgentCacheUsageError);
-      await expect(store.destroyThread('thread?1')).rejects.toThrow(AgentCacheUsageError);
-      await expect(store.destroyThread('thread[1]')).rejects.toThrow(AgentCacheUsageError);
+    it('escapes glob metacharacters in threadId during invalidation scan', async () => {
+      (client.scan as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(['0', ['test_ac:session:thread-[1]:last_intent']]);
+      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      const deleted = await store.destroyThread('thread-[1]');
+
+      expect(deleted).toBe(1);
+      expect(client.scan).toHaveBeenCalledWith(
+        '0',
+        'MATCH',
+        'test_ac:session:thread-\\[1\\]:*',
+        'COUNT',
+        100,
+      );
+      expect(client.del).toHaveBeenCalledWith('test_ac:session:thread-[1]:last_intent');
     });
   });
 

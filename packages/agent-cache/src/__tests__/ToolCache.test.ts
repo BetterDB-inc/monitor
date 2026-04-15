@@ -251,6 +251,18 @@ describe('ToolCache', () => {
       expect(client.scan).toHaveBeenCalledWith('0', 'MATCH', 'test_ac:tool:get_weather:*', 'COUNT', 100);
       expect(client.del).toHaveBeenCalledWith('test_ac:tool:get_weather:abc', 'test_ac:tool:get_weather:def');
     });
+
+    it('escapes glob metacharacters in toolName during invalidation scan', async () => {
+      (client.scan as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(['0', ['test_ac:tool:tool[1]:abc']]);
+      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      const deleted = await cache.invalidateByTool('tool[1]');
+
+      expect(deleted).toBe(1);
+      expect(client.scan).toHaveBeenCalledWith('0', 'MATCH', 'test_ac:tool:tool\\[1\\]:*', 'COUNT', 100);
+      expect(client.del).toHaveBeenCalledWith('test_ac:tool:tool[1]:abc');
+    });
   });
 
   describe('invalidate()', () => {
@@ -300,10 +312,5 @@ describe('ToolCache', () => {
       await expect(cache.setPolicy('my:tool', { ttl: 300 })).rejects.toThrow(AgentCacheUsageError);
     });
 
-    it('rejects glob metacharacters in invalidateByTool()', async () => {
-      await expect(cache.invalidateByTool('tool*')).rejects.toThrow(AgentCacheUsageError);
-      await expect(cache.invalidateByTool('tool?name')).rejects.toThrow(AgentCacheUsageError);
-      await expect(cache.invalidateByTool('tool[1]')).rejects.toThrow(AgentCacheUsageError);
-    });
   });
 });

@@ -1,7 +1,7 @@
 import type { Valkey, ToolStoreOptions, ToolCacheResult, ToolPolicy } from '../types';
 import type { Telemetry } from '../telemetry';
 import { ValkeyCommandError, AgentCacheUsageError } from '../errors';
-import { toolCacheHash, escapeGlobPattern, validateNoGlobChars } from '../utils';
+import { toolCacheHash, escapeGlobPattern } from '../utils';
 
 /**
  * Validate that tool name doesn't contain colons, which are used as key delimiters.
@@ -252,15 +252,12 @@ export class ToolCache {
   }
 
   async invalidateByTool(toolName: string): Promise<number> {
-    // Reject glob metacharacters to prevent matching unintended keys
-    validateNoGlobChars(toolName, 'toolName');
-
     return this.telemetry.tracer.startActiveSpan('agent_cache.tool.invalidateByTool', async (span) => {
       try {
         span.setAttribute('cache.tool_name', toolName);
 
-        // Escape cache name in case it contains glob metacharacters
-        const pattern = `${escapeGlobPattern(this.name)}:tool:${toolName}:*`;
+        // Escape glob chars to match only this tool's keys during SCAN.
+        const pattern = `${escapeGlobPattern(this.name)}:tool:${escapeGlobPattern(toolName)}:*`;
         let cursor = '0';
         let deletedCount = 0;
 
