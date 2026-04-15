@@ -84,7 +84,11 @@ export class AgentCache {
       disabled: analyticsOpts?.disabled,
     })
       .then((a) => {
-        if (this.shutdownCalled) return;
+        if (this.shutdownCalled) {
+          // If shutdown won the race, ensure the late-created analytics client
+          // is also torn down so its internal timers do not keep the process alive.
+          return a.shutdown();
+        }
         this.analytics = a;
         const configProps: Record<string, unknown> = {
           defaultTtl: options.defaultTtl,
