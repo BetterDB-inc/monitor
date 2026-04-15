@@ -360,6 +360,44 @@ const graph = new StateGraph({ channels: schema })
   .compile({ checkpointer });
 ```
 
+See [`examples/langgraph`](./examples/langgraph) for a full working example. Sample output:
+
+```
+═══ Part 1: Graph State Persistence ═══
+Two separate messages on the same thread — graph resumes from checkpoint.
+
+User [demo-thread-1]: What is the weather in Sofia?
+  [tool cache MISS] get_weather("Sofia") — calling API
+Assistant: The weather in Sofia is currently sunny with a temperature of 18°C.
+  (2328ms)
+
+User [demo-thread-1]: And in Berlin?
+  [tool cache MISS] get_weather("Berlin") — calling API
+Assistant: The weather in Berlin is currently sunny with a temperature of 27°C.
+  (1649ms)
+
+═══ Part 2: LLM + Tool Caching ═══
+Same questions on a new thread — LLM and tool results served from cache.
+
+User [demo-thread-2]: What is the weather in Sofia?
+Assistant:
+  (7ms)
+
+User [demo-thread-2]: And in Berlin?
+  [tool cache HIT] get_weather("Sofia")
+  [tool cache HIT] get_weather("Berlin")
+Assistant: The current weather is as follows:
+
+- **Sofia**: 18°C, sunny
+- **Berlin**: 27°C, sunny
+  (2871ms)
+
+── Cache Stats ──
+LLM tier:   1 hits / 6 misses (14% hit rate)
+Tool tier:  2 hits / 2 misses (50% hit rate)
+Cost saved: $0.000017
+```
+
 ## Prometheus metrics
 
 All metric names are prefixed with `agent_cache_` by default (configurable via `telemetry.metricsPrefix`).
