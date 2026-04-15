@@ -42,10 +42,10 @@ function isTelemetryOptedOut(): boolean {
 }
 
 class PostHogAnalytics implements Analytics {
-  private posthog: { capture: (opts: Record<string, unknown>) => void; shutdown: () => Promise<void> };
+  private posthog: { capture: (opts: { distinctId?: string; event: string; properties?: Record<string, unknown> }) => void; shutdown: () => Promise<void> };
   private distinctId = '';
 
-  constructor(posthog: { capture: (opts: Record<string, unknown>) => void; shutdown: () => Promise<void> }) {
+  constructor(posthog: { capture: (opts: { distinctId?: string; event: string; properties?: Record<string, unknown> }) => void; shutdown: () => Promise<void> }) {
     this.posthog = posthog;
   }
 
