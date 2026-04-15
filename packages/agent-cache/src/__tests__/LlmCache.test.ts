@@ -1,0 +1,329 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { LlmCache } from '../tiers/LlmCache';
+import type { Telemetry } from '../telemetry';
+import type { Valkey } from '../types';
+
+function createMockClient(): Valkey {
+  const hincrbyCalls: Array<[string, string, number]> = [];
+  return {
+    get: vi.fn(),
+    set: vi.fn(),
+    expire: vi.fn(),
+    hincrby: vi.fn(),
+    del: vi.fn(),
+    scan: vi.fn(),
+    pipeline: vi.fn(() => ({
+      get: vi.fn().mockReturnThis(),
+      hincrby: vi.fn(function(this: { _calls: Array<[string, string, number]> }, key: string, field: string, val: number) {
+        hincrbyCalls.push([key, field, val]);
+        return this;
+      }),
+      exec: vi.fn().mockResolvedValue([]),
+      _hincrbyCalls: hincrbyCalls,
+    })),
+    _hincrbyCalls: hincrbyCalls,
+  } as unknown as Valkey;
+}
+
+function createMockTelemetry(): Telemetry {
+  return {
+    tracer: {
+      startActiveSpan: vi.fn((_name, fn) => fn({
+        setAttribute: vi.fn(),
+        recordException: vi.fn(),
+        end: vi.fn(),
+      })),
+    },
+    metrics: {
+      requestsTotal: { labels: vi.fn(() => ({ inc: vi.fn() })) },
+      operationDuration: { labels: vi.fn(() => ({ observe: vi.fn() })) },
+      costSaved: { labels: vi.fn(() => ({ inc: vi.fn() })) },
+      storedBytes: { labels: vi.fn(() => ({ inc: vi.fn() })) },
+      activeSessions: { labels: vi.fn(() => ({ inc: vi.fn(), dec: vi.fn(), set: vi.fn() })) },
+    },
+  } as unknown as Telemetry;
+}
+
+describe('LlmCache', () => {
+  let client: Valkey;
+  let telemetry: Telemetry;
+  let cache: LlmCache;
+
+  beforeEach(() => {
+    client = createMockClient();
+    telemetry = createMockTelemetry();
+    cache = new LlmCache({
+      client,
+      name: 'test_ac',
+      defaultTtl: undefined,
+      tierTtl: 3600,
+      costTable: {
+        'gpt-4o': { inputPer1k: 0.0025, outputPer1k: 0.01 },
+      },
+      telemetry,
+      statsKey: 'test_ac:__stats',
+    });
+  });
+
+  describe('check()', () => {
+    it('returns miss when key does not exist', async () => {
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+      const result = await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      expect(result.hit).toBe(false);
+      expect(result.tier).toBe('llm');
+      expect(result.response).toBeUndefined();
+    });
+
+    it('returns hit with parsed response when key exists', async () => {
+      const stored = JSON.stringify({
+        response: 'Hello there!',
+        model: 'gpt-4o',
+        storedAt: Date.now(),
+      });
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
+
+      const result = await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      expect(result.hit).toBe(true);
+      expect(result.tier).toBe('llm');
+      expect(result.response).toBe('Hello there!');
+      expect(result.key).toContain('test_ac:llm:');
+    });
+
+    it('records hit in stats via pipeline', async () => {
+      const stored = JSON.stringify({
+        response: 'Hello there!',
+        model: 'gpt-4o',
+        storedAt: Date.now(),
+      });
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
+
+      await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      // Stats are now batched via pipeline
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'llm:hits', 1]);
+    });
+
+    it('deletes corrupt entry and returns miss on invalid JSON', async () => {
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue('not valid json{{{');
+      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      const result = await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      expect(result.hit).toBe(false);
+      expect(result.tier).toBe('llm');
+      expect(client.del).toHaveBeenCalledWith(expect.stringContaining('test_ac:llm:'));
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'llm:misses', 1]);
+    });
+
+    it('records miss in stats via pipeline', async () => {
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+      await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'llm:misses', 1]);
+    });
+
+    it('tracks cost savings on hit when entry has cost via pipeline', async () => {
+      const stored = JSON.stringify({
+        response: 'Hello there!',
+        model: 'gpt-4o',
+        storedAt: Date.now(),
+        cost: 0.05, // $0.05
+      });
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
+
+      await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      // Stats are now batched via pipeline - verify cost_saved_micros ($0.05 = 50000 microdollars)
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      expect(hincrbyCalls).toContainEqual(['test_ac:__stats', 'cost_saved_micros', 50000]);
+    });
+
+    it('does not track cost savings on hit when entry has no cost', async () => {
+      const stored = JSON.stringify({
+        response: 'Hello there!',
+        model: 'gpt-4o',
+        storedAt: Date.now(),
+        // No cost field
+      });
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
+
+      await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      // cost_saved_micros should not be in pipeline calls
+      const hincrbyCalls = (client as unknown as { _hincrbyCalls: Array<[string, string, number]> })._hincrbyCalls;
+      const costSavedCalls = hincrbyCalls.filter(
+        (call: [string, string, number]) => call[1] === 'cost_saved_micros'
+      );
+      expect(costSavedCalls.length).toBe(0);
+    });
+  });
+
+  describe('store()', () => {
+    it('calls SET with correct key format and JSON value', async () => {
+      (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
+      (client.expire as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      await cache.store(
+        { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
+        'Hello there!',
+      );
+
+      expect(client.set).toHaveBeenCalled();
+      const [key, value] = (client.set as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(key).toContain('test_ac:llm:');
+      const parsed = JSON.parse(value);
+      expect(parsed.response).toBe('Hello there!');
+      expect(parsed.model).toBe('gpt-4o');
+    });
+
+    it('uses SET with EX when TTL provided (atomic operation)', async () => {
+      (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
+
+      await cache.store(
+        { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
+        'Hello there!',
+        { ttl: 1800 },
+      );
+
+      expect(client.set).toHaveBeenCalledWith(
+        expect.stringContaining('test_ac:llm:'),
+        expect.any(String),
+        'EX',
+        1800,
+      );
+    });
+
+    it('uses tier TTL with SET EX when no per-call TTL', async () => {
+      (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
+
+      await cache.store(
+        { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
+        'Hello there!',
+      );
+
+      expect(client.set).toHaveBeenCalledWith(
+        expect.stringContaining('test_ac:llm:'),
+        expect.any(String),
+        'EX',
+        3600,
+      );
+    });
+
+    it('calls SET without EX when no TTL at any level', async () => {
+      const noTtlCache = new LlmCache({
+        client,
+        name: 'test_ac',
+        defaultTtl: undefined,
+        tierTtl: undefined,
+        costTable: undefined,
+        telemetry,
+        statsKey: 'test_ac:__stats',
+      });
+
+      (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
+
+      await noTtlCache.store(
+        { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
+        'Hello there!',
+      );
+
+      // SET called without EX argument
+      expect(client.set).toHaveBeenCalledWith(
+        expect.stringContaining('test_ac:llm:'),
+        expect.any(String),
+      );
+      // Verify only 2 arguments (no EX)
+      expect((client.set as ReturnType<typeof vi.fn>).mock.calls[0].length).toBe(2);
+    });
+
+    it('stores cost in entry when costTable and tokens provided (but does not track yet)', async () => {
+      (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
+
+      await cache.store(
+        { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
+        'Hello there!',
+        { tokens: { input: 10, output: 20 } },
+      );
+
+      // Verify cost is stored in the entry
+      const [, value] = (client.set as ReturnType<typeof vi.fn>).mock.calls[0];
+      const parsed = JSON.parse(value);
+      expect(parsed.cost).toBeDefined();
+      expect(parsed.cost).toBeGreaterThan(0);
+
+      // Verify cost_saved_micros is NOT incremented at store time
+      const hincrbyCalls = (client.hincrby as ReturnType<typeof vi.fn>).mock.calls;
+      const costSavedCalls = hincrbyCalls.filter(
+        (call: unknown[]) => call[1] === 'cost_saved_micros'
+      );
+      expect(costSavedCalls.length).toBe(0);
+    });
+  });
+
+  describe('invalidateByModel()', () => {
+    it('deletes only matching model entries using batched pipeline', async () => {
+      const entry1 = JSON.stringify({ response: 'A', model: 'gpt-4o', storedAt: Date.now() });
+      const entry2 = JSON.stringify({ response: 'B', model: 'gpt-3.5', storedAt: Date.now() });
+
+      (client.scan as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(['0', ['test_ac:llm:abc', 'test_ac:llm:def']]);
+
+      // Mock pipeline for batched GET
+      const mockPipeline = {
+        get: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([
+          [null, entry1],
+          [null, entry2],
+        ]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>).mockReturnValue(mockPipeline);
+
+      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      const deleted = await cache.invalidateByModel('gpt-4o');
+
+      expect(deleted).toBe(1);
+      // Should only delete the matching key (gpt-4o)
+      expect(client.del).toHaveBeenCalledWith('test_ac:llm:abc');
+      expect(client.del).not.toHaveBeenCalledWith('test_ac:llm:def');
+    });
+
+    it('handles empty SCAN results', async () => {
+      (client.scan as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(['0', []]);
+
+      const deleted = await cache.invalidateByModel('gpt-4o');
+
+      expect(deleted).toBe(0);
+      expect(client.del).not.toHaveBeenCalled();
+    });
+  });
+});

@@ -71,11 +71,17 @@ export class UsageTelemetryService implements OnModuleInit {
     }
   }
 
+  /**
+   * Returns a truncated license key suffix for analytics correlation.
+   * Only the last 4 characters are sent to avoid exposing the full key.
+   */
   private getLicenseKeySafely(): string | undefined {
     const licenseService = this.licenseService as { getLicenseKey?: () => string } | undefined;
     if (typeof licenseService?.getLicenseKey !== 'function') return undefined;
     try {
-      return licenseService.getLicenseKey();
+      const fullKey = licenseService.getLicenseKey();
+      if (!fullKey || fullKey.length < 4) return undefined;
+      return `...${fullKey.slice(-4)}`;
     } catch {
       return undefined;
     }

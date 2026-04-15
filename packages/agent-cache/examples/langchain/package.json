@@ -1,0 +1,17 @@
+{
+  "name": "agent-cache-langchain-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@betterdb/agent-cache": "file:../../",
+    "@langchain/core": "^1.1.0",
+    "@langchain/openai": "^1.4.0",
+    "iovalkey": "^0.3.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}
