@@ -393,9 +393,11 @@ export class SessionStore {
           for (const key of keys) pipeline.expire(key, ttl);
           try {
             await pipeline.exec();
-            // Approximate: counts keys sent, not keys that successfully refreshed.
-            // Individual EXPIRE failures within the pipeline are swallowed intentionally
-            // — a missed TTL refresh is less harmful than failing the whole touch().
+            // Per-command EXPIRE results are intentionally not inspected here —
+            // unlike DEL, a key disappearing between SCAN and EXPIRE is harmless
+            // (it was already gone). DEL pipelines must inspect results because a
+            // failed delete would silently leave a key behind. The _approx suffix
+            // on the span attribute documents this over-counting trade-off.
             touchedCount += keys.length;
           } catch (err) {
             throw new ValkeyCommandError('EXPIRE', err);
