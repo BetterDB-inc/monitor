@@ -334,7 +334,10 @@ export class SessionStore {
           } catch (err) {
             throw new ValkeyCommandError('DEL', err);
           }
-          for (const [, count] of delResults) deletedCount += count ?? 0;
+          for (const [err, count] of delResults) {
+            if (err) throw new ValkeyCommandError('DEL', err);
+            deletedCount += count ?? 0;
+          }
         });
 
         // Decrement active sessions gauge
@@ -390,6 +393,9 @@ export class SessionStore {
           for (const key of keys) pipeline.expire(key, ttl);
           try {
             await pipeline.exec();
+            // Approximate: counts keys sent, not keys that successfully refreshed.
+            // Individual EXPIRE failures within the pipeline are swallowed intentionally
+            // — a missed TTL refresh is less harmful than failing the whole touch().
             touchedCount += keys.length;
           } catch (err) {
             throw new ValkeyCommandError('EXPIRE', err);

@@ -286,10 +286,14 @@ export class AgentCache {
         // CROSSSLOT errors in cluster mode when keys span different hash slots.
         const pipeline = nodeClient.pipeline();
         for (const key of keys) pipeline.del(key);
+        let delResults: Array<[Error | null, number]>;
         try {
-          await pipeline.exec();
+          delResults = await pipeline.exec() as Array<[Error | null, number]>;
         } catch (err) {
           throw new ValkeyCommandError('DEL', err);
+        }
+        for (const [err] of delResults) {
+          if (err) throw new ValkeyCommandError('DEL', err);
         }
       });
     } finally {

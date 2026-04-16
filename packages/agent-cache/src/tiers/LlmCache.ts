@@ -265,7 +265,10 @@ export class LlmCache {
             } catch (err) {
               throw new ValkeyCommandError('DEL', err);
             }
-            for (const [, count] of delResults) deletedCount += count ?? 0;
+            for (const [err, count] of delResults) {
+              if (err) throw new ValkeyCommandError('DEL', err);
+              deletedCount += count ?? 0;
+            }
           }
         });
 

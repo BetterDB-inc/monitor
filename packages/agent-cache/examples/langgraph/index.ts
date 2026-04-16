@@ -28,7 +28,12 @@ import { BetterDBLlmCache } from '@betterdb/agent-cache/langchain';
 
 // ── 1. Connect to Valkey (standalone or cluster) ─────────────────────
 const CLUSTER_NODES = (process.env.VALKEY_CLUSTER_NODES ?? 'localhost:6401,localhost:6402,localhost:6403')
-  .split(',').map(hp => { const [host, port] = hp.split(':'); return { host, port: +port }; });
+  .split(',').map(hp => {
+    const [host, portStr] = hp.trim().split(':');
+    const port = parseInt(portStr, 10);
+    if (!host || isNaN(port)) throw new Error(`Invalid cluster node: "${hp}"`);
+    return { host, port };
+  });
 
 const valkey = process.env.VALKEY_CLUSTER
   ? new Cluster(CLUSTER_NODES) as unknown as Valkey
