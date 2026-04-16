@@ -54,3 +54,76 @@ services:
       retries: 3
     tmpfs:
       - /var/lib/postgresql/data
+
+  valkey-cluster-1:
+    image: valkey/valkey:8-alpine
+    container_name: betterdb-test-cluster-1
+    network_mode: host
+    command: >
+      valkey-server
+      --port 6401
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "6401", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+
+  valkey-cluster-2:
+    image: valkey/valkey:8-alpine
+    container_name: betterdb-test-cluster-2
+    network_mode: host
+    command: >
+      valkey-server
+      --port 6402
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "6402", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+
+  valkey-cluster-3:
+    image: valkey/valkey:8-alpine
+    container_name: betterdb-test-cluster-3
+    network_mode: host
+    command: >
+      valkey-server
+      --port 6403
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly no
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-p", "6403", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+
+  valkey-cluster-init:
+    image: valkey/valkey:8-alpine
+    container_name: betterdb-test-cluster-init
+    network_mode: host
+    depends_on:
+      valkey-cluster-1:
+        condition: service_healthy
+      valkey-cluster-2:
+        condition: service_healthy
+      valkey-cluster-3:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: >
+      sh -c "
+        valkey-cli --cluster create
+          127.0.0.1:6401
+          127.0.0.1:6402
+          127.0.0.1:6403
+          --cluster-replicas 0 --cluster-yes &&
+        echo 'Cluster created successfully'
+      "

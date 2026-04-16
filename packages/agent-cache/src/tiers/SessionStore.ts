@@ -2,6 +2,7 @@ import type { Valkey } from '../types';
 import type { Telemetry } from '../telemetry';
 import { ValkeyCommandError } from '../errors';
 import { escapeGlobPattern } from '../utils';
+import { clusterScan } from '../cluster';
 
 export interface SessionStoreConfig {
   client: Valkey;
@@ -224,52 +225,40 @@ export class SessionStore {
         // Escape glob chars to prevent threadId or cache name from matching unintended keys
         const pattern = `${escapeGlobPattern(this.name)}:session:${escapeGlobPattern(threadId)}:*`;
         const result: Record<string, string> = {};
-        const keysToRefresh: string[] = [];
-        let cursor = '0';
+        const ttl = this.tierTtl ?? this.defaultTtl;
+        const prefix = `${this.name}:session:${threadId}:`;
 
-        do {
-          let scanResult: [string, string[]];
+        await clusterScan(this.client, pattern, async (keys, nodeClient) => {
+          // Pipeline GET — individual commands avoid CROSSSLOT in cluster mode
+          const getPipeline = nodeClient.pipeline();
+          for (const key of keys) getPipeline.get(key);
+
+          let getResults: Array<[Error | null, string | null]>;
           try {
-            scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+            getResults = await getPipeline.exec() as Array<[Error | null, string | null]>;
           } catch (err) {
-            throw new ValkeyCommandError('SCAN', err);
+            throw new ValkeyCommandError('GET', err);
           }
 
-          cursor = scanResult[0];
-          const keys = scanResult[1];
+          const keysToRefresh: string[] = [];
+          for (let i = 0; i < keys.length; i++) {
+            const [err, value] = getResults[i];
+            if (err || value === null) continue;
+            result[keys[i].slice(prefix.length)] = value;
+            keysToRefresh.push(keys[i]);
+          }
 
-          if (keys.length > 0) {
+          // Refresh TTL per batch on this node (sliding window)
+          if (ttl !== undefined && keysToRefresh.length > 0) {
+            const expPipeline = nodeClient.pipeline();
+            for (const key of keysToRefresh) expPipeline.expire(key, ttl);
             try {
-              const values = await this.client.mget(...keys);
-              for (let i = 0; i < keys.length; i++) {
-                const value = values[i];
-                if (value !== null) {
-                  // Extract field name from key (strip prefix)
-                  const prefix = `${this.name}:session:${threadId}:`;
-                  const field = keys[i].slice(prefix.length);
-                  result[field] = value;
-                  keysToRefresh.push(keys[i]);
-                }
-              }
-            } catch (err) {
-              throw new ValkeyCommandError('MGET', err);
+              await expPipeline.exec();
+            } catch {
+              // TTL refresh failure should not break the read
             }
           }
-        } while (cursor !== '0');
-
-        // Refresh TTL on all found keys (sliding window)
-        const ttl = this.tierTtl ?? this.defaultTtl;
-        if (ttl !== undefined && keysToRefresh.length > 0) {
-          const pipeline = this.client.pipeline();
-          for (const key of keysToRefresh) {
-            pipeline.expire(key, ttl);
-          }
-          try {
-            await pipeline.exec();
-          } catch {
-            // TTL refresh failure should not break the read
-          }
-        }
+        });
 
         span.setAttribute('cache.field_count', Object.keys(result).length);
         span.end();
@@ -292,33 +281,25 @@ export class SessionStore {
     const pattern = `${escapeGlobPattern(this.name)}:session:${escapeGlobPattern(threadId)}:${escapeGlobPattern(fieldPrefix)}*`;
     const result: Record<string, string> = {};
     const keyPrefix = `${this.name}:session:${threadId}:`;
-    let cursor = '0';
 
-    do {
-      let scanResult: [string, string[]];
+    await clusterScan(this.client, pattern, async (keys, nodeClient) => {
+      // Pipeline GET — individual commands avoid CROSSSLOT in cluster mode
+      const pipeline = nodeClient.pipeline();
+      for (const key of keys) pipeline.get(key);
+
+      let getResults: Array<[Error | null, string | null]>;
       try {
-        scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        getResults = await pipeline.exec() as Array<[Error | null, string | null]>;
       } catch (err) {
-        throw new ValkeyCommandError('SCAN', err);
+        throw new ValkeyCommandError('GET', err);
       }
 
-      cursor = scanResult[0];
-      const keys = scanResult[1];
-
-      if (keys.length > 0) {
-        try {
-          const values = await this.client.mget(...keys);
-          for (let i = 0; i < keys.length; i++) {
-            const value = values[i];
-            if (value !== null) {
-              result[keys[i].slice(keyPrefix.length)] = value;
-            }
-          }
-        } catch (err) {
-          throw new ValkeyCommandError('MGET', err);
-        }
+      for (let i = 0; i < keys.length; i++) {
+        const [err, value] = getResults[i];
+        if (err || value === null) continue;
+        result[keys[i].slice(keyPrefix.length)] = value;
       }
-    } while (cursor !== '0');
+    });
 
     return result;
   }
@@ -341,29 +322,23 @@ export class SessionStore {
 
         // Escape glob chars to match only this thread's keys during SCAN.
         const pattern = `${escapeGlobPattern(this.name)}:session:${escapeGlobPattern(threadId)}:*`;
-        let cursor = '0';
         let deletedCount = 0;
 
-        do {
-          let scanResult: [string, string[]];
+        await clusterScan(this.client, pattern, async (keys, nodeClient) => {
+          // Pipeline DEL — individual commands avoid CROSSSLOT in cluster mode
+          const pipeline = nodeClient.pipeline();
+          for (const key of keys) pipeline.del(key);
+          let delResults: Array<[Error | null, number]>;
           try {
-            scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+            delResults = await pipeline.exec() as Array<[Error | null, number]>;
           } catch (err) {
-            throw new ValkeyCommandError('SCAN', err);
+            throw new ValkeyCommandError('DEL', err);
           }
-
-          cursor = scanResult[0];
-          const keys = scanResult[1];
-
-          if (keys.length > 0) {
-            try {
-              const deleted = await this.client.del(...keys);
-              deletedCount += deleted;
-            } catch (err) {
-              throw new ValkeyCommandError('DEL', err);
-            }
+          for (const [err, count] of delResults) {
+            if (err) throw new ValkeyCommandError('DEL', err);
+            deletedCount += count ?? 0;
           }
-        } while (cursor !== '0');
+        });
 
         // Decrement active sessions gauge
         if (this.sessionTracker.remove(threadId)) {
@@ -411,35 +386,25 @@ export class SessionStore {
           return;
         }
 
-        let cursor = '0';
         let touchedCount = 0;
 
-        do {
-          let scanResult: [string, string[]];
+        await clusterScan(this.client, pattern, async (keys, nodeClient) => {
+          const pipeline = nodeClient.pipeline();
+          for (const key of keys) pipeline.expire(key, ttl);
           try {
-            scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+            await pipeline.exec();
+            // Per-command EXPIRE results are intentionally not inspected here —
+            // unlike DEL, a key disappearing between SCAN and EXPIRE is harmless
+            // (it was already gone). DEL pipelines must inspect results because a
+            // failed delete would silently leave a key behind. The _approx suffix
+            // on the span attribute documents this over-counting trade-off.
+            touchedCount += keys.length;
           } catch (err) {
-            throw new ValkeyCommandError('SCAN', err);
+            throw new ValkeyCommandError('EXPIRE', err);
           }
+        });
 
-          cursor = scanResult[0];
-          const keys = scanResult[1];
-
-          if (keys.length > 0) {
-            const pipeline = this.client.pipeline();
-            for (const key of keys) {
-              pipeline.expire(key, ttl);
-            }
-            try {
-              await pipeline.exec();
-              touchedCount += keys.length;
-            } catch (err) {
-              throw new ValkeyCommandError('EXPIRE', err);
-            }
-          }
-        } while (cursor !== '0');
-
-        span.setAttribute('cache.touched_count', touchedCount);
+        span.setAttribute('cache.touched_count_approx', touchedCount);
         span.end();
       } catch (err) {
         span.recordException(err as Error);
