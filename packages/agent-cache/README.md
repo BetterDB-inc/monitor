@@ -426,7 +426,7 @@ Every public method emits an OTel span. Spans require an OpenTelemetry SDK to be
 | `agent_cache.session.set` | `cache.key`, `cache.thread_id`, `cache.field`, `cache.ttl`, `cache.bytes` |
 | `agent_cache.session.getAll` | `cache.thread_id`, `cache.field_count` |
 | `agent_cache.session.destroyThread` | `cache.thread_id`, `cache.deleted_count` |
-| `agent_cache.session.touch` | `cache.thread_id`, `cache.touched_count` |
+| `agent_cache.session.touch` | `cache.thread_id`, `cache.touched_count_approx` |
 
 ## BetterDB Monitor integration
 

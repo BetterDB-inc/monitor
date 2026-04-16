@@ -4,6 +4,10 @@
 // so they are safe to run on any platform — they will simply be skipped on macOS.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+
+// Populated in beforeAll — defined here so it.skipIf() can reference it at test-definition time.
+// Vitest evaluates skipIf lazily (at run time, not parse time), so this works correctly.
+let skip = false;
 import { Cluster } from 'iovalkey';
 import { AgentCache } from '../AgentCache';
 import { Registry } from 'prom-client';
@@ -19,7 +23,6 @@ const CLUSTER_NODES = (process.env.VALKEY_CLUSTER_NODES ?? 'localhost:6401,local
 
 let client: Cluster;
 let cache: AgentCache;
-let skip = false;
 let registry: Registry;
 
 beforeAll(async () => {
@@ -61,8 +64,7 @@ afterAll(async () => {
 });
 
 describe('AgentCache cluster integration', () => {
-  it('basic operations work through cluster (LLM, tool, session)', async () => {
-    if (skip) return;
+  it.skipIf(skip)('basic operations work through cluster (LLM, tool, session)', async () => {
 
     // LLM tier
     const llmParams = {
@@ -87,8 +89,7 @@ describe('AgentCache cluster integration', () => {
     expect(sessionResult).toBe('value1');
   });
 
-  it('flush() removes keys across all nodes', async () => {
-    if (skip) return;
+  it.skipIf(skip)('flush() removes keys across all nodes', async () => {
 
     const flushName = `betterdb_ac_flush_cluster_${Date.now()}`;
     const flushCache = new AgentCache({
@@ -120,8 +121,7 @@ describe('AgentCache cluster integration', () => {
     }
   });
 
-  it('destroyThread() removes keys across all nodes', async () => {
-    if (skip) return;
+  it.skipIf(skip)('destroyThread() removes keys across all nodes', async () => {
 
     // Write fields for multiple threads to increase cross-node likelihood
     const threadIds = [
@@ -156,8 +156,7 @@ describe('AgentCache cluster integration', () => {
     }
   });
 
-  it('invalidateByModel() removes keys across all nodes', async () => {
-    if (skip) return;
+  it.skipIf(skip)('invalidateByModel() removes keys across all nodes', async () => {
 
     const modelName = 'gpt-cluster-invalidate-test';
     // 15 different prompts → 15 different SHA-256 hashes → likely different hash slots
@@ -199,8 +198,7 @@ describe('AgentCache cluster integration', () => {
     }
   });
 
-  it('invalidateByTool() removes keys across all nodes', async () => {
-    if (skip) return;
+  it.skipIf(skip)('invalidateByTool() removes keys across all nodes', async () => {
 
     const toolName = 'cluster_weather_invalidate';
     // 15 different argument sets → different hashes → different hash slots
@@ -228,8 +226,7 @@ describe('AgentCache cluster integration', () => {
     }
   });
 
-  it('getAll() returns fields from all nodes', async () => {
-    if (skip) return;
+  it.skipIf(skip)('getAll() returns fields from all nodes', async () => {
 
     const threadId = `cluster-getall-${Date.now()}`;
     const fieldCount = 20;
@@ -253,8 +250,7 @@ describe('AgentCache cluster integration', () => {
     await cache.session.destroyThread(threadId);
   });
 
-  it('touch() refreshes TTLs across all nodes', async () => {
-    if (skip) return;
+  it.skipIf(skip)('touch() refreshes TTLs across all nodes', async () => {
 
     const threadId = `cluster-touch-${Date.now()}`;
     const fieldCount = 15;
@@ -283,8 +279,7 @@ describe('AgentCache cluster integration', () => {
     await cache.session.destroyThread(threadId);
   }, 10000);
 
-  it('stats() works through cluster', async () => {
-    if (skip) return;
+  it.skipIf(skip)('stats() works through cluster', async () => {
 
     const statsName = `betterdb_ac_cluster_stats_${Date.now()}`;
     const statsCache = new AgentCache({

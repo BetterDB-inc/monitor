@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Internal SCAN loops replaced with shared `clusterScan()` utility in `src/cluster.ts`
+- `agent_cache.session.touch` span attribute renamed from `cache.touched_count` to `cache.touched_count_approx` — the value counts keys sent to EXPIRE, not keys that successfully refreshed (keys that expire between SCAN and EXPIRE are included in the count)
 
 ## [0.1.0] - 2026-04-14
 
