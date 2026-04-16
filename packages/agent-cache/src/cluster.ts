@@ -25,6 +25,10 @@ export async function clusterScan(
 ): Promise<void> {
   const nodes = getMasterNodes(client);
 
+  if (nodes.length === 0) {
+    throw new ValkeyCommandError('SCAN', new Error('cluster has no master nodes visible'));
+  }
+
   for (const nodeClient of nodes) {
     let cursor = '0';
     do {

@@ -22,21 +22,21 @@ import { AgentCache } from '@betterdb/agent-cache';
 import { BetterDBLlmCache } from '@betterdb/agent-cache/langchain';
 
 // ── 1. Connect to Valkey (standalone or cluster) ─────────────────────
-const CLUSTER_NODES = (process.env.VALKEY_CLUSTER_NODES ?? 'localhost:6401,localhost:6402,localhost:6403')
-  .split(',').map(hp => {
-    const [host, portStr] = hp.trim().split(':');
-    const port = parseInt(portStr, 10);
-    if (!host || isNaN(port)) throw new Error(`Invalid cluster node: "${hp}"`);
-    return { host, port };
-  });
-
-const valkey = process.env.VALKEY_CLUSTER
-  ? new Cluster(CLUSTER_NODES) as unknown as Valkey
-  : new Valkey({ host: 'localhost', port: 6379 });
-
-console.log(process.env.VALKEY_CLUSTER
-  ? `Cluster mode — nodes: ${CLUSTER_NODES.map(n => `${n.host}:${n.port}`).join(', ')}`
-  : 'Standalone mode — localhost:6379');
+let valkey: Valkey;
+if (process.env.VALKEY_CLUSTER) {
+  const clusterNodes = (process.env.VALKEY_CLUSTER_NODES ?? 'localhost:6401,localhost:6402,localhost:6403')
+    .split(',').map(hp => {
+      const [host, portStr] = hp.trim().split(':');
+      const port = parseInt(portStr, 10);
+      if (!host || isNaN(port)) throw new Error(`Invalid cluster node: "${hp}"`);
+      return { host, port };
+    });
+  console.log(`Cluster mode — nodes: ${clusterNodes.map(n => `${n.host}:${n.port}`).join(', ')}`);
+  valkey = new Cluster(clusterNodes) as unknown as Valkey;
+} else {
+  console.log('Standalone mode — localhost:6379');
+  valkey = new Valkey({ host: 'localhost', port: 6379 });
+}
 
 // ── 2. Create a cache ───────────────────────────────────────────────
 const cache = new AgentCache({

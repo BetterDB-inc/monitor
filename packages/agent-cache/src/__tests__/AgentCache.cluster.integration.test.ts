@@ -11,8 +11,10 @@ import { Registry } from 'prom-client';
 const CLUSTER_NODES = (process.env.VALKEY_CLUSTER_NODES ?? 'localhost:6401,localhost:6402,localhost:6403')
   .split(',')
   .map((hp) => {
-    const [host, port] = hp.split(':');
-    return { host, port: parseInt(port, 10) };
+    const [host, portStr] = hp.trim().split(':');
+    const port = parseInt(portStr, 10);
+    if (!host || isNaN(port)) throw new Error(`Invalid cluster node: "${hp}"`);
+    return { host, port };
   });
 
 let client: Cluster;

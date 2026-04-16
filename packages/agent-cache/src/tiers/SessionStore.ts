@@ -242,11 +242,10 @@ export class SessionStore {
 
           const keysToRefresh: string[] = [];
           for (let i = 0; i < keys.length; i++) {
-            const [, value] = getResults[i];
-            if (value !== null) {
-              result[keys[i].slice(prefix.length)] = value;
-              keysToRefresh.push(keys[i]);
-            }
+            const [err, value] = getResults[i];
+            if (err || value === null) continue;
+            result[keys[i].slice(prefix.length)] = value;
+            keysToRefresh.push(keys[i]);
           }
 
           // Refresh TTL per batch on this node (sliding window)
@@ -296,8 +295,9 @@ export class SessionStore {
       }
 
       for (let i = 0; i < keys.length; i++) {
-        const [, value] = getResults[i];
-        if (value !== null) result[keys[i].slice(keyPrefix.length)] = value;
+        const [err, value] = getResults[i];
+        if (err || value === null) continue;
+        result[keys[i].slice(keyPrefix.length)] = value;
       }
     });
 
