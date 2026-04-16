@@ -15,6 +15,7 @@ import { createTelemetry } from './telemetry';
 import { createAnalytics, NOOP_ANALYTICS, type Analytics } from './analytics';
 import { ValkeyCommandError } from './errors';
 import { escapeGlobPattern } from './utils';
+import { clusterScan } from './cluster';
 
 export class AgentCache {
   public readonly llm: LlmCache;
@@ -278,28 +279,19 @@ export class AgentCache {
   async flush(): Promise<void> {
     // Escape cache name in case it contains glob metacharacters
     const pattern = `${escapeGlobPattern(this.name)}:*`;
-    let cursor = '0';
 
     try {
-      do {
-        let scanResult: [string, string[]];
+      await clusterScan(this.client, pattern, async (keys, nodeClient) => {
+        // Use a pipeline of individual DEL commands — multi-key DEL causes
+        // CROSSSLOT errors in cluster mode when keys span different hash slots.
+        const pipeline = nodeClient.pipeline();
+        for (const key of keys) pipeline.del(key);
         try {
-          scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+          await pipeline.exec();
         } catch (err) {
-          throw new ValkeyCommandError('SCAN', err);
+          throw new ValkeyCommandError('DEL', err);
         }
-
-        cursor = scanResult[0];
-        const keys = scanResult[1];
-
-        if (keys.length > 0) {
-          try {
-            await this.client.del(...keys);
-          } catch (err) {
-            throw new ValkeyCommandError('DEL', err);
-          }
-        }
-      } while (cursor !== '0');
+      });
     } finally {
       // Always reset in-memory state even on partial failure — leaving stale
       // sessions or policies after some keys were deleted would be worse than

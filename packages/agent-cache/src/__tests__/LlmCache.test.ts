@@ -14,6 +14,7 @@ function createMockClient(): Valkey {
     scan: vi.fn(),
     pipeline: vi.fn(() => ({
       get: vi.fn().mockReturnThis(),
+      del: vi.fn().mockReturnThis(),
       hincrby: vi.fn(function(this: { _calls: Array<[string, string, number]> }, key: string, field: string, val: number) {
         hincrbyCalls.push([key, field, val]);
         return this;
@@ -296,24 +297,29 @@ describe('LlmCache', () => {
       (client.scan as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce(['0', ['test_ac:llm:abc', 'test_ac:llm:def']]);
 
-      // Mock pipeline for batched GET
-      const mockPipeline = {
+      // First pipeline() call: batched GET to read model names
+      const getPipeline = {
         get: vi.fn().mockReturnThis(),
-        exec: vi.fn().mockResolvedValue([
-          [null, entry1],
-          [null, entry2],
-        ]),
+        exec: vi.fn().mockResolvedValue([[null, entry1], [null, entry2]]),
       };
-      (client.pipeline as ReturnType<typeof vi.fn>).mockReturnValue(mockPipeline);
-
-      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+      // Second pipeline() call: batched DEL for matching keys
+      const delPipeline = {
+        del: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([[null, 1]]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(getPipeline)
+        .mockReturnValueOnce(delPipeline);
 
       const deleted = await cache.invalidateByModel('gpt-4o');
 
       expect(deleted).toBe(1);
-      // Should only delete the matching key (gpt-4o)
-      expect(client.del).toHaveBeenCalledWith('test_ac:llm:abc');
-      expect(client.del).not.toHaveBeenCalledWith('test_ac:llm:def');
+      // GET pipeline fetches both keys
+      expect(getPipeline.get).toHaveBeenCalledWith('test_ac:llm:abc');
+      expect(getPipeline.get).toHaveBeenCalledWith('test_ac:llm:def');
+      // DEL pipeline only deletes the gpt-4o entry
+      expect(delPipeline.del).toHaveBeenCalledWith('test_ac:llm:abc');
+      expect(delPipeline.del).not.toHaveBeenCalledWith('test_ac:llm:def');
     });
 
     it('handles empty SCAN results', async () => {

@@ -16,6 +16,7 @@ function createMockClient(): Valkey {
     del: vi.fn(),
     scan: vi.fn(),
     pipeline: vi.fn(() => ({
+      del: vi.fn().mockReturnThis(),
       hincrby: vi.fn(function(this: unknown, key: string, field: string, val: number) {
         hincrbyCalls.push([key, field, val]);
         return this;
@@ -243,25 +244,36 @@ describe('ToolCache', () => {
     it('scans and deletes correct pattern', async () => {
       (client.scan as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce(['0', ['test_ac:tool:get_weather:abc', 'test_ac:tool:get_weather:def']]);
-      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(2);
+
+      const mockDelPipeline = {
+        del: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([[null, 1], [null, 1]]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockDelPipeline);
 
       const deleted = await cache.invalidateByTool('get_weather');
 
       expect(deleted).toBe(2);
       expect(client.scan).toHaveBeenCalledWith('0', 'MATCH', 'test_ac:tool:get_weather:*', 'COUNT', 100);
-      expect(client.del).toHaveBeenCalledWith('test_ac:tool:get_weather:abc', 'test_ac:tool:get_weather:def');
+      expect(mockDelPipeline.del).toHaveBeenCalledWith('test_ac:tool:get_weather:abc');
+      expect(mockDelPipeline.del).toHaveBeenCalledWith('test_ac:tool:get_weather:def');
     });
 
     it('escapes glob metacharacters in toolName during invalidation scan', async () => {
       (client.scan as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce(['0', ['test_ac:tool:tool[1]:abc']]);
-      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      const mockDelPipeline = {
+        del: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([[null, 1]]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockDelPipeline);
 
       const deleted = await cache.invalidateByTool('tool[1]');
 
       expect(deleted).toBe(1);
       expect(client.scan).toHaveBeenCalledWith('0', 'MATCH', 'test_ac:tool:tool\\[1\\]:*', 'COUNT', 100);
-      expect(client.del).toHaveBeenCalledWith('test_ac:tool:tool[1]:abc');
+      expect(mockDelPipeline.del).toHaveBeenCalledWith('test_ac:tool:tool[1]:abc');
     });
   });
 
