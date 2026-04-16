@@ -402,7 +402,7 @@ export class SessionStore {
           }
         });
 
-        span.setAttribute('cache.touched_count', touchedCount);
+        span.setAttribute('cache.touched_count_approx', touchedCount);
         span.end();
       } catch (err) {
         span.recordException(err as Error);

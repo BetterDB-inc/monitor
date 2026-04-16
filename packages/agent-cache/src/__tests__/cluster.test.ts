@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Cluster } from 'iovalkey';
 import { clusterScan } from '../cluster';
+import { ValkeyCommandError } from '../errors';
 import type Valkey from 'iovalkey';
 
 // Build a mock node client that returns the given pages sequentially.
@@ -110,5 +111,37 @@ describe('clusterScan', () => {
     });
 
     expect(collected).toEqual(['page1-key1', 'page1-key2', 'page2-key1']);
+  });
+
+  it('SCAN rejection is wrapped in ValkeyCommandError', async () => {
+    const client = {
+      scan: vi.fn().mockRejectedValue(new Error('connection lost')),
+    } as unknown as Valkey;
+
+    await expect(clusterScan(client, '*', async () => {}))
+      .rejects.toBeInstanceOf(ValkeyCommandError);
+  });
+
+  it('onKeys throwing propagates and stops iteration on remaining nodes', async () => {
+    const client = makeClusterClient([[['key1']], [['key2']], [['key3']]]);
+    const visited: string[] = [];
+
+    await expect(
+      clusterScan(client, '*', async (keys) => {
+        visited.push(...keys);
+        if (keys.includes('key1')) throw new Error('callback error');
+      }),
+    ).rejects.toThrow('callback error');
+
+    // Only node 1 was visited — nodes 2 and 3 were never reached
+    expect(visited).toEqual(['key1']);
+  });
+
+  it('throws ValkeyCommandError when cluster has no master nodes', async () => {
+    const client = { nodes: vi.fn().mockReturnValue([]) };
+    Object.setPrototypeOf(client, Cluster.prototype);
+
+    await expect(clusterScan(client as unknown as Valkey, '*', async () => {}))
+      .rejects.toBeInstanceOf(ValkeyCommandError);
   });
 });
