@@ -2,6 +2,7 @@ import type { Valkey, LlmCacheParams, LlmStoreOptions, LlmCacheResult, ModelCost
 import type { Telemetry } from '../telemetry';
 import { ValkeyCommandError } from '../errors';
 import { llmCacheHash, escapeGlobPattern } from '../utils';
+import { clusterScan } from '../cluster';
 
 export interface LlmCacheConfig {
   client: Valkey;
@@ -227,27 +228,12 @@ export class LlmCache {
 
         // Escape cache name in case it contains glob metacharacters
         const pattern = `${escapeGlobPattern(this.name)}:llm:*`;
-        let cursor = '0';
         let deletedCount = 0;
 
-        do {
-          let scanResult: [string, string[]];
-          try {
-            scanResult = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-          } catch (err) {
-            throw new ValkeyCommandError('SCAN', err);
-          }
-
-          cursor = scanResult[0];
-          const keys = scanResult[1];
-
-          if (keys.length === 0) continue;
-
-          // Batch GET all keys in this SCAN page using pipeline
-          const getPipeline = this.client.pipeline();
-          for (const key of keys) {
-            getPipeline.get(key);
-          }
+        await clusterScan(this.client, pattern, async (keys, nodeClient) => {
+          // Pipeline GET — individual commands avoid CROSSSLOT in cluster mode
+          const getPipeline = nodeClient.pipeline();
+          for (const key of keys) getPipeline.get(key);
 
           let getResults: Array<[Error | null, string | null]>;
           try {
@@ -256,32 +242,35 @@ export class LlmCache {
             throw new ValkeyCommandError('GET (pipeline)', err);
           }
 
-          // Collect keys that match the model
+          // Collect keys whose stored model matches
           const keysToDelete: string[] = [];
           for (let i = 0; i < keys.length; i++) {
             const [err, raw] = getResults[i];
             if (err || !raw) continue;
-
             try {
               const entry: StoredLlmEntry = JSON.parse(raw);
-              if (entry.model === model) {
-                keysToDelete.push(keys[i]);
-              }
+              if (entry.model === model) keysToDelete.push(keys[i]);
             } catch {
               // Skip corrupt entries
             }
           }
 
-          // Batch DEL matching keys
+          // Pipeline DEL — individual commands avoid CROSSSLOT in cluster mode
           if (keysToDelete.length > 0) {
+            const delPipeline = nodeClient.pipeline();
+            for (const key of keysToDelete) delPipeline.del(key);
+            let delResults: Array<[Error | null, number]>;
             try {
-              const deleted = await this.client.del(...keysToDelete);
-              deletedCount += deleted;
+              delResults = await delPipeline.exec() as Array<[Error | null, number]>;
             } catch (err) {
               throw new ValkeyCommandError('DEL', err);
             }
+            for (const [err, count] of delResults) {
+              if (err) throw new ValkeyCommandError('DEL', err);
+              deletedCount += count ?? 0;
+            }
           }
-        } while (cursor !== '0');
+        });
 
         span.setAttribute('cache.deleted_count', deletedCount);
         span.end();
