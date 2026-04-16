@@ -5,25 +5,39 @@
  *   1. LLM response caching — identical prompts return instantly from Valkey
  *   2. Tool result caching  — repeated tool calls skip the API
  *
- * Usage:
- *   # Start a local Valkey (or Redis) on port 6379
+ * Usage (standalone):
  *   docker run -d --name valkey -p 6379:6379 valkey/valkey:8
- *
- *   # Set your OpenAI key
  *   export OPENAI_API_KEY=sk-...
+ *   npx tsx index.ts
  *
- *   # Run the example
+ * Usage (cluster):
+ *   export VALKEY_CLUSTER=1   # uses localhost:6401,6402,6403 by default
+ *   export OPENAI_API_KEY=sk-...
  *   npx tsx index.ts
  */
-import Valkey from 'iovalkey';
+import Valkey, { Cluster } from 'iovalkey';
 import { generateText, tool, jsonSchema, stepCountIs } from 'ai';
 import { wrapLanguageModel } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { AgentCache } from '@betterdb/agent-cache';
 import { createAgentCacheMiddleware } from '@betterdb/agent-cache/ai';
 
-// ── 1. Connect to Valkey ────────────────────────────────────────────
-const valkey = new Valkey({ host: 'localhost', port: 6379 });
+// ── 1. Connect to Valkey (standalone or cluster) ─────────────────────
+const CLUSTER_NODES = (process.env.VALKEY_CLUSTER_NODES ?? 'localhost:6401,localhost:6402,localhost:6403')
+  .split(',').map(hp => {
+    const [host, portStr] = hp.trim().split(':');
+    const port = parseInt(portStr, 10);
+    if (!host || isNaN(port)) throw new Error(`Invalid cluster node: "${hp}"`);
+    return { host, port };
+  });
+
+const valkey = process.env.VALKEY_CLUSTER
+  ? new Cluster(CLUSTER_NODES) as unknown as Valkey
+  : new Valkey({ host: 'localhost', port: 6379 });
+
+console.log(process.env.VALKEY_CLUSTER
+  ? `Cluster mode — nodes: ${CLUSTER_NODES.map(n => `${n.host}:${n.port}`).join(', ')}`
+  : 'Standalone mode — localhost:6379');
 
 // ── 2. Create a cache with cost tracking ────────────────────────────
 const cache = new AgentCache({

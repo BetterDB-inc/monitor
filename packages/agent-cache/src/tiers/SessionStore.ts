@@ -229,30 +229,32 @@ export class SessionStore {
         const prefix = `${this.name}:session:${threadId}:`;
 
         await clusterScan(this.client, pattern, async (keys, nodeClient) => {
-          let values: Array<string | null>;
+          // Pipeline GET — individual commands avoid CROSSSLOT in cluster mode
+          const getPipeline = nodeClient.pipeline();
+          for (const key of keys) getPipeline.get(key);
+
+          let getResults: Array<[Error | null, string | null]>;
           try {
-            values = await nodeClient.mget(...keys);
+            getResults = await getPipeline.exec() as Array<[Error | null, string | null]>;
           } catch (err) {
-            throw new ValkeyCommandError('MGET', err);
+            throw new ValkeyCommandError('GET', err);
           }
 
           const keysToRefresh: string[] = [];
           for (let i = 0; i < keys.length; i++) {
-            const value = values[i];
+            const [, value] = getResults[i];
             if (value !== null) {
               result[keys[i].slice(prefix.length)] = value;
               keysToRefresh.push(keys[i]);
             }
           }
 
-          // Refresh TTL on found keys in this batch (sliding window)
+          // Refresh TTL per batch on this node (sliding window)
           if (ttl !== undefined && keysToRefresh.length > 0) {
-            const pipeline = nodeClient.pipeline();
-            for (const key of keysToRefresh) {
-              pipeline.expire(key, ttl);
-            }
+            const expPipeline = nodeClient.pipeline();
+            for (const key of keysToRefresh) expPipeline.expire(key, ttl);
             try {
-              await pipeline.exec();
+              await expPipeline.exec();
             } catch {
               // TTL refresh failure should not break the read
             }
@@ -282,18 +284,20 @@ export class SessionStore {
     const keyPrefix = `${this.name}:session:${threadId}:`;
 
     await clusterScan(this.client, pattern, async (keys, nodeClient) => {
-      let values: Array<string | null>;
+      // Pipeline GET — individual commands avoid CROSSSLOT in cluster mode
+      const pipeline = nodeClient.pipeline();
+      for (const key of keys) pipeline.get(key);
+
+      let getResults: Array<[Error | null, string | null]>;
       try {
-        values = await nodeClient.mget(...keys);
+        getResults = await pipeline.exec() as Array<[Error | null, string | null]>;
       } catch (err) {
-        throw new ValkeyCommandError('MGET', err);
+        throw new ValkeyCommandError('GET', err);
       }
 
       for (let i = 0; i < keys.length; i++) {
-        const value = values[i];
-        if (value !== null) {
-          result[keys[i].slice(keyPrefix.length)] = value;
-        }
+        const [, value] = getResults[i];
+        if (value !== null) result[keys[i].slice(keyPrefix.length)] = value;
       }
     });
 
@@ -321,11 +325,18 @@ export class SessionStore {
         let deletedCount = 0;
 
         await clusterScan(this.client, pattern, async (keys, nodeClient) => {
+          // Pipeline DEL — individual commands avoid CROSSSLOT in cluster mode
+          const pipeline = nodeClient.pipeline();
+          for (const key of keys) pipeline.del(key);
+          let delResults: Array<[Error | null, number]>;
           try {
-            const deleted = await nodeClient.del(...keys);
-            deletedCount += deleted;
+            delResults = await pipeline.exec() as Array<[Error | null, number]>;
           } catch (err) {
             throw new ValkeyCommandError('DEL', err);
+          }
+          for (const [err, count] of delResults) {
+            if (err) throw new ValkeyCommandError('DEL', err);
+            deletedCount += count ?? 0;
           }
         });
 
@@ -379,11 +390,12 @@ export class SessionStore {
 
         await clusterScan(this.client, pattern, async (keys, nodeClient) => {
           const pipeline = nodeClient.pipeline();
-          for (const key of keys) {
-            pipeline.expire(key, ttl);
-          }
+          for (const key of keys) pipeline.expire(key, ttl);
           try {
             await pipeline.exec();
+            // Approximate: counts keys sent, not keys that successfully refreshed.
+            // Individual EXPIRE failures within the pipeline are swallowed intentionally
+            // — a missed TTL refresh is less harmful than failing the whole touch().
             touchedCount += keys.length;
           } catch (err) {
             throw new ValkeyCommandError('EXPIRE', err);

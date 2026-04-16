@@ -1,13 +1,12 @@
 import type Valkey from 'iovalkey';
+import { Cluster } from 'iovalkey';
 import { ValkeyCommandError } from './errors';
 
-function isCluster(client: Valkey): boolean {
-  return typeof (client as any).nodes === 'function';
-}
-
 function getMasterNodes(client: Valkey): Valkey[] {
-  if (!isCluster(client)) return [client];
-  return (client as any).nodes('master') as Valkey[];
+  if (!(client instanceof Cluster)) return [client];
+  // Cast needed: TypeScript can't narrow Valkey & Cluster because both classes
+  // share a private `reconnectTimeout` field, collapsing the intersection to never.
+  return (client as unknown as Cluster).nodes('master') as Valkey[];
 }
 
 /**

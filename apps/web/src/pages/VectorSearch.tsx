@@ -774,6 +774,7 @@ function humanizeFieldName(name: string): string {
 }
 
 function formatRelativeTime(timestamp: number): string {
+  if (!Number.isFinite(timestamp)) return 'unknown';
   const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
   const delta = timestamp - Date.now();
   const abs = Math.abs(delta);
@@ -941,6 +942,7 @@ function FieldGrid({ fields, fieldMeta, docKey }: { fields: Record<string, strin
         const byRelative = new Map<string, { names: string[]; iso: string }>();
         for (const { key: k, value: v } of groups.temporal) {
           const ts = parseTimestampValue(v);
+          if (!Number.isFinite(ts)) continue;
           const rel = formatRelativeTime(ts);
           const existing = byRelative.get(rel);
           if (existing) {
@@ -1405,7 +1407,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
                         <td className="px-3 py-1.5 text-right">
                           <button
                             onClick={e => { e.stopPropagation(); handleFindSimilar(result.key); }}
-                            className="text-[11px] text-primary hover:text-primary/80 font-medium"
+                            className="text-[11px] text-primary hover:text-primary/80 font-medium px-2 py-1 cursor-pointer"
                             title={`Find keys similar to ${result.key}`}
                           >
                             Find similar
@@ -1519,7 +1521,7 @@ function SearchTester({ info }: { info: VectorIndexInfo }) {
                             <td className="px-3 py-1.5 text-right">
                               <button
                                 onClick={e => { e.stopPropagation(); handleFindSimilar(row.key); }}
-                                className="text-[11px] text-primary hover:text-primary/80 font-medium"
+                                className="text-[11px] text-primary hover:text-primary/80 font-medium px-2 py-1 cursor-pointer"
                                 title={`Find keys similar to ${row.key}`}
                               >
                                 Find similar
@@ -2126,7 +2128,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     const bgColor = cs?.getPropertyValue('--background').trim() || '#ffffff';
     const fgColor = cs?.getPropertyValue('--foreground').trim() || '#1e293b';
     const mutedFg = cs?.getPropertyValue('--muted-foreground').trim() || '#94a3b8';
-    ctx.fillStyle = `hsl(${bgColor})`;
+    ctx.fillStyle = bgColor;
     ctx.fillRect(0, 0, w, h);
 
     ctx.save();
@@ -2177,7 +2179,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
       ctx.restore();
 
       if (isS) {
-        ctx.strokeStyle = `hsl(${fgColor})`;
+        ctx.strokeStyle = fgColor;
         ctx.lineWidth = 1.5;
         ctx.globalAlpha = 0.7;
         ctx.beginPath();
@@ -2212,11 +2214,11 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
       ctx.font = `${fs}px ui-monospace, monospace`;
       const tw = ctx.measureText(lbl).width;
       const p = 3;
-      ctx.fillStyle = `hsl(${bgColor})`;
+      ctx.fillStyle = bgColor;
       ctx.globalAlpha = 0.8;
       ctx.fillRect(n.x - tw / 2 - p, n.y - r * 1.6 - fs - p, tw + p * 2, fs + p * 2);
       ctx.globalAlpha = isH || isS ? 1 : 0.7;
-      ctx.fillStyle = `hsl(${fgColor})`;
+      ctx.fillStyle = fgColor;
       ctx.fillText(lbl, n.x, n.y - r * 1.6);
       ctx.globalAlpha = 1;
     }
@@ -2224,7 +2226,7 @@ function VectorGraphTab({ info }: { info: VectorIndexInfo }) {
     ctx.restore();
 
     // HUD
-    ctx.fillStyle = `hsl(${mutedFg})`;
+    ctx.fillStyle = mutedFg;
     ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { Cluster } from 'iovalkey';
 import { clusterScan } from '../cluster';
 import type Valkey from 'iovalkey';
 
@@ -22,11 +23,12 @@ function makeStandaloneClient(keys: string[]): Valkey {
 }
 
 // Cluster client exposes `.nodes('master')` returning per-node mock clients.
+// Object.setPrototypeOf makes instanceof Cluster return true without a real connection.
 function makeClusterClient(nodesPages: string[][][]): Valkey {
   const nodes = nodesPages.map((pages) => makeNodeClient(pages));
-  return {
-    nodes: vi.fn().mockReturnValue(nodes),
-  } as unknown as Valkey;
+  const client = { nodes: vi.fn().mockReturnValue(nodes) };
+  Object.setPrototypeOf(client, Cluster.prototype);
+  return client as unknown as Valkey;
 }
 
 describe('clusterScan', () => {

@@ -231,11 +231,9 @@ export class LlmCache {
         let deletedCount = 0;
 
         await clusterScan(this.client, pattern, async (keys, nodeClient) => {
-          // Batch GET all keys in this SCAN page using pipeline
+          // Pipeline GET — individual commands avoid CROSSSLOT in cluster mode
           const getPipeline = nodeClient.pipeline();
-          for (const key of keys) {
-            getPipeline.get(key);
-          }
+          for (const key of keys) getPipeline.get(key);
 
           let getResults: Array<[Error | null, string | null]>;
           try {
@@ -244,29 +242,32 @@ export class LlmCache {
             throw new ValkeyCommandError('GET (pipeline)', err);
           }
 
-          // Collect keys that match the model
+          // Collect keys whose stored model matches
           const keysToDelete: string[] = [];
           for (let i = 0; i < keys.length; i++) {
             const [err, raw] = getResults[i];
             if (err || !raw) continue;
-
             try {
               const entry: StoredLlmEntry = JSON.parse(raw);
-              if (entry.model === model) {
-                keysToDelete.push(keys[i]);
-              }
+              if (entry.model === model) keysToDelete.push(keys[i]);
             } catch {
               // Skip corrupt entries
             }
           }
 
-          // Batch DEL matching keys
+          // Pipeline DEL — individual commands avoid CROSSSLOT in cluster mode
           if (keysToDelete.length > 0) {
+            const delPipeline = nodeClient.pipeline();
+            for (const key of keysToDelete) delPipeline.del(key);
+            let delResults: Array<[Error | null, number]>;
             try {
-              const deleted = await nodeClient.del(...keysToDelete);
-              deletedCount += deleted;
+              delResults = await delPipeline.exec() as Array<[Error | null, number]>;
             } catch (err) {
               throw new ValkeyCommandError('DEL', err);
+            }
+            for (const [err, count] of delResults) {
+              if (err) throw new ValkeyCommandError('DEL', err);
+              deletedCount += count ?? 0;
             }
           }
         });

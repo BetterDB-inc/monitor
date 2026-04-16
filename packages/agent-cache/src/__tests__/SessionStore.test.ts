@@ -13,6 +13,8 @@ function createMockClient(): Valkey {
     scan: vi.fn(),
     mget: vi.fn(),
     pipeline: vi.fn(() => ({
+      get: vi.fn().mockReturnThis(),
+      del: vi.fn().mockReturnThis(),
       expire: vi.fn().mockReturnThis(),
       exec: vi.fn().mockResolvedValue([]),
     })),
@@ -147,11 +149,20 @@ describe('SessionStore', () => {
           'test_ac:session:thread-1:last_intent',
           'test_ac:session:thread-1:user_name',
         ]]);
-      (client.mget as ReturnType<typeof vi.fn>).mockResolvedValue(['book_flight', 'John']);
+
+      // First pipeline(): individual GETs to avoid CROSSSLOT
+      const mockGetPipeline = {
+        get: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([[null, 'book_flight'], [null, 'John']]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockGetPipeline);
+      // Second pipeline(): TTL refresh (expire) — default mock handles it
 
       const result = await store.getAll('thread-1');
 
       expect(client.scan).toHaveBeenCalledWith('0', 'MATCH', 'test_ac:session:thread-1:*', 'COUNT', 100);
+      expect(mockGetPipeline.get).toHaveBeenCalledWith('test_ac:session:thread-1:last_intent');
+      expect(mockGetPipeline.get).toHaveBeenCalledWith('test_ac:session:thread-1:user_name');
       expect(result).toEqual({
         last_intent: 'book_flight',
         user_name: 'John',
@@ -186,22 +197,30 @@ describe('SessionStore', () => {
           'test_ac:session:thread-1:user_name',
           'test_ac:session:thread-1:checkpoint:abc',
         ]]);
-      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(3);
+
+      const mockDelPipeline = {
+        del: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([[null, 1], [null, 1], [null, 1]]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockDelPipeline);
 
       const deleted = await store.destroyThread('thread-1');
 
       expect(deleted).toBe(3);
-      expect(client.del).toHaveBeenCalledWith(
-        'test_ac:session:thread-1:last_intent',
-        'test_ac:session:thread-1:user_name',
-        'test_ac:session:thread-1:checkpoint:abc',
-      );
+      expect(mockDelPipeline.del).toHaveBeenCalledWith('test_ac:session:thread-1:last_intent');
+      expect(mockDelPipeline.del).toHaveBeenCalledWith('test_ac:session:thread-1:user_name');
+      expect(mockDelPipeline.del).toHaveBeenCalledWith('test_ac:session:thread-1:checkpoint:abc');
     });
 
     it('escapes glob metacharacters in threadId during invalidation scan', async () => {
       (client.scan as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce(['0', ['test_ac:session:thread-[1]:last_intent']]);
-      (client.del as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+
+      const mockDelPipeline = {
+        del: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([[null, 1]]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockDelPipeline);
 
       const deleted = await store.destroyThread('thread-[1]');
 
@@ -213,7 +232,7 @@ describe('SessionStore', () => {
         'COUNT',
         100,
       );
-      expect(client.del).toHaveBeenCalledWith('test_ac:session:thread-[1]:last_intent');
+      expect(mockDelPipeline.del).toHaveBeenCalledWith('test_ac:session:thread-[1]:last_intent');
     });
   });
 
@@ -224,7 +243,12 @@ describe('SessionStore', () => {
           'test_ac:session:thread-1:writes:cp-1|task-1|output|0',
           'test_ac:session:thread-1:writes:cp-1|task-1|state|1',
         ]]);
-      (client.mget as ReturnType<typeof vi.fn>).mockResolvedValue(['"result"', '{"step":2}']);
+
+      const mockGetPipeline = {
+        get: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([[null, '"result"'], [null, '{"step":2}']]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockGetPipeline);
 
       const result = await store.scanFieldsByPrefix('thread-1', 'writes:cp-1|');
 
@@ -243,7 +267,7 @@ describe('SessionStore', () => {
       const result = await store.scanFieldsByPrefix('thread-1', 'writes:cp-nonexistent|');
 
       expect(result).toEqual({});
-      expect(client.mget).not.toHaveBeenCalled();
+      expect(client.pipeline).not.toHaveBeenCalled();
     });
 
     it('does NOT refresh TTL on matched keys (unlike getAll)', async () => {
@@ -251,11 +275,18 @@ describe('SessionStore', () => {
         .mockResolvedValueOnce(['0', [
           'test_ac:session:thread-1:writes:cp-1|task-1|output|0',
         ]]);
-      (client.mget as ReturnType<typeof vi.fn>).mockResolvedValue(['"result"']);
+
+      const mockGetPipeline = {
+        get: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([[null, '"result"']]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockGetPipeline);
 
       await store.scanFieldsByPrefix('thread-1', 'writes:cp-1|');
 
-      expect(client.expire).not.toHaveBeenCalled();
+      // Only one pipeline call (GET) — no expire pipeline
+      expect(client.pipeline).toHaveBeenCalledTimes(1);
+      expect(mockGetPipeline.get).toHaveBeenCalled();
     });
 
     it('handles multi-page SCAN cursor', async () => {
@@ -266,9 +297,18 @@ describe('SessionStore', () => {
         .mockResolvedValueOnce(['0', [
           'test_ac:session:thread-1:writes:cp-1|task-1|b|0',
         ]]);
-      (client.mget as ReturnType<typeof vi.fn>)
-        .mockResolvedValueOnce(['"val-a"'])
-        .mockResolvedValueOnce(['"val-b"']);
+
+      const mockGetPipeline1 = {
+        get: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([[null, '"val-a"']]),
+      };
+      const mockGetPipeline2 = {
+        get: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockResolvedValue([[null, '"val-b"']]),
+      };
+      (client.pipeline as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(mockGetPipeline1)
+        .mockReturnValueOnce(mockGetPipeline2);
 
       const result = await store.scanFieldsByPrefix('thread-1', 'writes:cp-1|');
 

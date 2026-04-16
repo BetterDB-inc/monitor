@@ -262,11 +262,18 @@ export class ToolCache {
         let deletedCount = 0;
 
         await clusterScan(this.client, pattern, async (keys, nodeClient) => {
+          // Pipeline DEL — individual commands avoid CROSSSLOT in cluster mode
+          const pipeline = nodeClient.pipeline();
+          for (const key of keys) pipeline.del(key);
+          let delResults: Array<[Error | null, number]>;
           try {
-            const deleted = await nodeClient.del(...keys);
-            deletedCount += deleted;
+            delResults = await pipeline.exec() as Array<[Error | null, number]>;
           } catch (err) {
             throw new ValkeyCommandError('DEL', err);
+          }
+          for (const [err, count] of delResults) {
+            if (err) throw new ValkeyCommandError('DEL', err);
+            deletedCount += count ?? 0;
           }
         });
 
