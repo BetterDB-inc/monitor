@@ -7,17 +7,17 @@
  *   2. LLM response caching  — identical LLM calls return from Valkey
  *   3. Tool result caching   — repeated tool calls skip the API
  *
- * Usage:
- *   # Start a local Valkey (or Redis) on port 6379
+ * Usage (standalone):
  *   docker run -d --name valkey -p 6379:6379 valkey/valkey:8
- *
- *   # Set your OpenAI key
  *   export OPENAI_API_KEY=sk-...
+ *   npx tsx index.ts
  *
- *   # Run the example
+ * Usage (cluster):
+ *   export VALKEY_CLUSTER=1   # uses localhost:6401,6402,6403 by default
+ *   export OPENAI_API_KEY=sk-...
  *   npx tsx index.ts
  */
-import Valkey from 'iovalkey';
+import Valkey, { Cluster } from 'iovalkey';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, AIMessage, ToolMessage } from '@langchain/core/messages';
 import { StateGraph, Annotation, END } from '@langchain/langgraph';
@@ -26,8 +26,17 @@ import { AgentCache } from '@betterdb/agent-cache';
 import { BetterDBSaver } from '@betterdb/agent-cache/langgraph';
 import { BetterDBLlmCache } from '@betterdb/agent-cache/langchain';
 
-// ── 1. Connect to Valkey ────────────────────────────────────────────
-const valkey = new Valkey({ host: 'localhost', port: 6379 });
+// ── 1. Connect to Valkey (standalone or cluster) ─────────────────────
+const CLUSTER_NODES = (process.env.VALKEY_CLUSTER_NODES ?? 'localhost:6401,localhost:6402,localhost:6403')
+  .split(',').map(hp => { const [host, port] = hp.split(':'); return { host, port: +port }; });
+
+const valkey = process.env.VALKEY_CLUSTER
+  ? new Cluster(CLUSTER_NODES) as unknown as Valkey
+  : new Valkey({ host: 'localhost', port: 6379 });
+
+console.log(process.env.VALKEY_CLUSTER
+  ? `Cluster mode — nodes: ${CLUSTER_NODES.map(n => `${n.host}:${n.port}`).join(', ')}`
+  : 'Standalone mode — localhost:6379');
 
 // ── 2. Create the cache ─────────────────────────────────────────────
 const cache = new AgentCache({
