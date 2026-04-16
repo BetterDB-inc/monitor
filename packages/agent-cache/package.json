@@ -1,8 +1,18 @@
 {
   "name": "@betterdb/agent-cache",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Multi-tier exact-match cache for AI agent workloads backed by Valkey. LLM responses, tool results, and session state with built-in OpenTelemetry and Prometheus instrumentation.",
-  "keywords": ["valkey", "redis", "agent", "cache", "llm", "opentelemetry", "prometheus", "langchain", "langgraph"],
+  "keywords": [
+    "valkey",
+    "redis",
+    "agent",
+    "cache",
+    "llm",
+    "opentelemetry",
+    "prometheus",
+    "langchain",
+    "langgraph"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -33,7 +43,10 @@
       "types": "./dist/adapters/langgraph.d.ts"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc && node scripts/inject-telemetry-defaults.mjs",
     "typecheck": "tsc --noEmit",
@@ -65,9 +78,17 @@
     "posthog-node": ">=4.0.0"
   },
   "peerDependenciesMeta": {
-    "@langchain/core": { "optional": true },
-    "@langchain/langgraph-checkpoint": { "optional": true },
-    "ai": { "optional": true },
-    "posthog-node": { "optional": true }
+    "@langchain/core": {
+      "optional": true
+    },
+    "@langchain/langgraph-checkpoint": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    },
+    "posthog-node": {
+      "optional": true
+    }
   }
 }
