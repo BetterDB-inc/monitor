@@ -13,6 +13,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
   private readonly POLL_INTERVAL_MS = 30_000;
   private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
   private lastPruneByConnection = new Map<string, number>();
+  private lastIndexingFailures = new Map<string, number>();
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -32,6 +33,11 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
 
   protected onConnectionRemoved(connectionId: string): void {
     this.lastPruneByConnection.delete(connectionId);
+    for (const key of this.lastIndexingFailures.keys()) {
+      if (key.startsWith(`${connectionId}|`)) {
+        this.lastIndexingFailures.delete(key);
+      }
+    }
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
@@ -49,14 +55,28 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
         .map(r => r.value);
       if (details.length === 0) return;
 
-      const snapshots: VectorIndexSnapshot[] = details.map(info => ({
-        id: randomUUID(),
-        timestamp: Date.now(),
-        connectionId: ctx.connectionId,
-        indexName: info.name,
-        numDocs: info.numDocs,
-        memorySizeMb: info.memorySizeMb,
-      }));
+      const snapshots: VectorIndexSnapshot[] = details.map(info => {
+        const key = `${ctx.connectionId}|${info.name}`;
+        const prev = this.lastIndexingFailures.get(key);
+        const delta = prev === undefined ? 0 : Math.max(0, info.indexingFailures - prev);
+        this.lastIndexingFailures.set(key, info.indexingFailures);
+
+        return {
+          id: randomUUID(),
+          timestamp: Date.now(),
+          connectionId: ctx.connectionId,
+          indexName: info.name,
+          numDocs: info.numDocs,
+          numRecords: info.numRecords,
+          numDeletedDocs: info.numDeletedDocs,
+          indexingFailures: info.indexingFailures,
+          indexingFailuresDelta: delta,
+          percentIndexed: info.percentIndexed,
+          indexingState: info.indexingState,
+          totalIndexingTime: info.totalIndexingTime,
+          memorySizeMb: info.memorySizeMb,
+        };
+      });
 
       await this.storage.saveVectorIndexSnapshots(snapshots, ctx.connectionId);
 
@@ -91,7 +111,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
     return sampled;
   }
 
-  private getCheckedClient(connectionId?: string) {
+  private getCheckedClient(connectionId?: string): ReturnType<ConnectionRegistry['get']> {
     const client = this.connectionRegistry.get(connectionId);
     if (!client.getCapabilities().hasVectorSearch) {
       throw new Error('Vector search is not available on this connection (Search module not loaded)');

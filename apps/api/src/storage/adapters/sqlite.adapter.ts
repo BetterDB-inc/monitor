@@ -1205,6 +1205,13 @@ export class SqliteAdapter implements StoragePort {
         connection_id TEXT NOT NULL,
         index_name TEXT NOT NULL,
         num_docs INTEGER NOT NULL,
+        num_records INTEGER NOT NULL DEFAULT 0,
+        num_deleted_docs INTEGER NOT NULL DEFAULT 0,
+        indexing_failures INTEGER NOT NULL DEFAULT 0,
+        indexing_failures_delta INTEGER NOT NULL DEFAULT 0,
+        percent_indexed REAL NOT NULL DEFAULT 0,
+        indexing_state TEXT NOT NULL DEFAULT 'indexed',
+        total_indexing_time INTEGER NOT NULL DEFAULT 0,
         memory_size_mb REAL NOT NULL
       );
 
@@ -1232,6 +1239,13 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('memory_snapshots', 'cpu_user', 'REAL', '0');
     addColumnIfMissing('memory_snapshots', 'io_threaded_reads', 'INTEGER', '0');
     addColumnIfMissing('memory_snapshots', 'io_threaded_writes', 'INTEGER', '0');
+    addColumnIfMissing('vector_index_snapshots', 'num_records', 'INTEGER', '0');
+    addColumnIfMissing('vector_index_snapshots', 'num_deleted_docs', 'INTEGER', '0');
+    addColumnIfMissing('vector_index_snapshots', 'indexing_failures', 'INTEGER', '0');
+    addColumnIfMissing('vector_index_snapshots', 'indexing_failures_delta', 'INTEGER', '0');
+    addColumnIfMissing('vector_index_snapshots', 'percent_indexed', 'REAL', '0');
+    addColumnIfMissing('vector_index_snapshots', 'indexing_state', 'TEXT', "'indexed'");
+    addColumnIfMissing('vector_index_snapshots', 'total_indexing_time', 'INTEGER', '0');
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
@@ -2893,8 +2907,14 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db || snapshots.length === 0) return 0;
 
     const stmt = this.db.prepare(`
-      INSERT OR IGNORE INTO vector_index_snapshots (id, timestamp, connection_id, index_name, num_docs, memory_size_mb)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO vector_index_snapshots (
+        id, timestamp, connection_id, index_name,
+        num_docs, num_records, num_deleted_docs,
+        indexing_failures, indexing_failures_delta,
+        percent_indexed, indexing_state, total_indexing_time,
+        memory_size_mb
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
@@ -2906,6 +2926,13 @@ export class SqliteAdapter implements StoragePort {
           connId,
           snapshot.indexName,
           snapshot.numDocs,
+          snapshot.numRecords,
+          snapshot.numDeletedDocs,
+          snapshot.indexingFailures,
+          snapshot.indexingFailuresDelta,
+          snapshot.percentIndexed,
+          snapshot.indexingState,
+          snapshot.totalIndexingTime,
           snapshot.memorySizeMb,
         );
         count += result.changes;
@@ -2945,7 +2972,11 @@ export class SqliteAdapter implements StoragePort {
     const limit = options.limit ?? 200;
 
     const query = `
-      SELECT id, timestamp, connection_id, index_name, num_docs, memory_size_mb
+      SELECT id, timestamp, connection_id, index_name,
+             num_docs, num_records, num_deleted_docs,
+             indexing_failures, indexing_failures_delta,
+             percent_indexed, indexing_state, total_indexing_time,
+             memory_size_mb
       FROM vector_index_snapshots
       ${whereClause}
       ORDER BY timestamp DESC
@@ -2960,6 +2991,13 @@ export class SqliteAdapter implements StoragePort {
       connectionId: row.connection_id,
       indexName: row.index_name,
       numDocs: row.num_docs,
+      numRecords: row.num_records ?? 0,
+      numDeletedDocs: row.num_deleted_docs ?? 0,
+      indexingFailures: row.indexing_failures ?? 0,
+      indexingFailuresDelta: row.indexing_failures_delta ?? 0,
+      percentIndexed: row.percent_indexed ?? 0,
+      indexingState: row.indexing_state ?? 'indexed',
+      totalIndexingTime: row.total_indexing_time ?? 0,
       memorySizeMb: row.memory_size_mb,
     }));
   }
