@@ -19,9 +19,9 @@ export class CommandstatsPollerService
 {
   protected readonly logger = new Logger(CommandstatsPollerService.name);
 
-  private readonly POLL_INTERVAL_MS = 15_000;
-  private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000;
-  private readonly RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+  private readonly POLL_INTERVAL_MS = 15_000; // 15 seconds
+  private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+  private readonly RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
   private lastPruneByConnection = new Map<string, number>();
   private baselines = new Map<string, ConnectionBaseline>();
 
