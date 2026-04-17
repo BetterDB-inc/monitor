@@ -1,6 +1,6 @@
 {
   "name": "web",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "homepage": "https://betterdb.com",
   "private": true,
   "type": "module",
