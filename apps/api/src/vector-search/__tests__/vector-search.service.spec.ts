@@ -190,4 +190,30 @@ describe('VectorSearchService.pollConnection — extended snapshot fields', () =
     expect(client.getVectorIndexList).not.toHaveBeenCalled();
     expect(storage.saveVectorIndexSnapshots).not.toHaveBeenCalled();
   });
+
+  it('clears stale Prometheus labels when the index list becomes empty', async () => {
+    const client = {
+      getCapabilities: () => ({ hasVectorSearch: true }),
+      getVectorIndexList: jest.fn().mockResolvedValue([]),
+      getVectorIndexInfo: jest.fn(),
+    };
+
+    await (service as any).pollConnection(makeCtx(client, 'conn-empty'));
+
+    expect(prometheus.updateVectorIndexMetrics).toHaveBeenCalledWith('conn-empty', []);
+    expect(storage.saveVectorIndexSnapshots).not.toHaveBeenCalled();
+  });
+
+  it('clears stale Prometheus labels when every getVectorIndexInfo call fails', async () => {
+    const client = {
+      getCapabilities: () => ({ hasVectorSearch: true }),
+      getVectorIndexList: jest.fn().mockResolvedValue(['idx_a', 'idx_b']),
+      getVectorIndexInfo: jest.fn().mockRejectedValue(new Error('index dropped')),
+    };
+
+    await (service as any).pollConnection(makeCtx(client, 'conn-flaky'));
+
+    expect(prometheus.updateVectorIndexMetrics).toHaveBeenCalledWith('conn-flaky', []);
+    expect(storage.saveVectorIndexSnapshots).not.toHaveBeenCalled();
+  });
 });

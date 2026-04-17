@@ -47,7 +47,10 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
 
     try {
       const indexes = await ctx.client.getVectorIndexList();
-      if (indexes.length === 0) return;
+      if (indexes.length === 0) {
+        this.prometheusService.updateVectorIndexMetrics(ctx.connectionId, []);
+        return;
+      }
 
       const settled = await Promise.allSettled(
         indexes.map(name => ctx.client.getVectorIndexInfo(name)),
@@ -55,7 +58,10 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       const details = settled
         .filter((r): r is PromiseFulfilledResult<VectorIndexInfo> => r.status === 'fulfilled')
         .map(r => r.value);
-      if (details.length === 0) return;
+      if (details.length === 0) {
+        this.prometheusService.updateVectorIndexMetrics(ctx.connectionId, []);
+        return;
+      }
 
       const snapshots: VectorIndexSnapshot[] = details.map(info => {
         const key = `${ctx.connectionId}|${info.name}`;
