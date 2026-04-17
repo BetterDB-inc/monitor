@@ -21,6 +21,7 @@ import { Settings } from '../../pages/Settings';
 import { Webhooks } from '../../pages/Webhooks';
 import { MigrationPage } from '../../pages/MigrationPage';
 import { VectorSearch } from '../../pages/VectorSearch';
+import { VectorAi } from '../../pages/VectorAi';
 import { MetricForecasting } from '../../pages/MetricForecasting';
 import { Members } from '../../pages/Members';
 import { CloudUser } from '../../api/workspace';
@@ -114,6 +115,14 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <VectorSearch />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/vector-ai"
+                element={
+                  <NoConnectionsGuard>
+                    <VectorAi />
                   </NoConnectionsGuard>
                 }
               />
