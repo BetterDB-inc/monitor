@@ -60,7 +60,7 @@
     "better-sqlite3": "^12.8.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
-    "fastify": "^5.8.4",
+    "fastify": "^5.8.5",
     "hnswlib-node": "^3.0.0",
     "iovalkey": "^0.3.3",
     "jsonwebtoken": "^9.0.3",
