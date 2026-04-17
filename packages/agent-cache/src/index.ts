@@ -33,3 +33,13 @@ export type {
   ReasoningBlock,
   BlockHints,
 } from './utils';
+export type { BinaryRef, BinaryNormalizer, NormalizerConfig } from './normalizer';
+export {
+  hashBase64,
+  hashBytes,
+  hashUrl,
+  fetchAndHash,
+  passthrough,
+  composeNormalizer,
+  defaultNormalizer,
+} from './normalizer';
