@@ -38,6 +38,8 @@ import {
   HotKeyEntry,
   HotKeyQueryOptions,
   StoredLatencyHistogram,
+  StoredCommandStatsSample,
+  CommandStatsHistoryQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1198,6 +1200,19 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
+
+      CREATE TABLE IF NOT EXISTS command_stats_samples (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        calls_delta INTEGER NOT NULL,
+        usec_delta INTEGER NOT NULL,
+        interval_ms INTEGER NOT NULL,
+        captured_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
+        ON command_stats_samples(connection_id, command, captured_at);
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -2895,6 +2910,90 @@ export class SqliteAdapter implements StoragePort {
 
     const result = this.db
       .prepare('DELETE FROM memory_snapshots WHERE timestamp < ?')
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  // Command Stats Sample Methods
+  async saveCommandStatsSamples(
+    samples: Omit<StoredCommandStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.db || samples.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO command_stats_samples
+        (id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    let count = 0;
+    const transaction = this.db.transaction((connId: string) => {
+      for (const s of samples) {
+        const result = stmt.run(
+          randomUUID(),
+          connId,
+          s.command,
+          s.callsDelta,
+          s.usecDelta,
+          s.intervalMs,
+          s.capturedAt,
+        );
+        count += result.changes;
+      }
+    });
+    transaction(connectionId);
+
+    return count;
+  }
+
+  async getCommandStatsHistory(
+    options: CommandStatsHistoryQueryOptions,
+  ): Promise<StoredCommandStatsSample[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at
+         FROM command_stats_samples
+         WHERE connection_id = ? AND command = ? AND captured_at >= ? AND captured_at <= ?
+         ORDER BY captured_at ASC
+         LIMIT ?`,
+      )
+      .all(
+        options.connectionId,
+        options.command,
+        options.startTime,
+        options.endTime,
+        options.limit ?? 10_000,
+      ) as any[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      command: row.command,
+      callsDelta: row.calls_delta,
+      usecDelta: row.usec_delta,
+      intervalMs: row.interval_ms,
+      capturedAt: row.captured_at,
+    }));
+  }
+
+  async pruneOldCommandStatsSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db
+        .prepare('DELETE FROM command_stats_samples WHERE captured_at < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
+
+    const result = this.db
+      .prepare('DELETE FROM command_stats_samples WHERE captured_at < ?')
       .run(cutoffTimestamp);
     return result.changes;
   }

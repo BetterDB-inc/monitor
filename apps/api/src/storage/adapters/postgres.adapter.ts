@@ -1,4 +1,5 @@
 import { Pool, PoolClient, PoolConfig } from 'pg';
+import { randomUUID } from 'crypto';
 import {
   StoragePort,
   StoredAclEntry,
@@ -34,6 +35,8 @@ import {
   HotKeyQueryOptions,
   StoredLatencyHistogram,
   DatabaseConnectionConfig,
+  StoredCommandStatsSample,
+  CommandStatsHistoryQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1395,6 +1398,19 @@ export class PostgresAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
+
+      CREATE TABLE IF NOT EXISTS command_stats_samples (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        calls_delta BIGINT NOT NULL,
+        usec_delta BIGINT NOT NULL,
+        interval_ms INTEGER NOT NULL,
+        captured_at BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
+        ON command_stats_samples(connection_id, command, captured_at);
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -3163,6 +3179,95 @@ export class PostgresAdapter implements StoragePort {
     const result = await this.pool.query('DELETE FROM memory_snapshots WHERE timestamp < $1', [
       cutoffTimestamp,
     ]);
+    return result.rowCount ?? 0;
+  }
+
+  // Command Stats Sample Methods
+  async saveCommandStatsSamples(
+    samples: Omit<StoredCommandStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.pool || samples.length === 0) return 0;
+
+    const values: any[] = [];
+    const placeholders: string[] = [];
+    let paramIndex = 1;
+
+    for (const s of samples) {
+      const row: string[] = [];
+      for (let i = 0; i < 7; i++) {
+        row.push(`$${paramIndex++}`);
+      }
+      placeholders.push(`(${row.join(', ')})`);
+      values.push(
+        randomUUID(),
+        connectionId,
+        s.command,
+        s.callsDelta,
+        s.usecDelta,
+        s.intervalMs,
+        s.capturedAt,
+      );
+    }
+
+    const query = `
+      INSERT INTO command_stats_samples
+        (id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at)
+      VALUES ${placeholders.join(', ')}
+    `;
+    const result = await this.pool.query(query, values);
+    return result.rowCount ?? 0;
+  }
+
+  async getCommandStatsHistory(
+    options: CommandStatsHistoryQueryOptions,
+  ): Promise<StoredCommandStatsSample[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `SELECT id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at
+       FROM command_stats_samples
+       WHERE connection_id = $1 AND command = $2 AND captured_at >= $3 AND captured_at <= $4
+       ORDER BY captured_at ASC
+       LIMIT $5`,
+      [
+        options.connectionId,
+        options.command,
+        options.startTime,
+        options.endTime,
+        options.limit ?? 10_000,
+      ],
+    );
+
+    return result.rows.map((row: any) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      command: row.command,
+      callsDelta: Number(row.calls_delta),
+      usecDelta: Number(row.usec_delta),
+      intervalMs: Number(row.interval_ms),
+      capturedAt: Number(row.captured_at),
+    }));
+  }
+
+  async pruneOldCommandStatsSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = await this.pool.query(
+        'DELETE FROM command_stats_samples WHERE captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
+      return result.rowCount ?? 0;
+    }
+
+    const result = await this.pool.query(
+      'DELETE FROM command_stats_samples WHERE captured_at < $1',
+      [cutoffTimestamp],
+    );
     return result.rowCount ?? 0;
   }
 
