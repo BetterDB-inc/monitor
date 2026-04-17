@@ -2,6 +2,7 @@ import type { Valkey, LlmCacheParams, LlmStoreOptions, LlmCacheResult, ModelCost
 import type { Telemetry } from '../telemetry';
 import { ValkeyCommandError } from '../errors';
 import { llmCacheHash, escapeGlobPattern } from '../utils';
+import type { ContentBlock, TextBlock } from '../utils';
 import { clusterScan } from '../cluster';
 
 export interface LlmCacheConfig {
@@ -16,6 +17,7 @@ export interface LlmCacheConfig {
 
 interface StoredLlmEntry {
   response: string;
+  contentBlocks?: ContentBlock[];
   model: string;
   storedAt: number;
   tokens?: { input: number; output: number };
@@ -121,6 +123,7 @@ export class LlmCache {
           return {
             hit: true,
             response: entry.response,
+            contentBlocks: entry.contentBlocks,
             key,
             tier: 'llm' as const,
           };
@@ -221,6 +224,62 @@ export class LlmCache {
     });
   }
 
+  async storeMultipart(
+    params: LlmCacheParams,
+    blocks: ContentBlock[],
+    options?: LlmStoreOptions,
+  ): Promise<string> {
+    const flattenedText = blocks
+      .filter((b): b is TextBlock => b.type === "text")
+      .map(b => b.text)
+      .join("");
+
+    return this.telemetry.tracer.startActiveSpan("agent_cache.llm.store_multipart", async (span) => {
+      const hash = llmCacheHash(params);
+      const key = this.buildKey(hash);
+
+      const entry: StoredLlmEntry = {
+        response: flattenedText,
+        contentBlocks: blocks,
+        model: params.model,
+        storedAt: Date.now(),
+        tokens: options?.tokens,
+      };
+
+      if (this.costTable && options?.tokens) {
+        const modelCost = this.costTable[params.model];
+        if (modelCost) {
+          const inputCost = (options.tokens.input / 1000) * modelCost.inputPer1k;
+          const outputCost = (options.tokens.output / 1000) * modelCost.outputPer1k;
+          entry.cost = inputCost + outputCost;
+        }
+      }
+
+      const valueJson = JSON.stringify(entry);
+      const ttl = options?.ttl ?? this.tierTtl ?? this.defaultTtl;
+
+      try {
+        if (ttl !== undefined) {
+          await this.client.set(key, valueJson, "EX", ttl);
+        } else {
+          await this.client.set(key, valueJson);
+        }
+      } catch (err) {
+        throw new ValkeyCommandError("SET", err);
+      }
+
+      span.setAttribute("cache.key", key);
+      span.setAttribute("cache.ttl", ttl ?? 0);
+      span.setAttribute("cache.blocks", blocks.length);
+
+      this.telemetry.metrics.storedBytes
+        .labels(this.name, "llm")
+        .inc(Buffer.byteLength(valueJson, "utf8"));
+
+      return key;
+    });
+  }
+
   async invalidateByModel(model: string): Promise<number> {
     return this.telemetry.tracer.startActiveSpan('agent_cache.llm.invalidateByModel', async (span) => {
       try {
@@ -231,7 +290,7 @@ export class LlmCache {
         let deletedCount = 0;
 
         await clusterScan(this.client, pattern, async (keys, nodeClient) => {
-          // Pipeline GET — individual commands avoid CROSSSLOT in cluster mode
+          // Pipeline GET -- individual commands avoid CROSSSLOT in cluster mode
           const getPipeline = nodeClient.pipeline();
           for (const key of keys) getPipeline.get(key);
 
@@ -255,7 +314,7 @@ export class LlmCache {
             }
           }
 
-          // Pipeline DEL — individual commands avoid CROSSSLOT in cluster mode
+          // Pipeline DEL -- individual commands avoid CROSSSLOT in cluster mode
           if (keysToDelete.length > 0) {
             const delPipeline = nodeClient.pipeline();
             for (const key of keysToDelete) delPipeline.del(key);

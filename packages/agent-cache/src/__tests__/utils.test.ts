@@ -123,6 +123,102 @@ describe('llmCacheHash', () => {
   });
 });
 
+describe("llmCacheHash multi-modal", () => {
+  it("same image ref produces same hash (deterministic)", () => {
+    const params = {
+      model: "gpt-4o",
+      messages: [{
+        role: "user",
+        content: [{
+          type: "binary" as const,
+          kind: "image" as const,
+          mediaType: "image/png",
+          ref: "sha256:abc123",
+        }],
+      }],
+    };
+    expect(llmCacheHash(params)).toBe(llmCacheHash(params));
+  });
+
+  it("different image refs produce different hashes", () => {
+    const base = {
+      model: "gpt-4o",
+      messages: [{
+        role: "user",
+        content: [{
+          type: "binary" as const,
+          kind: "image" as const,
+          mediaType: "image/png",
+          ref: "sha256:aaa",
+        }],
+      }],
+    };
+    const other = {
+      model: "gpt-4o",
+      messages: [{
+        role: "user",
+        content: [{
+          type: "binary" as const,
+          kind: "image" as const,
+          mediaType: "image/png",
+          ref: "sha256:bbb",
+        }],
+      }],
+    };
+    expect(llmCacheHash(base)).not.toBe(llmCacheHash(other));
+  });
+
+  it("reordering content blocks within a message changes hash", () => {
+    const msg1 = {
+      model: "gpt-4o",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text" as const, text: "A" },
+          { type: "text" as const, text: "B" },
+        ],
+      }],
+    };
+    const msg2 = {
+      model: "gpt-4o",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text" as const, text: "B" },
+          { type: "text" as const, text: "A" },
+        ],
+      }],
+    };
+    expect(llmCacheHash(msg1)).not.toBe(llmCacheHash(msg2));
+  });
+
+  it("adding toolChoice changes hash", () => {
+    const without = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    };
+    const withChoice = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+      toolChoice: "auto",
+    };
+    expect(llmCacheHash(without)).not.toBe(llmCacheHash(withChoice));
+  });
+
+  it("adding promptCacheKey changes hash", () => {
+    const without = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+    };
+    const withKey = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+      promptCacheKey: "my-key",
+    };
+    expect(llmCacheHash(without)).not.toBe(llmCacheHash(withKey));
+  });
+});
+
 describe('toolCacheHash', () => {
   it('produces same hash regardless of arg key order', () => {
     const hash1 = toolCacheHash({ city: 'Sofia', units: 'metric' });

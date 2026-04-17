@@ -2,6 +2,7 @@ export { AgentCache } from './AgentCache';
 export type {
   AgentCacheOptions,
   LlmCacheParams,
+  LlmCacheMessage,
   LlmStoreOptions,
   LlmCacheResult,
   ToolStoreOptions,
@@ -23,3 +24,12 @@ export {
   ValkeyCommandError,
 } from './errors';
 export type { Analytics } from './analytics';
+export type {
+  ContentBlock,
+  TextBlock,
+  BinaryBlock,
+  ToolCallBlock,
+  ToolResultBlock,
+  ReasoningBlock,
+  BlockHints,
+} from './utils';
