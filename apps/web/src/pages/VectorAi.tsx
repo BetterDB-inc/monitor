@@ -261,7 +261,18 @@ export function VectorAi() {
 
   if (!hasVectorSearch) {
     return (
-      <UnavailableOverlay featureName="Vector / AI" command="FT._LIST">
+      <UnavailableOverlay
+        featureName="Vector / AI"
+        command="FT._LIST"
+        description={
+          <>
+            The Valkey/Redis Search module is not available on this connection. Either the module
+            isn&rsquo;t loaded (plain Valkey / Redis without RediSearch) or{' '}
+            <code className="px-1 py-0.5 bg-muted rounded text-xs">FT._LIST</code> is restricted
+            by a managed service.
+          </>
+        }
+      >
         {content}
       </UnavailableOverlay>
     );
