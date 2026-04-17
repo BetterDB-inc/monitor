@@ -90,6 +90,30 @@ describe('parseVectorIndexInfo', () => {
     expect(info.numVectorFields).toBe(1);
   });
 
+  it('should parse num_deleted_docs and total_indexing_time when present', () => {
+    const info = parseVectorIndexInfo('idx', [
+      'num_docs', 100,
+      'num_deleted_docs', 7,
+      'total_indexing_time', 1234,
+      'hash_indexing_failures', 0,
+      'attributes', [],
+    ]);
+
+    expect(info.numDeletedDocs).toBe(7);
+    expect(info.totalIndexingTime).toBe(1234);
+  });
+
+  it('should default num_deleted_docs and total_indexing_time to 0 when absent', () => {
+    const info = parseVectorIndexInfo('idx', [
+      'num_docs', 100,
+      'hash_indexing_failures', 0,
+      'attributes', [],
+    ]);
+
+    expect(info.numDeletedDocs).toBe(0);
+    expect(info.totalIndexingTime).toBe(0);
+  });
+
   it('should parse vector field attributes from Valkey Search nested format', () => {
     const info = parseVectorIndexInfo('idx', valkeyResponse);
     const vecField = info.fields[0];

@@ -467,11 +467,13 @@ export interface VectorIndexInfo {
   name: string;
   numDocs: number;
   numRecords: number;
+  numDeletedDocs: number;
   numVectorFields: number;
   indexingState: string;
   percentIndexed: number;
   memorySizeMb: number;
   indexingFailures: number;
+  totalIndexingTime: number;
   fields: VectorIndexField[];
   gcStats: VectorIndexGcStats | null;
   indexDefinition: VectorIndexDefinition | null;
