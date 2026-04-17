@@ -41,6 +41,11 @@
       "import": "./dist/adapters/langgraph.js",
       "require": "./dist/adapters/langgraph.js",
       "types": "./dist/adapters/langgraph.d.ts"
+    },
+    "./openai": {
+      "import": "./dist/adapters/openai-chat.js",
+      "require": "./dist/adapters/openai-chat.js",
+      "types": "./dist/adapters/openai-chat.d.ts"
     }
   },
   "files": [
@@ -64,6 +69,7 @@
     "ai": "^6.0.135",
     "@types/node": "^22.19.15",
     "iovalkey": ">=0.3.0",
+    "openai": "^6.34.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.1"
   },
@@ -75,7 +81,8 @@
     "@langchain/core": ">=0.3.0",
     "@langchain/langgraph-checkpoint": ">=0.1.0",
     "ai": "^6.0.135",
-    "posthog-node": ">=4.0.0"
+    "posthog-node": ">=4.0.0",
+    "openai": ">=6.0.0"
   },
   "peerDependenciesMeta": {
     "@langchain/core": {
@@ -88,6 +95,9 @@
       "optional": true
     },
     "posthog-node": {
+      "optional": true
+    },
+    "openai": {
       "optional": true
     }
   }

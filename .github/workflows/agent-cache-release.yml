@@ -96,6 +96,8 @@ jobs:
           test -f packages/agent-cache/dist/adapters/langchain.js
           test -f packages/agent-cache/dist/adapters/ai.js
           test -f packages/agent-cache/dist/adapters/langgraph.js
+          test -f packages/agent-cache/dist/adapters/openai-chat.js
+          test -f packages/agent-cache/dist/adapters/openai-chat.d.ts
 
       - name: Prepare for publishing
         run: |
