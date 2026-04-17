@@ -1,4 +1,4 @@
-import { parseCommandStatsSection } from './commandstats-parser';
+import { parseCommandStatsSection } from '../commandstats-parser';
 
 describe('parseCommandStatsSection', () => {
   it('parses a single cmdstat line into calls/usec', () => {
