@@ -4,6 +4,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { VectorIndexInfo, VectorSearchResult, TextSearchResult, ProfileResult, FieldDistribution } from '../common/types/metrics.types';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import { PrometheusService } from '../prometheus/prometheus.service';
 import type { VectorIndexSnapshot } from '@betterdb/shared';
 
 @Injectable()
@@ -18,6 +19,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
   constructor(
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
+    private prometheusService: PrometheusService,
   ) {
     super(connectionRegistry);
   }
@@ -79,6 +81,17 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       });
 
       await this.storage.saveVectorIndexSnapshots(snapshots, ctx.connectionId);
+
+      this.prometheusService.updateVectorIndexMetrics(
+        ctx.connectionId,
+        snapshots.map(s => ({
+          indexName: s.indexName,
+          numDocs: s.numDocs,
+          memorySizeMb: s.memorySizeMb,
+          indexingFailures: s.indexingFailures,
+          percentIndexed: s.percentIndexed,
+        })),
+      );
 
       const now = Date.now();
       const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;

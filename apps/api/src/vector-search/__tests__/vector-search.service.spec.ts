@@ -4,6 +4,7 @@ import { VectorSearchService } from '../vector-search.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
+import { PrometheusService } from '../../prometheus/prometheus.service';
 import { VectorIndexInfo } from '../../common/types/metrics.types';
 
 function makeInfo(name: string, overrides: Partial<VectorIndexInfo> = {}): VectorIndexInfo {
@@ -28,6 +29,7 @@ function makeInfo(name: string, overrides: Partial<VectorIndexInfo> = {}): Vecto
 describe('VectorSearchService.pollConnection — extended snapshot fields', () => {
   let service: VectorSearchService;
   let storage: jest.Mocked<StoragePort>;
+  let prometheus: jest.Mocked<PrometheusService>;
 
   function buildClient(info: VectorIndexInfo) {
     return {
@@ -54,10 +56,15 @@ describe('VectorSearchService.pollConnection — extended snapshot fields', () =
       pruneOldVectorIndexSnapshots: jest.fn().mockResolvedValue(0),
     } as any;
 
+    prometheus = {
+      updateVectorIndexMetrics: jest.fn(),
+    } as any;
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         VectorSearchService,
         { provide: 'STORAGE_CLIENT', useValue: storage },
+        { provide: PrometheusService, useValue: prometheus },
         {
           provide: ConnectionRegistry,
           useValue: { getDefaultId: jest.fn(), list: jest.fn().mockReturnValue([]) },
@@ -147,6 +154,28 @@ describe('VectorSearchService.pollConnection — extended snapshot fields', () =
     // conn-2's first poll should still report delta 0 even though conn-1 saw the same value first
     const secondCall = storage.saveVectorIndexSnapshots.mock.calls[1];
     expect(secondCall[0][0].indexingFailuresDelta).toBe(0);
+  });
+
+  it('exports gauge values via PrometheusService after each poll', async () => {
+    const info = makeInfo('idx_a', {
+      numDocs: 500,
+      memorySizeMb: 8,
+      indexingFailures: 2,
+      percentIndexed: 80,
+    });
+    const client = buildClient(info);
+
+    await (service as any).pollConnection(makeCtx(client, 'conn-1'));
+
+    expect(prometheus.updateVectorIndexMetrics).toHaveBeenCalledWith('conn-1', [
+      {
+        indexName: 'idx_a',
+        numDocs: 500,
+        memorySizeMb: 8,
+        indexingFailures: 2,
+        percentIndexed: 80,
+      },
+    ]);
   });
 
   it('skips polling entirely when hasVectorSearch is false', async () => {
