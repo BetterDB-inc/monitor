@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   MessageCreateParamsNonStreaming,
   ContentBlockParam,
@@ -65,11 +66,12 @@ async function normalizeBlock(
 
   if (type === "document") {
     const b = block as DocumentBlockParam;
-    const src = b.source as { type: string; data?: string; media_type?: string; url?: string; content?: unknown; file_id?: string };
+    const src = b.source as { type: string; data?: string; text?: string; media_type?: string; url?: string; content?: unknown; file_id?: string };
 
     if (src.type === "content") {
-      const nested = JSON.stringify(src.content).slice(0, 64);
-      const result: BinaryBlock = { type: "binary", kind: "document", mediaType: "application/x-nested-content", ref: `nested:${nested}` };
+      const fullJson = JSON.stringify(src.content);
+      const ref = "nested:sha256:" + createHash("sha256").update(fullJson).digest("hex");
+      const result: BinaryBlock = { type: "binary", kind: "document", mediaType: "application/x-nested-content", ref };
       return result;
     }
 
@@ -80,7 +82,7 @@ async function normalizeBlock(
       source = { type: "base64", data: src.data! };
       mediaType = src.media_type ?? "application/pdf";
     } else if (src.type === "text") {
-      const encoded = Buffer.from(src.data!).toString("base64");
+      const encoded = Buffer.from(src.text!).toString("base64");
       source = { type: "base64", data: encoded };
       mediaType = "text/plain";
     } else if (src.type === "url") {

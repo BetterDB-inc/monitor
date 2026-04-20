@@ -229,6 +229,7 @@ export class LlmCache {
     blocks: ContentBlock[],
     options?: LlmStoreOptions,
   ): Promise<string> {
+    const startTime = Date.now();
     const flattenedText = blocks
       .filter((b): b is TextBlock => b.type === "text")
       .map(b => b.text)
@@ -269,13 +270,20 @@ export class LlmCache {
           throw new ValkeyCommandError("SET", err);
         }
 
+        const byteLength = Buffer.byteLength(valueJson, "utf8");
+        this.telemetry.metrics.storedBytes
+          .labels(this.name, "llm")
+          .inc(byteLength);
+
+        const duration = (Date.now() - startTime) / 1000;
+        this.telemetry.metrics.operationDuration
+          .labels(this.name, "llm", "store")
+          .observe(duration);
+
         span.setAttribute("cache.key", key);
         span.setAttribute("cache.ttl", ttl ?? 0);
         span.setAttribute("cache.blocks", blocks.length);
-
-        this.telemetry.metrics.storedBytes
-          .labels(this.name, "llm")
-          .inc(Buffer.byteLength(valueJson, "utf8"));
+        span.setAttribute("cache.bytes", byteLength);
 
         span.end();
         return key;
