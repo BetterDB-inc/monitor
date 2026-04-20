@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Inject,
+  NotFoundException,
   Query,
 } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
@@ -39,8 +40,7 @@ export class CommandstatsController {
   })
   @ApiHeader({ name: 'x-connection-id', required: false })
   getSummary(@ConnectionId() connectionId?: string): CommandStatsSnapshotEntry[] {
-    const resolvedId = this.resolveConnectionId(connectionId);
-    if (!resolvedId) return [];
+    const resolvedId = this.requireConnectionId(connectionId);
     return this.poller.getSnapshot(resolvedId);
   }
 
@@ -93,8 +93,7 @@ export class CommandstatsController {
       throw new BadRequestException('command query parameter is required');
     }
 
-    const resolvedId = this.resolveConnectionId(connectionId);
-    if (!resolvedId) return [];
+    const resolvedId = this.requireConnectionId(connectionId);
 
     const now = Date.now();
     const defaultWindowMs = 60 * 60 * 1000; // 1 hour
@@ -109,12 +108,18 @@ export class CommandstatsController {
     return this.storage.getCommandStatsHistory(options);
   }
 
-  private resolveConnectionId(requestedId: string | undefined): string | null {
+  private requireConnectionId(requestedId: string | undefined): string {
     if (requestedId) {
       // Throws NotFoundException (404) if the id is not registered.
       this.connectionRegistry.get(requestedId);
       return requestedId;
     }
-    return this.connectionRegistry.getDefaultId();
+    const defaultId = this.connectionRegistry.getDefaultId();
+    if (!defaultId) {
+      throw new NotFoundException(
+        'No connection available. Pass x-connection-id header or configure a default connection.',
+      );
+    }
+    return defaultId;
   }
 }

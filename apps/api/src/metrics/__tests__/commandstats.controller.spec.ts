@@ -90,14 +90,13 @@ describe('CommandstatsController', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('returns empty array when no connection id can be resolved', async () => {
+    it('throws 404 when no connection id can be resolved', async () => {
       const fresh: TestingModule = await buildModule(
         registryWithKnown([], null) as any,
       );
       const c = fresh.get(CommandstatsController);
 
-      const result = await c.getHistory('get');
-      expect(result).toEqual([]);
+      await expect(c.getHistory('get')).rejects.toBeInstanceOf(NotFoundException);
       expect(storage.getCommandStatsHistory).not.toHaveBeenCalled();
     });
   });
@@ -131,13 +130,13 @@ describe('CommandstatsController', () => {
       expect(() => controller.getSummary('missing')).toThrow(NotFoundException);
     });
 
-    it('returns empty array when no connection id can be resolved', async () => {
+    it('throws 404 when no connection id can be resolved', async () => {
       const fresh: TestingModule = await buildModule(
         registryWithKnown([], null) as any,
       );
       const c = fresh.get(CommandstatsController);
 
-      expect(c.getSummary()).toEqual([]);
+      expect(() => c.getSummary()).toThrow(NotFoundException);
       expect(poller.getSnapshot).not.toHaveBeenCalled();
     });
   });
