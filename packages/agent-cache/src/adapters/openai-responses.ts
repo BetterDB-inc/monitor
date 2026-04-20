@@ -2,20 +2,13 @@ import type { ResponseCreateParams } from "openai/resources/responses/responses"
 import type { ContentBlock, LlmCacheParams, TextBlock, BinaryBlock, ToolCallBlock, ReasoningBlock } from "../types";
 import type { BinaryNormalizer, BinaryRef } from "../normalizer";
 import { defaultNormalizer } from "../normalizer";
+import { parseToolCallArgs } from "../utils";
 
 export interface OpenAIResponsesPrepareOptions {
   normalizer?: BinaryNormalizer;
 }
 
 type AnyItem = { type?: string; role?: string; [k: string]: unknown };
-
-function parseArgs(raw: string): unknown {
-  try {
-    return JSON.parse(raw || "{}");
-  } catch {
-    return { __raw: raw };
-  }
-}
 
 async function normalizeResponsesPart(
   part: AnyItem,
@@ -136,7 +129,7 @@ export async function prepareParams(
           type: "tool_call",
           id: item.call_id as string,
           name: item.name as string,
-          args: parseArgs(item.arguments as string),
+          args: parseToolCallArgs(item.arguments as string),
         } as ToolCallBlock);
         continue;
       }
@@ -156,7 +149,7 @@ export async function prepareParams(
       if (itemType === "function_call_output") {
         flushAssistant();
         const output = item.output;
-        const text = typeof output === "string" ? output : JSON.stringify(output ?? "");
+        const text = typeof output === "string" ? output : output != null ? JSON.stringify(output) : "";
         messages.push({
           role: "tool",
           toolCallId: item.call_id as string,

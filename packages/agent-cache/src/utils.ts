@@ -132,3 +132,15 @@ export function llmCacheHash(params: {
 export function toolCacheHash(args: unknown): string {
   return sha256(canonicalJson(args ?? {}));
 }
+
+/**
+ * Parse a JSON-encoded tool call arguments string.
+ * Falls back to { __raw: raw } on parse failure.
+ */
+export function parseToolCallArgs(raw: string): unknown {
+  try {
+    return JSON.parse(raw || "{}");
+  } catch {
+    return { __raw: raw };
+  }
+}

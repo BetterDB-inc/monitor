@@ -6,17 +6,10 @@ import type {
 import type { ContentBlock, LlmCacheParams, TextBlock, BinaryBlock, ToolCallBlock } from "../types";
 import type { BinaryNormalizer, BinaryRef } from "../normalizer";
 import { defaultNormalizer } from "../normalizer";
+import { parseToolCallArgs } from "../utils";
 
 export interface OpenAIChatPrepareOptions {
   normalizer?: BinaryNormalizer;
-}
-
-function parseToolArgs(raw: string): unknown {
-  try {
-    return JSON.parse(raw || "{}");
-  } catch {
-    return { __raw: raw };
-  }
 }
 
 function toolCallFromAny(tc: ChatCompletionMessageToolCall): ToolCallBlock | null {
@@ -25,7 +18,7 @@ function toolCallFromAny(tc: ChatCompletionMessageToolCall): ToolCallBlock | nul
     type: "tool_call",
     id: tc.id,
     name: tc.function.name,
-    args: parseToolArgs(tc.function.arguments),
+    args: parseToolCallArgs(tc.function.arguments),
   };
 }
 
