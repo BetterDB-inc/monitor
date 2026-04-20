@@ -63,13 +63,13 @@ describe("prepareParams (OpenAI Chat)", () => {
     expect(block.args).toEqual({ __raw: "not valid json{{{" });
   });
 
-  it("plain string user content passes through as string", async () => {
+  it("plain string user content is wrapped in a text block array (cross-provider parity)", async () => {
     const prepared = await prepareParams({
       model: "gpt-4o",
       messages: [{ role: "user", content: "What is 2+2?" }],
     });
-    expect(typeof prepared.messages[0].content).toBe("string");
-    expect(prepared.messages[0].content).toBe("What is 2+2?");
+    expect(Array.isArray(prepared.messages[0].content)).toBe(true);
+    expect(prepared.messages[0].content).toEqual([{ type: "text", text: "What is 2+2?" }]);
   });
 
   it("image_url detail field is preserved in binary block", async () => {

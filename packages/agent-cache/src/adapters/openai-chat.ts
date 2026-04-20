@@ -46,8 +46,8 @@ function toolCallFromAny(tc: ChatCompletionMessageToolCall): ToolCallBlock {
 async function normalizeUserContent(
   content: string | ChatCompletionContentPart[],
   normalizer: BinaryNormalizer,
-): Promise<string | ContentBlock[]> {
-  if (typeof content === "string") return content;
+): Promise<ContentBlock[]> {
+  if (typeof content === "string") return [{ type: "text", text: content } as TextBlock];
 
   const blocks: ContentBlock[] = [];
 

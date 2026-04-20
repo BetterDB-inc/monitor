@@ -235,48 +235,55 @@ export class LlmCache {
       .join("");
 
     return this.telemetry.tracer.startActiveSpan("agent_cache.llm.store_multipart", async (span) => {
-      const hash = llmCacheHash(params);
-      const key = this.buildKey(hash);
-
-      const entry: StoredLlmEntry = {
-        response: flattenedText,
-        contentBlocks: blocks,
-        model: params.model,
-        storedAt: Date.now(),
-        tokens: options?.tokens,
-      };
-
-      if (this.costTable && options?.tokens) {
-        const modelCost = this.costTable[params.model];
-        if (modelCost) {
-          const inputCost = (options.tokens.input / 1000) * modelCost.inputPer1k;
-          const outputCost = (options.tokens.output / 1000) * modelCost.outputPer1k;
-          entry.cost = inputCost + outputCost;
-        }
-      }
-
-      const valueJson = JSON.stringify(entry);
-      const ttl = options?.ttl ?? this.tierTtl ?? this.defaultTtl;
-
       try {
-        if (ttl !== undefined) {
-          await this.client.set(key, valueJson, "EX", ttl);
-        } else {
-          await this.client.set(key, valueJson);
+        const hash = llmCacheHash(params);
+        const key = this.buildKey(hash);
+
+        const entry: StoredLlmEntry = {
+          response: flattenedText,
+          contentBlocks: blocks,
+          model: params.model,
+          storedAt: Date.now(),
+          tokens: options?.tokens,
+        };
+
+        if (this.costTable && options?.tokens) {
+          const modelCost = this.costTable[params.model];
+          if (modelCost) {
+            const inputCost = (options.tokens.input / 1000) * modelCost.inputPer1k;
+            const outputCost = (options.tokens.output / 1000) * modelCost.outputPer1k;
+            entry.cost = inputCost + outputCost;
+          }
         }
+
+        const valueJson = JSON.stringify(entry);
+        const ttl = options?.ttl ?? this.tierTtl ?? this.defaultTtl;
+
+        try {
+          if (ttl !== undefined) {
+            await this.client.set(key, valueJson, "EX", ttl);
+          } else {
+            await this.client.set(key, valueJson);
+          }
+        } catch (err) {
+          throw new ValkeyCommandError("SET", err);
+        }
+
+        span.setAttribute("cache.key", key);
+        span.setAttribute("cache.ttl", ttl ?? 0);
+        span.setAttribute("cache.blocks", blocks.length);
+
+        this.telemetry.metrics.storedBytes
+          .labels(this.name, "llm")
+          .inc(Buffer.byteLength(valueJson, "utf8"));
+
+        span.end();
+        return key;
       } catch (err) {
-        throw new ValkeyCommandError("SET", err);
+        span.recordException(err as Error);
+        span.end();
+        throw err;
       }
-
-      span.setAttribute("cache.key", key);
-      span.setAttribute("cache.ttl", ttl ?? 0);
-      span.setAttribute("cache.blocks", blocks.length);
-
-      this.telemetry.metrics.storedBytes
-        .labels(this.name, "llm")
-        .inc(Buffer.byteLength(valueJson, "utf8"));
-
-      return key;
     });
   }
 
