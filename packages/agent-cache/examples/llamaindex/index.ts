@@ -10,7 +10,7 @@
  *   export OPENAI_API_KEY=sk-...
  *   npx tsx index.ts
  */
-import Valkey from "iovalkey";
+import Valkey, { Cluster } from "iovalkey";
 import { OpenAI } from "@llamaindex/openai";
 import { AgentCache } from "@betterdb/agent-cache";
 import { composeNormalizer, hashBase64 } from "@betterdb/agent-cache";
@@ -18,8 +18,22 @@ import { prepareParams } from "@betterdb/agent-cache/llamaindex";
 import type { ContentBlock, TextBlock } from "@betterdb/agent-cache";
 import type { ChatMessage } from "@llamaindex/core/llms";
 
-// ── 1. Connect to Valkey ─────────────────────────────────────────────
-const valkey = new Valkey({ host: "localhost", port: 6379 });
+// ── 1. Connect to Valkey (standalone or cluster) ─────────────────────
+let valkey: Valkey;
+if (process.env.VALKEY_CLUSTER) {
+  const clusterNodes = (process.env.VALKEY_CLUSTER_NODES ?? "localhost:6401,localhost:6402,localhost:6403")
+    .split(",").map(hp => {
+      const [host, portStr] = hp.trim().split(":");
+      const port = parseInt(portStr, 10);
+      if (!host || isNaN(port)) throw new Error(`Invalid cluster node: "${hp}"`);
+      return { host, port };
+    });
+  console.log(`Cluster mode — nodes: ${clusterNodes.map(n => `${n.host}:${n.port}`).join(", ")}`);
+  valkey = new Cluster(clusterNodes) as unknown as Valkey;
+} else {
+  console.log("Standalone mode — localhost:6379");
+  valkey = new Valkey({ host: "localhost", port: 6379 });
+}
 
 // ── 2. Create cache ──────────────────────────────────────────────────
 const cache = new AgentCache({
@@ -52,8 +66,14 @@ async function chat(messages: ChatMessage[]): Promise<string> {
 
   const text = response.message.content as string;
   const blocks: ContentBlock[] = [{ type: "text", text } as TextBlock];
+  const usage = (response.raw as { usage?: { prompt_tokens?: number; completion_tokens?: number } } | null)?.usage;
 
-  await cache.llm.storeMultipart(cacheParams, blocks);
+  await cache.llm.storeMultipart(cacheParams, blocks, {
+    tokens: {
+      input: usage?.prompt_tokens ?? 0,
+      output: usage?.completion_tokens ?? 0,
+    },
+  });
 
   return text;
 }
@@ -67,9 +87,9 @@ async function main() {
   console.log("  Response:", r2);
 
   console.log("\n=== 2. Vision with data URL ===");
-  // 1x1 red PNG as data URL
+  // 50x50 solid red PNG
   const redPixel =
-    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI6QAAAABJRU5ErkJggg==";
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADIAAAAyCAIAAACRXR/mAAAAQ0lEQVR4nO3OMQ0AMAwDsPAnvRHonxyWDMB5yaD+QEtLS0tLa0N/oKWlpaWltaE/0NLS0tLS2tAfaGlpaWlpbegPTh97K7rEaOcNTQAAAABJRU5ErkJggg==";
   await chat([{
     role: "user",
     content: [
@@ -80,7 +100,8 @@ async function main() {
 
   const stats = await cache.stats();
   console.log("\n-- Cache Stats --");
-  console.log(`LLM: ${stats.llm.hits} hits / ${stats.llm.misses} misses`);
+  console.log(`LLM:        ${stats.llm.hits} hits / ${stats.llm.misses} misses (${(stats.llm.hitRate * 100).toFixed(0)}% hit rate)`);
+  console.log(`Cost saved: $${(stats.costSavedMicros / 1_000_000).toFixed(6)}`);
 
   await cache.shutdown();
   await valkey.quit();

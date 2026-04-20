@@ -7,7 +7,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",
-    "@betterdb/agent-cache": "^0.3.0",
+    "@betterdb/agent-cache": "file:../../",
     "iovalkey": "^0.3.0"
   },
   "devDependencies": {

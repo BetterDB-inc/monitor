@@ -6,7 +6,7 @@
     "start": "tsx index.ts"
   },
   "dependencies": {
-    "@betterdb/agent-cache": "^0.3.0",
+    "@betterdb/agent-cache": "file:../../",
     "@llamaindex/core": "^0.6.23",
     "@llamaindex/openai": "^0.4.23",
     "iovalkey": "^0.3.0"

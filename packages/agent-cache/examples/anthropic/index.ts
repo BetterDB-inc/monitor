@@ -11,7 +11,7 @@
  *   export ANTHROPIC_API_KEY=sk-ant-...
  *   npx tsx index.ts
  */
-import Valkey from "iovalkey";
+import Valkey, { Cluster } from "iovalkey";
 import Anthropic from "@anthropic-ai/sdk";
 import { AgentCache } from "@betterdb/agent-cache";
 import { composeNormalizer, hashBase64 } from "@betterdb/agent-cache";
@@ -19,8 +19,22 @@ import { prepareParams } from "@betterdb/agent-cache/anthropic";
 import type { ContentBlock, TextBlock, ToolCallBlock, ReasoningBlock } from "@betterdb/agent-cache";
 import type { MessageCreateParamsNonStreaming } from "@anthropic-ai/sdk/resources";
 
-// ── 1. Connect to Valkey ─────────────────────────────────────────────
-const valkey = new Valkey({ host: "localhost", port: 6379 });
+// ── 1. Connect to Valkey (standalone or cluster) ─────────────────────
+let valkey: Valkey;
+if (process.env.VALKEY_CLUSTER) {
+  const clusterNodes = (process.env.VALKEY_CLUSTER_NODES ?? "localhost:6401,localhost:6402,localhost:6403")
+    .split(",").map(hp => {
+      const [host, portStr] = hp.trim().split(":");
+      const port = parseInt(portStr, 10);
+      if (!host || isNaN(port)) throw new Error(`Invalid cluster node: "${hp}"`);
+      return { host, port };
+    });
+  console.log(`Cluster mode — nodes: ${clusterNodes.map(n => `${n.host}:${n.port}`).join(", ")}`);
+  valkey = new Cluster(clusterNodes) as unknown as Valkey;
+} else {
+  console.log("Standalone mode — localhost:6379");
+  valkey = new Valkey({ host: "localhost", port: 6379 });
+}
 
 // ── 2. Create cache ──────────────────────────────────────────────────
 const cache = new AgentCache({
@@ -63,8 +77,8 @@ async function chat(params: MessageCreateParamsNonStreaming): Promise<string> {
 
   await cache.llm.storeMultipart(cacheParams, blocks, {
     tokens: {
-      input: response.usage.input_tokens,
-      output: response.usage.output_tokens,
+      input: response.usage?.input_tokens ?? 0,
+      output: response.usage?.output_tokens ?? 0,
     },
   });
 
@@ -83,8 +97,8 @@ async function main() {
   console.log("  Response:", r2);
 
   console.log("\n=== 2. Vision with base64 image ===");
-  // 1x1 red PNG as base64
-  const redPixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI6QAAAABJRU5ErkJggg==";
+  // 50x50 solid red PNG (generated with Node.js zlib - valid and accepted by APIs)
+  const redPixel = "iVBORw0KGgoAAAANSUhEUgAAADIAAAAyCAIAAACRXR/mAAAAQ0lEQVR4nO3OMQ0AMAwDsPAnvRHonxyWDMB5yaD+QEtLS0tLa0N/oKWlpaWltaE/0NLS0tLS2tAfaGlpaWlpbegPTh97K7rEaOcNTQAAAABJRU5ErkJggg==";
   await chat({
     model,
     max_tokens: 20,
@@ -115,7 +129,8 @@ async function main() {
 
   const stats = await cache.stats();
   console.log("\n-- Cache Stats --");
-  console.log(`LLM: ${stats.llm.hits} hits / ${stats.llm.misses} misses`);
+  console.log(`LLM:        ${stats.llm.hits} hits / ${stats.llm.misses} misses (${(stats.llm.hitRate * 100).toFixed(0)}% hit rate)`);
+  console.log(`Cost saved: $${(stats.costSavedMicros / 1_000_000).toFixed(6)}`);
 
   await cache.shutdown();
   await valkey.quit();
