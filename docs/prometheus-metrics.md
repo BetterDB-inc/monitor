@@ -15,6 +15,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/promethe
   - [Client Analytics Metrics](#client-analytics-metrics)
   - [Slowlog Metrics](#slowlog-metrics)
   - [COMMANDLOG Metrics](#commandlog-metrics-valkey-81)
+  - [Vector Index Metrics](#vector-index-metrics)
   - [Server Info Metrics](#server-info-metrics)
   - [Memory Metrics](#memory-metrics)
   - [Stats Metrics](#stats-metrics)
@@ -96,6 +97,21 @@ Valkey-specific metrics for tracking large request/reply commands.
 | `betterdb_commandlog_large_reply_by_pattern` | gauge | `pattern` | Large reply count by command pattern | `3` |
 
 **Availability**: Only populated when connected to Valkey 8.1+. Returns no data for Redis or older Valkey versions.
+
+### Vector Index Metrics
+
+Per-index health metrics for vector search indexes, populated by `VectorSearchService` every 30 s. Gauges are emitted once per `(connection, index)` pair, and stale labels are automatically removed when an index is dropped between polls.
+
+| Metric | Type | Labels | Description | Example |
+|--------|------|--------|-------------|---------|
+| `betterdb_vector_index_docs` | gauge | `index` | Current document count for a vector index | `30000` |
+| `betterdb_vector_index_memory_bytes` | gauge | `index` | Current memory usage for a vector index, in bytes | `62914560` |
+| `betterdb_vector_index_indexing_failures` | gauge | `index` | Cumulative `hash_indexing_failures` for a vector index | `0` |
+| `betterdb_vector_index_percent_indexed` | gauge | `index` | Percent of documents indexed (0–100) | `100` |
+
+**Availability**: Only populated when connected to an instance with the Search module loaded (RediSearch or [`valkey-search`](https://github.com/valkey-io/valkey-search)). Returns no data otherwise. See [Vector / AI](vector-ai/README.md) for the feature overview and the REST endpoints that back the monitor UI.
+
+**Cardinality Warning**: Label cardinality scales with the number of indexes per connection. Typical deployments have single-digit index counts; if you run hundreds of indexes per instance, monitor scrape size accordingly.
 
 ### Server Info Metrics
 
