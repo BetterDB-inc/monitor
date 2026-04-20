@@ -6,9 +6,10 @@ import { CommandstatsPollerService } from './commandstats-poller.service';
 import { ClusterModule } from '../cluster/cluster.module';
 import { StorageModule } from '../storage/storage.module';
 import { ConnectionsModule } from '../connections/connections.module';
+import { PrometheusModule } from '../prometheus/prometheus.module';
 
 @Module({
-  imports: [ClusterModule, StorageModule, ConnectionsModule],
+  imports: [ClusterModule, StorageModule, ConnectionsModule, PrometheusModule],
   controllers: [MetricsController, CommandstatsController],
   providers: [MetricsService, CommandstatsPollerService],
   exports: [MetricsService],

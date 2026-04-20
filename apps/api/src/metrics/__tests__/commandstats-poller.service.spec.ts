@@ -4,10 +4,12 @@ import { CommandstatsPollerService } from '../commandstats-poller.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { ConnectionContext } from '../../common/services/multi-connection-poller';
+import { PrometheusService } from '../../prometheus/prometheus.service';
 
 describe('CommandstatsPollerService', () => {
   let service: CommandstatsPollerService;
   let storage: jest.Mocked<StoragePort>;
+  let prometheus: { updateCommandstatsMetrics: jest.Mock };
 
   const makeCtx = (client: any, connectionId = 'conn-1'): ConnectionContext => ({
     connectionId,
@@ -27,6 +29,7 @@ describe('CommandstatsPollerService', () => {
       getCommandStatsHistory: jest.fn().mockResolvedValue([]),
       pruneOldCommandStatsSamples: jest.fn().mockResolvedValue(0),
     } as any;
+    prometheus = { updateCommandstatsMetrics: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -36,6 +39,7 @@ describe('CommandstatsPollerService', () => {
           provide: ConnectionRegistry,
           useValue: { list: jest.fn().mockReturnValue([]) },
         },
+        { provide: PrometheusService, useValue: prometheus },
       ],
     }).compile();
 
@@ -163,6 +167,29 @@ describe('CommandstatsPollerService', () => {
       callsDelta: 30,
       usecDelta: 1500,
     });
+  });
+
+  it('pushes current absolute totals to Prometheus on every poll', async () => {
+    const client = clientWithCommandstats({
+      'cmdstat_ft.search':
+        'calls=42,usec=2100,usec_per_call=50,rejected_calls=0,failed_calls=0',
+      'cmdstat_get':
+        'calls=1000,usec=50000,usec_per_call=50,rejected_calls=0,failed_calls=0',
+    });
+    await (service as any).pollConnection(makeCtx(client));
+
+    expect(prometheus.updateCommandstatsMetrics).toHaveBeenCalledTimes(1);
+    const [connId, entries] = prometheus.updateCommandstatsMetrics.mock.calls[0];
+    expect(connId).toBe('conn-1');
+    const byCommand = Object.fromEntries(
+      (entries as any[]).map((e) => [e.command, e]),
+    );
+    expect(byCommand['ft.search']).toEqual({
+      command: 'ft.search',
+      callsTotal: 42,
+      usecPerCall: 50,
+    });
+    expect(byCommand.get.callsTotal).toBe(1000);
   });
 
   it('exposes the current per-command snapshot via getSnapshot()', async () => {
