@@ -90,10 +90,12 @@ export class CommandstatsPollerService
       | undefined;
     const current = parseCommandStatsSection(section);
 
+    const currentByCommand = new Map(current.map((s) => [s.command, s]));
+
     const previous = this.baselines.get(ctx.connectionId);
     if (!previous) {
       this.baselines.set(ctx.connectionId, {
-        samples: new Map(Object.entries(current)),
+        samples: currentByCommand,
         lastCapturedAt: now,
       });
       return;
@@ -114,8 +116,8 @@ export class CommandstatsPollerService
     }> = [];
 
     let hadReset = false;
-    for (const [command, sample] of Object.entries(current)) {
-      const prev = previous.samples.get(command);
+    for (const sample of current) {
+      const prev = previous.samples.get(sample.command);
       if (!prev) {
         continue;
       }
@@ -128,7 +130,7 @@ export class CommandstatsPollerService
       if (callsDelta === 0 && usecDelta === 0) continue;
 
       batch.push({
-        command,
+        command: sample.command,
         callsTotal: sample.calls,
         usecTotal: sample.usec,
         usecPerCall: sample.usecPerCall,
@@ -143,7 +145,7 @@ export class CommandstatsPollerService
 
     // Update baseline regardless — reset case also needs a fresh baseline
     this.baselines.set(ctx.connectionId, {
-      samples: new Map(Object.entries(current)),
+      samples: currentByCommand,
       lastCapturedAt: now,
     });
 

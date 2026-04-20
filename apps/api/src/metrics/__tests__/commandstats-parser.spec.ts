@@ -6,15 +6,16 @@ describe('parseCommandStatsSection', () => {
       'cmdstat_get': 'calls=100,usec=500,usec_per_call=5.00,rejected_calls=2,failed_calls=1',
     });
 
-    expect(result).toEqual({
-      get: {
+    expect(result).toEqual([
+      {
+        command: 'get',
         calls: 100,
         usec: 500,
         usecPerCall: 5,
         rejectedCalls: 2,
         failedCalls: 1,
       },
-    });
+    ]);
   });
 
   it('parses multiple commands and lowercases names', () => {
@@ -23,8 +24,9 @@ describe('parseCommandStatsSection', () => {
       'cmdstat_FT.SEARCH': 'calls=25,usec=250000,usec_per_call=10000.00,rejected_calls=0,failed_calls=3',
     });
 
-    expect(result.get).toMatchObject({ calls: 100, usec: 500, usecPerCall: 5 });
-    expect(result['ft.search']).toMatchObject({
+    const byCommand = Object.fromEntries(result.map((s) => [s.command, s]));
+    expect(byCommand.get).toMatchObject({ calls: 100, usec: 500, usecPerCall: 5 });
+    expect(byCommand['ft.search']).toMatchObject({
       calls: 25,
       usec: 250000,
       usecPerCall: 10000,
@@ -39,15 +41,16 @@ describe('parseCommandStatsSection', () => {
       'some_noise': 'ignored',
     });
 
-    expect(Object.keys(result)).toEqual(['get']);
+    expect(result.map((s) => s.command)).toEqual(['get']);
   });
 
   it('defaults missing numeric fields to 0', () => {
-    const result = parseCommandStatsSection({
+    const [sample] = parseCommandStatsSection({
       'cmdstat_get': 'calls=50',
     });
 
-    expect(result.get).toEqual({
+    expect(sample).toEqual({
+      command: 'get',
       calls: 50,
       usec: 0,
       usecPerCall: 0,
@@ -56,8 +59,8 @@ describe('parseCommandStatsSection', () => {
     });
   });
 
-  it('returns empty object for an empty or missing section', () => {
-    expect(parseCommandStatsSection({})).toEqual({});
-    expect(parseCommandStatsSection(undefined)).toEqual({});
+  it('returns an empty array for an empty or missing section', () => {
+    expect(parseCommandStatsSection({})).toEqual([]);
+    expect(parseCommandStatsSection(undefined)).toEqual([]);
   });
 });
