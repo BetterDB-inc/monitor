@@ -1,6 +1,9 @@
 export interface CommandStatsSample {
   calls: number;
   usec: number;
+  usecPerCall: number;
+  rejectedCalls: number;
+  failedCalls: number;
 }
 
 export function parseCommandStatsSection(
@@ -26,6 +29,9 @@ export function parseCommandStatsSection(
     result[command] = {
       calls: fields.calls ?? 0,
       usec: fields.usec ?? 0,
+      usecPerCall: fields.usec_per_call ?? 0,
+      rejectedCalls: fields.rejected_calls ?? 0,
+      failedCalls: fields.failed_calls ?? 0,
     };
   }
 

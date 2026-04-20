@@ -196,6 +196,11 @@ export interface StoredCommandStatsSample {
   id: string;
   connectionId: string;
   command: string;
+  callsTotal: number;
+  usecTotal: number;
+  usecPerCall: number;
+  rejectedCalls: number;
+  failedCalls: number;
   callsDelta: number;
   usecDelta: number;
   intervalMs: number;

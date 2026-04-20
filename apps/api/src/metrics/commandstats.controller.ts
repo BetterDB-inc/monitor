@@ -7,6 +7,10 @@ import {
   StoredCommandStatsSample,
 } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import {
+  CommandstatsPollerService,
+  CommandStatsSnapshotEntry,
+} from './commandstats-poller.service';
 
 @ApiTags('metrics')
 @Controller('metrics/commandstats')
@@ -14,14 +18,28 @@ export class CommandstatsController {
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly connectionRegistry: ConnectionRegistry,
+    private readonly poller: CommandstatsPollerService,
   ) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'Get the current commandstats snapshot',
+    description: `Returns the most recent absolute per-command counters (calls, usec, usec_per_call, 
+rejected_calls, failed_calls) as captured by the last poll. Empty until the first  
+successful poll completes for the connection.`,
+  })
+  @ApiHeader({ name: 'x-connection-id', required: false })
+  getSnapshot(@ConnectionId() connectionId?: string): CommandStatsSnapshotEntry[] {
+    const resolvedId = connectionId ?? this.connectionRegistry.getDefaultId();
+    if (!resolvedId) return [];
+    return this.poller.getSnapshot(resolvedId);
+  }
 
   @Get(':command/history')
   @ApiOperation({
     summary: 'Get commandstats delta samples for a single command',
-    description:
-      'Returns per-sample deltas (calls, usec) since the previous poll so clients ' +
-      'can derive ops/sec and average latency time-series without cumulative offset.',
+    description: `Returns per-sample deltas (calls, usec) since the previous poll so clients 
+can derive ops/sec and average latency time-series without cumulative offset.`,
   })
   @ApiParam({ name: 'command', example: 'ft.search', description: 'Case-insensitive command name' })
   @ApiHeader({ name: 'x-connection-id', required: false })
@@ -37,8 +55,7 @@ export class CommandstatsController {
     name: 'to',
     required: false,
     type: Number,
-    description:
-      'End of the query window as a Unix timestamp in milliseconds. Defaults to now.',
+    description: 'End of the query window as a Unix timestamp in milliseconds. Defaults to now.',
     example: 1700000600000,
   })
   @ApiQuery({

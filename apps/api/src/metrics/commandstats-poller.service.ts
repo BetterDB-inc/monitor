@@ -12,6 +12,16 @@ interface ConnectionBaseline {
   lastCapturedAt: number;
 }
 
+export interface CommandStatsSnapshotEntry {
+  command: string;
+  callsTotal: number;
+  usecTotal: number;
+  usecPerCall: number;
+  rejectedCalls: number;
+  failedCalls: number;
+  capturedAt: number;
+}
+
 @Injectable()
 export class CommandstatsPollerService
   extends MultiConnectionPoller
@@ -19,7 +29,7 @@ export class CommandstatsPollerService
 {
   protected readonly logger = new Logger(CommandstatsPollerService.name);
 
-  private readonly POLL_INTERVAL_MS = 15_000; // 15 seconds
+  private readonly POLL_INTERVAL_MS = 60_000; // 60 seconds
   private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
   private readonly RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
   private lastPruneByConnection = new Map<string, number>();
@@ -46,6 +56,21 @@ export class CommandstatsPollerService
   protected onConnectionRemoved(connectionId: string): void {
     this.baselines.delete(connectionId);
     this.lastPruneByConnection.delete(connectionId);
+  }
+
+  getSnapshot(connectionId: string): CommandStatsSnapshotEntry[] {
+    const baseline = this.baselines.get(connectionId);
+    if (!baseline) return [];
+
+    return Array.from(baseline.samples.entries()).map(([command, sample]) => ({
+      command,
+      callsTotal: sample.calls,
+      usecTotal: sample.usec,
+      usecPerCall: sample.usecPerCall,
+      rejectedCalls: sample.rejectedCalls,
+      failedCalls: sample.failedCalls,
+      capturedAt: baseline.lastCapturedAt,
+    }));
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
@@ -77,6 +102,11 @@ export class CommandstatsPollerService
     const intervalMs = now - previous.lastCapturedAt;
     const batch: Array<{
       command: string;
+      callsTotal: number;
+      usecTotal: number;
+      usecPerCall: number;
+      rejectedCalls: number;
+      failedCalls: number;
       callsDelta: number;
       usecDelta: number;
       intervalMs: number;
@@ -99,6 +129,11 @@ export class CommandstatsPollerService
 
       batch.push({
         command,
+        callsTotal: sample.calls,
+        usecTotal: sample.usec,
+        usecPerCall: sample.usecPerCall,
+        rejectedCalls: sample.rejectedCalls,
+        failedCalls: sample.failedCalls,
         callsDelta,
         usecDelta,
         intervalMs,
