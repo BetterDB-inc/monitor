@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-20
+
+### Added
+
+- **New provider adapters**
+  - `@betterdb/agent-cache/openai` — OpenAI Chat Completions adapter; normalises `ChatCompletionCreateParams` including text, images (URL and base64), audio, files, tool calls, and legacy `function` role messages
+  - `@betterdb/agent-cache/openai-responses` — OpenAI Responses API adapter; covers `reasoning` items, `function_call` / `function_call_output` item types, and `instructions` as a system message
+  - `@betterdb/agent-cache/anthropic` — Anthropic Messages adapter; normalises tool use blocks, tool result blocks, thinking / extended thinking blocks, and image sources
+  - `@betterdb/agent-cache/llamaindex` — LlamaIndex adapter; wraps `ChatMessage` history into the canonical format, covering text and image nodes
+
+- **Pluggable binary normalizer**
+  - New `BinaryNormalizer` interface controls how binary content (images, audio, documents) is reduced to a stable string before hashing
+  - Built-in helpers exported from the main entry point: `hashBase64`, `hashBytes`, `hashUrl`, `fetchAndHash`, `passthrough`, `composeNormalizer`
+  - `defaultNormalizer` uses `passthrough` behaviour — zero-latency, no network calls
+  - `composeNormalizer(cfg)` factory accepts per-source-type and per-kind handlers for custom storage strategies
+
+- **Extended `LlmCacheParams`**
+  - `toolChoice`, `seed`, `stop`, `responseFormat` — now included in cache key computation
+  - `reasoningEffort` — for models that support extended thinking
+  - `promptCacheKey` — pass-through for provider-level prompt caching
+  - New exported `LlmCacheMessage` type for consumers building params by hand
+
+- **New content block types** exported from main entry point: `TextBlock`, `BinaryBlock`, `ToolCallBlock`, `ToolResultBlock`, `ReasoningBlock`, `BlockHints`
+
+- **New examples**: `examples/openai`, `examples/anthropic`, `examples/llamaindex`
+
+### Fixed
+
+- `function_call_output` items with `null` or `undefined` output in the Responses adapter now produce an empty string instead of the two-character literal `""`
+- Deduplicated `parseToolCallArgs` extracted to shared utility in `utils.ts`
+
 ## [0.2.0] - 2026-04-16
 
 ### Added
