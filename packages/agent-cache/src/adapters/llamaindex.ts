@@ -112,7 +112,7 @@ export async function prepareParams(
       }
     }
 
-    out.push({ role, content: blocks.length > 0 ? blocks : "" });
+    out.push({ role, content: blocks });
   }
 
   const result: LlmCacheParams = { model: opts.model, messages: out };

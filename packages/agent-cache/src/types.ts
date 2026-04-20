@@ -86,10 +86,6 @@ export interface CacheResult {
 export interface LlmCacheResult extends CacheResult {
   tier: 'llm';
   contentBlocks?: ContentBlock[];
-  model?: string;
-  storedAt?: number;
-  tokens?: { input: number; output: number };
-  cost?: number;
 }
 
 // --- Tool tier ---

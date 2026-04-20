@@ -95,6 +95,37 @@ describe("prepareParams (OpenAI Responses)", () => {
     expect(block.args).toEqual({ __raw: "BAD{{{" });
   });
 
+  it("non-string function_call_output is JSON-serialized rather than dropped", async () => {
+    const prepared = await prepareParams({
+      model: "gpt-4o",
+      input: [
+        { type: "function_call", call_id: "c1", name: "weather", arguments: "{}" },
+        { type: "function_call_output", call_id: "c1", output: { temperature: 21, unit: "C" } },
+      ],
+    });
+    expect(prepared.messages).toHaveLength(2);
+    expect(prepared.messages[1].role).toBe("tool");
+    const content = prepared.messages[1].content as Array<{ type: string; text: string }>;
+    expect(content[0].text).toBe('{"temperature":21,"unit":"C"}');
+  });
+
+  it("reasoning summary filters to reasoning_text items only", async () => {
+    const prepared = await prepareParams({
+      model: "o1",
+      input: [{
+        type: "reasoning",
+        encrypted_content: "sig",
+        summary: [
+          { type: "reasoning_text", text: "First." },
+          { type: "reasoning_summary", text: "IGNORED" },
+          { type: "reasoning_text", text: "Second." },
+        ],
+      }],
+    });
+    const block = (prepared.messages[0].content as Array<Record<string, unknown>>)[0];
+    expect(block.text).toBe("First.Second.");
+  });
+
   it("reasoning.effort maps to reasoningEffort", async () => {
     const prepared = await prepareParams({
       model: "o3",

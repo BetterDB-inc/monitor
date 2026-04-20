@@ -2,7 +2,6 @@ import type {
   ChatCompletionCreateParams,
   ChatCompletionContentPart,
   ChatCompletionMessageToolCall,
-  ChatCompletionMessageFunctionToolCall,
 } from "openai/resources/chat/completions";
 import type { ContentBlock, LlmCacheParams, TextBlock, BinaryBlock, ToolCallBlock } from "../types";
 import type { BinaryNormalizer, BinaryRef } from "../normalizer";
@@ -20,26 +19,13 @@ function parseToolArgs(raw: string): unknown {
   }
 }
 
-function toolCallFromFn(tc: ChatCompletionMessageFunctionToolCall): ToolCallBlock {
+function toolCallFromAny(tc: ChatCompletionMessageToolCall): ToolCallBlock | null {
+  if (tc.type !== "function") return null;
   return {
     type: "tool_call",
     id: tc.id,
     name: tc.function.name,
     args: parseToolArgs(tc.function.arguments),
-  };
-}
-
-function toolCallFromAny(tc: ChatCompletionMessageToolCall): ToolCallBlock {
-  if (tc.type === "function") {
-    return toolCallFromFn(tc);
-  }
-  // custom tool
-  const custom = (tc as { id: string; custom: { name: string; input: string } });
-  return {
-    type: "tool_call",
-    id: custom.id,
-    name: custom.custom.name,
-    args: parseToolArgs(custom.custom.input),
   };
 }
 
@@ -150,7 +136,8 @@ export async function prepareParams(
       }
       if (m.tool_calls) {
         for (const tc of m.tool_calls) {
-          blocks.push(toolCallFromAny(tc));
+          const block = toolCallFromAny(tc);
+          if (block) blocks.push(block);
         }
       }
       messages.push({ role: "assistant", content: blocks });

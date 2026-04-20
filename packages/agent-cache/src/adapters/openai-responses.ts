@@ -143,8 +143,8 @@ export async function prepareParams(
 
       if (itemType === "reasoning") {
         if (!currentAssistant) currentAssistant = { role: "assistant", content: [] };
-        const summary = (item.summary as Array<{ text: string }> | undefined) ?? [];
-        const text = summary.map(s => s.text).join("");
+        const summary = (item.summary as Array<{ type?: string; text: string }> | undefined) ?? [];
+        const text = summary.filter(s => s.type === "reasoning_text").map(s => s.text).join("");
         currentAssistant.content.push({
           type: "reasoning",
           text,
@@ -156,13 +156,12 @@ export async function prepareParams(
       if (itemType === "function_call_output") {
         flushAssistant();
         const output = item.output;
-        if (typeof output === "string") {
-          messages.push({
-            role: "tool",
-            toolCallId: item.call_id as string,
-            content: [{ type: "text", text: output } as TextBlock],
-          });
-        }
+        const text = typeof output === "string" ? output : JSON.stringify(output ?? "");
+        messages.push({
+          role: "tool",
+          toolCallId: item.call_id as string,
+          content: [{ type: "text", text } as TextBlock],
+        });
         continue;
       }
 
