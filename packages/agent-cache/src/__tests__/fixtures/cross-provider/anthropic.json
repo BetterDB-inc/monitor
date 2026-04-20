@@ -1,0 +1,34 @@
+{
+  "model": "SHARED_MODEL_ALIAS",
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "role": "assistant",
+      "content": [{
+        "type": "tool_use",
+        "id": "call_abc",
+        "name": "get_weather",
+        "input": { "location": "Paris" }
+      }]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_abc",
+          "content": "Sunny, 21C"
+        },
+        { "type": "text", "text": "What's in this picture?" },
+        {
+          "type": "image",
+          "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "aGVsbG8gd29ybGQ="
+          }
+        }
+      ]
+    }
+  ]
+}

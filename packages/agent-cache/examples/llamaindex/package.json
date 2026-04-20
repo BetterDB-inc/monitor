@@ -1,0 +1,17 @@
+{
+  "name": "agent-cache-llamaindex-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@betterdb/agent-cache": "^0.3.0",
+    "@llamaindex/core": "^0.6.23",
+    "@llamaindex/openai": "^0.4.23",
+    "iovalkey": "^0.3.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

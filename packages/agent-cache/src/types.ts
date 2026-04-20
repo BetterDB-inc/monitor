@@ -1,5 +1,6 @@
 import type Valkey from 'iovalkey';
 import type { Registry } from 'prom-client';
+import type { ContentBlock } from './utils';
 
 export type { Valkey };
 
@@ -48,13 +49,26 @@ export interface AgentCacheOptions {
 
 // --- LLM tier ---
 
+export interface LlmCacheMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | ContentBlock[];
+  toolCallId?: string;
+  name?: string;
+}
+
 export interface LlmCacheParams {
   model: string;
-  messages: Array<{ role: string; content: unknown }>;
+  messages: Array<{ role: string; content: unknown; toolCallId?: string; name?: string }>;
   temperature?: number;
   top_p?: number;
   max_tokens?: number;
   tools?: Array<{ type: string; function: { name: string; [key: string]: unknown } }>;
+  toolChoice?: unknown;
+  seed?: number;
+  stop?: string[];
+  responseFormat?: unknown;
+  reasoningEffort?: string;
+  promptCacheKey?: string;
 }
 
 export interface LlmStoreOptions {
@@ -71,6 +85,7 @@ export interface CacheResult {
 
 export interface LlmCacheResult extends CacheResult {
   tier: 'llm';
+  contentBlocks?: ContentBlock[];
 }
 
 // --- Tool tier ---
@@ -131,3 +146,13 @@ export interface AgentCacheStats {
   costSavedMicros: number;
   perTool: Record<string, ToolStats>;
 }
+
+export type {
+  ContentBlock,
+  TextBlock,
+  BinaryBlock,
+  ToolCallBlock,
+  ToolResultBlock,
+  ReasoningBlock,
+  BlockHints,
+} from "./utils";

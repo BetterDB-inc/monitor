@@ -155,7 +155,7 @@ export class ProvisioningService {
 
       // Step 10: Wait for deployment readiness
       this.logger.log(`[${tenant.subdomain}] Waiting for deployment readiness...`);
-      await this.waitForDeploymentReady(namespace, 240000);
+      await this.waitForDeploymentReady(namespace, 6 * 60 * 1000);
 
       // Step 11: Update status to ready
       await this.updateTenantStatus(tenantId, 'ready');

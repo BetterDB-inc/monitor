@@ -289,6 +289,104 @@ describe('LlmCache', () => {
     });
   });
 
+  describe('storeMultipart()', () => {
+    it('stores blocks and flattens text for response field', async () => {
+      (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
+
+      const blocks = [
+        { type: 'text' as const, text: 'Hello ' },
+        { type: 'tool_call' as const, id: 'call_1', name: 'lookup', args: {} },
+        { type: 'text' as const, text: 'world' },
+      ];
+
+      await cache.storeMultipart(
+        { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hi' }] },
+        blocks,
+      );
+
+      const [, value] = (client.set as ReturnType<typeof vi.fn>).mock.calls[0];
+      const parsed = JSON.parse(value);
+      expect(parsed.response).toBe('Hello world');
+      expect(parsed.contentBlocks).toHaveLength(3);
+    });
+
+    it('produces empty response when no text blocks', async () => {
+      (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
+
+      const blocks = [
+        { type: 'tool_call' as const, id: 'call_1', name: 'search', args: { q: 'test' } },
+      ];
+
+      await cache.storeMultipart(
+        { model: 'gpt-4o', messages: [{ role: 'user', content: 'Search' }] },
+        blocks,
+      );
+
+      const [, value] = (client.set as ReturnType<typeof vi.fn>).mock.calls[0];
+      const parsed = JSON.parse(value);
+      expect(parsed.response).toBe('');
+      expect(parsed.contentBlocks).toHaveLength(1);
+    });
+
+    it('applies TTL via SET EX', async () => {
+      (client.set as ReturnType<typeof vi.fn>).mockResolvedValue('OK');
+
+      await cache.storeMultipart(
+        { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hi' }] },
+        [{ type: 'text' as const, text: 'ok' }],
+        { ttl: 900 },
+      );
+
+      expect(client.set).toHaveBeenCalledWith(
+        expect.stringContaining('test_ac:llm:'),
+        expect.any(String),
+        'EX',
+        900,
+      );
+    });
+  });
+
+  describe('check() with multipart entries', () => {
+    it('returns contentBlocks when stored entry has them', async () => {
+      const blocks = [
+        { type: 'text', text: 'Hello' },
+        { type: 'tool_call', id: 'c1', name: 'fn', args: {} },
+      ];
+      const stored = JSON.stringify({
+        response: 'Hello',
+        contentBlocks: blocks,
+        model: 'gpt-4o',
+        storedAt: Date.now(),
+      });
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
+
+      const result = await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hi' }],
+      });
+
+      expect(result.hit).toBe(true);
+      expect(result.contentBlocks).toEqual(blocks);
+    });
+
+    it('returns contentBlocks: undefined for text-only entries (v0.2.0 shape)', async () => {
+      const stored = JSON.stringify({
+        response: 'Legacy response',
+        model: 'gpt-4o',
+        storedAt: Date.now(),
+      });
+      (client.get as ReturnType<typeof vi.fn>).mockResolvedValue(stored);
+
+      const result = await cache.check({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hi' }],
+      });
+
+      expect(result.hit).toBe(true);
+      expect(result.contentBlocks).toBeUndefined();
+    });
+  });
+
   describe('invalidateByModel()', () => {
     it('deletes only matching model entries using batched pipeline', async () => {
       const entry1 = JSON.stringify({ response: 'A', model: 'gpt-4o', storedAt: Date.now() });

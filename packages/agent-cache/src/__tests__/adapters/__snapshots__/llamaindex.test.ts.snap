@@ -1,0 +1,3 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`prepareParams (LlamaIndex) > llmCacheHash produces stable value for fixture 1`] = `"e03eff0788b9556fdb2f388261f7e02793ebdc13dbdb6d96b117a2d84dbffe16"`;

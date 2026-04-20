@@ -1,6 +1,6 @@
 {
   "name": "@betterdb/agent-cache",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Multi-tier exact-match cache for AI agent workloads backed by Valkey. LLM responses, tool results, and session state with built-in OpenTelemetry and Prometheus instrumentation.",
   "keywords": [
     "valkey",
@@ -41,6 +41,26 @@
       "import": "./dist/adapters/langgraph.js",
       "require": "./dist/adapters/langgraph.js",
       "types": "./dist/adapters/langgraph.d.ts"
+    },
+    "./openai": {
+      "import": "./dist/adapters/openai-chat.js",
+      "require": "./dist/adapters/openai-chat.js",
+      "types": "./dist/adapters/openai-chat.d.ts"
+    },
+    "./anthropic": {
+      "import": "./dist/adapters/anthropic.js",
+      "require": "./dist/adapters/anthropic.js",
+      "types": "./dist/adapters/anthropic.d.ts"
+    },
+    "./llamaindex": {
+      "import": "./dist/adapters/llamaindex.js",
+      "require": "./dist/adapters/llamaindex.js",
+      "types": "./dist/adapters/llamaindex.d.ts"
+    },
+    "./openai-responses": {
+      "import": "./dist/adapters/openai-responses.js",
+      "require": "./dist/adapters/openai-responses.js",
+      "types": "./dist/adapters/openai-responses.d.ts"
     }
   },
   "files": [
@@ -59,11 +79,15 @@
     "prom-client": "^15.1.3"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
     "@langchain/core": "^1.1.35",
     "@langchain/langgraph-checkpoint": "^0.1.0",
+    "@llamaindex/core": "^0.6.23",
+    "@llamaindex/openai": "^0.4.23",
     "ai": "^6.0.135",
     "@types/node": "^22.19.15",
     "iovalkey": ">=0.3.0",
+    "openai": "^6.34.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.1"
   },
@@ -75,7 +99,10 @@
     "@langchain/core": ">=0.3.0",
     "@langchain/langgraph-checkpoint": ">=0.1.0",
     "ai": "^6.0.135",
-    "posthog-node": ">=4.0.0"
+    "posthog-node": ">=4.0.0",
+    "openai": ">=6.0.0",
+    "@anthropic-ai/sdk": ">=0.90.0",
+    "@llamaindex/core": ">=0.6.0"
   },
   "peerDependenciesMeta": {
     "@langchain/core": {
@@ -88,6 +115,15 @@
       "optional": true
     },
     "posthog-node": {
+      "optional": true
+    },
+    "openai": {
+      "optional": true
+    },
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "@llamaindex/core": {
       "optional": true
     }
   }
