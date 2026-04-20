@@ -71,4 +71,20 @@ describe("prepareParams (OpenAI Chat)", () => {
     expect(typeof prepared.messages[0].content).toBe("string");
     expect(prepared.messages[0].content).toBe("What is 2+2?");
   });
+
+  it("image_url detail field is preserved in binary block", async () => {
+    const prepared = await prepareParams({
+      model: "gpt-4o",
+      messages: [{
+        role: "user",
+        content: [{
+          type: "image_url",
+          image_url: { url: "https://example.com/img.png", detail: "high" },
+        }],
+      }],
+    }, { normalizer });
+    const block = (prepared.messages[0].content as Array<Record<string, unknown>>)[0];
+    expect(block.type).toBe("binary");
+    expect(block.detail).toBe("high");
+  });
 });

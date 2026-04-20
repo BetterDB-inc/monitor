@@ -1,0 +1,16 @@
+{
+  "name": "agent-cache-anthropic-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
+    "@betterdb/agent-cache": "^0.3.0",
+    "iovalkey": "^0.3.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}
