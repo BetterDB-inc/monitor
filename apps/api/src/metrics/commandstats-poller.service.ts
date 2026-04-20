@@ -23,10 +23,7 @@ export interface CommandStatsSnapshotEntry {
 }
 
 @Injectable()
-export class CommandstatsPollerService
-  extends MultiConnectionPoller
-  implements OnModuleInit
-{
+export class CommandstatsPollerService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(CommandstatsPollerService.name);
 
   private readonly POLL_INTERVAL_MS = 60_000; // 60 seconds
@@ -47,9 +44,7 @@ export class CommandstatsPollerService
   }
 
   async onModuleInit(): Promise<void> {
-    this.logger.log(
-      `Starting commandstats polling (interval: ${this.getIntervalMs()}ms)`,
-    );
+    this.logger.log(`Starting commandstats polling (interval: ${this.getIntervalMs()}ms)`);
     this.start();
   }
 
@@ -60,7 +55,9 @@ export class CommandstatsPollerService
 
   getSnapshot(connectionId: string): CommandStatsSnapshotEntry[] {
     const baseline = this.baselines.get(connectionId);
-    if (!baseline) return [];
+    if (!baseline) {
+      return [];
+    }
 
     return Array.from(baseline.samples.entries()).map(([command, sample]) => ({
       command,
@@ -85,9 +82,7 @@ export class CommandstatsPollerService
       return;
     }
 
-    const section = (raw.commandstats ?? raw['Commandstats']) as
-      | Record<string, string>
-      | undefined;
+    const section = (raw.commandstats ?? raw['Commandstats']) as Record<string, string> | undefined;
     const current = parseCommandStatsSection(section);
 
     const currentByCommand = new Map(current.map((s) => [s.command, s]));
@@ -151,9 +146,7 @@ export class CommandstatsPollerService
 
     if (hadReset || batch.length === 0) {
       if (hadReset) {
-        this.logger.log(
-          `commandstats counter reset on ${ctx.connectionName}, re-baselining`,
-        );
+        this.logger.log(`commandstats counter reset on ${ctx.connectionName}, re-baselining`);
       }
       return;
     }
@@ -163,10 +156,7 @@ export class CommandstatsPollerService
     const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;
     if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
       this.lastPruneByConnection.set(ctx.connectionId, now);
-      await this.storage.pruneOldCommandStatsSamples(
-        now - this.RETENTION_MS,
-        ctx.connectionId,
-      );
+      await this.storage.pruneOldCommandStatsSamples(now - this.RETENTION_MS, ctx.connectionId);
     }
   }
 }
