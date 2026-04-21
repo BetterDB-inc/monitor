@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "betterdb-agent-cache"
+version = "0.3.0"
+description = "Multi-tier exact-match cache for AI agent workloads backed by Valkey. LLM responses, tool results, and session state with built-in OpenTelemetry and Prometheus instrumentation."
+keywords = ["valkey", "redis", "agent", "cache", "llm", "opentelemetry", "prometheus", "langchain", "langgraph"]
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "valkey>=6.0.0",
+    "opentelemetry-api>=1.20.0",
+    "prometheus-client>=0.19.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.0.0"]
+anthropic = ["anthropic>=0.20.0"]
+langchain = ["langchain-core>=0.1.0"]
+langgraph = ["langgraph>=0.1.0"]
+llamaindex = ["llama-index-core>=0.10.0"]
+analytics = ["posthog>=3.0.0"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "fakeredis[aioredis]>=2.20.0",
+]
+all = [
+    "openai>=1.0.0",
+    "anthropic>=0.20.0",
+    "langchain-core>=0.1.0",
+    "langgraph>=0.1.0",
+    "llama-index-core>=0.10.0",
+    "posthog>=3.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/BetterDB-inc/monitor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["betterdb_agent_cache"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100

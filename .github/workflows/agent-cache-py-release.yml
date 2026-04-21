@@ -1,0 +1,158 @@
+# Publish betterdb-agent-cache to PyPI
+#
+# Required secrets:
+#   PYPI_API_TOKEN — PyPI API token with publish access to betterdb-agent-cache
+#
+# Trigger by pushing a tag: agent-cache-py-v0.3.0
+
+name: Publish Agent Cache (Python)
+
+on:
+  push:
+    tags:
+      - 'agent-cache-py-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.3.0)'
+        required: true
+        type: string
+      skip_pypi:
+        description: 'Skip PyPI publish (dry run)'
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      valkey:
+        image: valkey/valkey:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: packages/agent-cache-py
+        run: pip install -e ".[dev]" langchain-core langgraph
+
+      - name: Run tests
+        working-directory: packages/agent-cache-py
+        run: pytest tests/ -v
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_pypi }}
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: pip install build hatchling
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
+          else
+            # agent-cache-py-v0.3.0 → 0.3.0
+            echo "version=${GITHUB_REF_NAME#agent-cache-py-v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update pyproject.toml version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        working-directory: packages/agent-cache-py
+        run: |
+          python - <<'EOF'
+          import re, os, pathlib
+          path = pathlib.Path("pyproject.toml")
+          content = path.read_text()
+          content = re.sub(
+              r'^version\s*=\s*"[^"]+"',
+              f'version = "{os.environ["VERSION"]}"',
+              content,
+              flags=re.MULTILINE,
+          )
+          path.write_text(content)
+          EOF
+
+      - name: Build wheel and sdist
+        working-directory: packages/agent-cache-py
+        run: python -m build
+
+      - name: Verify build artifacts
+        working-directory: packages/agent-cache-py
+        run: |
+          ls dist/
+          test -n "$(ls dist/*.whl 2>/dev/null)"
+          test -n "$(ls dist/*.tar.gz 2>/dev/null)"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/agent-cache-py/dist/
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: agent-cache-py-v${{ steps.version.outputs.version }}
+          name: Agent Cache Python v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          body_path: packages/agent-cache-py/RELEASE_NOTES.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify PyPI package (with retry)
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if pip index versions betterdb-agent-cache 2>/dev/null | grep -q "$VERSION"; then
+              echo "Package betterdb-agent-cache==$VERSION verified"
+              exit 0
+            fi
+            echo "Attempt $i: not yet available, retrying in 30s…"
+            sleep 30
+          done
+          echo "Package not available after 5 attempts"
+          exit 1
