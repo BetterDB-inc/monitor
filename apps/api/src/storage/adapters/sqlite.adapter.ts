@@ -38,6 +38,8 @@ import {
   HotKeyEntry,
   HotKeyQueryOptions,
   StoredLatencyHistogram,
+  StoredCommandStatsSample,
+  CommandStatsHistoryQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1199,12 +1201,32 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
 
+      CREATE TABLE IF NOT EXISTS command_stats_samples (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        calls_delta INTEGER NOT NULL,
+        usec_delta INTEGER NOT NULL,
+        interval_ms INTEGER NOT NULL,
+        captured_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
+        ON command_stats_samples(connection_id, command, captured_at);
+
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
         timestamp INTEGER NOT NULL,
         connection_id TEXT NOT NULL,
         index_name TEXT NOT NULL,
         num_docs INTEGER NOT NULL,
+        num_records INTEGER NOT NULL DEFAULT 0,
+        num_deleted_docs INTEGER NOT NULL DEFAULT 0,
+        indexing_failures INTEGER NOT NULL DEFAULT 0,
+        indexing_failures_delta INTEGER NOT NULL DEFAULT 0,
+        percent_indexed REAL NOT NULL DEFAULT 0,
+        indexing_state TEXT NOT NULL DEFAULT 'indexed',
+        total_indexing_time INTEGER NOT NULL DEFAULT 0,
         memory_size_mb REAL NOT NULL
       );
 
@@ -1232,6 +1254,13 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('memory_snapshots', 'cpu_user', 'REAL', '0');
     addColumnIfMissing('memory_snapshots', 'io_threaded_reads', 'INTEGER', '0');
     addColumnIfMissing('memory_snapshots', 'io_threaded_writes', 'INTEGER', '0');
+    addColumnIfMissing('vector_index_snapshots', 'num_records', 'INTEGER', '0');
+    addColumnIfMissing('vector_index_snapshots', 'num_deleted_docs', 'INTEGER', '0');
+    addColumnIfMissing('vector_index_snapshots', 'indexing_failures', 'INTEGER', '0');
+    addColumnIfMissing('vector_index_snapshots', 'indexing_failures_delta', 'INTEGER', '0');
+    addColumnIfMissing('vector_index_snapshots', 'percent_indexed', 'REAL', '0');
+    addColumnIfMissing('vector_index_snapshots', 'indexing_state', 'TEXT', "'indexed'");
+    addColumnIfMissing('vector_index_snapshots', 'total_indexing_time', 'INTEGER', '0');
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
@@ -2885,6 +2914,90 @@ export class SqliteAdapter implements StoragePort {
     return result.changes;
   }
 
+  // Command Stats Sample Methods
+  async saveCommandStatsSamples(
+    samples: Omit<StoredCommandStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.db || samples.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO command_stats_samples
+        (id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    let count = 0;
+    const transaction = this.db.transaction((connId: string) => {
+      for (const s of samples) {
+        const result = stmt.run(
+          randomUUID(),
+          connId,
+          s.command,
+          s.callsDelta,
+          s.usecDelta,
+          s.intervalMs,
+          s.capturedAt,
+        );
+        count += result.changes;
+      }
+    });
+    transaction(connectionId);
+
+    return count;
+  }
+
+  async getCommandStatsHistory(
+    options: CommandStatsHistoryQueryOptions,
+  ): Promise<StoredCommandStatsSample[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at
+         FROM command_stats_samples
+         WHERE connection_id = ? AND command = ? AND captured_at >= ? AND captured_at <= ?
+         ORDER BY captured_at ASC
+         LIMIT ?`,
+      )
+      .all(
+        options.connectionId,
+        options.command,
+        options.startTime,
+        options.endTime,
+        options.limit ?? 10_000,
+      ) as any[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      command: row.command,
+      callsDelta: row.calls_delta,
+      usecDelta: row.usec_delta,
+      intervalMs: row.interval_ms,
+      capturedAt: row.captured_at,
+    }));
+  }
+
+  async pruneOldCommandStatsSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db
+        .prepare('DELETE FROM command_stats_samples WHERE captured_at < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
+
+    const result = this.db
+      .prepare('DELETE FROM command_stats_samples WHERE captured_at < ?')
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
   // Vector Index Snapshot Methods
   async saveVectorIndexSnapshots(
     snapshots: VectorIndexSnapshot[],
@@ -2893,8 +3006,14 @@ export class SqliteAdapter implements StoragePort {
     if (!this.db || snapshots.length === 0) return 0;
 
     const stmt = this.db.prepare(`
-      INSERT OR IGNORE INTO vector_index_snapshots (id, timestamp, connection_id, index_name, num_docs, memory_size_mb)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO vector_index_snapshots (
+        id, timestamp, connection_id, index_name,
+        num_docs, num_records, num_deleted_docs,
+        indexing_failures, indexing_failures_delta,
+        percent_indexed, indexing_state, total_indexing_time,
+        memory_size_mb
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
@@ -2906,6 +3025,13 @@ export class SqliteAdapter implements StoragePort {
           connId,
           snapshot.indexName,
           snapshot.numDocs,
+          snapshot.numRecords,
+          snapshot.numDeletedDocs,
+          snapshot.indexingFailures,
+          snapshot.indexingFailuresDelta,
+          snapshot.percentIndexed,
+          snapshot.indexingState,
+          snapshot.totalIndexingTime,
           snapshot.memorySizeMb,
         );
         count += result.changes;
@@ -2945,7 +3071,11 @@ export class SqliteAdapter implements StoragePort {
     const limit = options.limit ?? 200;
 
     const query = `
-      SELECT id, timestamp, connection_id, index_name, num_docs, memory_size_mb
+      SELECT id, timestamp, connection_id, index_name,
+             num_docs, num_records, num_deleted_docs,
+             indexing_failures, indexing_failures_delta,
+             percent_indexed, indexing_state, total_indexing_time,
+             memory_size_mb
       FROM vector_index_snapshots
       ${whereClause}
       ORDER BY timestamp DESC
@@ -2960,6 +3090,13 @@ export class SqliteAdapter implements StoragePort {
       connectionId: row.connection_id,
       indexName: row.index_name,
       numDocs: row.num_docs,
+      numRecords: row.num_records ?? 0,
+      numDeletedDocs: row.num_deleted_docs ?? 0,
+      indexingFailures: row.indexing_failures ?? 0,
+      indexingFailuresDelta: row.indexing_failures_delta ?? 0,
+      percentIndexed: row.percent_indexed ?? 0,
+      indexingState: row.indexing_state ?? 'indexed',
+      totalIndexingTime: row.total_indexing_time ?? 0,
       memorySizeMb: row.memory_size_mb,
     }));
   }

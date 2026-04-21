@@ -41,6 +41,8 @@ interface ConnectionMetricState {
   // Anomaly detection labels (per-connection)
   currentAnomalyMetricLabels: Set<string>;
   currentCorrelatedPatternLabels: Set<string>;
+  // Vector index labels (per-connection)
+  currentVectorIndexLabels: Set<string>;
 }
 
 @Injectable()
@@ -137,6 +139,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // Slowlog Raw Metrics
   private slowlogLength: Gauge;
   private slowlogLastId: Gauge;
+
+  // Vector Index Metrics
+  private vectorIndexDocs: Gauge;
+  private vectorIndexMemoryBytes: Gauge;
+  private vectorIndexFailures: Gauge;
+  private vectorIndexPercentIndexed: Gauge;
 
   // Poll Counter Metric
   private pollsTotal: Counter;
@@ -245,6 +253,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         // Anomaly detection labels
         currentAnomalyMetricLabels: new Set(),
         currentCorrelatedPatternLabels: new Set(),
+        // Vector index labels
+        currentVectorIndexLabels: new Set(),
       });
     }
     return this.perConnectionState.get(connectionId)!;
@@ -475,6 +485,28 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // Slowlog Raw Metrics (per connection)
     this.slowlogLength = this.createGauge('slowlog_length', 'Current slowlog length');
     this.slowlogLastId = this.createGauge('slowlog_last_id', 'ID of last slowlog entry');
+
+    // Vector Index Metrics (per connection, per index)
+    this.vectorIndexDocs = this.createGauge(
+      'vector_index_docs',
+      'Current document count for a vector index',
+      ['index'],
+    );
+    this.vectorIndexMemoryBytes = this.createGauge(
+      'vector_index_memory_bytes',
+      'Current memory usage for a vector index in bytes',
+      ['index'],
+    );
+    this.vectorIndexFailures = this.createGauge(
+      'vector_index_indexing_failures',
+      'Cumulative hash_indexing_failures for a vector index',
+      ['index'],
+    );
+    this.vectorIndexPercentIndexed = this.createGauge(
+      'vector_index_percent_indexed',
+      'Percent of documents indexed (0-100)',
+      ['index'],
+    );
 
     // Poll Counter Metric (per connection)
     this.pollsTotal = new Counter({
@@ -1270,6 +1302,41 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   incrementPollCounter(connectionId?: string): void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'system';
     this.pollsTotal.labels(connLabel).inc();
+  }
+
+  updateVectorIndexMetrics(
+    connectionId: string,
+    indexes: ReadonlyArray<{
+      indexName: string;
+      numDocs: number;
+      memorySizeMb: number;
+      indexingFailures: number;
+      percentIndexed: number;
+    }>,
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    const state = this.getConnectionState(connectionId);
+    const currentIndexLabels = new Set<string>();
+
+    for (const idx of indexes) {
+      currentIndexLabels.add(idx.indexName);
+      this.vectorIndexDocs.labels(connLabel, idx.indexName).set(idx.numDocs);
+      this.vectorIndexMemoryBytes
+        .labels(connLabel, idx.indexName)
+        .set(idx.memorySizeMb * 1024 * 1024);
+      this.vectorIndexFailures.labels(connLabel, idx.indexName).set(idx.indexingFailures);
+      this.vectorIndexPercentIndexed.labels(connLabel, idx.indexName).set(idx.percentIndexed);
+    }
+
+    for (const staleLabel of state.currentVectorIndexLabels) {
+      if (!currentIndexLabels.has(staleLabel)) {
+        this.vectorIndexDocs.remove(connLabel, staleLabel);
+        this.vectorIndexMemoryBytes.remove(connLabel, staleLabel);
+        this.vectorIndexFailures.remove(connLabel, staleLabel);
+        this.vectorIndexPercentIndexed.remove(connLabel, staleLabel);
+      }
+    }
+    state.currentVectorIndexLabels = currentIndexLabels;
   }
 
   startPollTimer(service: string, connectionId?: string): () => void {

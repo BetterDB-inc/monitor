@@ -33,6 +33,8 @@ import {
   HotKeyEntry,
   HotKeyQueryOptions,
   DatabaseConnectionConfig,
+  StoredCommandStatsSample,
+  CommandStatsHistoryQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1180,6 +1182,55 @@ export class MemoryAdapter implements StoragePort {
       this.memorySnapshots = this.memorySnapshots.filter((e) => e.timestamp >= cutoffTimestamp);
     }
     return before - this.memorySnapshots.length;
+  }
+
+  // Command Stats Sample Methods
+  private commandStatsSamples: StoredCommandStatsSample[] = [];
+
+  async saveCommandStatsSamples(
+    samples: Omit<StoredCommandStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    for (const s of samples) {
+      this.commandStatsSamples.push({
+        id: randomUUID(),
+        connectionId,
+        ...s,
+      });
+    }
+    return samples.length;
+  }
+
+  async getCommandStatsHistory(
+    options: CommandStatsHistoryQueryOptions,
+  ): Promise<StoredCommandStatsSample[]> {
+    return this.commandStatsSamples
+      .filter(
+        (s) =>
+          s.connectionId === options.connectionId &&
+          s.command === options.command &&
+          s.capturedAt >= options.startTime &&
+          s.capturedAt <= options.endTime,
+      )
+      .sort((a, b) => a.capturedAt - b.capturedAt)
+      .slice(0, options.limit ?? 10_000);
+  }
+
+  async pruneOldCommandStatsSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    const before = this.commandStatsSamples.length;
+    if (connectionId) {
+      this.commandStatsSamples = this.commandStatsSamples.filter(
+        (s) => s.capturedAt >= cutoffTimestamp || s.connectionId !== connectionId,
+      );
+    } else {
+      this.commandStatsSamples = this.commandStatsSamples.filter(
+        (s) => s.capturedAt >= cutoffTimestamp,
+      );
+    }
+    return before - this.commandStatsSamples.length;
   }
 
   // Vector Index Snapshot Methods

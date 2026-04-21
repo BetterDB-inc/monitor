@@ -1,4 +1,5 @@
 import { Pool, PoolClient, PoolConfig } from 'pg';
+import { randomUUID } from 'crypto';
 import {
   StoragePort,
   StoredAclEntry,
@@ -34,6 +35,8 @@ import {
   HotKeyQueryOptions,
   StoredLatencyHistogram,
   DatabaseConnectionConfig,
+  StoredCommandStatsSample,
+  CommandStatsHistoryQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1396,17 +1399,45 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_memory_snap_timestamp ON memory_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_snap_connection_id ON memory_snapshots(connection_id);
 
+      CREATE TABLE IF NOT EXISTS command_stats_samples (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        calls_delta BIGINT NOT NULL,
+        usec_delta BIGINT NOT NULL,
+        interval_ms INTEGER NOT NULL,
+        captured_at BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
+        ON command_stats_samples(connection_id, command, captured_at);
+
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
         timestamp BIGINT NOT NULL,
         connection_id TEXT NOT NULL,
         index_name TEXT NOT NULL,
         num_docs INTEGER NOT NULL,
+        num_records INTEGER NOT NULL DEFAULT 0,
+        num_deleted_docs INTEGER NOT NULL DEFAULT 0,
+        indexing_failures INTEGER NOT NULL DEFAULT 0,
+        indexing_failures_delta INTEGER NOT NULL DEFAULT 0,
+        percent_indexed DOUBLE PRECISION NOT NULL DEFAULT 0,
+        indexing_state TEXT NOT NULL DEFAULT 'indexed',
+        total_indexing_time BIGINT NOT NULL DEFAULT 0,
         memory_size_mb DOUBLE PRECISION NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_vis_timestamp ON vector_index_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
+
+      ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS num_records INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS num_deleted_docs INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS indexing_failures INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS indexing_failures_delta INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS percent_indexed DOUBLE PRECISION NOT NULL DEFAULT 0;
+      ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS indexing_state TEXT NOT NULL DEFAULT 'indexed';
+      ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS total_indexing_time BIGINT NOT NULL DEFAULT 0;
 
       -- Idempotent migration for existing deployments without ops/CPU/IO columns
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS ops_per_sec BIGINT NOT NULL DEFAULT 0;
@@ -3151,6 +3182,95 @@ export class PostgresAdapter implements StoragePort {
     return result.rowCount ?? 0;
   }
 
+  // Command Stats Sample Methods
+  async saveCommandStatsSamples(
+    samples: Omit<StoredCommandStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.pool || samples.length === 0) return 0;
+
+    const values: any[] = [];
+    const placeholders: string[] = [];
+    let paramIndex = 1;
+
+    for (const s of samples) {
+      const row: string[] = [];
+      for (let i = 0; i < 7; i++) {
+        row.push(`$${paramIndex++}`);
+      }
+      placeholders.push(`(${row.join(', ')})`);
+      values.push(
+        randomUUID(),
+        connectionId,
+        s.command,
+        s.callsDelta,
+        s.usecDelta,
+        s.intervalMs,
+        s.capturedAt,
+      );
+    }
+
+    const query = `
+      INSERT INTO command_stats_samples
+        (id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at)
+      VALUES ${placeholders.join(', ')}
+    `;
+    const result = await this.pool.query(query, values);
+    return result.rowCount ?? 0;
+  }
+
+  async getCommandStatsHistory(
+    options: CommandStatsHistoryQueryOptions,
+  ): Promise<StoredCommandStatsSample[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `SELECT id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at
+       FROM command_stats_samples
+       WHERE connection_id = $1 AND command = $2 AND captured_at >= $3 AND captured_at <= $4
+       ORDER BY captured_at ASC
+       LIMIT $5`,
+      [
+        options.connectionId,
+        options.command,
+        options.startTime,
+        options.endTime,
+        options.limit ?? 10_000,
+      ],
+    );
+
+    return result.rows.map((row: any) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      command: row.command,
+      callsDelta: Number(row.calls_delta),
+      usecDelta: Number(row.usec_delta),
+      intervalMs: Number(row.interval_ms),
+      capturedAt: Number(row.captured_at),
+    }));
+  }
+
+  async pruneOldCommandStatsSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = await this.pool.query(
+        'DELETE FROM command_stats_samples WHERE captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
+      return result.rowCount ?? 0;
+    }
+
+    const result = await this.pool.query(
+      'DELETE FROM command_stats_samples WHERE captured_at < $1',
+      [cutoffTimestamp],
+    );
+    return result.rowCount ?? 0;
+  }
+
   // Vector Index Snapshot Methods
   async saveVectorIndexSnapshots(
     snapshots: VectorIndexSnapshot[],
@@ -3163,21 +3283,36 @@ export class PostgresAdapter implements StoragePort {
     let paramIndex = 1;
 
     for (const snapshot of snapshots) {
-      placeholders.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
-      );
+      const placeholderRow: string[] = [];
+      for (let i = 0; i < 13; i++) {
+        placeholderRow.push(`$${paramIndex++}`);
+      }
+      placeholders.push(`(${placeholderRow.join(', ')})`);
       values.push(
         snapshot.id,
         snapshot.timestamp,
         connectionId,
         snapshot.indexName,
         snapshot.numDocs,
+        snapshot.numRecords,
+        snapshot.numDeletedDocs,
+        snapshot.indexingFailures,
+        snapshot.indexingFailuresDelta,
+        snapshot.percentIndexed,
+        snapshot.indexingState,
+        snapshot.totalIndexingTime,
         snapshot.memorySizeMb,
       );
     }
 
     const query = `
-      INSERT INTO vector_index_snapshots (id, timestamp, connection_id, index_name, num_docs, memory_size_mb)
+      INSERT INTO vector_index_snapshots (
+        id, timestamp, connection_id, index_name,
+        num_docs, num_records, num_deleted_docs,
+        indexing_failures, indexing_failures_delta,
+        percent_indexed, indexing_state, total_indexing_time,
+        memory_size_mb
+      )
       VALUES ${placeholders.join(', ')}
       ON CONFLICT (id) DO NOTHING
     `;
@@ -3216,7 +3351,11 @@ export class PostgresAdapter implements StoragePort {
     const limit = options.limit ?? 200;
 
     const query = `
-      SELECT id, timestamp, connection_id, index_name, num_docs, memory_size_mb
+      SELECT id, timestamp, connection_id, index_name,
+             num_docs, num_records, num_deleted_docs,
+             indexing_failures, indexing_failures_delta,
+             percent_indexed, indexing_state, total_indexing_time,
+             memory_size_mb
       FROM vector_index_snapshots
       ${whereClause}
       ORDER BY timestamp DESC
@@ -3231,6 +3370,13 @@ export class PostgresAdapter implements StoragePort {
       connectionId: row.connection_id,
       indexName: row.index_name,
       numDocs: Number(row.num_docs),
+      numRecords: Number(row.num_records ?? 0),
+      numDeletedDocs: Number(row.num_deleted_docs ?? 0),
+      indexingFailures: Number(row.indexing_failures ?? 0),
+      indexingFailuresDelta: Number(row.indexing_failures_delta ?? 0),
+      percentIndexed: Number(row.percent_indexed ?? 0),
+      indexingState: row.indexing_state ?? 'indexed',
+      totalIndexingTime: Number(row.total_indexing_time ?? 0),
       memorySizeMb: Number(row.memory_size_mb),
     }));
   }
