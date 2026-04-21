@@ -104,6 +104,20 @@ jobs:
           path.write_text(content)
           EOF
 
+      - name: Refresh default cost table
+        working-directory: packages/agent-cache-py
+        run: python scripts/update_model_prices.py
+
+      - name: Verify cost table is non-empty
+        working-directory: packages/agent-cache-py
+        run: |
+          ENTRIES=$(grep -c "ModelCost(" betterdb_agent_cache/default_cost_table.py)
+          if [ "$ENTRIES" -lt 50 ]; then
+            echo "Cost table suspiciously small: $ENTRIES entries"
+            exit 1
+          fi
+          echo "Cost table has $ENTRIES entries"
+
       - name: Build wheel and sdist
         working-directory: packages/agent-cache-py
         run: python -m build
