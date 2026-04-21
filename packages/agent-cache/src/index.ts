@@ -1,4 +1,5 @@
 export { AgentCache } from './AgentCache';
+export { DEFAULT_COST_TABLE } from './defaultCostTable';
 export type {
   AgentCacheOptions,
   LlmCacheParams,
