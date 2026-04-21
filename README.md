@@ -301,6 +301,10 @@ docker rm betterdb-monitor
 - Full Redis 6.x and 7.x support (85-90% feature parity with Valkey)
 - Graceful degradation for Valkey-only features
 
+### Vector / AI
+
+For deployments running RediSearch or [`valkey-search`](https://github.com/valkey-io/valkey-search), BetterDB ships a dedicated **Vector / AI** tab that surfaces FT.SEARCH ops/sec and average latency over time alongside per-index health (docs, records, deleted docs, indexing failures, backfill progress). Stale Prometheus labels are reconciled when indexes are dropped, and the tab hides automatically when the Search module isn't available. See [`docs/vector-ai/`](docs/vector-ai/README.md) for the full walkthrough and screenshots.
+
 ### Supported Database Versions
 
 | Database | Minimum Version | Supported Features |
