@@ -36,7 +36,9 @@ export function parseVectorIndexInfo(indexName: string, raw: unknown[]): VectorI
 
   const numDocs = Number(map.get('num_docs') ?? 0);
   const numRecords = Number(map.get('num_records') ?? 0);
+  const numDeletedDocs = Number(map.get('num_deleted_docs') ?? 0);
   const indexingFailures = Number(map.get('hash_indexing_failures') ?? 0);
+  const totalIndexingTime = Number(map.get('total_indexing_time') ?? 0);
 
   // Valkey Search: "backfill_complete_percent" (float 0-1), RediSearch: "percent_indexed" (float 0-1)
   const backfillPercent = map.get('backfill_complete_percent');
@@ -87,11 +89,13 @@ export function parseVectorIndexInfo(indexName: string, raw: unknown[]): VectorI
     name: indexName,
     numDocs,
     numRecords,
+    numDeletedDocs,
     numVectorFields,
     indexingState,
     percentIndexed,
     memorySizeMb,
     indexingFailures,
+    totalIndexingTime,
     fields,
     gcStats,
     indexDefinition,

@@ -82,6 +82,11 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
               Vector Search
             </NavItem>
           )}
+          {hasVectorSearch && (
+            <NavItem to="/vector-ai" active={location.pathname === '/vector-ai'}>
+              Vector / AI
+            </NavItem>
+          )}
           <NavItem to="/audit" active={location.pathname === '/audit'}>
             Audit Trail
           </NavItem>

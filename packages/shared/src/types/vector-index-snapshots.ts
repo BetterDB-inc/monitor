@@ -4,6 +4,13 @@ export interface VectorIndexSnapshot {
   connectionId: string;
   indexName: string;
   numDocs: number;
+  numRecords: number;
+  numDeletedDocs: number;
+  indexingFailures: number;
+  indexingFailuresDelta: number;
+  percentIndexed: number;
+  indexingState: string;
+  totalIndexingTime: number;
   memorySizeMb: number;
 }
 

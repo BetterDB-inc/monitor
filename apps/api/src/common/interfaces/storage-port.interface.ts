@@ -191,6 +191,30 @@ export interface StoredLatencyHistogram {
   connectionId?: string;
 }
 
+// Command Stats Sample Types
+export interface StoredCommandStatsSample {
+  id: string;
+  connectionId: string;
+  command: string;
+  callsTotal: number;
+  usecTotal: number;
+  usecPerCall: number;
+  rejectedCalls: number;
+  failedCalls: number;
+  callsDelta: number;
+  usecDelta: number;
+  intervalMs: number;
+  capturedAt: number;
+}
+
+export interface CommandStatsHistoryQueryOptions {
+  connectionId: string;
+  command: string;
+  startTime: number;
+  endTime: number;
+  limit?: number;
+}
+
 // Memory Snapshot Types
 export interface StoredMemorySnapshot {
   id: string; // UUID
@@ -391,6 +415,14 @@ export interface StoragePort {
   saveMemorySnapshots(snapshots: StoredMemorySnapshot[], connectionId: string): Promise<number>;
   getMemorySnapshots(options?: MemorySnapshotQueryOptions): Promise<StoredMemorySnapshot[]>;
   pruneOldMemorySnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Command Stats Sample Methods - connectionId required for writes
+  saveCommandStatsSamples(
+    samples: Omit<StoredCommandStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number>;
+  getCommandStatsHistory(options: CommandStatsHistoryQueryOptions): Promise<StoredCommandStatsSample[]>;
+  pruneOldCommandStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Vector Index Snapshot Methods
   saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number>;

@@ -11,6 +11,24 @@ const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NUMERIC_REGEX = /^\d+$/;
 const LONG_ALPHANUMERIC_REGEX = /^[a-zA-Z0-9]{20,}$/;
+const MAX_ARG_LENGTH = 200;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F]/;
+const BLOB_PLACEHOLDER = '<blob>';
+
+function isFtCommand(command: string): boolean {
+  return command.startsWith('FT.');
+}
+
+function sanitizeCommandArgs(args: string[]): string[] {
+  return args.map((arg) => {
+    if (typeof arg !== 'string') return BLOB_PLACEHOLDER;
+    if (arg.length > MAX_ARG_LENGTH) return BLOB_PLACEHOLDER;
+    if (arg.includes('\uFFFD')) return BLOB_PLACEHOLDER;
+    if (CONTROL_CHAR_REGEX.test(arg)) return BLOB_PLACEHOLDER;
+    return arg;
+  });
+}
 
 export function extractKeyPattern(key: string): string {
   if (!key || key.length === 0) return key;
@@ -99,7 +117,9 @@ export function analyzeSlowLogPatterns(
     commandMap.get(command)!.push(entry);
 
     // Aggregate by key prefix (first segment before delimiter)
-    if (key) {
+    // FT.* commands use an index name rather than a keyspace key, so
+    // aggregating them by prefix yields meaningless results.
+    if (key && !isFtCommand(command)) {
       const prefix = key.split(/[:/]/)[0] + ':';
       if (!prefixMap.has(prefix)) {
         prefixMap.set(prefix, []);
@@ -162,7 +182,7 @@ export function analyzeSlowLogPatterns(
           id: e.id,
           timestamp: e.timestamp,
           duration: e.duration,
-          fullCommand: e.command,
+          fullCommand: sanitizeCommandArgs(e.command),
           clientAddress: e.clientAddress,
         })),
         clientBreakdown,
