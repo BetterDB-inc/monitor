@@ -10,6 +10,7 @@ export class UsageTelemetryService implements OnModuleInit {
   private tier: string;
   private readonly deploymentMode: string;
   private readonly workspaceName: string | undefined;
+  private readonly subdomain: string | undefined;
 
   constructor(
     @Inject('TELEMETRY_CLIENT') private readonly telemetryClient: TelemetryPort,
@@ -23,6 +24,10 @@ export class UsageTelemetryService implements OnModuleInit {
     this.deploymentMode =
       this.configService.get<string>('CLOUD_MODE') === 'true' ? 'cloud' : 'self-hosted';
     this.workspaceName = this.configService.get<string>('TENANT_ID') || undefined;
+    const dbSchema = this.configService.get<string>('DB_SCHEMA');
+    this.subdomain = dbSchema?.startsWith('tenant_')
+      ? dbSchema.slice('tenant_'.length).replace(/_/g, '-')
+      : undefined;
     this.instanceId = '';
     this.tier = 'community';
   }
@@ -41,6 +46,7 @@ export class UsageTelemetryService implements OnModuleInit {
         tier: this.tier,
         licenseKey,
         deploymentMode: this.deploymentMode,
+        subdomain: this.subdomain,
       });
     } catch {
       // fire-and-forget — telemetry must never crash the app
@@ -63,6 +69,7 @@ export class UsageTelemetryService implements OnModuleInit {
           licenseKey,
           deploymentMode: this.deploymentMode,
           workspaceName: this.workspaceName,
+          subdomain: this.subdomain,
           timestamp: Date.now(),
         },
       });
