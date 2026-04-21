@@ -141,13 +141,14 @@ class BetterDBSaver(BaseCheckpointSaver):
         before: Optional[RunnableConfig] = None,
         limit: Optional[int] = None,
     ) -> AsyncIterator[CheckpointTuple]:
-        async for item in self._alist_impl(config, before=before, limit=limit):
+        async for item in self._alist_impl(config, filter=filter, before=before, limit=limit):
             yield item
 
     async def _alist_impl(
         self,
         config: Optional[RunnableConfig],
         *,
+        filter: Optional[dict[str, Any]] = None,
         before: Optional[RunnableConfig] = None,
         limit: Optional[int] = None,
     ) -> AsyncIterator[CheckpointTuple]:  # type: ignore[override]
@@ -223,6 +224,11 @@ class BetterDBSaver(BaseCheckpointSaver):
                 continue
             if limit is not None and yielded >= limit:
                 break
+            # Apply metadata filter if provided
+            if filter:
+                meta = td.get("metadata") or {}
+                if not all(meta.get(k) == v for k, v in filter.items()):
+                    continue
             yield _dict_to_tuple(td)
             yielded += 1
 

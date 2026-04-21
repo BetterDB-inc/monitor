@@ -72,7 +72,7 @@ async def chat(messages: list[dict], cache: AgentCache, llm: OpenAI) -> str:
 
 
 async def main() -> None:
-    client = valkey_client.Valkey(host="localhost", port=6399)
+    client = valkey_client.Valkey(host="localhost", port=6379)
     cache = AgentCache(AgentCacheOptions(
         client=client,
         tier_defaults={"llm": TierDefaults(ttl=3600)},

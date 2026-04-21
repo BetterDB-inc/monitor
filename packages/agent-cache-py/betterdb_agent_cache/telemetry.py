@@ -28,7 +28,10 @@ def _get_or_create_counter(
                 name, documentation, labelnames, registry=registry
             )
         except ValueError:
-            pass
+            existing = registry._names_to_collectors.get(name)
+            if existing is None:
+                raise
+            _metric_cache[key] = existing
     return _metric_cache[key]  # type: ignore[return-value]
 
 
@@ -46,7 +49,10 @@ def _get_or_create_histogram(
                 name, documentation, labelnames, buckets=buckets, registry=registry
             )
         except ValueError:
-            pass
+            existing = registry._names_to_collectors.get(name)
+            if existing is None:
+                raise
+            _metric_cache[key] = existing
     return _metric_cache[key]  # type: ignore[return-value]
 
 
@@ -63,7 +69,10 @@ def _get_or_create_gauge(
                 name, documentation, labelnames, registry=registry
             )
         except ValueError:
-            pass
+            existing = registry._names_to_collectors.get(name)
+            if existing is None:
+                raise
+            _metric_cache[key] = existing
     return _metric_cache[key]  # type: ignore[return-value]
 
 

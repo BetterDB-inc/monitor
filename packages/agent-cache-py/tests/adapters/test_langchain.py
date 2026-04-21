@@ -55,7 +55,7 @@ async def test_alookup_hit_plain_text():
 
     result = await adapter.alookup("hello", 'model_name:"gpt-4o"')
     assert result is not None
-    assert result[0]["text"] == "Hello!"
+    assert result[0].text == "Hello!"
 
 
 @pytest.mark.asyncio
@@ -67,8 +67,8 @@ async def test_alookup_hit_json_generations():
     result = await adapter.alookup("hello", 'model_name:"gpt-4o"')
     assert result is not None
     assert len(result) == 2
-    assert result[0]["text"] == "Hello"
-    assert result[1]["text"] == "World"
+    assert result[0].text == "Hello"
+    assert result[1].text == "World"
 
 
 @pytest.mark.asyncio

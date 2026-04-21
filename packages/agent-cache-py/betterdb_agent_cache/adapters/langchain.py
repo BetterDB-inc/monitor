@@ -19,12 +19,13 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence
 try:
     from langchain_core.caches import BaseCache
     from langchain_core.messages import AIMessage
-    from langchain_core.outputs import Generation
+    from langchain_core.outputs import ChatGeneration, Generation
     _LANGCHAIN_AVAILABLE = True
 except ImportError:
     _LANGCHAIN_AVAILABLE = False
     BaseCache = object  # type: ignore[assignment,misc]
     Generation = Any  # type: ignore[misc,assignment]
+    ChatGeneration = Any  # type: ignore[misc,assignment]
 
 if TYPE_CHECKING:
     from ..agent_cache import AgentCache
@@ -97,20 +98,20 @@ class BetterDBLlmCache(BaseCache):
         try:
             parsed: list[dict[str, Any]] = json.loads(result.response)
             return [
-                {"text": g.get("text", ""), "message": AIMessage(g.get("text", ""))}
+                ChatGeneration(text=g.get("text", ""), message=AIMessage(g.get("text", "")))
                 for g in parsed
             ]
         except (json.JSONDecodeError, TypeError):
             text = result.response
-            return [{"text": text, "message": AIMessage(text)}]
+            return [ChatGeneration(text=text, message=AIMessage(text))]
 
     async def aupdate(
         self, prompt: str, llm_string: str, return_val: Sequence[Any]
     ) -> None:
+        if not return_val:
+            return
         stripped = [{"text": g.text if hasattr(g, "text") else g.get("text", "")} for g in return_val]
         text = json.dumps(stripped)
-        if not text:
-            return
 
         # Extract token counts — try usage_metadata first, fall back to response_metadata
         first = return_val[0] if return_val else None

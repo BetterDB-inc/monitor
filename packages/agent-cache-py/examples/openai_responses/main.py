@@ -77,7 +77,7 @@ async def respond(params: dict, cache: AgentCache, openai: AsyncOpenAI) -> str:
 
 
 async def main() -> None:
-    client = valkey_client.Valkey(host="localhost", port=6399)
+    client = valkey_client.Valkey(host="localhost", port=6379)
     cache = AgentCache(AgentCacheOptions(
         client=client,
         tier_defaults={"llm": TierDefaults(ttl=3600)},

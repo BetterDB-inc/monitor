@@ -27,7 +27,7 @@ from betterdb_agent_cache.types import AgentCacheOptions
 
 
 async def main() -> None:
-    client = valkey_client.Valkey(host="localhost", port=6399)
+    client = valkey_client.Valkey(host="localhost", port=6379)
     cache = AgentCache(AgentCacheOptions(
         client=client,
         tier_defaults={

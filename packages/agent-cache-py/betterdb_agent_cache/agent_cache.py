@@ -36,7 +36,7 @@ class AgentCache:
         self._name = options.name
         self._stats_key = f"{self._name}:__stats"
         self._default_ttl = options.default_ttl
-        self._tool_tier_ttl = options.tier_defaults.get("tool", None)
+        self._tool_tier_defaults = options.tier_defaults.get("tool", None)
         self._cost_table = options.cost_table
         self._analytics_opts = options.analytics
         self._analytics: Analytics = NOOP_ANALYTICS
@@ -194,7 +194,7 @@ class AgentCache:
         stats = await self.stats()
         entries: list[ToolEffectivenessEntry] = []
 
-        tool_tier = self._tool_tier_ttl
+        tool_tier = self._tool_tier_defaults
         tool_tier_ttl = tool_tier.ttl if tool_tier else None
 
         for tool_name, tool_stats in stats.per_tool.items():
