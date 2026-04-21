@@ -120,7 +120,7 @@ class SessionStore:
                 span.set_attribute("cache.thread_id", thread_id)
                 span.set_attribute("cache.field", field)
 
-                effective_ttl = ttl or self._tier_ttl or self._default_ttl
+                effective_ttl = ttl if ttl is not None else (self._tier_ttl if self._tier_ttl is not None else self._default_ttl)
                 try:
                     if effective_ttl is not None:
                         await self._client.set(key, value, ex=effective_ttl)

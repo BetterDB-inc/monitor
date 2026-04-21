@@ -151,7 +151,8 @@ class LlmCache:
                         entry["cost"] = cost
 
                 value_json = json.dumps(entry, separators=(",", ":"), ensure_ascii=False)
-                ttl = (options.ttl if options else None) or self._tier_ttl or self._default_ttl
+                _per_call_ttl = options.ttl if options else None
+                ttl = _per_call_ttl if _per_call_ttl is not None else (self._tier_ttl if self._tier_ttl is not None else self._default_ttl)
                 await self._set(key, value_json, ttl)
 
                 byte_len = len(value_json.encode())
@@ -194,7 +195,8 @@ class LlmCache:
                         entry["cost"] = cost
 
                 value_json = json.dumps(entry, separators=(",", ":"), ensure_ascii=False)
-                ttl = (options.ttl if options else None) or self._tier_ttl or self._default_ttl
+                _per_call_ttl = options.ttl if options else None
+                ttl = _per_call_ttl if _per_call_ttl is not None else (self._tier_ttl if self._tier_ttl is not None else self._default_ttl)
                 await self._set(key, value_json, ttl)
 
                 byte_len = len(value_json.encode())

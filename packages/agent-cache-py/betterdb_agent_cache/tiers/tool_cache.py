@@ -156,11 +156,11 @@ class ToolCache:
 
                 # TTL resolution: per-call → policy → tier → default
                 policy = self._policies.get(tool_name)
-                ttl = (
-                    (options.ttl if options else None)
-                    or (policy.ttl if policy else None)
-                    or self._tier_ttl
-                    or self._default_ttl
+                _per_call_ttl = options.ttl if options else None
+                _policy_ttl = policy.ttl if policy else None
+                ttl = next(
+                    (t for t in (_per_call_ttl, _policy_ttl, self._tier_ttl, self._default_ttl) if t is not None),
+                    None,
                 )
                 await self._set(key, value_json, ttl)
 

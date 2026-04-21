@@ -156,8 +156,8 @@ class BetterDBSaver(BaseCheckpointSaver):
         if not thread_id:
             return
 
-        # Fast path: limit=1, no before filter → read the latest pointer directly
-        if limit == 1 and not before:
+        # Fast path: limit=1, no before filter, no metadata filter → read the latest pointer directly
+        if limit == 1 and not before and not filter:
             latest = await self._cache.session.get(thread_id, _LATEST_FIELD)
             if latest:
                 try:
