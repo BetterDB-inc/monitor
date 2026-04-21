@@ -56,7 +56,7 @@ async def test_tool_message():
     })
     assert p["messages"][0] == {
         "role": "tool",
-        "tool_call_id": "call_1",
+        "toolCallId": "call_1",
         "content": [{"type": "text", "text": "sunny"}],
     }
 
@@ -69,7 +69,7 @@ async def test_function_role_mapped_to_tool():
     })
     msg = p["messages"][0]
     assert msg["role"] == "tool"
-    assert msg["tool_call_id"] == "legacy:weather"
+    assert msg["toolCallId"] == "legacy:weather"
 
 
 # ─── tool calls ───────────────────────────────────────────────────────────────

@@ -219,7 +219,7 @@ async def prepare_params(
                 )
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tr["tool_use_id"],
+                    "toolCallId": tr["tool_use_id"],
                     "content": tr_content,
                 })
 

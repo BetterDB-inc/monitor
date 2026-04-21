@@ -176,7 +176,7 @@ async def prepare_params(
                     text_val = ""
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": item.get("call_id", ""),
+                    "toolCallId": item.get("call_id", ""),
                     "content": [{"type": "text", "text": text_val}],
                 })
                 continue

@@ -170,14 +170,14 @@ async def prepare_params(
                 )
             messages.append({
                 "role": "tool",
-                "tool_call_id": msg["tool_call_id"],
+                "toolCallId": msg["tool_call_id"],
                 "content": [{"type": "text", "text": text}],
             })
 
         elif role == "function":
             messages.append({
                 "role": "tool",
-                "tool_call_id": f"legacy:{msg['name']}",
+                "toolCallId": f"legacy:{msg['name']}",
                 "content": [{"type": "text", "text": msg.get("content") or ""}],
             })
 

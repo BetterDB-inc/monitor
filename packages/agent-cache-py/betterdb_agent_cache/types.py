@@ -41,7 +41,7 @@ class ToolCallBlock(TypedDict):
 
 class ToolResultBlock(TypedDict):
     type: Literal["tool_result"]
-    tool_call_id: str
+    toolCallId: str
     content: list[TextBlock | BinaryBlock]
     is_error: NotRequired[bool]
     hints: NotRequired[BlockHints]
@@ -63,7 +63,7 @@ ContentBlock = TextBlock | BinaryBlock | ToolCallBlock | ToolResultBlock | Reaso
 class LlmCacheMessage(TypedDict, total=False):
     role: Required[Literal["system", "user", "assistant", "tool"]]
     content: Required[str | list[ContentBlock]]
-    tool_call_id: str
+    toolCallId: str
     name: str
 
 

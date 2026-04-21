@@ -57,18 +57,18 @@ def llm_cache_hash(params: LlmCacheParams) -> str:
         "temperature": params.get("temperature", 1),
         "top_p": params.get("top_p", 1),
     }
-    for key in (
-        "max_tokens",
-        "tool_choice",
-        "seed",
-        "stop",
-        "response_format",
-        "reasoning_effort",
-        "prompt_cache_key",
+    for src_key, out_key in (
+        ("max_tokens", "max_tokens"),
+        ("tool_choice", "toolChoice"),
+        ("seed", "seed"),
+        ("stop", "stop"),
+        ("response_format", "responseFormat"),
+        ("reasoning_effort", "reasoningEffort"),
+        ("prompt_cache_key", "promptCacheKey"),
     ):
-        val = params.get(key)
+        val = params.get(src_key)
         if val is not None:
-            d[key] = val
+            d[out_key] = val
     if tools is not None:
         d["tools"] = tools
 

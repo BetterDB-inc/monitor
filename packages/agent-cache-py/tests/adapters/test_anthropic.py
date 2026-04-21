@@ -79,7 +79,7 @@ async def test_tool_result_becomes_tool_role():
     ]}]))
     msg = p["messages"][-1]
     assert msg["role"] == "tool"
-    assert msg["tool_call_id"] == "toolu_1"
+    assert msg["toolCallId"] == "toolu_1"
     assert msg["content"][0]["text"] == "sunny"
 
 

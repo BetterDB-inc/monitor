@@ -123,7 +123,7 @@ async def prepare_params(
             tr = options["tool_result"]
             out.append({
                 "role": "tool",
-                "tool_call_id": tr["id"],
+                "toolCallId": tr["id"],
                 "content": [{"type": "text", "text": tr.get("result", "")}],
             })
             continue

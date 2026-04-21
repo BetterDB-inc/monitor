@@ -65,7 +65,7 @@ async def test_tool_result_from_options():
     )
     msg = p["messages"][0]
     assert msg["role"] == "tool"
-    assert msg["tool_call_id"] == "call_1"
+    assert msg["toolCallId"] == "call_1"
     assert msg["content"][0]["text"] == "sunny"
 
 
