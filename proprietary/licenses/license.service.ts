@@ -204,6 +204,8 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    const licenseKey = this.getTruncatedLicenseKey();
+
     try {
       this.telemetryClient.capture({
         distinctId: this.instanceId,
@@ -212,6 +214,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
           tier: this.getLicenseTier(),
           deploymentMode:
             process.env.CLOUD_MODE === 'true' ? 'cloud' : 'self-hosted',
+          licenseKey,
           ...data,
         },
       });
@@ -308,6 +311,15 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
 
   getLicenseKey(): string | null {
     return this.licenseKey;
+  }
+
+  /**
+   * Returns a truncated license key suffix for analytics correlation.
+   * Only the last 4 characters are sent to avoid exposing the full key.
+   */
+  getTruncatedLicenseKey(): string | undefined {
+    if (!this.licenseKey || this.licenseKey.length < 4) return undefined;
+    return `...${this.licenseKey.slice(-4)}`;
   }
 
   async refreshLicense(): Promise<EntitlementResponse> {
