@@ -83,6 +83,18 @@ jobs:
             fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
+      - name: Refresh default cost table
+        run: pnpm --filter @betterdb/agent-cache update:pricing
+
+      - name: Verify cost table is non-empty
+        run: |
+          ENTRIES=$(grep -c "inputPer1k" packages/agent-cache/src/defaultCostTable.ts)
+          if [ "$ENTRIES" -lt 50 ]; then
+            echo "Cost table suspiciously small: $ENTRIES entries"
+            exit 1
+          fi
+          echo "Cost table has $ENTRIES entries"
+
       - name: Build agent-cache
         env:
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
