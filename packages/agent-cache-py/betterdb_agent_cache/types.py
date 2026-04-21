@@ -122,6 +122,8 @@ class AgentCacheOptions:
     default_ttl: int | None = None
     tier_defaults: dict[str, TierDefaults] = field(default_factory=dict)
     cost_table: dict[str, ModelCost] = field(default_factory=dict)
+    use_default_cost_table: bool = True
+    """Use bundled default cost table from LiteLLM. User cost_table entries override defaults. Default: True."""
     telemetry: TelemetryOptions = field(default_factory=TelemetryOptions)
     analytics: AnalyticsOptions = field(default_factory=AnalyticsOptions)
 

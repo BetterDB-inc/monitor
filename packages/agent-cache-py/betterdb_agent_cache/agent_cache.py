@@ -6,6 +6,7 @@ from typing import Any
 
 from .analytics import NOOP_ANALYTICS, Analytics, create_analytics
 from .cluster import cluster_scan
+from .default_cost_table import DEFAULT_COST_TABLE
 from .errors import ValkeyCommandError
 from .telemetry import create_telemetry
 from .tiers.llm_cache import LlmCache, LlmCacheConfig
@@ -14,6 +15,7 @@ from .tiers.tool_cache import ToolCache, ToolCacheConfig
 from .types import (
     AgentCacheOptions,
     AgentCacheStats,
+    ModelCost,
     SessionStats,
     TierStats,
     ToolEffectivenessEntry,
@@ -38,10 +40,18 @@ class AgentCache:
         self._default_ttl = options.default_ttl
         self._tool_tier_defaults = options.tier_defaults.get("tool", None)
         self._cost_table = options.cost_table
+        self._use_default_cost_table = options.use_default_cost_table
         self._analytics_opts = options.analytics
         self._analytics: Analytics = NOOP_ANALYTICS
         self._stats_task: asyncio.Task[None] | None = None
         self._shutdown = False
+
+        use_default = options.use_default_cost_table
+        effective_cost_table: dict[str, ModelCost] | None
+        if use_default:
+            effective_cost_table = {**DEFAULT_COST_TABLE, **(options.cost_table or {})}
+        else:
+            effective_cost_table = options.cost_table or None
 
         telemetry = create_telemetry(
             prefix=options.telemetry.metrics_prefix,
@@ -54,7 +64,7 @@ class AgentCache:
             name=self._name,
             default_ttl=options.default_ttl,
             tier_ttl=options.tier_defaults.get("llm", None) and options.tier_defaults["llm"].ttl,
-            cost_table=options.cost_table or None,
+            cost_table=effective_cost_table,
             telemetry=telemetry,
             stats_key=self._stats_key,
         ))
@@ -111,6 +121,7 @@ class AgentCache:
             await analytics.init(self._client, self._name, {
                 "default_ttl": self._default_ttl,
                 "has_cost_table": bool(self._cost_table),
+                "uses_default_cost_table": self._use_default_cost_table,
             })
             if not self._shutdown and opts.stats_interval_s > 0:
                 self._stats_task = asyncio.create_task(self._stats_loop(opts.stats_interval_s))

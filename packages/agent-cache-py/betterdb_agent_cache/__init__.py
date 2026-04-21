@@ -1,4 +1,5 @@
 from .agent_cache import AgentCache
+from .default_cost_table import DEFAULT_COST_TABLE
 from .analytics import Analytics
 from .errors import AgentCacheError, AgentCacheUsageError, ValkeyCommandError
 from .normalizer import (
@@ -42,6 +43,7 @@ from .types import (
 __all__ = [
     # Main class
     "AgentCache",
+    "DEFAULT_COST_TABLE",
     # Types
     "AgentCacheOptions",
     "AgentCacheStats",
