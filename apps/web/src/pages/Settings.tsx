@@ -504,7 +504,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       Save this token - it won't be shown again
                     </h3>
                     <div className="flex gap-2 mb-3">
-                      <code className="flex-1 text-xs bg-white p-2 rounded border font-mono break-all select-all">
+                      <code className="flex-1 text-xs bg-white dark:text-gray-900 p-2 rounded border font-mono break-all select-all">
                         {mcpGeneratedToken.token}
                       </code>
                       <button
@@ -516,7 +516,7 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                     </div>
 
                     <h4 className="text-xs font-medium mb-1">Add to your Claude Code MCP config:</h4>
-                    <pre className="text-xs bg-white p-2 rounded border overflow-x-auto">
+                    <pre className="text-xs bg-white dark:text-gray-900 p-2 rounded border overflow-x-auto">
 {`{
   "mcpServers": {
     "betterdb": {

@@ -182,7 +182,7 @@ export function WebhookDeliveries({ webhook, onClose }: WebhookDeliveriesProps) 
             {deliveries[0].responseBody && (
               <div>
                 <span className="font-medium">Response Body:</span>
-                <pre className="mt-1 p-2 bg-white border rounded text-xs overflow-x-auto">
+                <pre className="mt-1 p-2 bg-white dark:text-gray-900 border rounded text-xs overflow-x-auto">
                   {deliveries[0].responseBody}
                 </pre>
               </div>
