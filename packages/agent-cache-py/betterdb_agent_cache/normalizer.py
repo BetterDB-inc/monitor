@@ -124,15 +124,16 @@ def compose_normalizer(cfg: NormalizerConfig | None = None) -> BinaryNormalizer:
     async def normalizer(ref: BinaryRef) -> str:
         kind = ref["kind"]
         by_kind = c.get("by_kind", {})
-        if kind in by_kind:
-            return await by_kind[kind](ref)
-
         source = ref["source"]
         t = source["type"]
 
         async def _call(handler: Any, *args: Any) -> str:
             result = handler(*args)
             return await result if asyncio.iscoroutine(result) else result  # type: ignore[return-value]
+
+        by_kind = c.get("by_kind", {})
+        if kind in by_kind:
+            return await _call(by_kind[kind], ref)
 
         if t == "base64":
             h = c.get("base64")
