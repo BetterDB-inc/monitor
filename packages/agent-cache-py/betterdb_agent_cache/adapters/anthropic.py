@@ -84,13 +84,16 @@ async def _normalize_block(
         src_type = src.get("type")
 
         if src_type == "content":
-            full_json = json.dumps(src.get("content"))
+            full_json = json.dumps(src.get("content"), sort_keys=True)
             digest = hashlib.sha256(full_json.encode()).hexdigest()
             ref = f"nested:sha256:{digest}"
             doc_block: BinaryBlock = {
                 "type": "binary", "kind": "document",
                 "media_type": "application/x-nested-content", "ref": ref,
             }
+            hints = _build_cache_hints(block.get("cache_control"))
+            if hints:
+                doc_block["hints"] = hints
             return doc_block
 
         media_type = "application/octet-stream"

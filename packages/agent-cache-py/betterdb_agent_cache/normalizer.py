@@ -131,7 +131,6 @@ def compose_normalizer(cfg: NormalizerConfig | None = None) -> BinaryNormalizer:
             result = handler(*args)
             return await result if asyncio.iscoroutine(result) else result  # type: ignore[return-value]
 
-        by_kind = c.get("by_kind", {})
         if kind in by_kind:
             return await _call(by_kind[kind], ref)
 
