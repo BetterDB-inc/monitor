@@ -30,6 +30,8 @@ export interface AgentCacheOptions {
   };
   /** Model pricing for cost savings tracking. Optional. */
   costTable?: Record<string, ModelCost>;
+  /** Use bundled default cost table from LiteLLM. User costTable entries override defaults. Default: true. */
+  useDefaultCostTable?: boolean;
   telemetry?: {
     tracerName?: string;
     metricsPrefix?: string;

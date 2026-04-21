@@ -7,7 +7,9 @@ import type {
   TierStats,
   SessionStats,
   ToolStats,
+  ModelCost,
 } from './types';
+import { DEFAULT_COST_TABLE } from './defaultCostTable';
 import { LlmCache } from './tiers/LlmCache';
 import { ToolCache } from './tiers/ToolCache';
 import { SessionStore } from './tiers/SessionStore';
@@ -46,12 +48,17 @@ export class AgentCache {
 
     const defaultTtl = options.defaultTtl;
 
+    const useDefault = options.useDefaultCostTable ?? true;
+    const effectiveCostTable: Record<string, ModelCost> | undefined = useDefault
+      ? { ...DEFAULT_COST_TABLE, ...(options.costTable ?? {}) }
+      : options.costTable;
+
     this.llm = new LlmCache({
       client: this.client,
       name: this.name,
       defaultTtl,
       tierTtl: options.tierDefaults?.llm?.ttl,
-      costTable: options.costTable,
+      costTable: effectiveCostTable,
       telemetry,
       statsKey: this.statsKey,
     });
@@ -97,6 +104,7 @@ export class AgentCache {
           toolTtl: options.tierDefaults?.tool?.ttl,
           sessionTtl: options.tierDefaults?.session?.ttl,
           hasCostTable: !!options.costTable,
+          usesDefaultCostTable: useDefault,
         };
         return a.init(this.client, this.name, configProps);
       })

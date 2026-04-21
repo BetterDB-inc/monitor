@@ -89,7 +89,8 @@ As of 2026, no existing caching solution for AI agents provides all three of the
 | `tierDefaults.llm.ttl` | `number` | `undefined` | Default TTL for LLM cache entries |
 | `tierDefaults.tool.ttl` | `number` | `undefined` | Default TTL for tool cache entries |
 | `tierDefaults.session.ttl` | `number` | `undefined` | Default TTL for session entries |
-| `costTable` | `Record<string, ModelCost>` | `undefined` | Model pricing for cost savings tracking |
+| `costTable` | `Record<string, ModelCost>` | `undefined` | Model pricing for cost savings tracking. Optional. Merges with built-in default table from LiteLLM (overrides default entries for matching keys). Set useDefaultCostTable: false to disable the default. |
+| `useDefaultCostTable` | `boolean` | `true` | Use bundled default cost table sourced from LiteLLM. Set to `false` to disable. |
 | `telemetry.tracerName` | `string` | `'@betterdb/agent-cache'` | OpenTelemetry tracer name |
 | `telemetry.metricsPrefix` | `string` | `'agent_cache'` | Prefix for all Prometheus metric names |
 | `telemetry.registry` | `Registry` | prom-client default | prom-client `Registry` to register metrics on |
@@ -101,6 +102,31 @@ As of 2026, no existing caching solution for AI agents provides all three of the
   'gpt-4o': { inputPer1k: 0.0025, outputPer1k: 0.01 },
   'gpt-4o-mini': { inputPer1k: 0.00015, outputPer1k: 0.0006 },
 }
+```
+
+### Default cost table
+
+A default cost table sourced from LiteLLM's `model_prices_and_context_window.json` is bundled with the package and refreshed on every release. Cost tracking works out of the box for common models (GPT-4o, Claude, Gemini, and 100+ others).
+
+To override a specific model's pricing without losing the defaults for others:
+
+```typescript
+const cache = new AgentCache({
+  client,
+  costTable: {
+    'gpt-4o': { inputPer1k: 0.002, outputPer1k: 0.008 },
+  },
+});
+```
+
+To disable the default table entirely:
+
+```typescript
+const cache = new AgentCache({
+  client,
+  useDefaultCostTable: false,
+  costTable: { /* your exact table */ },
+});
 ```
 
 ## Cache tiers
