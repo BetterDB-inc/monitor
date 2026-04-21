@@ -72,7 +72,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "update:pricing": "node scripts/update-model-prices.mjs"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
