@@ -14,6 +14,11 @@ describe('CommandStats samples storage', () => {
     overrides: Partial<Omit<StoredCommandStatsSample, 'id' | 'connectionId'>> = {},
   ): Omit<StoredCommandStatsSample, 'id' | 'connectionId'> => ({
     command: 'ft.search',
+    callsTotal: 100,
+    usecTotal: 500_000,
+    usecPerCall: 5_000,
+    rejectedCalls: 0,
+    failedCalls: 0,
     callsDelta: 5,
     usecDelta: 50_000,
     intervalMs: 5_000,
@@ -70,6 +75,37 @@ describe('CommandStats samples storage', () => {
     });
     expect(window).toHaveLength(1);
     expect(window[0].capturedAt).toBe(500);
+  });
+
+  it('round-trips absolute totals, usec_per_call, and error counts', async () => {
+    await storage.saveCommandStatsSamples(
+      [
+        sample({
+          callsTotal: 9_001,
+          usecTotal: 4_500_000,
+          usecPerCall: 499.9,
+          rejectedCalls: 7,
+          failedCalls: 3,
+          capturedAt: 1_234,
+        }),
+      ],
+      CONN,
+    );
+
+    const [row] = await storage.getCommandStatsHistory({
+      connectionId: CONN,
+      command: 'ft.search',
+      startTime: 0,
+      endTime: 10_000,
+    });
+
+    expect(row).toMatchObject({
+      callsTotal: 9_001,
+      usecTotal: 4_500_000,
+      usecPerCall: 499.9,
+      rejectedCalls: 7,
+      failedCalls: 3,
+    });
   });
 
   it('prunes samples older than cutoff', async () => {

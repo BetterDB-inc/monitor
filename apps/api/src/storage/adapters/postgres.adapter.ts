@@ -1403,6 +1403,11 @@ export class PostgresAdapter implements StoragePort {
         id TEXT PRIMARY KEY,
         connection_id TEXT NOT NULL,
         command TEXT NOT NULL,
+        calls_total BIGINT NOT NULL DEFAULT 0,
+        usec_total BIGINT NOT NULL DEFAULT 0,
+        usec_per_call DOUBLE PRECISION NOT NULL DEFAULT 0,
+        rejected_calls BIGINT NOT NULL DEFAULT 0,
+        failed_calls BIGINT NOT NULL DEFAULT 0,
         calls_delta BIGINT NOT NULL,
         usec_delta BIGINT NOT NULL,
         interval_ms INTEGER NOT NULL,
@@ -1438,6 +1443,12 @@ export class PostgresAdapter implements StoragePort {
       ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS percent_indexed DOUBLE PRECISION NOT NULL DEFAULT 0;
       ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS indexing_state TEXT NOT NULL DEFAULT 'indexed';
       ALTER TABLE vector_index_snapshots ADD COLUMN IF NOT EXISTS total_indexing_time BIGINT NOT NULL DEFAULT 0;
+
+      ALTER TABLE command_stats_samples ADD COLUMN IF NOT EXISTS calls_total BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE command_stats_samples ADD COLUMN IF NOT EXISTS usec_total BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE command_stats_samples ADD COLUMN IF NOT EXISTS usec_per_call DOUBLE PRECISION NOT NULL DEFAULT 0;
+      ALTER TABLE command_stats_samples ADD COLUMN IF NOT EXISTS rejected_calls BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE command_stats_samples ADD COLUMN IF NOT EXISTS failed_calls BIGINT NOT NULL DEFAULT 0;
 
       -- Idempotent migration for existing deployments without ops/CPU/IO columns
       ALTER TABLE memory_snapshots ADD COLUMN IF NOT EXISTS ops_per_sec BIGINT NOT NULL DEFAULT 0;
@@ -3195,7 +3206,7 @@ export class PostgresAdapter implements StoragePort {
 
     for (const s of samples) {
       const row: string[] = [];
-      for (let i = 0; i < 7; i++) {
+      for (let i = 0; i < 12; i++) {
         row.push(`$${paramIndex++}`);
       }
       placeholders.push(`(${row.join(', ')})`);
@@ -3203,6 +3214,11 @@ export class PostgresAdapter implements StoragePort {
         randomUUID(),
         connectionId,
         s.command,
+        s.callsTotal,
+        s.usecTotal,
+        s.usecPerCall,
+        s.rejectedCalls,
+        s.failedCalls,
         s.callsDelta,
         s.usecDelta,
         s.intervalMs,
@@ -3212,7 +3228,9 @@ export class PostgresAdapter implements StoragePort {
 
     const query = `
       INSERT INTO command_stats_samples
-        (id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at)
+        (id, connection_id, command,
+         calls_total, usec_total, usec_per_call, rejected_calls, failed_calls,
+         calls_delta, usec_delta, interval_ms, captured_at)
       VALUES ${placeholders.join(', ')}
     `;
     const result = await this.pool.query(query, values);
@@ -3225,7 +3243,9 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     const result = await this.pool.query(
-      `SELECT id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at
+      `SELECT id, connection_id, command,
+              calls_total, usec_total, usec_per_call, rejected_calls, failed_calls,
+              calls_delta, usec_delta, interval_ms, captured_at
        FROM command_stats_samples
        WHERE connection_id = $1 AND command = $2 AND captured_at >= $3 AND captured_at <= $4
        ORDER BY captured_at ASC
@@ -3243,6 +3263,11 @@ export class PostgresAdapter implements StoragePort {
       id: row.id,
       connectionId: row.connection_id,
       command: row.command,
+      callsTotal: Number(row.calls_total),
+      usecTotal: Number(row.usec_total),
+      usecPerCall: Number(row.usec_per_call),
+      rejectedCalls: Number(row.rejected_calls),
+      failedCalls: Number(row.failed_calls),
       callsDelta: Number(row.calls_delta),
       usecDelta: Number(row.usec_delta),
       intervalMs: Number(row.interval_ms),

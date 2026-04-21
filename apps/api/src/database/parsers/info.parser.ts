@@ -42,4 +42,32 @@ export class InfoParser {
 
     return 'valkey_version' in server;
   }
+
+  /**
+   * Parses a "k=v<sep>k=v<sep>…" line into a string map.
+   *
+   * Used across INFO sections where a single line carries multiple fields —
+   * e.g. `cmdstat_*` lines (`calls=100,usec=500,usec_per_call=5.00,…`),
+   * `keyspace.db*` (`keys=123,expires=5,avg_ttl=0`), and CLIENT LIST rows
+   * (`id=1 addr=... name=...`, space-separated).
+   *
+   * Unlike `pair.split('=')`, this preserves `=` inside values by splitting
+   * on the first `=` only. Callers are responsible for coercing to number
+   * or other types as needed.
+   */
+  static parseKvLine(line: string, separator: string): Record<string, string> {
+    const result: Record<string, string> = {};
+    if (!line) {
+      return result;
+    }
+
+    for (const pair of line.split(separator)) {
+      const eq = pair.indexOf('=');
+      if (eq === -1) continue;
+      const key = pair.slice(0, eq).trim();
+      if (!key) continue;
+      result[key] = pair.slice(eq + 1).trim();
+    }
+    return result;
+  }
 }

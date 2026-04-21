@@ -7,8 +7,8 @@ import {
   AclLogEntry,
   ClusterNode,
   SlotStats,
-  SlotStatsMetric,
 } from '../../common/types/metrics.types';
+import { InfoParser } from './info.parser';
 
 export class MetricsParser {
   static parseInfoToTyped(info: Record<string, unknown>): InfoResponse {
@@ -68,11 +68,8 @@ export class MetricsParser {
         user: '',
       };
 
-      const pairs = line.split(' ');
-      for (const pair of pairs) {
-        const [key, value] = pair.split('=');
-        if (!key || value === undefined) continue;
-
+      const fields = InfoParser.parseKvLine(line, ' ');
+      for (const [key, value] of Object.entries(fields)) {
         switch (key) {
           case 'id':
             client.id = value;

@@ -12,14 +12,21 @@ interface ConnectionBaseline {
   lastCapturedAt: number;
 }
 
+export interface CommandStatsSnapshotEntry {
+  command: string;
+  callsTotal: number;
+  usecTotal: number;
+  usecPerCall: number;
+  rejectedCalls: number;
+  failedCalls: number;
+  capturedAt: number;
+}
+
 @Injectable()
-export class CommandstatsPollerService
-  extends MultiConnectionPoller
-  implements OnModuleInit
-{
+export class CommandstatsPollerService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(CommandstatsPollerService.name);
 
-  private readonly POLL_INTERVAL_MS = 15_000; // 15 seconds
+  private readonly POLL_INTERVAL_MS = 60_000; // 60 seconds
   private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
   private readonly RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
   private lastPruneByConnection = new Map<string, number>();
@@ -37,15 +44,30 @@ export class CommandstatsPollerService
   }
 
   async onModuleInit(): Promise<void> {
-    this.logger.log(
-      `Starting commandstats polling (interval: ${this.getIntervalMs()}ms)`,
-    );
+    this.logger.log(`Starting commandstats polling (interval: ${this.getIntervalMs()}ms)`);
     this.start();
   }
 
   protected onConnectionRemoved(connectionId: string): void {
     this.baselines.delete(connectionId);
     this.lastPruneByConnection.delete(connectionId);
+  }
+
+  getSnapshot(connectionId: string): CommandStatsSnapshotEntry[] {
+    const baseline = this.baselines.get(connectionId);
+    if (!baseline) {
+      return [];
+    }
+
+    return Array.from(baseline.samples.entries()).map(([command, sample]) => ({
+      command,
+      callsTotal: sample.calls,
+      usecTotal: sample.usec,
+      usecPerCall: sample.usecPerCall,
+      rejectedCalls: sample.rejectedCalls,
+      failedCalls: sample.failedCalls,
+      capturedAt: baseline.lastCapturedAt,
+    }));
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
@@ -60,15 +82,15 @@ export class CommandstatsPollerService
       return;
     }
 
-    const section = (raw.commandstats ?? raw['Commandstats']) as
-      | Record<string, string>
-      | undefined;
+    const section = (raw.commandstats ?? raw['Commandstats']) as Record<string, string> | undefined;
     const current = parseCommandStatsSection(section);
+
+    const currentByCommand = new Map(current.map((s) => [s.command, s]));
 
     const previous = this.baselines.get(ctx.connectionId);
     if (!previous) {
       this.baselines.set(ctx.connectionId, {
-        samples: new Map(Object.entries(current)),
+        samples: currentByCommand,
         lastCapturedAt: now,
       });
       return;
@@ -77,6 +99,11 @@ export class CommandstatsPollerService
     const intervalMs = now - previous.lastCapturedAt;
     const batch: Array<{
       command: string;
+      callsTotal: number;
+      usecTotal: number;
+      usecPerCall: number;
+      rejectedCalls: number;
+      failedCalls: number;
       callsDelta: number;
       usecDelta: number;
       intervalMs: number;
@@ -84,8 +111,8 @@ export class CommandstatsPollerService
     }> = [];
 
     let hadReset = false;
-    for (const [command, sample] of Object.entries(current)) {
-      const prev = previous.samples.get(command);
+    for (const sample of current) {
+      const prev = previous.samples.get(sample.command);
       if (!prev) {
         continue;
       }
@@ -98,7 +125,12 @@ export class CommandstatsPollerService
       if (callsDelta === 0 && usecDelta === 0) continue;
 
       batch.push({
-        command,
+        command: sample.command,
+        callsTotal: sample.calls,
+        usecTotal: sample.usec,
+        usecPerCall: sample.usecPerCall,
+        rejectedCalls: sample.rejectedCalls,
+        failedCalls: sample.failedCalls,
         callsDelta,
         usecDelta,
         intervalMs,
@@ -108,15 +140,13 @@ export class CommandstatsPollerService
 
     // Update baseline regardless — reset case also needs a fresh baseline
     this.baselines.set(ctx.connectionId, {
-      samples: new Map(Object.entries(current)),
+      samples: currentByCommand,
       lastCapturedAt: now,
     });
 
     if (hadReset || batch.length === 0) {
       if (hadReset) {
-        this.logger.log(
-          `commandstats counter reset on ${ctx.connectionName}, re-baselining`,
-        );
+        this.logger.log(`commandstats counter reset on ${ctx.connectionName}, re-baselining`);
       }
       return;
     }
@@ -126,10 +156,7 @@ export class CommandstatsPollerService
     const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;
     if (now - lastPrune > this.PRUNE_INTERVAL_MS) {
       this.lastPruneByConnection.set(ctx.connectionId, now);
-      await this.storage.pruneOldCommandStatsSamples(
-        now - this.RETENTION_MS,
-        ctx.connectionId,
-      );
+      await this.storage.pruneOldCommandStatsSamples(now - this.RETENTION_MS, ctx.connectionId);
     }
   }
 }

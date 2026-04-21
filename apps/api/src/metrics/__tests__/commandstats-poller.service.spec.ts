@@ -137,4 +137,61 @@ describe('CommandstatsPollerService', () => {
     expect(storage.saveCommandStatsSamples.mock.calls[0][1]).toBe('conn-A');
     expect(storage.saveCommandStatsSamples.mock.calls[0][0][0].callsDelta).toBe(5);
   });
+
+  it('persists absolute totals and error counts alongside deltas', async () => {
+    const client = clientWithCommandstats({
+      'cmdstat_ft.search': 'calls=100,usec=5000,usec_per_call=50,rejected_calls=2,failed_calls=1',
+    });
+    await (service as any).pollConnection(makeCtx(client));
+
+    client.getInfo.mockResolvedValueOnce({
+      commandstats: {
+        'cmdstat_ft.search':
+          'calls=130,usec=6500,usec_per_call=50,rejected_calls=4,failed_calls=3',
+      },
+    });
+    await (service as any).pollConnection(makeCtx(client));
+
+    const [batch] = storage.saveCommandStatsSamples.mock.calls[0];
+    expect(batch[0]).toMatchObject({
+      command: 'ft.search',
+      callsTotal: 130,
+      usecTotal: 6500,
+      usecPerCall: 50,
+      rejectedCalls: 4,
+      failedCalls: 3,
+      callsDelta: 30,
+      usecDelta: 1500,
+    });
+  });
+
+  it('exposes the current per-command snapshot via getSnapshot()', async () => {
+    const client = clientWithCommandstats({
+      'cmdstat_ft.search':
+        'calls=42,usec=2100,usec_per_call=50,rejected_calls=0,failed_calls=0',
+      'cmdstat_get':
+        'calls=1000,usec=50000,usec_per_call=50,rejected_calls=0,failed_calls=0',
+    });
+
+    expect(service.getSnapshot('conn-1')).toEqual([]);
+
+    jest.spyOn(Date, 'now').mockReturnValue(1234567890);
+    await (service as any).pollConnection(makeCtx(client));
+    jest.restoreAllMocks();
+
+    const snapshot = service.getSnapshot('conn-1');
+    const byCommand = Object.fromEntries(snapshot.map((s) => [s.command, s]));
+
+    expect(byCommand['ft.search']).toEqual({
+      command: 'ft.search',
+      callsTotal: 42,
+      usecTotal: 2100,
+      usecPerCall: 50,
+      rejectedCalls: 0,
+      failedCalls: 0,
+      capturedAt: 1234567890,
+    });
+    expect(byCommand.get.callsTotal).toBe(1000);
+    expect(service.getSnapshot('unknown-conn')).toEqual([]);
+  });
 });

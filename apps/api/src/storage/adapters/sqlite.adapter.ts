@@ -1205,6 +1205,11 @@ export class SqliteAdapter implements StoragePort {
         id TEXT PRIMARY KEY,
         connection_id TEXT NOT NULL,
         command TEXT NOT NULL,
+        calls_total INTEGER NOT NULL DEFAULT 0,
+        usec_total INTEGER NOT NULL DEFAULT 0,
+        usec_per_call REAL NOT NULL DEFAULT 0,
+        rejected_calls INTEGER NOT NULL DEFAULT 0,
+        failed_calls INTEGER NOT NULL DEFAULT 0,
         calls_delta INTEGER NOT NULL,
         usec_delta INTEGER NOT NULL,
         interval_ms INTEGER NOT NULL,
@@ -1261,6 +1266,11 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('vector_index_snapshots', 'percent_indexed', 'REAL', '0');
     addColumnIfMissing('vector_index_snapshots', 'indexing_state', 'TEXT', "'indexed'");
     addColumnIfMissing('vector_index_snapshots', 'total_indexing_time', 'INTEGER', '0');
+    addColumnIfMissing('command_stats_samples', 'calls_total', 'INTEGER', '0');
+    addColumnIfMissing('command_stats_samples', 'usec_total', 'INTEGER', '0');
+    addColumnIfMissing('command_stats_samples', 'usec_per_call', 'REAL', '0');
+    addColumnIfMissing('command_stats_samples', 'rejected_calls', 'INTEGER', '0');
+    addColumnIfMissing('command_stats_samples', 'failed_calls', 'INTEGER', '0');
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
@@ -2923,8 +2933,10 @@ export class SqliteAdapter implements StoragePort {
 
     const stmt = this.db.prepare(`
       INSERT INTO command_stats_samples
-        (id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+        (id, connection_id, command,
+         calls_total, usec_total, usec_per_call, rejected_calls, failed_calls,
+         calls_delta, usec_delta, interval_ms, captured_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
@@ -2934,6 +2946,11 @@ export class SqliteAdapter implements StoragePort {
           randomUUID(),
           connId,
           s.command,
+          s.callsTotal,
+          s.usecTotal,
+          s.usecPerCall,
+          s.rejectedCalls,
+          s.failedCalls,
           s.callsDelta,
           s.usecDelta,
           s.intervalMs,
@@ -2954,7 +2971,9 @@ export class SqliteAdapter implements StoragePort {
 
     const rows = this.db
       .prepare(
-        `SELECT id, connection_id, command, calls_delta, usec_delta, interval_ms, captured_at
+        `SELECT id, connection_id, command,
+                calls_total, usec_total, usec_per_call, rejected_calls, failed_calls,
+                calls_delta, usec_delta, interval_ms, captured_at
          FROM command_stats_samples
          WHERE connection_id = ? AND command = ? AND captured_at >= ? AND captured_at <= ?
          ORDER BY captured_at ASC
@@ -2972,6 +2991,11 @@ export class SqliteAdapter implements StoragePort {
       id: row.id,
       connectionId: row.connection_id,
       command: row.command,
+      callsTotal: row.calls_total,
+      usecTotal: row.usec_total,
+      usecPerCall: row.usec_per_call,
+      rejectedCalls: row.rejected_calls,
+      failedCalls: row.failed_calls,
       callsDelta: row.calls_delta,
       usecDelta: row.usec_delta,
       intervalMs: row.interval_ms,
