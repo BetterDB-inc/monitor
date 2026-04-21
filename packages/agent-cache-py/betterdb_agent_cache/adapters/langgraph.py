@@ -246,9 +246,16 @@ class BetterDBSaver(BaseCheckpointSaver):
             raise AgentCacheUsageError("aput() requires config['configurable']['thread_id']")
 
         checkpoint_id = checkpoint.get("id") if isinstance(checkpoint, dict) else getattr(checkpoint, "id", None)
+        parent_config = _clean_config(config)
+        parent_checkpoint_id = (parent_config.get("configurable") or {}).get("checkpoint_id")
         clean = _clean_config(config)
         clean.setdefault("configurable", {})["checkpoint_id"] = checkpoint_id
-        stored = {"config": clean, "checkpoint": checkpoint, "metadata": metadata}
+        stored = {
+            "config": clean,
+            "checkpoint": checkpoint,
+            "metadata": metadata,
+            "parent_config": parent_config if parent_checkpoint_id else None,
+        }
         serialised = json.dumps(_make_serializable(stored))
 
         await self._cache.session.set(thread_id, f"checkpoint:{checkpoint_id}", serialised)

@@ -134,6 +134,19 @@ async def test_aput_writes_checkpoint_and_latest():
 
 
 @pytest.mark.asyncio
+async def test_aput_stores_parent_config():
+    saver, agent_cache = _make_saver()
+    config = _config("t1", "ckpt-parent")
+    checkpoint = {"id": "ckpt-child", "ts": "2026-04-20T12:00:00Z"}
+
+    await saver.aput(config, checkpoint, {}, {})
+
+    stored_payload = json.loads(agent_cache.session.set.call_args_list[0].args[2])
+    assert stored_payload["config"]["configurable"]["checkpoint_id"] == "ckpt-child"
+    assert stored_payload["parent_config"]["configurable"]["checkpoint_id"] == "ckpt-parent"
+
+
+@pytest.mark.asyncio
 async def test_aput_raises_without_thread_id():
     saver, _ = _make_saver()
     from betterdb_agent_cache.errors import AgentCacheUsageError
