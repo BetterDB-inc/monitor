@@ -9,23 +9,27 @@ import pytest
 # Guard: skip entire module if langchain-core is not installed
 langchain_core = pytest.importorskip("langchain_core")
 
-from betterdb_agent_cache.adapters.langchain import BetterDBLlmCache, _extract_model_name
+from betterdb_agent_cache.adapters.langchain import BetterDBLlmCache, _parse_llm_params
 
 
-# ─── _extract_model_name ──────────────────────────────────────────────────────
+# ─── _parse_llm_params ────────────────────────────────────────────────────────
 
 def test_extract_from_langchain_format():
     llm_string = '_model:"chatModel",_type:"openai",model_name:"gpt-4o-mini"'
-    assert _extract_model_name(llm_string) == "gpt-4o-mini"
+    params = _parse_llm_params(llm_string)
+    assert params["model"] == "gpt-4o-mini"
 
 
 def test_extract_from_json_format():
     llm_string = json.dumps({"model_name": "gpt-4o", "temperature": 0.7})
-    assert _extract_model_name(llm_string) == "gpt-4o"
+    params = _parse_llm_params(llm_string)
+    assert params["model"] == "gpt-4o"
+    assert params["temperature"] == 0.7
 
 
 def test_extract_fallback_to_raw_string():
-    assert _extract_model_name("unknown-format") == "unknown-format"
+    params = _parse_llm_params("unknown-format")
+    assert params["model"] == "unknown-format"
 
 
 # ─── BetterDBLlmCache ─────────────────────────────────────────────────────────
@@ -34,6 +38,7 @@ def _make_cache_adapter():
     llm_cache = MagicMock()
     llm_cache.check = AsyncMock()
     llm_cache.store = AsyncMock()
+    llm_cache.clear = AsyncMock()
     agent_cache = MagicMock()
     agent_cache.llm = llm_cache
     return BetterDBLlmCache(cache=agent_cache), agent_cache
@@ -102,6 +107,16 @@ async def test_aupdate_with_token_usage():
     store_options = call_args.args[2] if len(call_args.args) > 2 else call_args.kwargs.get("options")
     assert store_options is not None
     assert store_options.tokens == {"input": 10, "output": 20}
+
+
+@pytest.mark.asyncio
+async def test_aclear_only_clears_llm_tier():
+    adapter, agent_cache = _make_cache_adapter()
+
+    await adapter.aclear()
+
+    agent_cache.llm.clear.assert_awaited_once()
+    agent_cache.flush.assert_not_called()
 
 
 def test_sync_lookup_raises():

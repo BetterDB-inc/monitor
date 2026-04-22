@@ -186,4 +186,4 @@ class BetterDBLlmCache(BaseCache):
         )
 
     async def aclear(self, **kwargs: Any) -> None:
-        await self._cache.flush()
+        await self._cache.llm.clear()

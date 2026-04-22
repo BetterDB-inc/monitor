@@ -188,6 +188,32 @@ async def test_store_multipart_flattens_text_blocks():
     assert entry["contentBlocks"] == blocks
 
 
+@pytest.mark.asyncio
+async def test_clear_deletes_only_llm_keys():
+    cache, client = _make_cache()
+    client.scan = AsyncMock(return_value=(0, [b"test:llm:aaa", b"test:llm:bbb"]))
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[1, 1])
+
+    deleted = await cache.clear()
+
+    assert deleted == 2
+    client.scan.assert_awaited_once_with(0, match="test:llm:*", count=100)
+    assert pipe.delete.call_count == 2
+    pipe.delete.assert_any_call("test:llm:aaa")
+    pipe.delete.assert_any_call("test:llm:bbb")
+
+
+@pytest.mark.asyncio
+async def test_clear_no_keys_returns_zero():
+    cache, client = _make_cache()
+    client.scan = AsyncMock(return_value=(0, []))
+
+    deleted = await cache.clear()
+
+    assert deleted == 0
+
+
 # ─── invalidate_by_model ──────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

@@ -215,6 +215,34 @@ class LlmCache:
                 span.record_exception(exc)
                 raise
 
+    async def clear(self) -> int:
+        with self._telemetry.tracer.start_as_current_span("agent_cache.llm.clear") as span:
+            try:
+                pattern = f"{escape_glob_pattern(self._name)}:llm:*"
+                deleted_count = 0
+
+                async def on_keys(keys: list[str], client: Any) -> None:
+                    nonlocal deleted_count
+                    pipe = client.pipeline(transaction=False)
+                    for k in keys:
+                        pipe.delete(k)
+                    try:
+                        results = await pipe.execute()
+                    except Exception as exc:
+                        raise ValkeyCommandError("DEL", exc) from exc
+                    for result in results:
+                        if isinstance(result, Exception):
+                            raise ValkeyCommandError("DEL", result)
+                        deleted_count += int(result or 0)
+
+                await cluster_scan(self._client, pattern, on_keys)
+                span.set_attribute("cache.deleted_count", deleted_count)
+                return deleted_count
+
+            except Exception as exc:
+                span.record_exception(exc)
+                raise
+
     async def invalidate_by_model(self, model: str) -> int:
         with self._telemetry.tracer.start_as_current_span(
             "agent_cache.llm.invalidate_by_model"
