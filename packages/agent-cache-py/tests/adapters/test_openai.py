@@ -128,7 +128,7 @@ async def test_user_base64_image():
     })
     block = p["messages"][0]["content"][0]
     assert block["type"] == "binary"
-    assert block["media_type"] == "image/jpeg"
+    assert block["mediaType"] == "image/jpeg"
     assert block["ref"].startswith("base64:")
 
 

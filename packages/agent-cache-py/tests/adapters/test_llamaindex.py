@@ -121,7 +121,7 @@ async def test_file_content():
     block = p["messages"][0]["content"][0]
     assert block["type"] == "binary"
     assert block["kind"] == "document"
-    assert block["media_type"] == "application/pdf"
+    assert block["mediaType"] == "application/pdf"
 
 
 # ─── optional params ──────────────────────────────────────────────────────────

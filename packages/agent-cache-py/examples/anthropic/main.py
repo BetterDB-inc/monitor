@@ -45,7 +45,7 @@ async def chat(params: dict, cache: AgentCache, anthropic: sdk.AsyncAnthropic) -
             blocks.append({"type": "tool_call", "id": block.id, "name": block.name, "args": block.input})
         elif block.type == "thinking":
             blocks.append({"type": "reasoning", "text": block.thinking,
-                           "opaque_signature": getattr(block, "signature", None)})
+                           "opaqueSignature": getattr(block, "signature", None)})
 
     await cache.llm.store_multipart(cache_params, blocks, LlmStoreOptions(tokens={
         "input":  response.usage.input_tokens,

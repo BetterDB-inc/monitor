@@ -12,7 +12,7 @@ class CacheControlHint(TypedDict, total=False):
 
 
 class BlockHints(TypedDict, total=False):
-    anthropic_cache_control: CacheControlHint
+    anthropicCacheControl: CacheControlHint
 
 
 class TextBlock(TypedDict):
@@ -24,7 +24,7 @@ class TextBlock(TypedDict):
 class BinaryBlock(TypedDict):
     type: Literal["binary"]
     kind: Literal["image", "audio", "document"]
-    media_type: str
+    mediaType: str
     ref: str
     detail: NotRequired[Literal["auto", "low", "high", "original"]]
     filename: NotRequired[str]
@@ -43,14 +43,14 @@ class ToolResultBlock(TypedDict):
     type: Literal["tool_result"]
     toolCallId: str
     content: list[TextBlock | BinaryBlock]
-    is_error: NotRequired[bool]
+    isError: NotRequired[bool]
     hints: NotRequired[BlockHints]
 
 
 class ReasoningBlock(TypedDict):
     type: Literal["reasoning"]
     text: str
-    opaque_signature: NotRequired[str]
+    opaqueSignature: NotRequired[str]
     redacted: NotRequired[bool]
     hints: NotRequired[BlockHints]
 

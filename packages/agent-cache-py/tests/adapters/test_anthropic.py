@@ -33,7 +33,7 @@ async def test_system_block_with_cache_control():
     }]))
     hints = p["messages"][0]["content"][0].get("hints")
     assert hints is not None
-    assert hints["anthropic_cache_control"]["type"] == "ephemeral"
+    assert hints["anthropicCacheControl"]["type"] == "ephemeral"
 
 
 # ─── user messages ────────────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ async def test_user_image_base64():
     block = p["messages"][-1]["content"][0]
     assert block["type"] == "binary"
     assert block["kind"] == "image"
-    assert block["media_type"] == "image/png"
+    assert block["mediaType"] == "image/png"
 
 
 @pytest.mark.asyncio
@@ -121,7 +121,7 @@ async def test_thinking_block():
     block = p["messages"][-1]["content"][0]
     assert block["type"] == "reasoning"
     assert block["text"] == "Let me reason..."
-    assert block["opaque_signature"] == "sig123"
+    assert block["opaqueSignature"] == "sig123"
 
 
 @pytest.mark.asyncio
@@ -144,7 +144,7 @@ async def test_document_text_source():
     block = p["messages"][-1]["content"][0]
     assert block["type"] == "binary"
     assert block["kind"] == "document"
-    assert block["media_type"] == "text/plain"
+    assert block["mediaType"] == "text/plain"
 
 
 @pytest.mark.asyncio

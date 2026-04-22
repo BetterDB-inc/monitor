@@ -57,7 +57,7 @@ async def _normalize_user_content(
             else:
                 source = {"type": "url", "url": url}
             ref = await normalizer({"kind": "image", "source": source})
-            block: BinaryBlock = {"type": "binary", "kind": "image", "media_type": media_type, "ref": ref}
+            block: BinaryBlock = {"type": "binary", "kind": "image", "mediaType": media_type, "ref": ref}
             if image_url.get("detail"):
                 block["detail"] = image_url["detail"]
             blocks.append(block)
@@ -70,7 +70,7 @@ async def _normalize_user_content(
             })
             blocks.append({
                 "type": "binary", "kind": "audio",
-                "media_type": f"audio/{audio['format']}",
+                "mediaType": f"audio/{audio['format']}",
                 "ref": ref,
             })
 
@@ -91,7 +91,7 @@ async def _normalize_user_content(
                 continue
             ref = await normalizer({"kind": "document", "source": src})
             doc_block: BinaryBlock = {
-                "type": "binary", "kind": "document", "media_type": media_type, "ref": ref,
+                "type": "binary", "kind": "document", "mediaType": media_type, "ref": ref,
             }
             if file_info.get("filename"):
                 doc_block["filename"] = file_info["filename"]

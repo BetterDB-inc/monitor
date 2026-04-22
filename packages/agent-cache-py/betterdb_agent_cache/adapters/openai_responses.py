@@ -60,7 +60,7 @@ async def _normalize_part(
             return None
 
         ref = await normalizer({"kind": "image", "source": source})
-        block: BinaryBlock = {"type": "binary", "kind": "image", "media_type": media_type, "ref": ref}
+        block: BinaryBlock = {"type": "binary", "kind": "image", "mediaType": media_type, "ref": ref}
         if detail:
             block["detail"] = detail
         return block
@@ -87,7 +87,7 @@ async def _normalize_part(
 
         ref = await normalizer({"kind": "document", "source": source})
         doc_block: BinaryBlock = {
-            "type": "binary", "kind": "document", "media_type": media_type, "ref": ref,
+            "type": "binary", "kind": "document", "mediaType": media_type, "ref": ref,
         }
         if filename:
             doc_block["filename"] = filename
@@ -160,7 +160,7 @@ async def prepare_params(
                 )
                 reasoning_block: ReasoningBlock = {"type": "reasoning", "text": text}
                 if item.get("encrypted_content"):
-                    reasoning_block["opaque_signature"] = item["encrypted_content"]
+                    reasoning_block["opaqueSignature"] = item["encrypted_content"]
                 current_assistant["content"].append(reasoning_block)
                 continue
 

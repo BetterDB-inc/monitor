@@ -58,7 +58,7 @@ async def _normalize_detail(
         else:
             source = {"type": "url", "url": url}
         ref = await normalizer({"kind": "image", "source": source})
-        return {"type": "binary", "kind": "image", "media_type": media_type, "ref": ref}
+        return {"type": "binary", "kind": "image", "mediaType": media_type, "ref": ref}
 
     if t == "file" and part.get("data"):
         ref = await normalizer({
@@ -67,7 +67,7 @@ async def _normalize_detail(
         })
         return {
             "type": "binary", "kind": "document",
-            "media_type": part.get("mime_type") or "application/octet-stream",
+            "mediaType": part.get("mime_type") or "application/octet-stream",
             "ref": ref,
         }
 
@@ -80,7 +80,7 @@ async def _normalize_detail(
         default_media = "audio/*" if kind == "audio" else "image/*"
         return {
             "type": "binary", "kind": kind,
-            "media_type": part.get("mime_type") or default_media,
+            "mediaType": part.get("mime_type") or default_media,
             "ref": ref,
         }
 

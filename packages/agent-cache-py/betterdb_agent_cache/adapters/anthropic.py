@@ -38,9 +38,9 @@ class AnthropicPrepareOptions:
 def _build_cache_hints(cache_control: dict[str, Any] | None) -> BlockHints | None:
     if not cache_control:
         return None
-    hint: BlockHints = {"anthropic_cache_control": {"type": "ephemeral"}}
+    hint: BlockHints = {"anthropicCacheControl": {"type": "ephemeral"}}
     if cache_control.get("ttl"):
-        hint["anthropic_cache_control"]["ttl"] = cache_control["ttl"]  # type: ignore[typeddict-item]
+        hint["anthropicCacheControl"]["ttl"] = cache_control["ttl"]  # type: ignore[typeddict-item]
     return hint
 
 
@@ -73,7 +73,7 @@ async def _normalize_block(
             return None
 
         ref = await normalizer({"kind": "image", "source": source})
-        img_block: BinaryBlock = {"type": "binary", "kind": "image", "media_type": media_type, "ref": ref}
+        img_block: BinaryBlock = {"type": "binary", "kind": "image", "mediaType": media_type, "ref": ref}
         hints = _build_cache_hints(block.get("cache_control"))
         if hints:
             img_block["hints"] = hints
@@ -89,7 +89,7 @@ async def _normalize_block(
             ref = f"nested:sha256:{digest}"
             doc_block: BinaryBlock = {
                 "type": "binary", "kind": "document",
-                "media_type": "application/x-nested-content", "ref": ref,
+                "mediaType": "application/x-nested-content", "ref": ref,
             }
             hints = _build_cache_hints(block.get("cache_control"))
             if hints:
@@ -113,7 +113,7 @@ async def _normalize_block(
             return None
 
         ref = await normalizer({"kind": "document", "source": source})
-        doc_b: BinaryBlock = {"type": "binary", "kind": "document", "media_type": media_type, "ref": ref}
+        doc_b: BinaryBlock = {"type": "binary", "kind": "document", "mediaType": media_type, "ref": ref}
         hints = _build_cache_hints(block.get("cache_control"))
         if hints:
             doc_b["hints"] = hints
@@ -130,7 +130,7 @@ async def _normalize_block(
     if t == "thinking":
         result_r: ReasoningBlock = {"type": "reasoning", "text": block["thinking"]}
         if block.get("signature"):
-            result_r["opaque_signature"] = block["signature"]
+            result_r["opaqueSignature"] = block["signature"]
         return result_r
 
     if t == "redacted_thinking":
@@ -138,7 +138,7 @@ async def _normalize_block(
             "type": "reasoning",
             "text": "",
             "redacted": True,
-            "opaque_signature": block.get("data", ""),
+            "opaqueSignature": block.get("data", ""),
         }
 
     return None
