@@ -10,6 +10,7 @@ interface DateRangePickerProps {
   value?: DateRange;
   onChange?: (range: DateRange | undefined) => void;
   className?: string;
+  placeholder?: string;
 }
 
 const presets = [
@@ -26,7 +27,7 @@ function parseLocalDate(dateStr: string): Date {
   return new Date(year, month - 1, day);
 }
 
-export function DateRangePicker({ value, onChange, className }: DateRangePickerProps) {
+export function DateRangePicker({ value, onChange, className, placeholder = 'All time' }: DateRangePickerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [alignRight, setAlignRight] = useState(false);
   const [customStart, setCustomStart] = useState('');
@@ -78,7 +79,7 @@ export function DateRangePicker({ value, onChange, className }: DateRangePickerP
   };
 
   const formatDisplayValue = () => {
-    if (!value) return 'All time';
+    if (!value) return placeholder;
     // Show time when both dates fall on the same day (e.g. drag-selected range)
     const sameDay = format(value.from, 'yyyy-MM-dd') === format(value.to, 'yyyy-MM-dd');
     if (sameDay) {

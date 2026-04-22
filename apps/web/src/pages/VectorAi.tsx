@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Line,
   LineChart,
@@ -23,10 +23,11 @@ import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card'
 import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert';
 import { Badge } from '../components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
+import { DateRangePicker, type DateRange } from '../components/ui/date-range-picker';
 
 const INDEX_POLL_MS = 30_000;
 const COMMANDSTATS_POLL_MS = 15_000;
-const COMMANDSTATS_WINDOW_MS = 60 * 60 * 1000;
+const DEFAULT_WINDOW_MS = 60 * 60 * 1000;
 
 interface HealthAlert {
   indexName: string;
@@ -70,6 +71,7 @@ function formatTick(ms: number): string {
 export function VectorAi() {
   const { hasVectorSearch } = useCapabilities();
   const { currentConnection } = useConnection();
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
 
   const indexListQuery = usePolling({
     fetcher: (signal) => metricsApi.getVectorIndexList(signal),
@@ -92,15 +94,22 @@ export function VectorAi() {
     refetchKey: `${currentConnection?.id}|${indexNames.join(',')}`,
   });
 
+  const isCustomRange = dateRange !== undefined;
+  const rangeKey = isCustomRange
+    ? `${dateRange.from.getTime()}-${dateRange.to.getTime()}`
+    : 'rolling';
+
   const commandStatsQuery = usePolling({
-    fetcher: () =>
-      getCommandStatsHistory('ft.search', {
-        from: Date.now() - COMMANDSTATS_WINDOW_MS,
-        to: Date.now(),
-      }),
-    interval: COMMANDSTATS_POLL_MS,
+    fetcher: () => {
+      const endTime = isCustomRange ? dateRange.to.getTime() : Date.now();
+      const startTime = isCustomRange
+        ? dateRange.from.getTime()
+        : endTime - DEFAULT_WINDOW_MS;
+      return getCommandStatsHistory('ft.search', { startTime, endTime });
+    },
+    interval: isCustomRange ? 0 : COMMANDSTATS_POLL_MS,
     enabled: hasVectorSearch,
-    refetchKey: currentConnection?.id,
+    refetchKey: `${currentConnection?.id}|${rangeKey}`,
   });
 
   const indexes = useMemo(() => indexInfoQuery.data ?? [], [indexInfoQuery.data]);
@@ -112,11 +121,18 @@ export function VectorAi() {
 
   const content = (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">Vector / AI</h1>
-        <p className="text-muted-foreground">
-          FT.SEARCH workload and vector index health at a glance.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold">Vector / AI</h1>
+          <p className="text-muted-foreground">
+            FT.SEARCH workload and vector index health at a glance.
+          </p>
+        </div>
+        <DateRangePicker
+          value={dateRange}
+          onChange={setDateRange}
+          placeholder="Last 1 hour (live)"
+        />
       </div>
 
       {alerts.length > 0 && (
@@ -138,7 +154,9 @@ export function VectorAi() {
           <CardContent>
             {series.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                Waiting for samples (first poll is a baseline — data appears after the next cycle).
+                {isCustomRange
+                  ? 'No samples in the selected range.'
+                  : 'Waiting for samples (first poll is a baseline — data appears after the next cycle).'}
               </p>
             ) : (
               <ResponsiveContainer width="100%" height={200}>
@@ -175,7 +193,7 @@ export function VectorAi() {
           <CardContent>
             {series.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                Waiting for samples.
+                {isCustomRange ? 'No samples in the selected range.' : 'Waiting for samples.'}
               </p>
             ) : (
               <ResponsiveContainer width="100%" height={200}>
