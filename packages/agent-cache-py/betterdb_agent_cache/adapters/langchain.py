@@ -31,39 +31,59 @@ if TYPE_CHECKING:
     from ..agent_cache import AgentCache
 
 
-_MODEL_NAME_RE = re.compile(r'\bmodel_name:"([^"]+)"')
+_KV_RE = re.compile(r'\b(\w+):"([^"]*)"')
+
+_NUMERIC_PARAMS = {"temperature", "top_p"}
+_INT_PARAMS = {"max_tokens"}
 
 
-def _extract_model_name(llm_string: str) -> str:
-    """Extract a model name from LangChain's serialised llm_string.
+def _parse_llm_params(llm_string: str) -> dict[str, Any]:
+    """Extract model and sampling parameters from LangChain's serialised llm_string.
 
     Handles two formats:
-    - Comma-separated key:value pairs: ``model_name:"gpt-4o-mini",...``
-    - LangChain JSON serialisation: ``{"kwargs": {"model_name": "gpt-4o-mini"}, ...}---[...]``
-    """
-    # Format 1: comma-separated key:"value" pairs (older LangChain / simple cache key)
-    match = _MODEL_NAME_RE.search(llm_string)
-    if match:
-        return match.group(1)
+    - Comma-separated key:value pairs: ``model_name:"gpt-4o-mini",temperature:"0.7",...``
+    - LangChain JSON serialisation: ``{"kwargs": {"model_name": "gpt-4o-mini", ...}, ...}---[...]``
 
-    # Format 2: LangChain JSON serialisation with optional ---[...] suffix
+    Returns a dict suitable for use as ``LlmCacheParams`` (without ``messages``).
+    Falls back to using the raw ``llm_string`` as the model name if extraction fails.
+    """
+    # Format 2: JSON serialisation with optional ---[...] suffix
     try:
         json_part = llm_string.split("---")[0].strip()
-        parsed = json.loads(json_part)
-        # Nested under "kwargs" in LangChain's serialisation format
-        kwargs = parsed.get("kwargs", {})
-        model = (
-            kwargs.get("model_name")
-            or kwargs.get("model")
-            or parsed.get("model_name")
-            or parsed.get("model")
-        )
+        data = json.loads(json_part)
+        kwargs = data.get("kwargs", data)
+        params: dict[str, Any] = {}
+        model = kwargs.get("model_name") or kwargs.get("model")
         if model:
-            return str(model)
+            params["model"] = str(model)
+        for field in ("temperature", "top_p", "max_tokens"):
+            if (v := kwargs.get(field)) is not None:
+                params[field] = v
+        if params.get("model"):
+            return params
     except (json.JSONDecodeError, TypeError, AttributeError):
         pass
 
-    return llm_string
+    # Format 1: comma-separated key:"value" pairs
+    params = {}
+    for m in _KV_RE.finditer(llm_string):
+        k, v = m.group(1), m.group(2)
+        if k in ("model_name", "model"):
+            params["model"] = v
+        elif k in _NUMERIC_PARAMS:
+            try:
+                params[k] = float(v)
+            except ValueError:
+                pass
+        elif k in _INT_PARAMS:
+            try:
+                params[k] = int(v)
+            except ValueError:
+                pass
+
+    if not params.get("model"):
+        params["model"] = llm_string
+    return params
 
 
 class BetterDBLlmCache(BaseCache):
@@ -90,7 +110,7 @@ class BetterDBLlmCache(BaseCache):
         self, prompt: str, llm_string: str
     ) -> Optional[list[Generation]]:
         result = await self._cache.llm.check({
-            "model": _extract_model_name(llm_string),
+            **_parse_llm_params(llm_string),
             "messages": [{"role": "user", "content": prompt}],
         })
         if not result.hit or not result.response:
@@ -141,7 +161,7 @@ class BetterDBLlmCache(BaseCache):
 
         from ..types import LlmStoreOptions
         await self._cache.llm.store(
-            {"model": _extract_model_name(llm_string), "messages": [{"role": "user", "content": prompt}]},
+            {**_parse_llm_params(llm_string), "messages": [{"role": "user", "content": prompt}]},
             text,
             LlmStoreOptions(tokens=tokens) if tokens else None,
         )

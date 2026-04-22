@@ -44,6 +44,7 @@ class AgentCache:
         self._analytics_opts = options.analytics
         self._analytics: Analytics = NOOP_ANALYTICS
         self._stats_task: asyncio.Task[None] | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._shutdown = False
 
         use_default = options.use_default_cost_table
@@ -95,8 +96,10 @@ class AgentCache:
         # outside an async context (policies will be empty until next load).
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._load_policies_safe())
-            loop.create_task(self._init_analytics_safe())
+            for coro in (self._load_policies_safe(), self._init_analytics_safe()):
+                t = loop.create_task(coro)
+                self._background_tasks.add(t)
+                t.add_done_callback(self._background_tasks.discard)
         except RuntimeError:
             pass
 
