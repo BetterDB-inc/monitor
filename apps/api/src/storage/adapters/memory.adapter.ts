@@ -742,6 +742,9 @@ export class MemoryAdapter implements StoragePort {
       validUpdates.metricForecastingDefaultAlertThresholdMs =
         updates.metricForecastingDefaultAlertThresholdMs;
     }
+    if (updates.inferenceSlaConfig !== undefined) {
+      validUpdates.inferenceSlaConfig = updates.inferenceSlaConfig;
+    }
 
     this.settings = {
       ...this.settings,
