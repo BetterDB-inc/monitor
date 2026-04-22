@@ -5,6 +5,7 @@ import {
   ConnectionContext,
 } from '../common/services/multi-connection-poller';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { PrometheusService } from '../prometheus/prometheus.service';
 import { parseCommandStatsSection, CommandStatsSample } from './commandstats-parser';
 
 interface ConnectionBaseline {
@@ -35,6 +36,7 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
   constructor(
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private storage: StoragePort,
+    private prometheusService: PrometheusService,
   ) {
     super(connectionRegistry);
   }
@@ -86,6 +88,15 @@ export class CommandstatsPollerService extends MultiConnectionPoller implements 
     const current = parseCommandStatsSection(section);
 
     const currentByCommand = new Map(current.map((s) => [s.command, s]));
+
+    this.prometheusService.updateCommandstatsMetrics(
+      ctx.connectionId,
+      current.map((s) => ({
+        command: s.command,
+        callsTotal: s.calls,
+        usecPerCall: s.usecPerCall,
+      })),
+    );
 
     const previous = this.baselines.get(ctx.connectionId);
     if (!previous) {

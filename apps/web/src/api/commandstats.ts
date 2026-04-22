@@ -38,13 +38,12 @@ export function toChartSeries(samples: CommandStatsSample[]): CommandStatsChartP
 
 export function getCommandStatsHistory(
   command: string,
-  options: { from?: number; to?: number; limit?: number } = {},
+  options: { startTime?: number; endTime?: number; limit?: number } = {},
 ): Promise<CommandStatsSample[]> {
   const params = new URLSearchParams();
-  if (options.from !== undefined) params.set('from', String(options.from));
-  if (options.to !== undefined) params.set('to', String(options.to));
+  params.set('command', command);
+  if (options.startTime !== undefined) params.set('startTime', String(options.startTime));
+  if (options.endTime !== undefined) params.set('endTime', String(options.endTime));
   if (options.limit !== undefined) params.set('limit', String(options.limit));
-  const qs = params.toString();
-  const path = `/metrics/commandstats/${encodeURIComponent(command)}/history${qs ? `?${qs}` : ''}`;
-  return fetchApi<CommandStatsSample[]>(path);
+  return fetchApi<CommandStatsSample[]>(`/metrics/commandstats/history?${params.toString()}`);
 }

@@ -44,6 +44,8 @@ interface ConnectionMetricState {
   currentCorrelatedPatternLabels: Set<string>;
   // Vector index labels (per-connection)
   currentVectorIndexLabels: Set<string>;
+  // Commandstats labels (per-connection)
+  currentCommandStatsLabels: Set<string>;
 }
 
 @Injectable()
@@ -146,6 +148,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private vectorIndexMemoryBytes: Gauge;
   private vectorIndexFailures: Gauge;
   private vectorIndexPercentIndexed: Gauge;
+
+  // Commandstats Metrics
+  private commandstatsCallsTotal: Gauge;
+  private commandstatsLatencyUs: Gauge;
 
   // Poll Counter Metric
   private pollsTotal: Counter;
@@ -256,6 +262,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         currentCorrelatedPatternLabels: new Set(),
         // Vector index labels
         currentVectorIndexLabels: new Set(),
+        // Commandstats labels
+        currentCommandStatsLabels: new Set(),
       });
     }
     return this.perConnectionState.get(connectionId)!;
@@ -507,6 +515,18 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'vector_index_percent_indexed',
       'Percent of documents indexed (0-100)',
       ['index'],
+    );
+
+    // Commandstats Metrics (per connection, per command)
+    this.commandstatsCallsTotal = this.createGauge(
+      'commandstats_calls_total',
+      'Cumulative number of times a command has been executed (INFO commandstats.calls)',
+      ['command'],
+    );
+    this.commandstatsLatencyUs = this.createGauge(
+      'commandstats_latency_us',
+      'Average command latency in microseconds (INFO commandstats.usec_per_call)',
+      ['command'],
     );
 
     // Poll Counter Metric (per connection)
@@ -1331,6 +1351,33 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
     }
     state.currentVectorIndexLabels = currentIndexLabels;
+  }
+
+  updateCommandstatsMetrics(
+    connectionId: string,
+    samples: ReadonlyArray<{
+      command: string;
+      callsTotal: number;
+      usecPerCall: number;
+    }>,
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    const state = this.getConnectionState(connectionId);
+    const currentLabels = new Set<string>();
+
+    for (const s of samples) {
+      currentLabels.add(s.command);
+      this.commandstatsCallsTotal.labels(connLabel, s.command).set(s.callsTotal);
+      this.commandstatsLatencyUs.labels(connLabel, s.command).set(s.usecPerCall);
+    }
+
+    for (const staleLabel of state.currentCommandStatsLabels) {
+      if (!currentLabels.has(staleLabel)) {
+        this.commandstatsCallsTotal.remove(connLabel, staleLabel);
+        this.commandstatsLatencyUs.remove(connLabel, staleLabel);
+      }
+    }
+    state.currentCommandStatsLabels = currentLabels;
   }
 
   startPollTimer(service: string, connectionId?: string): () => void {

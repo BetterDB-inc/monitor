@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { CommandstatsController } from '../commandstats.controller';
 import { CommandstatsPollerService } from '../commandstats-poller.service';
@@ -20,16 +21,26 @@ describe('CommandstatsController', () => {
       ],
     }).compile();
 
+  const registryWithKnown = (
+    knownIds: string[],
+    defaultId: string | null = 'default-conn',
+  ): Partial<ConnectionRegistry> => ({
+    get: jest.fn((id: string) => {
+      if (!knownIds.includes(id)) {
+        throw new NotFoundException(`Connection '${id}' not found.`);
+      }
+      return {} as any;
+    }),
+    getDefaultId: jest.fn().mockReturnValue(defaultId),
+  });
+
   beforeEach(async () => {
     storage = {
       getCommandStatsHistory: jest.fn().mockResolvedValue([]),
     } as any;
     poller = { getSnapshot: jest.fn().mockReturnValue([]) };
 
-    const module: TestingModule = await buildModule({
-      getDefaultId: jest.fn().mockReturnValue('default-conn'),
-    } as any);
-
+    const module: TestingModule = await buildModule(registryWithKnown(['conn-x', 'c']) as any);
     controller = module.get(CommandstatsController);
   });
 
@@ -48,7 +59,7 @@ describe('CommandstatsController', () => {
       );
     });
 
-    it('coerces from/to/limit query strings to numbers', async () => {
+    it('coerces startTime/endTime/limit query strings to numbers', async () => {
       await controller.getHistory('get', '500', '1500', '42', 'c');
       const call = storage.getCommandStatsHistory.mock.calls[0][0];
       expect(call.startTime).toBe(500);
@@ -56,17 +67,41 @@ describe('CommandstatsController', () => {
       expect(call.limit).toBe(42);
     });
 
-    it('returns empty array when no connection id can be resolved', async () => {
-      const fresh: TestingModule = await buildModule({ getDefaultId: () => null } as any);
+    it('defaults the window to the last 1 hour when startTime/endTime are omitted', async () => {
+      const now = 10_000_000;
+      jest.spyOn(Date, 'now').mockReturnValue(now);
+      await controller.getHistory('get', undefined, undefined, undefined, 'conn-x');
+      jest.restoreAllMocks();
+
+      const call = storage.getCommandStatsHistory.mock.calls[0][0];
+      expect(call.endTime).toBe(now);
+      expect(call.startTime).toBe(now - 60 * 60 * 1000);
+    });
+
+    it('throws 400 when the command query parameter is missing', async () => {
+      await expect(
+        controller.getHistory(undefined as unknown as string, '0', '100', undefined, 'conn-x'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('throws 404 when an explicit connection id is not registered', async () => {
+      await expect(
+        controller.getHistory('get', '0', '100', undefined, 'missing'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('throws 404 when no connection id can be resolved', async () => {
+      const fresh: TestingModule = await buildModule(
+        registryWithKnown([], null) as any,
+      );
       const c = fresh.get(CommandstatsController);
 
-      const result = await c.getHistory('get');
-      expect(result).toEqual([]);
+      await expect(c.getHistory('get')).rejects.toBeInstanceOf(NotFoundException);
       expect(storage.getCommandStatsHistory).not.toHaveBeenCalled();
     });
   });
 
-  describe('getSnapshot', () => {
+  describe('getSummary', () => {
     it('returns the poller snapshot for the requested connection', () => {
       const entries = [
         {
@@ -81,21 +116,27 @@ describe('CommandstatsController', () => {
       ];
       poller.getSnapshot.mockReturnValue(entries);
 
-      const result = controller.getSnapshot('conn-x');
+      const result = controller.getSummary('conn-x');
       expect(poller.getSnapshot).toHaveBeenCalledWith('conn-x');
       expect(result).toEqual(entries);
     });
 
     it('falls back to the default connection id when none provided', () => {
-      controller.getSnapshot();
+      controller.getSummary();
       expect(poller.getSnapshot).toHaveBeenCalledWith('default-conn');
     });
 
-    it('returns empty array when no connection id can be resolved', async () => {
-      const fresh: TestingModule = await buildModule({ getDefaultId: () => null } as any);
+    it('throws 404 when an explicit connection id is not registered', () => {
+      expect(() => controller.getSummary('missing')).toThrow(NotFoundException);
+    });
+
+    it('throws 404 when no connection id can be resolved', async () => {
+      const fresh: TestingModule = await buildModule(
+        registryWithKnown([], null) as any,
+      );
       const c = fresh.get(CommandstatsController);
 
-      expect(c.getSnapshot()).toEqual([]);
+      expect(() => c.getSummary()).toThrow(NotFoundException);
       expect(poller.getSnapshot).not.toHaveBeenCalled();
     });
   });

@@ -16,6 +16,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/promethe
   - [Slowlog Metrics](#slowlog-metrics)
   - [COMMANDLOG Metrics](#commandlog-metrics-valkey-81)
   - [Vector Index Metrics](#vector-index-metrics)
+  - [Commandstats Metrics](#commandstats-metrics)
   - [Server Info Metrics](#server-info-metrics)
   - [Memory Metrics](#memory-metrics)
   - [Stats Metrics](#stats-metrics)
@@ -112,6 +113,19 @@ Per-index health metrics for vector search indexes, populated by `VectorSearchSe
 **Availability**: Only populated when connected to an instance with the Search module loaded (RediSearch or [`valkey-search`](https://github.com/valkey-io/valkey-search)). Returns no data otherwise. See [Vector / AI](vector-ai/README.md) for the feature overview and the REST endpoints that back the monitor UI.
 
 **Cardinality Warning**: Label cardinality scales with the number of indexes per connection. Typical deployments have single-digit index counts; if you run hundreds of indexes per instance, monitor scrape size accordingly.
+
+### Commandstats Metrics
+
+Per-command execution counts and latency sourced from `INFO commandstats`, populated by `CommandstatsPollerService` every 60 s. Gauges are emitted once per `(connection, command)` pair, and stale labels are automatically removed when a command disappears between polls (e.g., after `CONFIG RESETSTAT`).
+
+| Metric | Type | Labels | Description | Example |
+|--------|------|--------|-------------|---------|
+| `betterdb_commandstats_calls_total` | gauge | `command` | Cumulative number of times a command has been executed (`calls` from INFO commandstats) | `1523` |
+| `betterdb_commandstats_latency_us` | gauge | `command` | Rolling average command latency in microseconds (`usec_per_call` from INFO commandstats) | `29700` |
+
+`calls_total` is published as a gauge (not a counter) because the source value is the absolute cumulative count reported by the server, not an increment computed in-process. This makes `rate()` queries behave correctly across both incremental polls and `CONFIG RESETSTAT`-driven counter resets, without needing Prometheus-side counter-reset detection.
+
+**Cardinality Warning**: Label cardinality scales with the number of distinct commands executed per connection. A typical Valkey workload exposes a few dozen; modules like RediSearch add another handful. If your workload uses a very large module surface, monitor scrape size accordingly.
 
 ### Server Info Metrics
 
