@@ -17,6 +17,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/promethe
   - [COMMANDLOG Metrics](#commandlog-metrics-valkey-81)
   - [Vector Index Metrics](#vector-index-metrics)
   - [Commandstats Metrics](#commandstats-metrics)
+  - [Inference Latency Metrics](#inference-latency-metrics)
   - [Server Info Metrics](#server-info-metrics)
   - [Memory Metrics](#memory-metrics)
   - [Stats Metrics](#stats-metrics)
@@ -126,6 +127,22 @@ Per-command execution counts and latency sourced from `INFO commandstats`, popul
 `calls_total` is published as a gauge (not a counter) because the source value is the absolute cumulative count reported by the server, not an increment computed in-process. This makes `rate()` queries behave correctly across both incremental polls and `CONFIG RESETSTAT`-driven counter resets, without needing Prometheus-side counter-reset detection.
 
 **Cardinality Warning**: Label cardinality scales with the number of distinct commands executed per connection. A typical Valkey workload exposes a few dozen; modules like RediSearch add another handful. If your workload uses a very large module surface, monitor scrape size accordingly.
+
+### Inference Latency Metrics
+
+Percentile latency for inference-shaped buckets, sourced from per-entry duration tables (`command_log_entries` on Valkey 8.1+, `slowlog_entries` elsewhere). Buckets are `FT.SEARCH:<index-name>` per configured index, plus aggregate `read` (GET/MGET) and `write` (SET/HSET family). Populated by the `InferenceLatencyService` evaluation loop; stale labels are removed when a bucket disappears.
+
+| Metric | Type | Labels | Description | Example |
+|--------|------|--------|-------------|---------|
+| `betterdb_inference_bucket_p50_us` | gauge | `bucket` | p50 latency in microseconds for an inference bucket | `4200` |
+| `betterdb_inference_bucket_p95_us` | gauge | `bucket` | p95 latency in microseconds for an inference bucket | `18500` |
+| `betterdb_inference_bucket_p99_us` | gauge | `bucket` | p99 latency in microseconds for an inference bucket | `31000` |
+| `betterdb_inference_unhealthy` | gauge | `bucket` | Whether a bucket is unhealthy (p50 > 10 ms for `FT.SEARCH:*`): 1 unhealthy, 0 healthy | `0` |
+| `betterdb_inference_sla_breach` | gauge | `index` | Whether the configured per-index p99 SLA is currently breached: 1 breached, 0 ok | `0` |
+
+**Threshold-gating bias**: the source tables only store entries slower than the configured threshold directive (`command-log-slow-time-threshold` or `slowlog-log-slower-than`), so percentiles skew toward the tail. The `/inference-latency/profile` HTTP response exposes the active directive + value so consumers can qualify the number.
+
+**Cardinality Warning**: `FT.SEARCH` buckets scale with the number of vector indexes per connection. `inference_sla_breach` only emits for indexes with an active SLA configured (Pro tier). Aggregate `read` / `write` buckets are constant cardinality.
 
 ### Server Info Metrics
 

@@ -46,6 +46,9 @@ interface ConnectionMetricState {
   currentVectorIndexLabels: Set<string>;
   // Commandstats labels (per-connection)
   currentCommandStatsLabels: Set<string>;
+  // Inference latency labels (per-connection)
+  currentInferenceBucketLabels: Set<string>;
+  currentInferenceSlaBreachLabels: Set<string>;
 }
 
 @Injectable()
@@ -152,6 +155,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // Commandstats Metrics
   private commandstatsCallsTotal: Gauge;
   private commandstatsLatencyUs: Gauge;
+
+  // Inference Latency Metrics
+  private inferenceBucketP50Us: Gauge;
+  private inferenceBucketP95Us: Gauge;
+  private inferenceBucketP99Us: Gauge;
+  private inferenceUnhealthy: Gauge;
+  private inferenceSlaBreach: Gauge;
 
   // Poll Counter Metric
   private pollsTotal: Counter;
@@ -264,6 +274,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         currentVectorIndexLabels: new Set(),
         // Commandstats labels
         currentCommandStatsLabels: new Set(),
+        // Inference latency labels
+        currentInferenceBucketLabels: new Set(),
+        currentInferenceSlaBreachLabels: new Set(),
       });
     }
     return this.perConnectionState.get(connectionId)!;
@@ -527,6 +540,33 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'commandstats_latency_us',
       'Average command latency in microseconds (INFO commandstats.usec_per_call)',
       ['command'],
+    );
+
+    // Inference Latency Metrics (per connection, per bucket / per index)
+    this.inferenceBucketP50Us = this.createGauge(
+      'inference_bucket_p50_us',
+      'p50 latency in microseconds for an inference bucket (FT.SEARCH:<index> | read | write)',
+      ['bucket'],
+    );
+    this.inferenceBucketP95Us = this.createGauge(
+      'inference_bucket_p95_us',
+      'p95 latency in microseconds for an inference bucket',
+      ['bucket'],
+    );
+    this.inferenceBucketP99Us = this.createGauge(
+      'inference_bucket_p99_us',
+      'p99 latency in microseconds for an inference bucket',
+      ['bucket'],
+    );
+    this.inferenceUnhealthy = this.createGauge(
+      'inference_unhealthy',
+      'Whether an inference bucket is unhealthy (p50 > 10ms for FT.SEARCH buckets): 1 unhealthy, 0 healthy',
+      ['bucket'],
+    );
+    this.inferenceSlaBreach = this.createGauge(
+      'inference_sla_breach',
+      'Whether the per-index p99 SLA is currently breached: 1 breached, 0 ok',
+      ['index'],
     );
 
     // Poll Counter Metric (per connection)
@@ -1378,6 +1418,60 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
     }
     state.currentCommandStatsLabels = currentLabels;
+  }
+
+  updateInferenceLatencyMetrics(
+    connectionId: string,
+    buckets: ReadonlyArray<{
+      bucket: string;
+      p50: number;
+      p95: number;
+      p99: number;
+      unhealthy: boolean;
+    }>,
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    const state = this.getConnectionState(connectionId);
+    const currentLabels = new Set<string>();
+
+    for (const b of buckets) {
+      currentLabels.add(b.bucket);
+      this.inferenceBucketP50Us.labels(connLabel, b.bucket).set(b.p50);
+      this.inferenceBucketP95Us.labels(connLabel, b.bucket).set(b.p95);
+      this.inferenceBucketP99Us.labels(connLabel, b.bucket).set(b.p99);
+      this.inferenceUnhealthy.labels(connLabel, b.bucket).set(b.unhealthy ? 1 : 0);
+    }
+
+    for (const staleLabel of state.currentInferenceBucketLabels) {
+      if (!currentLabels.has(staleLabel)) {
+        this.inferenceBucketP50Us.remove(connLabel, staleLabel);
+        this.inferenceBucketP95Us.remove(connLabel, staleLabel);
+        this.inferenceBucketP99Us.remove(connLabel, staleLabel);
+        this.inferenceUnhealthy.remove(connLabel, staleLabel);
+      }
+    }
+    state.currentInferenceBucketLabels = currentLabels;
+  }
+
+  updateInferenceSlaBreachMetrics(
+    connectionId: string,
+    breaches: ReadonlyArray<{ indexName: string; breached: boolean }>,
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    const state = this.getConnectionState(connectionId);
+    const currentLabels = new Set<string>();
+
+    for (const b of breaches) {
+      currentLabels.add(b.indexName);
+      this.inferenceSlaBreach.labels(connLabel, b.indexName).set(b.breached ? 1 : 0);
+    }
+
+    for (const staleLabel of state.currentInferenceSlaBreachLabels) {
+      if (!currentLabels.has(staleLabel)) {
+        this.inferenceSlaBreach.remove(connLabel, staleLabel);
+      }
+    }
+    state.currentInferenceSlaBreachLabels = currentLabels;
   }
 
   startPollTimer(service: string, connectionId?: string): () => void {
