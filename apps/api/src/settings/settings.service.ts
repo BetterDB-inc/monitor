@@ -73,6 +73,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
         this.configService.get('METRIC_FORECASTING_DEFAULT_ALERT_THRESHOLD_MS', '7200000'),
         10,
       ),
+      inferenceSlaConfig: {},
       createdAt: now,
       updatedAt: now,
     };

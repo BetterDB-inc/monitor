@@ -19,6 +19,7 @@ function mockGlobalSettings(overrides?: Partial<AppSettings>): AppSettings {
     metricForecastingEnabled: true,
     metricForecastingDefaultRollingWindowMs: 21600000,
     metricForecastingDefaultAlertThresholdMs: 7200000,
+    inferenceSlaConfig: {},
     createdAt: Date.now(),
     updatedAt: Date.now(),
     ...overrides,

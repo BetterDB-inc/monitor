@@ -1,0 +1,36 @@
+export type InferenceLatencySource = 'commandlog' | 'slowlog';
+
+export interface IndexingEvent {
+  kind: 'latency_degraded_during_indexing';
+  bucket: string;
+  since: number;
+}
+
+export interface InferenceLatencyBucket {
+  bucket: string;
+  p50: number;
+  p95: number;
+  p99: number;
+  count: number;
+  unhealthy: boolean;
+  namedEvents: IndexingEvent[];
+}
+
+export interface InferenceLatencyProfile {
+  connectionId: string;
+  windowMs: number;
+  source: InferenceLatencySource;
+  thresholdDirective: string;
+  thresholdUs: number;
+  buckets: InferenceLatencyBucket[];
+  generatedAt: number;
+}
+
+export interface InferenceSlaEntry {
+  p99ThresholdUs: number;
+  enabled: boolean;
+}
+
+export type InferenceSlaConfig = Record<string, InferenceSlaEntry>;
+
+export const FT_SEARCH_HEALTHY_P50_THRESHOLD_US = 10_000;

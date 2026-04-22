@@ -1,3 +1,5 @@
+import type { InferenceSlaConfig } from './inference-latency';
+
 export interface AppSettings {
   id: number;
 
@@ -12,6 +14,8 @@ export interface AppSettings {
   metricForecastingEnabled: boolean;
   metricForecastingDefaultRollingWindowMs: number;
   metricForecastingDefaultAlertThresholdMs: number;
+
+  inferenceSlaConfig: InferenceSlaConfig;
 
   updatedAt: number;
   createdAt: number;
