@@ -1,7 +1,11 @@
 # Publish betterdb-agent-cache to PyPI
 #
+# Uses PyPI Trusted Publisher (OIDC) — no API token required.
+# Trusted publisher is registered at pypi.org/manage/account/publishing/
+#
 # Required secrets:
-#   PYPI_API_TOKEN — PyPI API token with publish access to betterdb-agent-cache
+#   POSTHOG_API_KEY — baked into the wheel at build time
+#   POSTHOG_HOST    — baked into the wheel at build time
 #
 # Trigger by pushing a tag: agent-cache-py-v0.3.0
 
@@ -57,6 +61,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     if: ${{ !inputs.skip_pypi }}
+    environment: pypi
     permissions:
       contents: write
       id-token: write
@@ -136,7 +141,6 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: packages/agent-cache-py/dist/
-          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
