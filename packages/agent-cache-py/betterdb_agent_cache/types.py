@@ -109,8 +109,6 @@ class TelemetryOptions:
 
 @dataclass
 class AnalyticsOptions:
-    api_key: str | None = None
-    host: str | None = None
     disabled: bool = False
     stats_interval_s: float = 300.0
 

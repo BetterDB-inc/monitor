@@ -109,11 +109,7 @@ class AgentCache:
     async def _init_analytics_safe(self) -> None:
         try:
             opts = self._analytics_opts
-            analytics = await create_analytics(
-                api_key=opts.api_key,
-                host=opts.host,
-                disabled=opts.disabled,
-            )
+            analytics = await create_analytics(disabled=opts.disabled)
             if self._shutdown:
                 await analytics.shutdown()
                 return
@@ -123,7 +119,7 @@ class AgentCache:
                 "has_cost_table": bool(self._cost_table),
                 "uses_default_cost_table": self._use_default_cost_table,
             })
-            if not self._shutdown and opts.stats_interval_s > 0:
+            if not self._shutdown and opts.stats_interval_s > 0 and self._analytics is not NOOP_ANALYTICS:
                 self._stats_task = asyncio.create_task(self._stats_loop(opts.stats_interval_s))
         except Exception:
             pass

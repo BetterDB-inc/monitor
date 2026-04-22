@@ -15,6 +15,11 @@ from typing import Any
 
 _EVENT_PREFIX = "agent_cache:"
 
+# Build-time placeholders — replaced by hatch_build.py during wheel build.
+# When the placeholder is NOT replaced, the startswith('__') guard treats it as unset.
+_BAKED_POSTHOG_API_KEY = "__BETTERDB_POSTHOG_API_KEY__"
+_BAKED_POSTHOG_HOST = "__BETTERDB_POSTHOG_HOST__"
+
 
 def _is_opted_out() -> bool:
     val = os.environ.get("BETTERDB_TELEMETRY", "")
@@ -81,14 +86,16 @@ class _PostHogAnalytics(Analytics):
             pass
 
 
-async def create_analytics(
-    api_key: str | None = None,
-    host: str | None = None,
-    disabled: bool = False,
-) -> Analytics:
+async def create_analytics(disabled: bool = False) -> Analytics:
     """Return a PostHog-backed Analytics instance, or the no-op fallback."""
-    if disabled or _is_opted_out() or not api_key:
+    if disabled or _is_opted_out():
         return NOOP_ANALYTICS
+
+    api_key = None if _BAKED_POSTHOG_API_KEY.startswith("__") else _BAKED_POSTHOG_API_KEY
+    if not api_key:
+        return NOOP_ANALYTICS
+
+    host = None if _BAKED_POSTHOG_HOST.startswith("__") else _BAKED_POSTHOG_HOST
 
     try:
         from posthog import Posthog  # type: ignore[import]

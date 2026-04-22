@@ -42,6 +42,9 @@ Repository = "https://github.com/BetterDB-inc/monitor"
 [tool.hatch.build.targets.wheel]
 packages = ["betterdb_agent_cache"]
 
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
