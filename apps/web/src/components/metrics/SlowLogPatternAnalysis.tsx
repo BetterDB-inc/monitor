@@ -1,13 +1,6 @@
 import React, { useState } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../ui/table';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 import type { SlowLogPatternAnalysis } from '../../types/metrics';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { formatDurationUs } from '../../lib/utils';
@@ -28,9 +21,7 @@ const COLORS = [
 ];
 
 export function SlowLogPatternAnalysisView({ analysis }: Props) {
-  const [expandedPatterns, setExpandedPatterns] = useState<Set<string>>(
-    new Set()
-  );
+  const [expandedPatterns, setExpandedPatterns] = useState<Set<string>>(new Set());
 
   const togglePattern = (pattern: string) => {
     setExpandedPatterns((prev) => {
@@ -44,8 +35,6 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
     });
   };
 
-  const formatDuration = formatDurationUs;
-
   return (
     <div className="space-y-6">
       {/* Summary Cards */}
@@ -53,24 +42,18 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
         <Card>
           <CardContent className="pt-6">
             <div className="text-2xl font-bold">{analysis.totalEntries}</div>
-            <div className="text-sm text-muted-foreground">
-              Total Slow Queries
-            </div>
+            <div className="text-sm text-muted-foreground">Total Slow Queries</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="pt-6">
             <div className="text-2xl font-bold">{analysis.patterns.length}</div>
-            <div className="text-sm text-muted-foreground">
-              Unique Patterns
-            </div>
+            <div className="text-sm text-muted-foreground">Unique Patterns</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="pt-6">
-            <div className="text-2xl font-bold">
-              {analysis.byCommand.length}
-            </div>
+            <div className="text-2xl font-bold">{analysis.byCommand.length}</div>
             <div className="text-sm text-muted-foreground">Command Types</div>
           </CardContent>
         </Card>
@@ -85,8 +68,8 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
               {analysis.patterns[0].percentage.toFixed(1)}% of slow queries
             </div>
             <div className="text-sm text-muted-foreground mt-1">
-              Average duration: {formatDuration(analysis.patterns[0].avgDuration)}{' '}
-              • {analysis.patterns[0].count} occurrences
+              Average duration: {formatDurationUs(analysis.patterns[0].avgDuration)} •{' '}
+              {analysis.patterns[0].count} occurrences
             </div>
           </CardContent>
         </Card>
@@ -104,14 +87,12 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
                 <div className="flex items-center justify-between text-sm">
                   <span className="font-mono flex items-center gap-2">
                     <span
-                      className="w-3 h-3 rounded-full flex-shrink-0"
+                      className="w-3 h-3 rounded-full shrink-0"
                       style={{ backgroundColor: COLORS[i % COLORS.length] }}
                     />
                     {pattern.pattern}
                   </span>
-                  <span className="font-semibold">
-                    {pattern.percentage.toFixed(1)}%
-                  </span>
+                  <span className="font-semibold">{pattern.percentage.toFixed(1)}%</span>
                 </div>
                 <div className="w-full bg-secondary rounded-full h-2">
                   <div
@@ -123,8 +104,7 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
                   />
                 </div>
                 <div className="text-xs text-muted-foreground">
-                  {pattern.count} queries • avg{' '}
-                  {formatDuration(pattern.avgDuration)}
+                  {pattern.count} queries • avg {formatDurationUs(pattern.avgDuration)}
                 </div>
               </div>
             ))}
@@ -140,16 +120,13 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
         <CardContent>
           <div className="flex gap-2 flex-wrap">
             {analysis.byCommand.slice(0, 10).map((cmd) => (
-              <div
-                key={cmd.command}
-                className="px-3 py-2 bg-muted rounded-lg text-sm"
-              >
+              <div key={cmd.command} className="px-3 py-2 bg-muted rounded-lg text-sm">
                 <span className="font-mono font-semibold">{cmd.command}</span>
                 <span className="text-muted-foreground ml-2">
                   {cmd.percentage.toFixed(1)}% ({cmd.count})
                 </span>
                 <div className="text-xs text-muted-foreground mt-1">
-                  avg {formatDuration(cmd.avgDuration)}
+                  avg {formatDurationUs(cmd.avgDuration)}
                 </div>
               </div>
             ))}
@@ -166,18 +143,13 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
           <CardContent>
             <div className="flex gap-2 flex-wrap">
               {analysis.byKeyPrefix.slice(0, 10).map((prefix) => (
-                <div
-                  key={prefix.prefix}
-                  className="px-3 py-2 bg-muted rounded-lg text-sm"
-                >
-                  <span className="font-mono font-semibold">
-                    {prefix.prefix}
-                  </span>
+                <div key={prefix.prefix} className="px-3 py-2 bg-muted rounded-lg text-sm">
+                  <span className="font-mono font-semibold">{prefix.prefix}</span>
                   <span className="text-muted-foreground ml-2">
                     {prefix.percentage.toFixed(1)}% ({prefix.count})
                   </span>
                   <div className="text-xs text-muted-foreground mt-1">
-                    avg {formatDuration(prefix.avgDuration)}
+                    avg {formatDurationUs(prefix.avgDuration)}
                   </div>
                 </div>
               ))}
@@ -199,14 +171,12 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
                   key={client.clientIdentifier}
                   className="px-3 py-2 bg-muted rounded-lg text-sm"
                 >
-                  <span className="font-mono font-semibold">
-                    {client.clientIdentifier}
-                  </span>
+                  <span className="font-mono font-semibold">{client.clientIdentifier}</span>
                   <span className="text-muted-foreground ml-2">
                     {client.percentage.toFixed(1)}% ({client.count})
                   </span>
                   <div className="text-xs text-muted-foreground mt-1">
-                    avg {formatDuration(client.avgDuration)}
+                    avg {formatDurationUs(client.avgDuration)}
                   </div>
                 </div>
               ))}
@@ -250,7 +220,7 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
                     <TableCell className="font-mono text-sm">
                       <span className="inline-flex items-center gap-2">
                         <span
-                          className="w-3 h-3 rounded-full flex-shrink-0"
+                          className="w-3 h-3 rounded-full shrink-0"
                           style={{
                             backgroundColor: COLORS[i % COLORS.length],
                           }}
@@ -259,43 +229,31 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
                       </span>
                     </TableCell>
                     <TableCell className="text-right">{pattern.count}</TableCell>
-                    <TableCell className="text-right">
-                      {pattern.percentage.toFixed(1)}%
+                    <TableCell className="text-right">{pattern.percentage.toFixed(1)}%</TableCell>
+                    <TableCell className="text-right font-mono">
+                      {formatDurationUs(pattern.avgDuration)}
                     </TableCell>
                     <TableCell className="text-right font-mono">
-                      {formatDuration(pattern.avgDuration)}
+                      {formatDurationUs(pattern.maxDuration)}
                     </TableCell>
                     <TableCell className="text-right font-mono">
-                      {formatDuration(pattern.maxDuration)}
-                    </TableCell>
-                    <TableCell className="text-right font-mono">
-                      {formatDuration(pattern.totalDuration)}
+                      {formatDurationUs(pattern.totalDuration)}
                     </TableCell>
                   </TableRow>
                   {expandedPatterns.has(pattern.pattern) && (
                     <TableRow key={`${pattern.pattern}-details`}>
                       <TableCell colSpan={7} className="bg-muted/30 p-0">
                         <div className="p-4">
-                          <h4 className="text-sm font-semibold mb-3">
-                            Client Breakdown
-                          </h4>
+                          <h4 className="text-sm font-semibold mb-3">Client Breakdown</h4>
                           {pattern.clientBreakdown.length > 0 ? (
                             <Table>
                               <TableHeader>
                                 <TableRow>
                                   <TableHead>Client</TableHead>
-                                  <TableHead className="text-right">
-                                    Count
-                                  </TableHead>
-                                  <TableHead className="text-right">
-                                    % of Pattern
-                                  </TableHead>
-                                  <TableHead className="text-right">
-                                    Avg Duration
-                                  </TableHead>
-                                  <TableHead className="text-right">
-                                    Max Duration
-                                  </TableHead>
+                                  <TableHead className="text-right">Count</TableHead>
+                                  <TableHead className="text-right">% of Pattern</TableHead>
+                                  <TableHead className="text-right">Avg Duration</TableHead>
+                                  <TableHead className="text-right">Max Duration</TableHead>
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -304,17 +262,15 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
                                     <TableCell className="font-mono text-sm">
                                       {client.clientIdentifier}
                                     </TableCell>
-                                    <TableCell className="text-right">
-                                      {client.count}
-                                    </TableCell>
+                                    <TableCell className="text-right">{client.count}</TableCell>
                                     <TableCell className="text-right">
                                       {client.percentage.toFixed(1)}%
                                     </TableCell>
                                     <TableCell className="text-right font-mono">
-                                      {formatDuration(client.avgDuration)}
+                                      {formatDurationUs(client.avgDuration)}
                                     </TableCell>
                                     <TableCell className="text-right font-mono">
-                                      {formatDuration(client.maxDuration)}
+                                      {formatDurationUs(client.maxDuration)}
                                     </TableCell>
                                   </TableRow>
                                 ))}
