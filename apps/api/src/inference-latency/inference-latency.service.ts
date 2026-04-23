@@ -117,8 +117,12 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     const capabilities = connection.getCapabilities();
     const source: InferenceLatencySource = capabilities.hasCommandLog ? 'commandlog' : 'slowlog';
 
+    // Storage timestamps are second-resolution. Round the window outward so
+    // the storage query always returns a superset of the requested ms window
+    // (robust against either inclusive `<=` or strict `<` upper bounds in the
+    // adapter); the ms-precision filter below is then authoritative.
     const startSec = Math.floor(startTime / 1000);
-    const endSec = Math.floor(endTime / 1000);
+    const endSec = Math.ceil(endTime / 1000);
 
     const rawEntries =
       source === 'commandlog'
@@ -224,7 +228,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     const { startMs, endMs } = window;
     const windowMs = endMs - startMs;
     const startSec = Math.floor(startMs / 1000);
-    const endSec = Math.floor(endMs / 1000);
+    const endSec = Math.ceil(endMs / 1000);
 
     const rawEntries: Array<StoredSlowLogEntry | StoredCommandLogEntry> =
       source === 'commandlog'

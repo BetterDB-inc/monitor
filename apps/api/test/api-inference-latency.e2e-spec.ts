@@ -110,6 +110,27 @@ describe('Inference Latency API (e2e)', () => {
         .set('x-connection-id', 'definitely-not-a-real-connection-id')
         .expect(404);
     });
+
+    it('honors an explicit startTime/endTime window', async () => {
+      const end = Date.now();
+      const start = end - 30 * 60 * 1000;
+      const response = await request(app.getHttpServer())
+        .get(`/inference-latency/profile?startTime=${start}&endTime=${end}`)
+        .expect(200);
+      expect(response.body.windowMs).toBe(end - start);
+    });
+
+    it('rejects startTime without endTime', async () => {
+      await request(app.getHttpServer())
+        .get('/inference-latency/profile?startTime=100')
+        .expect(400);
+    });
+
+    it('rejects a non-numeric windowMs', async () => {
+      await request(app.getHttpServer())
+        .get('/inference-latency/profile?windowMs=not-a-number')
+        .expect(400);
+    });
   });
 
   describe('GET /inference-latency/trend', () => {
