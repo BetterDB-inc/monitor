@@ -1,6 +1,6 @@
 {
   "name": "@betterdb/semantic-cache",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Valkey-native semantic cache for LLM applications with built-in OpenTelemetry and Prometheus instrumentation",
   "keywords": [
     "valkey",
@@ -8,7 +8,11 @@
     "semantic-cache",
     "llm",
     "opentelemetry",
-    "prometheus"
+    "prometheus",
+    "langchain",
+    "langgraph",
+    "openai",
+    "anthropic"
   ],
   "license": "MIT",
   "repository": {
@@ -33,6 +37,56 @@
       "import": "./dist/adapters/ai.js",
       "require": "./dist/adapters/ai.js",
       "types": "./dist/adapters/ai.d.ts"
+    },
+    "./langgraph": {
+      "import": "./dist/adapters/langgraph.js",
+      "require": "./dist/adapters/langgraph.js",
+      "types": "./dist/adapters/langgraph.d.ts"
+    },
+    "./openai": {
+      "import": "./dist/adapters/openai.js",
+      "require": "./dist/adapters/openai.js",
+      "types": "./dist/adapters/openai.d.ts"
+    },
+    "./anthropic": {
+      "import": "./dist/adapters/anthropic.js",
+      "require": "./dist/adapters/anthropic.js",
+      "types": "./dist/adapters/anthropic.d.ts"
+    },
+    "./llamaindex": {
+      "import": "./dist/adapters/llamaindex.js",
+      "require": "./dist/adapters/llamaindex.js",
+      "types": "./dist/adapters/llamaindex.d.ts"
+    },
+    "./openai-responses": {
+      "import": "./dist/adapters/openai-responses.js",
+      "require": "./dist/adapters/openai-responses.js",
+      "types": "./dist/adapters/openai-responses.d.ts"
+    },
+    "./embed/openai": {
+      "import": "./dist/embed/openai.js",
+      "require": "./dist/embed/openai.js",
+      "types": "./dist/embed/openai.d.ts"
+    },
+    "./embed/bedrock": {
+      "import": "./dist/embed/bedrock.js",
+      "require": "./dist/embed/bedrock.js",
+      "types": "./dist/embed/bedrock.d.ts"
+    },
+    "./embed/voyage": {
+      "import": "./dist/embed/voyage.js",
+      "require": "./dist/embed/voyage.js",
+      "types": "./dist/embed/voyage.d.ts"
+    },
+    "./embed/cohere": {
+      "import": "./dist/embed/cohere.js",
+      "require": "./dist/embed/cohere.js",
+      "types": "./dist/embed/cohere.d.ts"
+    },
+    "./embed/ollama": {
+      "import": "./dist/embed/ollama.js",
+      "require": "./dist/embed/ollama.js",
+      "types": "./dist/embed/ollama.d.ts"
     }
   },
   "files": [
@@ -44,16 +98,22 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "update:pricing": "node scripts/update-model-prices.mjs"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
     "prom-client": "^15.1.3"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
     "@langchain/core": "^1.1.35",
+    "@langchain/langgraph-checkpoint": "^0.1.0",
+    "@llamaindex/core": "^0.6.23",
     "@types/node": "^22.19.15",
     "ai": "^6.0.135",
+    "iovalkey": ">=0.3.0",
+    "openai": "^6.34.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.1"
   },
@@ -61,15 +121,31 @@
     "node": ">=20.0.0"
   },
   "peerDependencies": {
+    "@anthropic-ai/sdk": ">=0.90.0",
     "@langchain/core": ">=0.3.0",
+    "@langchain/langgraph-checkpoint": ">=0.1.0",
+    "@llamaindex/core": ">=0.6.0",
     "ai": ">=4.0.0",
-    "iovalkey": ">=0.3.0"
+    "iovalkey": ">=0.3.0",
+    "openai": ">=6.0.0"
   },
   "peerDependenciesMeta": {
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
     "@langchain/core": {
       "optional": true
     },
+    "@langchain/langgraph-checkpoint": {
+      "optional": true
+    },
+    "@llamaindex/core": {
+      "optional": true
+    },
     "ai": {
+      "optional": true
+    },
+    "openai": {
       "optional": true
     }
   }

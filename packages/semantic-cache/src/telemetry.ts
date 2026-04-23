@@ -19,6 +19,9 @@ interface CacheMetrics {
   similarityScore: Histogram;
   operationDuration: Histogram;
   embeddingDuration: Histogram;
+  costSavedTotal: Counter;
+  embeddingCacheTotal: Counter;
+  staleModelEvictions: Counter;
 }
 
 export interface Telemetry {
@@ -77,6 +80,24 @@ export function createTelemetry(opts: TelemetryFactoryOptions): Telemetry {
     buckets: operationBuckets,
   });
 
+  const costSavedTotal = getOrCreateCounter(registry, {
+    name: `${opts.prefix}_cost_saved_total`,
+    help: 'Estimated cost saved in dollars from semantic cache hits',
+    labelNames: ['cache_name', 'category'],
+  });
+
+  const embeddingCacheTotal = getOrCreateCounter(registry, {
+    name: `${opts.prefix}_embedding_cache_total`,
+    help: 'Total embedding cache lookups (hit or miss)',
+    labelNames: ['cache_name', 'result'],
+  });
+
+  const staleModelEvictions = getOrCreateCounter(registry, {
+    name: `${opts.prefix}_stale_model_evictions_total`,
+    help: 'Entries evicted due to staleAfterModelChange detection',
+    labelNames: ['cache_name'],
+  });
+
   return {
     tracer,
     metrics: {
@@ -84,6 +105,9 @@ export function createTelemetry(opts: TelemetryFactoryOptions): Telemetry {
       similarityScore,
       operationDuration,
       embeddingDuration,
+      costSavedTotal,
+      embeddingCacheTotal,
+      staleModelEvictions,
     },
   };
 }
