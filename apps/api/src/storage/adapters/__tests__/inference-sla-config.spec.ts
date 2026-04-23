@@ -79,5 +79,21 @@ describe('inference_sla_config round-trip', () => {
       expect(loaded?.inferenceSlaConfig).toEqual({});
       await storage.close();
     });
+
+    it('persists inferenceSlaConfig through updateSettings partial-update path', async () => {
+      const storage = new SqliteAdapter({ filepath: ':memory:' });
+      await storage.initialize();
+      await storage.saveSettings(buildSettings());
+
+      const config = {
+        idx_x: { p99ThresholdUs: 17_500, enabled: true },
+      };
+      const updated = await storage.updateSettings({ inferenceSlaConfig: config });
+      expect(updated.inferenceSlaConfig).toEqual(config);
+
+      const reloaded = await storage.getSettings();
+      expect(reloaded?.inferenceSlaConfig).toEqual(config);
+      await storage.close();
+    });
   });
 });

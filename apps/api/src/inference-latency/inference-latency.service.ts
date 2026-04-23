@@ -130,6 +130,10 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
             connectionId,
             startTime: startSec,
             endTime: endSec,
+            // COMMANDLOG stores three types (slow, large-request, large-reply).
+            // Only `slow` reflects execution time; the large-payload types
+            // carry unrelated durations that would pollute percentiles.
+            type: 'slow',
             limit: MAX_ENTRIES_PER_PROFILE,
           })
         : await this.storage.getSlowLogEntries({
@@ -236,6 +240,10 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
             connectionId,
             startTime: startSec,
             endTime: endSec,
+            // COMMANDLOG stores three types (slow, large-request, large-reply).
+            // Only `slow` reflects execution time; the large-payload types
+            // carry unrelated durations that would pollute percentiles.
+            type: 'slow',
             limit: MAX_ENTRIES_PER_PROFILE,
           })
         : await this.storage.getSlowLogEntries({
