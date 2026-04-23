@@ -12,7 +12,10 @@ import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { ConnectionId } from '../common/decorators';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
-import { InferenceLatencyService } from './inference-latency.service';
+import {
+  InferenceLatencyService,
+  InferenceLatencyValidationError,
+} from './inference-latency.service';
 
 @ApiTags('inference-latency')
 @Controller('inference-latency')
@@ -35,17 +38,64 @@ export class InferenceLatencyController {
     name: 'windowMs',
     required: false,
     type: Number,
-    description: 'Window length in milliseconds (default 15 minutes).',
+    description:
+      'Rolling window length in ms (default 15 minutes). Ignored when startTime and endTime are both supplied.',
     example: 900000,
+  })
+  @ApiQuery({
+    name: 'startTime',
+    required: false,
+    type: Number,
+    description:
+      'Explicit window start (Unix ms). Must be supplied together with endTime. Takes precedence over windowMs.',
+  })
+  @ApiQuery({
+    name: 'endTime',
+    required: false,
+    type: Number,
+    description: 'Explicit window end (Unix ms). Must be supplied together with startTime.',
   })
   @ApiHeader({ name: 'x-connection-id', required: false })
   async getProfile(
     @Query('windowMs') windowMs?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
     @ConnectionId() connectionId?: string,
   ): Promise<InferenceLatencyProfile> {
     const resolvedId = this.requireConnectionId(connectionId);
+
+    const hasStart = startTime !== undefined && startTime !== '';
+    const hasEnd = endTime !== undefined && endTime !== '';
+    if (hasStart !== hasEnd) {
+      throw new BadRequestException('startTime and endTime must be supplied together');
+    }
+
+    const parsedStart = hasStart ? Number(startTime) : undefined;
+    const parsedEnd = hasEnd ? Number(endTime) : undefined;
+    if (
+      (parsedStart !== undefined && !Number.isFinite(parsedStart)) ||
+      (parsedEnd !== undefined && !Number.isFinite(parsedEnd))
+    ) {
+      throw new BadRequestException('startTime and endTime must be numeric');
+    }
+
     const parsedWindow = windowMs ? Number(windowMs) : undefined;
-    return this.service.getProfile(resolvedId, parsedWindow);
+    if (parsedWindow !== undefined && !Number.isFinite(parsedWindow)) {
+      throw new BadRequestException('windowMs must be numeric');
+    }
+
+    try {
+      return await this.service.getProfile(resolvedId, {
+        windowMs: parsedWindow,
+        startTime: parsedStart,
+        endTime: parsedEnd,
+      });
+    } catch (err) {
+      if (err instanceof InferenceLatencyValidationError) {
+        throw new BadRequestException(err.message);
+      }
+      throw err;
+    }
   }
 
   @Get('trend')
@@ -88,7 +138,10 @@ export class InferenceLatencyController {
     try {
       return await this.service.getTrend(resolvedId, bucket, startMs, endMs, parsedBucketMs);
     } catch (err) {
-      throw new BadRequestException((err as Error).message);
+      if (err instanceof InferenceLatencyValidationError) {
+        throw new BadRequestException(err.message);
+      }
+      throw err;
     }
   }
 

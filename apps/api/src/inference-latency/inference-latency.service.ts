@@ -34,6 +34,22 @@ const FT_SEARCH_BUCKET_PREFIX = 'FT.SEARCH:';
 const DEFAULT_TREND_BUCKET_MS = 60_000;
 const MAX_TREND_POINTS = 1_440;
 
+/**
+ * Thrown for caller-supplied bad inputs that should surface as 4xx.
+ * Anything else bubbling out of getTrend/getProfile should stay a 5xx.
+ */
+export class InferenceLatencyValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InferenceLatencyValidationError';
+  }
+}
+
+export interface ProfileWindow {
+  startMs: number;
+  endMs: number;
+}
+
 @Injectable()
 export class InferenceLatencyService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(InferenceLatencyService.name);
@@ -67,9 +83,12 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     }
   }
 
-  async getProfile(connectionId: string, windowMs?: number): Promise<InferenceLatencyProfile> {
-    const effectiveWindow = Math.max(1_000, windowMs ?? DEFAULT_PROFILE_WINDOW_MS);
-    return this.computeProfile(connectionId, effectiveWindow);
+  async getProfile(
+    connectionId: string,
+    options: { windowMs?: number; startTime?: number; endTime?: number } = {},
+  ): Promise<InferenceLatencyProfile> {
+    const window = this.resolveProfileWindow(options);
+    return this.computeProfile(connectionId, window);
   }
 
   async getTrend(
@@ -80,14 +99,14 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     bucketMs: number = DEFAULT_TREND_BUCKET_MS,
   ): Promise<InferenceLatencyTrend> {
     if (endTime <= startTime) {
-      throw new Error('endTime must be greater than startTime');
+      throw new InferenceLatencyValidationError('endTime must be greater than startTime');
     }
     if (bucketMs <= 0) {
-      throw new Error('bucketMs must be positive');
+      throw new InferenceLatencyValidationError('bucketMs must be positive');
     }
     const binCount = Math.ceil((endTime - startTime) / bucketMs);
     if (binCount > MAX_TREND_POINTS) {
-      throw new Error(
+      throw new InferenceLatencyValidationError(
         `trend window produces ${binCount} bins; cap is ${MAX_TREND_POINTS}. Increase bucketMs or shrink the range.`,
       );
     }
@@ -146,7 +165,11 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
-    const profile = await this.computeProfile(ctx.connectionId, SLA_EVAL_WINDOW_MS);
+    const endMs = Date.now();
+    const profile = await this.computeProfile(ctx.connectionId, {
+      startMs: endMs - SLA_EVAL_WINDOW_MS,
+      endMs,
+    });
     this.prometheusService.updateInferenceLatencyMetrics(
       ctx.connectionId,
       profile.buckets.map((b) => ({
@@ -160,17 +183,41 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     await this.evaluateSlas(ctx, profile);
   }
 
+  private resolveProfileWindow(options: {
+    windowMs?: number;
+    startTime?: number;
+    endTime?: number;
+  }): ProfileWindow {
+    const hasStart = options.startTime !== undefined;
+    const hasEnd = options.endTime !== undefined;
+    if (hasStart !== hasEnd) {
+      throw new InferenceLatencyValidationError(
+        'startTime and endTime must be provided together',
+      );
+    }
+    if (hasStart && hasEnd) {
+      if (options.endTime! <= options.startTime!) {
+        throw new InferenceLatencyValidationError('endTime must be greater than startTime');
+      }
+      return { startMs: options.startTime!, endMs: options.endTime! };
+    }
+    const windowMs = Math.max(1_000, options.windowMs ?? DEFAULT_PROFILE_WINDOW_MS);
+    const endMs = Date.now();
+    return { startMs: endMs - windowMs, endMs };
+  }
+
   private async computeProfile(
     connectionId: string,
-    windowMs: number,
+    window: ProfileWindow,
   ): Promise<InferenceLatencyProfile> {
     const connection = this.connectionRegistry.get(connectionId);
     const capabilities = connection.getCapabilities();
     const source: InferenceLatencySource = capabilities.hasCommandLog ? 'commandlog' : 'slowlog';
 
-    const nowMs = Date.now();
-    const startSec = Math.floor((nowMs - windowMs) / 1000);
-    const endSec = Math.floor(nowMs / 1000);
+    const { startMs, endMs } = window;
+    const windowMs = endMs - startMs;
+    const startSec = Math.floor(startMs / 1000);
+    const endSec = Math.floor(endMs / 1000);
 
     const rawEntries: Array<StoredSlowLogEntry | StoredCommandLogEntry> =
       source === 'commandlog'
@@ -203,8 +250,8 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
 
     const snapshots = await this.storage.getVectorIndexSnapshots({
       connectionId,
-      startTime: nowMs - windowMs,
-      endTime: nowMs,
+      startTime: startMs,
+      endTime: endMs,
     });
 
     const buckets: InferenceLatencyBucket[] = [];
@@ -216,8 +263,8 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
         bucketKey,
         entries,
         snapshots,
-        windowStartMs: nowMs - windowMs,
-        windowEndMs: nowMs,
+        windowStartMs: startMs,
+        windowEndMs: endMs,
       });
       buckets.push({ bucket: bucketKey, p50, p95, p99, count, unhealthy, namedEvents });
     }
@@ -234,7 +281,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
       thresholdDirective,
       thresholdUs,
       buckets,
-      generatedAt: nowMs,
+      generatedAt: Date.now(),
     };
   }
 

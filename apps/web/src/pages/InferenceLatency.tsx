@@ -75,15 +75,20 @@ export function InferenceLatency() {
   // Community is locked to the live rolling window — ignore any stale state.
   const effectiveRange = canUseHistorical ? dateRange : undefined;
   const isCustomRange = effectiveRange !== undefined;
-  const profileWindowMs = isCustomRange
-    ? Math.max(1_000, effectiveRange.to.getTime() - effectiveRange.from.getTime())
-    : DEFAULT_WINDOW_MS;
   const rangeKey = isCustomRange
     ? `${effectiveRange.from.getTime()}-${effectiveRange.to.getTime()}`
     : 'rolling';
 
   const profileQuery = usePolling({
-    fetcher: () => getInferenceLatencyProfile({ windowMs: profileWindowMs }),
+    fetcher: () => {
+      if (isCustomRange) {
+        return getInferenceLatencyProfile({
+          startTime: effectiveRange.from.getTime(),
+          endTime: effectiveRange.to.getTime(),
+        });
+      }
+      return getInferenceLatencyProfile({ windowMs: DEFAULT_WINDOW_MS });
+    },
     interval: isCustomRange ? 0 : PROFILE_POLL_MS,
     enabled: hasVectorSearch,
     refetchKey: `${currentConnection?.id ?? 'default'}|${rangeKey}`,
