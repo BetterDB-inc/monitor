@@ -60,6 +60,14 @@ export function InferenceTrendChart({
                 tickFormatter={(v) => formatDurationUs(Number(v))}
               />
               <Tooltip
+                contentStyle={{
+                  backgroundColor: 'var(--popover)',
+                  borderColor: 'var(--border)',
+                  borderRadius: 8,
+                  color: 'var(--popover-foreground)',
+                }}
+                labelStyle={{ color: 'var(--muted-foreground)' }}
+                itemStyle={{ color: 'var(--popover-foreground)' }}
                 labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
                 formatter={(value, name) => [formatDurationUs(Number(value)), name]}
               />
@@ -69,36 +77,36 @@ export function InferenceTrendChart({
                   x1={band.start}
                   x2={band.end}
                   strokeOpacity={0}
-                  fill="rgb(251 191 36)"
-                  fillOpacity={0.2}
+                  fill="rgb(180 83 9)"
+                  fillOpacity={0.18}
                 />
               ))}
               {healthyThresholdUs != null && (
                 <ReferenceLine
                   y={healthyThresholdUs}
-                  stroke="rgb(239 68 68)"
+                  stroke="rgb(185 28 28)"
                   strokeDasharray="4 4"
-                  strokeOpacity={0.6}
+                  strokeOpacity={0.7}
                 />
               )}
               <Line
                 type="monotone"
                 dataKey="p50"
-                stroke="var(--chart-1)"
+                stroke="rgb(29 78 216)"
                 strokeWidth={1.5}
                 dot={false}
               />
               <Line
                 type="monotone"
                 dataKey="p95"
-                stroke="var(--chart-2)"
+                stroke="rgb(180 83 9)"
                 strokeWidth={1.5}
                 dot={false}
               />
               <Line
                 type="monotone"
                 dataKey="p99"
-                stroke="var(--chart-3)"
+                stroke="rgb(185 28 28)"
                 strokeWidth={2}
                 dot={false}
               />
