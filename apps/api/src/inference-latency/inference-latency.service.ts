@@ -223,7 +223,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     }
 
     const thresholdDirective =
-      source === 'commandlog' ? 'command-log-slow-time-threshold' : 'slowlog-log-slower-than';
+      source === 'commandlog' ? 'commandlog-execution-slower-than' : 'slowlog-log-slower-than';
     const thresholdRaw = await connection.getConfigValue(thresholdDirective).catch(() => null);
     const thresholdUs = thresholdRaw === null ? 0 : Number(thresholdRaw) || 0;
 

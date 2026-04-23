@@ -140,7 +140,7 @@ Percentile latency for inference-shaped buckets, sourced from per-entry duration
 | `betterdb_inference_unhealthy` | gauge | `bucket` | Whether a bucket is unhealthy (p50 > 10 ms for `FT.SEARCH:*`): 1 unhealthy, 0 healthy | `0` |
 | `betterdb_inference_sla_breach` | gauge | `index` | Whether the configured per-index p99 SLA is currently breached: 1 breached, 0 ok | `0` |
 
-**Threshold-gating bias**: the source tables only store entries slower than the configured threshold directive (`command-log-slow-time-threshold` or `slowlog-log-slower-than`), so percentiles skew toward the tail. The `/inference-latency/profile` HTTP response exposes the active directive + value so consumers can qualify the number.
+**Threshold-gating bias**: the source tables only store entries slower than the configured threshold directive (`commandlog-execution-slower-than` or `slowlog-log-slower-than`), so percentiles skew toward the tail. The `/inference-latency/profile` HTTP response exposes the active directive + value so consumers can qualify the number.
 
 **Cardinality Warning**: `FT.SEARCH` buckets scale with the number of vector indexes per connection. `inference_sla_breach` only emits for indexes with an active SLA configured (Pro tier). Aggregate `read` / `write` buckets are constant cardinality.
 

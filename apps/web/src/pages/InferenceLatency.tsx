@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   FT_SEARCH_HEALTHY_P50_THRESHOLD_US,
@@ -20,6 +20,16 @@ import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card'
 import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
+import {
+  DateRangePicker,
+  type DateRange,
+} from '../components/ui/date-range-picker';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '../components/ui/tooltip';
 import { formatDurationUs } from '../lib/utils';
 import { InferenceSlaConfig } from '../components/inference/InferenceSlaConfig';
 import { InferenceTrendChart } from '../components/inference/InferenceTrendChart';
@@ -168,22 +178,25 @@ function BreachBanner({ breaches }: { breaches: Breach[] }) {
 function FtSearchTrendPanel({
   bucket,
   connectionId,
+  dateRange,
 }: {
   bucket: InferenceLatencyBucket;
   connectionId: string | undefined;
+  dateRange: DateRange | undefined;
 }) {
+  const isCustom = dateRange !== undefined;
+  const rangeKey = isCustom
+    ? `${dateRange.from.getTime()}-${dateRange.to.getTime()}`
+    : 'rolling';
+
   const query = usePolling({
     fetcher: () => {
-      const end = Date.now();
-      return getInferenceLatencyTrend(
-        bucket.bucket,
-        end - TREND_WINDOW_MS,
-        end,
-        TREND_BUCKET_MS,
-      );
+      const end = isCustom ? dateRange.to.getTime() : Date.now();
+      const start = isCustom ? dateRange.from.getTime() : end - TREND_WINDOW_MS;
+      return getInferenceLatencyTrend(bucket.bucket, start, end, TREND_BUCKET_MS);
     },
-    interval: TREND_POLL_MS,
-    refetchKey: `${connectionId ?? 'default'}|${bucket.bucket}`,
+    interval: isCustom ? 0 : TREND_POLL_MS,
+    refetchKey: `${connectionId ?? 'default'}|${bucket.bucket}|${rangeKey}`,
   });
 
   if (query.error) {
@@ -221,13 +234,24 @@ export function InferenceLatency() {
   const { hasVectorSearch } = useCapabilities();
   const { currentConnection } = useConnection();
   const { hasFeature } = useLicense();
-  const canSeeTrend = hasFeature(Feature.INFERENCE_SLA);
+  const canUseHistorical = hasFeature(Feature.INFERENCE_SLA);
+  const canSeeTrend = canUseHistorical;
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
+  // Community is locked to the live rolling window — ignore any stale state.
+  const effectiveRange = canUseHistorical ? dateRange : undefined;
+  const isCustomRange = effectiveRange !== undefined;
+  const profileWindowMs = isCustomRange
+    ? Math.max(1_000, effectiveRange.to.getTime() - effectiveRange.from.getTime())
+    : DEFAULT_WINDOW_MS;
+  const rangeKey = isCustomRange
+    ? `${effectiveRange.from.getTime()}-${effectiveRange.to.getTime()}`
+    : 'rolling';
 
   const profileQuery = usePolling({
-    fetcher: () => getInferenceLatencyProfile({ windowMs: DEFAULT_WINDOW_MS }),
-    interval: PROFILE_POLL_MS,
+    fetcher: () => getInferenceLatencyProfile({ windowMs: profileWindowMs }),
+    interval: isCustomRange ? 0 : PROFILE_POLL_MS,
     enabled: hasVectorSearch,
-    refetchKey: currentConnection?.id,
+    refetchKey: `${currentConnection?.id ?? 'default'}|${rangeKey}`,
   });
 
   const settingsQuery = useQuery({
@@ -244,14 +268,45 @@ export function InferenceLatency() {
     [profile, settingsQuery.data],
   );
 
+  const picker = (
+    <DateRangePicker
+      value={effectiveRange}
+      onChange={setDateRange}
+      placeholder={canUseHistorical ? 'Last 15 minutes (live)' : 'Last 15 minutes (Pro required)'}
+    />
+  );
+
   const content = (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">Inference Latency</h1>
-        <p className="text-muted-foreground">
-          Per-bucket p50 / p95 / p99 across the inference hot path — FT.SEARCH indexes plus aggregate
-          session reads and writes — over the last 15 minutes.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold">Inference Latency</h1>
+          <p className="text-muted-foreground">
+            Per-bucket p50 / p95 / p99 across the inference hot path — FT.SEARCH indexes plus
+            aggregate session reads and writes.
+          </p>
+        </div>
+        {canUseHistorical ? (
+          picker
+        ) : (
+          <TooltipProvider delayDuration={100}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div
+                  className="pointer-events-none opacity-60"
+                  aria-disabled="true"
+                  tabIndex={-1}
+                >
+                  {picker}
+                </div>
+              </TooltipTrigger>
+              <TooltipContent>
+                Historical ranges are a Pro feature. Community is locked to the live 15-minute
+                window. Upgrade to query any past window.
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
       </div>
 
       <BreachBanner breaches={activeBreaches} />
@@ -267,9 +322,9 @@ export function InferenceLatency() {
       ) : buckets.length === 0 ? (
         <Card>
           <CardContent className="p-6 text-sm text-muted-foreground">
-            No entries in the current window. Data appears after the first poll captures slow
-            traffic; if your threshold directive is set high, you may need traffic exceeding it
-            before any bucket appears.
+            {isCustomRange
+              ? 'No entries in the selected range.'
+              : 'No entries in the current window. Data appears after the first poll captures slow traffic; if your threshold directive is set high, you may need traffic exceeding it before any bucket appears.'}
           </CardContent>
         </Card>
       ) : (
@@ -293,6 +348,7 @@ export function InferenceLatency() {
                         key={`trend-${b.bucket}`}
                         bucket={b}
                         connectionId={currentConnection?.id}
+                        dateRange={effectiveRange}
                       />
                     ))}
                 </div>

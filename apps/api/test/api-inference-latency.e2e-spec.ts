@@ -75,7 +75,7 @@ describe('Inference Latency API (e2e)', () => {
       expect(body).toHaveProperty('connectionId');
       expect(typeof body.windowMs).toBe('number');
       expect(['commandlog', 'slowlog']).toContain(body.source);
-      expect(['command-log-slow-time-threshold', 'slowlog-log-slower-than']).toContain(
+      expect(['commandlog-execution-slower-than', 'slowlog-log-slower-than']).toContain(
         body.thresholdDirective,
       );
       expect(typeof body.thresholdUs).toBe('number');
