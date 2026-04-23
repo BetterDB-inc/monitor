@@ -1,136 +1,50 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import {
-  FT_SEARCH_HEALTHY_P50_THRESHOLD_US,
-  Feature,
-  type InferenceLatencyBucket,
-  type InferenceLatencyProfile,
-} from '@betterdb/shared';
-import {
-  getInferenceLatencyProfile,
-  getInferenceLatencyTrend,
-} from '../api/inference-latency';
+import { Feature, type InferenceLatencyBucket, InferenceLatencyProfile } from '@betterdb/shared';
+import { getInferenceLatencyProfile } from '../api/inference-latency';
 import { settingsApi } from '../api/settings';
 import { useCapabilities } from '../hooks/useCapabilities';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
 import { usePolling } from '../hooks/usePolling';
 import { UnavailableOverlay } from '../components/UnavailableOverlay';
-import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
-import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert';
-import { Badge } from '../components/ui/badge';
-import { Button } from '../components/ui/button';
-import {
-  DateRangePicker,
-  type DateRange,
-} from '../components/ui/date-range-picker';
+import { Card, CardContent } from '../components/ui/card';
+import { type DateRange, DateRangePicker } from '../components/ui/date-range-picker';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
-import { formatDurationUs } from '../lib/utils';
-import { InferenceSlaConfig } from '../components/inference/InferenceSlaConfig';
-import { InferenceTrendChart } from '../components/inference/InferenceTrendChart';
+import { BucketTile } from '@/components/pages/inference-latency/BucketTile.tsx';
+import { SourceAdvisory } from '@/components/pages/inference-latency/SourceAdvisory.tsx';
+import { Breach, BreachBanner } from '@/components/pages/inference-latency/BreachBanner.tsx';
+import { FtSearchTrendPanel } from '@/components/pages/inference-latency/FtSearchTrendPanel.tsx';
 
 const PROFILE_POLL_MS = 30_000;
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000;
-const TREND_WINDOW_MS = 60 * 60 * 1000;
-const TREND_BUCKET_MS = 60_000;
-const TREND_POLL_MS = 60_000;
-
-function bucketLabel(bucket: string): string {
-  if (bucket.startsWith('FT.SEARCH:')) return bucket;
-  if (bucket === 'read') return 'Session reads (GET / MGET)';
-  if (bucket === 'write') return 'Session writes (SET / HSET family)';
-  return bucket;
-}
 
 function sortBuckets(buckets: InferenceLatencyBucket[]): InferenceLatencyBucket[] {
-  const ftSearch = buckets.filter((b) => b.bucket.startsWith('FT.SEARCH:'));
-  const reads = buckets.filter((b) => b.bucket === 'read');
-  const writes = buckets.filter((b) => b.bucket === 'write');
-  return [...ftSearch.sort((a, b) => a.bucket.localeCompare(b.bucket)), ...reads, ...writes];
-}
+  const ftSearch: InferenceLatencyBucket[] = [];
+  const reads: InferenceLatencyBucket[] = [];
+  const writes: InferenceLatencyBucket[] = [];
+  buckets.forEach((b) => {
+    if (b.bucket.startsWith('FT.SEARCH:')) {
+      ftSearch.push(b);
+      return;
+    }
+    if (b.bucket === 'read') {
+      reads.push(b);
+      return;
+    }
+    if (b.bucket === 'write') {
+      writes.push(b);
+      return;
+    }
+  });
 
-function BucketTile({ bucket }: { bucket: InferenceLatencyBucket }) {
-  const borderClass = bucket.unhealthy
-    ? 'border-destructive/60 bg-destructive/5'
-    : 'border-border';
-  const indexName = bucket.bucket.startsWith('FT.SEARCH:')
-    ? bucket.bucket.slice('FT.SEARCH:'.length)
-    : null;
-  return (
-    <Card className={borderClass}>
-      <CardHeader className="pb-2">
-        <CardTitle className="flex items-center justify-between text-base font-mono">
-          <span className="truncate">{bucketLabel(bucket.bucket)}</span>
-          <div className="flex items-center gap-2">
-            {bucket.unhealthy ? (
-              <Badge variant="destructive">unhealthy</Badge>
-            ) : (
-              <Badge variant="secondary">healthy</Badge>
-            )}
-            {indexName && (
-              <InferenceSlaConfig
-                indexName={indexName}
-                trigger={
-                  <Button type="button" variant="ghost" size="sm" aria-label="Configure SLA">
-                    ⚙
-                  </Button>
-                }
-              />
-            )}
-          </div>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-2">
-        <div className="grid grid-cols-3 gap-2 text-sm">
-          <div>
-            <div className="text-muted-foreground text-xs">p50</div>
-            <div className="font-mono">{formatDurationUs(bucket.p50)}</div>
-          </div>
-          <div>
-            <div className="text-muted-foreground text-xs">p95</div>
-            <div className="font-mono">{formatDurationUs(bucket.p95)}</div>
-          </div>
-          <div>
-            <div className="text-muted-foreground text-xs">p99</div>
-            <div className="font-mono">{formatDurationUs(bucket.p99)}</div>
-          </div>
-        </div>
-        <div className="text-xs text-muted-foreground">{bucket.count.toLocaleString()} samples</div>
-        {bucket.namedEvents.length > 0 && (
-          <div className="text-xs text-amber-700 dark:text-amber-400">
-            Latency degraded during indexing since{' '}
-            {new Date(bucket.namedEvents[0].since).toLocaleTimeString()}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function SourceAdvisory({ profile }: { profile: InferenceLatencyProfile }) {
-  const thresholdFormatted = profile.thresholdUs > 0 ? formatDurationUs(profile.thresholdUs) : '—';
-  return (
-    <Alert>
-      <AlertTitle>
-        Percentiles sourced from{' '}
-        <code className="px-1 py-0.5 bg-muted rounded text-xs">
-          {profile.source === 'commandlog' ? 'command_log_entries' : 'slowlog_entries'}
-        </code>
-      </AlertTitle>
-      <AlertDescription>
-        Only entries slower than the active threshold directive{' '}
-        <code className="px-1 py-0.5 bg-muted rounded text-xs">{profile.thresholdDirective}</code>{' '}
-        (currently <strong>{thresholdFormatted}</strong>) are recorded, so percentiles skew toward
-        the tail. A healthy p50 here reflects the slow-call distribution, not your full traffic.
-      </AlertDescription>
-    </Alert>
-  );
-}
-
-interface Breach {
-  indexName: string;
-  currentP99Us: number;
-  thresholdUs: number;
+  return [
+    ...ftSearch.sort((a, b) => {
+      return a.bucket.localeCompare(b.bucket);
+    }),
+    ...reads,
+    ...writes,
+  ];
 }
 
 function deriveActiveBreaches(
@@ -149,81 +63,6 @@ function deriveActiveBreaches(
     }
   }
   return breaches;
-}
-
-function BreachBanner({ breaches }: { breaches: Breach[] }) {
-  if (breaches.length === 0) return null;
-  return (
-    <Alert variant="destructive">
-      <AlertTitle>Active SLA breach{breaches.length === 1 ? '' : 'es'}</AlertTitle>
-      <AlertDescription>
-        <ul className="list-disc pl-4 space-y-1">
-          {breaches.map((b) => (
-            <li key={b.indexName} className="font-mono text-sm">
-              {b.indexName}: p99 {formatDurationUs(b.currentP99Us)} ≥ threshold{' '}
-              {formatDurationUs(b.thresholdUs)}
-            </li>
-          ))}
-        </ul>
-      </AlertDescription>
-    </Alert>
-  );
-}
-
-function FtSearchTrendPanel({
-  bucket,
-  connectionId,
-  dateRange,
-}: {
-  bucket: InferenceLatencyBucket;
-  connectionId: string | undefined;
-  dateRange: DateRange | undefined;
-}) {
-  const isCustom = dateRange !== undefined;
-  const rangeKey = isCustom
-    ? `${dateRange.from.getTime()}-${dateRange.to.getTime()}`
-    : 'rolling';
-
-  const query = usePolling({
-    fetcher: () => {
-      const end = isCustom ? dateRange.to.getTime() : Date.now();
-      const start = isCustom ? dateRange.from.getTime() : end - TREND_WINDOW_MS;
-      return getInferenceLatencyTrend(bucket.bucket, start, end, TREND_BUCKET_MS);
-    },
-    interval: isCustom ? 0 : TREND_POLL_MS,
-    refetchKey: `${connectionId ?? 'default'}|${bucket.bucket}|${rangeKey}`,
-  });
-
-  if (query.error) {
-    return (
-      <Card>
-        <CardContent className="p-4 text-sm text-muted-foreground">
-          Trend unavailable: {query.error.message}
-        </CardContent>
-      </Card>
-    );
-  }
-  const trend = query.data;
-  if (!trend) {
-    return (
-      <Card>
-        <CardContent className="p-4 text-sm text-muted-foreground">Loading trend…</CardContent>
-      </Card>
-    );
-  }
-
-  const indexingBands = bucket.namedEvents.map((e) => ({
-    start: e.since,
-    end: trend.endTime,
-  }));
-
-  return (
-    <InferenceTrendChart
-      trend={trend}
-      healthyThresholdUs={FT_SEARCH_HEALTHY_P50_THRESHOLD_US}
-      indexingBands={indexingBands}
-    />
-  );
 }
 
 export function InferenceLatency() {
@@ -296,8 +135,8 @@ export function InferenceLatency() {
               </div>
             </TooltipTrigger>
             <TooltipContent side="left" className="max-w-xs">
-              Historical ranges are a Pro feature. Community is locked to the live 15-minute
-              window. Upgrade to query any past window.
+              Historical ranges are a Pro feature. Community is locked to the live 15-minute window.
+              Upgrade to query any past window.
             </TooltipContent>
           </Tooltip>
         )}
@@ -309,9 +148,7 @@ export function InferenceLatency() {
 
       {profileQuery.loading && !profile ? (
         <Card>
-          <CardContent className="p-6 text-sm text-muted-foreground">
-            Loading profile…
-          </CardContent>
+          <CardContent className="p-6 text-sm text-muted-foreground">Loading profile…</CardContent>
         </Card>
       ) : buckets.length === 0 ? (
         <Card>
@@ -381,8 +218,8 @@ export function InferenceLatency() {
           <>
             The Valkey/Redis Search module is not available on this connection, so the profiler has
             no inference workload to analyse. Load the Search module (e.g.{' '}
-            <code className="px-1 py-0.5 bg-muted rounded text-xs">valkey-bundle</code>) or attach
-            a connection that has it enabled.
+            <code className="px-1 py-0.5 bg-muted rounded text-xs">valkey-bundle</code>) or attach a
+            connection that has it enabled.
           </>
         }
       >
