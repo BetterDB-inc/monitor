@@ -5,6 +5,8 @@ import {
   InferenceLatencyBucket,
   InferenceLatencyProfile,
   InferenceLatencySource,
+  InferenceLatencyTrend,
+  InferenceLatencyTrendPoint,
   WEBHOOK_EVENTS_PRO_SERVICE,
 } from '@betterdb/shared';
 import {
@@ -29,6 +31,8 @@ const DEFAULT_PROFILE_WINDOW_MS = 15 * 60 * 1000;
 const MAX_ENTRIES_PER_PROFILE = 100_000;
 const POLL_INTERVAL_MS = 60_000;
 const FT_SEARCH_BUCKET_PREFIX = 'FT.SEARCH:';
+const DEFAULT_TREND_BUCKET_MS = 60_000;
+const MAX_TREND_POINTS = 1_440;
 
 @Injectable()
 export class InferenceLatencyService extends MultiConnectionPoller implements OnModuleInit {
@@ -66,6 +70,79 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
   async getProfile(connectionId: string, windowMs?: number): Promise<InferenceLatencyProfile> {
     const effectiveWindow = Math.max(1_000, windowMs ?? DEFAULT_PROFILE_WINDOW_MS);
     return this.computeProfile(connectionId, effectiveWindow);
+  }
+
+  async getTrend(
+    connectionId: string,
+    bucket: string,
+    startTime: number,
+    endTime: number,
+    bucketMs: number = DEFAULT_TREND_BUCKET_MS,
+  ): Promise<InferenceLatencyTrend> {
+    if (endTime <= startTime) {
+      throw new Error('endTime must be greater than startTime');
+    }
+    if (bucketMs <= 0) {
+      throw new Error('bucketMs must be positive');
+    }
+    const binCount = Math.ceil((endTime - startTime) / bucketMs);
+    if (binCount > MAX_TREND_POINTS) {
+      throw new Error(
+        `trend window produces ${binCount} bins; cap is ${MAX_TREND_POINTS}. Increase bucketMs or shrink the range.`,
+      );
+    }
+
+    const connection = this.connectionRegistry.get(connectionId);
+    const capabilities = connection.getCapabilities();
+    const source: InferenceLatencySource = capabilities.hasCommandLog ? 'commandlog' : 'slowlog';
+
+    const startSec = Math.floor(startTime / 1000);
+    const endSec = Math.floor(endTime / 1000);
+
+    const rawEntries =
+      source === 'commandlog'
+        ? await this.storage.getCommandLogEntries({
+            connectionId,
+            startTime: startSec,
+            endTime: endSec,
+            limit: MAX_ENTRIES_PER_PROFILE,
+          })
+        : await this.storage.getSlowLogEntries({
+            connectionId,
+            startTime: startSec,
+            endTime: endSec,
+            limit: MAX_ENTRIES_PER_PROFILE,
+          });
+
+    const binsByIndex = new Map<number, number[]>();
+    for (const raw of rawEntries) {
+      if (bucketEntry(raw.command) !== bucket) continue;
+      const tsMs = raw.timestamp * 1000;
+      if (tsMs < startTime || tsMs >= endTime) continue;
+      const binIndex = Math.floor((tsMs - startTime) / bucketMs);
+      let arr = binsByIndex.get(binIndex);
+      if (!arr) {
+        arr = [];
+        binsByIndex.set(binIndex, arr);
+      }
+      arr.push(raw.duration);
+    }
+
+    const points: InferenceLatencyTrendPoint[] = [];
+    for (let i = 0; i < binCount; i += 1) {
+      const durations = binsByIndex.get(i);
+      if (!durations || durations.length === 0) continue;
+      const { p50, p95, p99, count } = computePercentiles(durations);
+      points.push({
+        capturedAt: startTime + i * bucketMs,
+        p50,
+        p95,
+        p99,
+        count,
+      });
+    }
+
+    return { connectionId, bucket, startTime, endTime, bucketMs, source, points };
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {

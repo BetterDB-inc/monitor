@@ -1,13 +1,20 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { LicenseGuard } from '@proprietary/licenses';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { InferenceLatencyController } from '../inference-latency.controller';
 import { InferenceLatencyService } from '../inference-latency.service';
 
+class AllowingGuard {
+  canActivate(): boolean {
+    return true;
+  }
+}
+
 describe('InferenceLatencyController', () => {
   let controller: InferenceLatencyController;
-  let service: { getProfile: jest.Mock };
+  let service: { getProfile: jest.Mock; getTrend: jest.Mock };
 
   const buildModule = (registry: Partial<ConnectionRegistry>): Promise<TestingModule> =>
     Test.createTestingModule({
@@ -16,7 +23,10 @@ describe('InferenceLatencyController', () => {
         { provide: InferenceLatencyService, useValue: service },
         { provide: ConnectionRegistry, useValue: registry },
       ],
-    }).compile();
+    })
+      .overrideGuard(LicenseGuard)
+      .useClass(AllowingGuard)
+      .compile();
 
   const registry = (
     known: string[],
@@ -30,7 +40,10 @@ describe('InferenceLatencyController', () => {
   });
 
   beforeEach(async () => {
-    service = { getProfile: jest.fn().mockResolvedValue({ buckets: [] }) };
+    service = {
+      getProfile: jest.fn().mockResolvedValue({ buckets: [] }),
+      getTrend: jest.fn().mockResolvedValue({ points: [] }),
+    };
     const module = await buildModule(registry(['conn-1'], 'default-conn') as any);
     controller = module.get(InferenceLatencyController);
   });
@@ -62,14 +75,40 @@ describe('InferenceLatencyController', () => {
   });
 
   describe('GET /trend', () => {
-    it('returns 402 Payment Required', () => {
-      try {
-        controller.getTrend();
-        throw new Error('expected HttpException');
-      } catch (err) {
-        expect(err).toBeInstanceOf(HttpException);
-        expect((err as HttpException).getStatus()).toBe(HttpStatus.PAYMENT_REQUIRED);
-      }
+    it('requires bucket, startTime, and endTime', async () => {
+      await expect(
+        controller.getTrend(undefined, '1', '2', undefined, 'conn-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        controller.getTrend('FT.SEARCH:idx', undefined, '2', undefined, 'conn-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        controller.getTrend('FT.SEARCH:idx', '1', undefined, undefined, 'conn-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects non-numeric time params', async () => {
+      await expect(
+        controller.getTrend('FT.SEARCH:idx', 'not-a-number', '2', undefined, 'conn-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects non-positive bucketMs', async () => {
+      await expect(
+        controller.getTrend('FT.SEARCH:idx', '1', '2', '-5', 'conn-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('delegates valid input to the service', async () => {
+      await controller.getTrend('FT.SEARCH:idx', '100', '900', '60000', 'conn-1');
+      expect(service.getTrend).toHaveBeenCalledWith('conn-1', 'FT.SEARCH:idx', 100, 900, 60000);
+    });
+
+    it('translates service validation errors to 400', async () => {
+      service.getTrend.mockRejectedValueOnce(new Error('bin cap exceeded'));
+      await expect(
+        controller.getTrend('FT.SEARCH:idx', '100', '900', undefined, 'conn-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
     });
   });
 });

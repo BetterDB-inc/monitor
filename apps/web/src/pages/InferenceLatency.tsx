@@ -1,17 +1,34 @@
 import { useMemo } from 'react';
-import type { InferenceLatencyBucket, InferenceLatencyProfile } from '@betterdb/shared';
-import { getInferenceLatencyProfile } from '../api/inference-latency';
+import { useQuery } from '@tanstack/react-query';
+import {
+  FT_SEARCH_HEALTHY_P50_THRESHOLD_US,
+  Feature,
+  type InferenceLatencyBucket,
+  type InferenceLatencyProfile,
+} from '@betterdb/shared';
+import {
+  getInferenceLatencyProfile,
+  getInferenceLatencyTrend,
+} from '../api/inference-latency';
+import { settingsApi } from '../api/settings';
 import { useCapabilities } from '../hooks/useCapabilities';
 import { useConnection } from '../hooks/useConnection';
+import { useLicense } from '../hooks/useLicense';
 import { usePolling } from '../hooks/usePolling';
 import { UnavailableOverlay } from '../components/UnavailableOverlay';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert';
 import { Badge } from '../components/ui/badge';
+import { Button } from '../components/ui/button';
 import { formatDurationUs } from '../lib/utils';
+import { InferenceSlaConfig } from '../components/inference/InferenceSlaConfig';
+import { InferenceTrendChart } from '../components/inference/InferenceTrendChart';
 
 const PROFILE_POLL_MS = 30_000;
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000;
+const TREND_WINDOW_MS = 60 * 60 * 1000;
+const TREND_BUCKET_MS = 60_000;
+const TREND_POLL_MS = 60_000;
 
 function bucketLabel(bucket: string): string {
   if (bucket.startsWith('FT.SEARCH:')) return bucket;
@@ -31,16 +48,31 @@ function BucketTile({ bucket }: { bucket: InferenceLatencyBucket }) {
   const borderClass = bucket.unhealthy
     ? 'border-destructive/60 bg-destructive/5'
     : 'border-border';
+  const indexName = bucket.bucket.startsWith('FT.SEARCH:')
+    ? bucket.bucket.slice('FT.SEARCH:'.length)
+    : null;
   return (
     <Card className={borderClass}>
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center justify-between text-base font-mono">
           <span className="truncate">{bucketLabel(bucket.bucket)}</span>
-          {bucket.unhealthy ? (
-            <Badge variant="destructive">unhealthy</Badge>
-          ) : (
-            <Badge variant="secondary">healthy</Badge>
-          )}
+          <div className="flex items-center gap-2">
+            {bucket.unhealthy ? (
+              <Badge variant="destructive">unhealthy</Badge>
+            ) : (
+              <Badge variant="secondary">healthy</Badge>
+            )}
+            {indexName && (
+              <InferenceSlaConfig
+                indexName={indexName}
+                trigger={
+                  <Button type="button" variant="ghost" size="sm" aria-label="Configure SLA">
+                    ⚙
+                  </Button>
+                }
+              />
+            )}
+          </div>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -90,9 +122,106 @@ function SourceAdvisory({ profile }: { profile: InferenceLatencyProfile }) {
   );
 }
 
+interface Breach {
+  indexName: string;
+  currentP99Us: number;
+  thresholdUs: number;
+}
+
+function deriveActiveBreaches(
+  profile: InferenceLatencyProfile | null,
+  slaConfig: Record<string, { p99ThresholdUs: number; enabled: boolean }> | undefined,
+): Breach[] {
+  if (!profile || !slaConfig) return [];
+  const breaches: Breach[] = [];
+  for (const bucket of profile.buckets) {
+    if (!bucket.bucket.startsWith('FT.SEARCH:')) continue;
+    const indexName = bucket.bucket.slice('FT.SEARCH:'.length);
+    const config = slaConfig[indexName];
+    if (!config?.enabled) continue;
+    if (bucket.p99 >= config.p99ThresholdUs) {
+      breaches.push({ indexName, currentP99Us: bucket.p99, thresholdUs: config.p99ThresholdUs });
+    }
+  }
+  return breaches;
+}
+
+function BreachBanner({ breaches }: { breaches: Breach[] }) {
+  if (breaches.length === 0) return null;
+  return (
+    <Alert variant="destructive">
+      <AlertTitle>Active SLA breach{breaches.length === 1 ? '' : 'es'}</AlertTitle>
+      <AlertDescription>
+        <ul className="list-disc pl-4 space-y-1">
+          {breaches.map((b) => (
+            <li key={b.indexName} className="font-mono text-sm">
+              {b.indexName}: p99 {formatDurationUs(b.currentP99Us)} ≥ threshold{' '}
+              {formatDurationUs(b.thresholdUs)}
+            </li>
+          ))}
+        </ul>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+function FtSearchTrendPanel({
+  bucket,
+  connectionId,
+}: {
+  bucket: InferenceLatencyBucket;
+  connectionId: string | undefined;
+}) {
+  const query = usePolling({
+    fetcher: () => {
+      const end = Date.now();
+      return getInferenceLatencyTrend(
+        bucket.bucket,
+        end - TREND_WINDOW_MS,
+        end,
+        TREND_BUCKET_MS,
+      );
+    },
+    interval: TREND_POLL_MS,
+    refetchKey: `${connectionId ?? 'default'}|${bucket.bucket}`,
+  });
+
+  if (query.error) {
+    return (
+      <Card>
+        <CardContent className="p-4 text-sm text-muted-foreground">
+          Trend unavailable: {query.error.message}
+        </CardContent>
+      </Card>
+    );
+  }
+  if (!query.data) {
+    return (
+      <Card>
+        <CardContent className="p-4 text-sm text-muted-foreground">Loading trend…</CardContent>
+      </Card>
+    );
+  }
+
+  const indexingBands = bucket.namedEvents.map((e) => ({
+    start: e.since,
+    end: Date.now(),
+  }));
+
+  return (
+    <InferenceTrendChart
+      trend={query.data}
+      healthyThresholdUs={FT_SEARCH_HEALTHY_P50_THRESHOLD_US}
+      indexingBands={indexingBands}
+    />
+  );
+}
+
 export function InferenceLatency() {
   const { hasVectorSearch } = useCapabilities();
   const { currentConnection } = useConnection();
+  const { hasFeature } = useLicense();
+  const canSeeTrend = hasFeature(Feature.INFERENCE_SLA);
 
   const profileQuery = usePolling({
     fetcher: () => getInferenceLatencyProfile({ windowMs: DEFAULT_WINDOW_MS }),
@@ -101,9 +230,19 @@ export function InferenceLatency() {
     refetchKey: currentConnection?.id,
   });
 
+  const settingsQuery = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => settingsApi.getSettings(),
+    enabled: hasVectorSearch,
+  });
+
   const profile = profileQuery.data ?? null;
   const buckets = useMemo(() => (profile ? sortBuckets(profile.buckets) : []), [profile]);
   const hasFtSearchBuckets = buckets.some((b) => b.bucket.startsWith('FT.SEARCH:'));
+  const activeBreaches = useMemo(
+    () => deriveActiveBreaches(profile, settingsQuery.data?.settings.inferenceSlaConfig),
+    [profile, settingsQuery.data],
+  );
 
   const content = (
     <div className="space-y-6">
@@ -114,6 +253,8 @@ export function InferenceLatency() {
           session reads and writes — over the last 15 minutes.
         </p>
       </div>
+
+      <BreachBanner breaches={activeBreaches} />
 
       {profile && <SourceAdvisory profile={profile} />}
 
@@ -134,8 +275,8 @@ export function InferenceLatency() {
       ) : (
         <>
           {hasFtSearchBuckets && (
-            <div>
-              <h2 className="text-xl font-semibold mb-3">Vector search</h2>
+            <div className="space-y-4">
+              <h2 className="text-xl font-semibold">Vector search</h2>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {buckets
                   .filter((b) => b.bucket.startsWith('FT.SEARCH:'))
@@ -143,6 +284,19 @@ export function InferenceLatency() {
                     <BucketTile key={b.bucket} bucket={b} />
                   ))}
               </div>
+              {canSeeTrend && (
+                <div className="grid gap-4 md:grid-cols-2">
+                  {buckets
+                    .filter((b) => b.bucket.startsWith('FT.SEARCH:'))
+                    .map((b) => (
+                      <FtSearchTrendPanel
+                        key={`trend-${b.bucket}`}
+                        bucket={b}
+                        connectionId={currentConnection?.id}
+                      />
+                    ))}
+                </div>
+              )}
             </div>
           )}
           <div>

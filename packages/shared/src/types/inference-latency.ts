@@ -34,3 +34,21 @@ export interface InferenceSlaEntry {
 export type InferenceSlaConfig = Record<string, InferenceSlaEntry>;
 
 export const FT_SEARCH_HEALTHY_P50_THRESHOLD_US = 10_000;
+
+export interface InferenceLatencyTrendPoint {
+  capturedAt: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  count: number;
+}
+
+export interface InferenceLatencyTrend {
+  connectionId: string;
+  bucket: string;
+  startTime: number;
+  endTime: number;
+  bucketMs: number;
+  source: InferenceLatencySource;
+  points: InferenceLatencyTrendPoint[];
+}
