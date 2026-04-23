@@ -331,7 +331,7 @@ export class WebhookEventsProService implements OnModuleInit {
         currentP99Us: data.currentP99Us,
         thresholdUs: data.thresholdUs,
         windowMs: data.windowMs,
-        message: `Inference SLA breach on ${data.indexName}: p99 ${data.currentP99Us}µs >= threshold ${data.thresholdUs}µs`,
+        message: `Inference SLA breach on ${data.indexName}: p99 ${data.currentP99Us}µs > threshold ${data.thresholdUs}µs`,
         timestamp: data.timestamp,
         instance: data.instance,
       },

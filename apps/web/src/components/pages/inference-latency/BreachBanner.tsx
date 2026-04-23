@@ -16,7 +16,7 @@ export function BreachBanner({ breaches }: { breaches: Breach[] }) {
         <ul className="list-disc pl-4 space-y-1">
           {breaches.map((b) => (
             <li key={b.indexName} className="font-mono text-sm">
-              {b.indexName}: p99 {formatDurationUs(b.currentP99Us)} ≥ threshold{' '}
+              {b.indexName}: p99 {formatDurationUs(b.currentP99Us)} &gt; threshold{' '}
               {formatDurationUs(b.thresholdUs)}
             </li>
           ))}
