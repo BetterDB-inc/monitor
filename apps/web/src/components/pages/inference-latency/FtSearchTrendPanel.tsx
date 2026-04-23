@@ -6,8 +6,15 @@ import { Card, CardContent } from '@/components/ui/card.tsx';
 import { InferenceTrendChart } from '@/components/inference/InferenceTrendChart.tsx';
 
 const TREND_WINDOW_MS = 60 * 60 * 1000;
-const TREND_BUCKET_MS = 60_000;
+const MIN_TREND_BUCKET_MS = 60_000;
 const TREND_POLL_MS = 60_000;
+// Server caps /trend at 1440 bins; stay a hair under so rounding never pushes us past.
+const MAX_TREND_BINS = 1_400;
+
+function pickBucketMs(rangeMs: number): number {
+  const minBucketForRange = Math.ceil(rangeMs / MAX_TREND_BINS);
+  return Math.max(MIN_TREND_BUCKET_MS, minBucketForRange);
+}
 
 export function FtSearchTrendPanel({
   bucket,
@@ -25,7 +32,8 @@ export function FtSearchTrendPanel({
     fetcher: () => {
       const end = isCustom ? dateRange.to.getTime() : Date.now();
       const start = isCustom ? dateRange.from.getTime() : end - TREND_WINDOW_MS;
-      return getInferenceLatencyTrend(bucket.bucket, start, end, TREND_BUCKET_MS);
+      const bucketMs = pickBucketMs(end - start);
+      return getInferenceLatencyTrend(bucket.bucket, start, end, bucketMs);
     },
     interval: isCustom ? 0 : TREND_POLL_MS,
     refetchKey: `${connectionId ?? 'default'}|${bucket.bucket}|${rangeKey}`,
