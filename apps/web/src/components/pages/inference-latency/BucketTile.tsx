@@ -64,7 +64,10 @@ export function BucketTile({ bucket }: { bucket: InferenceLatencyBucket }) {
         </div>
         <div className="text-xs text-muted-foreground">{bucket.count.toLocaleString()} samples</div>
         {bucket.namedEvents.length > 0 && (
-          <div className="text-xs text-amber-700 dark:text-amber-400">
+          <div
+            className="text-xs"
+            style={{ color: 'var(--chart-warning)' }}
+          >
             Latency degraded during indexing since{' '}
             {new Date(bucket.namedEvents[0].since).toLocaleTimeString()}
           </div>

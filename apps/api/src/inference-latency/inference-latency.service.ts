@@ -305,6 +305,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     const slaConfig = settings.inferenceSlaConfig ?? {};
     const now = Date.now();
     const breaches: Array<{ indexName: string; breached: boolean }> = [];
+    const activeKeys = new Set<string>();
 
     for (const bucket of profile.buckets) {
       if (!bucket.bucket.startsWith(FT_SEARCH_BUCKET_PREFIX)) continue;
@@ -321,6 +322,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
         state: this.slaState,
       });
 
+      activeKeys.add(`${ctx.connectionId}|${indexName}`);
       breaches.push({ indexName, breached: bucket.p99 > config.p99ThresholdUs });
 
       if (result.fired && this.webhookEventsProService) {
@@ -339,6 +341,16 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
             `dispatchInferenceSlaBreach failed for ${ctx.connectionId}/${indexName}: ${(error as Error).message}`,
           );
         }
+      }
+    }
+
+    // Drop debounce state for indexes on this connection that no longer have
+    // an enabled SLA config — otherwise state accumulates indefinitely every
+    // time a user disables or removes an SLA and re-adds a new one.
+    const prefix = `${ctx.connectionId}|`;
+    for (const key of Array.from(this.slaState.keys())) {
+      if (key.startsWith(prefix) && !activeKeys.has(key)) {
+        this.slaState.delete(key);
       }
     }
 
