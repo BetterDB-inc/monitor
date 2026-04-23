@@ -98,15 +98,16 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     bucket: string,
     startTime: number,
     endTime: number,
-    bucketMs: number = DEFAULT_TREND_BUCKET_MS,
+    bucketMs?: number,
   ): Promise<InferenceLatencyTrend> {
     if (endTime <= startTime) {
       throw new InferenceLatencyValidationError('endTime must be greater than startTime');
     }
-    if (bucketMs <= 0) {
+    const effectiveBucketMs = bucketMs ?? DEFAULT_TREND_BUCKET_MS;
+    if (effectiveBucketMs <= 0) {
       throw new InferenceLatencyValidationError('bucketMs must be positive');
     }
-    const binCount = Math.ceil((endTime - startTime) / bucketMs);
+    const binCount = Math.ceil((endTime - startTime) / effectiveBucketMs);
     if (binCount > MAX_TREND_POINTS) {
       throw new InferenceLatencyValidationError(
         `trend window produces ${binCount} bins; cap is ${MAX_TREND_POINTS}. Increase bucketMs or shrink the range.`,
@@ -153,7 +154,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
       const projected = projectToLatencyEntry(raw);
       const tsMs = projected.timestamp * 1000;
       if (tsMs < startTime || tsMs >= endTime) continue;
-      const binIndex = Math.floor((tsMs - startTime) / bucketMs);
+      const binIndex = Math.floor((tsMs - startTime) / effectiveBucketMs);
       let arr = binsByIndex.get(binIndex);
       if (!arr) {
         arr = [];
@@ -168,7 +169,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
       if (!durations || durations.length === 0) continue;
       const { p50, p95, p99, count } = computePercentiles(durations);
       points.push({
-        capturedAt: startTime + i * bucketMs,
+        capturedAt: startTime + i * effectiveBucketMs,
         p50,
         p95,
         p99,
@@ -176,7 +177,15 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
       });
     }
 
-    return { connectionId, bucket, startTime, endTime, bucketMs, source, points };
+    return {
+      connectionId,
+      bucket,
+      startTime,
+      endTime,
+      bucketMs: effectiveBucketMs,
+      source,
+      points,
+    };
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
@@ -317,7 +326,17 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     const slaConfig = settings.inferenceSlaConfig ?? {};
     const now = Date.now();
     const breaches: Array<{ indexName: string; breached: boolean }> = [];
-    const activeKeys = new Set<string>();
+
+    // Build the authoritative set of (connection, index) pairs that SHOULD
+    // retain state on this tick. Drive it from config, not from traffic —
+    // a tick with no FT.SEARCH traffic must not wipe the debounce state of
+    // a still-breaching index.
+    const configuredKeys = new Set<string>();
+    for (const [indexName, entry] of Object.entries(slaConfig)) {
+      if (entry?.enabled) {
+        configuredKeys.add(`${ctx.connectionId}|${indexName}`);
+      }
+    }
 
     for (const bucket of profile.buckets) {
       if (!bucket.bucket.startsWith(FT_SEARCH_BUCKET_PREFIX)) continue;
@@ -334,7 +353,6 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
         state: this.slaState,
       });
 
-      activeKeys.add(`${ctx.connectionId}|${indexName}`);
       breaches.push({ indexName, breached: bucket.p99 > config.p99ThresholdUs });
 
       if (result.fired && this.webhookEventsProService) {
@@ -356,12 +374,12 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
       }
     }
 
-    // Drop debounce state for indexes on this connection that no longer have
-    // an enabled SLA config — otherwise state accumulates indefinitely every
-    // time a user disables or removes an SLA and re-adds a new one.
+    // Drop debounce state only for indexes whose SLA was disabled or removed
+    // from the config — not for indexes that simply had no FT.SEARCH traffic
+    // this tick.
     const prefix = `${ctx.connectionId}|`;
     for (const key of Array.from(this.slaState.keys())) {
-      if (key.startsWith(prefix) && !activeKeys.has(key)) {
+      if (key.startsWith(prefix) && !configuredKeys.has(key)) {
         this.slaState.delete(key);
       }
     }

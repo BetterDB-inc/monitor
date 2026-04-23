@@ -120,10 +120,34 @@ describe('InferenceLatencyService SLA state GC', () => {
     await runEvaluate(service, 'conn-2', [bucket({ p99: 9_000 })]);
     expect(internalState(service).has('conn-1|idx_a')).toBe(true);
     expect(internalState(service).has('conn-2|idx_a')).toBe(true);
+  });
 
-    // conn-1's bucket disappears entirely (no FT.SEARCH buckets); conn-2 stays.
+  it('still GCs state when config is disabled AND no traffic arrives in the tick', async () => {
+    const { service, settings } = await build({
+      idx_a: { p99ThresholdUs: 5_000, enabled: true },
+    });
+    await runEvaluate(service, 'conn-1', [bucket({ p99: 9_000 })]);
+    expect(internalState(service).has('conn-1|idx_a')).toBe(true);
+
+    settings.getCachedSettings.mockReturnValueOnce({
+      inferenceSlaConfig: { idx_a: { p99ThresholdUs: 5_000, enabled: false } },
+    });
     await runEvaluate(service, 'conn-1', []);
     expect(internalState(service).has('conn-1|idx_a')).toBe(false);
-    expect(internalState(service).has('conn-2|idx_a')).toBe(true);
+  });
+
+  it('keeps state when a still-configured index has no FT.SEARCH traffic this tick', async () => {
+    const { service } = await build({
+      idx_a: { p99ThresholdUs: 5_000, enabled: true },
+    });
+    // Establish a breach + debounce state.
+    await runEvaluate(service, 'conn-1', [bucket({ p99: 9_000 })]);
+    expect(internalState(service).has('conn-1|idx_a')).toBe(true);
+
+    // Next tick: no FT.SEARCH traffic (bucket disappears from the profile).
+    // State MUST NOT be GC'd — otherwise the next breach after traffic
+    // resumes would bypass the 10-min debounce and fire a duplicate webhook.
+    await runEvaluate(service, 'conn-1', []);
+    expect(internalState(service).has('conn-1|idx_a')).toBe(true);
   });
 });
