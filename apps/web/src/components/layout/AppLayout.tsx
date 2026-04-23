@@ -5,6 +5,7 @@ import { useNavigationTracker } from '../../hooks/useNavigationTracker';
 import { useCliPanel } from '../../hooks/useCliPanel';
 import { UpdateBanner } from '../UpdateBanner';
 import { NoConnectionsGuard } from '../NoConnectionsGuard';
+import { VectorSearchGuard } from '../VectorSearchGuard';
 import { CliPanel } from '../CliPanel';
 import { Dashboard } from '../../pages/Dashboard';
 import { SlowLog } from '../../pages/SlowLog';
@@ -131,7 +132,17 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                 path="/inference-latency"
                 element={
                   <NoConnectionsGuard>
-                    <InferenceLatency />
+                    <VectorSearchGuard
+                      featureName="Inference Latency"
+                      description={
+                        <>
+                          The Valkey/Redis Search module is not available on this connection, so
+                          there is no inference workload to analyse.
+                        </>
+                      }
+                    >
+                      <InferenceLatency />
+                    </VectorSearchGuard>
                   </NoConnectionsGuard>
                 }
               />

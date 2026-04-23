@@ -7,7 +7,6 @@ import { useCapabilities } from '../hooks/useCapabilities';
 import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
 import { usePolling } from '../hooks/usePolling';
-import { UnavailableOverlay } from '../components/UnavailableOverlay';
 import { Card, CardContent } from '../components/ui/card';
 import { type DateRange, DateRangePicker } from '../components/ui/date-range-picker';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
@@ -58,7 +57,7 @@ function deriveActiveBreaches(
     const indexName = bucket.bucket.slice('FT.SEARCH:'.length);
     const config = slaConfig[indexName];
     if (!config?.enabled) continue;
-    if (bucket.p99 >= config.p99ThresholdUs) {
+    if (bucket.p99 > config.p99ThresholdUs) {
       breaches.push({ indexName, currentP99Us: bucket.p99, thresholdUs: config.p99ThresholdUs });
     }
   }
@@ -214,24 +213,7 @@ export function InferenceLatency() {
     </div>
   );
 
-  if (!hasVectorSearch) {
-    return (
-      <UnavailableOverlay
-        featureName="Inference Latency"
-        command="FT._LIST"
-        description={
-          <>
-            The Valkey/Redis Search module is not available on this connection, so the profiler has
-            no inference workload to analyse. Load the Search module (e.g.{' '}
-            <code className="px-1 py-0.5 bg-muted rounded text-xs">valkey-bundle</code>) or attach a
-            connection that has it enabled.
-          </>
-        }
-      >
-        {content}
-      </UnavailableOverlay>
-    );
-  }
-
+  // The route-level VectorSearchGuard handles the missing-module case, so by
+  // the time this component mounts hasVectorSearch is always true.
   return content;
 }

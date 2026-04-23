@@ -138,7 +138,12 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     const binsByIndex = new Map<number, number[]>();
     for (const raw of rawEntries) {
       if (bucketEntry(raw.command) !== bucket) continue;
-      const tsMs = raw.timestamp * 1000;
+      // Route every storage row through the same projection the profile path
+      // uses, so a timestamp/unit change in StoredCommandLogEntry /
+      // StoredSlowLogEntry breaks exactly one place (bucketing.ts) instead of
+      // silently desynchronising the profile and trend pipelines.
+      const projected = projectToLatencyEntry(raw);
+      const tsMs = projected.timestamp * 1000;
       if (tsMs < startTime || tsMs >= endTime) continue;
       const binIndex = Math.floor((tsMs - startTime) / bucketMs);
       let arr = binsByIndex.get(binIndex);
@@ -146,7 +151,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
         arr = [];
         binsByIndex.set(binIndex, arr);
       }
-      arr.push(raw.duration);
+      arr.push(projected.duration);
     }
 
     const points: InferenceLatencyTrendPoint[] = [];
@@ -311,7 +316,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
         state: this.slaState,
       });
 
-      breaches.push({ indexName, breached: bucket.p99 >= config.p99ThresholdUs });
+      breaches.push({ indexName, breached: bucket.p99 > config.p99ThresholdUs });
 
       if (result.fired && this.webhookEventsProService) {
         try {

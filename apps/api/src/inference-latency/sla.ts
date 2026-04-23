@@ -23,7 +23,9 @@ export function evaluateSla(params: EvaluateSlaParams): EvaluateSlaResult {
   const key = `${connectionId}|${indexName}`;
   const prior = state.get(key);
 
-  if (currentP99Us < thresholdUs) {
+  // The configured threshold is the allowed ceiling: a p99 exactly at the
+  // threshold is still passing. Only a strictly greater value is a breach.
+  if (currentP99Us <= thresholdUs) {
     if (prior) prior.resolved = true;
     return { fired: false };
   }

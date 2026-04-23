@@ -118,4 +118,39 @@ describe('evaluateSla', () => {
     expect(result.fired).toBe(false);
     expect(state.has('c|i')).toBe(false);
   });
+
+  it('does not fire when p99 is exactly at the threshold (inclusive ceiling)', () => {
+    const state = freshState();
+    const result = evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 10_000,
+      thresholdUs: 10_000,
+      now: T0,
+      state,
+    });
+    expect(result.fired).toBe(false);
+    expect(state.has('c|i')).toBe(false);
+  });
+
+  it('marks a pair resolved when p99 returns exactly to the threshold', () => {
+    const state = freshState();
+    evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 20_000,
+      thresholdUs: 10_000,
+      now: T0,
+      state,
+    });
+    evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 10_000,
+      thresholdUs: 10_000,
+      now: T0 + MIN,
+      state,
+    });
+    expect(state.get('c|i')?.resolved).toBe(true);
+  });
 });
