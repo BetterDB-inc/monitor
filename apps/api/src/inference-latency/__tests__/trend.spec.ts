@@ -98,4 +98,12 @@ describe('InferenceLatencyService.getTrend', () => {
       service.getTrend('conn-1', 'read', 0, 86_400_000, 1_000),
     ).rejects.toThrow(/cap is 1440/);
   });
+
+  it('requests only type=slow commandlog entries, never large-request / large-reply', async () => {
+    await build({ hasCommandLog: true });
+    await service.getTrend('conn-1', 'read', 0, 60_000, 10_000);
+    expect(storage.getCommandLogEntries).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'slow' }),
+    );
+  });
 });

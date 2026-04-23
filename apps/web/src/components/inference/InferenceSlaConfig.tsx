@@ -63,6 +63,7 @@ export function InferenceSlaConfig({ indexName, trigger }: Props) {
   });
 
   const handleSave = () => {
+    setError(null);
     const thresholdMs = Number(thresholdMsInput);
     if (!Number.isFinite(thresholdMs) || thresholdMs <= 0) {
       setError('Threshold must be a positive number of milliseconds.');
@@ -76,6 +77,7 @@ export function InferenceSlaConfig({ indexName, trigger }: Props) {
   };
 
   const handleRemove = () => {
+    setError(null);
     const existing = settingsQuery.data?.settings.inferenceSlaConfig ?? {};
     const { [indexName]: _dropped, ...rest } = existing;
     void _dropped;
