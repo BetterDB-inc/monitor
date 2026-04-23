@@ -112,7 +112,7 @@ export function InferenceLatency() {
   );
 
   const content = (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold">Inference Latency</h1>
