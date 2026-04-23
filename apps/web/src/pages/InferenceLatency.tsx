@@ -24,12 +24,7 @@ import {
   DateRangePicker,
   type DateRange,
 } from '../components/ui/date-range-picker';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '../components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { formatDurationUs } from '../lib/utils';
 import { InferenceSlaConfig } from '../components/inference/InferenceSlaConfig';
 import { InferenceTrendChart } from '../components/inference/InferenceTrendChart';
@@ -208,7 +203,8 @@ function FtSearchTrendPanel({
       </Card>
     );
   }
-  if (!query.data) {
+  const trend = query.data;
+  if (!trend) {
     return (
       <Card>
         <CardContent className="p-4 text-sm text-muted-foreground">Loading trend…</CardContent>
@@ -218,12 +214,12 @@ function FtSearchTrendPanel({
 
   const indexingBands = bucket.namedEvents.map((e) => ({
     start: e.since,
-    end: Date.now(),
+    end: trend.endTime,
   }));
 
   return (
     <InferenceTrendChart
-      trend={query.data}
+      trend={trend}
       healthyThresholdUs={FT_SEARCH_HEALTHY_P50_THRESHOLD_US}
       indexingBands={indexingBands}
     />
@@ -289,23 +285,21 @@ export function InferenceLatency() {
         {canUseHistorical ? (
           picker
         ) : (
-          <TooltipProvider delayDuration={100}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  className="pointer-events-none opacity-60"
-                  aria-disabled="true"
-                  tabIndex={-1}
-                >
-                  {picker}
-                </div>
-              </TooltipTrigger>
-              <TooltipContent>
-                Historical ranges are a Pro feature. Community is locked to the live 15-minute
-                window. Upgrade to query any past window.
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div
+                className="inline-block cursor-not-allowed opacity-60"
+                aria-disabled="true"
+                tabIndex={0}
+              >
+                <div className="pointer-events-none select-none">{picker}</div>
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="left" className="max-w-xs">
+              Historical ranges are a Pro feature. Community is locked to the live 15-minute
+              window. Upgrade to query any past window.
+            </TooltipContent>
+          </Tooltip>
         )}
       </div>
 
