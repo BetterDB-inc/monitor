@@ -1,11 +1,7 @@
-import { VectorIndexSnapshot } from '@betterdb/shared';
+import { IndexingEvent, VectorIndexSnapshot } from '@betterdb/shared';
 import { LatencyEntry } from './bucketing';
 
-export interface IndexingEvent {
-  kind: 'latency_degraded_during_indexing';
-  bucket: string;
-  since: number;
-}
+export type { IndexingEvent };
 
 export interface AnnotateIndexingEventsParams {
   bucketKey: string;
