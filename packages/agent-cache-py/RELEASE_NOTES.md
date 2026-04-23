@@ -1,4 +1,4 @@
-# betterdb-agent-cache v0.3.0
+# betterdb-agent-cache v0.4.0
 
 Python port of `@betterdb/agent-cache`. Multi-tier exact-match cache for AI agent
 workloads backed by Valkey — LLM responses, tool results, and session state, with
@@ -48,7 +48,42 @@ pip install "betterdb-agent-cache[llamaindex]"
 | `betterdb_agent_cache.adapters.langchain` | LangChain `BaseCache` |
 | `betterdb_agent_cache.adapters.langgraph` | LangGraph `BaseCheckpointSaver` |
 
+### Bundled default cost table
+
+A default cost table sourced from [LiteLLM's `model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
+is bundled with the package and refreshed on every release. Cost tracking works out of
+the box for 1,900+ models — no `cost_table` configuration required.
+
+User-supplied `cost_table` entries are merged on top of the defaults, so you can
+override a single model without losing coverage for everything else:
+
+```python
+cache = AgentCache(AgentCacheOptions(
+    client=client,
+    cost_table={"gpt-4o": ModelCost(input_per_1k=0.002, output_per_1k=0.008)},
+))
+```
+
+To disable the default table entirely:
+
+```python
+cache = AgentCache(AgentCacheOptions(
+    client=client,
+    use_default_cost_table=False,
+    cost_table={...},
+))
+```
+
+The bundled table is also exported directly if you need to inspect it:
+
+```python
+from betterdb_agent_cache import DEFAULT_COST_TABLE
+```
+
 ### Pluggable binary normalizer
+
+Controls how binary content (images, audio, documents) is reduced to a stable string
+before hashing. Zero-latency by default — no network calls.
 
 ```python
 from betterdb_agent_cache import compose_normalizer, hash_base64
@@ -59,17 +94,24 @@ normalizer = compose_normalizer({"base64": hash_base64})
 ### Observability
 
 - OpenTelemetry spans on every cache operation
-- Prometheus counters, histograms, and gauges (`requests_total`, `operation_duration_seconds`,
-  `cost_saved_total`, `stored_bytes_total`, `active_sessions`)
+- Prometheus counters, histograms, and gauges: `requests_total`, `operation_duration_seconds`,
+  `cost_saved_total`, `stored_bytes_total`, `active_sessions`
+
+### Cluster support
+
+Pass a `ValkeyCluster` client and all SCAN-based operations (`flush`, `invalidate_by_model`,
+`invalidate_by_tool`, `destroy_thread`, `touch`) automatically iterate all master nodes.
 
 ---
 
 ## Quick start
 
+Cost tracking is pre-defined for 1,900+ models — no pricing configuration needed.
+
 ```python
 import asyncio
 import valkey.asyncio as valkey_client
-from betterdb_agent_cache import AgentCache, ModelCost, TierDefaults
+from betterdb_agent_cache import AgentCache, TierDefaults
 from betterdb_agent_cache.adapters.openai import prepare_params
 from betterdb_agent_cache.types import AgentCacheOptions
 
@@ -77,7 +119,7 @@ client = valkey_client.Valkey(host="localhost", port=6379)
 cache = AgentCache(AgentCacheOptions(
     client=client,
     tier_defaults={"llm": TierDefaults(ttl=3600)},
-    cost_table={"gpt-4o-mini": ModelCost(input_per_1k=0.00015, output_per_1k=0.0006)},
+    # cost_table is pre-defined for GPT-4o, Claude, Gemini, and 1,900+ others
 ))
 
 async def main():

@@ -40,11 +40,7 @@ if (process.env.VALKEY_CLUSTER) {
 const cache = new AgentCache({
   client: valkey,
   tierDefaults: { llm: { ttl: 3600 } },
-  costTable: {
-    "gpt-4o": { inputPer1k: 0.0025, outputPer1k: 0.01 },
-    "gpt-4o-mini": { inputPer1k: 0.00015, outputPer1k: 0.0006 },
-  },
-});
+  });
 
 // ── 3. Create normalizer and OpenAI client ───────────────────────────
 const normalizer = composeNormalizer({ base64: hashBase64 });

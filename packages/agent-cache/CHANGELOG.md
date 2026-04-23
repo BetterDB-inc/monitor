@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-23
+
+### Added
+
+- **Bundled default cost table**
+  - A default cost table sourced from [LiteLLM's `model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) is now bundled with the package and refreshed on every release
+  - Cost tracking works out of the box for 100+ models including GPT-4o, Claude, and Gemini — no `costTable` configuration required
+  - User-supplied `costTable` entries are merged on top of the defaults, allowing selective overrides without losing coverage for other models
+
+- **New `useDefaultCostTable` option on `AgentCacheOptions`**
+  - Defaults to `true`. Set to `false` to disable the bundled table entirely and supply your own
+
+- **`DEFAULT_COST_TABLE` export**
+  - The bundled table is now exported from the main entry point for inspection or extension
+
+- **`update:pricing` npm script**
+  - Regenerates `defaultCostTable.ts` from the latest LiteLLM pricing data
+
 ## [0.3.0] - 2026-04-20
 
 ### Added

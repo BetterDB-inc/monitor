@@ -1,6 +1,6 @@
 {
   "name": "@betterdb/agent-cache",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Multi-tier exact-match cache for AI agent workloads backed by Valkey. LLM responses, tool results, and session state with built-in OpenTelemetry and Prometheus instrumentation.",
   "keywords": [
     "valkey",
