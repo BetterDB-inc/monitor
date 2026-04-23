@@ -22,6 +22,7 @@ import { Webhooks } from '../../pages/Webhooks';
 import { MigrationPage } from '../../pages/MigrationPage';
 import { VectorSearch } from '../../pages/VectorSearch';
 import { VectorAi } from '../../pages/VectorAi';
+import { InferenceLatency } from '../../pages/InferenceLatency';
 import { MetricForecasting } from '../../pages/MetricForecasting';
 import { Members } from '../../pages/Members';
 import { CloudUser } from '../../api/workspace';
@@ -123,6 +124,14 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <VectorAi />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/inference-latency"
+                element={
+                  <NoConnectionsGuard>
+                    <InferenceLatency />
                   </NoConnectionsGuard>
                 }
               />

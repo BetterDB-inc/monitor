@@ -10,6 +10,7 @@ import {
 } from '../ui/table';
 import type { SlowLogPatternAnalysis } from '../../types/metrics';
 import { ChevronDown, ChevronRight } from 'lucide-react';
+import { formatDurationUs } from '../../lib/utils';
 
 interface Props {
   analysis: SlowLogPatternAnalysis;
@@ -43,11 +44,7 @@ export function SlowLogPatternAnalysisView({ analysis }: Props) {
     });
   };
 
-  const formatDuration = (us: number) => {
-    if (us < 1000) return `${us.toFixed(0)}µs`;
-    if (us < 1000000) return `${(us / 1000).toFixed(1)}ms`;
-    return `${(us / 1000000).toFixed(2)}s`;
-  };
+  const formatDuration = formatDurationUs;
 
   return (
     <div className="space-y-6">
