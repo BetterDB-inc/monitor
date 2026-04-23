@@ -136,6 +136,33 @@ describe('InferenceLatencyService SLA state GC', () => {
     expect(internalState(service).has('conn-1|idx_a')).toBe(false);
   });
 
+  it('emits a breach gauge value for configured-but-quiet indexes (carries breached state)', async () => {
+    const { service, prometheus } = await build({
+      idx_a: { p99ThresholdUs: 5_000, enabled: true },
+    });
+    // Tick 1: breach, state lands.
+    await runEvaluate(service, 'conn-1', [bucket({ p99: 9_000 })]);
+    // Tick 2: no FT.SEARCH traffic.
+    prometheus.updateInferenceSlaBreachMetrics.mockClear();
+    await runEvaluate(service, 'conn-1', []);
+    // The Prometheus call must still include idx_a with breached=true so the
+    // time-series is continuous and Grafana does not see a resolve-like gap.
+    expect(prometheus.updateInferenceSlaBreachMetrics).toHaveBeenCalledWith('conn-1', [
+      { indexName: 'idx_a', breached: true },
+    ]);
+  });
+
+  it('emits breached=false for configured indexes with no prior debounce state and no traffic', async () => {
+    const { service, prometheus } = await build({
+      idx_a: { p99ThresholdUs: 5_000, enabled: true },
+    });
+    prometheus.updateInferenceSlaBreachMetrics.mockClear();
+    await runEvaluate(service, 'conn-1', []);
+    expect(prometheus.updateInferenceSlaBreachMetrics).toHaveBeenCalledWith('conn-1', [
+      { indexName: 'idx_a', breached: false },
+    ]);
+  });
+
   it('keeps state when a still-configured index has no FT.SEARCH traffic this tick', async () => {
     const { service } = await build({
       idx_a: { p99ThresholdUs: 5_000, enabled: true },

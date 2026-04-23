@@ -325,7 +325,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
     const settings = this.settingsService.getCachedSettings();
     const slaConfig = settings.inferenceSlaConfig ?? {};
     const now = Date.now();
-    const breaches: Array<{ indexName: string; breached: boolean }> = [];
+    const evaluatedIndexes = new Set<string>();
 
     // Build the authoritative set of (connection, index) pairs that SHOULD
     // retain state on this tick. Drive it from config, not from traffic —
@@ -337,6 +337,8 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
         configuredKeys.add(`${ctx.connectionId}|${indexName}`);
       }
     }
+
+    const breachByIndex = new Map<string, boolean>();
 
     for (const bucket of profile.buckets) {
       if (!bucket.bucket.startsWith(FT_SEARCH_BUCKET_PREFIX)) continue;
@@ -353,7 +355,8 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
         state: this.slaState,
       });
 
-      breaches.push({ indexName, breached: bucket.p99 > config.p99ThresholdUs });
+      evaluatedIndexes.add(indexName);
+      breachByIndex.set(indexName, bucket.p99 > config.p99ThresholdUs);
 
       if (result.fired && this.webhookEventsProService) {
         try {
@@ -373,6 +376,22 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
         }
       }
     }
+
+    // Fill in configured-but-quiet indexes so the Prometheus time-series stays
+    // continuous. "No traffic" ≠ "no data"; carry forward the debounce state
+    // (breached if a prior fire wasn't resolved, not breached otherwise) so
+    // Grafana doesn't flip to a false 'resolved' when an index goes quiet.
+    for (const [indexName, entry] of Object.entries(slaConfig)) {
+      if (!entry?.enabled) continue;
+      if (evaluatedIndexes.has(indexName)) continue;
+      const prior = this.slaState.get(`${ctx.connectionId}|${indexName}`);
+      breachByIndex.set(indexName, Boolean(prior) && !prior!.resolved);
+    }
+
+    const breaches = Array.from(breachByIndex, ([indexName, breached]) => ({
+      indexName,
+      breached,
+    }));
 
     // Drop debounce state only for indexes whose SLA was disabled or removed
     // from the config — not for indexes that simply had no FT.SEARCH traffic
