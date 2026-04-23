@@ -26,8 +26,10 @@ import { annotateIndexingEvents } from './correlation';
 import { computePercentiles } from './percentiles';
 import { SlaState, evaluateSla } from './sla';
 
-const SLA_EVAL_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_PROFILE_WINDOW_MS = 15 * 60 * 1000;
+// Prometheus gauges + SLA evaluation share the same window as the UI default
+// so dashboard tiles, docs, and Grafana always reflect the same percentile.
+const POLL_TICK_WINDOW_MS = DEFAULT_PROFILE_WINDOW_MS;
 const MAX_ENTRIES_PER_PROFILE = 100_000;
 const POLL_INTERVAL_MS = 60_000;
 const FT_SEARCH_BUCKET_PREFIX = 'FT.SEARCH:';
@@ -167,7 +169,7 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     const endMs = Date.now();
     const profile = await this.computeProfile(ctx.connectionId, {
-      startMs: endMs - SLA_EVAL_WINDOW_MS,
+      startMs: endMs - POLL_TICK_WINDOW_MS,
       endMs,
     });
     this.prometheusService.updateInferenceLatencyMetrics(
