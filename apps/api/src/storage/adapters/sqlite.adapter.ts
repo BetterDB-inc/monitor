@@ -119,12 +119,14 @@ export class SqliteAdapter implements StoragePort {
       }
     }
 
-    // Add throughput forecasting columns to app_settings if they don't exist
+    // Lazy ALTERs for app_settings columns added after the initial schema.
+    // Add new entries here as additional feature-scoped columns land; each
+    // entry is idempotent and only runs when the column is missing.
     const settingsInfo = this.db.prepare('PRAGMA table_info(app_settings)').all() as {
       name: string;
     }[];
     const settingsColumns = new Set(settingsInfo.map((col) => col.name));
-    const throughputColumns = [
+    const appSettingsMigrations = [
       { name: 'throughput_forecasting_enabled', type: 'INTEGER NOT NULL DEFAULT 1' },
       {
         name: 'throughput_forecasting_default_rolling_window_ms',
@@ -136,7 +138,7 @@ export class SqliteAdapter implements StoragePort {
       },
       { name: 'inference_sla_config', type: "TEXT NOT NULL DEFAULT '{}'" },
     ];
-    for (const col of throughputColumns) {
+    for (const col of appSettingsMigrations) {
       if (!settingsColumns.has(col.name)) {
         this.db.exec(`ALTER TABLE app_settings ADD COLUMN ${col.name} ${col.type}`);
       }
