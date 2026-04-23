@@ -12,6 +12,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from '../ui/dialog';
 import { Input } from '../ui/input';
 import { Badge } from '../ui/badge';
@@ -83,7 +84,7 @@ export function InferenceSlaConfig({ indexName, trigger }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <span onClick={() => setOpen(true)}>{trigger}</span>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Inference SLA — {indexName}</DialogTitle>

@@ -57,10 +57,16 @@ export function FtSearchTrendPanel({
     );
   }
 
-  const indexingBands = bucket.namedEvents.map((e) => ({
-    start: e.since,
-    end: trend.endTime,
-  }));
+  // namedEvents is derived from the live 15-min profile window; overlaying
+  // it on a user-picked historical range would paint a band in the wrong
+  // place (a "degraded since 5 min ago" marker on a chart showing yesterday).
+  // Only render the band when the trend follows the same live window.
+  const indexingBands = isCustom
+    ? []
+    : bucket.namedEvents.map((e) => ({
+        start: e.since,
+        end: trend.endTime,
+      }));
 
   return (
     <InferenceTrendChart
