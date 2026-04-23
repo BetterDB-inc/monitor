@@ -246,7 +246,12 @@ export class InferenceLatencyService extends MultiConnectionPoller implements On
       const bucket = bucketEntry(raw.command);
       if (!bucket) continue;
       const projected = projectToLatencyEntry(raw);
-      const normalised: LatencyEntry = { ...projected, timestamp: projected.timestamp * 1000 };
+      const tsMs = projected.timestamp * 1000;
+      // Storage boundaries are second-precision (floored); re-filter at ms
+      // precision so sub-second slop cannot leak into the profile and
+      // disagree with the trend path for the same logical window.
+      if (tsMs < startMs || tsMs >= endMs) continue;
+      const normalised: LatencyEntry = { ...projected, timestamp: tsMs };
       let arr = entriesByBucket.get(bucket);
       if (!arr) {
         arr = [];
