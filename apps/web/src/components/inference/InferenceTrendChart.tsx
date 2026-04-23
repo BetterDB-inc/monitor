@@ -77,14 +77,14 @@ export function InferenceTrendChart({
                   x1={band.start}
                   x2={band.end}
                   strokeOpacity={0}
-                  fill="rgb(180 83 9)"
+                  fill="var(--chart-warning)"
                   fillOpacity={0.18}
                 />
               ))}
               {healthyThresholdUs != null && (
                 <ReferenceLine
                   y={healthyThresholdUs}
-                  stroke="rgb(185 28 28)"
+                  stroke="var(--chart-critical)"
                   strokeDasharray="4 4"
                   strokeOpacity={0.7}
                 />
@@ -92,21 +92,21 @@ export function InferenceTrendChart({
               <Line
                 type="monotone"
                 dataKey="p50"
-                stroke="rgb(29 78 216)"
+                stroke="var(--chart-info)"
                 strokeWidth={1.5}
                 dot={false}
               />
               <Line
                 type="monotone"
                 dataKey="p95"
-                stroke="rgb(180 83 9)"
+                stroke="var(--chart-warning)"
                 strokeWidth={1.5}
                 dot={false}
               />
               <Line
                 type="monotone"
                 dataKey="p99"
-                stroke="rgb(185 28 28)"
+                stroke="var(--chart-critical)"
                 strokeWidth={2}
                 dot={false}
               />
