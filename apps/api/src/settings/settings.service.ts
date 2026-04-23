@@ -113,6 +113,11 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     }
 
     const updated = await this.storageClient.updateSettings(updates);
+    // Refresh the in-memory cache eagerly. The 30s interval would otherwise
+    // leave consumers of getCachedSettings() reading stale data for up to
+    // half a minute — notably InferenceLatencyService, whose SLA evaluation
+    // runs on a 60s tick and depends on fresh inferenceSlaConfig.
+    this.cachedSettings = updated;
 
     return {
       settings: updated,
@@ -128,6 +133,8 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
     if (!settings) {
       throw new Error('Failed to reset settings');
     }
+
+    this.cachedSettings = settings;
 
     return {
       settings,
