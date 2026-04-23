@@ -126,6 +126,38 @@ describe('annotateIndexingEvents', () => {
     ).toEqual([]);
   });
 
+  it('excludes snapshots at exactly windowEndMs (half-open upper bound)', () => {
+    const entries = Array.from({ length: 10 }, (_, i) =>
+      entry({ timestamp: 1_700_000_010_000 + i * 1_000, duration: (i + 1) * 1_000 }),
+    );
+    // A snapshot stamped at the window's exclusive upper bound belongs to
+    // the NEXT tick, not this one — same as entries.
+    expect(
+      annotateIndexingEvents({
+        bucketKey: 'FT.SEARCH:idx_cache',
+        entries,
+        snapshots: [snap({ timestamp: windowEnd, percentIndexed: 30 })],
+        windowStartMs: windowStart,
+        windowEndMs: windowEnd,
+      }),
+    ).toEqual([]);
+  });
+
+  it('includes snapshots at exactly windowStartMs (inclusive lower bound)', () => {
+    const entries = Array.from({ length: 10 }, (_, i) =>
+      entry({ timestamp: 1_700_000_010_000 + i * 1_000, duration: (i + 1) * 1_000 }),
+    );
+    const result = annotateIndexingEvents({
+      bucketKey: 'FT.SEARCH:idx_cache',
+      entries,
+      snapshots: [snap({ timestamp: windowStart, percentIndexed: 30 })],
+      windowStartMs: windowStart,
+      windowEndMs: windowEnd,
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].since).toBe(windowStart);
+  });
+
   it('ignores snapshots for a different index', () => {
     const entries = Array.from({ length: 10 }, (_, i) =>
       entry({ timestamp: 1_700_000_010_000 + i * 1_000, duration: (i + 1) * 1_000 }),

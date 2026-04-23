@@ -25,12 +25,15 @@ export function annotateIndexingEvents(params: AnnotateIndexingEventsParams): In
   if (entries.length === 0) return [];
 
   const indexName = bucketKey.slice(FT_SEARCH_BUCKET_PREFIX.length);
+  // Half-open window [windowStartMs, windowEndMs) matches the entry filter
+  // applied in computeProfile / getTrend; a snapshot right at endMs is the
+  // first tick of the next window, not this one.
   const relevantSnapshots = snapshots
     .filter(
       (s) =>
         s.indexName === indexName &&
         s.timestamp >= windowStartMs &&
-        s.timestamp <= windowEndMs,
+        s.timestamp < windowEndMs,
     )
     .sort((a, b) => a.timestamp - b.timestamp);
 
