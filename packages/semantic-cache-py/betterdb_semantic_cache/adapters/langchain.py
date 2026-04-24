@@ -96,21 +96,18 @@ class BetterDBSemanticCache(BaseCache):
     # ── Sync interface (not supported) ────────────────────────────────────
 
     def lookup(self, prompt: str, llm_string: str) -> Optional[list[Any]]:
-        raise RuntimeError(
-            "BetterDBSemanticCache is async-only. "
-            "Use an async LangChain invocation (ainvoke / astream)."
-        )
+        # Return None (cache miss) rather than raising — LangChain's BaseCache
+        # contract expects None on miss; raising propagates instead of falling back.
+        # Use an async invocation (ainvoke / astream) to get actual cache behaviour.
+        return None
 
     def update(self, prompt: str, llm_string: str, return_val: Sequence[Any]) -> None:
-        raise RuntimeError(
-            "BetterDBSemanticCache is async-only. "
-            "Use an async LangChain invocation (ainvoke / astream)."
-        )
+        # No-op rather than raising — raising from update() breaks LangChain callers
+        # that store responses synchronously. Use an async invocation for real caching.
+        pass
 
     def clear(self, **kwargs: Any) -> None:
-        raise RuntimeError(
-            "BetterDBSemanticCache is async-only. Use aclear() instead."
-        )
+        raise NotImplementedError("BetterDBSemanticCache is async-only. Use aclear() instead.")
 
     async def aclear(self, **kwargs: Any) -> None:
         await self._cache.flush()

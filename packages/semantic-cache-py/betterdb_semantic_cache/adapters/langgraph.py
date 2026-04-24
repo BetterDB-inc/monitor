@@ -223,6 +223,7 @@ class BetterDBSemanticStore:
         is adjusted by the number of deletions so no entries are skipped.
         """
         await self._cache.initialize()
+        from ..errors import ValkeyCommandError as _ValkeyCommandError
         from ..utils import parse_ft_search_response
         category = _namespace_to_category(namespace)
         cat_filter = f"@category:{{{escape_tag(category)}}}"
@@ -232,6 +233,8 @@ class BetterDBSemanticStore:
         while True:
             try:
                 raw = await self._cache._search_entries(cat_filter, batch, offset)
+            except _ValkeyCommandError:
+                raise  # propagate real Valkey errors; don't silently skip the upsert guard
             except Exception:
                 return
 

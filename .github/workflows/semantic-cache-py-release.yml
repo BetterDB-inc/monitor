@@ -56,6 +56,9 @@ jobs:
   publish:
     needs: test
     runs-on: ubuntu-latest
+    # skip_pypi is only populated on workflow_dispatch; on tag push it is null/falsy,
+    # so !inputs.skip_pypi is always true for tag events (publish always runs).
+    # Dry-run is only available via manual workflow_dispatch with skip_pypi=true.
     if: ${{ !inputs.skip_pypi }}
     environment: pypi
     permissions:

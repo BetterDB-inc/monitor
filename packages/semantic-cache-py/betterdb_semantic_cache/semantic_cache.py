@@ -249,6 +249,14 @@ class SemanticCache:
                     ).inc()
                     _set_span_attrs(span, {"cache.hit": False, "cache.name": self._name, "cache.reranked": True})
                     return CacheCheckResult(hit=False, confidence="miss")
+                # Validate bounds: rerank_fn is caller-supplied and could return out-of-range
+                if not (0 <= picked < len(indexed_candidates)):
+                    await self._record_similarity_window(score, "miss", category)
+                    await self._record_stat("misses")
+                    self._telemetry.metrics.requests_total.labels(
+                        cache_name=self._name, result="miss", category=category_label
+                    ).inc()
+                    return CacheCheckResult(hit=False, confidence="miss")
                 # Map back to the original parsed[] index (not the candidates[] index)
                 winner_parsed_index = indexed_candidates[picked][0]
 
@@ -533,6 +541,7 @@ class SemanticCache:
 
             results: list[CacheCheckResult] = []
             category_label = category or "none"
+            keys_to_expire: list[str] = []
 
             for i in range(len(prompts)):
                 raw_result = pipeline_results[i] if pipeline_results and i < len(pipeline_results) else None
@@ -582,7 +591,7 @@ class SemanticCache:
 
                 matched_key = parsed[0]["key"]
                 if self._default_ttl is not None and matched_key:
-                    await self._client.expire(matched_key, self._default_ttl)
+                    keys_to_expire.append(matched_key)
 
                 cost_saved: float | None = None
                 cost_micros_str = parsed[0]["fields"].get("cost_micros")
@@ -618,6 +627,16 @@ class SemanticCache:
                 if content_blocks is not None:
                     r.content_blocks = content_blocks
                 results.append(r)
+
+            # Batch all TTL refreshes into one pipeline (avoids K serial round-trips)
+            if keys_to_expire and self._default_ttl is not None:
+                try:
+                    expire_pipe = self._client.pipeline()
+                    for k in keys_to_expire:
+                        expire_pipe.expire(k, self._default_ttl)
+                    await expire_pipe.execute()
+                except Exception:
+                    pass  # best-effort TTL refresh
 
             return results
 
@@ -788,7 +807,12 @@ class SemanticCache:
         uncertain_hits = [e for e in hits if e["score"] >= threshold - self._uncertainty_band]
         uncertain_hit_rate = len(uncertain_hits) / len(hits) if hits else 0.0
 
-        near_misses = [e for e in misses if e["score"] <= threshold + 0.03]
+        # Near-misses are scores just ABOVE the threshold (genuine close misses).
+        # Scores below the threshold recorded as misses (rerank rejection, stale eviction)
+        # must be excluded — they would produce negative avg_near_miss_delta, causing
+        # recommended_threshold = threshold + negative_delta < threshold, contradicting
+        # the "loosen" recommendation.
+        near_misses = [e for e in misses if threshold < e["score"] <= threshold + 0.03]
         near_miss_rate = len(near_misses) / len(misses) if misses else 0.0
 
         avg_hit_similarity = sum(e["score"] for e in hits) / len(hits) if hits else 0.0
@@ -1137,10 +1161,13 @@ class SemanticCache:
                 ).observe(time.perf_counter() - start)
 
     async def _record_stat(self, field: str) -> None:
-        pipe = self._client.pipeline()
-        pipe.hincrby(self._stats_key, "total", 1)
-        pipe.hincrby(self._stats_key, field, 1)
-        await pipe.execute()
+        try:
+            pipe = self._client.pipeline()
+            pipe.hincrby(self._stats_key, "total", 1)
+            pipe.hincrby(self._stats_key, field, 1)
+            await pipe.execute()
+        except Exception:
+            pass  # best effort — never fail on stat writes
 
     async def _record_similarity_window(
         self, score: float, result: str, category: str

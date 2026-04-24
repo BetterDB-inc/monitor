@@ -840,7 +840,11 @@ export class SemanticCache {
     const uncertainHits = hits.filter((e) => e.score >= threshold - this.uncertaintyBand);
     const uncertainHitRate = hits.length > 0 ? uncertainHits.length / hits.length : 0;
 
-    const nearMisses = misses.filter((e) => e.score <= threshold + 0.03);
+    // Near-misses are scores just ABOVE the threshold (genuine close misses).
+    // Scores below the threshold recorded as misses (rerank rejection, stale eviction)
+    // must be excluded — they produce negative avgNearMissDelta, causing
+    // recommendedThreshold = threshold + negative < threshold, contradicting "loosen".
+    const nearMisses = misses.filter((e) => e.score > threshold && e.score <= threshold + 0.03);
     const nearMissRate = misses.length > 0 ? nearMisses.length / misses.length : 0;
 
     const avgHitSimilarity =
