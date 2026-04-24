@@ -652,8 +652,8 @@ class SemanticCache:
             if keys_to_expire or total_cost_micros:
                 try:
                     post_pipe = self._client.pipeline()
-                    for k in keys_to_expire:
-                        post_pipe.expire(k, self._default_ttl)
+                    for expire_key in keys_to_expire:
+                        post_pipe.expire(expire_key, self._default_ttl)
                     if total_cost_micros:
                         post_pipe.hincrby(self._stats_key, "cost_saved_micros", total_cost_micros)
                     await post_pipe.execute()
@@ -1239,7 +1239,12 @@ class SemanticCache:
 
     def _is_index_not_found_error(self, err: Exception) -> bool:
         msg = str(err).lower()
-        return "unknown index name" in msg or "no such index" in msg or "not found" in msg
+        return (
+            "unknown index name" in msg
+            or "no such index" in msg
+            # Valkey Search 1.2: "index with name <n> not found in database 0"
+            or ("index" in msg and "not found" in msg)
+        )
 
 
 def _safe_float(value: Any, default: float = float("nan")) -> float:

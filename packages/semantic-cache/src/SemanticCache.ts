@@ -287,8 +287,9 @@ export class SemanticCache {
         const picked = await rerankOpts.rerankFn(
           promptText, indexedCandidates.map((x) => x.candidate),
         );
-        if (picked === -1) {
-          // Record the actual outcome — rerank rejected, so it's a miss
+        // Explicit bounds check: -1 means "reject all"; out-of-range is a caller bug
+        // treated as a miss rather than silently falling back to the top candidate.
+        if (picked === -1 || picked < 0 || picked >= indexedCandidates.length) {
           await this.recordSimilarityWindow(score, 'miss', category);
           await this.recordStat('misses');
           this.telemetry.metrics.requestsTotal
@@ -297,7 +298,7 @@ export class SemanticCache {
           return { hit: false, confidence: 'miss' as const };
         }
         // Map back to the original parsed[] index (not the candidates[] index)
-        winnerParsedIndex = indexedCandidates[picked]?.origIdx ?? 0;
+        winnerParsedIndex = indexedCandidates[picked].origIdx;
       }
 
       const winner = parsed[winnerParsedIndex] ?? parsed[0];

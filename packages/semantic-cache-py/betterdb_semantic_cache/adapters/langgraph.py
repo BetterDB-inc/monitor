@@ -258,12 +258,16 @@ class BetterDBSemanticStore:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-            if len(entries) < batch:
-                break  # Last page — we've scanned everything
-
-            # Advance by (batch - deleted_count): deleted entries shift later entries
-            # left so the next batch starts at the correct position.
-            offset += batch - deleted_count
+            if deleted_count > 0:
+                # After deletions, Valkey Search may take a moment to update the
+                # index (async indexing), so offset arithmetic is unreliable.
+                # Re-scan from 0 to catch any remaining copies without skipping.
+                offset = 0
+            elif len(entries) < batch:
+                break  # Last page with no matches — we've scanned everything
+            else:
+                # No deletions this page and page is full — advance safely.
+                offset += batch
 
     async def abatch(
         self,

@@ -301,6 +301,35 @@ describe('rerank hook', () => {
     expect(result.hit).toBe(false);
     expect(result.confidence).toBe('miss');
   });
+
+  it('rerank returning out-of-range index yields miss', async () => {
+    const client = makeMockClient({
+      searchResult: {
+        key: 'test_rerank3:entry:abc',
+        fields: { response: 'Answer', model: '', category: '' },
+      },
+    });
+    const embedFn = vi.fn(async () => [0.5, 0.5]);
+
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn,
+      name: 'test_rerank3',
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+
+    // rerankFn returns k (one past the end of the candidates array)
+    const result = await cache.check('Hello', {
+      rerank: {
+        k: 1,
+        rerankFn: async (_q, candidates) => candidates.length, // out-of-range
+      },
+    });
+
+    expect(result.hit).toBe(false);
+    expect(result.confidence).toBe('miss');
+  });
 });
 
 // --- params-aware filtering ---
