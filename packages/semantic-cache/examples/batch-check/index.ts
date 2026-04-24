@@ -18,14 +18,19 @@ import { SemanticCache } from '@betterdb/semantic-cache';
 const host = process.env.VALKEY_HOST ?? 'localhost';
 const port = parseInt(process.env.VALKEY_PORT ?? '6399', 10);
 
+// Word-hashing embedder: each word maps to a fixed index in a large sparse vector.
+// This gives much better topic separation than character-code approaches.
 function mockEmbed(text: string): Promise<number[]> {
-  const dim = 8;
+  const dim = 128;
   const words = text.toLowerCase().split(/\W+/).filter(Boolean);
   const vec = new Array<number>(dim).fill(0);
   for (const w of words) {
-    for (let i = 0; i < Math.min(w.length, dim); i++) {
-      vec[i % dim] += w.charCodeAt(i) / 128;
+    // Simple hash to slot the word into a bucket
+    let h = 5381;
+    for (let i = 0; i < w.length; i++) {
+      h = ((h << 5) + h + w.charCodeAt(i)) & 0xffffffff;
     }
+    vec[Math.abs(h) % dim] += 1;
   }
   const norm = Math.sqrt(vec.reduce((s, x) => s + x * x, 0)) || 1;
   return Promise.resolve(vec.map((x) => x / norm));
@@ -37,7 +42,7 @@ const cache = new SemanticCache({
   client,
   embedFn: mockEmbed,
   name: 'example_batch',
-  defaultThreshold: 0.2,
+  defaultThreshold: 0.1,
   embeddingCache: { enabled: false },
 });
 

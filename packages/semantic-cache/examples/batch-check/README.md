@@ -31,6 +31,6 @@ Who invented the telephone?                  MISS          MISS
 What is the capital of Italy?                HIT(high)     HIT(high)
 What is the best programming language?       MISS          MISS
 
-Sequential: 8.3ms | Batch: 4.1ms
-Batch was 51% faster.
+Sequential: 8.6ms | Batch: 2.6ms
+Batch was 69% faster.
 ```
