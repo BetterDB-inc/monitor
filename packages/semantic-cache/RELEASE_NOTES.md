@@ -348,7 +348,7 @@ examples/rerank
 ```
 
 Each runs against a local Valkey instance with `pnpm start`. See
-[`examples/README.md`](./examples/README.md) for setup instructions.
+[examples/README.md](./examples/README.md) for setup instructions.
 
 ---
 
@@ -367,3 +367,4 @@ new fields, call `flush()` then `initialize()` — this drops and rebuilds the i
 
 - [Changelog](./CHANGELOG.md)
 - [Examples](./examples/README.md)
+- [Documentation](../../docs/packages/semantic-cache.md)
