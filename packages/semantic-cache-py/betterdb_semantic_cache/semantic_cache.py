@@ -114,6 +114,13 @@ class SemanticCache:
         """
         self._initialized = False
 
+        # Cancel the periodic stats task — stats() calls _assert_initialized() which
+        # would raise and be swallowed by the loop, wasting event-loop cycles until
+        # initialize() or shutdown() is called.
+        if self._stats_task is not None:
+            self._stats_task.cancel()
+            self._stats_task = None
+
         try:
             await self._client.execute_command("FT.DROPINDEX", self._index_name)
         except Exception as err:
@@ -549,6 +556,7 @@ class SemanticCache:
             results: list[CacheCheckResult] = []
             category_label = category or "none"
             keys_to_expire: list[str] = []
+            total_cost_micros = 0
 
             for i in range(len(prompts)):
                 raw_result = pipeline_results[i] if pipeline_results and i < len(pipeline_results) else None
@@ -612,7 +620,7 @@ class SemanticCache:
                         cost_micros = int(cost_micros_str)
                         if cost_micros > 0:
                             cost_saved = cost_micros / 1_000_000
-                            await self._client.hincrby(self._stats_key, "cost_saved_micros", cost_micros)
+                            total_cost_micros += cost_micros
                             self._telemetry.metrics.cost_saved_total.labels(
                                 cache_name=self._name, category=category_label
                             ).inc(cost_saved)
@@ -640,15 +648,17 @@ class SemanticCache:
                     r.content_blocks = content_blocks
                 results.append(r)
 
-            # Batch all TTL refreshes into one pipeline (avoids K serial round-trips)
-            if keys_to_expire and self._default_ttl is not None:
+            # Single pipeline for all post-loop Valkey writes (TTL refreshes + cost stats)
+            if keys_to_expire or total_cost_micros:
                 try:
-                    expire_pipe = self._client.pipeline()
+                    post_pipe = self._client.pipeline()
                     for k in keys_to_expire:
-                        expire_pipe.expire(k, self._default_ttl)
-                    await expire_pipe.execute()
+                        post_pipe.expire(k, self._default_ttl)
+                    if total_cost_micros:
+                        post_pipe.hincrby(self._stats_key, "cost_saved_micros", total_cost_micros)
+                    await post_pipe.execute()
                 except Exception:
-                    pass  # best-effort TTL refresh
+                    pass  # best-effort
 
             return results
 
@@ -774,15 +784,15 @@ class SemanticCache:
         min_samples: int = 100,
     ) -> ThresholdEffectivenessResult:
         self._assert_initialized("threshold_effectiveness")
-
-        threshold = self._category_thresholds.get(category or "", self._default_threshold) \
-            if category else self._default_threshold
-
         try:
             raw_entries = await self._client.zrange(self._similarity_window_key, 0, -1)
         except Exception:
             raw_entries = []
+        all_entries = self._parse_window_entries(raw_entries)
+        return self._compute_threshold_effectiveness(all_entries, category, min_samples)
 
+    def _parse_window_entries(self, raw_entries: list) -> list[dict]:
+        """Decode and validate raw ZRANGE results from the similarity window."""
         entries = []
         for raw in raw_entries or []:
             raw_str = raw.decode() if isinstance(raw, bytes) else str(raw)
@@ -790,10 +800,24 @@ class SemanticCache:
                 entry = json.loads(raw_str)
                 if (isinstance(entry.get("score"), (int, float))
                         and entry.get("result") in ("hit", "miss")):
-                    if not category or entry.get("category") == category:
-                        entries.append(entry)
+                    entries.append(entry)
             except (json.JSONDecodeError, TypeError):
                 pass
+        return entries
+
+    def _compute_threshold_effectiveness(
+        self,
+        all_entries: list[dict],
+        category: str | None,
+        min_samples: int,
+    ) -> ThresholdEffectivenessResult:
+        threshold = self._category_thresholds.get(category or "", self._default_threshold) \
+            if category else self._default_threshold
+
+        entries = [
+            e for e in all_entries
+            if not category or e.get("category") == category
+        ]
 
         sample_count = len(entries)
         category_label = category or "all"
@@ -869,6 +893,7 @@ class SemanticCache:
         *,
         min_samples: int = 100,
     ) -> list[ThresholdEffectivenessResult]:
+        """Fetch the similarity window once, then compute per-category results in memory."""
         self._assert_initialized("threshold_effectiveness_all")
 
         try:
@@ -876,22 +901,14 @@ class SemanticCache:
         except Exception:
             raw_entries = []
 
-        categories: set[str] = set()
-        for raw in raw_entries or []:
-            raw_str = raw.decode() if isinstance(raw, bytes) else str(raw)
-            try:
-                entry = json.loads(raw_str)
-                if entry.get("category"):
-                    categories.add(entry["category"])
-            except (json.JSONDecodeError, TypeError):
-                pass
+        all_entries = self._parse_window_entries(raw_entries)
+        categories = {e["category"] for e in all_entries if e.get("category")}
 
-        tasks = [self.threshold_effectiveness(min_samples=min_samples)] + [
-            self.threshold_effectiveness(category=cat, min_samples=min_samples)
-            for cat in sorted(categories)
-            if cat
+        return [
+            self._compute_threshold_effectiveness(all_entries, None, min_samples),
+            *[self._compute_threshold_effectiveness(all_entries, cat, min_samples)
+              for cat in sorted(categories) if cat],
         ]
-        return list(await asyncio.gather(*tasks))
 
     # -- Private helpers --
 
@@ -902,13 +919,21 @@ class SemanticCache:
 
         Uses SORTBY inserted_at ASC so that offset-based pagination is reliable
         even across calls that delete entries from earlier pages.
+        Always wraps exceptions in ValkeyCommandError so callers can use
+        ``except ValkeyCommandError: raise`` to distinguish Valkey failures from
+        empty results.
         """
-        return await self._client.execute_command(
-            "FT.SEARCH", self._index_name, filter_expr,
-            "SORTBY", "inserted_at", "ASC",
-            "LIMIT", str(offset), str(limit),
-            "DIALECT", "2",
-        )
+        try:
+            return await self._client.execute_command(
+                "FT.SEARCH", self._index_name, filter_expr,
+                "SORTBY", "inserted_at", "ASC",
+                "LIMIT", str(offset), str(limit),
+                "DIALECT", "2",
+            )
+        except ValkeyCommandError:
+            raise
+        except Exception as exc:
+            raise ValkeyCommandError("FT.SEARCH", exc) from exc
 
     async def _do_initialize(self) -> None:
         with self._telemetry.tracer.start_as_current_span("semantic_cache.initialize") as span:

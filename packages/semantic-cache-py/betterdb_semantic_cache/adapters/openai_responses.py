@@ -128,6 +128,10 @@ async def prepare_semantic_params(
         # collide across different user queries sharing the same instructions).
         return SemanticParams(text="", model=model)
 
+    # input is absent — fall back to instructions only when input was not provided
+    # at all (not a string, not a list). When input was a list with no user-role
+    # items we already returned "" above; using instructions there would cause
+    # collisions across requests sharing the same system prompt.
     if instructions:
         return SemanticParams(text=instructions, model=model)
 

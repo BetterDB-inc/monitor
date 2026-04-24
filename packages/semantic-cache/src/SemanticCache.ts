@@ -927,6 +927,9 @@ export class SemanticCache {
 
   // -- Internal helpers exposed to package adapters --
 
+  /** @internal Default similarity threshold. */
+  get _defaultThreshold(): number { return this.defaultThreshold; }
+
   /**
    * Execute a stable FT.SEARCH for use by adapters (e.g. LangGraph).
    * SORTBY inserted_at ASC gives stable ordering across paginated calls.

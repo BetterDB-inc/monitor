@@ -173,7 +173,7 @@ export class BetterDBSemanticStore {
 
     if (query) {
       const { encodeFloat32, parseFtSearchResponse } = await import('../utils');
-      const threshold = options?.threshold ?? (this.cache as unknown as { defaultThreshold: number }).defaultThreshold;
+      const threshold = options?.threshold ?? this.cache._defaultThreshold;
       const { vector } = await this.cache._embedText(query);
       const filterExpr = `(@category:{${escapeTag(category)}})`;
       const knnQuery = `${filterExpr}=>[KNN ${limit} @embedding $vec AS __score]`;
