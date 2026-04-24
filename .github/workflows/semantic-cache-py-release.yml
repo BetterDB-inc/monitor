@@ -1,0 +1,172 @@
+# Publish betterdb-semantic-cache to PyPI
+#
+# Uses PyPI Trusted Publisher (OIDC) — no API token required.
+# Trusted publisher is registered at pypi.org/manage/account/publishing/
+#
+# Trigger by pushing a tag: semantic-cache-py-v0.1.0
+
+name: Publish Semantic Cache (Python)
+
+on:
+  push:
+    tags:
+      - 'semantic-cache-py-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.1.0)'
+        required: true
+        type: string
+      skip_pypi:
+        description: 'Skip PyPI publish (dry run)'
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      valkey:
+        image: valkey/valkey-bundle:unstable
+        ports:
+          - 6399:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: packages/semantic-cache-py
+        run: pip install -e ".[dev]" langchain-core langgraph
+
+      - name: Run tests
+        working-directory: packages/semantic-cache-py
+        run: pytest tests/ -v
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_pypi }}
+    environment: pypi
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: pip install build hatchling
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
+          else
+            # semantic-cache-py-v0.1.0 → 0.1.0
+            echo "version=${GITHUB_REF_NAME#semantic-cache-py-v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update pyproject.toml version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        working-directory: packages/semantic-cache-py
+        run: |
+          python - <<'EOF'
+          import re, os, pathlib
+          path = pathlib.Path("pyproject.toml")
+          content = path.read_text()
+          content = re.sub(
+              r'^version\s*=\s*"[^"]+"',
+              f'version = "{os.environ["VERSION"]}"',
+              content,
+              flags=re.MULTILINE,
+          )
+          path.write_text(content)
+          EOF
+
+      - name: Refresh default cost table
+        working-directory: packages/semantic-cache-py
+        run: python scripts/update_model_prices.py
+
+      - name: Verify cost table is non-empty
+        working-directory: packages/semantic-cache-py
+        run: |
+          ENTRIES=$(grep -c "ModelCost(" betterdb_semantic_cache/default_cost_table.py)
+          if [ "$ENTRIES" -lt 50 ]; then
+            echo "Cost table suspiciously small: $ENTRIES entries"
+            exit 1
+          fi
+          echo "Cost table has $ENTRIES entries"
+
+      - name: Build wheel and sdist
+        working-directory: packages/semantic-cache-py
+        run: python -m build
+
+      - name: Verify build artifacts
+        working-directory: packages/semantic-cache-py
+        run: |
+          ls dist/
+          test -n "$(ls dist/*.whl 2>/dev/null)"
+          test -n "$(ls dist/*.tar.gz 2>/dev/null)"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/semantic-cache-py/dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: semantic-cache-py-v${{ steps.version.outputs.version }}
+          name: Semantic Cache Python v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          body_path: packages/semantic-cache-py/RELEASE_NOTES.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify PyPI package (with retry)
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if pip index versions betterdb-semantic-cache 2>/dev/null | grep -q "$VERSION"; then
+              echo "Package betterdb-semantic-cache==$VERSION verified"
+              exit 0
+            fi
+            echo "Attempt $i: not yet available, retrying in 30s…"
+            sleep 30
+          done
+          echo "Package not available after 5 attempts"
+          exit 1
