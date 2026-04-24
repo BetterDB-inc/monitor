@@ -555,6 +555,9 @@ class SemanticCache:
                         if cost_micros > 0:
                             cost_saved = cost_micros / 1_000_000
                             await self._client.hincrby(self._stats_key, "cost_saved_micros", cost_micros)
+                            self._telemetry.metrics.cost_saved_total.labels(
+                                cache_name=self._name, category=category_label
+                            ).inc(cost_saved)
                     except (ValueError, TypeError):
                         pass
 
@@ -1025,7 +1028,10 @@ class SemanticCache:
         self, score: float, result: str, category: str
     ) -> None:
         now_ms = int(time.time() * 1000)
-        member = json.dumps({"score": score, "result": result, "category": category})
+        # Include a unique nonce so identical (score, result, category) tuples are
+        # each recorded as distinct ZADD members instead of overwriting each other.
+        member = json.dumps({"score": score, "result": result, "category": category,
+                             "_n": str(uuid.uuid4())})
         seven_days_ago = now_ms - 7 * 24 * 60 * 60 * 1000
         try:
             pipe = self._client.pipeline()

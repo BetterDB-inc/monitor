@@ -77,7 +77,7 @@ def create_bedrock_embed(
             )
             return json.loads(resp["body"].read())
 
-        parsed = await asyncio.get_event_loop().run_in_executor(None, _invoke)
+        parsed = await asyncio.get_running_loop().run_in_executor(None, _invoke)
 
         if is_titan:
             return parsed.get("embedding", [])

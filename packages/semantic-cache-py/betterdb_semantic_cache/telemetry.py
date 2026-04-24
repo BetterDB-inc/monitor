@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,9 +12,13 @@ from prometheus_client import CollectorRegistry, Counter, Histogram
 _OPERATION_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
 _SIMILARITY_BUCKETS = [0.02, 0.05, 0.08, 0.1, 0.12, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0]
 
-# Module-level cache keyed by (id(registry), metric_name) to prevent
-# duplicate-registration errors in multi-instance scenarios.
-_metric_cache: dict[tuple[int, str], Any] = {}
+# WeakKeyDictionary keyed on the registry object itself so entries are
+# automatically evicted when the registry is garbage-collected, preventing
+# stale metric instances from being returned to a new registry that happens
+# to occupy the same memory address.
+_metric_cache: weakref.WeakKeyDictionary[CollectorRegistry, dict[str, Any]] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _get_or_create_counter(
@@ -22,18 +27,16 @@ def _get_or_create_counter(
     documentation: str,
     labelnames: list[str],
 ) -> Counter:
-    key = (id(registry), name)
-    if key not in _metric_cache:
+    by_name = _metric_cache.setdefault(registry, {})
+    if name not in by_name:
         try:
-            _metric_cache[key] = Counter(
-                name, documentation, labelnames, registry=registry
-            )
+            by_name[name] = Counter(name, documentation, labelnames, registry=registry)
         except ValueError:
             existing = registry._names_to_collectors.get(name)
             if existing is None:
                 raise
-            _metric_cache[key] = existing
-    return _metric_cache[key]  # type: ignore[return-value]
+            by_name[name] = existing
+    return by_name[name]  # type: ignore[return-value]
 
 
 def _get_or_create_histogram(
@@ -43,18 +46,18 @@ def _get_or_create_histogram(
     labelnames: list[str],
     buckets: list[float],
 ) -> Histogram:
-    key = (id(registry), name)
-    if key not in _metric_cache:
+    by_name = _metric_cache.setdefault(registry, {})
+    if name not in by_name:
         try:
-            _metric_cache[key] = Histogram(
+            by_name[name] = Histogram(
                 name, documentation, labelnames, buckets=buckets, registry=registry
             )
         except ValueError:
             existing = registry._names_to_collectors.get(name)
             if existing is None:
                 raise
-            _metric_cache[key] = existing
-    return _metric_cache[key]  # type: ignore[return-value]
+            by_name[name] = existing
+    return by_name[name]  # type: ignore[return-value]
 
 
 @dataclass

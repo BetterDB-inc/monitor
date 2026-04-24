@@ -12,7 +12,10 @@ Usage::
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import asyncio
+import json
+import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -53,7 +56,6 @@ class BetterDBSemanticStore:
         self, namespace: list[str], key: str, value: dict[str, Any]
     ) -> None:
         """Store a value at namespace/key."""
-        import json
         import time
 
         embed_text = (
@@ -63,8 +65,6 @@ class BetterDBSemanticStore:
         )
         category = _namespace_to_category(namespace)
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        item = Item(namespace=namespace, key=key, value=value,
-                    created_at=now, updated_at=now)
 
         from ..types import CacheStoreOptions
         await self._cache.store(
@@ -79,8 +79,6 @@ class BetterDBSemanticStore:
 
     async def aget(self, namespace: list[str], key: str) -> Item | None:
         """Retrieve a value by exact namespace and key."""
-        import json
-
         from ..utils import parse_ft_search_response
         category = _namespace_to_category(namespace)
         try:
@@ -94,8 +92,7 @@ class BetterDBSemanticStore:
         except Exception:
             return None
 
-        parsed = parse_ft_search_response(raw)
-        for entry in parsed:
+        for entry in parse_ft_search_response(raw):
             response_str = entry["fields"].get("response")
             if not response_str:
                 continue
@@ -121,22 +118,45 @@ class BetterDBSemanticStore:
         limit: int = 10,
         threshold: float | None = None,
     ) -> list[Item]:
-        """Search the namespace using similarity or scan."""
-        import json
+        """Search the namespace using similarity or scan.
 
+        When query is provided, performs a KNN vector search returning up to
+        limit results. When query is absent, returns all entries in the namespace.
+        """
+        from ..utils import encode_float32, parse_ft_search_response
         category = _namespace_to_category(namespace)
 
         if query:
-            from ..types import CacheCheckOptions
-            results = await self._cache.check_batch(
-                [query],
-                CacheCheckOptions(category=category, k=limit, threshold=threshold),
+            # Direct KNN FT.SEARCH so we can retrieve top-k, not just 1 result.
+            eff_threshold = (
+                threshold if threshold is not None else self._cache._default_threshold
             )
+            vector, _ = await self._cache._embed(query)
+            filter_expr = f"(@category:{{{category}}})"
+            knn_query = f"{filter_expr}=>[KNN {limit} @embedding $vec AS __score]"
+            try:
+                raw = await self._cache._client.execute_command(
+                    "FT.SEARCH", self._cache._index_name, knn_query,
+                    "PARAMS", "2", "vec", encode_float32(vector),
+                    "LIMIT", "0", str(limit),
+                    "DIALECT", "2",
+                )
+            except Exception:
+                return []
+
             items = []
-            for result in results:
-                if result.hit and result.response:
+            for entry in parse_ft_search_response(raw):
+                score_str = entry["fields"].get("__score")
+                try:
+                    score = float(score_str) if score_str is not None else float("nan")
+                except (ValueError, TypeError):
+                    score = float("nan")
+                if math.isnan(score) or score > eff_threshold:
+                    continue
+                response_str = entry["fields"].get("response")
+                if response_str:
                     try:
-                        data = json.loads(result.response)
+                        data = json.loads(response_str)
                         items.append(Item(
                             namespace=data.get("namespace", namespace),
                             key=data.get("key", ""),
@@ -149,7 +169,6 @@ class BetterDBSemanticStore:
             return items
 
         # No query — return all entries in namespace
-        from ..utils import parse_ft_search_response
         try:
             raw = await self._cache._client.execute_command(
                 "FT.SEARCH",
@@ -179,19 +198,52 @@ class BetterDBSemanticStore:
         return items
 
     async def adelete(self, namespace: list[str], key: str) -> None:
-        """Delete all entries at namespace/key."""
-        await self._cache.invalidate_by_category(_namespace_to_category(namespace))
+        """Delete the specific entry at namespace/key.
+
+        Scans the namespace category and deletes only the Valkey key whose
+        stored JSON response matches the given key, leaving other entries in
+        the same namespace intact.
+        """
+        from ..utils import parse_ft_search_response
+        category = _namespace_to_category(namespace)
+        try:
+            raw = await self._cache._client.execute_command(
+                "FT.SEARCH",
+                self._cache._index_name,
+                f"@category:{{{category}}}",
+                "LIMIT", "0", "1000",
+                "DIALECT", "2",
+            )
+        except Exception:
+            return
+
+        for entry in parse_ft_search_response(raw):
+            response_str = entry["fields"].get("response")
+            if not response_str:
+                continue
+            try:
+                data = json.loads(response_str)
+                if data.get("key") == key:
+                    try:
+                        await self._cache._client.delete(entry["key"])
+                    except Exception:
+                        pass
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     async def abatch(
         self,
         writes: list[dict[str, Any]],
     ) -> None:
         """Batch put/delete multiple items."""
-        import asyncio
-
         async def _apply(write: dict[str, Any]) -> None:
-            ns = write["namespace"]
-            k = write["key"]
+            try:
+                ns = write["namespace"]
+                k = write["key"]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Each write entry must have 'namespace' and 'key' fields; missing: {exc}"
+                ) from exc
             v = write.get("value")
             if v is None:
                 await self.adelete(ns, k)

@@ -180,20 +180,40 @@ export class BetterDBSemanticStore {
     const category = namespaceToCategory(namespace);
 
     if (query) {
-      // Use semantic similarity search
-      const results = await this.cache.checkBatch([query], {
-        category,
-        k: limit,
-        threshold: options?.threshold,
-      });
+      // Direct KNN FT.SEARCH so we retrieve up to `limit` results, not just 1.
+      // checkBatch([query], { k: limit }) passes limit as top-k to the search but
+      // only returns one CacheCheckResult per prompt — so we bypass it here.
+      const cacheInternals = this.cache as unknown as {
+        client: { call: (...args: unknown[]) => Promise<unknown> };
+        indexName: string;
+        embed: (text: string) => Promise<{ vector: number[]; durationSec: number }>;
+        defaultThreshold: number;
+      };
+      const { encodeFloat32, parseFtSearchResponse } = await import('../utils');
+      const threshold = options?.threshold ?? cacheInternals.defaultThreshold;
+      const { vector } = await cacheInternals.embed(query);
+      const filterExpr = `(@category:{${category}})`;
+      const knnQuery = `${filterExpr}=>[KNN ${limit} @embedding $vec AS __score]`;
+
+      let raw: unknown;
+      try {
+        raw = await cacheInternals.client.call(
+          'FT.SEARCH', cacheInternals.indexName, knnQuery,
+          'PARAMS', '2', 'vec', encodeFloat32(vector),
+          'LIMIT', '0', String(limit),
+          'DIALECT', '2',
+        );
+      } catch {
+        return [];
+      }
 
       const items: Item[] = [];
-      for (const result of results) {
-        if (result.hit && result.response) {
-          try {
-            const item = JSON.parse(result.response) as Item;
-            items.push(item);
-          } catch { /* skip */ }
+      for (const entry of parseFtSearchResponse(raw)) {
+        const scoreVal = parseFloat(entry.fields['__score'] ?? 'NaN');
+        if (isNaN(scoreVal) || scoreVal > threshold) continue;
+        const responseStr = entry.fields['response'];
+        if (responseStr) {
+          try { items.push(JSON.parse(responseStr) as Item); } catch { /* skip */ }
         }
       }
       return items;
@@ -238,14 +258,40 @@ export class BetterDBSemanticStore {
   }
 
   /**
-   * Delete all entries at namespace/key.
+   * Delete the specific entry at namespace/key.
+   * Scans the namespace category and deletes only the Valkey key whose stored JSON
+   * response matches the given key, leaving other entries in the namespace intact.
    */
   async delete(namespace: string[], key: string): Promise<void> {
     const category = namespaceToCategory(namespace);
-    // Use invalidate to delete all entries in category matching the key
-    // (key is stored in metadata but not indexed - use category filter + post-filter)
-    // For simplicity, delete by category; a production impl would need a key index.
-    await this.cache.invalidateByCategory(category);
+    const cacheInternals = this.cache as unknown as {
+      client: { call: (...args: unknown[]) => Promise<unknown>; del: (...keys: string[]) => Promise<unknown> };
+      indexName: string;
+    };
+    const { parseFtSearchResponse } = await import('../utils');
+
+    let raw: unknown;
+    try {
+      raw = await cacheInternals.client.call(
+        'FT.SEARCH', cacheInternals.indexName,
+        `@category:{${category}}`,
+        'LIMIT', '0', '1000',
+        'DIALECT', '2',
+      );
+    } catch {
+      return;
+    }
+
+    for (const entry of parseFtSearchResponse(raw)) {
+      const responseStr = entry.fields['response'];
+      if (!responseStr) continue;
+      try {
+        const item = JSON.parse(responseStr) as { key?: string };
+        if (item.key === key) {
+          await cacheInternals.client.del(entry.key).catch(() => { /* best effort */ });
+        }
+      } catch { /* skip corrupt entries */ }
+    }
   }
 
   /**

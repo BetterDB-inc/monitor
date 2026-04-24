@@ -111,8 +111,7 @@ async def prepare_semantic_params(
     if isinstance(input_val, list):
         user_items = [
             item for item in input_val
-            if not _get(item, "role") or _get(item, "role") == "user"
-            or _get(item, "type") == "message"
+            if _get(item, "role") == "user"
         ]
         last_user = user_items[-1] if user_items else None
 

@@ -53,12 +53,11 @@ class BetterDBSemanticCache(BaseCache):
         super().__init__()
         self._cache = cache
         self._filter_by_model = filter_by_model
-        self._init_promise: Any = None
 
     async def _ensure_initialized(self) -> None:
-        if self._init_promise is None:
-            self._init_promise = self._cache.initialize()
-        await self._init_promise
+        # SemanticCache.initialize() is idempotent (guarded by asyncio.Lock),
+        # so calling it directly is safe and avoids the coroutine-reuse bug.
+        await self._cache.initialize()
 
     def _model_hash(self, llm_string: str) -> str:
         return sha256(llm_string)[:16]

@@ -88,7 +88,7 @@ async def fetch_and_hash(url: str) -> str:
     import httpx
 
     async with httpx.AsyncClient() as client:
-        resp = client.get(url)
+        resp = await client.get(url)
         resp.raise_for_status()
         return "sha256:" + hashlib.sha256(resp.content).hexdigest()
 

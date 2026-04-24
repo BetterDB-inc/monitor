@@ -1050,7 +1050,9 @@ export class SemanticCache {
     category: string,
   ): Promise<void> {
     const now = Date.now();
-    const member = JSON.stringify({ score, result, category });
+    // Include a unique nonce so identical (score, result, category) tuples are
+    // each recorded as distinct ZADD members instead of overwriting each other.
+    const member = JSON.stringify({ score, result, category, _n: Math.random() });
     const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
     try {
       const pipeline = this.client.pipeline();
