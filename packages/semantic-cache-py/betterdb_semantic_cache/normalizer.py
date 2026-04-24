@@ -93,8 +93,13 @@ async def fetch_and_hash(url: str) -> str:
         return "sha256:" + hashlib.sha256(resp.content).hexdigest()
 
 
-def passthrough(ref: BinaryRef) -> str:
-    """Return a scheme-prefixed reference without any transformation."""
+async def passthrough(ref: BinaryRef) -> str:
+    """Return a scheme-prefixed reference without any transformation.
+
+    This function satisfies the ``BinaryNormalizer`` async signature so it can
+    be used directly as a normalizer argument to adapters. It does no hashing —
+    pass it only when refs are already stable identifiers.
+    """
     source = ref["source"]
     t = source["type"]
     if t == "base64":
@@ -141,13 +146,13 @@ def compose_normalizer(cfg: NormalizerConfig | None = None) -> BinaryNormalizer:
             return await _call(h, source["data"]) if h else hash_base64(source["data"])  # type: ignore[index]
         if t == "url":
             h = c.get("url")
-            return await _call(h, source["url"]) if h else passthrough(ref)  # type: ignore[index]
+            return await _call(h, source["url"]) if h else await passthrough(ref)  # type: ignore[index]
         if t == "file_id":
             h = c.get("file_id")
             return (
                 await _call(h, source["file_id"], source["provider"])  # type: ignore[index]
                 if h
-                else passthrough(ref)
+                else await passthrough(ref)
             )
         # bytes — default to hashing for the same reason as base64
         h = c.get("bytes")

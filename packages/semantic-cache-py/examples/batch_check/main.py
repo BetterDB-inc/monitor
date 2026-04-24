@@ -23,10 +23,8 @@ import time
 # This gives much better topic separation than character-code approaches.
 # Mirrors the TS batch-check mock exactly: h = ((h << 5) + h + charCode) & 0xffffffff
 def _mock_embed(text: str) -> list[float]:
-    dim = 128
-    words = [w for w in text.lower().split() if w.replace("'", "").isalpha() or w.isalnum()]
-    # Split on non-word chars like TS /\W+/
     import re
+    dim = 128
     words = [w for w in re.split(r'\W+', text.lower()) if w]
     vec = [0.0] * dim
     for w in words:

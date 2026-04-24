@@ -69,7 +69,7 @@ async def test_aupdate_calls_store():
     assert args[1] == "the answer"
 
 
-def test_sync_lookup_raises():
+def test_sync_lookup_returns_none():
     try:
         from langchain_core.caches import BaseCache
     except ImportError:
@@ -77,11 +77,12 @@ def test_sync_lookup_raises():
 
     mock_cache = _make_mock_cache()
     lc_cache = BetterDBSemanticCache(mock_cache)
-    with pytest.raises(RuntimeError, match="async-only"):
-        lc_cache.lookup("hello", "gpt-4o")
+    # lookup() returns None (cache miss) rather than raising so LangChain
+    # callers fall back to the LLM instead of propagating an exception.
+    assert lc_cache.lookup("hello", "gpt-4o") is None
 
 
-def test_sync_update_raises():
+def test_sync_update_is_noop():
     try:
         from langchain_core.caches import BaseCache
     except ImportError:
@@ -89,8 +90,9 @@ def test_sync_update_raises():
 
     mock_cache = _make_mock_cache()
     lc_cache = BetterDBSemanticCache(mock_cache)
-    with pytest.raises(RuntimeError, match="async-only"):
-        lc_cache.update("hello", "gpt-4o", [])
+    # update() is a no-op rather than raising so LangChain callers that
+    # try to store synchronously don't crash.
+    lc_cache.update("hello", "gpt-4o", [])  # should not raise
 
 
 @pytest.mark.asyncio

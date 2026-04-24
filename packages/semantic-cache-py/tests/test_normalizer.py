@@ -47,25 +47,29 @@ def test_hash_url_normalizes():
     assert hash_url(url1).startswith("url:")
 
 
-def test_passthrough_base64():
+@pytest.mark.asyncio
+async def test_passthrough_base64():
     ref = {"kind": "image", "source": {"type": "base64", "data": "abc123"}}
-    assert passthrough(ref) == "base64:abc123"  # type: ignore[arg-type]
+    assert await passthrough(ref) == "base64:abc123"  # type: ignore[arg-type]
 
 
-def test_passthrough_url():
+@pytest.mark.asyncio
+async def test_passthrough_url():
     ref = {"kind": "image", "source": {"type": "url", "url": "https://example.com"}}
-    assert passthrough(ref) == "url:https://example.com"  # type: ignore[arg-type]
+    assert await passthrough(ref) == "url:https://example.com"  # type: ignore[arg-type]
 
 
-def test_passthrough_file_id():
+@pytest.mark.asyncio
+async def test_passthrough_file_id():
     ref = {"kind": "image", "source": {"type": "file_id", "file_id": "f123", "provider": "openai"}}
-    assert passthrough(ref) == "fileid:openai:f123"  # type: ignore[arg-type]
+    assert await passthrough(ref) == "fileid:openai:f123"  # type: ignore[arg-type]
 
 
-def test_passthrough_bytes():
+@pytest.mark.asyncio
+async def test_passthrough_bytes():
     data = b"raw"
     ref = {"kind": "image", "source": {"type": "bytes", "data": data}}
-    result = passthrough(ref)  # type: ignore[arg-type]
+    result = await passthrough(ref)  # type: ignore[arg-type]
     assert result == "sha256:" + hashlib.sha256(data).hexdigest()
 
 

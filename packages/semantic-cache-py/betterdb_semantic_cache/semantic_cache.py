@@ -28,6 +28,7 @@ from .types import (
     SemanticCacheOptions,
     ThresholdEffectivenessResult,
 )
+from .normalizer import BinaryNormalizer, default_normalizer
 from .utils import ContentBlock, encode_float32, decode_float32, escape_tag, extract_binary_refs, extract_text, parse_ft_search_response
 
 INVALIDATE_BATCH_SIZE = 1000
@@ -67,6 +68,12 @@ class SemanticCache:
         # Embedding cache config
         self._embedding_cache_enabled = options.embedding_cache.enabled
         self._embedding_cache_ttl = options.embedding_cache.ttl
+
+        # Store normalizer as a public attribute so users can pass it to
+        # adapter prepare_semantic_params() calls to share the same strategy.
+        # It is not used internally by SemanticCache — normalization happens at
+        # the adapter level before ContentBlocks are created.
+        self.normalizer: BinaryNormalizer = options.normalizer or default_normalizer
 
         self._telemetry: Telemetry = create_telemetry(
             prefix=options.telemetry.metrics_prefix,
@@ -564,6 +571,11 @@ class SemanticCache:
 
                 score_str = parsed[0]["fields"].get("__score")
                 score = _safe_float(score_str)
+
+                if not math.isnan(score):
+                    self._telemetry.metrics.similarity_score.labels(
+                        cache_name=self._name, category=category_label
+                    ).observe(score)
 
                 if math.isnan(score) or score > threshold:
                     if not math.isnan(score):
