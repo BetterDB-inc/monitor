@@ -94,16 +94,15 @@ export async function createAnalytics(opts?: AnalyticsOptions): Promise<Analytic
     return NOOP_ANALYTICS;
   }
 
-  const apiKey =
-    opts?.apiKey ??
-    (BAKED_POSTHOG_API_KEY.startsWith('__') ? undefined : BAKED_POSTHOG_API_KEY);
+  // Key resolution: opts.apiKey → BETTERDB_POSTHOG_API_KEY env var → baked wheel value
+  const bakedKey = BAKED_POSTHOG_API_KEY.startsWith('__') ? undefined : BAKED_POSTHOG_API_KEY;
+  const apiKey = opts?.apiKey ?? process.env.BETTERDB_POSTHOG_API_KEY ?? bakedKey;
   if (!apiKey) {
     return NOOP_ANALYTICS;
   }
 
-  const host =
-    opts?.host ??
-    (BAKED_POSTHOG_HOST.startsWith('__') ? undefined : BAKED_POSTHOG_HOST);
+  const bakedHost = BAKED_POSTHOG_HOST.startsWith('__') ? undefined : BAKED_POSTHOG_HOST;
+  const host = opts?.host ?? process.env.BETTERDB_POSTHOG_HOST ?? bakedHost;
 
   try {
     // @ts-ignore — posthog-node is an optional peer dep

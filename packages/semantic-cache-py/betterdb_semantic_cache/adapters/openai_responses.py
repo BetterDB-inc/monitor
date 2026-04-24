@@ -123,6 +123,11 @@ async def prepare_semantic_params(
                 text = " ".join(b["text"] for b in blocks if b.get("type") == "text")
                 return SemanticParams(text=text, blocks=blocks, model=model)
 
+        # input is a list but no user-role item found — return empty rather
+        # than falling back to instructions (which is a system prompt and would
+        # collide across different user queries sharing the same instructions).
+        return SemanticParams(text="", model=model)
+
     if instructions:
         return SemanticParams(text=instructions, model=model)
 

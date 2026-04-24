@@ -87,15 +87,26 @@ class _PostHogAnalytics(Analytics):
 
 
 async def create_analytics(disabled: bool = False) -> Analytics:
-    """Return a PostHog-backed Analytics instance, or the no-op fallback."""
+    """Return a PostHog-backed Analytics instance, or the no-op fallback.
+
+    Key resolution order:
+    1. BETTERDB_POSTHOG_API_KEY environment variable (runtime override / dev use)
+    2. The value baked into the wheel at publish time (write-only, rate-limited key)
+    3. No key → NOOP_ANALYTICS
+    """
     if disabled or _is_opted_out():
         return NOOP_ANALYTICS
 
-    api_key = None if _BAKED_POSTHOG_API_KEY.startswith("__") else _BAKED_POSTHOG_API_KEY
+    # Runtime env var takes precedence over the baked key so operators can
+    # rotate or override without rebuilding the wheel.
+    baked = None if _BAKED_POSTHOG_API_KEY.startswith("__") else _BAKED_POSTHOG_API_KEY
+    api_key = os.environ.get("BETTERDB_POSTHOG_API_KEY") or baked
     if not api_key:
         return NOOP_ANALYTICS
 
-    host = None if _BAKED_POSTHOG_HOST.startswith("__") else _BAKED_POSTHOG_HOST
+    host = os.environ.get("BETTERDB_POSTHOG_HOST") or (
+        None if _BAKED_POSTHOG_HOST.startswith("__") else _BAKED_POSTHOG_HOST
+    )
 
     try:
         from posthog import Posthog  # type: ignore[import]

@@ -537,6 +537,10 @@ class SemanticCache:
             for i in range(len(prompts)):
                 raw_result = pipeline_results[i] if pipeline_results and i < len(pipeline_results) else None
                 if isinstance(raw_result, Exception) or raw_result is None:
+                    await self._record_stat("misses")
+                    self._telemetry.metrics.requests_total.labels(
+                        cache_name=self._name, result="miss", category=category_label
+                    ).inc()
                     results.append(CacheCheckResult(hit=False, confidence="miss"))
                     continue
 
@@ -594,6 +598,14 @@ class SemanticCache:
                     except (ValueError, TypeError):
                         pass
 
+                content_blocks = None
+                content_blocks_str = parsed[0]["fields"].get("content_blocks")
+                if content_blocks_str:
+                    try:
+                        content_blocks = json.loads(content_blocks_str)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
                 r = CacheCheckResult(
                     hit=True,
                     response=parsed[0]["fields"].get("response"),
@@ -603,6 +615,8 @@ class SemanticCache:
                 )
                 if cost_saved is not None:
                     r.cost_saved = cost_saved
+                if content_blocks is not None:
+                    r.content_blocks = content_blocks
                 results.append(r)
 
             return results

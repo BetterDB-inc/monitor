@@ -45,4 +45,7 @@ class CustomBuildHook(BuildHookInterface):
 
     def finalize(self, version: str, build_data: dict, artifact_path: str) -> None:
         if hasattr(self, "_tmp_path"):
-            os.unlink(self._tmp_path)
+            try:
+                os.unlink(self._tmp_path)
+            except OSError:
+                pass

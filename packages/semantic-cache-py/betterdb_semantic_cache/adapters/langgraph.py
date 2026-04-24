@@ -89,6 +89,7 @@ class BetterDBSemanticStore:
 
     async def aget(self, namespace: list[str], key: str) -> Item | None:
         """Retrieve a value by exact namespace and key."""
+        from ..errors import ValkeyCommandError as _ValkeyCommandError
         await self._cache.initialize()
         from ..utils import parse_ft_search_response
         category = _namespace_to_category(namespace)
@@ -98,6 +99,8 @@ class BetterDBSemanticStore:
         while True:
             try:
                 raw = await self._cache._search_entries(cat_filter, batch, offset)
+            except _ValkeyCommandError:
+                raise  # propagate real Valkey errors to the caller
             except Exception:
                 return None
             entries = parse_ft_search_response(raw)
@@ -183,7 +186,11 @@ class BetterDBSemanticStore:
                         pass
             return items
 
-        # No query — return all entries in namespace (up to limit)
+        # No query — return all entries in namespace (up to limit).
+        # Results are capped at limit; if the namespace has more entries than
+        # limit, the result is silently truncated. Callers should set limit
+        # large enough for their namespace size, or use a query with asearch()
+        # for ranked retrieval from large namespaces.
         cat_filter = f"@category:{{{escape_tag(category)}}}"
         try:
             raw = await self._cache._search_entries(cat_filter, limit, 0)
