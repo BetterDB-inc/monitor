@@ -35,3 +35,27 @@ async def main():
 
 asyncio.run(main())
 ```
+
+## Telemetry
+
+The published wheel includes anonymous product analytics powered by PostHog.
+When a baked API key is present in the package (injected at publish time),
+**aggregate usage statistics** (hit rate, cost saved) are collected on a
+per-instance basis — no prompt text, responses, or personally-identifiable
+information is ever sent.
+
+**To opt out**, set the environment variable before starting your process:
+
+```bash
+export BETTERDB_TELEMETRY=false   # also accepts: 0, no, off
+```
+
+You can also disable it programmatically:
+
+```python
+from betterdb_semantic_cache.types import AnalyticsOptions
+cache = SemanticCache(SemanticCacheOptions(
+    ...,
+    analytics=AnalyticsOptions(disabled=True),
+))
+```

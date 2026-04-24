@@ -264,8 +264,16 @@ export class BetterDBSemanticStore {
         } catch { /* skip corrupt */ }
       }
 
-      if (entries.length < BATCH) break;
-      offset += BATCH - deletedCount;
+      if (deletedCount > 0) {
+        // After deletions, Valkey Search async indexing may keep deleted entries
+        // visible briefly — offset arithmetic is unreliable. Re-scan from 0 to
+        // catch any remaining copies (mirrors the Python implementation).
+        offset = 0;
+      } else if (entries.length < BATCH) {
+        break; // Last page with no matches — done
+      } else {
+        offset += BATCH; // No deletions this page, advance safely
+      }
     }
   }
 

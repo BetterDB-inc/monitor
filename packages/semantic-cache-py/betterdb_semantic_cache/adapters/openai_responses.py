@@ -15,15 +15,9 @@ from typing import Any
 
 from ..normalizer import BinaryNormalizer, BinaryRef, default_normalizer
 from ..utils import BinaryBlock, TextBlock
-from ._types import SemanticParams
+from ._types import SemanticParams, _get
 
 __all__ = ["SemanticParams", "prepare_semantic_params"]
-
-
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
 
 
 async def _normalize_responses_part(

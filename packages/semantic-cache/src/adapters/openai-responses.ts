@@ -122,7 +122,7 @@ export async function prepareSemanticParams(
   if (Array.isArray(p.input)) {
     // Find last user/message input item
     const userItems = (p.input as AnyItem[]).filter(
-      (item) => !item.role || item.role === 'user' || item.type === 'message',
+      (item) => item.role === 'user',
     );
     const lastUser = userItems[userItems.length - 1];
 

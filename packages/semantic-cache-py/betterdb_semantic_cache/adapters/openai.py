@@ -16,7 +16,7 @@ from typing import Any
 
 from ..normalizer import BinaryNormalizer, BinaryRef, default_normalizer
 from ..utils import BinaryBlock, TextBlock
-from ._types import SemanticParams
+from ._types import SemanticParams, _get
 
 __all__ = ["SemanticParams", "prepare_semantic_params"]
 
@@ -25,20 +25,15 @@ async def _normalize_content_part(
     part: Any,
     normalizer: BinaryNormalizer,
 ) -> TextBlock | BinaryBlock | None:
-    part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+    part_type = _get(part, "type")
 
     if part_type == "text":
-        text = part.get("text") if isinstance(part, dict) else getattr(part, "text", "")
-        return TextBlock(type="text", text=text or "")
+        return TextBlock(type="text", text=_get(part, "text", "") or "")
 
     if part_type == "image_url":
-        image_url = part.get("image_url") if isinstance(part, dict) else getattr(part, "image_url", {})
-        if isinstance(image_url, dict):
-            url = image_url.get("url", "")
-            detail = image_url.get("detail")
-        else:
-            url = getattr(image_url, "url", "")
-            detail = getattr(image_url, "detail", None)
+        image_url = _get(part, "image_url", {})
+        url = _get(image_url, "url", "")
+        detail = _get(image_url, "detail")
 
         media_type = "image/*"
         source: BinaryRef["source"]
@@ -57,26 +52,17 @@ async def _normalize_content_part(
         return block
 
     if part_type == "input_audio":
-        audio_data = part.get("input_audio") if isinstance(part, dict) else getattr(part, "input_audio", {})
-        if isinstance(audio_data, dict):
-            data = audio_data.get("data", "")
-            fmt = audio_data.get("format", "wav")
-        else:
-            data = getattr(audio_data, "data", "")
-            fmt = getattr(audio_data, "format", "wav")
+        audio_data = _get(part, "input_audio", {})
+        data = _get(audio_data, "data", "")
+        fmt = _get(audio_data, "format", "wav")
         ref = await normalizer({"kind": "audio", "source": {"type": "base64", "data": data}})  # type: ignore[typeddict-item]
         return BinaryBlock(type="binary", kind="audio", mediaType=f"audio/{fmt}", ref=ref)
 
     if part_type == "file":
-        file_obj = part.get("file") if isinstance(part, dict) else getattr(part, "file", {})
-        if isinstance(file_obj, dict):
-            file_id = file_obj.get("file_id")
-            file_data = file_obj.get("file_data")
-            filename = file_obj.get("filename")
-        else:
-            file_id = getattr(file_obj, "file_id", None)
-            file_data = getattr(file_obj, "file_data", None)
-            filename = getattr(file_obj, "filename", None)
+        file_obj = _get(part, "file", {})
+        file_id = _get(file_obj, "file_id")
+        file_data = _get(file_obj, "file_data")
+        filename = _get(file_obj, "filename")
 
         media_type = "application/octet-stream"
         if file_id:
@@ -109,16 +95,15 @@ async def prepare_semantic_params(
     Extracts the last user message for semantic similarity matching.
     """
     norm = normalizer or default_normalizer
-    messages = params.get("messages") if isinstance(params, dict) else getattr(params, "messages", [])
-    model = params.get("model") if isinstance(params, dict) else getattr(params, "model", None)
+    messages = _get(params, "messages", [])
+    model = _get(params, "model")
 
-    user_messages = [m for m in (messages or []) if
-                     (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"]
+    user_messages = [m for m in (messages or []) if _get(m, "role") == "user"]
     if not user_messages:
         return SemanticParams(text="", model=model)
 
     last_user = user_messages[-1]
-    content = last_user.get("content") if isinstance(last_user, dict) else getattr(last_user, "content", "")
+    content = _get(last_user, "content", "")
 
     if isinstance(content, str):
         return SemanticParams(text=content, model=model)

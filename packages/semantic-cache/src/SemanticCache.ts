@@ -599,6 +599,9 @@ export class SemanticCache {
         const rawResult = pipelineEntry?.[1];
 
         if (err) {
+          await this.recordStat('misses');
+          this.telemetry.metrics.requestsTotal
+            .labels({ cache_name: this.name, result: 'miss', category: categoryLabel }).inc();
           results.push({ hit: false, confidence: 'miss' as const });
           continue;
         }
