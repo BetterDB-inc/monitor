@@ -127,52 +127,37 @@ export class BetterDBSemanticStore {
 
   /**
    * Retrieve a value by exact namespace and key.
-   * Uses FT.SEARCH with category and key metadata filter to locate the entry.
+   * Paginates through all entries in the namespace using stable SORTBY ordering.
    */
   async get(namespace: string[], key: string): Promise<Item | null> {
     const category = namespaceToCategory(namespace);
-    // Use invalidate-style FT.SEARCH with filter
-    try {
-      const result = await (this.cache as unknown as {
-        client: {
-          call: (...args: string[]) => Promise<unknown>;
-        };
-        indexName: string;
-      }).client.call(
-        'FT.SEARCH',
-        (this.cache as unknown as { indexName: string }).indexName,
-        `@category:{${escapeTag(category)}}`,
-        'LIMIT', '0', '100',
-        'DIALECT', '2',
-      );
+    const catFilter = `@category:{${escapeTag(category)}}`;
+    const { parseFtSearchResponse } = await import('../utils');
+    const BATCH = 100;
+    let offset = 0;
 
-      // Parse response manually since we need access to cache internals
-      if (!Array.isArray(result) || result.length < 1) return null;
+    while (true) {
+      let raw: unknown;
+      try {
+        raw = await this.cache._searchEntries(catFilter, BATCH, offset);
+      } catch {
+        return null;
+      }
+      const entries = parseFtSearchResponse(raw);
+      if (entries.length === 0) break;
 
-      const total = parseInt(String(result[0]), 10);
-      if (!total) return null;
-
-      for (let i = 1; i < (result as unknown[]).length; i += 2) {
-        const fieldList = (result as unknown[])[i + 1];
-        if (!Array.isArray(fieldList)) continue;
-
-        const fields: Record<string, string> = {};
-        for (let j = 0; j < fieldList.length - 1; j += 2) {
-          fields[String(fieldList[j])] = String(fieldList[j + 1]);
-        }
-
-        const responseStr = fields['response'];
+      for (const entry of entries) {
+        const responseStr = entry.fields['response'];
         if (!responseStr) continue;
-
         try {
           const item = JSON.parse(responseStr) as Item;
-          if (item.key === key) {
-            return item;
-          }
+          if (item.key === key) return item;
         } catch { /* skip corrupt */ }
       }
-    } catch { /* return null on error */ }
 
+      if (entries.length < BATCH) break;
+      offset += BATCH;
+    }
     return null;
   }
 
@@ -187,25 +172,21 @@ export class BetterDBSemanticStore {
     const category = namespaceToCategory(namespace);
 
     if (query) {
-      // Direct KNN FT.SEARCH so we retrieve up to `limit` results, not just 1.
-      // checkBatch([query], { k: limit }) passes limit as top-k to the search but
-      // only returns one CacheCheckResult per prompt — so we bypass it here.
-      const cacheInternals = this.cache as unknown as {
-        client: { call: (...args: unknown[]) => Promise<unknown> };
-        indexName: string;
-        embed: (text: string) => Promise<{ vector: number[]; durationSec: number }>;
-        defaultThreshold: number;
-      };
       const { encodeFloat32, parseFtSearchResponse } = await import('../utils');
-      const threshold = options?.threshold ?? cacheInternals.defaultThreshold;
-      const { vector } = await cacheInternals.embed(query);
+      const threshold = options?.threshold ?? (this.cache as unknown as { defaultThreshold: number }).defaultThreshold;
+      const { vector } = await this.cache._embedText(query);
       const filterExpr = `(@category:{${escapeTag(category)}})`;
       const knnQuery = `${filterExpr}=>[KNN ${limit} @embedding $vec AS __score]`;
 
       let raw: unknown;
       try {
-        raw = await cacheInternals.client.call(
-          'FT.SEARCH', cacheInternals.indexName, knnQuery,
+        raw = await (this.cache as unknown as {
+          client: { call: (...args: unknown[]) => Promise<unknown> };
+          indexName: string;
+        }).client.call(
+          'FT.SEARCH',
+          (this.cache as unknown as { indexName: string }).indexName,
+          knnQuery,
           'PARAMS', '2', 'vec', encodeFloat32(vector),
           'LIMIT', '0', String(limit),
           'DIALECT', '2',
@@ -226,36 +207,17 @@ export class BetterDBSemanticStore {
       return items;
     }
 
-    // No query - return all entries in namespace (non-semantic scan)
+    // No query — return all entries in namespace (up to limit) using _searchEntries
+    const { parseFtSearchResponse } = await import('../utils');
     try {
-      const result = await (this.cache as unknown as {
-        client: { call: (...args: string[]) => Promise<unknown> };
-        indexName: string;
-      }).client.call(
-        'FT.SEARCH',
-        (this.cache as unknown as { indexName: string }).indexName,
-        `@category:{${escapeTag(category)}}`,
-        'LIMIT', '0', String(limit),
-        'DIALECT', '2',
+      const result = await this.cache._searchEntries(
+        `@category:{${escapeTag(category)}}`, limit, 0,
       );
-
-      if (!Array.isArray(result) || result.length < 1) return [];
-
       const items: Item[] = [];
-      for (let i = 1; i < (result as unknown[]).length; i += 2) {
-        const fieldList = (result as unknown[])[i + 1];
-        if (!Array.isArray(fieldList)) continue;
-
-        const fields: Record<string, string> = {};
-        for (let j = 0; j < fieldList.length - 1; j += 2) {
-          fields[String(fieldList[j])] = String(fieldList[j + 1]);
-        }
-
-        const responseStr = fields['response'];
+      for (const entry of parseFtSearchResponse(result)) {
+        const responseStr = entry.fields['response'];
         if (responseStr) {
-          try {
-            items.push(JSON.parse(responseStr) as Item);
-          } catch { /* skip */ }
+          try { items.push(JSON.parse(responseStr) as Item); } catch { /* skip */ }
         }
       }
       return items;
@@ -266,53 +228,61 @@ export class BetterDBSemanticStore {
 
   /**
    * Delete the specific entry at namespace/key.
-   * Scans the namespace category and deletes only the Valkey key whose stored JSON
-   * response matches the given key, leaving other entries in the namespace intact.
+   * Pages through the namespace using stable SORTBY ordering; adjusts the offset
+   * for each deleted entry so no entries are skipped in large namespaces.
    */
   async delete(namespace: string[], key: string): Promise<void> {
     const category = namespaceToCategory(namespace);
-    const cacheInternals = this.cache as unknown as {
-      client: { call: (...args: unknown[]) => Promise<unknown>; del: (...keys: string[]) => Promise<unknown> };
-      indexName: string;
-    };
+    const catFilter = `@category:{${escapeTag(category)}}`;
+    const client = (this.cache as unknown as {
+      client: { del: (...keys: string[]) => Promise<unknown> };
+    }).client;
     const { parseFtSearchResponse } = await import('../utils');
+    const BATCH = 100;
+    let offset = 0;
 
-    let raw: unknown;
-    try {
-      raw = await cacheInternals.client.call(
-        'FT.SEARCH', cacheInternals.indexName,
-        `@category:{${escapeTag(category)}}`,
-        'LIMIT', '0', '1000',
-        'DIALECT', '2',
-      );
-    } catch {
-      return;
-    }
-
-    for (const entry of parseFtSearchResponse(raw)) {
-      const responseStr = entry.fields['response'];
-      if (!responseStr) continue;
+    while (true) {
+      let raw: unknown;
       try {
-        const item = JSON.parse(responseStr) as { key?: string };
-        if (item.key === key) {
-          await cacheInternals.client.del(entry.key).catch(() => { /* best effort */ });
-        }
-      } catch { /* skip corrupt entries */ }
+        raw = await this.cache._searchEntries(catFilter, BATCH, offset);
+      } catch {
+        return;
+      }
+      const entries = parseFtSearchResponse(raw);
+      if (entries.length === 0) break;
+
+      let deletedCount = 0;
+      for (const entry of entries) {
+        const responseStr = entry.fields['response'];
+        if (!responseStr) continue;
+        try {
+          const item = JSON.parse(responseStr) as { key?: string };
+          if (item.key === key) {
+            await client.del(entry.key).catch(() => { /* best effort */ });
+            deletedCount++;
+          }
+        } catch { /* skip corrupt */ }
+      }
+
+      if (entries.length < BATCH) break;
+      offset += BATCH - deletedCount;
     }
   }
 
   /**
-   * Batch put multiple items.
+   * Batch put/delete multiple items.
+   * Executes sequentially to avoid races when the same (namespace, key) appears
+   * more than once: concurrent delete+put pairs can interleave and leave duplicates.
    */
   async batch(
     writes: Array<{ namespace: string[]; key: string; value: Record<string, unknown> | null }>,
   ): Promise<void> {
-    await Promise.all(
-      writes.map((w) =>
-        w.value === null
-          ? this.delete(w.namespace, w.key)
-          : this.put(w.namespace, w.key, w.value),
-      ),
-    );
+    for (const w of writes) {
+      if (w.value === null) {
+        await this.delete(w.namespace, w.key);
+      } else {
+        await this.put(w.namespace, w.key, w.value);
+      }
+    }
   }
 }

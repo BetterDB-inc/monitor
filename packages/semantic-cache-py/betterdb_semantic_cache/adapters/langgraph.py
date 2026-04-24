@@ -92,33 +92,36 @@ class BetterDBSemanticStore:
         await self._cache.initialize()
         from ..utils import parse_ft_search_response
         category = _namespace_to_category(namespace)
-        try:
-            raw = await self._cache._client.execute_command(
-                "FT.SEARCH",
-                self._cache._index_name,
-                f"@category:{{{escape_tag(category)}}}",
-                "LIMIT", "0", "100",
-                "DIALECT", "2",
-            )
-        except Exception:
-            return None
-
-        for entry in parse_ft_search_response(raw):
-            response_str = entry["fields"].get("response")
-            if not response_str:
-                continue
+        cat_filter = f"@category:{{{escape_tag(category)}}}"
+        offset = 0
+        batch = 100
+        while True:
             try:
-                data = json.loads(response_str)
-                if data.get("key") == key:
-                    return Item(
-                        namespace=data.get("namespace", namespace),
-                        key=data.get("key", key),
-                        value=data.get("value", {}),
-                        created_at=data.get("created_at", ""),
-                        updated_at=data.get("updated_at", ""),
-                    )
-            except (json.JSONDecodeError, TypeError):
-                pass
+                raw = await self._cache._search_entries(cat_filter, batch, offset)
+            except Exception:
+                return None
+            entries = parse_ft_search_response(raw)
+            if not entries:
+                break
+            for entry in entries:
+                response_str = entry["fields"].get("response")
+                if not response_str:
+                    continue
+                try:
+                    data = json.loads(response_str)
+                    if data.get("key") == key:
+                        return Item(
+                            namespace=data.get("namespace", namespace),
+                            key=data.get("key", key),
+                            value=data.get("value", {}),
+                            created_at=data.get("created_at", ""),
+                            updated_at=data.get("updated_at", ""),
+                        )
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if len(entries) < batch:
+                break
+            offset += batch
         return None
 
     async def asearch(
@@ -180,18 +183,12 @@ class BetterDBSemanticStore:
                         pass
             return items
 
-        # No query — return all entries in namespace
+        # No query — return all entries in namespace (up to limit)
+        cat_filter = f"@category:{{{escape_tag(category)}}}"
         try:
-            raw = await self._cache._client.execute_command(
-                "FT.SEARCH",
-                self._cache._index_name,
-                f"@category:{{{escape_tag(category)}}}",
-                "LIMIT", "0", str(limit),
-                "DIALECT", "2",
-            )
+            raw = await self._cache._search_entries(cat_filter, limit, 0)
         except Exception:
             return []
-
         items = []
         for entry in parse_ft_search_response(raw):
             response_str = entry["fields"].get("response")
@@ -214,25 +211,20 @@ class BetterDBSemanticStore:
     async def adelete(self, namespace: list[str], key: str) -> None:
         """Delete the specific entry at namespace/key.
 
-        Scans the namespace category page by page and deletes only Valkey keys
-        whose stored JSON response matches the given key, leaving other entries
-        in the same namespace intact. Loops until no more matching entries are
-        found so namespaces larger than one page are handled correctly.
+        Pages through the namespace category using stable SORTBY-based pagination.
+        After deleting matching entries from a page, the offset for the next page
+        is adjusted by the number of deletions so no entries are skipped.
         """
         await self._cache.initialize()
         from ..utils import parse_ft_search_response
         category = _namespace_to_category(namespace)
         cat_filter = f"@category:{{{escape_tag(category)}}}"
+        offset = 0
+        batch = self._DELETE_SCAN_BATCH
 
         while True:
             try:
-                raw = await self._cache._client.execute_command(
-                    "FT.SEARCH",
-                    self._cache._index_name,
-                    cat_filter,
-                    "LIMIT", "0", str(self._DELETE_SCAN_BATCH),
-                    "DIALECT", "2",
-                )
+                raw = await self._cache._search_entries(cat_filter, batch, offset)
             except Exception:
                 return
 
@@ -240,7 +232,7 @@ class BetterDBSemanticStore:
             if not entries:
                 break
 
-            deleted_any = False
+            deleted_count = 0
             for entry in entries:
                 response_str = entry["fields"].get("response")
                 if not response_str:
@@ -250,18 +242,18 @@ class BetterDBSemanticStore:
                     if data.get("key") == key:
                         try:
                             await self._cache._client.delete(entry["key"])
-                            deleted_any = True
+                            deleted_count += 1
                         except Exception:
                             pass
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-            if not deleted_any:
-                # This page contained no matching entries; if it was a full page
-                # there may be more entries beyond, but none will match our key
-                # (since all pages are sorted the same way and we start from 0).
-                # A full page with zero matches means the key does not exist.
-                break
+            if len(entries) < batch:
+                break  # Last page — we've scanned everything
+
+            # Advance by (batch - deleted_count): deleted entries shift later entries
+            # left so the next batch starts at the correct position.
+            offset += batch - deleted_count
 
     async def abatch(
         self,

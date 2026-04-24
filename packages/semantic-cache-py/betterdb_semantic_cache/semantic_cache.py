@@ -30,10 +30,6 @@ from .utils import ContentBlock, encode_float32, decode_float32, escape_tag, ext
 INVALIDATE_BATCH_SIZE = 1000
 
 
-def _escape_tag(value: str) -> str:
-    return escape_tag(value)
-
-
 class SemanticCache:
     """Semantic cache backed by Valkey vector search (FT.SEARCH KNN).
 
@@ -144,11 +140,11 @@ class SemanticCache:
             user_filter = opts.filter
             if binary_refs and self._has_binary_refs:
                 if len(binary_refs) == 1:
-                    binary_filter: str | None = f"@binary_refs:{{{_escape_tag(binary_refs[0])}}}"
+                    binary_filter: str | None = f"@binary_refs:{{{escape_tag(binary_refs[0])}}}"
                 else:
                     # AND semantics: chain separate TAG clauses so all refs must be present
                     binary_filter = " ".join(
-                        f"@binary_refs:{{{_escape_tag(r)}}}" for r in binary_refs
+                        f"@binary_refs:{{{escape_tag(r)}}}" for r in binary_refs
                     )
             else:
                 binary_filter = None
@@ -479,10 +475,10 @@ class SemanticCache:
 
                 if binary_refs and self._has_binary_refs:
                     if len(binary_refs) == 1:
-                        binary_filter: str | None = f"@binary_refs:{{{_escape_tag(binary_refs[0])}}}"
+                        binary_filter: str | None = f"@binary_refs:{{{escape_tag(binary_refs[0])}}}"
                     else:
                         binary_filter = " ".join(
-                            f"@binary_refs:{{{_escape_tag(r)}}}" for r in binary_refs
+                            f"@binary_refs:{{{escape_tag(r)}}}" for r in binary_refs
                         )
                 else:
                     binary_filter = None
@@ -523,6 +519,8 @@ class SemanticCache:
                 score = _safe_float(score_str)
 
                 if math.isnan(score) or score > threshold:
+                    if not math.isnan(score):
+                        await self._record_similarity_window(score, "miss", category)
                     await self._record_stat("misses")
                     self._telemetry.metrics.requests_total.labels(
                         cache_name=self._name, result="miss", category=category_label
@@ -536,6 +534,7 @@ class SemanticCache:
                     results.append(r)
                     continue
 
+                await self._record_similarity_window(score, "hit", category)
                 confidence = "uncertain" if score >= threshold - self._uncertainty_band else "high"
                 await self._record_stat("hits")
                 metric_result = "uncertain_hit" if confidence == "uncertain" else "hit"
@@ -619,7 +618,7 @@ class SemanticCache:
         """Delete all entries tagged with the given model name."""
         total = 0
         while True:
-            result = await self.invalidate(f"@model:{{{_escape_tag(model)}}}")
+            result = await self.invalidate(f"@model:{{{escape_tag(model)}}}")
             total += result.deleted
             if not result.truncated:
                 break
@@ -629,7 +628,7 @@ class SemanticCache:
         """Delete all entries tagged with the given category."""
         total = 0
         while True:
-            result = await self.invalidate(f"@category:{{{_escape_tag(category)}}}")
+            result = await self.invalidate(f"@category:{{{escape_tag(category)}}}")
             total += result.deleted
             if not result.truncated:
                 break
@@ -811,6 +810,21 @@ class SemanticCache:
         return list(await asyncio.gather(*tasks))
 
     # -- Private helpers --
+
+    async def _search_entries(
+        self, filter_expr: str, limit: int, offset: int = 0
+    ) -> Any:
+        """Execute a stable FT.SEARCH for use by adapters.
+
+        Uses SORTBY inserted_at ASC so that offset-based pagination is reliable
+        even across calls that delete entries from earlier pages.
+        """
+        return await self._client.execute_command(
+            "FT.SEARCH", self._index_name, filter_expr,
+            "SORTBY", "inserted_at", "ASC",
+            "LIMIT", str(offset), str(limit),
+            "DIALECT", "2",
+        )
 
     async def _do_initialize(self) -> None:
         with self._telemetry.tracer.start_as_current_span("semantic_cache.initialize") as span:

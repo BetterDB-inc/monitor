@@ -34,9 +34,6 @@ import { clusterScan } from './cluster';
 
 const INVALIDATE_BATCH_SIZE = 1000;
 
-// Schema version tag - bump when schema fields change to detect incompatible indexes
-const SCHEMA_VERSION = '2';
-
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -583,6 +580,9 @@ export class SemanticCache {
         const score = scoreStr !== undefined ? parseFloat(scoreStr) : NaN;
 
         if (isNaN(score) || score > threshold) {
+          if (!isNaN(score)) {
+            await this.recordSimilarityWindow(score, 'miss', category);
+          }
           await this.recordStat('misses');
           this.telemetry.metrics.requestsTotal
             .labels({ cache_name: this.name, result: 'miss', category: categoryLabel }).inc();
@@ -595,6 +595,7 @@ export class SemanticCache {
           continue;
         }
 
+        await this.recordSimilarityWindow(score, 'hit', category);
         const confidence: CacheConfidence =
           score >= threshold - this.uncertaintyBand ? 'uncertain' : 'high';
         await this.recordStat('hits');
@@ -873,6 +874,30 @@ export class SemanticCache {
     ]);
 
     return results;
+  }
+
+  // -- Internal helpers exposed to package adapters --
+
+  /**
+   * Execute a stable FT.SEARCH for use by adapters (e.g. LangGraph).
+   * SORTBY inserted_at ASC gives stable ordering across paginated calls.
+   * @internal
+   */
+  async _searchEntries(filterExpr: string, limit: number, offset: number): Promise<unknown> {
+    return this.client.call(
+      'FT.SEARCH', this.indexName, filterExpr,
+      'SORTBY', 'inserted_at', 'ASC',
+      'LIMIT', String(offset), String(limit),
+      'DIALECT', '2',
+    );
+  }
+
+  /**
+   * Embed text for use by adapters (e.g. LangGraph semantic search).
+   * @internal
+   */
+  async _embedText(text: string): Promise<{ vector: number[]; durationSec: number }> {
+    return this.embed(text);
   }
 
   // -- Private helpers --
