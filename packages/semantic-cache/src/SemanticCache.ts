@@ -71,6 +71,7 @@ export class SemanticCache {
   private _hasBinaryRefs = false;
   private _initPromise: Promise<void> | null = null;
   private _initGeneration = 0;
+  private _disposed = false;
 
   private readonly analyticsOpts: SemanticCacheOptions['analytics'];
   private readonly usesDefaultCostTable: boolean;
@@ -199,6 +200,7 @@ export class SemanticCache {
    * entries. Safe to call multiple times.
    */
   async dispose(): Promise<void> {
+    this._disposed = true;
     if (this.discovery) {
       await this.discovery.stop({ deleteHeartbeat: true });
       this.discovery = null;
@@ -991,30 +993,36 @@ export class SemanticCache {
   // -- Private helpers --
 
   private async _doInitialize(): Promise<void> {
+    this._disposed = false;
     const gen = this._initGeneration;
     return this.traced('initialize', async () => {
       const { dim, hasBinaryRefs } = await this.ensureIndexAndGetDimension();
-      if (this._initGeneration !== gen) return;
+      if (this._initGeneration !== gen || this._disposed) {
+        return;
+      }
       this._dimension = dim;
-<<<<<<< HEAD
       this._hasBinaryRefs = hasBinaryRefs;
       // registerDiscovery() may throw SemanticCacheUsageError on a name
       // collision. Mark the cache initialized only after discovery succeeds
       // so a colliding caller cannot subsequently call check()/store()
       // against another owner's keys.
-=======
->>>>>>> 1033b74 (chore(semantic-cache): tighten discovery module)
-      await this.registerDiscovery();
-      if (this._initGeneration !== gen) return;
+      const manager = await this.registerDiscovery();
+      if (this._initGeneration !== gen || this._disposed) {
+        if (manager) {
+          await manager.stop({ deleteHeartbeat: true });
+        }
+        return;
+      }
+      this.discovery = manager;
       this._initialized = true;
       // Fire analytics init once (not on every flush+initialize cycle)
       this.initAnalyticsSafe().catch(() => {});
     });
   }
 
-  private async registerDiscovery(): Promise<void> {
+  private async registerDiscovery(): Promise<DiscoveryManager | null> {
     if (this.discoveryOptions.enabled === false) {
-      return;
+      return null;
     }
     const metadata = buildSemanticMetadata({
       name: this.name,
@@ -1036,7 +1044,7 @@ export class SemanticCache {
       },
     });
     await manager.register();
-    this.discovery = manager;
+    return manager;
   }
 
   private async initAnalyticsSafe(): Promise<void> {
