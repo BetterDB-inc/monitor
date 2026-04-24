@@ -42,7 +42,11 @@ async def cluster_scan(
         is_cluster = False
 
     if is_cluster:
-        nodes = client.get_primaries()
+        import asyncio
+        # get_primaries() is synchronous in most valkey-py versions but may
+        # return a coroutine in some async builds — await it defensively.
+        nodes_result = client.get_primaries()
+        nodes = await nodes_result if asyncio.iscoroutine(nodes_result) else nodes_result
         if not nodes:
             raise ValkeyCommandError(
                 "SCAN", Exception("cluster has no master nodes visible")

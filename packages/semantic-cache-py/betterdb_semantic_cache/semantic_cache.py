@@ -660,7 +660,11 @@ class SemanticCache:
                     r.content_blocks = content_blocks
                 results.append(r)
 
-            # Single pipeline for all post-loop Valkey writes (TTL refreshes + cost stats)
+            # Single pipeline for all post-loop Valkey writes (TTL refreshes + cost stats).
+            # Note: cost_saved_total Prometheus counter is incremented per-hit above (same
+            # as check()), while the stats-hash hincrby is batched here. If the pipeline
+            # fails, Prometheus and stats().cost_saved_micros may diverge by at most the
+            # batch total — both paths are best-effort and this is an accepted trade-off.
             if keys_to_expire or total_cost_micros:
                 try:
                     post_pipe = self._client.pipeline()
@@ -704,8 +708,14 @@ class SemanticCache:
 
             keys = [r["key"] for r in parsed]
             truncated = len(keys) == INVALIDATE_BATCH_SIZE
+            # Pipeline individual per-key DELs to avoid CROSSSLOT errors in
+            # cluster mode (multi-key DEL triggers CROSSSLOT when keys span
+            # multiple hash slots on the same node).
             try:
-                await self._client.delete(*keys)
+                pipe = self._client.pipeline()
+                for key in keys:
+                    pipe.delete(key)
+                await pipe.execute()
             except Exception as err:
                 raise ValkeyCommandError("DEL", err)
 
@@ -723,6 +733,10 @@ class SemanticCache:
             total += result.deleted
             if not result.truncated:
                 break
+            # Brief pause between iterations: Valkey Search indexes DELs
+            # asynchronously, so FT.SEARCH can keep returning already-deleted
+            # keys briefly. Without a pause the loop would busy-spin against Valkey.
+            await asyncio.sleep(0.05)
         return total
 
     async def invalidate_by_category(self, category: str) -> int:
@@ -733,6 +747,7 @@ class SemanticCache:
             total += result.deleted
             if not result.truncated:
                 break
+            await asyncio.sleep(0.05)
         return total
 
     async def stats(self) -> CacheStats:
