@@ -74,6 +74,61 @@ def make_client() -> MagicMock:
     return client
 
 
+def make_persisting_valkey_client() -> MagicMock:
+    """Valkey-like mock that remembers ``GET``/``SET``/``DELETE`` for a single process.
+
+    ``make_client()`` always returns ``None`` from ``get``; adapter tests that run
+    ``store``/``store_multipart`` then ``check`` need values to round-trip like a
+    real server.
+    """
+    storage: dict[str, str] = {}
+
+    def _norm_key(key: object) -> str:
+        if isinstance(key, bytes):
+            return key.decode()
+        return str(key)
+
+    async def _get(key: object) -> str | None:
+        return storage.get(_norm_key(key))
+
+    async def _set(key: object, value: object, ex: int | None = None) -> bool:
+        if isinstance(value, bytes):
+            storage[_norm_key(key)] = value.decode("utf-8")
+        else:
+            storage[_norm_key(key)] = str(value)
+        return True
+
+    async def _delete(key: object) -> int:
+        k = _norm_key(key)
+        if k in storage:
+            del storage[k]
+            return 1
+        return 0
+
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=_get)
+    client.set = AsyncMock(side_effect=_set)
+    client.delete = AsyncMock(side_effect=_delete)
+    client.expire = AsyncMock(return_value=1)
+    client.hincrby = AsyncMock(return_value=1)
+    client.hgetall = AsyncMock(return_value={})
+    client.hset = AsyncMock(return_value=1)
+    client.scan = AsyncMock(return_value=(0, []))
+
+    pipe = MagicMock()
+    pipe.get = MagicMock()
+    pipe.set = MagicMock()
+    pipe.delete = MagicMock()
+    pipe.expire = MagicMock()
+    pipe.hincrby = MagicMock()
+    pipe.execute = AsyncMock(return_value=[])
+    pipe.__aenter__ = AsyncMock(return_value=pipe)
+    pipe.__aexit__ = AsyncMock(return_value=False)
+    client.pipeline = MagicMock(return_value=pipe)
+
+    return client
+
+
 @pytest.fixture
 def telemetry() -> Telemetry:
     return make_telemetry()
