@@ -128,7 +128,16 @@ class SemanticCache:
                 raise ValkeyCommandError("FT.DROPINDEX", err)
 
         async def _del(keys: list[str], node_client: Any) -> None:
-            await node_client.delete(*keys)
+            # Use a pipeline of individual per-key DEL commands instead of a
+            # single multi-key DEL. Multi-key DEL causes CROSSSLOT errors in
+            # cluster mode when keys from one SCAN batch span different hash slots.
+            pipe = node_client.pipeline()
+            for key in keys:
+                pipe.delete(key)
+            try:
+                await pipe.execute()
+            except Exception as exc:
+                raise ValkeyCommandError("DEL", exc) from exc
 
         for pattern in [f"{self._name}:entry:*", f"{self._name}:embed:*"]:
             await cluster_scan(self._client, pattern, _del)
