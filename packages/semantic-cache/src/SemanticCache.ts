@@ -31,6 +31,7 @@ import {
 } from './utils';
 import { DEFAULT_COST_TABLE } from './defaultCostTable';
 import { clusterScan } from './cluster';
+import { createAnalytics, NOOP_ANALYTICS, type Analytics } from './analytics';
 
 const INVALIDATE_BATCH_SIZE = 1000;
 
@@ -61,6 +62,13 @@ export class SemanticCache {
   private _hasBinaryRefs = false;
   private _initPromise: Promise<void> | null = null;
   private _initGeneration = 0;
+
+  private readonly analyticsOpts: SemanticCacheOptions['analytics'];
+  private readonly usesDefaultCostTable: boolean;
+  private analytics: Analytics = NOOP_ANALYTICS;
+  private statsTimer: ReturnType<typeof setInterval> | undefined;
+  private shutdownCalled = false;
+  private analyticsInitiated = false;
 
   /**
    * Creates a new SemanticCache instance.
@@ -104,6 +112,9 @@ export class SemanticCache {
       tracerName: options.telemetry?.tracerName ?? '@betterdb/semantic-cache',
       registry: options.telemetry?.registry,
     });
+
+    this.analyticsOpts = options.analytics;
+    this.usesDefaultCostTable = useDefault;
   }
 
   // -- Lifecycle --
@@ -149,6 +160,17 @@ export class SemanticCache {
 
     await this.client.del(this.statsKey);
     await this.client.del(this.similarityWindowKey);
+    this.analytics.capture('cache_flush');
+  }
+
+  /** Shut down the analytics client and cancel the stats timer. */
+  async shutdown(): Promise<void> {
+    this.shutdownCalled = true;
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = undefined;
+    }
+    await this.analytics.shutdown();
   }
 
   // -- Public operations --
@@ -913,7 +935,49 @@ export class SemanticCache {
       this._dimension = dim;
       this._hasBinaryRefs = hasBinaryRefs;
       this._initialized = true;
+      // Fire analytics init once (not on every flush+initialize cycle)
+      this.initAnalyticsSafe().catch(() => {});
     });
+  }
+
+  private async initAnalyticsSafe(): Promise<void> {
+    if (this.analyticsInitiated) return;
+    this.analyticsInitiated = true;
+    try {
+      const a = await createAnalytics(this.analyticsOpts);
+      if (this.shutdownCalled) { await a.shutdown(); return; }
+      this.analytics = a;
+      await a.init(this.client, this.name, {
+        defaultThreshold: this.defaultThreshold,
+        uncertaintyBand: this.uncertaintyBand,
+        defaultTtl: this.defaultTtl ?? null,
+        hasCostTable: !!this.costTable,
+        usesDefaultCostTable: this.usesDefaultCostTable,
+        embeddingCacheEnabled: this.embeddingCacheEnabled,
+        categoryThresholdCount: Object.keys(this.categoryThresholds).length,
+        dimension: this._dimension,
+      });
+      const intervalMs = this.analyticsOpts?.statsIntervalMs ?? 300_000;
+      if (!this.shutdownCalled && intervalMs > 0) {
+        this.statsTimer = setInterval(() => this.captureStatsSnapshot(), intervalMs);
+        this.statsTimer.unref();
+      }
+    } catch {
+      // never throw from analytics
+    }
+  }
+
+  private captureStatsSnapshot(): void {
+    this.stats()
+      .then((s) => {
+        this.analytics.capture('stats_snapshot', {
+          hits: s.hits,
+          misses: s.misses,
+          hit_rate: s.hitRate,
+          cost_saved_micros: s.costSavedMicros,
+        });
+      })
+      .catch(() => {});
   }
 
   private async ensureIndexAndGetDimension(): Promise<{ dim: number; hasBinaryRefs: boolean }> {

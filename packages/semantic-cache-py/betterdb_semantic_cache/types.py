@@ -28,6 +28,12 @@ class TelemetryOptions:
 
 
 @dataclass
+class AnalyticsOptions:
+    disabled: bool = False
+    stats_interval_s: float = 300.0
+
+
+@dataclass
 class SemanticCacheOptions:
     client: Any  # valkey.asyncio.Valkey or ValkeyCluster
     embed_fn: EmbedFn
@@ -41,6 +47,7 @@ class SemanticCacheOptions:
     normalizer: Any = None  # BinaryNormalizer | None
     embedding_cache: EmbeddingCacheOptions = field(default_factory=EmbeddingCacheOptions)
     telemetry: TelemetryOptions = field(default_factory=TelemetryOptions)
+    analytics: AnalyticsOptions = field(default_factory=AnalyticsOptions)
 
 
 @dataclass

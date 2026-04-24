@@ -121,6 +121,9 @@ jobs:
 
       - name: Build wheel and sdist
         working-directory: packages/semantic-cache-py
+        env:
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
         run: python -m build
 
       - name: Verify build artifacts

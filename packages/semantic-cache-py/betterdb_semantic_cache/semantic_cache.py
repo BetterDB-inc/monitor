@@ -10,11 +10,13 @@ from typing import Any
 
 from opentelemetry.trace import StatusCode
 
+from .analytics import NOOP_ANALYTICS, Analytics, create_analytics
 from .cluster import cluster_scan
 from .default_cost_table import DEFAULT_COST_TABLE
 from .errors import EmbeddingError, SemanticCacheUsageError, ValkeyCommandError
 from .telemetry import Telemetry, create_telemetry
 from .types import (
+    AnalyticsOptions,
     CacheCheckOptions,
     CacheCheckResult,
     CacheStats,
@@ -77,6 +79,15 @@ class SemanticCache:
         self._has_binary_refs = False
         self._init_lock = asyncio.Lock()
 
+        # Analytics
+        self._analytics_opts: AnalyticsOptions = options.analytics
+        self._uses_default_cost_table = options.use_default_cost_table
+        self._analytics: Analytics = NOOP_ANALYTICS
+        self._stats_task: asyncio.Task[None] | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
+        self._shutdown = False
+        self._analytics_initiated = False
+
     # -- Lifecycle --
 
     async def initialize(self) -> None:
@@ -110,6 +121,15 @@ class SemanticCache:
 
         await self._client.delete(self._stats_key)
         await self._client.delete(self._similarity_window_key)
+        self._analytics.capture("cache_flush")
+
+    async def shutdown(self) -> None:
+        """Shut down the analytics client and cancel the stats timer."""
+        self._shutdown = True
+        if self._stats_task is not None:
+            self._stats_task.cancel()
+            self._stats_task = None
+        await self._analytics.shutdown()
 
     # -- Public operations --
 
@@ -848,9 +868,62 @@ class SemanticCache:
                 self._has_binary_refs = has_binary_refs
                 self._initialized = True
                 span.set_status(StatusCode.OK)
+                # Fire analytics init once — skip on flush()+initialize() re-runs
+                if not self._analytics_initiated:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        t = loop.create_task(self._init_analytics_safe())
+                        self._background_tasks.add(t)
+                        t.add_done_callback(self._background_tasks.discard)
+                    except RuntimeError:
+                        pass
             except Exception as e:
                 span.set_status(StatusCode.ERROR, str(e))
                 raise
+
+    async def _init_analytics_safe(self) -> None:
+        if self._analytics_initiated:
+            return
+        self._analytics_initiated = True
+        try:
+            opts = self._analytics_opts
+            analytics = await create_analytics(disabled=opts.disabled)
+            if self._shutdown:
+                await analytics.shutdown()
+                return
+            self._analytics = analytics
+            await analytics.init(self._client, self._name, {
+                "default_threshold": self._default_threshold,
+                "uncertainty_band": self._uncertainty_band,
+                "default_ttl": self._default_ttl,
+                "has_cost_table": bool(self._cost_table),
+                "uses_default_cost_table": self._uses_default_cost_table,
+                "embedding_cache_enabled": self._embedding_cache_enabled,
+                "category_threshold_count": len(self._category_thresholds),
+                "dimension": self._dimension,
+            })
+            if not self._shutdown and opts.stats_interval_s > 0 and self._analytics is not NOOP_ANALYTICS:
+                self._stats_task = asyncio.create_task(self._stats_loop(opts.stats_interval_s))
+        except Exception:
+            pass
+
+    async def _stats_loop(self, interval_s: float) -> None:
+        while not self._shutdown:
+            try:
+                await asyncio.sleep(interval_s)
+                if self._shutdown:
+                    break
+                s = await self.stats()
+                self._analytics.capture("stats_snapshot", {
+                    "hits": s.hits,
+                    "misses": s.misses,
+                    "hit_rate": s.hit_rate,
+                    "cost_saved_micros": s.cost_saved_micros,
+                })
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
 
     async def _ensure_index_and_get_dimension(self) -> tuple[int, bool]:
         try:

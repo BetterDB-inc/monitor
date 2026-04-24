@@ -94,7 +94,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/inject-telemetry-defaults.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -121,6 +121,7 @@
     "node": ">=20.0.0"
   },
   "peerDependencies": {
+    "posthog-node": ">=4.0.0",
     "@anthropic-ai/sdk": ">=0.90.0",
     "@langchain/core": ">=0.3.0",
     "@langchain/langgraph-checkpoint": ">=0.1.0",
@@ -130,6 +131,9 @@
     "openai": ">=6.0.0"
   },
   "peerDependenciesMeta": {
+    "posthog-node": {
+      "optional": true
+    },
     "@anthropic-ai/sdk": {
       "optional": true
     },

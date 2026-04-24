@@ -86,6 +86,16 @@ export interface SemanticCacheOptions {
      */
     registry?: Registry;
   };
+  analytics?: {
+    /** PostHog API key. Overrides the build-time baked key if set. */
+    apiKey?: string;
+    /** PostHog host. Overrides the build-time baked host if set. */
+    host?: string;
+    /** Disable analytics. Also controlled by BETTERDB_TELEMETRY env var. */
+    disabled?: boolean;
+    /** Interval in ms for periodic stats snapshots. Default: 300_000 (5 min). 0 to disable. */
+    statsIntervalMs?: number;
+  };
 }
 
 export interface RerankOptions {
