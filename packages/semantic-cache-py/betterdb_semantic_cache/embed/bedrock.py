@@ -5,7 +5,7 @@ Requires the 'bedrock' extra: pip install betterdb-semantic-cache[bedrock]
 
 Usage::
 
-    from embed.bedrock import create_bedrock_embed
+    from betterdb_semantic_cache.embed.bedrock import create_bedrock_embed
     embed = create_bedrock_embed(model_id="amazon.titan-embed-text-v2:0")
     cache = SemanticCache(SemanticCacheOptions(client=client, embed_fn=embed))
 """

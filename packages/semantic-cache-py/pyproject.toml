@@ -42,7 +42,7 @@ all = [
 Repository = "https://github.com/BetterDB-inc/monitor"
 
 [tool.hatch.build.targets.wheel]
-packages = ["betterdb_semantic_cache", "embed"]
+packages = ["betterdb_semantic_cache"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

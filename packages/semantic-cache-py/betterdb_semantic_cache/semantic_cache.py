@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import time
 import uuid
 from typing import Any
@@ -183,7 +184,6 @@ class SemanticCache:
             except (ValueError, TypeError):
                 score = float("nan")
 
-            import math
             if not math.isnan(score):
                 self._telemetry.metrics.similarity_score.labels(
                     cache_name=self._name, category=category_label
@@ -207,15 +207,19 @@ class SemanticCache:
                 return result
 
             # Rerank
-            winner_index = 0
+            winner_parsed_index = 0
             if rerank_opts and parsed:
-                candidates = [
-                    {"response": r["fields"].get("response", ""),
-                     "similarity": float(r["fields"].get("__score", "nan"))}
-                    for r in parsed
+                # Preserve the original parsed[] index alongside each candidate so
+                # we can map back even when NaN-scored entries are filtered out.
+                indexed_candidates = [
+                    (i, {"response": r["fields"].get("response", ""),
+                         "similarity": _safe_float(r["fields"].get("__score"))})
+                    for i, r in enumerate(parsed)
                     if not math.isnan(_safe_float(r["fields"].get("__score")))
                 ]
-                picked = await rerank_opts.rerank_fn(prompt_text, candidates)
+                picked = await rerank_opts.rerank_fn(
+                    prompt_text, [c for _, c in indexed_candidates]
+                )
                 if picked == -1:
                     # Record the actual outcome — rerank rejected, so it's a miss
                     await self._record_similarity_window(score, "miss", category)
@@ -225,9 +229,10 @@ class SemanticCache:
                     ).inc()
                     _set_span_attrs(span, {"cache.hit": False, "cache.name": self._name, "cache.reranked": True})
                     return CacheCheckResult(hit=False, confidence="miss")
-                winner_index = picked
+                # Map back to the original parsed[] index (not the candidates[] index)
+                winner_parsed_index = indexed_candidates[picked][0]
 
-            winner = parsed[winner_index] if winner_index < len(parsed) else parsed[0]
+            winner = parsed[winner_parsed_index] if winner_parsed_index < len(parsed) else parsed[0]
             winner_score = _safe_float(winner["fields"].get("__score"), score)
 
             # Stale model check
@@ -453,6 +458,16 @@ class SemanticCache:
             return []
 
         opts = options or CacheCheckOptions()
+        if opts.rerank is not None:
+            raise SemanticCacheUsageError(
+                "check_batch() does not support the 'rerank' option. "
+                "Use check() for reranking individual prompts."
+            )
+        if opts.stale_after_model_change:
+            raise SemanticCacheUsageError(
+                "check_batch() does not support 'stale_after_model_change'. "
+                "Use check() for stale-model eviction."
+            )
 
         async def _run(span: Any) -> list[CacheCheckResult]:
             resolved = [self._resolve_prompt(p) for p in prompts]
@@ -496,7 +511,6 @@ class SemanticCache:
             pipeline_results = await pipe.execute(raise_on_error=False)
             _set_span_attrs(span, {"cache.batch_size": len(prompts), "cache.name": self._name})
 
-            import math
             results: list[CacheCheckResult] = []
             category_label = category or "none"
 

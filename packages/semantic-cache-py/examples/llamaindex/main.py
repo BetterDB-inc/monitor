@@ -16,7 +16,7 @@ async def main() -> None:
     from betterdb_semantic_cache import SemanticCache, SemanticCacheOptions
     from betterdb_semantic_cache.adapters.llamaindex import prepare_semantic_params
     from betterdb_semantic_cache.types import CacheStoreOptions
-    from embed.openai import create_openai_embed
+    from betterdb_semantic_cache.embed.openai import create_openai_embed
 
     host = os.environ.get("VALKEY_HOST", "localhost")
     port = int(os.environ.get("VALKEY_PORT", "6399"))

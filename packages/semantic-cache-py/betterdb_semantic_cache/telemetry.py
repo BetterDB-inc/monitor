@@ -32,7 +32,9 @@ def _get_or_create_counter(
         try:
             by_name[name] = Counter(name, documentation, labelnames, registry=registry)
         except ValueError:
-            existing = registry._names_to_collectors.get(name)
+            # Metric already registered externally — retrieve via the private
+            # _names_to_collectors map (guarded against removal in future releases).
+            existing = getattr(registry, "_names_to_collectors", {}).get(name)
             if existing is None:
                 raise
             by_name[name] = existing
@@ -53,7 +55,9 @@ def _get_or_create_histogram(
                 name, documentation, labelnames, buckets=buckets, registry=registry
             )
         except ValueError:
-            existing = registry._names_to_collectors.get(name)
+            # Metric already registered externally — retrieve via the private
+            # _names_to_collectors map (guarded against removal in future releases).
+            existing = getattr(registry, "_names_to_collectors", {}).get(name)
             if existing is None:
                 raise
             by_name[name] = existing

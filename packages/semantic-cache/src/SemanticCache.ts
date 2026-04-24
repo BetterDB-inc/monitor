@@ -251,18 +251,20 @@ export class SemanticCache {
       }
 
       // Rerank: apply rerankFn to all candidates above threshold
-      let winnerIndex = 0;
+      let winnerParsedIndex = 0;
       if (rerankOpts && parsed.length > 0) {
-        const candidates = parsed
-          .filter((r) => {
-            const s = parseFloat(r.fields['__score'] ?? 'NaN');
-            return !isNaN(s);
-          })
-          .map((r) => ({
-            response: r.fields['response'] ?? '',
-            similarity: parseFloat(r.fields['__score'] ?? 'NaN'),
+        // Preserve the original parsed[] index alongside each candidate so we
+        // can map back even when NaN-scored entries are filtered out.
+        const indexedCandidates = parsed
+          .map((r, i) => ({ i, s: parseFloat(r.fields['__score'] ?? 'NaN') }))
+          .filter(({ s }) => !isNaN(s))
+          .map(({ i, s }) => ({
+            origIdx: i,
+            candidate: { response: parsed[i].fields['response'] ?? '', similarity: s },
           }));
-        const picked = await rerankOpts.rerankFn(promptText, candidates);
+        const picked = await rerankOpts.rerankFn(
+          promptText, indexedCandidates.map((x) => x.candidate),
+        );
         if (picked === -1) {
           // Record the actual outcome — rerank rejected, so it's a miss
           await this.recordSimilarityWindow(score, 'miss', category);
@@ -272,10 +274,11 @@ export class SemanticCache {
           span.setAttributes({ 'cache.hit': false, 'cache.name': this.name, 'cache.reranked': true });
           return { hit: false, confidence: 'miss' as const };
         }
-        winnerIndex = picked;
+        // Map back to the original parsed[] index (not the candidates[] index)
+        winnerParsedIndex = indexedCandidates[picked]?.origIdx ?? 0;
       }
 
-      const winner = parsed[winnerIndex] ?? parsed[0];
+      const winner = parsed[winnerParsedIndex] ?? parsed[0];
       const winnerScore = parseFloat(winner.fields['__score'] ?? String(score));
 
       // Stale model check: if winner's model differs from currentModel, evict and treat as miss

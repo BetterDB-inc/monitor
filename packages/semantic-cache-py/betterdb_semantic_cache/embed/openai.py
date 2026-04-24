@@ -5,7 +5,7 @@ Requires the 'openai' extra: pip install betterdb-semantic-cache[openai]
 
 Usage::
 
-    from embed.openai import create_openai_embed
+    from betterdb_semantic_cache.embed.openai import create_openai_embed
     embed = create_openai_embed(model="text-embedding-3-small")
     cache = SemanticCache(SemanticCacheOptions(client=client, embed_fn=embed))
 """
