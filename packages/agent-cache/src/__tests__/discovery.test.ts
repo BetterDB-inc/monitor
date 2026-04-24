@@ -183,7 +183,6 @@ describe('DiscoveryManager.register', () => {
     const mgr = new DiscoveryManager({
       client: asValkey(client),
       name: 'foo',
-      cacheType: 'agent_cache',
       buildMetadata: () => agentMetadata('foo'),
       heartbeatIntervalMs: 999_999,
       onWriteFailed,
@@ -211,7 +210,6 @@ describe('DiscoveryManager.register', () => {
     const mgr = new DiscoveryManager({
       client: asValkey(client),
       name: 'foo',
-      cacheType: 'agent_cache',
       buildMetadata: () => agentMetadata('foo'),
       heartbeatIntervalMs: 999_999,
     });
@@ -234,7 +232,6 @@ describe('DiscoveryManager.register', () => {
     const mgr = new DiscoveryManager({
       client: asValkey(client),
       name: 'foo',
-      cacheType: 'agent_cache',
       buildMetadata: () => agentMetadata('foo'),
       heartbeatIntervalMs: 999_999,
       logger: { warn, debug: () => {} },
@@ -254,7 +251,6 @@ describe('DiscoveryManager.register', () => {
     const mgr = new DiscoveryManager({
       client: asValkey(client),
       name: 'foo',
-      cacheType: 'agent_cache',
       buildMetadata: () => agentMetadata('foo'),
       heartbeatIntervalMs: 999_999,
       onWriteFailed,
@@ -270,7 +266,6 @@ describe('DiscoveryManager.register', () => {
     const mgr = new DiscoveryManager({
       client: asValkey(client),
       name: 'foo',
-      cacheType: 'agent_cache',
       buildMetadata: () => agentMetadata('foo'),
       heartbeatIntervalMs: 999_999,
       onWriteFailed,
@@ -295,7 +290,6 @@ describe('DiscoveryManager heartbeat', () => {
     const mgr = new DiscoveryManager({
       client: asValkey(client),
       name: 'foo',
-      cacheType: 'agent_cache',
       buildMetadata: () => agentMetadata('foo', { toolPolicyNames }),
       heartbeatIntervalMs: 999_999,
     });
@@ -326,7 +320,6 @@ describe('DiscoveryManager heartbeat', () => {
     const mgr = new DiscoveryManager({
       client: asValkey(client),
       name: 'foo',
-      cacheType: 'agent_cache',
       buildMetadata: () => agentMetadata('foo'),
       heartbeatIntervalMs: 999_999,
       onWriteFailed,
@@ -342,7 +335,6 @@ describe('DiscoveryManager heartbeat', () => {
     const mgr = new DiscoveryManager({
       client: asValkey(client),
       name: 'foo',
-      cacheType: 'agent_cache',
       buildMetadata: () => agentMetadata('foo'),
       heartbeatIntervalMs: 999_999,
     });

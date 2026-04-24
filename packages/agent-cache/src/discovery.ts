@@ -12,17 +12,14 @@ export const HEARTBEAT_KEY_PREFIX = '__betterdb:heartbeat:';
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 export const HEARTBEAT_TTL_SECONDS = 60;
 
-/** Cap on the number of tool names published in the marker to keep HSET cheap. */
 export const TOOL_POLICIES_LIMIT = 500;
 
-export type CacheType = 'semantic_cache' | 'agent_cache';
+export const CACHE_TYPE = 'agent_cache' as const;
+export type CacheType = typeof CACHE_TYPE;
 
 export interface DiscoveryOptions {
-  /** Set to false to skip all registry writes. Default: true. */
   enabled?: boolean;
-  /** Heartbeat interval in ms. Default: 30000. Exposed mainly for tests. */
   heartbeatIntervalMs?: number;
-  /** Include `tool_policies` in the published marker. Default: true. */
   includeToolPolicies?: boolean;
 }
 
@@ -71,11 +68,7 @@ export function buildAgentMetadata(input: BuildAgentMetadataInput): MarkerMetada
     prefix: input.name,
     version: input.version,
     protocol_version: PROTOCOL_VERSION,
-    capabilities: [
-      'tool_ttl_adjust',
-      'invalidate_by_tool',
-      'tool_effectiveness',
-    ],
+    capabilities: ['tool_ttl_adjust', 'invalidate_by_tool', 'tool_effectiveness'],
     stats_key: `${input.name}:__stats`,
     tiers: {
       llm: tierMarker(input.tiers.llm?.ttl),
@@ -119,33 +112,15 @@ function errMsg(err: unknown): string {
 export interface DiscoveryManagerDeps {
   client: Valkey;
   name: string;
-  cacheType: CacheType;
-  /** Snapshot of the marker metadata to publish. Called on register and on each heartbeat tick. */
   buildMetadata: () => MarkerMetadata;
   heartbeatIntervalMs?: number;
   logger?: DiscoveryLogger;
-  /** Called each time a best-effort write fails (HGET/HSET/SET protocol/heartbeat). */
   onWriteFailed?: () => void;
 }
 
-/**
- * Implements the shared `__betterdb:*` discovery marker protocol for
- * agent-cache. See docs/plans/specs/spec-agent-cache-discovery-markers.md.
- *
- * Semantics:
- * - `register()` throws `AgentCacheUsageError` on name collision (different
- *   cache type already registered). All other Valkey errors are logged and
- *   swallowed; discovery is advisory, never a hard failure for the cache.
- * - Heartbeat ticks refresh the registry metadata (so `tool_policies`
- *   discovered via `setPolicy` becomes visible within 30s) and re-write the
- *   protocol NX key as belt-and-braces against LRU eviction.
- * - `stop({ deleteHeartbeat: true })` is called from `shutdown()` and
- *   removes the heartbeat key but leaves the registry entry intact.
- */
 export class DiscoveryManager {
   private readonly client: Valkey;
   private readonly name: string;
-  private readonly cacheType: CacheType;
   private readonly buildMetadata: () => MarkerMetadata;
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatKey: string;
@@ -157,7 +132,6 @@ export class DiscoveryManager {
   constructor(deps: DiscoveryManagerDeps) {
     this.client = deps.client;
     this.name = deps.name;
-    this.cacheType = deps.cacheType;
     this.buildMetadata = deps.buildMetadata;
     this.heartbeatIntervalMs = deps.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
     this.heartbeatKey = `${HEARTBEAT_KEY_PREFIX}${deps.name}`;
@@ -177,9 +151,6 @@ export class DiscoveryManager {
       'SET protocol',
     );
 
-    // Write the initial heartbeat synchronously so Monitor sees the cache as
-    // alive immediately after register() returns, instead of waiting up to
-    // heartbeatIntervalMs for the first scheduled tick.
     await this.writeHeartbeat();
 
     this.startHeartbeat();
@@ -200,7 +171,6 @@ export class DiscoveryManager {
     }
   }
 
-  /** Exposed for tests. Writes heartbeat, refreshes metadata, re-asserts the protocol NX. */
   async tickHeartbeat(): Promise<void> {
     await this.writeHeartbeat();
     await this.writeMetadata();
@@ -237,10 +207,7 @@ export class DiscoveryManager {
       this.onWriteFailed();
       return;
     }
-    await this.safeCall(
-      () => this.client.hset(REGISTRY_KEY, this.name, payload),
-      'HSET registry',
-    );
+    await this.safeCall(() => this.client.hset(REGISTRY_KEY, this.name, payload), 'HSET registry');
   }
 
   private async safeHget(): Promise<string | null> {
@@ -269,7 +236,7 @@ export class DiscoveryManager {
     } catch {
       return;
     }
-    if (parsed.type && parsed.type !== this.cacheType) {
+    if (parsed.type && parsed.type !== CACHE_TYPE) {
       throw new AgentCacheUsageError(
         `cache name collision: '${this.name}' is already registered as type '${String(parsed.type)}' on this Valkey instance`,
       );

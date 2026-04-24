@@ -25,9 +25,7 @@ import {
   type MarkerMetadata,
 } from './discovery';
 
-// Keep in sync with package.json. Baked into the discovery marker so Monitor
-// can surface the running library version without a live RPC.
-const PACKAGE_VERSION = '0.5.0';
+const PACKAGE_VERSION = (require('../package.json') as { version: string }).version;
 
 export class AgentCache {
   public readonly llm: LlmCache;
@@ -43,7 +41,6 @@ export class AgentCache {
   private statsTimer: ReturnType<typeof setInterval> | undefined;
   private shutdownCalled = false;
 
-  private readonly telemetry: Telemetry;
   private discovery: DiscoveryManager | null = null;
   private discoveryReady: Promise<void> | null = null;
   private discoveryError: Error | null = null;
@@ -74,7 +71,6 @@ export class AgentCache {
       tracerName: options.telemetry?.tracerName ?? '@betterdb/agent-cache',
       registry: options.telemetry?.registry,
     });
-    this.telemetry = telemetry;
 
     const defaultTtl = options.defaultTtl;
 
@@ -116,10 +112,7 @@ export class AgentCache {
     // Fire-and-forget: load persisted tool policies from Valkey
     this.tool.loadPolicies().catch(() => {});
 
-    // Fire-and-forget: register this instance in the discovery marker registry.
-    // Collision errors are captured on discoveryError and can be surfaced by
-    // callers that explicitly await ensureDiscoveryReady().
-    this.registerDiscovery(options.discovery);
+    this.registerDiscovery(options.discovery, telemetry);
 
     // Fire-and-forget: initialize product analytics
     const analyticsOpts = options.analytics;
@@ -325,32 +318,19 @@ export class AgentCache {
     await this.analytics.shutdown();
   }
 
-  /**
-   * Awaits the in-flight discovery registration. Resolves when the marker
-   * has been written (or the write failed best-effort). Rejects with
-   * `AgentCacheUsageError` if another cache type is registered under the
-   * same `name` on this Valkey — callers who want strict collision
-   * enforcement can `await cache.ensureDiscoveryReady()` right after
-   * construction. Safe to call multiple times; subsequent calls settle
-   * with the same outcome as the first.
-   */
   async ensureDiscoveryReady(): Promise<void> {
     if (this.discoveryError) {
       throw this.discoveryError;
     }
     if (this.discoveryReady) {
       await this.discoveryReady;
-      // The internal .catch() below resolves discoveryReady with undefined
-      // even on collision; the real outcome is captured in discoveryError.
-      // Re-check after awaiting so the first caller after construction
-      // sees the collision error.
       if (this.discoveryError) {
         throw this.discoveryError;
       }
     }
   }
 
-  private registerDiscovery(options: DiscoveryOptions | undefined): void {
+  private registerDiscovery(options: DiscoveryOptions | undefined, telemetry: Telemetry): void {
     if (options?.enabled === false) {
       return;
     }
@@ -375,11 +355,10 @@ export class AgentCache {
     const manager = new DiscoveryManager({
       client: this.client,
       name: this.name,
-      cacheType: 'agent_cache',
       buildMetadata,
       heartbeatIntervalMs: options?.heartbeatIntervalMs,
       onWriteFailed: () => {
-        this.telemetry.metrics.discoveryWriteFailed
+        telemetry.metrics.discoveryWriteFailed
           .labels({ cache_name: this.name })
           .inc();
       },
@@ -389,7 +368,6 @@ export class AgentCache {
       .register()
       .then(() => {
         if (this.shutdownCalled) {
-          // Shutdown won the race — tear down the manager we just started.
           return manager.stop({ deleteHeartbeat: true });
         }
         this.discovery = manager;
@@ -398,7 +376,6 @@ export class AgentCache {
         if (err instanceof AgentCacheUsageError) {
           this.discoveryError = err;
         }
-        // Swallow non-usage errors — registration is advisory.
       });
   }
 
