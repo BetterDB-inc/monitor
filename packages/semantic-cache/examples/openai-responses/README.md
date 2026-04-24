@@ -25,7 +25,7 @@ Assistant: The capital of Australia is Canberra.
 
 -- Round 2: Semantic hit --
 User: Which city is the capital of Australia?
-  [cache HIT] similarity=0.0341 confidence=high
+  [cache HIT] similarity=0.0810 confidence=uncertain
 Assistant: The capital of Australia is Canberra.
 
 -- Cache Stats --

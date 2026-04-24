@@ -26,18 +26,18 @@ Cache initialized. Threshold: 0.15
   Seeding complete.
 
 -- Running 12 queries to build similarity window --
-  HIT  (0.021) - "What is machine learning?"
-  HIT~ (0.143) - "Explain machine learning simply"
-  MISS (0.187) - "What is ML?"
+  HIT  (0.002) - "What is machine learning?"
+  HIT  (0.035) - "Explain machine learning simply"
+  HIT~ (0.119) - "What is ML?"
   ...
 
 -- Threshold Effectiveness Analysis --
 Category: all
 Sample count: 12
 Current threshold: 0.15
-Hit rate: 50.0%
-Uncertain hit rate: 33.3%
-Recommendation: TIGHTEN_THRESHOLD
-Recommended threshold: 0.1425
-Reasoning: 33.3% of hits are in the uncertainty band - tighten the threshold...
+Hit rate: 100.0%
+Uncertain hit rate: 8.3%
+Near-miss rate: 0.0%
+Recommendation: OPTIMAL
+Reasoning: Hit rate is 100.0% with 8.3% uncertain hits - threshold appears well-calibrated.
 ```

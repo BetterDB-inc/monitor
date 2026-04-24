@@ -27,9 +27,8 @@ pnpm install && pnpm start
 
 -- Check 2: Paraphrase --
   Extracted key: "How fast does light travel?"
-  [cache HIT] similarity=0.0421 confidence=high
-  Response: The speed of light in vacuum is approximately 299,792 km/s.
+  MISS
 
 -- Stats --
-Hits: 2 | Misses: 0
+Hits: 1 | Misses: 1
 ```

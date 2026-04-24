@@ -31,7 +31,7 @@ Assistant: The capital of Spain is Madrid.
 === Round 3: Paraphrase (semantic cache hit) ===
 User: Which city is the capital of Spain?
 Assistant: The capital of Spain is Madrid.
-  (52ms)
+  (553ms)
 
 -- Cache Stats --
 Hits: 2 | Misses: 2 | Hit rate: 50%

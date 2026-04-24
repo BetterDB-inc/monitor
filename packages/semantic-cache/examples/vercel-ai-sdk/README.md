@@ -28,11 +28,11 @@ User: What is the capital of Portugal?
 Assistant: The capital of Portugal is Lisbon.
   (38ms)
 
-=== Round 3: Paraphrase (semantic hit) ===
+=== Round 3: Paraphrase (semantic miss - above threshold) ===
 User: Which city serves as Portugal's capital?
-Assistant: The capital of Portugal is Lisbon.
-  (41ms)
+Assistant: Lisbon is the capital city of Portugal.
+  (2335ms)
 
 -- Cache Stats --
-Hits: 2 | Misses: 1 | Hit rate: 67%
+Hits: 1 | Misses: 2 | Hit rate: 33%
 ```

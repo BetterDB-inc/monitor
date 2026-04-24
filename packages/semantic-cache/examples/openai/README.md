@@ -28,10 +28,11 @@ Assistant: The capital of France is Paris.
 
 -- Round 2: Semantic cache hit --
 User: What city is the capital of France?
-  [cache HIT] similarity=0.0312 confidence=high
+  [cache HIT] similarity=0.0868 confidence=uncertain
+  [cost saved] $0.000006
 Assistant: The capital of France is Paris.
 
 -- Cache Stats --
 Hits: 1 | Misses: 1 | Hit rate: 50%
-Cost saved: $0.000012
+Cost saved: $0.000006
 ```

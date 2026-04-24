@@ -28,13 +28,13 @@ Cache initialized and flushed.
   Stored: "Who wrote Romeo and Juliet?..."
 
 -- Running 5 cache lookups --
-  HIT: "What is the capital city of France..." | saved $0.000012
-  HIT: "What is France's capital?..." | saved $0.000012
-  HIT: "Capital of Germany?..." | saved $0.000012
-  HIT: "Who is the author of Romeo and Juli..." | saved $0.000012
-  HIT: "Who wrote the play Romeo and Juliet..." | saved $0.000012
+  HIT: "What is the capital city of France..." | saved $0.000013
+  HIT: "What is France's capital?..." | saved $0.000013
+  HIT: "Capital of Germany?..." | saved $0.000013
+  HIT: "Who is the author of Romeo and Juli..." | saved $0.000013
+  HIT: "Who wrote the play Romeo and Juliet..." | saved $0.000013
 
 -- Cost Summary --
 Hits: 5 / Requests: 5
-Total cost saved: $0.000060
+Total cost saved: $0.000065
 ```

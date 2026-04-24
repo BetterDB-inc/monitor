@@ -29,10 +29,10 @@ Assistant: Tokyo is the capital of Japan.
 
 -- Round 2: Semantic cache hit --
 User: Which city is the capital of Japan?
-  [cache HIT] similarity=0.0287 confidence=high
-Assistant: Tokyo is the capital of Japan.
+  [cache HIT] similarity=0.0915 confidence=uncertain
+Assistant: The capital of Japan is Tokyo.
 
 -- Cache Stats --
 Hits: 1 | Misses: 1 | Hit rate: 50%
-Cost saved: $0.000003
+Cost saved: $0.000064
 ```
