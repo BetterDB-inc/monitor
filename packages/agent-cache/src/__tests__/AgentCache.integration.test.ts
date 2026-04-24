@@ -288,8 +288,8 @@ describe('AgentCache integration', () => {
     });
   });
 
-  describe('Flush', () => {
-    it('discovery: registers in __betterdb:caches with a heartbeat after construction', async () => {
+  describe('Discovery markers', () => {
+    it('registers in __betterdb:caches with a heartbeat after construction', async () => {
       if (skip) return;
 
       const discoveryCacheName = `betterdb_ac_disco_${Date.now()}`;
@@ -331,7 +331,9 @@ describe('AgentCache integration', () => {
         await client.hdel('__betterdb:caches', discoveryCacheName);
       }
     });
+  });
 
+  describe('Flush', () => {
     it('flush() removes all keys with the cache prefix', async () => {
       if (skip) return;
 

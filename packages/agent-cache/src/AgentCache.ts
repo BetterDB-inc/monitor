@@ -15,7 +15,7 @@ import { ToolCache } from './tiers/ToolCache';
 import { SessionStore } from './tiers/SessionStore';
 import { createTelemetry, type Telemetry } from './telemetry';
 import { createAnalytics, NOOP_ANALYTICS, type Analytics } from './analytics';
-import { AgentCacheUsageError, ValkeyCommandError } from './errors';
+import { ValkeyCommandError } from './errors';
 import { escapeGlobPattern } from './utils';
 import { clusterScan } from './cluster';
 import {
@@ -376,9 +376,7 @@ export class AgentCache {
         this.discovery = manager;
       })
       .catch((err: unknown) => {
-        if (err instanceof AgentCacheUsageError) {
-          this.discoveryError = err;
-        }
+        this.discoveryError = err instanceof Error ? err : new Error(String(err));
       });
   }
 
