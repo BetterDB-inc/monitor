@@ -122,4 +122,7 @@ export function composeNormalizer(cfg: NormalizerConfig = {}): BinaryNormalizer 
   };
 }
 
-export const defaultNormalizer: BinaryNormalizer = composeNormalizer();
+export const defaultNormalizer: BinaryNormalizer = composeNormalizer({
+  base64: hashBase64,
+  bytes: hashBytes,
+});

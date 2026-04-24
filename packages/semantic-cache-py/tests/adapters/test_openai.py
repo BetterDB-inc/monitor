@@ -86,7 +86,8 @@ async def test_base64_image_hashed():
     result = await prepare_semantic_params(params)
     assert result.blocks is not None
     binary_block = next(b for b in result.blocks if b.get("type") == "binary")
-    assert binary_block["ref"].startswith("base64:")
+    # default_normalizer hashes base64 content to avoid storing large payloads in TAG fields
+    assert binary_block["ref"].startswith("sha256:")
 
 
 @pytest.mark.asyncio

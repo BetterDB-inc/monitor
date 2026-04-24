@@ -15,8 +15,11 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from ..utils import escape_tag
 
 if TYPE_CHECKING:
     from ..semantic_cache import SemanticCache
@@ -37,7 +40,9 @@ def _namespace_key(namespace: list[str]) -> str:
 
 
 def _namespace_to_category(namespace: list[str]) -> str:
-    return _namespace_key(namespace).replace(".", "_").replace("/", "_")
+    # Replace path separators (. and /) with underscore, leaving : intact as
+    # the namespace-segment separator. Matches the TypeScript implementation.
+    return re.sub(r'[./]', '_', _namespace_key(namespace))
 
 
 class BetterDBSemanticStore:
@@ -55,8 +60,12 @@ class BetterDBSemanticStore:
     async def aput(
         self, namespace: list[str], key: str, value: dict[str, Any]
     ) -> None:
-        """Store a value at namespace/key."""
+        """Store a value at namespace/key (upsert — deletes existing entry first)."""
         import time
+
+        # Upsert: remove any existing entry for this key before writing a new one
+        # so repeated aput() calls don't accumulate stale duplicates.
+        await self.adelete(namespace, key)
 
         embed_text = (
             value[self._embed_field]
@@ -85,7 +94,7 @@ class BetterDBSemanticStore:
             raw = await self._cache._client.execute_command(
                 "FT.SEARCH",
                 self._cache._index_name,
-                f"@category:{{{category}}}",
+                f"@category:{{{escape_tag(category)}}}",
                 "LIMIT", "0", "100",
                 "DIALECT", "2",
             )
@@ -132,7 +141,7 @@ class BetterDBSemanticStore:
                 threshold if threshold is not None else self._cache._default_threshold
             )
             vector, _ = await self._cache._embed(query)
-            filter_expr = f"(@category:{{{category}}})"
+            filter_expr = f"(@category:{{{escape_tag(category)}}})"
             knn_query = f"{filter_expr}=>[KNN {limit} @embedding $vec AS __score]"
             try:
                 raw = await self._cache._client.execute_command(
@@ -173,7 +182,7 @@ class BetterDBSemanticStore:
             raw = await self._cache._client.execute_command(
                 "FT.SEARCH",
                 self._cache._index_name,
-                f"@category:{{{category}}}",
+                f"@category:{{{escape_tag(category)}}}",
                 "LIMIT", "0", str(limit),
                 "DIALECT", "2",
             )
@@ -210,7 +219,7 @@ class BetterDBSemanticStore:
             raw = await self._cache._client.execute_command(
                 "FT.SEARCH",
                 self._cache._index_name,
-                f"@category:{{{category}}}",
+                f"@category:{{{escape_tag(category)}}}",
                 "LIMIT", "0", "1000",
                 "DIALECT", "2",
             )

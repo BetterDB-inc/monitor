@@ -22,6 +22,7 @@ import {
 import { createTelemetry, type Telemetry } from './telemetry';
 import {
   encodeFloat32,
+  escapeTag,
   parseFtSearchResponse,
   extractText,
   extractBinaryRefs,
@@ -38,11 +39,6 @@ const SCHEMA_VERSION = '2';
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** Escape a string for use as a Valkey Search TAG value. */
-function escapeTag(value: string): string {
-  return value.replace(/[,.<>{}[\]"':;!@#$%^&*()\-+=~|/\\]/g, '\\$&');
 }
 
 export class SemanticCache {
@@ -186,9 +182,12 @@ export class SemanticCache {
 
       // Build filter
       const userFilter = options?.filter;
+      // AND semantics: each ref must be present — chain separate TAG clauses.
       const binaryFilter =
         binaryRefs.length > 0 && this._hasBinaryRefs
-          ? `@binary_refs:{${binaryRefs.map(escapeTag).join('|')}}`
+          ? (binaryRefs.length === 1
+              ? `@binary_refs:{${escapeTag(binaryRefs[0])}}`
+              : binaryRefs.map((r) => `@binary_refs:{${escapeTag(r)}}`).join(' '))
           : null;
       const combinedFilter = [userFilter, binaryFilter].filter(Boolean).join(' ');
       const filterExpr = combinedFilter ? `(${combinedFilter})` : '*';
@@ -540,7 +539,9 @@ export class SemanticCache {
 
         const binaryFilter =
           binaryRefs.length > 0 && this._hasBinaryRefs
-            ? `@binary_refs:{${binaryRefs.map(escapeTag).join('|')}}`
+            ? (binaryRefs.length === 1
+                ? `@binary_refs:{${escapeTag(binaryRefs[0])}}`
+                : binaryRefs.map((r) => `@binary_refs:{${escapeTag(r)}}`).join(' '))
             : null;
         const combinedFilter = [userFilter, binaryFilter].filter(Boolean).join(' ');
         const filterExpr = combinedFilter ? `(${combinedFilter})` : '*';

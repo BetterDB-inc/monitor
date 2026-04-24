@@ -12,18 +12,13 @@ Usage::
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
 from typing import Any
 
 from ..normalizer import BinaryNormalizer, BinaryRef, default_normalizer
 from ..utils import BinaryBlock, TextBlock
+from ._types import SemanticParams
 
-
-@dataclass
-class SemanticParams:
-    text: str
-    blocks: list[TextBlock | BinaryBlock] | None = None
-    model: str | None = None
+__all__ = ["SemanticParams", "prepare_semantic_params"]
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:

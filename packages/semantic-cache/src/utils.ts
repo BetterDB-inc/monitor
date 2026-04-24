@@ -5,6 +5,11 @@ export function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
+/** Escape a string for safe use as a Valkey Search TAG filter value. */
+export function escapeTag(value: string): string {
+  return value.replace(/[,.<>{}[\]"':;!@#$%^&*()\-+=~|/\\]/g, '\\$&');
+}
+
 // --- Content block types (mirrors agent-cache for cross-package compatibility) ---
 
 export type ContentBlock =

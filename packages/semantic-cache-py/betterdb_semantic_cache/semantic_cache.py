@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 import time
 import uuid
 from typing import Any
@@ -26,15 +25,13 @@ from .types import (
     SemanticCacheOptions,
     ThresholdEffectivenessResult,
 )
-from .utils import ContentBlock, encode_float32, decode_float32, extract_binary_refs, extract_text, parse_ft_search_response
+from .utils import ContentBlock, encode_float32, decode_float32, escape_tag, extract_binary_refs, extract_text, parse_ft_search_response
 
 INVALIDATE_BATCH_SIZE = 1000
-_TAG_ESCAPE_RE = re.compile(r'([,.<>{}\[\]"\'!@#$%^&*()\-+=~|/\\:;])')
 
 
 def _escape_tag(value: str) -> str:
-    """Escape a string for use as a Valkey Search TAG value."""
-    return _TAG_ESCAPE_RE.sub(r'\\\1', value)
+    return escape_tag(value)
 
 
 class SemanticCache:
@@ -145,11 +142,16 @@ class SemanticCache:
             self._assert_dimension(vector)
 
             user_filter = opts.filter
-            binary_filter = (
-                f"@binary_refs:{{{' | '.join(_escape_tag(r) for r in binary_refs)}}}"
-                if binary_refs and self._has_binary_refs
-                else None
-            )
+            if binary_refs and self._has_binary_refs:
+                if len(binary_refs) == 1:
+                    binary_filter: str | None = f"@binary_refs:{{{_escape_tag(binary_refs[0])}}}"
+                else:
+                    # AND semantics: chain separate TAG clauses so all refs must be present
+                    binary_filter = " ".join(
+                        f"@binary_refs:{{{_escape_tag(r)}}}" for r in binary_refs
+                    )
+            else:
+                binary_filter = None
             combined = " ".join(f for f in [user_filter, binary_filter] if f)
             filter_expr = f"({combined})" if combined else "*"
             query = f"{filter_expr}=>[KNN {k} @embedding $vec AS __score]"
@@ -481,11 +483,15 @@ class SemanticCache:
                 _, binary_refs = resolved[i]
                 vector, _ = embeddings[i]
 
-                binary_filter = (
-                    f"@binary_refs:{{{' | '.join(_escape_tag(r) for r in binary_refs)}}}"
-                    if binary_refs and self._has_binary_refs
-                    else None
-                )
+                if binary_refs and self._has_binary_refs:
+                    if len(binary_refs) == 1:
+                        binary_filter: str | None = f"@binary_refs:{{{_escape_tag(binary_refs[0])}}}"
+                    else:
+                        binary_filter = " ".join(
+                            f"@binary_refs:{{{_escape_tag(r)}}}" for r in binary_refs
+                        )
+                else:
+                    binary_filter = None
                 combined = " ".join(f for f in [user_filter, binary_filter] if f)
                 filter_expr = f"({combined})" if combined else "*"
                 query = f"{filter_expr}=>[KNN {k} @embedding $vec AS __score]"
@@ -965,9 +971,14 @@ class SemanticCache:
 
     async def _embed(self, text: str) -> tuple[list[float], float]:
         """Embed text with optional embedding cache. Returns (vector, duration_sec)."""
-        if self._embedding_cache_enabled and text:
-            hash_hex = hashlib.sha256(text.encode()).hexdigest()
-            embed_key = f"{self._embed_key_prefix}{hash_hex}"
+        # Compute once; reused for both cache GET and cache SET paths.
+        embed_key = (
+            f"{self._embed_key_prefix}{hashlib.sha256(text.encode()).hexdigest()}"
+            if self._embedding_cache_enabled and text
+            else None
+        )
+
+        if embed_key is not None:
             try:
                 cached = await self._client.get(embed_key)
                 if cached is not None and isinstance(cached, (bytes, bytearray)):
@@ -992,9 +1003,7 @@ class SemanticCache:
             cache_name=self._name
         ).observe(duration_sec)
 
-        if self._embedding_cache_enabled and text:
-            hash_hex = hashlib.sha256(text.encode()).hexdigest()
-            embed_key = f"{self._embed_key_prefix}{hash_hex}"
+        if embed_key is not None:
             try:
                 await self._client.set(embed_key, encode_float32(vector), ex=self._embedding_cache_ttl)
             except Exception:

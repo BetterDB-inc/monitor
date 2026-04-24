@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import struct
 from typing import Any, Literal, NotRequired, Required, TypedDict
 
@@ -8,6 +9,14 @@ from typing import Any, Literal, NotRequired, Required, TypedDict
 def sha256(text: str) -> str:
     """SHA-256 hex digest of a UTF-8 string."""
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+_TAG_ESCAPE_RE = re.compile(r'([,.<>{}\[\]"\'!@#$%^&*()\-+=~|/\\:;])')
+
+
+def escape_tag(value: str) -> str:
+    """Escape a string for safe use as a Valkey Search TAG filter value."""
+    return _TAG_ESCAPE_RE.sub(r'\\\1', value)
 
 
 # --- Content block types ---

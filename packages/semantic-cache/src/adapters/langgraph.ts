@@ -24,6 +24,7 @@
  */
 
 import type { SemanticCache } from '../SemanticCache';
+import { escapeTag } from '../utils';
 
 // --- Minimal LangGraph BaseStore shims ---
 // We define minimal interface shims that match the LangGraph BaseStore contract
@@ -73,7 +74,9 @@ function namespaceKey(namespace: string[]): string {
 }
 
 function namespaceToCategory(namespace: string[]): string {
-  return namespaceKey(namespace).replace(/[^a-zA-Z0-9_-]/g, '_');
+  // Replace path separators (. and /) only, leaving : intact as the namespace-segment
+  // separator. Matches the Python implementation for cross-language compatibility.
+  return namespaceKey(namespace).replace(/[./]/g, '_');
 }
 
 /**
@@ -97,6 +100,10 @@ export class BetterDBSemanticStore {
    * Falls back to JSON stringified value if embedField is absent.
    */
   async put(namespace: string[], key: string, value: Record<string, unknown>): Promise<void> {
+    // Upsert: remove any existing entry for this key before writing so repeated
+    // put() calls don't accumulate stale duplicates.
+    await this.delete(namespace, key);
+
     const embedText =
       typeof value[this.embedField] === 'string'
         ? (value[this.embedField] as string)
@@ -134,7 +141,7 @@ export class BetterDBSemanticStore {
       }).client.call(
         'FT.SEARCH',
         (this.cache as unknown as { indexName: string }).indexName,
-        `@category:{${category}}`,
+        `@category:{${escapeTag(category)}}`,
         'LIMIT', '0', '100',
         'DIALECT', '2',
       );
@@ -192,7 +199,7 @@ export class BetterDBSemanticStore {
       const { encodeFloat32, parseFtSearchResponse } = await import('../utils');
       const threshold = options?.threshold ?? cacheInternals.defaultThreshold;
       const { vector } = await cacheInternals.embed(query);
-      const filterExpr = `(@category:{${category}})`;
+      const filterExpr = `(@category:{${escapeTag(category)}})`;
       const knnQuery = `${filterExpr}=>[KNN ${limit} @embedding $vec AS __score]`;
 
       let raw: unknown;
@@ -227,7 +234,7 @@ export class BetterDBSemanticStore {
       }).client.call(
         'FT.SEARCH',
         (this.cache as unknown as { indexName: string }).indexName,
-        `@category:{${category}}`,
+        `@category:{${escapeTag(category)}}`,
         'LIMIT', '0', String(limit),
         'DIALECT', '2',
       );
@@ -274,7 +281,7 @@ export class BetterDBSemanticStore {
     try {
       raw = await cacheInternals.client.call(
         'FT.SEARCH', cacheInternals.indexName,
-        `@category:{${category}}`,
+        `@category:{${escapeTag(category)}}`,
         'LIMIT', '0', '1000',
         'DIALECT', '2',
       );

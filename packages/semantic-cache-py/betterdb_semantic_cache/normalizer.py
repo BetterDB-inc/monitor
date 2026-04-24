@@ -154,4 +154,7 @@ def compose_normalizer(cfg: NormalizerConfig | None = None) -> BinaryNormalizer:
     return normalizer
 
 
-default_normalizer: BinaryNormalizer = compose_normalizer()
+default_normalizer: BinaryNormalizer = compose_normalizer({
+    "base64": hash_base64,
+    "bytes": hash_bytes,
+})
