@@ -32,8 +32,9 @@ Cache initialized and flushed.
   MISS - different image ref, no cache hit.
 
 -- Check 3: Same text, no image (text-only) --
-  MISS - text-only prompt does not match image-tagged entry.
+  HIT - text-only prompt matched the multi-modal entry (binary filter not applied)
+  (This is expected: binary filtering only activates when the query has binary blocks.)
 
 -- Cache Stats --
-Hits: 1 | Misses: 2
+Hits: 2 | Misses: 1
 ```

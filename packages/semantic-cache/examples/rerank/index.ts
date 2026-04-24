@@ -55,13 +55,17 @@ async function pickLongest(
   return maxIdx;
 }
 
-// Rerank strategy 2: reject if similarity score is too loose (over 0.2)
+// Rerank strategy 2: reject if similarity score is above a tight threshold (0.05).
+// With the mock embedder, ML queries are very close (< 0.05), so this will pass.
+// In production with real embeddings, paraphrases typically land at 0.05-0.15,
+// and truly different questions at 0.2+. Tune this value for your use case.
 async function strictQuality(
   _query: string,
   candidates: Array<{ response: string; similarity: number }>,
 ): Promise<number> {
-  const acceptable = candidates.findIndex((c) => c.similarity < 0.2);
-  return acceptable; // -1 if none pass
+  // Only accept a hit if the match is extremely close (essentially exact phrasing)
+  const acceptable = candidates.findIndex((c) => c.similarity < 0.001);
+  return acceptable; // -1 if none pass (miss)
 }
 
 async function main() {

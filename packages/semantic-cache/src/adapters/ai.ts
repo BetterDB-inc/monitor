@@ -98,10 +98,15 @@ export function createSemanticCacheMiddleware(
             // LanguageModelV3GenerateResult is imported transitively via the
             // LanguageModelMiddleware type — we construct it inline to avoid
             // depending on @ai-sdk/provider directly.
+            //
+            // AI SDK v6 (specificationVersion v3) uses inputTokens/outputTokens
+            // (not promptTokens/completionTokens). request is required to avoid
+            // "Cannot read properties of undefined" in the SDK pipeline.
             return {
               content: [{ type: 'text', text: cached.response }],
               finishReason: 'stop',
-              usage: { promptTokens: 0, completionTokens: 0 },
+              usage: { inputTokens: 0, outputTokens: 0 },
+              request: { body: '' },
               warnings: [],
             } as unknown as Awaited<ReturnType<typeof doGenerate>>;
           }

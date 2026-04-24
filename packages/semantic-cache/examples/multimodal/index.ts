@@ -109,12 +109,17 @@ async function main() {
   console.log();
 
   // -- Check 3: Same text, no image --
+  // Note: text-only checks match entries regardless of whether they have binary
+  // content, because the binary_refs filter is only applied when the incoming
+  // prompt itself has binary blocks. This is by design - a text-only lookup
+  // retrieves the best semantic match from all entries, including multi-modal ones.
   console.log('-- Check 3: Same text, no image (text-only) --');
   const check3 = await cache.check(prompt);
   if (check3.hit) {
-    console.log('  HIT (text-only matched entry with image)');
+    console.log(`  HIT - text-only prompt matched the multi-modal entry (binary filter not applied)`);
+    console.log(`  (This is expected: binary filtering only activates when the query has binary blocks.)`);
   } else {
-    console.log('  MISS - text-only prompt does not match image-tagged entry.');
+    console.log('  MISS');
   }
   console.log();
 
