@@ -6,6 +6,21 @@ from typing import Any
 from .errors import ValkeyCommandError
 
 
+def _cursor_done(cursor: Any) -> bool:
+    """Return True when a SCAN cursor signals completion.
+
+    In standalone mode valkey-py returns int 0.
+    In cluster mode with target_nodes, some versions return a dict
+    {node_repr: cursor_value} — normalise all forms safely.
+    """
+    if isinstance(cursor, dict):
+        return all(_cursor_done(v) for v in cursor.values()) if cursor else True
+    try:
+        return int(cursor) == 0
+    except (TypeError, ValueError):
+        return not cursor
+
+
 async def cluster_scan(
     client: Any,
     pattern: str,
@@ -34,7 +49,7 @@ async def cluster_scan(
             )
 
         for node in nodes:
-            cursor = 0
+            cursor: Any = 0
             while True:
                 try:
                     cursor, keys = await client.scan(
@@ -46,7 +61,7 @@ async def cluster_scan(
                 decoded = [k.decode() if isinstance(k, bytes) else k for k in keys]
                 if decoded:
                     await on_keys(decoded, client)
-                if cursor == 0:
+                if _cursor_done(cursor):
                     break
     else:
         cursor = 0
@@ -59,5 +74,5 @@ async def cluster_scan(
             decoded = [k.decode() if isinstance(k, bytes) else k for k in keys]
             if decoded:
                 await on_keys(decoded, client)
-            if cursor == 0:
+            if _cursor_done(cursor):
                 break

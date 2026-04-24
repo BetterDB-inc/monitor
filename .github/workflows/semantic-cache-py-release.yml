@@ -28,7 +28,7 @@ jobs:
 
     services:
       valkey:
-        image: valkey/valkey-bundle:unstable
+        image: valkey/valkey-bundle:8.0
         ports:
           - 6399:6379
         options: >-
@@ -164,7 +164,7 @@ jobs:
           VERSION: ${{ needs.publish.outputs.version }}
         run: |
           for i in 1 2 3 4 5; do
-            if pip index versions betterdb-semantic-cache 2>/dev/null | grep -q "$VERSION"; then
+            if pip install "betterdb-semantic-cache==$VERSION" --dry-run --quiet 2>/dev/null; then
               echo "Package betterdb-semantic-cache==$VERSION verified"
               exit 0
             fi

@@ -18,7 +18,7 @@ pip install betterdb-semantic-cache[all]
 import asyncio
 import valkey.asyncio as valkey
 from betterdb_semantic_cache import SemanticCache, SemanticCacheOptions
-from embed.openai import create_openai_embed
+from betterdb_semantic_cache.embed.openai import create_openai_embed
 
 async def main():
     client = valkey.Valkey(host="localhost", port=6399)

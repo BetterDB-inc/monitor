@@ -537,6 +537,17 @@ export class SemanticCache {
 
     if (prompts.length === 0) return [];
 
+    if (options?.rerank) {
+      throw new SemanticCacheUsageError(
+        "checkBatch() does not support the 'rerank' option. Use check() for reranking individual prompts.",
+      );
+    }
+    if (options?.staleAfterModelChange) {
+      throw new SemanticCacheUsageError(
+        "checkBatch() does not support 'staleAfterModelChange'. Use check() for stale-model eviction.",
+      );
+    }
+
     return this.traced('checkBatch', async (span) => {
       // Resolve all prompts and embed in parallel
       const resolved = await Promise.all(prompts.map((p) => this.resolvePrompt(p)));
@@ -640,7 +651,15 @@ export class SemanticCache {
           if (!isNaN(costMicros) && costMicros > 0) {
             costSaved = costMicros / 1_000_000;
             await this.client.hincrby(this.statsKey, 'cost_saved_micros', costMicros);
+            this.telemetry.metrics.costSavedTotal
+              .labels({ cache_name: this.name, category: categoryLabel }).inc(costSaved);
           }
+        }
+
+        let contentBlocks: import('./utils').ContentBlock[] | undefined;
+        const contentBlocksStr = parsed[0].fields['content_blocks'];
+        if (contentBlocksStr) {
+          try { contentBlocks = JSON.parse(contentBlocksStr); } catch { /* ignore */ }
         }
 
         const result: CacheCheckResult = {
@@ -648,6 +667,7 @@ export class SemanticCache {
           similarity: score, confidence, matchedKey,
         };
         if (costSaved !== undefined) result.costSaved = costSaved;
+        if (contentBlocks) result.contentBlocks = contentBlocks;
         results.push(result);
       }
 
