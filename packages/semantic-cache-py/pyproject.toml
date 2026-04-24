@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "betterdb-semantic-cache"
+version = "0.1.0"
+description = "Semantic cache for AI workloads backed by Valkey vector search. Embeddings-based similarity matching with OpenTelemetry and Prometheus instrumentation."
+keywords = ["valkey", "redis", "semantic-cache", "vector-search", "embeddings", "llm", "opentelemetry", "prometheus", "langchain", "langgraph"]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "valkey[asyncio]>=6.0.0",
+    "opentelemetry-api>=1.20.0",
+    "prometheus-client>=0.19.0",
+]
+
+[project.optional-dependencies]
+openai     = ["openai>=1.0.0"]
+anthropic  = ["anthropic>=0.20.0"]
+langchain  = ["langchain-core>=0.2.0"]
+llamaindex = ["llama-index-core>=0.10.0"]
+langgraph  = ["langgraph>=0.1.0"]
+httpx      = ["httpx>=0.25.0"]
+bedrock    = ["boto3>=1.26.0"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+all = [
+    "openai>=1.0.0",
+    "anthropic>=0.20.0",
+    "langchain-core>=0.2.0",
+    "llama-index-core>=0.10.0",
+    "langgraph>=0.1.0",
+    "httpx>=0.25.0",
+    "boto3>=1.26.0",
+]
+
+[project.urls]
+Repository = "https://github.com/BetterDB-inc/monitor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["betterdb_semantic_cache", "embed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
