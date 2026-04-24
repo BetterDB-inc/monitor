@@ -289,6 +289,49 @@ describe('AgentCache integration', () => {
   });
 
   describe('Flush', () => {
+    it('discovery: registers in __betterdb:caches with a heartbeat after construction', async () => {
+      if (skip) return;
+
+      const discoveryCacheName = `betterdb_ac_disco_${Date.now()}`;
+      const discoveryCache = new AgentCache({
+        name: discoveryCacheName,
+        client,
+        telemetry: { registry },
+        discovery: { heartbeatIntervalMs: 60_000 },
+      });
+
+      try {
+        await discoveryCache.ensureDiscoveryReady();
+
+        const raw = await client.hget('__betterdb:caches', discoveryCacheName);
+        expect(raw).not.toBeNull();
+        const marker = JSON.parse(raw ?? '{}');
+        expect(marker.type).toBe('agent_cache');
+        expect(marker.prefix).toBe(discoveryCacheName);
+        expect(marker.protocol_version).toBe(1);
+
+        const protocol = await client.get('__betterdb:protocol');
+        expect(protocol).toBe('1');
+
+        const heartbeatKey = `__betterdb:heartbeat:${discoveryCacheName}`;
+        const heartbeat = await client.get(heartbeatKey);
+        expect(heartbeat).not.toBeNull();
+        const ttl = await client.ttl(heartbeatKey);
+        expect(ttl).toBeGreaterThan(0);
+        expect(ttl).toBeLessThanOrEqual(60);
+
+        await discoveryCache.shutdown();
+
+        const afterShutdown = await client.get(heartbeatKey);
+        expect(afterShutdown).toBeNull();
+        // Registry entry preserved after shutdown so Monitor retains history.
+        const registryAfter = await client.hget('__betterdb:caches', discoveryCacheName);
+        expect(registryAfter).not.toBeNull();
+      } finally {
+        await client.hdel('__betterdb:caches', discoveryCacheName);
+      }
+    });
+
     it('flush() removes all keys with the cache prefix', async () => {
       if (skip) return;
 

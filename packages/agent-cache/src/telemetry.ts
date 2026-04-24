@@ -22,6 +22,7 @@ interface AgentCacheMetrics {
   costSaved: Counter;
   storedBytes: Counter;
   activeSessions: Gauge;
+  discoveryWriteFailed: Counter;
 }
 
 export interface Telemetry {
@@ -93,6 +94,12 @@ export function createTelemetry(opts: TelemetryFactoryOptions): Telemetry {
     labelNames: ['cache_name'],
   });
 
+  const discoveryWriteFailed = getOrCreateCounter(registry, {
+    name: `${opts.prefix}_discovery_write_failed_total`,
+    help: 'Count of failed discovery-marker writes (best-effort HGET/HSET/SET operations against __betterdb:* keys)',
+    labelNames: ['cache_name'],
+  });
+
   return {
     tracer,
     metrics: {
@@ -101,6 +108,7 @@ export function createTelemetry(opts: TelemetryFactoryOptions): Telemetry {
       costSaved,
       storedBytes,
       activeSessions,
+      discoveryWriteFailed,
     },
   };
 }

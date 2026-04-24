@@ -24,6 +24,7 @@ export {
   AgentCacheUsageError,
   ValkeyCommandError,
 } from './errors';
+export type { DiscoveryOptions } from './discovery';
 export type { Analytics } from './analytics';
 export type {
   ContentBlock,
