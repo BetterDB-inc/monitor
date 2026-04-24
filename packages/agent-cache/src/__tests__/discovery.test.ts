@@ -30,6 +30,7 @@ class FakeClient {
 
   private failNextHset = false;
   private failNextHget = false;
+  private failSetsMatching: ((key: string, args: unknown[]) => boolean) | null = null;
 
   failHsetOnce() {
     this.failNextHset = true;
@@ -37,6 +38,10 @@ class FakeClient {
 
   failHgetOnce() {
     this.failNextHget = true;
+  }
+
+  failSetsMatchingPredicate(pred: (key: string, args: unknown[]) => boolean) {
+    this.failSetsMatching = pred;
   }
 
   async hget(key: string, field: string): Promise<string | null> {
@@ -66,6 +71,9 @@ class FakeClient {
 
   async set(key: string, value: string, ...args: unknown[]): Promise<string | null> {
     this.setCalls.push({ key, value, args });
+    if (this.failSetsMatching?.(key, args)) {
+      throw new Error('NOAUTH ACL denied');
+    }
     const hasNX = args.includes('NX');
     if (hasNX && this.strings.has(key)) {
       return null;
@@ -257,6 +265,27 @@ describe('DiscoveryManager.register', () => {
 
     await mgr.stop({ deleteHeartbeat: true });
   });
+
+  it('writes the initial heartbeat synchronously during register()', async () => {
+    const mgr = new DiscoveryManager({
+      client: asValkey(client),
+      name: 'foo',
+      cacheType: 'agent_cache',
+      buildMetadata: () => agentMetadata('foo'),
+      heartbeatIntervalMs: 999_999,
+      onWriteFailed,
+    });
+
+    await mgr.register();
+
+    // The heartbeat key must exist before any scheduled tick has had a
+    // chance to fire — Monitor needs to see the cache as alive immediately.
+    const heartbeatEntry = client.strings.get(`${HEARTBEAT_KEY_PREFIX}foo`);
+    expect(heartbeatEntry).toBeDefined();
+    expect(heartbeatEntry?.expiresAt).not.toBeNull();
+
+    await mgr.stop({ deleteHeartbeat: true });
+  });
 });
 
 describe('DiscoveryManager heartbeat', () => {
@@ -288,6 +317,24 @@ describe('DiscoveryManager heartbeat', () => {
     expect(refreshed).toBeDefined();
     const parsed = JSON.parse(refreshed ?? '{}') as MarkerMetadata;
     expect(parsed.tool_policies).toEqual(['weather_lookup']);
+  });
+
+  it('tickHeartbeat() heartbeat SET failure bumps the onWriteFailed counter', async () => {
+    const client = new FakeClient();
+    client.failSetsMatchingPredicate((key) => key === `${HEARTBEAT_KEY_PREFIX}foo`);
+    const onWriteFailed = vi.fn();
+    const mgr = new DiscoveryManager({
+      client: asValkey(client),
+      name: 'foo',
+      cacheType: 'agent_cache',
+      buildMetadata: () => agentMetadata('foo'),
+      heartbeatIntervalMs: 999_999,
+      onWriteFailed,
+    });
+
+    await mgr.tickHeartbeat();
+
+    expect(onWriteFailed).toHaveBeenCalled();
   });
 
   it('stop({ deleteHeartbeat: true }) deletes the heartbeat key without touching the registry', async () => {

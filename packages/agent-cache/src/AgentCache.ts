@@ -340,6 +340,13 @@ export class AgentCache {
     }
     if (this.discoveryReady) {
       await this.discoveryReady;
+      // The internal .catch() below resolves discoveryReady with undefined
+      // even on collision; the real outcome is captured in discoveryError.
+      // Re-check after awaiting so the first caller after construction
+      // sees the collision error.
+      if (this.discoveryError) {
+        throw this.discoveryError;
+      }
     }
   }
 

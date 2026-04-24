@@ -177,6 +177,11 @@ export class DiscoveryManager {
       'SET protocol',
     );
 
+    // Write the initial heartbeat synchronously so Monitor sees the cache as
+    // alive immediately after register() returns, instead of waiting up to
+    // heartbeatIntervalMs for the first scheduled tick.
+    await this.writeHeartbeat();
+
     this.startHeartbeat();
   }
 
@@ -197,12 +202,7 @@ export class DiscoveryManager {
 
   /** Exposed for tests. Writes heartbeat, refreshes metadata, re-asserts the protocol NX. */
   async tickHeartbeat(): Promise<void> {
-    const now = new Date().toISOString();
-    try {
-      await this.client.set(this.heartbeatKey, now, 'EX', HEARTBEAT_TTL_SECONDS);
-    } catch (err) {
-      this.logger.debug(`discovery: heartbeat SET failed: ${errMsg(err)}`);
-    }
+    await this.writeHeartbeat();
     await this.writeMetadata();
     await this.safeCall(
       () => this.client.set(PROTOCOL_KEY, String(PROTOCOL_VERSION), 'NX'),
@@ -216,6 +216,16 @@ export class DiscoveryManager {
     }, this.heartbeatIntervalMs);
     handle.unref?.();
     this.heartbeatHandle = handle;
+  }
+
+  private async writeHeartbeat(): Promise<void> {
+    const now = new Date().toISOString();
+    try {
+      await this.client.set(this.heartbeatKey, now, 'EX', HEARTBEAT_TTL_SECONDS);
+    } catch (err) {
+      this.logger.debug(`discovery: heartbeat SET failed: ${errMsg(err)}`);
+      this.onWriteFailed();
+    }
   }
 
   private async writeMetadata(): Promise<void> {

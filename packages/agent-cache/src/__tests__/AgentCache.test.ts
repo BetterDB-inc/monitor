@@ -84,6 +84,43 @@ describe('AgentCache', () => {
     expect(analyticsInit).not.toHaveBeenCalled();
     expect(analyticsShutdown).toHaveBeenCalledTimes(1);
   });
+
+  it('ensureDiscoveryReady() rejects on cross-type collision even when awaited before the registration promise settles', async () => {
+    createAnalyticsMock.mockResolvedValue({
+      init: vi.fn().mockResolvedValue(undefined),
+      capture: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const existingMarker = JSON.stringify({
+      type: 'semantic_cache',
+      prefix: 'collision-test',
+      version: '0.2.0',
+      protocol_version: 1,
+    });
+    const client = {
+      hget: vi.fn().mockResolvedValue(existingMarker),
+      hset: vi.fn().mockResolvedValue(1),
+      hgetall: vi.fn().mockResolvedValue({}),
+      set: vi.fn().mockResolvedValue('OK'),
+      del: vi.fn().mockResolvedValue(0),
+    };
+
+    const cache = new AgentCache({
+      client: client as any,
+      name: 'collision-test',
+      discovery: { heartbeatIntervalMs: 999_999 },
+    });
+
+    // Call before the fire-and-forget promise settles. The .catch() handler
+    // in registerDiscovery resolves discoveryReady with undefined, so the
+    // await alone would not surface the collision — ensureDiscoveryReady
+    // must re-check discoveryError after the await.
+    await expect(cache.ensureDiscoveryReady()).rejects.toThrow(/semantic_cache/);
+
+    // A second call still throws — the error is captured, not one-shot.
+    await expect(cache.ensureDiscoveryReady()).rejects.toThrow(/semantic_cache/);
+  });
 });
 
 describe('AgentCache cost table', () => {
