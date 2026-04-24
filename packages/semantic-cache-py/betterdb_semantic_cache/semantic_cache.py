@@ -172,19 +172,6 @@ class SemanticCache:
             category_label = category or "none"
             timing_attrs = {"embedding_latency_ms": embed_sec * 1000, "search_latency_ms": search_ms}
 
-            if parsed:
-                score_str = parsed[0]["fields"].get("__score")
-                if score_str is not None:
-                    try:
-                        window_score = float(score_str)
-                        await self._record_similarity_window(
-                            window_score,
-                            "hit" if window_score <= threshold else "miss",
-                            category,
-                        )
-                    except (ValueError, TypeError):
-                        pass
-
             if not parsed:
                 await self._record_stat("misses")
                 self._telemetry.metrics.requests_total.labels(
@@ -207,6 +194,8 @@ class SemanticCache:
                 ).observe(score)
 
             if math.isnan(score) or score > threshold:
+                if not math.isnan(score):
+                    await self._record_similarity_window(score, "miss", category)
                 await self._record_stat("misses")
                 self._telemetry.metrics.requests_total.labels(
                     cache_name=self._name, result="miss", category=category_label
@@ -232,6 +221,8 @@ class SemanticCache:
                 ]
                 picked = await rerank_opts.rerank_fn(prompt_text, candidates)
                 if picked == -1:
+                    # Record the actual outcome — rerank rejected, so it's a miss
+                    await self._record_similarity_window(score, "miss", category)
                     await self._record_stat("misses")
                     self._telemetry.metrics.requests_total.labels(
                         cache_name=self._name, result="miss", category=category_label
@@ -251,6 +242,7 @@ class SemanticCache:
                         await self._client.delete(winner["key"])
                     except Exception:
                         pass
+                    await self._record_similarity_window(winner_score, "miss", category)
                     self._telemetry.metrics.stale_model_evictions.labels(
                         cache_name=self._name
                     ).inc()
@@ -261,6 +253,8 @@ class SemanticCache:
                     _set_span_attrs(span, {"cache.hit": False, "cache.stale_evicted": True})
                     return CacheCheckResult(hit=False, confidence="miss")
 
+            # All checks passed — record as a genuine hit
+            await self._record_similarity_window(winner_score, "hit", category)
             confidence = "uncertain" if winner_score >= threshold - self._uncertainty_band else "high"
             await self._record_stat("hits")
             metric_result = "uncertain_hit" if confidence == "uncertain" else "hit"

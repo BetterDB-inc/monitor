@@ -211,15 +211,6 @@ export class SemanticCache {
       const categoryLabel = category || 'none';
       const timingAttrs = { 'embedding_latency_ms': embedSec * 1000, 'search_latency_ms': searchMs };
 
-      // Record in rolling similarity window
-      if (parsed.length > 0) {
-        const scoreStr = parsed[0].fields['__score'];
-        const windowScore = scoreStr !== undefined ? parseFloat(scoreStr) : NaN;
-        if (!isNaN(windowScore)) {
-          await this.recordSimilarityWindow(windowScore, windowScore <= threshold ? 'hit' : 'miss', category);
-        }
-      }
-
       // No candidates at all
       if (parsed.length === 0) {
         await this.recordStat('misses');
@@ -242,6 +233,9 @@ export class SemanticCache {
 
       // Miss (no usable score, or score exceeds threshold)
       if (isNaN(score) || score > threshold) {
+        if (!isNaN(score)) {
+          await this.recordSimilarityWindow(score, 'miss', category);
+        }
         await this.recordStat('misses');
         this.telemetry.metrics.requestsTotal
           .labels({ cache_name: this.name, result: 'miss', category: categoryLabel }).inc();
@@ -273,6 +267,8 @@ export class SemanticCache {
           }));
         const picked = await rerankOpts.rerankFn(promptText, candidates);
         if (picked === -1) {
+          // Record the actual outcome — rerank rejected, so it's a miss
+          await this.recordSimilarityWindow(score, 'miss', category);
           await this.recordStat('misses');
           this.telemetry.metrics.requestsTotal
             .labels({ cache_name: this.name, result: 'miss', category: categoryLabel }).inc();
@@ -293,6 +289,7 @@ export class SemanticCache {
           try {
             await this.client.del(winner.key);
           } catch { /* best effort */ }
+          await this.recordSimilarityWindow(winnerScore, 'miss', category);
           this.telemetry.metrics.staleModelEvictions.labels({ cache_name: this.name }).inc();
           await this.recordStat('misses');
           this.telemetry.metrics.requestsTotal
@@ -302,7 +299,8 @@ export class SemanticCache {
         }
       }
 
-      // Hit
+      // All checks passed — record as a genuine hit
+      await this.recordSimilarityWindow(winnerScore, 'hit', category);
       const confidence: CacheConfidence =
         winnerScore >= threshold - this.uncertaintyBand ? 'uncertain' : 'high';
 

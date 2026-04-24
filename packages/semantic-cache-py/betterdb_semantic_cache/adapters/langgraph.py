@@ -12,7 +12,6 @@ Usage::
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 import re
@@ -63,6 +62,8 @@ class BetterDBSemanticStore:
         """Store a value at namespace/key (upsert — deletes existing entry first)."""
         import time
 
+        await self._cache.initialize()
+
         # Upsert: remove any existing entry for this key before writing a new one
         # so repeated aput() calls don't accumulate stale duplicates.
         await self.adelete(namespace, key)
@@ -88,6 +89,7 @@ class BetterDBSemanticStore:
 
     async def aget(self, namespace: list[str], key: str) -> Item | None:
         """Retrieve a value by exact namespace and key."""
+        await self._cache.initialize()
         from ..utils import parse_ft_search_response
         category = _namespace_to_category(namespace)
         try:
@@ -132,6 +134,7 @@ class BetterDBSemanticStore:
         When query is provided, performs a KNN vector search returning up to
         limit results. When query is absent, returns all entries in the namespace.
         """
+        await self._cache.initialize()
         from ..utils import encode_float32, parse_ft_search_response
         category = _namespace_to_category(namespace)
 
@@ -206,46 +209,71 @@ class BetterDBSemanticStore:
                     pass
         return items
 
+    _DELETE_SCAN_BATCH = 100
+
     async def adelete(self, namespace: list[str], key: str) -> None:
         """Delete the specific entry at namespace/key.
 
-        Scans the namespace category and deletes only the Valkey key whose
-        stored JSON response matches the given key, leaving other entries in
-        the same namespace intact.
+        Scans the namespace category page by page and deletes only Valkey keys
+        whose stored JSON response matches the given key, leaving other entries
+        in the same namespace intact. Loops until no more matching entries are
+        found so namespaces larger than one page are handled correctly.
         """
+        await self._cache.initialize()
         from ..utils import parse_ft_search_response
         category = _namespace_to_category(namespace)
-        try:
-            raw = await self._cache._client.execute_command(
-                "FT.SEARCH",
-                self._cache._index_name,
-                f"@category:{{{escape_tag(category)}}}",
-                "LIMIT", "0", "1000",
-                "DIALECT", "2",
-            )
-        except Exception:
-            return
+        cat_filter = f"@category:{{{escape_tag(category)}}}"
 
-        for entry in parse_ft_search_response(raw):
-            response_str = entry["fields"].get("response")
-            if not response_str:
-                continue
+        while True:
             try:
-                data = json.loads(response_str)
-                if data.get("key") == key:
-                    try:
-                        await self._cache._client.delete(entry["key"])
-                    except Exception:
-                        pass
-            except (json.JSONDecodeError, TypeError):
-                pass
+                raw = await self._cache._client.execute_command(
+                    "FT.SEARCH",
+                    self._cache._index_name,
+                    cat_filter,
+                    "LIMIT", "0", str(self._DELETE_SCAN_BATCH),
+                    "DIALECT", "2",
+                )
+            except Exception:
+                return
+
+            entries = parse_ft_search_response(raw)
+            if not entries:
+                break
+
+            deleted_any = False
+            for entry in entries:
+                response_str = entry["fields"].get("response")
+                if not response_str:
+                    continue
+                try:
+                    data = json.loads(response_str)
+                    if data.get("key") == key:
+                        try:
+                            await self._cache._client.delete(entry["key"])
+                            deleted_any = True
+                        except Exception:
+                            pass
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if not deleted_any:
+                # This page contained no matching entries; if it was a full page
+                # there may be more entries beyond, but none will match our key
+                # (since all pages are sorted the same way and we start from 0).
+                # A full page with zero matches means the key does not exist.
+                break
 
     async def abatch(
         self,
         writes: list[dict[str, Any]],
     ) -> None:
-        """Batch put/delete multiple items."""
-        async def _apply(write: dict[str, Any]) -> None:
+        """Batch put/delete multiple items.
+
+        Writes are executed sequentially to avoid race conditions when the same
+        (namespace, key) appears more than once in a single batch: concurrent
+        execution would let two adelete+store pairs interleave, leaving duplicates.
+        """
+        for write in writes:
             try:
                 ns = write["namespace"]
                 k = write["key"]
@@ -258,5 +286,3 @@ class BetterDBSemanticStore:
                 await self.adelete(ns, k)
             else:
                 await self.aput(ns, k, v)
-
-        await asyncio.gather(*[_apply(w) for w in writes])

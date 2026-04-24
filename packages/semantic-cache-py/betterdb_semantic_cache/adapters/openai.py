@@ -82,7 +82,7 @@ async def _normalize_content_part(
         if file_id:
             source = {"type": "file_id", "file_id": file_id, "provider": "openai"}  # type: ignore[assignment]
         elif file_data:
-            if file_data.startswith("data:"):
+            if isinstance(file_data, str) and file_data.startswith("data:"):
                 semi = file_data.find(";")
                 if semi > 5:
                     media_type = file_data[5:semi]

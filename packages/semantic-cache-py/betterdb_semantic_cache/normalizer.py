@@ -136,7 +136,9 @@ def compose_normalizer(cfg: NormalizerConfig | None = None) -> BinaryNormalizer:
 
         if t == "base64":
             h = c.get("base64")
-            return await _call(h, source["data"]) if h else passthrough(ref)  # type: ignore[index]
+            # Default to hashing rather than passthrough: raw base64 can be megabytes,
+            # which is unsuitable as a Valkey TAG field value.
+            return await _call(h, source["data"]) if h else hash_base64(source["data"])  # type: ignore[index]
         if t == "url":
             h = c.get("url")
             return await _call(h, source["url"]) if h else passthrough(ref)  # type: ignore[index]
@@ -147,9 +149,9 @@ def compose_normalizer(cfg: NormalizerConfig | None = None) -> BinaryNormalizer:
                 if h
                 else passthrough(ref)
             )
-        # bytes
+        # bytes — default to hashing for the same reason as base64
         h = c.get("bytes")
-        return await _call(h, source["data"]) if h else passthrough(ref)  # type: ignore[index]
+        return await _call(h, source["data"]) if h else hash_bytes(source["data"])  # type: ignore[index]
 
     return normalizer
 
