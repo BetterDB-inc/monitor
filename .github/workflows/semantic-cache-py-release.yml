@@ -28,7 +28,7 @@ jobs:
 
     services:
       valkey:
-        image: valkey/valkey-bundle:8.0
+        image: valkey/valkey-bundle:8
         ports:
           - 6399:6379
         options: >-

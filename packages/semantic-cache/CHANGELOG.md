@@ -31,8 +31,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cluster-aware `flush()`** - uses `clusterScan()` (ported from `agent-cache`) to iterate entry keys and embedding cache keys across all cluster master nodes.
 - **FT.CREATE schema** - index schema now includes `binary_refs TAG`, `temperature NUMERIC`, `top_p NUMERIC`, `seed NUMERIC` alongside existing fields. Migration: `flush()` + `initialize()` rebuilds the schema.
 - **13 runnable examples** in `examples/`: `openai`, `openai-responses`, `anthropic`, `llamaindex`, `langchain`, `vercel-ai-sdk`, `langgraph`, `multimodal`, `cost-tracking`, `threshold-tuning`, `embedding-cache`, `batch-check`, `rerank`.
-- **`RELEASE_NOTES.md`** summarizing v0.2.0.
+- **PostHog analytics** — optional aggregate usage telemetry (hit rate, cost saved per instance). Baked into the wheel at publish time with a write-only key. Opt out with `BETTERDB_TELEMETRY=false` or `analytics: { disabled: true }`.
+- **`shutdown()`** — stops the periodic stats timer and flushes the PostHog queue. Call before process exit.
+- **`escapeTag(value)`** — exported utility for safely constructing `FT.SEARCH` TAG filter expressions.
 - **Test coverage**: 71 new unit tests across `cost.test.ts`, `multimodal.test.ts`, `features.test.ts`, `embedding-cache.test.ts`, and `adapters/` (4 adapter test files). Total: 99 tests.
+
+### Fixed
+
+- **`checkBatch()`** now records `similarity_score` histogram, `cost_saved_total` Prometheus counter, and `contentBlocks` on hits, and increments stats on pipeline-error entries — fully mirrors `check()` behavior.
+- **`binary_refs` filter** uses AND semantics (one `@binary_refs:{…}` clause per ref) rather than OR. Previously a prompt with two images could hit an entry that only contained one of them.
+- **`defaultNormalizer`** hashes base64 and bytes to `sha256:…` rather than storing raw data verbatim in TAG fields. Raw base64 image data in a TAG field would degrade indexing performance.
+- **Rerank index mapping** — `picked` is validated against the filtered candidates length. An out-of-range return from `rerankFn` is now a miss, not a silent fallback to the top candidate.
+- **Threshold near-miss calculation** excludes scores below the threshold (rerank-rejected or stale-evicted entries). Previously these produced negative `avgNearMissDelta`, making `recommendedThreshold < currentThreshold` on a `loosen_threshold` recommendation.
+- **`recordSimilarityWindow`** is called after the rerank decision and stale-model check, not before. Pre-decision recording inflated the apparent hit rate in threshold analysis.
+- **`openai-responses` user filter** is `role === 'user'` only. The previous `!item.role || role === 'user' || type === 'message'` could select assistant turns as the cache key.
+- **Cluster `flush()` and `invalidate()`** now use per-key pipelined `DEL` instead of multi-key `DEL`, avoiding `CROSSSLOT` errors on Valkey Cluster.
+- **LangGraph `batch()`** executes writes sequentially to prevent concurrent `delete+put` for the same key from interleaving and leaving duplicates.
+- **`checkBatch()`** raises `SemanticCacheUsageError` for `rerank` and `staleAfterModelChange` options rather than silently ignoring them.
 
 ## [0.1.0] - 2026-03-21
 
