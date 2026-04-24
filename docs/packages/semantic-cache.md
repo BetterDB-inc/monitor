@@ -7,11 +7,13 @@ nav_order: 1
 
 # Semantic Cache
 
-`@betterdb/semantic-cache` is a standalone, framework-agnostic semantic cache library for LLM applications backed by Valkey. It uses the `valkey-search` module's vector similarity search to match incoming prompts against previously cached responses, returning hits when the cosine distance falls below a configurable threshold. Every cache operation emits an OpenTelemetry span and updates Prometheus metrics, giving teams running Valkey full production observability over their cache layer without additional instrumentation.
+`@betterdb/semantic-cache` is a standalone, framework-agnostic semantic cache library for LLM applications backed by Valkey. It uses the `valkey-search` module's vector similarity search to match incoming prompts against previously cached responses, returning hits when the cosine distance falls below a configurable threshold.
+
+**v0.2.0** adds full adapter parity with `agent-cache`: OpenAI, Anthropic, LlamaIndex, LangGraph, multi-modal prompt support, cost tracking, threshold effectiveness recommendations, embedding caching, batch lookups, and more.
 
 ## Prerequisites
 
-- **Valkey 8.0+** with the `valkey-search` module loaded (self-hosted via the `valkey/valkey-bundle` Docker image)
+- **Valkey 8.0+** with the `valkey-search` module loaded
 - Or **Amazon ElastiCache for Valkey** (8.0+)
 - Or **Google Cloud Memorystore for Valkey**
 - Node.js >= 20
@@ -22,301 +24,289 @@ nav_order: 1
 npm install @betterdb/semantic-cache iovalkey
 ```
 
-`iovalkey` is a peer dependency — you must install it alongside the package.
+`iovalkey` is a peer dependency - you must install it alongside the package.
 
 ## Quick start
 
 ```typescript
 import Valkey from 'iovalkey';
 import { SemanticCache } from '@betterdb/semantic-cache';
+import { createOpenAIEmbed } from '@betterdb/semantic-cache/embed/openai';
 
 const client = new Valkey({ host: 'localhost', port: 6399 });
 
 const cache = new SemanticCache({
   client,
-  embedFn: async (text) => {
-    // Any embedding provider works — OpenAI, Voyage AI, Cohere, a local model, etc.
-    const res = await fetch('https://api.voyageai.com/v1/embeddings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.VOYAGE_API_KEY}` },
-      body: JSON.stringify({ model: 'voyage-3-lite', input: [text] }),
-    });
-    const json = await res.json();
-    return json.data[0].embedding;
-  },
+  embedFn: createOpenAIEmbed(), // text-embedding-3-small by default
   defaultThreshold: 0.1,
   defaultTtl: 3600,
 });
 
 await cache.initialize();
 
-// Store a response
 await cache.store('What is the capital of France?', 'Paris', {
-  category: 'geography',
   model: 'gpt-4o',
+  inputTokens: 20,
+  outputTokens: 5,
 });
 
-// Check for a semantically similar prompt
 const result = await cache.check('Capital city of France?');
-console.log(result.hit);        // true
-console.log(result.response);   // 'Paris'
-console.log(result.confidence); // 'high'
-console.log(result.similarity); // ~0.02 (cosine distance)
+// result.hit === true
+// result.response === 'Paris'
+// result.costSaved === 0.000105 (based on bundled LiteLLM prices)
 ```
-
-The `embedFn` parameter is caller-supplied — any embedding provider works (OpenAI, Cohere, a local model via Ollama, or a custom inference endpoint).
 
 ## Configuration reference
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `name` | `string` | `'betterdb_scache'` | Index name prefix used for all Valkey keys (`{name}:idx`, `{name}:entry:*`, `{name}:__stats`) |
-| `client` | `Valkey` | *required* | An `iovalkey` client instance. The caller owns the connection lifecycle |
-| `embedFn` | `(text: string) => Promise<number[]>` | *required* | Async function returning a float embedding vector for a text string |
-| `defaultThreshold` | `number` | `0.1` | Cosine distance threshold (0–2). A lookup is a hit when `score <= threshold` |
-| `defaultTtl` | `number` | `undefined` | Default TTL in seconds for stored entries. `undefined` means no expiry |
-| `categoryThresholds` | `Record<string, number>` | `{}` | Per-category threshold overrides. Applied when `CacheCheckOptions.category` matches a key |
-| `uncertaintyBand` | `number` | `0.05` | Width of the uncertainty band below the threshold. Hits within `[threshold - band, threshold]` are flagged `confidence: 'uncertain'` |
-| `telemetry.tracerName` | `string` | `'@betterdb/semantic-cache'` | OpenTelemetry tracer name |
-| `telemetry.metricsPrefix` | `string` | `'semantic_cache'` | Prefix for all Prometheus metric names |
-| `telemetry.registry` | `Registry` | prom-client default | prom-client `Registry` to register metrics on. Pass a custom `Registry` in library or multi-tenant contexts to avoid polluting the host application's default registry |
+| `name` | `string` | `'betterdb_scache'` | Index name prefix for all Valkey keys |
+| `client` | `Valkey` | *required* | An `iovalkey` client instance |
+| `embedFn` | `(text: string) => Promise<number[]>` | *required* | Embedding function |
+| `defaultThreshold` | `number` | `0.1` | Cosine distance threshold (0-2) |
+| `defaultTtl` | `number` | `undefined` | Default TTL in seconds |
+| `categoryThresholds` | `Record<string, number>` | `{}` | Per-category threshold overrides |
+| `uncertaintyBand` | `number` | `0.05` | Width of the uncertainty band below threshold |
+| `costTable` | `Record<string, ModelCost>` | `undefined` | Custom model pricing overrides |
+| `useDefaultCostTable` | `boolean` | `true` | Merge bundled LiteLLM price table |
+| `normalizer` | `BinaryNormalizer` | `defaultNormalizer` | Binary content normalizer for multi-modal prompts |
+| `embeddingCache.enabled` | `boolean` | `true` | Cache computed embeddings in Valkey |
+| `embeddingCache.ttl` | `number` | `86400` | Embedding cache TTL in seconds |
+| `telemetry.tracerName` | `string` | `'@betterdb/semantic-cache'` | OTel tracer name |
+| `telemetry.metricsPrefix` | `string` | `'semantic_cache'` | Prometheus metric name prefix |
+| `telemetry.registry` | `Registry` | prom-client default | Custom prom-client Registry |
 
-## Threshold tuning
+## Adapters
 
-This library uses **cosine distance** (0–2 scale), not cosine similarity (0–1). The relationship is `distance = 1 - similarity`. Lower distance means more similar:
+All adapters are subpath exports with optional peer dependencies.
 
-| Distance | Meaning |
-|----------|---------|
-| 0 | Identical vectors |
-| 1 | Orthogonal (unrelated) |
-| 2 | Opposite vectors |
-
-A cache lookup is a **hit** when the nearest neighbour's cosine distance is `<= threshold`. Choose your threshold based on the precision/recall trade-off:
-
-| `defaultThreshold` | Behaviour |
-|---|---|
-| `0.05` | Very strict — only near-identical phrasings hit |
-| `0.10` | Default — balanced precision/recall |
-| `0.15` | Looser — catches more paraphrases, higher false-positive risk |
-| `0.20+` | Very loose — use per-category overrides instead |
-
-### Uncertainty band
-
-When a hit's cosine distance falls within `[threshold - uncertaintyBand, threshold]`, the result is flagged `confidence: 'uncertain'` rather than `'high'`. This lets you handle borderline matches differently in your application — for example, by serving the cached response but also triggering a background refresh.
-
-### Per-category thresholds
-
-For mixed workloads, use `categoryThresholds` to set different thresholds per query category rather than loosening the global default:
+### LangChain
 
 ```typescript
-const cache = new SemanticCache({
-  client,
-  embedFn,
-  defaultThreshold: 0.10,
-  categoryThresholds: {
-    faq: 0.08,    // strict — FAQs have canonical phrasings
-    search: 0.15, // looser — search queries vary more
+import { BetterDBSemanticCache } from '@betterdb/semantic-cache/langchain';
+const llm = new ChatOpenAI({ cache: new BetterDBSemanticCache({ cache }) });
+```
+
+### Vercel AI SDK
+
+```typescript
+import { createSemanticCacheMiddleware } from '@betterdb/semantic-cache/ai';
+const model = wrapLanguageModel({ model: openai('gpt-4o'), middleware: createSemanticCacheMiddleware({ cache }) });
+```
+
+### OpenAI Chat Completions
+
+```typescript
+import { prepareSemanticParams } from '@betterdb/semantic-cache/openai';
+const { text, model } = await prepareSemanticParams(params);
+const result = await cache.check(text);
+```
+
+### OpenAI Responses API
+
+```typescript
+import { prepareSemanticParams } from '@betterdb/semantic-cache/openai-responses';
+const { text } = await prepareSemanticParams(params);
+```
+
+### Anthropic Messages
+
+```typescript
+import { prepareSemanticParams } from '@betterdb/semantic-cache/anthropic';
+const { text } = await prepareSemanticParams(params);
+```
+
+### LlamaIndex
+
+```typescript
+import { prepareSemanticParams } from '@betterdb/semantic-cache/llamaindex';
+const { text } = await prepareSemanticParams(messages, { model: 'gpt-4o' });
+```
+
+### LangGraph (semantic memory store)
+
+```typescript
+import { BetterDBSemanticStore } from '@betterdb/semantic-cache/langgraph';
+const store = new BetterDBSemanticStore({ cache });
+await store.put(['user', 'alice', 'memories'], 'mem1', { content: 'Alice lives in Paris.' });
+const results = await store.search(['user', 'alice', 'memories'], { query: 'Where does Alice live?' });
+```
+
+Use `BetterDBSemanticStore` for similarity-based memory retrieval. For exact-match checkpoint persistence, use `@betterdb/agent-cache/langgraph`.
+
+## Embedding helpers
+
+Pre-built `EmbedFn` factories for common providers:
+
+```typescript
+import { createOpenAIEmbed } from '@betterdb/semantic-cache/embed/openai';
+import { createBedrockEmbed } from '@betterdb/semantic-cache/embed/bedrock';
+import { createVoyageEmbed } from '@betterdb/semantic-cache/embed/voyage';
+import { createCohereEmbed } from '@betterdb/semantic-cache/embed/cohere';
+import { createOllamaEmbed } from '@betterdb/semantic-cache/embed/ollama';
+```
+
+| Helper | Model default | Dimensions |
+|---|---|---|
+| `createOpenAIEmbed` | `text-embedding-3-small` | 1536 |
+| `createBedrockEmbed` | `amazon.titan-embed-text-v2:0` | 1024 |
+| `createVoyageEmbed` | `voyage-3-lite` | 512 |
+| `createCohereEmbed` | `embed-english-v3.0` | 1024 |
+| `createOllamaEmbed` | `nomic-embed-text` | 768 |
+
+## Cost tracking
+
+Store token counts alongside responses to enable cost savings reporting:
+
+```typescript
+await cache.store('What is the capital of France?', 'Paris', {
+  model: 'gpt-4o',
+  inputTokens: 25,
+  outputTokens: 5,
+});
+
+const result = await cache.check('Capital of France?');
+// result.costSaved === 0.000105 on hit
+
+const stats = await cache.stats();
+// stats.costSavedMicros === 105 (microdollars)
+```
+
+Cost is computed using the bundled LiteLLM price table (1,971 models). Override or extend with `costTable` option.
+
+## Multi-modal prompts
+
+Use `ContentBlock[]` to cache prompts with binary content:
+
+```typescript
+import { hashBase64, type ContentBlock } from '@betterdb/semantic-cache';
+
+const prompt: ContentBlock[] = [
+  { type: 'text', text: 'Describe this image.' },
+  { type: 'binary', kind: 'image', mediaType: 'image/png', ref: hashBase64(imageBase64) },
+];
+
+await cache.store(prompt, 'A red square.');
+const result = await cache.check(prompt); // hit only if text AND image match
+```
+
+Use `storeMultipart()` to store structured response blocks:
+
+```typescript
+const blocks: ContentBlock[] = [
+  { type: 'text', text: 'The answer is 42.' },
+  { type: 'reasoning', text: 'By my calculation...' },
+];
+await cache.storeMultipart(prompt, blocks);
+
+const result = await cache.check(prompt);
+// result.contentBlocks === blocks
+```
+
+## Threshold effectiveness recommendations
+
+Analyze the rolling similarity score window for threshold tuning guidance:
+
+```typescript
+const analysis = await cache.thresholdEffectiveness({ minSamples: 100 });
+// analysis.recommendation: 'tighten_threshold' | 'loosen_threshold' | 'optimal' | 'insufficient_data'
+// analysis.recommendedThreshold: 0.085 (present when recommendation is not optimal/insufficient)
+// analysis.reasoning: 'Human-readable explanation'
+
+// Per-category analysis
+const allCategories = await cache.thresholdEffectivenessAll();
+```
+
+## Batch check
+
+Pipeline multiple lookups in a single round-trip:
+
+```typescript
+const results = await cache.checkBatch([
+  'What is the capital of France?',
+  'Who wrote Hamlet?',
+  'What is 2 + 2?',
+]);
+// results[0].hit === true, etc.
+```
+
+## Stale model eviction
+
+Automatically evict cache entries when the model changes:
+
+```typescript
+const result = await cache.check('What is 2+2?', {
+  staleAfterModelChange: true,
+  currentModel: 'gpt-4o',
+});
+// If the cached entry was stored with model='gpt-3.5-turbo', it's evicted and treated as miss
+```
+
+## Rerank hook
+
+Retrieve top-k candidates and select the best with a custom function:
+
+```typescript
+const result = await cache.check(prompt, {
+  rerank: {
+    k: 5,
+    rerankFn: async (query, candidates) => {
+      // Return index of best candidate, or -1 to reject all
+      return candidates.findIndex((c) => c.response.length > 50);
+    },
   },
 });
 ```
 
-Pass `{ category: 'faq' }` in `check()` and `store()` options to activate the override.
+## Params-aware filtering
+
+Store sampling parameters as indexed NUMERIC fields for opt-in filtering:
+
+```typescript
+await cache.store(prompt, response, { temperature: 0.7, topP: 0.9, seed: 42 });
+const result = await cache.check(prompt, { filter: '@temperature:[0 0]' });
+```
+
+## Invalidation helpers
+
+```typescript
+await cache.invalidateByModel('gpt-4o');       // delete all entries for a model
+await cache.invalidateByCategory('geography'); // delete all entries for a category
+```
 
 ## Observability
 
-### OpenTelemetry
-
-Every public method emits a span via the `@opentelemetry/api` tracer. Spans require an OpenTelemetry SDK to be configured in the host application — this package does not bundle an SDK.
-
-| Span name | Key attributes |
-|-----------|----------------|
-| `semantic_cache.initialize` | `cache.name` |
-| `semantic_cache.check` | `cache.hit`, `cache.similarity`, `cache.threshold`, `cache.confidence`, `cache.category`, `cache.matched_key`, `embedding_latency_ms`, `search_latency_ms` |
-| `semantic_cache.store` | `cache.name`, `cache.key`, `cache.ttl`, `cache.category`, `cache.model`, `embedding_latency_ms` |
-| `semantic_cache.invalidate` | `cache.name`, `cache.filter`, `cache.deleted_count` |
-
-### Prometheus
-
-All metric names are prefixed with the configured `telemetry.metricsPrefix` (default: `semantic_cache`).
+### Prometheus metrics
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `{prefix}_requests_total` | Counter | `cache_name`, `result`, `category` | Total cache lookups. `result` is `hit`, `miss`, or `uncertain_hit` |
-| `{prefix}_similarity_score` | Histogram | `cache_name`, `category` | Cosine distance of the nearest neighbour (0–2). Recorded on hit and near-miss |
-| `{prefix}_operation_duration_seconds` | Histogram | `cache_name`, `operation` | End-to-end duration per operation (`check`, `store`, `invalidate`, `initialize`) |
-| `{prefix}_embedding_duration_seconds` | Histogram | `cache_name` | Time spent in the caller-supplied `embedFn` |
-
-If you use [BetterDB Monitor](https://betterdb.com), connect it to the same Valkey instance and it will automatically detect the cache index and surface these metrics alongside your other Valkey observability data.
-
-## BetterDB Monitor integration
-
-BetterDB Monitor polls the `{name}:__stats` Valkey hash written by this package on every `check()` call and surfaces hit rate, similarity score distribution, and cache growth rate in the dashboard. Connect Monitor to the same Valkey instance used by the cache — no additional configuration is required. See [betterdb.com](https://betterdb.com) for details.
-
-## Framework adapters
-
-Two optional adapters are available as subpath exports. They do not add framework dependencies to the base package — only install the adapter's peer dependency if you use it.
-
-### LangChain
-
-Import from `@betterdb/semantic-cache/langchain`. Requires `@langchain/core` >= 0.3.0 as a peer dependency.
-
-```typescript
-import { ChatOpenAI } from '@langchain/openai';
-import { BetterDBSemanticCache } from '@betterdb/semantic-cache/langchain';
-
-const llm = new ChatOpenAI({
-  modelName: 'gpt-4o',
-  cache: new BetterDBSemanticCache({ cache }), // pass your SemanticCache instance
-});
-```
-
-The adapter implements LangChain's `BaseCache` interface. Set `filterByModel: true` to scope cache lookups by the LLM configuration string.
-
-### Vercel AI SDK
-
-Import from `@betterdb/semantic-cache/ai`. Requires `ai` >= 4.0.0 as a peer dependency.
-
-```typescript
-import { wrapLanguageModel } from 'ai';
-import { openai } from '@ai-sdk/openai';
-import { createSemanticCacheMiddleware } from '@betterdb/semantic-cache/ai';
-
-const model = wrapLanguageModel({
-  model: openai('gpt-4o'),
-  middleware: createSemanticCacheMiddleware({ cache }),
-});
-```
-
-The middleware intercepts `doGenerate` calls. On a cache hit, the model is not called. Streaming (`wrapStream`) is not supported in v0.1.
-
-## Valkey Search 1.2 compatibility notes
-
-The following divergences from Redis/RediSearch were discovered during live verification and are handled in the implementation:
-
-1. **`FT.INFO` error message** — Valkey Search 1.2 returns `"Index with name '...' not found in database 0"` rather than `"Unknown Index name"` (Redis/RediSearch convention) or `"no such index"`. The code matches all three patterns for cross-compatibility.
-2. **`FT.DROPINDEX DD`** — The `DD` (Delete Documents) flag is not supported in Valkey Search 1.2. Key cleanup is done separately via `SCAN` + `DEL` after dropping the index.
-3. **`FT.SEARCH` KNN score aliases** — KNN score aliases (`__score`) cannot be used in `RETURN` or `SORTBY` clauses. Results are returned automatically (without a `RETURN` clause) and pre-sorted by distance.
-4. **`FT.INFO` dimension parsing** — The vector field dimension is nested inside an `"index"` sub-array (as `"dimensions"`) rather than exposed at the top-level `DIM` key used by RediSearch.
+| `{prefix}_requests_total` | Counter | `cache_name`, `result`, `category` | Total lookups (result: hit/miss/uncertain_hit) |
+| `{prefix}_similarity_score` | Histogram | `cache_name`, `category` | Cosine distance on every lookup with a candidate |
+| `{prefix}_operation_duration_seconds` | Histogram | `cache_name`, `operation` | End-to-end operation duration |
+| `{prefix}_embedding_duration_seconds` | Histogram | `cache_name` | Time in embedFn |
+| `{prefix}_cost_saved_total` | Counter | `cache_name`, `category` | Cumulative dollars saved from cache hits |
+| `{prefix}_embedding_cache_total` | Counter | `cache_name`, `result` | Embedding cache hit/miss counts |
+| `{prefix}_stale_model_evictions_total` | Counter | `cache_name` | Entries evicted by staleAfterModelChange |
 
 ## Known limitations
 
 ### Cluster mode
 
-`@betterdb/semantic-cache` works with single-node Valkey instances and managed
-single-endpoint services (Amazon ElastiCache for Valkey, Google Cloud Memorystore
-for Valkey). It does not fully support Valkey in cluster mode.
+`flush()` and embedding cache cleanup use `SCAN`. In Valkey Cluster mode, `SCAN` on a single node only iterates that node's keys. v0.2.0 uses `clusterScan()` (same pattern as `agent-cache`) to fan out across all master nodes for these operations.
 
-The specific issue is `flush()`: it uses `SCAN` to find and delete entry keys,
-but `SCAN` in cluster mode only iterates keys on the node it is sent to. In a
-multi-node cluster, `flush()` will silently leave entry keys on other nodes
-(the FT index itself is dropped correctly).
-
-`check()`, `store()`, `invalidate()`, and `stats()` are unaffected — these use
-`FT.SEARCH`, `HSET`, `DEL`, and `HINCRBY` which route correctly in cluster mode
-via the key hash slot.
-
-If you need cluster support, either avoid `flush()` or implement a cluster-aware
-key sweep using the iovalkey cluster client's per-node scan capability.
-Cluster mode support is planned for a future release.
+The `FT.CREATE` index and `FT.SEARCH` queries work correctly in cluster mode because Valkey routes them to the appropriate node. However, `FT.CREATE` creates the index only on the node that receives the command - in a full cluster setup, users may need to create the index on each node. This is a fundamental limitation of `valkey-search` in cluster mode and is documented in the Valkey Search documentation.
 
 ### Streaming
 
-Streaming LLM responses are not supported. `store()` expects a complete response
-string. If your application uses streaming, accumulate the full response before
-calling `store()`. The cached response is always returned as a complete string,
-not re-streamed token-by-token.
+`store()` expects a complete response string. Accumulate the full streamed response before calling `store()`. The `createSemanticCacheMiddleware` Vercel AI SDK adapter does not implement `wrapStream`.
 
-## API reference
+### Schema migration
 
-### `cache.initialize(): Promise<void>`
+Adding `binary_refs`, `temperature`, `top_p`, and `seed` fields to the index schema in v0.2.0 requires a schema migration for existing v0.1.0 indexes. If the existing index lacks these fields, `check()` operates in text-only mode (no binary filtering). To migrate, call `flush()` and `initialize()` to rebuild with the full schema.
 
-Creates or reconnects to the Valkey search index. If the index already exists, reads the vector dimension from `FT.INFO` and marks the instance as initialized. If the index does not exist, calls `embedFn('probe')` to determine the embedding dimension, then creates the index via `FT.CREATE`.
+## Valkey Search 1.2 compatibility notes
 
-Must be called before `check()` or `store()`. Safe to call multiple times.
-
-**Throws:** `EmbeddingError` if `embedFn('probe')` fails, `ValkeyCommandError` if `FT.CREATE` or `FT.INFO` fails for a reason other than a missing index.
-
-### `cache.check(prompt: string, options?: CacheCheckOptions): Promise<CacheCheckResult>`
-
-Searches the cache for a semantically similar prompt using KNN vector search. Returns a `CacheCheckResult`:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `hit` | `boolean` | Whether the nearest neighbour's cosine distance was `<= threshold` |
-| `response` | `string \| undefined` | The cached response text. Present on hit |
-| `similarity` | `number \| undefined` | Cosine distance (0–2). Present when a nearest neighbour was found |
-| `confidence` | `'high' \| 'uncertain' \| 'miss'` | `'uncertain'` if the hit falls within the uncertainty band |
-| `matchedKey` | `string \| undefined` | The Valkey key of the matched entry. Present on hit |
-| `nearestMiss` | `{ similarity, deltaToThreshold } \| undefined` | Present on miss when a candidate existed but didn't clear the threshold |
-
-**Options** (`CacheCheckOptions`):
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `threshold` | `number` | — | Per-request threshold override (highest priority) |
-| `category` | `string` | — | Category tag for per-category threshold lookup and metric labels |
-| `filter` | `string` | — | Additional `valkey-search` pre-filter expression (e.g. `'@model:{gpt-4o}'`) |
-| `k` | `number` | `1` | Number of nearest neighbours to fetch before threshold check |
-
-On a hit, refreshes the entry's TTL if `defaultTtl` is configured (sliding window).
-
-**Throws:** `SemanticCacheUsageError` if `initialize()` was not called, `EmbeddingError` if `embedFn` fails, `ValkeyCommandError` if `FT.SEARCH` fails.
-
-### `cache.store(prompt: string, response: string, options?: CacheStoreOptions): Promise<string>`
-
-Stores a prompt/response pair with its embedding vector. Returns the Valkey key of the stored entry (format: `{name}:entry:{uuid}`).
-
-**Options** (`CacheStoreOptions`):
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `ttl` | `number` | `defaultTtl` | Per-entry TTL in seconds |
-| `category` | `string` | `''` | Category tag |
-| `model` | `string` | `''` | Model name tag (e.g. `'gpt-4o'`) |
-| `metadata` | `Record<string, string \| number>` | `{}` | Arbitrary metadata stored as JSON |
-
-**Throws:** `SemanticCacheUsageError` if `initialize()` was not called, `EmbeddingError` if `embedFn` fails, `SemanticCacheUsageError` if the embedding dimension doesn't match the index (usually means the embedding model changed — call `flush()` then `initialize()` to rebuild), `ValkeyCommandError` if `HSET` fails.
-
-### `cache.invalidate(filter: string): Promise<InvalidateResult>`
-
-Deletes all entries matching a `valkey-search` filter expression. Fetches up to 1000 matching keys via `FT.SEARCH`, then deletes them in a single `DEL` call. Returns `{ deleted: number, truncated: boolean }`. If `truncated` is true, call again with the same filter until it returns false.
-
-```typescript
-const { deleted, truncated } = await cache.invalidate('@model:{gpt-4o}');
-```
-
-**Throws:** `SemanticCacheUsageError` if `initialize()` was not called, `ValkeyCommandError` if `FT.SEARCH` or `DEL` fails.
-
-### `cache.stats(): Promise<CacheStats>`
-
-Returns cumulative hit/miss statistics from the `{name}:__stats` Valkey hash:
-
-```typescript
-interface CacheStats {
-  hits: number;
-  misses: number;
-  total: number;
-  hitRate: number; // hits / total, or 0 if total is 0
-}
-```
-
-### `cache.indexInfo(): Promise<IndexInfo>`
-
-Returns index metadata parsed from `FT.INFO`:
-
-```typescript
-interface IndexInfo {
-  name: string;        // e.g. 'betterdb_scache:idx'
-  numDocs: number;     // number of indexed entries
-  dimension: number;   // embedding vector dimension
-  indexingState: string; // e.g. 'ready' or 'unknown'
-}
-```
-
-**Throws:** `ValkeyCommandError` if `FT.INFO` fails.
-
-### `cache.flush(): Promise<void>`
-
-Drops the FT index via `FT.DROPINDEX` and deletes all entry keys and the stats hash via `SCAN` + `DEL`. Resets the instance to uninitialized — call `initialize()` again to rebuild.
-
-The caller owns the `iovalkey` client lifecycle — call `client.quit()` or `client.disconnect()` yourself when the application shuts down.
+1. `FT.INFO` error format: handles three variants for cross-compatibility
+2. `FT.DROPINDEX DD` not supported: key cleanup done via SCAN + DEL
+3. `FT.SEARCH` KNN score aliases: not usable in RETURN/SORTBY
+4. `FT.INFO` dimension: nested inside `"index"` sub-array as `"dimensions"`
