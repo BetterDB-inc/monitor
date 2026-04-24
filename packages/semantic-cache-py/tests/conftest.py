@@ -107,6 +107,7 @@ def make_client(
 
     pipe = MagicMock()
     pipe.hincrby = MagicMock()
+    pipe.expire = MagicMock()
     pipe.zadd = MagicMock()
     pipe.zremrangebyscore = MagicMock()
     pipe.zremrangebyrank = MagicMock()

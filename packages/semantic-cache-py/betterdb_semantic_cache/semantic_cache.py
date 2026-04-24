@@ -316,7 +316,10 @@ class SemanticCache:
                     cost_micros = int(cost_micros_str)
                     if cost_micros > 0:
                         cost_saved = cost_micros / 1_000_000
-                        await self._client.hincrby(self._stats_key, "cost_saved_micros", cost_micros)
+                        try:
+                            await self._client.hincrby(self._stats_key, "cost_saved_micros", cost_micros)
+                        except Exception:
+                            pass  # best-effort stat write — never fail a valid hit
                         self._telemetry.metrics.cost_saved_total.labels(
                             cache_name=self._name, category=category_label
                         ).inc(cost_saved)
@@ -729,7 +732,9 @@ class SemanticCache:
         raw = raw or {}
 
         def _int(key: str) -> int:
-            val = raw.get(key) or raw.get(key.encode() if isinstance(key, str) else key.decode(), b"0")
+            val = raw.get(key)
+            if val is None:
+                val = raw.get(key.encode() if isinstance(key, str) else key.decode(), b"0")
             if isinstance(val, bytes):
                 val = val.decode()
             try:
@@ -977,7 +982,12 @@ class SemanticCache:
                 "category_threshold_count": len(self._category_thresholds),
                 "dimension": self._dimension,
             })
-            if not self._shutdown and opts.stats_interval_s > 0 and self._analytics is not NOOP_ANALYTICS:
+            # Guard against flush() being called before this background task completed:
+            # if _initialized is False here, the cache was flushed and we must not
+            # start the stats loop (it would call stats() → _assert_initialized() → error).
+            if (not self._shutdown and self._initialized
+                    and opts.stats_interval_s > 0
+                    and self._analytics is not NOOP_ANALYTICS):
                 self._stats_task = asyncio.create_task(self._stats_loop(opts.stats_interval_s))
         except Exception:
             pass
@@ -1136,6 +1146,11 @@ class SemanticCache:
         if isinstance(prompt, str):
             return prompt, []
         text = extract_text(prompt)  # type: ignore[arg-type]
+        if not text:
+            raise SemanticCacheUsageError(
+                "Prompt contains no text blocks. Embedding providers require non-empty text. "
+                "Ensure at least one TextBlock is present alongside any binary blocks."
+            )
         binary_refs = extract_binary_refs(prompt)  # type: ignore[arg-type]
         return text, binary_refs
 

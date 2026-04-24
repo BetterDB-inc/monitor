@@ -313,3 +313,35 @@ async def test_flush_drops_index_and_deletes_keys():
         if c.args and c.args[0] == "FT.DROPINDEX"
     ]
     assert len(drop_calls) == 1
+
+
+# ── check_batch TTL refresh ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_check_batch_ttl_refresh_pipelined():
+    """When default_ttl is set and check_batch() gets hits, all TTL refreshes
+    must be issued in a single pipeline call after the result loop."""
+    cache, client = _make_cache(default_ttl=3600)
+    await cache.initialize()
+
+    # Pipeline returns two hits
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[
+        ["1", "key1", ["response", "Answer 1", "__score", "0.01"]],
+        ["1", "key2", ["response", "Answer 2", "__score", "0.02"]],
+    ])
+
+    results = await cache.check_batch(["prompt1", "prompt2"])
+    assert len(results) == 2
+    assert results[0].hit is True
+    assert results[1].hit is True
+
+    # expire() must have been called on the pipeline (not the raw client)
+    expire_calls = pipe.expire.call_args_list
+    assert len(expire_calls) == 2
+    called_keys = {c.args[0] for c in expire_calls}
+    assert "key1" in called_keys
+    assert "key2" in called_keys
+    # All expire calls should use the configured TTL
+    for c in expire_calls:
+        assert c.args[1] == 3600

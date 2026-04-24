@@ -152,6 +152,7 @@ class BetterDBSemanticStore:
             vector, _ = await self._cache._embed(query)
             filter_expr = f"(@category:{{{escape_tag(category)}}})"
             knn_query = f"{filter_expr}=>[KNN {limit} @embedding $vec AS __score]"
+            from ..errors import ValkeyCommandError as _ValkeyCommandError
             try:
                 raw = await self._cache._client.execute_command(
                     "FT.SEARCH", self._cache._index_name, knn_query,
@@ -159,6 +160,8 @@ class BetterDBSemanticStore:
                     "LIMIT", "0", str(limit),
                     "DIALECT", "2",
                 )
+            except _ValkeyCommandError:
+                raise  # propagate real Valkey errors like aget() and adelete()
             except Exception:
                 return []
 
@@ -251,8 +254,12 @@ class BetterDBSemanticStore:
                     data = json.loads(response_str)
                     if data.get("key") == key:
                         try:
-                            await self._cache._client.delete(entry["key"])
-                            deleted_count += 1
+                            n = await self._cache._client.delete(entry["key"])
+                            # Only count if the key actually existed — DEL returns 0
+                            # for non-existent keys (e.g. after async-index lag shows
+                            # a previously deleted entry again).
+                            if n > 0:
+                                deleted_count += 1
                         except Exception:
                             pass
                 except (json.JSONDecodeError, TypeError):
