@@ -1,5 +1,6 @@
 import { BaseCache } from '@langchain/core/caches';
 import type { Generation } from '@langchain/core/outputs';
+import { AIMessage } from '@langchain/core/messages';
 import { SemanticCache } from '../SemanticCache';
 import type { CacheCheckOptions } from '../types';
 import { sha256 } from '../utils';
@@ -56,7 +57,11 @@ export class BetterDBSemanticCache extends BaseCache {
     }
     const result = await this.cache.check(prompt, opts);
     if (!result.hit || !result.response) return null;
-    return [{ text: result.response }];
+    // Return a ChatGeneration-shaped object with a proper AIMessage so that
+    // ChatOpenAI and other chat models can unwrap it correctly on cache hit.
+    // Plain { text } without a message causes "Cannot read properties of undefined"
+    // when the model tries to access response.content.
+    return [{ text: result.response, message: new AIMessage(result.response) } as Generation];
   }
 
   async update(prompt: string, llm_string: string, return_val: Generation[]): Promise<void> {

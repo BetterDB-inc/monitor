@@ -1,6 +1,6 @@
 # @betterdb/semantic-cache
 
-A standalone, framework-agnostic semantic cache for LLM applications backed by [Valkey](https://valkey.io/) (or Redis). Uses Valkey's vector search (`valkey-search` module) for similarity matching with built-in [OpenTelemetry](https://opentelemetry.io/) tracing and [Prometheus](https://prometheus.io/) metrics via `prom-client`. The first semantic cache library designed to work natively with Valkey and BetterDB Monitor.
+A standalone, framework-agnostic semantic cache for LLM applications backed by [Valkey](https://valkey.io/). Uses Valkey's vector search (`valkey-search` module) for similarity matching with built-in [OpenTelemetry](https://opentelemetry.io/) tracing and [Prometheus](https://prometheus.io/) metrics. Full adapter parity with [`@betterdb/agent-cache`](../agent-cache/).
 
 ## Prerequisites
 
@@ -12,153 +12,154 @@ A standalone, framework-agnostic semantic cache for LLM applications backed by [
 ## Installation
 
 ```bash
-npm install @betterdb/semantic-cache
+npm install @betterdb/semantic-cache iovalkey
 ```
 
-You must also have `iovalkey` installed (it is a peer dependency):
-
-```bash
-npm install iovalkey
-```
+`iovalkey` is a required peer dependency.
 
 ## Why @betterdb/semantic-cache
 
-As of 2026, no existing semantic cache library simultaneously satisfies all three of the following properties: **Valkey-native** support (explicitly handling `valkey-search` API differences rather than assuming Redis wire compatibility), **standalone** operation (no coupling to LangChain, LiteLLM, AWS, or any other orchestration layer), and **built-in observability** (OpenTelemetry spans and Prometheus metrics emitted at the cache operation level, not just at the HTTP or LLM call level). This package was built to fill that gap.
-
-| Library / Service | Valkey-native | Standalone | Built-in OTel + Prometheus |
-|---|---|---|---|
-| **@betterdb/semantic-cache** | ✅ | ✅ | ✅ |
-| RedisVL `SemanticCache` | ❌ Redis only | ✅ | ❌ |
-| LangChain `RedisSemanticCache` | ❌ Redis only | ❌ Requires LangChain | ❌ |
-| LiteLLM `redis-semantic` | ❌ Redis only | ❌ Requires LiteLLM | ❌ Partial (no cache metrics) |
-| `langgraph-checkpoint-aws` `ValkeyCache` | ✅ | ❌ Requires AWS + LangGraph | ❌ |
-| Mem0 + Valkey | ✅ | ❌ Full memory framework | ❌ |
-| Redis LangCache | ❌ Redis Cloud only | ❌ Managed service | ✅ Dashboard only |
-| Upstash `semantic-cache` | ❌ Upstash Vector only | ✅ | ❌ |
-| GPTCache | ❌ Abandoned (2023) | ✅ | ❌ |
-
-- **Valkey-native**: `valkey-search` has API differences from Redis's RediSearch that require explicit handling (see [Valkey Search 1.2 compatibility notes](#valkey-search-12-compatibility-notes) in the changelog). Libraries targeting Redis are not guaranteed to work correctly against self-hosted Valkey or managed Valkey services (ElastiCache, Memorystore).
-- **Standalone**: no dependency on a specific AI framework means you can use this with any LLM client — OpenAI SDK, Anthropic SDK, a local model, or a custom inference endpoint — and swap it out without changing your cache layer.
-- **Built-in OTel + Prometheus**: every `check()` and `store()` call emits a span and increments counters. You get hit rate, similarity score distribution, and latency percentiles in Grafana or any OTel-compatible backend without writing any instrumentation code. If you use [BetterDB Monitor](https://betterdb.com), these metrics are surfaced automatically alongside your other Valkey observability data.
+The only semantic cache library that is simultaneously Valkey-native (explicit handling of `valkey-search` API differences), standalone (no coupling to any AI framework), and has built-in OpenTelemetry + Prometheus instrumentation at the cache operation level.
 
 ## Quick Start
 
 ```typescript
 import Valkey from 'iovalkey';
 import { SemanticCache } from '@betterdb/semantic-cache';
+import { createOpenAIEmbed } from '@betterdb/semantic-cache/embed/openai';
 
 const client = new Valkey({ host: 'localhost', port: 6399 });
 
 const cache = new SemanticCache({
   client,
-  embedFn: async (text) => {
-    // Any embedding provider works — OpenAI, Voyage AI, Cohere, a local model, etc.
-    const res = await fetch('https://api.voyageai.com/v1/embeddings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.VOYAGE_API_KEY}` },
-      body: JSON.stringify({ model: 'voyage-3-lite', input: [text] }),
-    });
-    const json = await res.json();
-    return json.data[0].embedding;
-  },
+  embedFn: createOpenAIEmbed(), // or createVoyageEmbed(), createOllamaEmbed(), etc.
+  defaultThreshold: 0.15,       // loosen slightly to catch paraphrases with high confidence
+  defaultTtl: 3600,
 });
 
 await cache.initialize();
 
-// Store a response
-await cache.store('What is the capital of France?', 'Paris');
+// Store with cost tracking
+await cache.store('What is the capital of France?', 'Paris', {
+  model: 'gpt-4o-mini',
+  inputTokens: 20,
+  outputTokens: 5,
+});
 
-// Check for a semantically similar prompt
-const result = await cache.check('Capital city of France?');
-// result.hit === true, result.response === 'Paris'
+// Exact match - always high confidence
+const exact = await cache.check('What is the capital of France?');
+// exact.hit === true
+// exact.confidence === 'high'
+// exact.similarity === 0.0000
+// exact.costSaved === 0.0000085
+
+// Paraphrase - typically 'uncertain' at threshold 0.1, 'high' at threshold 0.15
+const paraphrase = await cache.check('What city is the capital of France?');
+// paraphrase.hit === true
+// paraphrase.confidence === 'high'    // at threshold 0.15
+// paraphrase.similarity ~= 0.087      // observed with text-embedding-3-small
+// paraphrase.costSaved === 0.0000085
 ```
 
-## Client Lifecycle
+## Threshold and Confidence
 
-SemanticCache does **not** own the iovalkey client. You create it, you close it:
-
-```typescript
-const client = new Valkey({ host: 'localhost', port: 6399 });
-const cache = new SemanticCache({ client, embedFn });
-
-// ... use cache ...
-
-// When shutting down, close the client yourself:
-await client.quit();
-```
-
-## Threshold: Cosine Distance vs Cosine Similarity
-
-This library uses **cosine distance** (0–2 scale), not cosine similarity (0–1 scale):
+This library uses **cosine distance** (0-2 scale, lower = more similar):
 
 | Distance | Meaning |
 |----------|---------|
-| 0 | Identical vectors |
-| 1 | Orthogonal (unrelated) |
-| 2 | Opposite vectors |
+| 0.00 | Identical vectors |
+| 0.05-0.10 | Strong paraphrase |
+| 0.10-0.20 | Loose paraphrase / related topic |
+| 1.00 | Orthogonal (unrelated) |
 
-A cache lookup is a **hit** when `score <= threshold`. The default threshold of `0.1` is strict — it matches only very similar prompts. Increase to `0.15–0.2` for broader matching.
+A lookup is a **hit** when `score <= threshold`. The default threshold is `0.1`.
 
-The relationship is: `distance = 1 - similarity`. A cosine similarity of 0.95 corresponds to a distance of 0.05.
+### Confidence levels
 
-### Handling uncertain hits
+| `confidence` | When | What to do |
+|---|---|---|
+| `high` | `score <= threshold - uncertaintyBand` (e.g. `<= 0.05`) | Return the cached response directly |
+| `uncertain` | `threshold - band < score <= threshold` (e.g. `0.05–0.10`) | Return the response but consider flagging for review |
+| `miss` | `score > threshold` | No hit - call the LLM |
 
-When `confidence` is `'uncertain'`, the cached response is technically above
-the similarity threshold but close to the boundary. Three common patterns:
+**With real embeddings (`text-embedding-3-small`):**
+- Exact same phrasing: `~0.000` - always `high`
+- Close paraphrase ("Which city is the capital of France?"): `~0.08–0.09` - `uncertain` at default `0.1` threshold, `high` at `0.15`
+- Loose paraphrase ("France's capital?"): `~0.10–0.15` - typically `miss` at `0.1`, `uncertain` at `0.15`
 
-**Accept and monitor** — return the cached response but track uncertain hits
-separately via the `result: 'uncertain_hit'` Prometheus label. Review them
-periodically to decide if the threshold needs adjustment.
+**Recommended thresholds by use case:**
 
-**Fall back to LLM** — treat uncertain hits as misses, call the LLM, then
-update the cache entry with `store()` using the fresh response.
-
-**Prompt for feedback** — in user-facing applications, show the cached
-response but collect a thumbs up/down signal to identify false positives.
-
-A high rate of uncertain hits (visible in the `{prefix}_requests_total`
-metric) indicates the threshold may be too loose for the query distribution.
+| Use case | Threshold | Notes |
+|---|---|---|
+| FAQ / exact match only | `0.05` | Very strict, near-zero false positives |
+| Standard Q&A | `0.10` | Default - paraphrases land as `uncertain` |
+| Conversational / RAG | `0.15` | Paraphrases hit as `high` confidence |
+| Broad search / recall | `0.20` | High hit rate, review uncertain hits |
 
 ## Configuration Reference
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `name` | `string` | `'betterdb_scache'` | Index name prefix for Valkey keys |
-| `client` | `Valkey` | — | iovalkey client instance (required) |
-| `embedFn` | `(text: string) => Promise<number[]>` | — | Embedding function (required) |
-| `defaultThreshold` | `number` | `0.1` | Cosine distance threshold (0–2) |
-| `defaultTtl` | `number` | `undefined` | Default TTL in seconds for entries |
+| `name` | `string` | `'betterdb_scache'` | Key prefix |
+| `client` | `Valkey` | - | iovalkey client (required) |
+| `embedFn` | `EmbedFn` | - | Embedding function (required) |
+| `defaultThreshold` | `number` | `0.1` | Cosine distance threshold (0-2) |
+| `defaultTtl` | `number` | `undefined` | Default TTL in seconds |
 | `categoryThresholds` | `Record<string, number>` | `{}` | Per-category threshold overrides |
-| `uncertaintyBand` | `number` | `0.05` | Width of the uncertainty band below threshold |
-| `telemetry.tracerName` | `string` | `'@betterdb/semantic-cache'` | OpenTelemetry tracer name |
-| `telemetry.metricsPrefix` | `string` | `'semantic_cache'` | Prometheus metric name prefix |
-| `telemetry.registry` | `Registry` | default registry | prom-client Registry for metrics |
+| `uncertaintyBand` | `number` | `0.05` | Width of uncertainty band below threshold |
+| `costTable` | `Record<string, ModelCost>` | `undefined` | Per-model pricing overrides |
+| `useDefaultCostTable` | `boolean` | `true` | Use bundled LiteLLM price table (1,971 models) |
+| `normalizer` | `BinaryNormalizer` | `defaultNormalizer` | Binary content normalizer |
+| `embeddingCache.enabled` | `boolean` | `true` | Cache computed embeddings in Valkey |
+| `embeddingCache.ttl` | `number` | `86400` | Embedding cache TTL (seconds) |
+| `telemetry.tracerName` | `string` | `'@betterdb/semantic-cache'` | OTel tracer name |
+| `telemetry.metricsPrefix` | `string` | `'semantic_cache'` | Prometheus prefix |
+| `telemetry.registry` | `Registry` | default | prom-client Registry |
 
-## Observability
+## Cost Tracking
 
-### Prometheus Metrics
+Store token counts at cache-time to get per-hit cost savings:
 
-All metric names are prefixed with `semantic_cache_` by default (configurable via `telemetry.metricsPrefix`).
+```typescript
+await cache.store('What is the capital of France?', 'Paris', {
+  model: 'claude-haiku-4-5',   // looked up in bundled LiteLLM price table
+  inputTokens: 42,
+  outputTokens: 12,
+});
 
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `semantic_cache_requests_total` | Counter | `cache_name`, `result`, `category` | Total cache requests. `result` is `hit`, `miss`, or `uncertain_hit` |
-| `semantic_cache_similarity_score` | Histogram | `cache_name`, `category` | Cosine distance scores for lookups with candidates |
-| `semantic_cache_operation_duration_seconds` | Histogram | `cache_name`, `operation` | Duration of cache operations (`check`, `store`, `invalidate`, `initialize`) |
-| `semantic_cache_embedding_duration_seconds` | Histogram | `cache_name` | Duration of embedding function calls |
+const result = await cache.check('Capital of France?');
+console.log(result.costSaved);  // e.g. 0.000064 (dollars saved on this hit)
 
-### OpenTelemetry Tracing
+const stats = await cache.stats();
+console.log(stats.costSavedMicros); // cumulative microdollars saved
+```
 
-Every public method emits an OTel span with relevant attributes (`cache.hit`, `cache.similarity`, `cache.threshold`, `cache.confidence`, etc.). Spans require an OpenTelemetry SDK to be configured in the host application — this library uses `@opentelemetry/api` and does not bundle an SDK.
+Cost savings scale with the model. Observed values from live examples:
+- `gpt-4o-mini`: ~`$0.000006` per hit (cheap model, short responses)
+- `claude-haiku-4-5`: ~`$0.000064` per hit (~10x more expensive)
+- `gpt-4o`: ~`$0.000100` per hit at 20 input / 5 output tokens
 
-## BetterDB Monitor Integration
+## Adapters
 
-If you connect [BetterDB Monitor](https://github.com/KIvanow/monitor) to the same Valkey instance, it will automatically detect the semantic cache index and surface:
+| Import | Class/Function | Description |
+|---|---|---|
+| `@betterdb/semantic-cache/langchain` | `BetterDBSemanticCache` | LangChain `BaseCache` |
+| `@betterdb/semantic-cache/ai` | `createSemanticCacheMiddleware` | Vercel AI SDK middleware |
+| `@betterdb/semantic-cache/openai` | `prepareSemanticParams` | OpenAI Chat Completions |
+| `@betterdb/semantic-cache/openai-responses` | `prepareSemanticParams` | OpenAI Responses API |
+| `@betterdb/semantic-cache/anthropic` | `prepareSemanticParams` | Anthropic Messages API |
+| `@betterdb/semantic-cache/llamaindex` | `prepareSemanticParams` | LlamaIndex ChatMessage[] |
+| `@betterdb/semantic-cache/langgraph` | `BetterDBSemanticStore` | LangGraph BaseStore |
 
-- Hit rate and miss rate over time
-- Similarity score distribution
-- Cache entry count and memory usage
-- Cost savings estimates based on cache hit rates
+## Embedding Helpers
+
+| Import | Default model | Dimensions |
+|---|---|---|
+| `@betterdb/semantic-cache/embed/openai` | `text-embedding-3-small` | 1536 |
+| `@betterdb/semantic-cache/embed/bedrock` | `amazon.titan-embed-text-v2:0` | 1024 |
+| `@betterdb/semantic-cache/embed/voyage` | `voyage-3-lite` | 512 |
+| `@betterdb/semantic-cache/embed/cohere` | `embed-english-v3.0` | 1024 |
+| `@betterdb/semantic-cache/embed/ollama` | `nomic-embed-text` | 768 |
 
 ## API
 
@@ -168,55 +169,137 @@ Creates or reconnects to the Valkey search index. Must be called before `check()
 
 ### `cache.check(prompt, options?)`
 
-Searches for a semantically similar cached prompt. Returns `{ hit, response, similarity, confidence, matchedKey, nearestMiss }`.
+`prompt` is `string | ContentBlock[]`. Returns `CacheCheckResult`:
+
+| Field | Description |
+|---|---|
+| `hit` | Whether the nearest neighbour's distance was `<= threshold` |
+| `response` | Cached response text. Present on hit |
+| `similarity` | Cosine distance (0-2). Present when a candidate was found |
+| `confidence` | `'high'` / `'uncertain'` / `'miss'` |
+| `costSaved` | Dollars saved on this hit. Present when cost was recorded at store time |
+| `contentBlocks` | Structured response blocks. Present when stored via `storeMultipart()` |
+| `nearestMiss` | On miss with a candidate: `{ similarity, deltaToThreshold }` |
+
+**Options:** `threshold`, `category`, `filter`, `k`, `staleAfterModelChange`, `currentModel`, `rerank`
 
 ### `cache.store(prompt, response, options?)`
 
-Stores a prompt/response pair with its embedding vector. Returns the Valkey key.
+`prompt` is `string | ContentBlock[]`. Returns the Valkey key.
+
+**Options:** `ttl`, `category`, `model`, `metadata`, `inputTokens`, `outputTokens`, `temperature`, `topP`, `seed`
+
+### `cache.storeMultipart(prompt, blocks, options?)`
+
+Stores structured `ContentBlock[]` as the response. On hit, `check()` returns `contentBlocks`.
+
+### `cache.checkBatch(prompts[], options?)`
+
+Pipelined multi-prompt lookups. ~50-70% faster than sequential `check()` calls. Returns results in input order.
 
 ### `cache.invalidate(filter)`
 
-Deletes entries matching a valkey-search filter expression. Example: `cache.invalidate('@model:{gpt-4o}')`.
+Delete entries matching a `valkey-search` filter (e.g. `'@model:{gpt-4o}'`).
+
+### `cache.invalidateByModel(model)` / `cache.invalidateByCategory(category)`
+
+Convenience wrappers around `invalidate()`.
 
 ### `cache.stats()`
 
-Returns `{ hits, misses, total, hitRate }` from the Valkey stats hash.
+Returns `{ hits, misses, total, hitRate, costSavedMicros }`.
 
 ### `cache.indexInfo()`
 
-Returns index metadata: `{ name, numDocs, dimension, indexingState }`.
+Returns `{ name, numDocs, dimension, indexingState }`.
 
 ### `cache.flush()`
 
-Drops the index and all entries. Call `initialize()` again to rebuild.
+Drops the index and all keys. Call `initialize()` again to rebuild.
 
-## Known limitations
+### `cache.thresholdEffectiveness(options?)`
+
+Analyzes the rolling similarity score window (last 10,000 entries, up to 7 days) and returns:
+
+```typescript
+{
+  recommendation: 'tighten_threshold' | 'loosen_threshold' | 'optimal' | 'insufficient_data',
+  recommendedThreshold?: number,  // present when recommendation is tighten/loosen
+  reasoning: string,              // human-readable explanation
+  hitRate: number,
+  uncertainHitRate: number,       // >20% triggers tighten recommendation
+  nearMissRate: number,           // >30% with avg delta <0.03 triggers loosen
+  // ...
+}
+```
+
+### `cache.thresholdEffectivenessAll(options?)`
+
+Returns one result per category seen in the window, plus one aggregate `'all'` result.
+
+## Observability
+
+### Prometheus Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `{prefix}_requests_total` | Counter | `cache_name`, `result`, `category` | `result`: `hit`, `miss`, `uncertain_hit` |
+| `{prefix}_similarity_score` | Histogram | `cache_name`, `category` | Cosine distance per lookup |
+| `{prefix}_operation_duration_seconds` | Histogram | `cache_name`, `operation` | End-to-end latency |
+| `{prefix}_embedding_duration_seconds` | Histogram | `cache_name` | Time in `embedFn` |
+| `{prefix}_cost_saved_total` | Counter | `cache_name`, `category` | Dollars saved from hits |
+| `{prefix}_embedding_cache_total` | Counter | `cache_name`, `result` | Embedding cache hit/miss |
+| `{prefix}_stale_model_evictions_total` | Counter | `cache_name` | Evictions from `staleAfterModelChange` |
+
+### OpenTelemetry
+
+Every public method emits an OTel span. Requires an OpenTelemetry SDK in the host application.
+
+## Examples
+
+Runnable examples in [examples/](./examples/). All examples connect to `localhost:6399` by default (override via `VALKEY_HOST` / `VALKEY_PORT`).
+
+| Example | API key needed | What it shows |
+|---|---|---|
+| `basic/` | Voyage AI (or `--mock`) | Core store/check/invalidate |
+| `openai/` | OpenAI | Chat Completions + cost tracking |
+| `openai-responses/` | OpenAI | Responses API adapter |
+| `anthropic/` | Anthropic + OpenAI | Messages API, high cost savings (~$0.000064/hit) |
+| `llamaindex/` | OpenAI | ChatMessage[] adapter |
+| `langchain/` | OpenAI | BetterDBSemanticCache + ChatOpenAI |
+| `vercel-ai-sdk/` | OpenAI | createSemanticCacheMiddleware |
+| `langgraph/` | None | BetterDBSemanticStore memory |
+| `multimodal/` | None | ContentBlock[] with text + image |
+| `cost-tracking/` | None | Cost savings with mock embedder |
+| `threshold-tuning/` | None | thresholdEffectiveness() |
+| `embedding-cache/` | None | Embedding cache on/off comparison |
+| `batch-check/` | None | checkBatch() vs sequential |
+| `rerank/` | None | Top-k rerank hook |
+
+## Client Lifecycle
+
+SemanticCache does **not** own the iovalkey client:
+
+```typescript
+const client = new Valkey({ host: 'localhost', port: 6399 });
+const cache = new SemanticCache({ client, embedFn });
+// ... use cache ...
+await client.quit();
+```
+
+## Known Limitations
 
 ### Cluster mode
 
-`@betterdb/semantic-cache` works with single-node Valkey instances and managed
-single-endpoint services (Amazon ElastiCache for Valkey, Google Cloud Memorystore
-for Valkey). It does not fully support Valkey in cluster mode.
-
-The specific issue is `flush()`: it uses `SCAN` to find and delete entry keys,
-but `SCAN` in cluster mode only iterates keys on the node it is sent to. In a
-multi-node cluster, `flush()` will silently leave entry keys on other nodes
-(the FT index itself is dropped correctly).
-
-`check()`, `store()`, `invalidate()`, and `stats()` are unaffected — these use
-`FT.SEARCH`, `HSET`, `DEL`, and `HINCRBY` which route correctly in cluster mode
-via the key hash slot.
-
-If you need cluster support, either avoid `flush()` or implement a cluster-aware
-key sweep using the iovalkey cluster client's per-node scan capability.
-Cluster mode support is planned for a future release.
+`flush()` fans out via `clusterScan()` across all master nodes. `FT.SEARCH` routes correctly via hash slots. `FT.CREATE` only creates the index on the receiving node - in a full cluster, create the index on each node separately.
 
 ### Streaming
 
-Streaming LLM responses are not supported. `store()` expects a complete response
-string. If your application uses streaming, accumulate the full response before
-calling `store()`. The cached response is always returned as a complete string,
-not re-streamed token-by-token.
+`store()` requires a complete response string. The Vercel AI SDK adapter does not implement `wrapStream`. Accumulate the full streamed response before calling `store()`.
+
+### Schema migration (v0.1 -> v0.2)
+
+v0.2.0 added `binary_refs`, `temperature`, `top_p`, `seed` fields to the index schema. Existing v0.1.0 indexes operate in text-only mode until `flush()` + `initialize()` rebuilds the schema.
 
 ## License
 

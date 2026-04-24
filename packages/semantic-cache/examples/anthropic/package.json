@@ -1,0 +1,17 @@
+{
+  "name": "semantic-cache-anthropic-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
+    "@betterdb/semantic-cache": "file:../../",
+    "iovalkey": "^0.3.0",
+    "openai": "^6.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

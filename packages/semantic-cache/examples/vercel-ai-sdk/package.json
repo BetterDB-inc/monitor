@@ -1,0 +1,17 @@
+{
+  "name": "semantic-cache-vercel-ai-sdk-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.0",
+    "@betterdb/semantic-cache": "file:../../",
+    "ai": "^6.0.135",
+    "iovalkey": "^0.3.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

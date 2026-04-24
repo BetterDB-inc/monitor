@@ -30,7 +30,7 @@ describe('BetterDBSemanticCache (LangChain adapter)', () => {
     expect(result).toBeNull();
   });
 
-  it('lookup() returns [{ text }] on cache hit', async () => {
+  it('lookup() returns [{ text, message }] on cache hit', async () => {
     mockCache.check.mockResolvedValueOnce({
       hit: true,
       response: 'Artificial intelligence is...',
@@ -38,7 +38,10 @@ describe('BetterDBSemanticCache (LangChain adapter)', () => {
     });
     const adapter = await createAdapter();
     const result = await adapter.lookup('What is AI?', 'model-hash');
-    expect(result).toEqual([{ text: 'Artificial intelligence is...' }]);
+    expect(result).not.toBeNull();
+    expect(result![0].text).toBe('Artificial intelligence is...');
+    // message should be an AIMessage for ChatOpenAI compatibility
+    expect((result![0] as { message?: unknown }).message).toBeDefined();
   });
 
   it('update() calls cache.store() with joined generation text', async () => {

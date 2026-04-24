@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import type {
   SemanticCacheOptions,
@@ -11,6 +12,7 @@ import type {
   InvalidateResult,
   Valkey,
   EmbedFn,
+  ModelCost,
 } from './types';
 import {
   SemanticCacheUsageError,
@@ -18,7 +20,18 @@ import {
   ValkeyCommandError,
 } from './errors';
 import { createTelemetry, type Telemetry } from './telemetry';
-import { encodeFloat32, parseFtSearchResponse } from './utils';
+import {
+  encodeFloat32,
+  escapeTag,
+  parseFtSearchResponse,
+  extractText,
+  extractBinaryRefs,
+  type ContentBlock,
+  type TextBlock,
+} from './utils';
+import { DEFAULT_COST_TABLE } from './defaultCostTable';
+import { clusterScan } from './cluster';
+import { createAnalytics, NOOP_ANALYTICS, type Analytics } from './analytics';
 
 const INVALIDATE_BATCH_SIZE = 1000;
 
@@ -33,16 +46,29 @@ export class SemanticCache {
   private readonly indexName: string;
   private readonly entryPrefix: string;
   private readonly statsKey: string;
+  private readonly similarityWindowKey: string;
   private readonly defaultThreshold: number;
   private readonly defaultTtl: number | undefined;
   private readonly categoryThresholds: Record<string, number>;
   private readonly uncertaintyBand: number;
   private readonly telemetry: Telemetry;
+  private readonly costTable: Record<string, ModelCost> | undefined;
+  private readonly embeddingCacheEnabled: boolean;
+  private readonly embeddingCacheTtl: number;
+  private readonly embedKeyPrefix: string;
 
   private _initialized = false;
   private _dimension = 0;
+  private _hasBinaryRefs = false;
   private _initPromise: Promise<void> | null = null;
   private _initGeneration = 0;
+
+  private readonly analyticsOpts: SemanticCacheOptions['analytics'];
+  private readonly usesDefaultCostTable: boolean;
+  private analytics: Analytics = NOOP_ANALYTICS;
+  private statsTimer: ReturnType<typeof setInterval> | undefined;
+  private shutdownCalled = false;
+  private analyticsInitiated = false;
 
   /**
    * Creates a new SemanticCache instance.
@@ -60,19 +86,38 @@ export class SemanticCache {
     this.indexName = `${this.name}:idx`;
     this.entryPrefix = `${this.name}:entry:`;
     this.statsKey = `${this.name}:__stats`;
+    this.similarityWindowKey = `${this.name}:__similarity_window`;
+    this.embedKeyPrefix = `${this.name}:embed:`;
     this.defaultThreshold = options.defaultThreshold ?? 0.1;
     this.defaultTtl = options.defaultTtl;
     this.categoryThresholds = options.categoryThresholds ?? {};
     this.uncertaintyBand = options.uncertaintyBand ?? 0.05;
+
+    // Build effective cost table
+    const useDefault = options.useDefaultCostTable ?? true;
+    if (!useDefault && !options.costTable) {
+      this.costTable = undefined;
+    } else if (!useDefault) {
+      this.costTable = options.costTable;
+    } else {
+      this.costTable = { ...DEFAULT_COST_TABLE, ...(options.costTable ?? {}) };
+    }
+
+    // Embedding cache config
+    this.embeddingCacheEnabled = options.embeddingCache?.enabled ?? true;
+    this.embeddingCacheTtl = options.embeddingCache?.ttl ?? 86400;
 
     this.telemetry = createTelemetry({
       prefix: options.telemetry?.metricsPrefix ?? 'semantic_cache',
       tracerName: options.telemetry?.tracerName ?? '@betterdb/semantic-cache',
       registry: options.telemetry?.registry,
     });
+
+    this.analyticsOpts = options.analytics;
+    this.usesDefaultCostTable = useDefault;
   }
 
-  // ── Lifecycle ──────────────────────────────────────────────
+  // -- Lifecycle --
 
   async initialize(): Promise<void> {
     if (!this._initPromise) {
@@ -87,7 +132,6 @@ export class SemanticCache {
   async flush(): Promise<void> {
     // Mark uninitialized immediately so concurrent check()/store() calls get
     // a clear SemanticCacheUsageError instead of cryptic Valkey errors.
-    // Bump generation so any in-flight _doInitialize() won't overwrite this state.
     this._initialized = false;
     this._initPromise = null;
     this._initGeneration++;
@@ -102,41 +146,73 @@ export class SemanticCache {
       }
     }
 
-    const entryPattern = `${this.name}:entry:*`;
-    let cursor = '0';
-    do {
-      const [nextCursor, keys] = await this.client.scan(
-        cursor, 'MATCH', entryPattern, 'COUNT', '100',
-      );
-      cursor = nextCursor;
-      if (keys.length > 0) await this.client.del(keys);
-    } while (cursor !== '0');
+    // Cluster-aware SCAN for entry keys and embed cache keys
+    const patterns = [
+      `${this.name}:entry:*`,
+      `${this.name}:embed:*`,
+    ];
+
+    for (const pattern of patterns) {
+      await clusterScan(this.client, pattern, async (keys, nodeClient) => {
+        await nodeClient.del(keys);
+      });
+    }
 
     await this.client.del(this.statsKey);
+    await this.client.del(this.similarityWindowKey);
+    this.analytics.capture('cache_flush');
   }
 
-  // ── Public operations ──────────────────────────────────────
+  /** Shut down the analytics client and cancel the stats timer. */
+  async shutdown(): Promise<void> {
+    this.shutdownCalled = true;
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = undefined;
+    }
+    await this.analytics.shutdown();
+  }
 
-  async check(prompt: string, options?: CacheCheckOptions): Promise<CacheCheckResult> {
+  // -- Public operations --
+
+  async check(prompt: string | ContentBlock[], options?: CacheCheckOptions): Promise<CacheCheckResult> {
     this.assertInitialized('check');
 
     return this.traced('check', async (span) => {
       const category = options?.category ?? '';
-      const k = options?.k ?? 1;
       const threshold =
         options?.threshold ??
         (category && this.categoryThresholds[category] !== undefined
           ? this.categoryThresholds[category]
           : this.defaultThreshold);
 
-      const { vector: embedding, durationSec: embedSec } = await this.embed(prompt);
+      // Resolve text and binary refs from prompt
+      const { text: promptText, binaryRefs } = await this.resolvePrompt(prompt);
+
+      // Stale model detection
+      const checkStale = (options?.staleAfterModelChange ?? false) && !!options?.currentModel;
+
+      // Rerank option
+      const rerankOpts = options?.rerank;
+      const k = rerankOpts ? rerankOpts.k : (options?.k ?? 1);
+
+      const { vector: embedding, durationSec: embedSec } = await this.embed(promptText);
       this.assertDimension(embedding);
 
-      // FT.SEARCH — Valkey Search 1.2 rejects KNN aliases in RETURN/SORTBY,
-      // so we omit both. Results include all fields and are pre-sorted by distance.
+      // Build filter
+      const userFilter = options?.filter;
+      // AND semantics: each ref must be present — chain separate TAG clauses.
+      const binaryFilter =
+        binaryRefs.length > 0 && this._hasBinaryRefs
+          ? (binaryRefs.length === 1
+              ? `@binary_refs:{${escapeTag(binaryRefs[0])}}`
+              : binaryRefs.map((r) => `@binary_refs:{${escapeTag(r)}}`).join(' '))
+          : null;
+      const combinedFilter = [userFilter, binaryFilter].filter(Boolean).join(' ');
+      const filterExpr = combinedFilter ? `(${combinedFilter})` : '*';
+
+      const query = `${filterExpr}=>[KNN ${k} @embedding $vec AS __score]`;
       const searchStart = performance.now();
-      const filter = options?.filter;
-      const query = `${filter ? `(${filter})` : '*'}=>[KNN ${k} @embedding $vec AS __score]`;
       let rawResult: unknown;
       try {
         rawResult = await this.client.call(
@@ -176,6 +252,9 @@ export class SemanticCache {
 
       // Miss (no usable score, or score exceeds threshold)
       if (isNaN(score) || score > threshold) {
+        if (!isNaN(score)) {
+          await this.recordSimilarityWindow(score, 'miss', category);
+        }
         await this.recordStat('misses');
         this.telemetry.metrics.requestsTotal
           .labels({ cache_name: this.name, result: 'miss', category: categoryLabel }).inc();
@@ -193,51 +272,169 @@ export class SemanticCache {
         return result;
       }
 
-      // Hit
+      // Rerank: apply rerankFn to all candidates above threshold
+      let winnerParsedIndex = 0;
+      if (rerankOpts && parsed.length > 0) {
+        // Preserve the original parsed[] index alongside each candidate so we
+        // can map back even when NaN-scored entries are filtered out.
+        const indexedCandidates = parsed
+          .map((r, i) => ({ i, s: parseFloat(r.fields['__score'] ?? 'NaN') }))
+          .filter(({ s }) => !isNaN(s))
+          .map(({ i, s }) => ({
+            origIdx: i,
+            candidate: { response: parsed[i].fields['response'] ?? '', similarity: s },
+          }));
+        const picked = await rerankOpts.rerankFn(
+          promptText, indexedCandidates.map((x) => x.candidate),
+        );
+        // Explicit bounds check: -1 means "reject all"; out-of-range is a caller bug
+        // treated as a miss rather than silently falling back to the top candidate.
+        if (picked === -1 || picked < 0 || picked >= indexedCandidates.length) {
+          await this.recordSimilarityWindow(score, 'miss', category);
+          await this.recordStat('misses');
+          this.telemetry.metrics.requestsTotal
+            .labels({ cache_name: this.name, result: 'miss', category: categoryLabel }).inc();
+          span.setAttributes({ 'cache.hit': false, 'cache.name': this.name, 'cache.reranked': true });
+          return { hit: false, confidence: 'miss' as const };
+        }
+        // Map back to the original parsed[] index (not the candidates[] index)
+        winnerParsedIndex = indexedCandidates[picked].origIdx;
+      }
+
+      const winner = parsed[winnerParsedIndex] ?? parsed[0];
+      const winnerScore = parseFloat(winner.fields['__score'] ?? String(score));
+
+      // Stale model check: if winner's model differs from currentModel, evict and treat as miss
+      if (checkStale) {
+        const storedModel = winner.fields['model'] ?? '';
+        if (storedModel && storedModel !== options!.currentModel) {
+          // Evict stale entry
+          try {
+            await this.client.del(winner.key);
+          } catch { /* best effort */ }
+          await this.recordSimilarityWindow(winnerScore, 'miss', category);
+          this.telemetry.metrics.staleModelEvictions.labels({ cache_name: this.name }).inc();
+          await this.recordStat('misses');
+          this.telemetry.metrics.requestsTotal
+            .labels({ cache_name: this.name, result: 'miss', category: categoryLabel }).inc();
+          span.setAttributes({ 'cache.hit': false, 'cache.stale_evicted': true });
+          return { hit: false, confidence: 'miss' as const };
+        }
+      }
+
+      // All checks passed — record as a genuine hit
+      await this.recordSimilarityWindow(winnerScore, 'hit', category);
       const confidence: CacheConfidence =
-        score >= threshold - this.uncertaintyBand ? 'uncertain' : 'high';
+        winnerScore >= threshold - this.uncertaintyBand ? 'uncertain' : 'high';
 
       await this.recordStat('hits');
       const metricResult = confidence === 'uncertain' ? 'uncertain_hit' : 'hit';
       this.telemetry.metrics.requestsTotal
         .labels({ cache_name: this.name, result: metricResult, category: categoryLabel }).inc();
 
-      const matchedKey = parsed[0].key;
+      const matchedKey = winner.key;
       if (this.defaultTtl !== undefined && matchedKey) {
         await this.client.expire(matchedKey, this.defaultTtl);
       }
 
+      // Cost saved
+      let costSaved: number | undefined;
+      const costMicrosStr = winner.fields['cost_micros'];
+      if (costMicrosStr) {
+        const costMicros = parseInt(costMicrosStr, 10);
+        if (!isNaN(costMicros) && costMicros > 0) {
+          costSaved = costMicros / 1_000_000;
+          // Atomically increment cost_saved_micros in stats
+          await this.client.hincrby(this.statsKey, 'cost_saved_micros', costMicros);
+          this.telemetry.metrics.costSavedTotal
+            .labels({ cache_name: this.name, category: categoryLabel }).inc(costSaved);
+        }
+      }
+
+      // Content blocks
+      let contentBlocks: import('./utils').ContentBlock[] | undefined;
+      const contentBlocksStr = winner.fields['content_blocks'];
+      if (contentBlocksStr) {
+        try {
+          contentBlocks = JSON.parse(contentBlocksStr);
+        } catch { /* ignore parse errors */ }
+      }
+
       span.setAttributes({
-        'cache.hit': true, 'cache.similarity': score, 'cache.threshold': threshold,
+        'cache.hit': true, 'cache.similarity': winnerScore, 'cache.threshold': threshold,
         'cache.confidence': confidence, 'cache.matched_key': matchedKey,
         'cache.category': categoryLabel, ...timingAttrs,
       });
 
-      return {
-        hit: true, response: parsed[0].fields['response'],
-        similarity: score, confidence, matchedKey,
+      const result: CacheCheckResult = {
+        hit: true, response: winner.fields['response'],
+        similarity: winnerScore, confidence, matchedKey,
       };
+      if (costSaved !== undefined) result.costSaved = costSaved;
+      if (contentBlocks) result.contentBlocks = contentBlocks;
+      return result;
     });
   }
 
-  async store(prompt: string, response: string, options?: CacheStoreOptions): Promise<string> {
+  async store(prompt: string | ContentBlock[], response: string, options?: CacheStoreOptions): Promise<string> {
     this.assertInitialized('store');
 
     return this.traced('store', async (span) => {
-      const { vector: embedding, durationSec: embedSec } = await this.embed(prompt);
+      const { text: promptText, binaryRefs } = await this.resolvePrompt(prompt);
+      const { vector: embedding, durationSec: embedSec } = await this.embed(promptText);
       this.assertDimension(embedding);
 
       const entryKey = `${this.entryPrefix}${randomUUID()}`;
       const category = options?.category ?? '';
       const model = options?.model ?? '';
 
+      // Compute cost if tokens and model provided
+      let costMicros: number | undefined;
+      if (
+        options?.model &&
+        options?.inputTokens !== undefined &&
+        options?.outputTokens !== undefined &&
+        this.costTable
+      ) {
+        const pricing = this.costTable[options.model];
+        if (pricing) {
+          costMicros = Math.round(
+            (options.inputTokens * pricing.inputPer1k / 1000 +
+              options.outputTokens * pricing.outputPer1k / 1000) * 1_000_000
+          );
+        }
+      }
+
+      const hashFields: Record<string, string | Buffer> = {
+        prompt: promptText,
+        response,
+        model,
+        category,
+        inserted_at: Date.now().toString(),
+        metadata: JSON.stringify(options?.metadata ?? {}),
+        embedding: encodeFloat32(embedding),
+      };
+
+      if (binaryRefs.length > 0) {
+        hashFields['binary_refs'] = binaryRefs.join(',');
+      }
+
+      if (costMicros !== undefined && costMicros > 0) {
+        hashFields['cost_micros'] = String(costMicros);
+      }
+
+      if (options?.temperature !== undefined) {
+        hashFields['temperature'] = String(options.temperature);
+      }
+      if (options?.topP !== undefined) {
+        hashFields['top_p'] = String(options.topP);
+      }
+      if (options?.seed !== undefined) {
+        hashFields['seed'] = String(options.seed);
+      }
+
       try {
-        await this.client.hset(entryKey, {
-          prompt, response, model, category,
-          inserted_at: Date.now().toString(),
-          metadata: JSON.stringify(options?.metadata ?? {}),
-          embedding: encodeFloat32(embedding),
-        } as Record<string, string | Buffer>);
+        await this.client.hset(entryKey, hashFields);
       } catch (err) {
         throw new ValkeyCommandError('HSET', err);
       }
@@ -256,10 +453,237 @@ export class SemanticCache {
   }
 
   /**
+   * Store structured content blocks as the cached response.
+   * Populates both the response field (from TextBlock text) and content_blocks (full JSON).
+   */
+  async storeMultipart(
+    prompt: string | ContentBlock[],
+    blocks: ContentBlock[],
+    options?: CacheStoreOptions,
+  ): Promise<string> {
+    this.assertInitialized('storeMultipart');
+
+    return this.traced('storeMultipart', async (span) => {
+      const { text: promptText, binaryRefs } = await this.resolvePrompt(prompt);
+      const { vector: embedding, durationSec: embedSec } = await this.embed(promptText);
+      this.assertDimension(embedding);
+
+      // Derive text response from blocks for backward compat
+      const textResponse = extractText(blocks);
+
+      const entryKey = `${this.entryPrefix}${randomUUID()}`;
+      const category = options?.category ?? '';
+      const model = options?.model ?? '';
+
+      let costMicros: number | undefined;
+      if (options?.model && options?.inputTokens !== undefined && options?.outputTokens !== undefined && this.costTable) {
+        const pricing = this.costTable[options.model];
+        if (pricing) {
+          costMicros = Math.round(
+            (options.inputTokens * pricing.inputPer1k / 1000 +
+              options.outputTokens * pricing.outputPer1k / 1000) * 1_000_000
+          );
+        }
+      }
+
+      const hashFields: Record<string, string | Buffer> = {
+        prompt: promptText,
+        response: textResponse,
+        model,
+        category,
+        inserted_at: Date.now().toString(),
+        metadata: JSON.stringify(options?.metadata ?? {}),
+        embedding: encodeFloat32(embedding),
+        content_blocks: JSON.stringify(blocks),
+      };
+
+      if (binaryRefs.length > 0) {
+        hashFields['binary_refs'] = binaryRefs.join(',');
+      }
+      if (costMicros !== undefined && costMicros > 0) {
+        hashFields['cost_micros'] = String(costMicros);
+      }
+      if (options?.temperature !== undefined) hashFields['temperature'] = String(options.temperature);
+      if (options?.topP !== undefined) hashFields['top_p'] = String(options.topP);
+      if (options?.seed !== undefined) hashFields['seed'] = String(options.seed);
+
+      try {
+        await this.client.hset(entryKey, hashFields);
+      } catch (err) {
+        throw new ValkeyCommandError('HSET', err);
+      }
+
+      const ttl = options?.ttl ?? this.defaultTtl;
+      if (ttl !== undefined) await this.client.expire(entryKey, ttl);
+
+      span.setAttributes({
+        'cache.name': this.name, 'cache.key': entryKey, 'cache.ttl': ttl ?? -1,
+        'cache.category': category || 'none', 'cache.model': model || 'none',
+        'embedding_latency_ms': embedSec * 1000,
+      });
+
+      return entryKey;
+    });
+  }
+
+  /**
+   * Check multiple prompts in parallel, using pipelined FT.SEARCH calls.
+   * Returns results in input order.
+   */
+  async checkBatch(
+    prompts: (string | ContentBlock[])[],
+    options?: CacheCheckOptions,
+  ): Promise<CacheCheckResult[]> {
+    this.assertInitialized('checkBatch');
+
+    if (prompts.length === 0) return [];
+
+    if (options?.rerank) {
+      throw new SemanticCacheUsageError(
+        "checkBatch() does not support the 'rerank' option. Use check() for reranking individual prompts.",
+      );
+    }
+    if (options?.staleAfterModelChange) {
+      throw new SemanticCacheUsageError(
+        "checkBatch() does not support 'staleAfterModelChange'. Use check() for stale-model eviction.",
+      );
+    }
+
+    return this.traced('checkBatch', async (span) => {
+      // Resolve all prompts and embed in parallel
+      const resolved = await Promise.all(prompts.map((p) => this.resolvePrompt(p)));
+      const embeddings = await Promise.all(resolved.map(({ text }) => this.embed(text)));
+
+      const category = options?.category ?? '';
+      const threshold =
+        options?.threshold ??
+        (category && this.categoryThresholds[category] !== undefined
+          ? this.categoryThresholds[category]
+          : this.defaultThreshold);
+      const k = options?.k ?? 1;
+      const userFilter = options?.filter;
+
+      // Pipeline all FT.SEARCH calls
+      const pipeline = this.client.pipeline();
+      for (let i = 0; i < prompts.length; i++) {
+        const { binaryRefs } = resolved[i];
+        const { vector: embedding } = embeddings[i];
+
+        const binaryFilter =
+          binaryRefs.length > 0 && this._hasBinaryRefs
+            ? (binaryRefs.length === 1
+                ? `@binary_refs:{${escapeTag(binaryRefs[0])}}`
+                : binaryRefs.map((r) => `@binary_refs:{${escapeTag(r)}}`).join(' '))
+            : null;
+        const combinedFilter = [userFilter, binaryFilter].filter(Boolean).join(' ');
+        const filterExpr = combinedFilter ? `(${combinedFilter})` : '*';
+        const query = `${filterExpr}=>[KNN ${k} @embedding $vec AS __score]`;
+
+        pipeline.call(
+          'FT.SEARCH', this.indexName, query,
+          'PARAMS', '2', 'vec', encodeFloat32(embedding),
+          'LIMIT', '0', String(k),
+          'DIALECT', '2',
+        );
+      }
+
+      const pipelineResults = await pipeline.exec();
+      span.setAttributes({ 'cache.batch_size': prompts.length, 'cache.name': this.name });
+
+      const results: CacheCheckResult[] = [];
+      const categoryLabel = category || 'none';
+
+      for (let i = 0; i < prompts.length; i++) {
+        const pipelineEntry = pipelineResults?.[i];
+        const err = pipelineEntry?.[0];
+        const rawResult = pipelineEntry?.[1];
+
+        if (err) {
+          await this.recordStat('misses');
+          this.telemetry.metrics.requestsTotal
+            .labels({ cache_name: this.name, result: 'miss', category: categoryLabel }).inc();
+          results.push({ hit: false, confidence: 'miss' as const });
+          continue;
+        }
+
+        const parsed = parseFtSearchResponse(rawResult);
+
+        if (parsed.length === 0) {
+          await this.recordStat('misses');
+          this.telemetry.metrics.requestsTotal
+            .labels({ cache_name: this.name, result: 'miss', category: categoryLabel }).inc();
+          results.push({ hit: false, confidence: 'miss' as const });
+          continue;
+        }
+
+        const scoreStr = parsed[0].fields['__score'];
+        const score = scoreStr !== undefined ? parseFloat(scoreStr) : NaN;
+
+        if (isNaN(score) || score > threshold) {
+          if (!isNaN(score)) {
+            await this.recordSimilarityWindow(score, 'miss', category);
+          }
+          await this.recordStat('misses');
+          this.telemetry.metrics.requestsTotal
+            .labels({ cache_name: this.name, result: 'miss', category: categoryLabel }).inc();
+          const result: CacheCheckResult = { hit: false, confidence: 'miss' as const };
+          if (!isNaN(score)) {
+            result.similarity = score;
+            result.nearestMiss = { similarity: score, deltaToThreshold: score - threshold };
+          }
+          results.push(result);
+          continue;
+        }
+
+        await this.recordSimilarityWindow(score, 'hit', category);
+        const confidence: CacheConfidence =
+          score >= threshold - this.uncertaintyBand ? 'uncertain' : 'high';
+        await this.recordStat('hits');
+        const metricResult = confidence === 'uncertain' ? 'uncertain_hit' : 'hit';
+        this.telemetry.metrics.requestsTotal
+          .labels({ cache_name: this.name, result: metricResult, category: categoryLabel }).inc();
+
+        const matchedKey = parsed[0].key;
+        if (this.defaultTtl !== undefined && matchedKey) {
+          await this.client.expire(matchedKey, this.defaultTtl);
+        }
+
+        let costSaved: number | undefined;
+        const costMicrosStr = parsed[0].fields['cost_micros'];
+        if (costMicrosStr) {
+          const costMicros = parseInt(costMicrosStr, 10);
+          if (!isNaN(costMicros) && costMicros > 0) {
+            costSaved = costMicros / 1_000_000;
+            await this.client.hincrby(this.statsKey, 'cost_saved_micros', costMicros);
+            this.telemetry.metrics.costSavedTotal
+              .labels({ cache_name: this.name, category: categoryLabel }).inc(costSaved);
+          }
+        }
+
+        let contentBlocks: import('./utils').ContentBlock[] | undefined;
+        const contentBlocksStr = parsed[0].fields['content_blocks'];
+        if (contentBlocksStr) {
+          try { contentBlocks = JSON.parse(contentBlocksStr); } catch { /* ignore */ }
+        }
+
+        const result: CacheCheckResult = {
+          hit: true, response: parsed[0].fields['response'],
+          similarity: score, confidence, matchedKey,
+        };
+        if (costSaved !== undefined) result.costSaved = costSaved;
+        if (contentBlocks) result.contentBlocks = contentBlocks;
+        results.push(result);
+      }
+
+      return results;
+    });
+  }
+
+  /**
    * Deletes all entries matching a valkey-search filter expression.
    *
    * **Security note:** `filter` is passed directly to FT.SEARCH. Only pass
-   * trusted, programmatically-constructed expressions — never unsanitised
+   * trusted, programmatically-constructed expressions - never unsanitised
    * user input.
    */
   async invalidate(filter: string): Promise<InvalidateResult> {
@@ -303,13 +727,36 @@ export class SemanticCache {
     });
   }
 
+  /** Delete all entries tagged with the given model name. */
+  async invalidateByModel(model: string): Promise<number> {
+    let total = 0;
+    let result: InvalidateResult;
+    do {
+      result = await this.invalidate(`@model:{${escapeTag(model)}}`);
+      total += result.deleted;
+    } while (result.truncated);
+    return total;
+  }
+
+  /** Delete all entries tagged with the given category. */
+  async invalidateByCategory(category: string): Promise<number> {
+    let total = 0;
+    let result: InvalidateResult;
+    do {
+      result = await this.invalidate(`@category:{${escapeTag(category)}}`);
+      total += result.deleted;
+    } while (result.truncated);
+    return total;
+  }
+
   async stats(): Promise<CacheStats> {
     this.assertInitialized('stats');
     const raw = await this.client.hgetall(this.statsKey);
-    const hits = parseInt(raw.hits ?? '0', 10);
-    const misses = parseInt(raw.misses ?? '0', 10);
-    const total = parseInt(raw.total ?? '0', 10);
-    return { hits, misses, total, hitRate: total === 0 ? 0 : hits / total };
+    const hits = parseInt(raw?.hits ?? '0', 10);
+    const misses = parseInt(raw?.misses ?? '0', 10);
+    const total = parseInt(raw?.total ?? '0', 10);
+    const costSavedMicros = parseInt(raw?.cost_saved_micros ?? '0', 10);
+    return { hits, misses, total, hitRate: total === 0 ? 0 : hits / total, costSavedMicros };
   }
 
   async indexInfo(): Promise<IndexInfo> {
@@ -333,27 +780,247 @@ export class SemanticCache {
     return { name: this.indexName, numDocs, dimension: this._dimension, indexingState };
   }
 
-  // ── Private helpers ────────────────────────────────────────
+  /**
+   * Analyze the rolling similarity score window and recommend threshold adjustments.
+   */
+  async thresholdEffectiveness(options?: {
+    category?: string;
+    minSamples?: number;
+  }): Promise<ThresholdEffectivenessResult> {
+    this.assertInitialized('thresholdEffectiveness');
+
+    const minSamples = options?.minSamples ?? 100;
+    const category = options?.category;
+    const threshold = category && this.categoryThresholds[category] !== undefined
+      ? this.categoryThresholds[category]
+      : this.defaultThreshold;
+
+    // Read all window entries
+    let rawEntries: string[];
+    try {
+      rawEntries = (await this.client.zrange(this.similarityWindowKey, '0', '-1')) as string[];
+    } catch {
+      rawEntries = [];
+    }
+
+    // Parse and optionally filter by category
+    const entries: Array<{ score: number; result: 'hit' | 'miss'; category: string }> = [];
+    for (const raw of rawEntries) {
+      try {
+        const entry = JSON.parse(String(raw));
+        if (
+          typeof entry.score === 'number' &&
+          (entry.result === 'hit' || entry.result === 'miss')
+        ) {
+          if (!category || entry.category === category) {
+            entries.push(entry);
+          }
+        }
+      } catch { /* skip corrupt entries */ }
+    }
+
+    const sampleCount = entries.length;
+    const categoryLabel = category ?? 'all';
+
+    if (sampleCount < minSamples) {
+      return {
+        category: categoryLabel,
+        sampleCount,
+        currentThreshold: threshold,
+        hitRate: 0,
+        uncertainHitRate: 0,
+        nearMissRate: 0,
+        avgHitSimilarity: 0,
+        avgMissSimilarity: 0,
+        recommendation: 'insufficient_data',
+        reasoning: `Only ${sampleCount} samples collected; ${minSamples} required for a reliable recommendation.`,
+      };
+    }
+
+    const hits = entries.filter((e) => e.result === 'hit');
+    const misses = entries.filter((e) => e.result === 'miss');
+
+    const hitRate = hits.length / sampleCount;
+    const uncertainHits = hits.filter((e) => e.score >= threshold - this.uncertaintyBand);
+    const uncertainHitRate = hits.length > 0 ? uncertainHits.length / hits.length : 0;
+
+    // Near-misses are scores just ABOVE the threshold (genuine close misses).
+    // Scores below the threshold recorded as misses (rerank rejection, stale eviction)
+    // must be excluded — they produce negative avgNearMissDelta, causing
+    // recommendedThreshold = threshold + negative < threshold, contradicting "loosen".
+    const nearMisses = misses.filter((e) => e.score > threshold && e.score <= threshold + 0.03);
+    const nearMissRate = misses.length > 0 ? nearMisses.length / misses.length : 0;
+
+    const avgHitSimilarity =
+      hits.length > 0 ? hits.reduce((s, e) => s + e.score, 0) / hits.length : 0;
+    const avgMissSimilarity =
+      misses.length > 0 ? misses.reduce((s, e) => s + e.score, 0) / misses.length : 0;
+
+    // avgNearMissDelta: how far above the threshold near-misses are on average
+    const avgNearMissDelta =
+      nearMisses.length > 0
+        ? nearMisses.reduce((s, e) => s + (e.score - threshold), 0) / nearMisses.length
+        : 0;
+
+    let recommendation: ThresholdEffectivenessResult['recommendation'];
+    let recommendedThreshold: number | undefined;
+    let reasoning: string;
+
+    if (uncertainHitRate > 0.2) {
+      recommendation = 'tighten_threshold';
+      recommendedThreshold = Math.max(0, threshold - this.uncertaintyBand * 1.5);
+      reasoning = `${(uncertainHitRate * 100).toFixed(1)}% of hits are in the uncertainty band - tighten the threshold to reduce false positives.`;
+    } else if (nearMissRate > 0.3 && avgNearMissDelta < 0.03) {
+      recommendation = 'loosen_threshold';
+      recommendedThreshold = threshold + avgNearMissDelta;
+      reasoning = `${(nearMissRate * 100).toFixed(1)}% of misses are very close to the threshold - consider loosening to capture more hits.`;
+    } else {
+      recommendation = 'optimal';
+      reasoning = `Hit rate is ${(hitRate * 100).toFixed(1)}% with ${(uncertainHitRate * 100).toFixed(1)}% uncertain hits - threshold appears well-calibrated.`;
+    }
+
+    return {
+      category: categoryLabel,
+      sampleCount,
+      currentThreshold: threshold,
+      hitRate,
+      uncertainHitRate,
+      nearMissRate,
+      avgHitSimilarity,
+      avgMissSimilarity,
+      recommendation,
+      recommendedThreshold,
+      reasoning,
+    };
+  }
+
+  /**
+   * Returns threshold effectiveness results for every category seen in the
+   * rolling window, plus one aggregate result for all categories combined.
+   */
+  async thresholdEffectivenessAll(options?: {
+    minSamples?: number;
+  }): Promise<ThresholdEffectivenessResult[]> {
+    this.assertInitialized('thresholdEffectivenessAll');
+
+    let rawEntries: string[];
+    try {
+      rawEntries = (await this.client.zrange(this.similarityWindowKey, '0', '-1')) as string[];
+    } catch {
+      rawEntries = [];
+    }
+
+    // Collect unique categories
+    const categories = new Set<string>();
+    for (const raw of rawEntries) {
+      try {
+        const entry = JSON.parse(raw);
+        if (entry.category) categories.add(entry.category);
+      } catch { /* skip */ }
+    }
+
+    const results = await Promise.all([
+      this.thresholdEffectiveness({ minSamples: options?.minSamples }),
+      ...[...categories].filter(Boolean).map((cat) =>
+        this.thresholdEffectiveness({ category: cat, minSamples: options?.minSamples })
+      ),
+    ]);
+
+    return results;
+  }
+
+  // -- Internal helpers exposed to package adapters --
+
+  /** @internal Default similarity threshold. */
+  get _defaultThreshold(): number { return this.defaultThreshold; }
+
+  /**
+   * Execute a stable FT.SEARCH for use by adapters (e.g. LangGraph).
+   * SORTBY inserted_at ASC gives stable ordering across paginated calls.
+   * @internal
+   */
+  async _searchEntries(filterExpr: string, limit: number, offset: number): Promise<unknown> {
+    return this.client.call(
+      'FT.SEARCH', this.indexName, filterExpr,
+      'SORTBY', 'inserted_at', 'ASC',
+      'LIMIT', String(offset), String(limit),
+      'DIALECT', '2',
+    );
+  }
+
+  /**
+   * Embed text for use by adapters (e.g. LangGraph semantic search).
+   * @internal
+   */
+  async _embedText(text: string): Promise<{ vector: number[]; durationSec: number }> {
+    return this.embed(text);
+  }
+
+  // -- Private helpers --
 
   private async _doInitialize(): Promise<void> {
     const gen = this._initGeneration;
     return this.traced('initialize', async () => {
-      const dim = await this.ensureIndexAndGetDimension();
-      // If flush() ran while we were initializing, don't overwrite its state.
+      const { dim, hasBinaryRefs } = await this.ensureIndexAndGetDimension();
       if (this._initGeneration !== gen) return;
       this._dimension = dim;
+      this._hasBinaryRefs = hasBinaryRefs;
       this._initialized = true;
+      // Fire analytics init once (not on every flush+initialize cycle)
+      this.initAnalyticsSafe().catch(() => {});
     });
   }
 
-  private async ensureIndexAndGetDimension(): Promise<number> {
+  private async initAnalyticsSafe(): Promise<void> {
+    if (this.analyticsInitiated) return;
+    this.analyticsInitiated = true;
+    try {
+      const a = await createAnalytics(this.analyticsOpts);
+      if (this.shutdownCalled) { await a.shutdown(); return; }
+      this.analytics = a;
+      await a.init(this.client, this.name, {
+        defaultThreshold: this.defaultThreshold,
+        uncertaintyBand: this.uncertaintyBand,
+        defaultTtl: this.defaultTtl ?? null,
+        hasCostTable: !!this.costTable,
+        usesDefaultCostTable: this.usesDefaultCostTable,
+        embeddingCacheEnabled: this.embeddingCacheEnabled,
+        categoryThresholdCount: Object.keys(this.categoryThresholds).length,
+        dimension: this._dimension,
+      });
+      const intervalMs = this.analyticsOpts?.statsIntervalMs ?? 300_000;
+      if (!this.shutdownCalled && intervalMs > 0) {
+        this.statsTimer = setInterval(() => this.captureStatsSnapshot(), intervalMs);
+        this.statsTimer.unref();
+      }
+    } catch {
+      // never throw from analytics
+    }
+  }
+
+  private captureStatsSnapshot(): void {
+    this.stats()
+      .then((s) => {
+        this.analytics.capture('stats_snapshot', {
+          hits: s.hits,
+          misses: s.misses,
+          hit_rate: s.hitRate,
+          cost_saved_micros: s.costSavedMicros,
+        });
+      })
+      .catch(() => {});
+  }
+
+  private async ensureIndexAndGetDimension(): Promise<{ dim: number; hasBinaryRefs: boolean }> {
     // Try reading an existing index
     try {
       const info = (await this.client.call('FT.INFO', this.indexName)) as unknown[];
       const dim = this.parseDimensionFromInfo(info);
-      if (dim > 0) return dim;
-      // Couldn't parse dimension from FT.INFO — fall back to probe
-      return (await this.embed('probe')).vector.length;
+      const hasBinaryRefs = this.parseHasBinaryRefsFromInfo(info);
+      if (dim > 0) return { dim, hasBinaryRefs };
+      // Couldn't parse dimension from FT.INFO - fall back to probe
+      const probeDim = (await this.embed('probe')).vector.length;
+      return { dim: probeDim, hasBinaryRefs };
     } catch (err) {
       if (err instanceof EmbeddingError) throw err;
       if (!this.isIndexNotFoundError(err)) {
@@ -361,7 +1028,7 @@ export class SemanticCache {
       }
     }
 
-    // Index doesn't exist — probe dimension and create it
+    // Index doesn't exist - probe dimension and create it
     const dim = (await this.embed('probe')).vector.length;
     try {
       await this.client.call(
@@ -372,18 +1039,74 @@ export class SemanticCache {
         'response', 'TEXT', 'NOSTEM',
         'model', 'TAG',
         'category', 'TAG',
+        'binary_refs', 'TAG',
         'inserted_at', 'NUMERIC', 'SORTABLE',
+        'temperature', 'NUMERIC',
+        'top_p', 'NUMERIC',
+        'seed', 'NUMERIC',
         'embedding', 'VECTOR', 'HNSW', '6',
         'TYPE', 'FLOAT32', 'DIM', String(dim), 'DISTANCE_METRIC', 'COSINE',
       );
     } catch (err) {
       throw new ValkeyCommandError('FT.CREATE', err);
     }
-    return dim;
+    return { dim, hasBinaryRefs: true };
   }
 
-  /** Wraps embedFn with error handling and duration tracking. */
+  /** Check if the index schema has a binary_refs field. */
+  private parseHasBinaryRefsFromInfo(info: unknown[]): boolean {
+    for (let i = 0; i < info.length - 1; i += 2) {
+      const key = String(info[i]);
+      if (key !== 'attributes' && key !== 'fields') continue;
+      const attributes = info[i + 1];
+      if (!Array.isArray(attributes)) continue;
+      for (const attr of attributes) {
+        if (!Array.isArray(attr)) continue;
+        for (let j = 0; j < attr.length - 1; j++) {
+          if (String(attr[j]) === 'identifier' && String(attr[j + 1]) === 'binary_refs') {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Resolve a prompt (string or ContentBlock[]) into text + binary refs. */
+  private resolvePrompt(
+    prompt: string | ContentBlock[],
+  ): { text: string; binaryRefs: string[] } {
+    if (typeof prompt === 'string') {
+      return { text: prompt, binaryRefs: [] };
+    }
+    const text = extractText(prompt);
+    const binaryRefs = extractBinaryRefs(prompt);
+    return { text, binaryRefs };
+  }
+
+  /** Wraps embedFn with error handling, duration tracking, and optional embedding cache. */
   private async embed(text: string): Promise<{ vector: number[]; durationSec: number }> {
+    // Check embedding cache
+    if (this.embeddingCacheEnabled && text) {
+      const hash = createHash('sha256').update(text).digest('hex');
+      const embedKey = `${this.embedKeyPrefix}${hash}`;
+      try {
+        const cached = await this.client.getBuffer(embedKey);
+        if (cached) {
+          this.telemetry.metrics.embeddingCacheTotal
+            .labels({ cache_name: this.name, result: 'hit' }).inc();
+          // Decode Float32 buffer
+          const vector: number[] = [];
+          for (let i = 0; i < cached.length; i += 4) {
+            vector.push(cached.readFloatLE(i));
+          }
+          return { vector, durationSec: 0 };
+        }
+      } catch { /* ignore cache read errors */ }
+      this.telemetry.metrics.embeddingCacheTotal
+        .labels({ cache_name: this.name, result: 'miss' }).inc();
+    }
+
     const start = performance.now();
     let vector: number[];
     try {
@@ -395,13 +1118,24 @@ export class SemanticCache {
     this.telemetry.metrics.embeddingDuration
       .labels({ cache_name: this.name })
       .observe(durationSec);
+
+    // Store in embedding cache
+    if (this.embeddingCacheEnabled && text) {
+      const hash = createHash('sha256').update(text).digest('hex');
+      const embedKey = `${this.embedKeyPrefix}${hash}`;
+      try {
+        const buf = encodeFloat32(vector);
+        await this.client.set(embedKey, buf, 'EX', this.embeddingCacheTtl);
+      } catch { /* ignore cache write errors */ }
+    }
+
     return { vector, durationSec };
   }
 
   /**
    * Wraps a method body in an OTel span with automatic status, end, and
    * operation duration metric. The span is passed to fn so callers can
-   * set attributes — but callers must NOT call span.end() or span.setStatus(),
+   * set attributes - but callers must NOT call span.end() or span.setStatus(),
    * as traced() handles both.
    */
   private async traced<T>(operation: string, fn: (span: Span) => Promise<T>): Promise<T> {
@@ -429,6 +1163,28 @@ export class SemanticCache {
     pipeline.hincrby(this.statsKey, 'total', 1);
     pipeline.hincrby(this.statsKey, field, 1);
     await pipeline.exec();
+  }
+
+  /** Append to the rolling similarity window sorted set and trim to 10,000 entries or 7 days. */
+  private async recordSimilarityWindow(
+    score: number,
+    result: 'hit' | 'miss',
+    category: string,
+  ): Promise<void> {
+    const now = Date.now();
+    // Include a unique nonce so identical (score, result, category) tuples are
+    // each recorded as distinct ZADD members instead of overwriting each other.
+    const member = JSON.stringify({ score, result, category, _n: Math.random() });
+    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+    try {
+      const pipeline = this.client.pipeline();
+      pipeline.zadd(this.similarityWindowKey, now, member);
+      // Trim by time: remove entries older than 7 days
+      pipeline.zremrangebyscore(this.similarityWindowKey, '-inf', sevenDaysAgo);
+      // Trim by count: keep at most 10,000 most recent
+      pipeline.zremrangebyrank(this.similarityWindowKey, 0, -10001);
+      await pipeline.exec();
+    } catch { /* best effort - never fail on window writes */ }
   }
 
   private assertInitialized(method: string): void {
@@ -492,4 +1248,20 @@ export class SemanticCache {
 
     return 0;
   }
+}
+
+// -- ThresholdEffectiveness types --
+
+export interface ThresholdEffectivenessResult {
+  category: string;
+  sampleCount: number;
+  currentThreshold: number;
+  hitRate: number;
+  uncertainHitRate: number;
+  nearMissRate: number;
+  avgHitSimilarity: number;
+  avgMissSimilarity: number;
+  recommendation: 'tighten_threshold' | 'loosen_threshold' | 'optimal' | 'insufficient_data';
+  recommendedThreshold?: number;
+  reasoning: string;
 }

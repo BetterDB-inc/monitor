@@ -1,0 +1,15 @@
+{
+  "name": "semantic-cache-cost-tracking-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@betterdb/semantic-cache": "file:../../",
+    "iovalkey": "^0.3.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}
