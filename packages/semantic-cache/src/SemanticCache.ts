@@ -999,8 +999,10 @@ export class SemanticCache {
       if (this._initGeneration !== gen) return;
       this._dimension = dim;
       this._hasBinaryRefs = hasBinaryRefs;
-      // Discovery registration must succeed before we flip _initialized so a
-      // collision error leaves the cache in the uninitialized state.
+      // registerDiscovery() may throw SemanticCacheUsageError on a name
+      // collision. Mark the cache initialized only after discovery succeeds
+      // so a colliding caller cannot subsequently call check()/store()
+      // against another owner's keys.
       await this.registerDiscovery();
       if (this._initGeneration !== gen) return;
       this._initialized = true;

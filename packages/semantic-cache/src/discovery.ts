@@ -143,6 +143,11 @@ export class DiscoveryManager {
       'SET protocol',
     );
 
+    // Write the initial heartbeat synchronously so Monitor sees the cache as
+    // alive immediately after register() returns, instead of waiting up to
+    // heartbeatIntervalMs for the first scheduled tick.
+    await this.tickHeartbeat();
+
     this.startHeartbeat();
   }
 
@@ -168,6 +173,7 @@ export class DiscoveryManager {
       await this.client.set(this.heartbeatKey, now, 'EX', HEARTBEAT_TTL_SECONDS);
     } catch (err) {
       this.logger.debug(`discovery: heartbeat SET failed: ${errMsg(err)}`);
+      this.onWriteFailed();
     }
   }
 
