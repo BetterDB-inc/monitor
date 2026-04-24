@@ -38,3 +38,4 @@ export {
   composeNormalizer,
   defaultNormalizer,
 } from './normalizer';
+export type { DiscoveryOptions } from './discovery';

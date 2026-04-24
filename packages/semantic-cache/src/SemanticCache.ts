@@ -32,8 +32,17 @@ import {
 import { DEFAULT_COST_TABLE } from './defaultCostTable';
 import { clusterScan } from './cluster';
 import { createAnalytics, NOOP_ANALYTICS, type Analytics } from './analytics';
+import {
+  DiscoveryManager,
+  buildSemanticMetadata,
+  type DiscoveryOptions,
+} from './discovery';
 
 const INVALIDATE_BATCH_SIZE = 1000;
+
+// Keep in sync with package.json. Baked into the discovery marker so Monitor
+// can surface the running library version without a live RPC.
+const PACKAGE_VERSION = '0.2.0';
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -56,6 +65,8 @@ export class SemanticCache {
   private readonly embeddingCacheEnabled: boolean;
   private readonly embeddingCacheTtl: number;
   private readonly embedKeyPrefix: string;
+  private readonly discoveryOptions: DiscoveryOptions;
+  private discovery: DiscoveryManager | null = null;
 
   private _initialized = false;
   private _dimension = 0;
@@ -115,6 +126,7 @@ export class SemanticCache {
 
     this.analyticsOpts = options.analytics;
     this.usesDefaultCostTable = useDefault;
+    this.discoveryOptions = options.discovery ?? {};
   }
 
   // -- Lifecycle --
@@ -135,6 +147,11 @@ export class SemanticCache {
     this._initialized = false;
     this._initPromise = null;
     this._initGeneration++;
+
+    if (this.discovery) {
+      await this.discovery.stop({ deleteHeartbeat: true });
+      this.discovery = null;
+    }
 
     // Valkey Search 1.2 does not support the DD (Delete Documents) flag on
     // FT.DROPINDEX. Drop the index first, then clean up keys separately.
@@ -163,7 +180,10 @@ export class SemanticCache {
     this.analytics.capture('cache_flush');
   }
 
-  /** Shut down the analytics client and cancel the stats timer. */
+  /**
+   * Shut down the analytics client, cancel the stats timer, and stop the
+   * discovery heartbeat. Safe to call multiple times.
+   */
   async shutdown(): Promise<void> {
     this.shutdownCalled = true;
     if (this.statsTimer) {
@@ -171,6 +191,20 @@ export class SemanticCache {
       this.statsTimer = undefined;
     }
     await this.analytics.shutdown();
+    await this.dispose();
+  }
+
+  /**
+   * Graceful shutdown of the discovery layer — stops the heartbeat and
+   * deletes this instance's heartbeat key so Monitor marks the cache offline
+   * immediately. Does NOT touch the registry hash, the FT index, or any
+   * entries. Safe to call multiple times.
+   */
+  async dispose(): Promise<void> {
+    if (this.discovery) {
+      await this.discovery.stop({ deleteHeartbeat: true });
+      this.discovery = null;
+    }
   }
 
   // -- Public operations --
@@ -965,10 +999,41 @@ export class SemanticCache {
       if (this._initGeneration !== gen) return;
       this._dimension = dim;
       this._hasBinaryRefs = hasBinaryRefs;
+      // Discovery registration must succeed before we flip _initialized so a
+      // collision error leaves the cache in the uninitialized state.
+      await this.registerDiscovery();
+      if (this._initGeneration !== gen) return;
       this._initialized = true;
       // Fire analytics init once (not on every flush+initialize cycle)
       this.initAnalyticsSafe().catch(() => {});
     });
+  }
+
+  private async registerDiscovery(): Promise<void> {
+    if (this.discoveryOptions.enabled === false) {
+      return;
+    }
+    const metadata = buildSemanticMetadata({
+      name: this.name,
+      version: PACKAGE_VERSION,
+      defaultThreshold: this.defaultThreshold,
+      categoryThresholds: this.categoryThresholds,
+      uncertaintyBand: this.uncertaintyBand,
+      includeCategories: this.discoveryOptions.includeCategories ?? true,
+    });
+    const manager = new DiscoveryManager({
+      client: this.client,
+      name: this.name,
+      metadata,
+      heartbeatIntervalMs: this.discoveryOptions.heartbeatIntervalMs,
+      onWriteFailed: () => {
+        this.telemetry.metrics.discoveryWriteFailed
+          .labels({ cache_name: this.name })
+          .inc();
+      },
+    });
+    await manager.register();
+    this.discovery = manager;
   }
 
   private async initAnalyticsSafe(): Promise<void> {

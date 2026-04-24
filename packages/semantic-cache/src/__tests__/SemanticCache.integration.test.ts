@@ -235,4 +235,71 @@ describe('SemanticCache integration', () => {
     expect(info.numDocs).toBeGreaterThanOrEqual(0);
     expect(info.dimension).toBe(dim);
   });
+
+  it('discovery: registers in __betterdb:caches and writes a heartbeat on initialize()', async () => {
+    if (skip) return;
+    const discoveryCacheName = `betterdb_disco_test_${Date.now()}`;
+    const discoveryCache = new SemanticCache({
+      name: discoveryCacheName,
+      client,
+      embedFn: fakeEmbed,
+      telemetry: { registry },
+      discovery: { heartbeatIntervalMs: 60_000 },
+    });
+
+    try {
+      await discoveryCache.initialize();
+
+      const raw = await client.hget('__betterdb:caches', discoveryCacheName);
+      expect(raw).not.toBeNull();
+      const marker = JSON.parse(raw ?? '{}');
+      expect(marker.type).toBe('semantic_cache');
+      expect(marker.prefix).toBe(discoveryCacheName);
+      expect(marker.protocol_version).toBe(1);
+
+      const protocol = await client.get('__betterdb:protocol');
+      expect(protocol).toBe('1');
+
+      const heartbeat = await client.get(`__betterdb:heartbeat:${discoveryCacheName}`);
+      expect(heartbeat).not.toBeNull();
+      const ttl = await client.ttl(`__betterdb:heartbeat:${discoveryCacheName}`);
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(60);
+
+      await discoveryCache.dispose();
+
+      const afterDispose = await client.get(`__betterdb:heartbeat:${discoveryCacheName}`);
+      expect(afterDispose).toBeNull();
+      // Registry entry is intentionally preserved after dispose
+      const registryAfter = await client.hget('__betterdb:caches', discoveryCacheName);
+      expect(registryAfter).not.toBeNull();
+    } finally {
+      await discoveryCache.flush();
+      // flush also removes the heartbeat; the registry entry is preserved, so
+      // clean it up explicitly so repeated test runs don't accumulate fields.
+      await client.hdel('__betterdb:caches', discoveryCacheName);
+    }
+  });
+
+  it('discovery: enabled=false writes nothing to __betterdb:*', async () => {
+    if (skip) return;
+    const optOutName = `betterdb_disco_off_${Date.now()}`;
+    const optOutCache = new SemanticCache({
+      name: optOutName,
+      client,
+      embedFn: fakeEmbed,
+      telemetry: { registry },
+      discovery: { enabled: false },
+    });
+
+    try {
+      await optOutCache.initialize();
+      const raw = await client.hget('__betterdb:caches', optOutName);
+      expect(raw).toBeNull();
+      const heartbeat = await client.get(`__betterdb:heartbeat:${optOutName}`);
+      expect(heartbeat).toBeNull();
+    } finally {
+      await optOutCache.flush();
+    }
+  });
 });
