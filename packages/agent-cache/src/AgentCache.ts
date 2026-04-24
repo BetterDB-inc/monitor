@@ -311,6 +311,9 @@ export class AgentCache {
       clearInterval(this.statsTimer);
       this.statsTimer = undefined;
     }
+    if (this.discoveryReady) {
+      await this.discoveryReady;
+    }
     if (this.discovery) {
       await this.discovery.stop({ deleteHeartbeat: true });
       this.discovery = null;
