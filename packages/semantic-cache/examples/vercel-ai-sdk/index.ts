@@ -60,7 +60,7 @@ async function main() {
   console.log('\n=== Round 2: Same prompt (cache hit) ===');
   await generate('What is the capital of Portugal?');
 
-  console.log('\n=== Round 3: Paraphrase (semantic hit) ===');
+  console.log('\n=== Round 3: Paraphrase (semantic miss - above threshold) ===');
   await generate('Which city serves as Portugal\'s capital?');
 
   const stats = await semanticCache.stats();

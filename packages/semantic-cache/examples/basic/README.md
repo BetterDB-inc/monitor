@@ -43,7 +43,7 @@ Expected output (abbreviated):
 
 [check 3] "Who wrote Hamlet?"
   hit: false | nearest miss: 0.5918 (delta: +0.3418)
-  (mock: no shared words with stored prompts)
+  (mock: shares words [wrote] but above threshold)
 
 [check 4] "What is the best pizza topping?"
   hit: false | nearest miss: 1.0000 (delta: +0.7500)
