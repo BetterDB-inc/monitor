@@ -43,12 +43,12 @@ async def main() -> None:
     await store.aput(ns, "mem3", {"content": "Alice's favourite drink is green tea."})
 
     print("\nSearching: 'outdoor activities'")
-    results = await store.asearch(ns, query="outdoor activities", limit=3)
+    results = await store.asearch(ns, query="outdoor activities", limit=3, threshold=0.65)
     for item in results:
         print(f"  - {item.value.get('content', '')!r}")
 
     print("\nSearching: 'what does Alice drink?'")
-    results2 = await store.asearch(ns, query="what does Alice drink?", limit=2)
+    results2 = await store.asearch(ns, query="what does Alice drink?", limit=2, threshold=0.35)
     for item in results2:
         print(f"  - {item.value.get('content', '')!r}")
 

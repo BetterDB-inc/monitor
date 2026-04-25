@@ -34,7 +34,7 @@ Cache initialized and flushed.
 
 -- Semantic search: "What does Alice do for work?" --
   Found 1 result(s):
-  - [mem2] "Alice is a software engineer who works on AI projects."...
+  - [mem1] "Alice lives in Paris and loves museums."...
 
 -- Batch write --
   Batch write complete.

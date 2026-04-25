@@ -19,7 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 openai     = ["openai>=1.0.0"]
 anthropic  = ["anthropic>=0.20.0"]
-langchain  = ["langchain-core>=0.2.0"]
+langchain  = ["langchain-core>=0.2.0", "langchain-openai>=0.1.0"]
 llamaindex = ["llama-index-core>=0.10.0"]
 langgraph  = ["langgraph>=0.1.0"]
 httpx      = ["httpx>=0.25.0"]
@@ -33,6 +33,7 @@ all = [
     "openai>=1.0.0",
     "anthropic>=0.20.0",
     "langchain-core>=0.2.0",
+    "langchain-openai>=0.1.0",
     "llama-index-core>=0.10.0",
     "langgraph>=0.1.0",
     "httpx>=0.25.0",

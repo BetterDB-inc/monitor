@@ -33,6 +33,11 @@ User: Which city is the capital of Spain?
 Assistant: The capital of Spain is Madrid.
   (553ms)
 
+=== Round 4: Unrelated (cache miss) ===
+User: What is the best pizza topping?
+Assistant: The "best" pizza topping often depends on personal preference, but some popular choices include pepp...
+  (1903ms)
+
 -- Cache Stats --
 Hits: 2 | Misses: 2 | Hit rate: 50%
 ```
