@@ -1,5 +1,7 @@
 import { HttpTelemetryClientAdapter } from '../adapters/http-telemetry-client.adapter';
 
+const TEST_VERSION = '1.0.0-test';
+
 describe('HttpTelemetryClientAdapter', () => {
   let adapter: HttpTelemetryClientAdapter;
   let fetchSpy: jest.SpyInstance;
@@ -17,7 +19,12 @@ describe('HttpTelemetryClientAdapter', () => {
     adapter.capture({
       distinctId: 'inst-123',
       event: 'app_start',
-      properties: { version: '0.13.0', tier: 'community', deploymentMode: 'self-hosted', timestamp: 1000 },
+      properties: {
+        version: TEST_VERSION,
+        tier: 'community',
+        deploymentMode: 'self-hosted',
+        timestamp: 1000,
+      },
     });
 
     expect(fetchSpy).toHaveBeenCalledWith(
@@ -32,7 +39,7 @@ describe('HttpTelemetryClientAdapter', () => {
     expect(body).toEqual({
       instanceId: 'inst-123',
       eventType: 'app_start',
-      version: '0.13.0',
+      version: TEST_VERSION,
       tier: 'community',
       deploymentMode: 'self-hosted',
       timestamp: 1000,
@@ -44,7 +51,7 @@ describe('HttpTelemetryClientAdapter', () => {
       distinctId: 'inst-123',
       event: 'db_connect',
       properties: {
-        version: '0.13.0',
+        version: TEST_VERSION,
         tier: 'community',
         deploymentMode: 'self-hosted',
         timestamp: 1000,
@@ -54,7 +61,10 @@ describe('HttpTelemetryClientAdapter', () => {
     });
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.payload).toEqual({ connectionType: 'standalone', success: true });
+    expect(body.payload).toEqual({
+      connectionType: 'standalone',
+      success: true,
+    });
   });
 
   it('should use a 5s timeout signal', () => {
@@ -69,7 +79,6 @@ describe('HttpTelemetryClientAdapter', () => {
 
     adapter.capture({ distinctId: 'inst-123', event: 'app_start' });
 
-    // Drain microtask queue so the rejection + .catch() handler execute
     await Promise.resolve();
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -81,7 +90,6 @@ describe('HttpTelemetryClientAdapter', () => {
   });
 
   it('should abort in-flight requests on shutdown', async () => {
-    // Make fetch hang (never resolve)
     fetchSpy.mockReturnValue(new Promise(() => {}));
 
     adapter.capture({ distinctId: 'inst-123', event: 'app_start' });
