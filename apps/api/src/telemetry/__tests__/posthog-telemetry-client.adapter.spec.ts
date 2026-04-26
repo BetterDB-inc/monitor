@@ -1,5 +1,7 @@
 import { PosthogTelemetryClientAdapter } from '../adapters/posthog-telemetry-client.adapter';
 
+const TEST_VERSION = '1.0.0-test';
+
 const mockCapture = jest.fn();
 const mockIdentify = jest.fn();
 const mockShutdown = jest.fn().mockResolvedValue(undefined);
@@ -39,22 +41,22 @@ describe('PosthogTelemetryClientAdapter', () => {
     adapter.capture({
       distinctId: 'inst-123',
       event: 'app_start',
-      properties: { version: '0.13.0' },
+      properties: { version: TEST_VERSION },
     });
 
     expect(mockCapture).toHaveBeenCalledWith({
       distinctId: 'inst-123',
       event: 'app_start',
-      properties: { version: '0.13.0' },
+      properties: { version: TEST_VERSION },
     });
   });
 
   it('should delegate identify to posthog.identify', () => {
-    adapter.identify('inst-123', { tier: 'pro', version: '0.13.0' });
+    adapter.identify('inst-123', { tier: 'pro', version: TEST_VERSION });
 
     expect(mockIdentify).toHaveBeenCalledWith({
       distinctId: 'inst-123',
-      properties: { tier: 'pro', version: '0.13.0' },
+      properties: { tier: 'pro', version: TEST_VERSION },
     });
   });
 
