@@ -1,5 +1,5 @@
-export function readHashInt(raw: Record<string, string>, field: string): number {
-  const value = raw[field];
+export function readIntField(record: Record<string, string>, field: string): number {
+  const value = record[field];
   if (value === undefined || value === '') {
     return 0;
   }

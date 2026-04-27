@@ -6,7 +6,7 @@ import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { CacheNotFoundError, InvalidCacheTypeError } from './errors';
-import { readHashInt } from '../common/utils/valkey-fields';
+import { readIntField } from '../common/utils/record-fields';
 import {
   THRESHOLD_RECOMMENDATIONS,
   THRESHOLD_REASONINGS,
@@ -106,10 +106,10 @@ export class CacheReadonlyService {
     const raw = (await client.hgetall(statsKey)) ?? {};
 
     if (cache.type === SEMANTIC_CACHE) {
-      const hits = readHashInt(raw, 'hits');
-      const misses = readHashInt(raw, 'misses');
-      const total = readHashInt(raw, 'total') || hits + misses;
-      const costSavedMicros = readHashInt(raw, 'cost_saved_micros');
+      const hits = readIntField(raw, 'hits');
+      const misses = readIntField(raw, 'misses');
+      const total = readIntField(raw, 'total') || hits + misses;
+      const costSavedMicros = readIntField(raw, 'cost_saved_micros');
       const samples = await this.readSimilarityWindow(client, cache.prefix);
       const config = await this.readSemanticConfig(client, cache.prefix);
       const hitRate = total === 0 ? 0 : hits / total;
@@ -135,14 +135,14 @@ export class CacheReadonlyService {
       };
     }
 
-    const llmHits = readHashInt(raw, 'llm:hits');
-    const llmMisses = readHashInt(raw, 'llm:misses');
-    const toolHits = readHashInt(raw, 'tool:hits');
-    const toolMisses = readHashInt(raw, 'tool:misses');
+    const llmHits = readIntField(raw, 'llm:hits');
+    const llmMisses = readIntField(raw, 'llm:misses');
+    const toolHits = readIntField(raw, 'tool:hits');
+    const toolMisses = readIntField(raw, 'tool:misses');
     const totalHits = llmHits + toolHits;
     const totalMisses = llmMisses + toolMisses;
     const total = totalHits + totalMisses;
-    const costSavedMicros = readHashInt(raw, 'cost_saved_micros');
+    const costSavedMicros = readIntField(raw, 'cost_saved_micros');
     const tools = this.extractAgentToolStats(raw);
     const toolBreakdown = Object.entries(tools)
       .map(([tool, s]) => ({
@@ -394,10 +394,10 @@ export class CacheReadonlyService {
   ): Promise<{ hits: number; misses: number; total: number }> {
     const raw = (await client.hgetall(`${prefix}:__stats`)) ?? {};
     const hits =
-      readHashInt(raw, 'hits') + readHashInt(raw, 'llm:hits') + readHashInt(raw, 'tool:hits');
+      readIntField(raw, 'hits') + readIntField(raw, 'llm:hits') + readIntField(raw, 'tool:hits');
     const misses =
-      readHashInt(raw, 'misses') + readHashInt(raw, 'llm:misses') + readHashInt(raw, 'tool:misses');
-    const explicitTotal = readHashInt(raw, 'total');
+      readIntField(raw, 'misses') + readIntField(raw, 'llm:misses') + readIntField(raw, 'tool:misses');
+    const explicitTotal = readIntField(raw, 'total');
     return { hits, misses, total: explicitTotal === 0 ? hits + misses : explicitTotal };
   }
 
