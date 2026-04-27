@@ -7,6 +7,11 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { CacheNotFoundError, InvalidCacheTypeError } from './errors';
 import { readHashInt } from '../common/utils/valkey-fields';
+import {
+  THRESHOLD_RECOMMENDATIONS,
+  THRESHOLD_REASONINGS,
+  TOOL_EFFECTIVENESS_RECOMMENDATIONS,
+} from './cache-readonly.types';
 import type {
   CacheHealth,
   CacheHealthWarning,
@@ -190,8 +195,8 @@ export class CacheReadonlyService {
         near_miss_rate: 0,
         avg_hit_similarity: 0,
         avg_miss_similarity: 0,
-        recommendation: 'insufficient_data',
-        reasoning: `Only ${sampleCount} samples collected; ${minSamples} required for a reliable recommendation.`,
+        recommendation: THRESHOLD_RECOMMENDATIONS.INSUFFICIENT_DATA,
+        reasoning: THRESHOLD_REASONINGS.insufficientData(sampleCount, minSamples),
       };
     }
     const hits = filtered.filter((s) => s.result === 'hit');
@@ -214,16 +219,16 @@ export class CacheReadonlyService {
     let recommendedThreshold: number | undefined;
     let reasoning: string;
     if (uncertainHitRate > 0.2) {
-      recommendation = 'tighten_threshold';
+      recommendation = THRESHOLD_RECOMMENDATIONS.TIGHTEN;
       recommendedThreshold = Math.max(0, threshold - config.uncertainty_band * 1.5);
-      reasoning = `${(uncertainHitRate * 100).toFixed(1)}% of hits are in the uncertainty band — tighten the threshold.`;
+      reasoning = THRESHOLD_REASONINGS.tighten(uncertainHitRate);
     } else if (nearMissRate > 0.3 && avgNearMissDelta < 0.03) {
-      recommendation = 'loosen_threshold';
+      recommendation = THRESHOLD_RECOMMENDATIONS.LOOSEN;
       recommendedThreshold = threshold + avgNearMissDelta;
-      reasoning = `${(nearMissRate * 100).toFixed(1)}% of misses are very close to the threshold — consider loosening.`;
+      reasoning = THRESHOLD_REASONINGS.loosen(nearMissRate);
     } else {
-      recommendation = 'optimal';
-      reasoning = `Hit rate ${(hitRate * 100).toFixed(1)}% with ${(uncertainHitRate * 100).toFixed(1)}% uncertain hits — threshold appears well-calibrated.`;
+      recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
+      reasoning = THRESHOLD_REASONINGS.optimal(hitRate, uncertainHitRate);
     }
 
     return {
@@ -257,11 +262,14 @@ export class CacheReadonlyService {
       const policyTtl = await this.readToolPolicyTtl(client, cache.prefix, toolName);
       let recommendation: ToolEffectivenessRecommendation;
       if (hitRate > 0.8) {
-        recommendation = policyTtl !== null && policyTtl < 3600 ? 'increase_ttl' : 'optimal';
+        recommendation =
+          policyTtl !== null && policyTtl < 3600
+            ? TOOL_EFFECTIVENESS_RECOMMENDATIONS.INCREASE_TTL
+            : TOOL_EFFECTIVENESS_RECOMMENDATIONS.OPTIMAL;
       } else if (hitRate >= 0.4) {
-        recommendation = 'optimal';
+        recommendation = TOOL_EFFECTIVENESS_RECOMMENDATIONS.OPTIMAL;
       } else {
-        recommendation = 'decrease_ttl_or_disable';
+        recommendation = TOOL_EFFECTIVENESS_RECOMMENDATIONS.DECREASE_TTL_OR_DISABLE;
       }
       entries.push({
         tool: toolName,

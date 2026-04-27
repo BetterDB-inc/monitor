@@ -41,11 +41,28 @@ export interface AgentCacheHealth extends CacheHealthCommon {
 
 export type CacheHealth = SemanticCacheHealth | AgentCacheHealth;
 
+export const THRESHOLD_RECOMMENDATIONS = {
+  TIGHTEN: 'tighten_threshold',
+  LOOSEN: 'loosen_threshold',
+  OPTIMAL: 'optimal',
+  INSUFFICIENT_DATA: 'insufficient_data',
+} as const;
+
 export type ThresholdRecommendationKind =
-  | 'tighten_threshold'
-  | 'loosen_threshold'
-  | 'optimal'
-  | 'insufficient_data';
+  (typeof THRESHOLD_RECOMMENDATIONS)[keyof typeof THRESHOLD_RECOMMENDATIONS];
+
+const formatPct = (value: number): string => `${(value * 100).toFixed(1)}%`;
+
+export const THRESHOLD_REASONINGS = {
+  insufficientData: (sampleCount: number, minSamples: number): string =>
+    `Only ${sampleCount} samples collected; ${minSamples} required for a reliable recommendation.`,
+  tighten: (uncertainHitRate: number): string =>
+    `${formatPct(uncertainHitRate)} of hits are in the uncertainty band — tighten the threshold.`,
+  loosen: (nearMissRate: number): string =>
+    `${formatPct(nearMissRate)} of misses are very close to the threshold — consider loosening.`,
+  optimal: (hitRate: number, uncertainHitRate: number): string =>
+    `Hit rate ${formatPct(hitRate)} with ${formatPct(uncertainHitRate)} uncertain hits — threshold appears well-calibrated.`,
+} as const;
 
 export interface ThresholdRecommendation {
   category: string;
@@ -61,10 +78,14 @@ export interface ThresholdRecommendation {
   reasoning: string;
 }
 
+export const TOOL_EFFECTIVENESS_RECOMMENDATIONS = {
+  INCREASE_TTL: 'increase_ttl',
+  OPTIMAL: 'optimal',
+  DECREASE_TTL_OR_DISABLE: 'decrease_ttl_or_disable',
+} as const;
+
 export type ToolEffectivenessRecommendation =
-  | 'increase_ttl'
-  | 'optimal'
-  | 'decrease_ttl_or_disable';
+  (typeof TOOL_EFFECTIVENESS_RECOMMENDATIONS)[keyof typeof TOOL_EFFECTIVENESS_RECOMMENDATIONS];
 
 export interface ToolEffectivenessEntry {
   tool: string;
