@@ -35,6 +35,14 @@ export class SlidingWindowRateLimiter {
     this.buckets.set(key, events);
   }
 
+  reserve(key: string): RateLimiterCheck {
+    const result = this.check(key);
+    if (result.allowed) {
+      this.record(key);
+    }
+    return result;
+  }
+
   reset(key?: string): void {
     if (key === undefined) {
       this.buckets.clear();

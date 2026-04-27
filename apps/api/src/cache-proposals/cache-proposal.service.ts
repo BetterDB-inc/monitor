@@ -67,15 +67,17 @@ export interface ProposeResult {
 @Injectable()
 export class CacheProposalService {
   private readonly logger = new Logger(CacheProposalService.name);
-  private readonly rateLimiter = new SlidingWindowRateLimiter(
-    PROPOSAL_RATE_LIMIT,
-    PROPOSAL_RATE_WINDOW_MS,
-  );
+  private readonly rateLimiter: SlidingWindowRateLimiter;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly resolver: CacheResolverService,
-  ) {}
+  ) {
+    this.rateLimiter = new SlidingWindowRateLimiter(
+      PROPOSAL_RATE_LIMIT,
+      PROPOSAL_RATE_WINDOW_MS,
+    );
+  }
 
   async proposeThresholdAdjust(
     connectionId: string,
@@ -264,9 +266,13 @@ export class CacheProposalService {
       warnings: string[];
     },
   ): Promise<ProposeResult> {
-    const rateCheck = this.rateLimiter.check(connectionId);
-    if (!rateCheck.allowed) {
-      throw new RateLimitedError(rateCheck.retryAfterMs, PROPOSAL_RATE_LIMIT, PROPOSAL_RATE_WINDOW_MS);
+    const reservation = this.rateLimiter.reserve(connectionId);
+    if (!reservation.allowed) {
+      throw new RateLimitedError(
+        reservation.retryAfterMs,
+        PROPOSAL_RATE_LIMIT,
+        PROPOSAL_RATE_WINDOW_MS,
+      );
     }
 
     const proposedAt = Date.now();
@@ -285,7 +291,6 @@ export class CacheProposalService {
     } as CreateCacheProposalInput;
 
     const proposal = await this.storage.createCacheProposal(input);
-    this.rateLimiter.record(connectionId);
     this.logger.log(
       `Created ${args.cache_type}/${args.proposal_type} proposal ${proposal.id} for ${args.cacheName} on ${connectionId}`,
     );

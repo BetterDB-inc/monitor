@@ -31,12 +31,19 @@ interface MarkerJson {
 export class CacheResolverService {
   private readonly logger = new Logger(CacheResolverService.name);
   private readonly cache = new Map<string, CacheEntry>();
+  private ttlMs = DEFAULT_TTL_MS;
+  private now: () => number = Date.now;
 
-  constructor(
-    private readonly registry: ConnectionRegistry,
-    private readonly ttlMs: number = DEFAULT_TTL_MS,
-    private readonly now: () => number = Date.now,
-  ) {}
+  constructor(private readonly registry: ConnectionRegistry) {}
+
+  configureForTesting(options: { ttlMs?: number; now?: () => number }): void {
+    if (options.ttlMs !== undefined) {
+      this.ttlMs = options.ttlMs;
+    }
+    if (options.now !== undefined) {
+      this.now = options.now;
+    }
+  }
 
   async resolveCacheByName(connectionId: string, name: string): Promise<ResolvedCache | null> {
     const key = `${connectionId}:${name}`;

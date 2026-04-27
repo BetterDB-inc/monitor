@@ -19,6 +19,7 @@ import {
   RateLimitedError,
 } from '../cache-proposals/errors';
 import type { StoredCacheProposal } from '@betterdb/shared';
+import { ZodError } from 'zod';
 
 const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 const EVENT_NAME_RE = /^[a-zA-Z0-9_.-]+$/;
@@ -631,6 +632,21 @@ function formatProposalResult(result: { proposal: StoredCacheProposal; warnings:
 function mapCacheProposalError(err: unknown): HttpException {
   if (err instanceof HttpException) {
     return err;
+  }
+  if (err instanceof ZodError) {
+    return new HttpException(
+      {
+        statusCode: HttpStatus.BAD_REQUEST,
+        code: 'VALIDATION_ERROR',
+        message: 'Request payload failed schema validation',
+        issues: err.issues.map((issue) => ({
+          path: issue.path.join('.'),
+          code: issue.code,
+          message: issue.message,
+        })),
+      },
+      HttpStatus.BAD_REQUEST,
+    );
   }
   if (err instanceof RateLimitedError) {
     return new HttpException(
