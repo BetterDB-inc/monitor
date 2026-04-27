@@ -21,6 +21,7 @@ import { CloudAuthModule } from './auth/cloud-auth.module';
 import { McpModule } from './mcp/mcp.module';
 import { MetricForecastingModule } from './metric-forecasting/metric-forecasting.module';
 import { CliModule } from './cli/cli.module';
+import { CacheProposalsModule } from './cache-proposals/cache-proposals.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -125,6 +126,7 @@ const baseImports = [
   MigrationModule,
   MetricForecastingModule,
   CliModule,
+  CacheProposalsModule,
 ];
 
 const proprietaryImports = [

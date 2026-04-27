@@ -7,6 +7,7 @@ import { CommandLogAnalyticsModule } from '../commandlog-analytics/commandlog-an
 import { ClientAnalyticsModule } from '../client-analytics/client-analytics.module';
 import { ClusterModule } from '../cluster/cluster.module';
 import { TelemetryModule } from '../telemetry/telemetry.module';
+import { CacheProposalsModule } from '../cache-proposals/cache-proposals.module';
 
 const logger = new Logger('McpModule');
 
@@ -41,7 +42,7 @@ const tokenProviders = AgentTokensServiceClass
 const optionalImports = [AnomalyModule].filter(Boolean);
 
 @Module({
-  imports: [StorageModule, MetricsModule, CommandLogAnalyticsModule, ClientAnalyticsModule, ClusterModule, TelemetryModule, ...optionalImports],
+  imports: [StorageModule, MetricsModule, CommandLogAnalyticsModule, ClientAnalyticsModule, ClusterModule, TelemetryModule, CacheProposalsModule, ...optionalImports],
   controllers: [McpController],
   providers: [AgentTokenGuard, ...tokenProviders],
 })

@@ -9,6 +9,16 @@ import { ClientAnalyticsAnalysisService } from '../client-analytics/client-analy
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { CacheProposalService } from '../cache-proposals/cache-proposal.service';
+import {
+  CacheNotFoundError,
+  CacheProposalError,
+  CacheProposalValidationError,
+  DuplicatePendingProposalError,
+  InvalidCacheTypeError,
+  RateLimitedError,
+} from '../cache-proposals/errors';
+import type { StoredCacheProposal } from '@betterdb/shared';
 
 const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 const EVENT_NAME_RE = /^[a-zA-Z0-9_.-]+$/;
@@ -62,6 +72,7 @@ export class McpController {
     private readonly clusterDiscoveryService: ClusterDiscoveryService,
     private readonly clusterMetricsService: ClusterMetricsService,
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
+    private readonly cacheProposalService: CacheProposalService,
     @Optional() @Inject(ANOMALY_SERVICE) anomalyService?: any,
     @Optional() telemetryService?: UsageTelemetryService,
   ) {
@@ -449,4 +460,217 @@ export class McpController {
     ));
     return { ok: true };
   }
+
+  @Post('instance/:id/cache-proposals/threshold-adjust')
+  async proposeCacheThresholdAdjust(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Body()
+    body: {
+      cache_name?: unknown;
+      category?: unknown;
+      new_threshold?: unknown;
+      reasoning?: unknown;
+      proposed_by?: unknown;
+    },
+  ) {
+    const cacheName = requireString(body?.cache_name, 'cache_name');
+    const newThreshold = requireFiniteNumber(body?.new_threshold, 'new_threshold');
+    const reasoning = requireString(body?.reasoning, 'reasoning');
+    const category = optionalNullableString(body?.category, 'category');
+    const proposedBy = optionalString(body?.proposed_by, 'proposed_by');
+
+    try {
+      const result = await this.cacheProposalService.proposeThresholdAdjust(id, {
+        cacheName,
+        newThreshold,
+        reasoning,
+        category,
+        proposedBy,
+      });
+      return formatProposalResult(result);
+    } catch (err) {
+      throw mapCacheProposalError(err);
+    }
+  }
+
+  @Post('instance/:id/cache-proposals/tool-ttl-adjust')
+  async proposeCacheToolTtlAdjust(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Body()
+    body: {
+      cache_name?: unknown;
+      tool_name?: unknown;
+      new_ttl_seconds?: unknown;
+      reasoning?: unknown;
+      proposed_by?: unknown;
+    },
+  ) {
+    const cacheName = requireString(body?.cache_name, 'cache_name');
+    const toolName = requireString(body?.tool_name, 'tool_name');
+    const newTtlSeconds = requireFiniteNumber(body?.new_ttl_seconds, 'new_ttl_seconds');
+    const reasoning = requireString(body?.reasoning, 'reasoning');
+    const proposedBy = optionalString(body?.proposed_by, 'proposed_by');
+
+    try {
+      const result = await this.cacheProposalService.proposeToolTtlAdjust(id, {
+        cacheName,
+        toolName,
+        newTtlSeconds,
+        reasoning,
+        proposedBy,
+      });
+      return formatProposalResult(result);
+    } catch (err) {
+      throw mapCacheProposalError(err);
+    }
+  }
+
+  @Post('instance/:id/cache-proposals/invalidate')
+  async proposeCacheInvalidate(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Body()
+    body: {
+      cache_name?: unknown;
+      filter_kind?: unknown;
+      filter_expression?: unknown;
+      filter_value?: unknown;
+      estimated_affected?: unknown;
+      reasoning?: unknown;
+      proposed_by?: unknown;
+    },
+  ) {
+    const cacheName = requireString(body?.cache_name, 'cache_name');
+    const filterKind = requireString(body?.filter_kind, 'filter_kind');
+    const estimatedAffected = requireFiniteNumber(body?.estimated_affected, 'estimated_affected');
+    const reasoning = requireString(body?.reasoning, 'reasoning');
+    const proposedBy = optionalString(body?.proposed_by, 'proposed_by');
+
+    try {
+      if (filterKind === 'valkey_search') {
+        const filterExpression = requireString(body?.filter_expression, 'filter_expression');
+        const result = await this.cacheProposalService.proposeInvalidate(id, {
+          cacheName,
+          filterKind: 'valkey_search',
+          filterExpression,
+          estimatedAffected,
+          reasoning,
+          proposedBy,
+        });
+        return formatProposalResult(result);
+      }
+
+      if (filterKind === 'tool' || filterKind === 'key_prefix' || filterKind === 'session') {
+        const filterValue = requireString(body?.filter_value, 'filter_value');
+        const result = await this.cacheProposalService.proposeInvalidate(id, {
+          cacheName,
+          filterKind,
+          filterValue,
+          estimatedAffected,
+          reasoning,
+          proposedBy,
+        });
+        return formatProposalResult(result);
+      }
+
+      throw new BadRequestException(
+        `filter_kind must be one of 'valkey_search' | 'tool' | 'key_prefix' | 'session', got '${filterKind}'`,
+      );
+    } catch (err) {
+      throw mapCacheProposalError(err);
+    }
+  }
+}
+
+function requireString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new BadRequestException(`${field} is required and must be a non-empty string`);
+  }
+  return value;
+}
+
+function optionalString(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== 'string') {
+    throw new BadRequestException(`${field} must be a string when provided`);
+  }
+  return value;
+}
+
+function optionalNullableString(value: unknown, field: string): string | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== 'string') {
+    throw new BadRequestException(`${field} must be a string or null when provided`);
+  }
+  return value;
+}
+
+function requireFiniteNumber(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new BadRequestException(`${field} is required and must be a finite number`);
+  }
+  return value;
+}
+
+function formatProposalResult(result: { proposal: StoredCacheProposal; warnings: string[] }) {
+  const { proposal, warnings } = result;
+  return {
+    proposal_id: proposal.id,
+    status: proposal.status,
+    expires_at: proposal.expires_at,
+    warnings,
+  };
+}
+
+function mapCacheProposalError(err: unknown): HttpException {
+  if (err instanceof HttpException) {
+    return err;
+  }
+  if (err instanceof RateLimitedError) {
+    return new HttpException(
+      {
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        code: err.code,
+        message: err.message,
+        retry_after_ms: err.retryAfterMs,
+        details: err.details,
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+  if (err instanceof CacheNotFoundError) {
+    return new HttpException(
+      { statusCode: HttpStatus.NOT_FOUND, code: err.code, message: err.message, details: err.details },
+      HttpStatus.NOT_FOUND,
+    );
+  }
+  if (err instanceof DuplicatePendingProposalError) {
+    return new HttpException(
+      { statusCode: HttpStatus.CONFLICT, code: err.code, message: err.message, details: err.details },
+      HttpStatus.CONFLICT,
+    );
+  }
+  if (err instanceof InvalidCacheTypeError || err instanceof CacheProposalValidationError) {
+    return new HttpException(
+      { statusCode: HttpStatus.BAD_REQUEST, code: err.code, message: err.message, details: err.details },
+      HttpStatus.BAD_REQUEST,
+    );
+  }
+  if (err instanceof CacheProposalError) {
+    return new HttpException(
+      { statusCode: HttpStatus.BAD_REQUEST, code: err.code, message: err.message, details: err.details },
+      HttpStatus.BAD_REQUEST,
+    );
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return new HttpException(
+    { statusCode: HttpStatus.INTERNAL_SERVER_ERROR, message },
+    HttpStatus.INTERNAL_SERVER_ERROR,
+  );
 }

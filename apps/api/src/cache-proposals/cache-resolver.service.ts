@@ -1,0 +1,118 @@
+import { Injectable, Logger } from '@nestjs/common';
+import type { CacheType } from '@betterdb/shared';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
+
+const REGISTRY_HASH = '__betterdb:caches';
+const HEARTBEAT_PREFIX = '__betterdb:heartbeat:';
+const DEFAULT_TTL_MS = 30_000;
+
+export interface ResolvedCache {
+  name: string;
+  type: CacheType;
+  prefix: string;
+  capabilities: string[];
+  protocol_version: number;
+  live: boolean;
+}
+
+interface CacheEntry {
+  resolved: ResolvedCache | null;
+  fetchedAt: number;
+}
+
+interface MarkerJson {
+  type?: string;
+  prefix?: string;
+  capabilities?: unknown;
+  protocol_version?: number;
+}
+
+@Injectable()
+export class CacheResolverService {
+  private readonly logger = new Logger(CacheResolverService.name);
+  private readonly cache = new Map<string, CacheEntry>();
+
+  constructor(
+    private readonly registry: ConnectionRegistry,
+    private readonly ttlMs: number = DEFAULT_TTL_MS,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  async resolveCacheByName(connectionId: string, name: string): Promise<ResolvedCache | null> {
+    const key = `${connectionId}:${name}`;
+    const cached = this.cache.get(key);
+    const ts = this.now();
+    if (cached && ts - cached.fetchedAt < this.ttlMs) {
+      return cached.resolved;
+    }
+
+    const resolved = await this.fetchFromRegistry(connectionId, name);
+    this.cache.set(key, { resolved, fetchedAt: ts });
+    return resolved;
+  }
+
+  invalidate(connectionId: string, name?: string): void {
+    if (name === undefined) {
+      const prefix = `${connectionId}:`;
+      for (const key of this.cache.keys()) {
+        if (key.startsWith(prefix)) {
+          this.cache.delete(key);
+        }
+      }
+      return;
+    }
+    this.cache.delete(`${connectionId}:${name}`);
+  }
+
+  private async fetchFromRegistry(
+    connectionId: string,
+    name: string,
+  ): Promise<ResolvedCache | null> {
+    const adapter = this.registry.get(connectionId);
+    const client = adapter.getClient();
+
+    const raw = await client.hget(REGISTRY_HASH, name);
+    if (raw === null) {
+      return null;
+    }
+
+    let parsed: MarkerJson;
+    try {
+      parsed = JSON.parse(raw) as MarkerJson;
+    } catch (err) {
+      this.logger.warn(
+        `Discovery marker for '${name}' on connection '${connectionId}' is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+
+    if (parsed.type !== 'agent_cache' && parsed.type !== 'semantic_cache') {
+      this.logger.warn(
+        `Discovery marker for '${name}' has unknown type '${parsed.type}' — ignoring`,
+      );
+      return null;
+    }
+    if (typeof parsed.prefix !== 'string' || parsed.prefix.length === 0) {
+      this.logger.warn(`Discovery marker for '${name}' is missing prefix — ignoring`);
+      return null;
+    }
+
+    const capabilities = Array.isArray(parsed.capabilities)
+      ? parsed.capabilities.filter((c): c is string => typeof c === 'string')
+      : [];
+    const protocolVersion =
+      typeof parsed.protocol_version === 'number' ? parsed.protocol_version : 1;
+
+    const heartbeat = await client.get(`${HEARTBEAT_PREFIX}${name}`);
+    const live = heartbeat !== null;
+
+    return {
+      name,
+      type: parsed.type,
+      prefix: parsed.prefix,
+      capabilities,
+      protocol_version: protocolVersion,
+      live,
+    };
+  }
+}
