@@ -3,6 +3,9 @@ import { z } from 'zod';
 export const CacheTypeSchema = z.enum(['agent_cache', 'semantic_cache']);
 export type CacheType = z.infer<typeof CacheTypeSchema>;
 
+export const SEMANTIC_CACHE = 'semantic_cache' as const;
+export const AGENT_CACHE = 'agent_cache' as const;
+
 export const ProposalTypeSchema = z.enum(['threshold_adjust', 'tool_ttl_adjust', 'invalidate']);
 export type ProposalType = z.infer<typeof ProposalTypeSchema>;
 

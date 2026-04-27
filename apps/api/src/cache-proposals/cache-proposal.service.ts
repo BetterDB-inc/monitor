@@ -1,11 +1,14 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import {
+  AGENT_CACHE,
   AgentInvalidatePayloadSchema,
   AgentToolTtlAdjustPayloadSchema,
   PROPOSAL_DEFAULT_EXPIRY_MS,
+  SEMANTIC_CACHE,
   SemanticInvalidatePayloadSchema,
   SemanticThresholdAdjustPayloadSchema,
+  type CacheType,
   type CreateCacheProposalInput,
   type StoredCacheProposal,
 } from '@betterdb/shared';
@@ -101,7 +104,7 @@ export class CacheProposalService {
     input: ProposeThresholdAdjustInput,
   ): Promise<ProposeResult> {
     this.requireReasoning(input.reasoning);
-    const cache = await this.requireCache(connectionId, input.cacheName, 'semantic_cache');
+    const cache = await this.requireCache(connectionId, input.cacheName, SEMANTIC_CACHE);
 
     const category = input.category ?? null;
     const currentThreshold = await this.readCurrentThreshold(cache, category);
@@ -112,14 +115,14 @@ export class CacheProposalService {
     });
 
     await this.rejectIfDuplicatePending(connectionId, input.cacheName, 'threshold_adjust', (p) => {
-      if (p.cache_type !== 'semantic_cache' || p.proposal_type !== 'threshold_adjust') {
+      if (p.cache_type !== SEMANTIC_CACHE || p.proposal_type !== 'threshold_adjust') {
         return false;
       }
       return p.proposal_payload.category === category;
     });
 
     return this.persist(connectionId, {
-      cache_type: 'semantic_cache',
+      cache_type: SEMANTIC_CACHE,
       proposal_type: 'threshold_adjust',
       proposal_payload: payload,
       cacheName: input.cacheName,
@@ -134,7 +137,7 @@ export class CacheProposalService {
     input: ProposeToolTtlAdjustInput,
   ): Promise<ProposeResult> {
     this.requireReasoning(input.reasoning);
-    const cache = await this.requireCache(connectionId, input.cacheName, 'agent_cache');
+    const cache = await this.requireCache(connectionId, input.cacheName, AGENT_CACHE);
 
     const currentTtlSeconds = await this.readCurrentToolTtl(cache, input.toolName);
     const payload = AgentToolTtlAdjustPayloadSchema.parse({
@@ -144,14 +147,14 @@ export class CacheProposalService {
     });
 
     await this.rejectIfDuplicatePending(connectionId, input.cacheName, 'tool_ttl_adjust', (p) => {
-      if (p.cache_type !== 'agent_cache' || p.proposal_type !== 'tool_ttl_adjust') {
+      if (p.cache_type !== AGENT_CACHE || p.proposal_type !== 'tool_ttl_adjust') {
         return false;
       }
       return p.proposal_payload.tool_name === input.toolName;
     });
 
     return this.persist(connectionId, {
-      cache_type: 'agent_cache',
+      cache_type: AGENT_CACHE,
       proposal_type: 'tool_ttl_adjust',
       proposal_payload: payload,
       cacheName: input.cacheName,
@@ -175,7 +178,7 @@ export class CacheProposalService {
       );
     }
 
-    if (cache.type === 'semantic_cache') {
+    if (cache.type === SEMANTIC_CACHE) {
       if (input.filterKind !== 'valkey_search') {
         throw new CacheProposalValidationError(
           `Semantic cache invalidate requires filter_kind='valkey_search', got '${input.filterKind}'`,
@@ -189,7 +192,7 @@ export class CacheProposalService {
         estimated_affected: input.estimatedAffected,
       });
       return this.persist(connectionId, {
-        cache_type: 'semantic_cache',
+        cache_type: SEMANTIC_CACHE,
         proposal_type: 'invalidate',
         proposal_payload: payload,
         cacheName: input.cacheName,
@@ -212,7 +215,7 @@ export class CacheProposalService {
       estimated_affected: input.estimatedAffected,
     });
     return this.persist(connectionId, {
-      cache_type: 'agent_cache',
+      cache_type: AGENT_CACHE,
       proposal_type: 'invalidate',
       proposal_payload: payload,
       cacheName: input.cacheName,
@@ -234,7 +237,7 @@ export class CacheProposalService {
   private async requireCache(
     connectionId: string,
     cacheName: string,
-    expected: 'agent_cache' | 'semantic_cache',
+    expected: CacheType,
   ): Promise<ResolvedCache> {
     const cache = await this.requireCacheAny(connectionId, cacheName);
     if (cache.type !== expected) {
@@ -274,7 +277,7 @@ export class CacheProposalService {
   private async persist(
     connectionId: string,
     args: {
-      cache_type: 'agent_cache' | 'semantic_cache';
+      cache_type: CacheType;
       proposal_type: 'threshold_adjust' | 'tool_ttl_adjust' | 'invalidate';
       proposal_payload: CreateCacheProposalInput['proposal_payload'];
       cacheName: string;

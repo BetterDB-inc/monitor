@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { CacheType } from '@betterdb/shared';
-import { REGISTRY_KEY, heartbeatKeyFor } from '@betterdb/shared';
+import { REGISTRY_KEY, heartbeatKeyFor, AGENT_CACHE, SEMANTIC_CACHE } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 const DEFAULT_TTL_MS = 30_000;
@@ -104,7 +104,7 @@ export class CacheResolverService {
       return null;
     }
 
-    if (parsed.type !== 'agent_cache' && parsed.type !== 'semantic_cache') {
+    if (parsed.type !== AGENT_CACHE && parsed.type !== SEMANTIC_CACHE) {
       this.logger.warn(
         `Discovery marker for '${name}' has unknown type '${parsed.type}' — ignoring`,
       );
