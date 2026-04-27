@@ -17,8 +17,8 @@ const VALID_REASON = 'tightening based on observed false-positive rate above 6%'
 class StubResolver {
   private readonly entries = new Map<string, ResolvedCache>();
 
-  set(name: string, type: ResolvedCache['type']): void {
-    this.entries.set(`${CONNECTION_ID}:${name}`, {
+  set(name: string, type: ResolvedCache['type'], connectionId: string = CONNECTION_ID): void {
+    this.entries.set(`${connectionId}:${name}`, {
       name,
       type,
       prefix: name,
@@ -312,7 +312,10 @@ describe('CacheProposalService', () => {
     });
 
     it('does not count proposals against other connections', async () => {
-      const { service } = buildService();
+      const { service, resolver } = buildService();
+      const OTHER_CONNECTION_ID = 'conn-other';
+      resolver.set(AGENT_CACHE, 'agent_cache', OTHER_CONNECTION_ID);
+
       for (let i = 0; i < 30; i++) {
         await service.proposeToolTtlAdjust(CONNECTION_ID, {
           cacheName: AGENT_CACHE,
@@ -321,14 +324,6 @@ describe('CacheProposalService', () => {
           reasoning: VALID_REASON,
         });
       }
-      const otherStorage = new MemoryAdapter();
-      const otherResolver = new StubResolver();
-      otherResolver.set(AGENT_CACHE, 'agent_cache');
-      const _otherService = new CacheProposalService(
-        otherStorage,
-        otherResolver as unknown as CacheResolverService,
-      );
-
       await expect(
         service.proposeToolTtlAdjust(CONNECTION_ID, {
           cacheName: AGENT_CACHE,
@@ -337,6 +332,15 @@ describe('CacheProposalService', () => {
           reasoning: VALID_REASON,
         }),
       ).rejects.toBeInstanceOf(RateLimitedError);
+
+      const result = await service.proposeToolTtlAdjust(OTHER_CONNECTION_ID, {
+        cacheName: AGENT_CACHE,
+        toolName: 'fresh-tool',
+        newTtlSeconds: 60,
+        reasoning: VALID_REASON,
+      });
+      expect(result.proposal.status).toBe('pending');
+      expect(result.proposal.connection_id).toBe(OTHER_CONNECTION_ID);
     });
   });
 });

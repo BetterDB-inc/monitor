@@ -24,7 +24,7 @@ export class SlidingWindowRateLimiter {
       return { allowed: false, retryAfterMs, remaining: 0 };
     }
 
-    return { allowed: true, retryAfterMs: 0, remaining: this.limit - events.length - 1 };
+    return { allowed: true, retryAfterMs: 0, remaining: this.limit - events.length };
   }
 
   record(key: string): void {
