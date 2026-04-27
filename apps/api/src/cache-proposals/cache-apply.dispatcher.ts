@@ -55,17 +55,32 @@ export class CacheApplyDispatcher {
     const startedAt = Date.now();
 
     if (proposal.cache_type === SEMANTIC_CACHE && proposal.proposal_type === 'threshold_adjust') {
-      const out = await this.applySemanticThresholdAdjust(client, cache, proposal.proposal_payload);
+      const out = await this.applySemanticThresholdAdjust(
+        client,
+        cache,
+        proposal.proposal_payload,
+        proposal.id,
+      );
       return { ...out, durationMs: Date.now() - startedAt };
     }
 
     if (proposal.cache_type === AGENT_CACHE && proposal.proposal_type === 'tool_ttl_adjust') {
-      const out = await this.applyAgentToolTtlAdjust(client, cache, proposal.proposal_payload);
+      const out = await this.applyAgentToolTtlAdjust(
+        client,
+        cache,
+        proposal.proposal_payload,
+        proposal.id,
+      );
       return { ...out, durationMs: Date.now() - startedAt };
     }
 
     if (proposal.cache_type === SEMANTIC_CACHE && proposal.proposal_type === 'invalidate') {
-      const out = await this.applySemanticInvalidate(client, cache, proposal.proposal_payload);
+      const out = await this.applySemanticInvalidate(
+        client,
+        cache,
+        proposal.proposal_payload,
+        proposal.id,
+      );
       return { ...out, durationMs: Date.now() - startedAt };
     }
 
@@ -82,12 +97,13 @@ export class CacheApplyDispatcher {
     client: Valkey,
     cache: ResolvedCache,
     payload: SemanticThresholdAdjustPayload,
+    proposalId: string,
   ): Promise<Omit<ApplyOutcome, 'durationMs'>> {
     if (!cache.capabilities.includes('threshold_adjust')) {
       throw new ApplyFailedError(
-        cache.name,
+        proposalId,
         `Cache '${cache.name}' does not advertise 'threshold_adjust' capability — it cannot read runtime threshold overrides`,
-        { reason: 'capability_missing' },
+        { reason: 'capability_missing', cacheName: cache.name },
       );
     }
     const configKey = `${cache.name}:__config`;
@@ -97,8 +113,9 @@ export class CacheApplyDispatcher {
     try {
       await client.hset(configKey, field, String(payload.new_threshold));
     } catch (err) {
-      throw new ApplyFailedError(cache.name, `HSET ${configKey} failed`, {
+      throw new ApplyFailedError(proposalId, `HSET ${configKey} failed`, {
         reason: 'valkey_command_failed',
+        cacheName: cache.name,
         underlying: err instanceof Error ? err.message : String(err),
       });
     }
@@ -117,14 +134,16 @@ export class CacheApplyDispatcher {
     client: Valkey,
     cache: ResolvedCache,
     payload: AgentToolTtlAdjustPayload,
+    proposalId: string,
   ): Promise<Omit<ApplyOutcome, 'durationMs'>> {
     const policiesKey = `${cache.name}:__tool_policies`;
     const policy = JSON.stringify({ ttl: payload.new_ttl_seconds });
     try {
       await client.hset(policiesKey, payload.tool_name, policy);
     } catch (err) {
-      throw new ApplyFailedError(cache.name, `HSET ${policiesKey} failed`, {
+      throw new ApplyFailedError(proposalId, `HSET ${policiesKey} failed`, {
         reason: 'valkey_command_failed',
+        cacheName: cache.name,
         underlying: err instanceof Error ? err.message : String(err),
       });
     }
@@ -142,6 +161,7 @@ export class CacheApplyDispatcher {
     client: Valkey,
     cache: ResolvedCache,
     payload: SemanticInvalidatePayload,
+    proposalId: string,
   ): Promise<Omit<ApplyOutcome, 'durationMs'>> {
     const indexName = `${cache.name}:__index`;
     let raw: unknown;
@@ -159,8 +179,9 @@ export class CacheApplyDispatcher {
         '2',
       );
     } catch (err) {
-      throw new ApplyFailedError(cache.name, `FT.SEARCH ${indexName} failed`, {
+      throw new ApplyFailedError(proposalId, `FT.SEARCH ${indexName} failed`, {
         reason: 'valkey_command_failed',
+        cacheName: cache.name,
         underlying: err instanceof Error ? err.message : String(err),
       });
     }
@@ -179,8 +200,9 @@ export class CacheApplyDispatcher {
     try {
       deleted = await client.del(...keys);
     } catch (err) {
-      throw new ApplyFailedError(cache.name, `DEL failed during invalidate`, {
+      throw new ApplyFailedError(proposalId, `DEL failed during invalidate`, {
         reason: 'valkey_command_failed',
+        cacheName: cache.name,
         underlying: err instanceof Error ? err.message : String(err),
       });
     }
@@ -200,7 +222,7 @@ export class CacheApplyDispatcher {
     proposalId: string,
   ): Promise<Omit<ApplyOutcome, 'durationMs'>> {
     if (payload.filter_kind === 'tool') {
-      const pattern = `${cache.name}:tool:${escapeGlob(payload.filter_value)}:*`;
+      const pattern = `${escapeGlob(cache.name)}:tool:${escapeGlob(payload.filter_value)}:*`;
       const deleted = await scanAndDelete(client, pattern);
       return {
         actualAffected: deleted,
@@ -216,7 +238,7 @@ export class CacheApplyDispatcher {
       };
     }
     if (payload.filter_kind === 'session') {
-      const pattern = `${cache.name}:session:${escapeGlob(payload.filter_value)}*`;
+      const pattern = `${escapeGlob(cache.name)}:session:${escapeGlob(payload.filter_value)}*`;
       const deleted = await scanAndDelete(client, pattern);
       return {
         actualAffected: deleted,

@@ -115,6 +115,16 @@ describe('CacheApplyDispatcher', () => {
     expect(client.hsets).toEqual([]);
   });
 
+  it('threshold_adjust capability-missing error carries proposal id, not cache name', async () => {
+    const client = new FakeClient();
+    const dispatcher = buildDispatcher({ ...SEMANTIC_CACHE, capabilities: [] }, client);
+    const p = proposal({ id: 'prop-42' });
+    await expect(dispatcher.dispatch(p)).rejects.toMatchObject({
+      code: 'APPLY_FAILED',
+      details: expect.objectContaining({ proposalId: 'prop-42', cacheName: 'sc:prod' }),
+    });
+  });
+
   it('agent tool_ttl_adjust writes JSON policy to {cache_name}:__tool_policies', async () => {
     const client = new FakeClient();
     const dispatcher = buildDispatcher(AGENT_CACHE, client);

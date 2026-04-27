@@ -100,7 +100,7 @@ export class ProposalEditNotAllowedError extends CacheProposalError {
 
 export class ApplyFailedError extends CacheProposalError {
   constructor(proposalId: string, message: string, details?: Record<string, unknown>) {
-    super('APPLY_FAILED', message, { proposalId, ...details });
+    super('APPLY_FAILED', message, { ...details, proposalId });
     this.name = 'ApplyFailedError';
   }
 }
