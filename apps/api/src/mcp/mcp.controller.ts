@@ -10,6 +10,7 @@ import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CacheProposalService } from '../cache-proposals/cache-proposal.service';
+import { CacheReadonlyService } from '../cache-proposals/cache-readonly.service';
 import {
   CacheNotFoundError,
   CacheProposalError,
@@ -74,6 +75,7 @@ export class McpController {
     private readonly clusterMetricsService: ClusterMetricsService,
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
     private readonly cacheProposalService: CacheProposalService,
+    private readonly cacheReadonlyService: CacheReadonlyService,
     @Optional() @Inject(ANOMALY_SERVICE) anomalyService?: any,
     @Optional() telemetryService?: UsageTelemetryService,
   ) {
@@ -462,6 +464,104 @@ export class McpController {
     return { ok: true };
   }
 
+  @Get('instance/:id/caches')
+  async listCachesEndpoint(@Param('id', ValidateInstanceIdPipe) id: string) {
+    try {
+      const caches = await this.cacheReadonlyService.listCaches(id);
+      return { caches };
+    } catch (err) {
+      throw mapCacheProposalError(err);
+    }
+  }
+
+  @Get('instance/:id/caches/:name/health')
+  async cacheHealthEndpoint(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Param('name') name: string,
+  ) {
+    try {
+      return await this.cacheReadonlyService.cacheHealth(id, requireCacheName(name));
+    } catch (err) {
+      throw mapCacheProposalError(err);
+    }
+  }
+
+  @Get('instance/:id/caches/:name/threshold-recommendation')
+  async cacheThresholdRecommendationEndpoint(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Param('name') name: string,
+    @Query('category') category?: string,
+    @Query('minSamples') minSamples?: string,
+  ) {
+    try {
+      return await this.cacheReadonlyService.thresholdRecommendation(
+        id,
+        requireCacheName(name),
+        {
+          category: category && category.length > 0 ? category : undefined,
+          minSamples: minSamples ? safeParseInt(minSamples) : undefined,
+        },
+      );
+    } catch (err) {
+      throw mapCacheProposalError(err);
+    }
+  }
+
+  @Get('instance/:id/caches/:name/tool-effectiveness')
+  async cacheToolEffectivenessEndpoint(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Param('name') name: string,
+  ) {
+    try {
+      const tools = await this.cacheReadonlyService.toolEffectiveness(
+        id,
+        requireCacheName(name),
+      );
+      return { tools };
+    } catch (err) {
+      throw mapCacheProposalError(err);
+    }
+  }
+
+  @Get('instance/:id/caches/:name/similarity-distribution')
+  async cacheSimilarityDistributionEndpoint(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Param('name') name: string,
+    @Query('category') category?: string,
+    @Query('windowHours') windowHours?: string,
+  ) {
+    try {
+      return await this.cacheReadonlyService.similarityDistribution(
+        id,
+        requireCacheName(name),
+        {
+          category: category && category.length > 0 ? category : undefined,
+          windowHours: windowHours ? safeParseInt(windowHours) : undefined,
+        },
+      );
+    } catch (err) {
+      throw mapCacheProposalError(err);
+    }
+  }
+
+  @Get('instance/:id/caches/:name/recent-changes')
+  async cacheRecentChangesEndpoint(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Param('name') name: string,
+    @Query('limit') limit?: string,
+  ) {
+    try {
+      const proposals = await this.cacheReadonlyService.recentChanges(
+        id,
+        requireCacheName(name),
+        limit ? safeParseInt(limit, 20) : 20,
+      );
+      return { proposals };
+    } catch (err) {
+      throw mapCacheProposalError(err);
+    }
+  }
+
   @Post('instance/:id/cache-proposals/threshold-adjust')
   async proposeCacheThresholdAdjust(
     @Param('id', ValidateInstanceIdPipe) id: string,
@@ -580,6 +680,17 @@ export class McpController {
       throw mapCacheProposalError(err);
     }
   }
+}
+
+const CACHE_NAME_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
+
+function requireCacheName(value: string): string {
+  if (!CACHE_NAME_RE.test(value)) {
+    throw new BadRequestException(
+      `Invalid cache_name. Must match ${CACHE_NAME_RE.source}.`,
+    );
+  }
+  return value;
 }
 
 function requireString(value: unknown, field: string): string {

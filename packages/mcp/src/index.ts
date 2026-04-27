@@ -721,6 +721,187 @@ server.tool(
   }),
 );
 
+const CACHE_NAME_DESC = "Cache name as registered in __betterdb:caches (e.g. 'betterdb_scache_prod').";
+
+server.tool(
+  'cache_list',
+  'List all caches (semantic_cache and agent_cache) registered for the active instance, with hit rate and total ops.',
+  {
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_list', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/caches`) as {
+        caches: Array<{ name: string; type: string; hit_rate: number; total_ops: number; status: string }>;
+      };
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      if (data.caches.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No caches registered for this instance.' }] };
+      }
+      const lines = data.caches.map((c) =>
+        `${c.name} (${c.type}, ${c.status}) — hit rate ${(c.hit_rate * 100).toFixed(1)}%, ops ${c.total_ops}`,
+      );
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_health',
+  'Detailed health for a single cache. Response branches by type: semantic_cache reports category_breakdown + uncertain_hit_rate; agent_cache reports tool_breakdown.',
+  {
+    cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_health', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiFetch(
+        `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/health`,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_threshold_recommendation',
+  'Threshold-tuning recommendation for a semantic_cache, based on the rolling similarity-score window. Errors with INVALID_CACHE_TYPE on agent_cache.',
+  {
+    cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
+    category: z.string().optional().describe('Restrict to a single category; omit for the global threshold'),
+    minSamples: z.number().int().min(1).optional().describe('Minimum samples required (default 100)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_threshold_recommendation', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const qs = new URLSearchParams();
+      if (params.category !== undefined) {
+        qs.set('category', params.category);
+      }
+      if (params.minSamples !== undefined) {
+        qs.set('minSamples', String(params.minSamples));
+      }
+      const path = `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/threshold-recommendation${qs.size > 0 ? `?${qs}` : ''}`;
+      const data = await apiFetch(path);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_tool_effectiveness',
+  'Per-tool hit rate, cost saved, and TTL recommendation for an agent_cache. Errors with INVALID_CACHE_TYPE on semantic_cache.',
+  {
+    cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_tool_effectiveness', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiFetch(
+        `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/tool-effectiveness`,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_similarity_distribution',
+  'Histogram of recent similarity scores (20 buckets, width 0.1) for a semantic_cache. Errors on agent_cache.',
+  {
+    cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
+    category: z.string().optional().describe('Restrict to a single category'),
+    window_hours: z.number().int().min(1).max(168).optional().describe('Lookback window (default 24h, max 168h)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_similarity_distribution', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const qs = new URLSearchParams();
+      if (params.category !== undefined) {
+        qs.set('category', params.category);
+      }
+      if (params.window_hours !== undefined) {
+        qs.set('windowHours', String(params.window_hours));
+      }
+      const path = `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/similarity-distribution${qs.size > 0 ? `?${qs}` : ''}`;
+      const data = await apiFetch(path);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_recent_changes',
+  'Recent proposals for a single cache (any status), so agents can avoid re-proposing pending or recently-applied changes. Newest first.',
+  {
+    cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
+    limit: z.number().int().min(1).max(200).optional().describe('Max proposals to return (default 20, max 200)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_recent_changes', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const qs = params.limit !== undefined ? `?limit=${params.limit}` : '';
+      const data = await apiFetch(
+        `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/recent-changes${qs}`,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
 server.tool(
   'cache_propose_threshold_adjust',
   'Propose a semantic-cache similarity-threshold change for review. Creates a pending proposal that requires human approval before any change is applied. Reasoning must be at least 20 characters.',
