@@ -3742,6 +3742,9 @@ export class SqliteAdapter implements StoragePort {
       const expected = Array.isArray(input.expected_status)
         ? input.expected_status
         : [input.expected_status];
+      if (expected.length === 0) {
+        return null;
+      }
       const placeholders = expected.map(() => '?').join(', ');
       whereClauses.push(`status IN (${placeholders})`);
       whereParams.push(...expected);

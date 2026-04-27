@@ -3973,6 +3973,9 @@ export class PostgresAdapter implements StoragePort {
       const expected = Array.isArray(input.expected_status)
         ? input.expected_status
         : [input.expected_status];
+      if (expected.length === 0) {
+        return null;
+      }
       const placeholders = expected.map(() => `$${nextPlaceholder++}`).join(', ');
       whereClauses.push(`status IN (${placeholders})`);
       params.push(...expected);

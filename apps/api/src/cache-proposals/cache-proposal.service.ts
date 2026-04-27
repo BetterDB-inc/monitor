@@ -28,6 +28,11 @@ const PROPOSAL_RATE_LIMIT = 30;
 const PROPOSAL_RATE_WINDOW_MS = 60 * 60 * 1000;
 const ESTIMATED_AFFECTED_WARN_THRESHOLD = 10_000;
 
+const SQLITE_UNIQUE_VIOLATION_CODES = new Set([
+  'SQLITE_CONSTRAINT_UNIQUE',
+  'SQLITE_CONSTRAINT_PRIMARYKEY',
+]);
+
 function isUniqueConstraintViolation(err: unknown): boolean {
   if (err === null || typeof err !== 'object') {
     return false;
@@ -36,7 +41,7 @@ function isUniqueConstraintViolation(err: unknown): boolean {
   if (typeof e.code === 'string' && e.code === '23505') {
     return true;
   }
-  if (typeof e.code === 'string' && e.code.startsWith('SQLITE_CONSTRAINT')) {
+  if (typeof e.code === 'string' && SQLITE_UNIQUE_VIOLATION_CODES.has(e.code)) {
     return true;
   }
   if (typeof e.message === 'string' && /UNIQUE constraint failed/i.test(e.message)) {
@@ -260,18 +265,45 @@ export class CacheProposalService {
     proposalType: 'threshold_adjust' | 'tool_ttl_adjust',
     matches: (proposal: StoredCacheProposal) => boolean,
   ): Promise<void> {
-    const pending = await this.storage.listCacheProposals({
-      connection_id: connectionId,
-      status: 'pending',
-      cache_name: cacheName,
-      proposal_type: proposalType,
-    });
-    const conflict = pending.find(matches);
+    const conflict = await this.findFirstPendingMatch(
+      connectionId,
+      cacheName,
+      proposalType,
+      matches,
+    );
     if (conflict) {
       throw new DuplicatePendingProposalError(cacheName, proposalType, {
         existing_proposal_id: conflict.id,
       });
     }
+  }
+
+  private async findFirstPendingMatch(
+    connectionId: string,
+    cacheName: string,
+    proposalType: 'threshold_adjust' | 'tool_ttl_adjust',
+    matches: (proposal: StoredCacheProposal) => boolean,
+  ): Promise<StoredCacheProposal | null> {
+    const pageSize = 200;
+    const maxPages = 10;
+    for (let page = 0; page < maxPages; page += 1) {
+      const batch = await this.storage.listCacheProposals({
+        connection_id: connectionId,
+        status: 'pending',
+        cache_name: cacheName,
+        proposal_type: proposalType,
+        limit: pageSize,
+        offset: page * pageSize,
+      });
+      const found = batch.find(matches);
+      if (found) {
+        return found;
+      }
+      if (batch.length < pageSize) {
+        return null;
+      }
+    }
+    return null;
   }
 
   private async persist(

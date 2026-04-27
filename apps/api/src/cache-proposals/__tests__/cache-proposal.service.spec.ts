@@ -328,6 +328,25 @@ describe('CacheProposalService', () => {
       ).rejects.toBeInstanceOf(DuplicatePendingProposalError);
     });
 
+    it('does not treat a CHECK constraint failure as a duplicate', async () => {
+      const { service, storage } = buildService();
+      const checkError = Object.assign(
+        new Error('SQLITE_CONSTRAINT_CHECK: CHECK constraint failed'),
+        { code: 'SQLITE_CONSTRAINT_CHECK' },
+      );
+      storage.createCacheProposal = async () => {
+        throw checkError;
+      };
+      await expect(
+        service.proposeToolTtlAdjust(CONNECTION_ID, {
+          cacheName: AGENT_CACHE,
+          toolName: 'tool-x',
+          newTtlSeconds: 60,
+          reasoning: VALID_REASON,
+        }),
+      ).rejects.toBe(checkError);
+    });
+
     it('releases the rate-limit slot when storage write fails', async () => {
       const { service, storage } = buildService();
       const original = storage.createCacheProposal.bind(storage);

@@ -1497,7 +1497,7 @@ export class MemoryAdapter implements StoragePort {
       const allowed = Array.isArray(input.expected_status)
         ? input.expected_status
         : [input.expected_status];
-      if (!allowed.includes(existing.status)) {
+      if (allowed.length === 0 || !allowed.includes(existing.status)) {
         return null;
       }
     }
