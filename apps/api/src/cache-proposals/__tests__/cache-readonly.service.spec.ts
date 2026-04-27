@@ -5,6 +5,7 @@ import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
 import { CacheNotFoundError, InvalidCacheTypeError } from '../errors';
 import { randomUUID } from 'crypto';
 import type { CacheType, CreateCacheProposalInput } from '@betterdb/shared';
+import { REGISTRY_KEY, heartbeatKeyFor } from '@betterdb/shared';
 
 const CONNECTION_ID = 'conn-test';
 const SEMANTIC_NAME = 'sc:prod';
@@ -83,9 +84,9 @@ const buildService = async (): Promise<{
 };
 
 const seedRegistry = (client: StubValkey, entries: Record<string, { type: CacheType; prefix: string }>): void => {
-  client.hashes['__betterdb:caches'] = {};
+  client.hashes[REGISTRY_KEY] = {};
   for (const [name, marker] of Object.entries(entries)) {
-    client.hashes['__betterdb:caches'][name] = JSON.stringify({
+    client.hashes[REGISTRY_KEY][name] = JSON.stringify({
       type: marker.type,
       prefix: marker.prefix,
       capabilities: ['threshold_adjust'],
@@ -116,7 +117,7 @@ describe('CacheReadonlyService', () => {
       });
       client.hashes[`${SEMANTIC_NAME}:__stats`] = { hits: '40', misses: '60', total: '100' };
       client.hashes[`${AGENT_NAME}:__stats`] = { 'tool:hits': '7', 'tool:misses': '3' };
-      client.strings[`__betterdb:heartbeat:${SEMANTIC_NAME}`] = '1';
+      client.strings[heartbeatKeyFor(SEMANTIC_NAME)] = '1';
 
       const result = await service.listCaches(CONNECTION_ID);
       expect(result).toHaveLength(2);

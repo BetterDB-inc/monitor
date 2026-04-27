@@ -1,105 +1,44 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { CacheType, StoredCacheProposal } from '@betterdb/shared';
+import { REGISTRY_KEY, heartbeatKeyFor } from '@betterdb/shared';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { CacheNotFoundError, InvalidCacheTypeError } from './errors';
+import type {
+  CacheHealth,
+  CacheHealthWarning,
+  CacheListEntry,
+  SemanticCacheHealth,
+  AgentCacheHealth,
+  SimilarityDistribution,
+  SimilarityDistributionBucket,
+  ThresholdRecommendation,
+  ThresholdRecommendationKind,
+  ToolEffectivenessEntry,
+  ToolEffectivenessRecommendation,
+} from './cache-readonly.types';
 
-const REGISTRY_HASH = '__betterdb:caches';
-const HEARTBEAT_PREFIX = '__betterdb:heartbeat:';
+export type {
+  CacheHealth,
+  CacheHealthWarning,
+  CacheListEntry,
+  SemanticCacheHealth,
+  AgentCacheHealth,
+  SimilarityDistribution,
+  SimilarityDistributionBucket,
+  ThresholdRecommendation,
+  ThresholdRecommendationKind,
+  ToolEffectivenessEntry,
+  ToolEffectivenessRecommendation,
+} from './cache-readonly.types';
+
 const DEFAULT_THRESHOLD_MIN_SAMPLES = 100;
 const DEFAULT_DISTRIBUTION_WINDOW_HOURS = 24;
 const DISTRIBUTION_BUCKETS = 20;
 const DISTRIBUTION_BUCKET_WIDTH = 0.1;
 const DEFAULT_RECENT_CHANGES_LIMIT = 20;
 const RECENT_CHANGES_MAX_LIMIT = 200;
-
-export interface CacheListEntry {
-  name: string;
-  type: CacheType;
-  prefix: string;
-  hit_rate: number;
-  total_ops: number;
-  status: 'live' | 'stale' | 'unknown';
-}
-
-export interface CacheHealthWarning {
-  level: 'info' | 'warn' | 'critical';
-  message: string;
-}
-
-interface CacheHealthCommon {
-  name: string;
-  hit_rate: number;
-  miss_rate: number;
-  cost_saved_total_usd: number;
-  total_ops: number;
-  warnings: CacheHealthWarning[];
-}
-
-export interface SemanticCacheHealth extends CacheHealthCommon {
-  type: 'semantic_cache';
-  uncertain_hit_rate: number;
-  category_breakdown: Array<{ category: string; hit_rate: number; ops: number }>;
-}
-
-export interface AgentCacheHealth extends CacheHealthCommon {
-  type: 'agent_cache';
-  tool_breakdown: Array<{
-    tool: string;
-    hit_rate: number;
-    ops: number;
-    cost_saved_usd: number;
-  }>;
-}
-
-export type CacheHealth = SemanticCacheHealth | AgentCacheHealth;
-
-export type ThresholdRecommendationKind =
-  | 'tighten_threshold'
-  | 'loosen_threshold'
-  | 'optimal'
-  | 'insufficient_data';
-
-export interface ThresholdRecommendation {
-  category: string;
-  sample_count: number;
-  current_threshold: number;
-  hit_rate: number;
-  uncertain_hit_rate: number;
-  near_miss_rate: number;
-  avg_hit_similarity: number;
-  avg_miss_similarity: number;
-  recommendation: ThresholdRecommendationKind;
-  recommended_threshold?: number;
-  reasoning: string;
-}
-
-export type ToolEffectivenessRecommendation =
-  | 'increase_ttl'
-  | 'optimal'
-  | 'decrease_ttl_or_disable';
-
-export interface ToolEffectivenessEntry {
-  tool: string;
-  hit_rate: number;
-  cost_saved_usd: number;
-  ttl_current: number | null;
-  recommendation: ToolEffectivenessRecommendation;
-}
-
-export interface SimilarityDistributionBucket {
-  lower: number;
-  upper: number;
-  hit_count: number;
-  miss_count: number;
-}
-
-export interface SimilarityDistribution {
-  total_samples: number;
-  bucket_width: number;
-  buckets: SimilarityDistributionBucket[];
-}
 
 interface MarkerRecord {
   name: string;
@@ -130,7 +69,7 @@ export class CacheReadonlyService {
 
   async listCaches(connectionId: string): Promise<CacheListEntry[]> {
     const client = this.registry.get(connectionId).getClient();
-    const raw = await client.hgetall(REGISTRY_HASH);
+    const raw = await client.hgetall(REGISTRY_KEY);
     const markers = this.parseRegistry(raw ?? {});
     if (markers.length === 0) {
       return [];
@@ -139,7 +78,7 @@ export class CacheReadonlyService {
     const entries: CacheListEntry[] = [];
     for (const marker of markers) {
       const stats = await this.readBaseStats(client, marker.name);
-      const heartbeat = await client.get(`${HEARTBEAT_PREFIX}${marker.name}`);
+      const heartbeat = await client.get(heartbeatKeyFor(marker.name));
       const status: CacheListEntry['status'] =
         heartbeat === null ? 'stale' : 'live';
       entries.push({
