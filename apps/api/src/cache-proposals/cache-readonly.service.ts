@@ -83,7 +83,7 @@ export class CacheReadonlyService {
 
     const entries: CacheListEntry[] = [];
     for (const marker of markers) {
-      const stats = await this.readBaseStats(client, marker.name);
+      const stats = await this.readBaseStats(client, marker.prefix);
       const heartbeat = await client.get(heartbeatKeyFor(marker.name));
       const status: CacheListEntry['status'] = heartbeat === null ? 'stale' : 'live';
       entries.push({

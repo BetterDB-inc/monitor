@@ -132,6 +132,24 @@ describe('CacheReadonlyService', () => {
       expect(ac.status).toBe('stale');
     });
 
+    it('reads stats from prefix, not name, when they differ', async () => {
+      const { service, client } = await buildService();
+      const ALIAS = 'prod-llm';
+      const PREFIX = 'betterdb_scache_prod';
+      seedRegistry(client, {
+        [ALIAS]: { type: 'semantic_cache', prefix: PREFIX },
+      });
+      client.hashes[`${PREFIX}:__stats`] = { hits: '90', misses: '10', total: '100' };
+      client.hashes[`${ALIAS}:__stats`] = { hits: '0', misses: '0', total: '0' };
+
+      const result = await service.listCaches(CONNECTION_ID);
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe(ALIAS);
+      expect(result[0].prefix).toBe(PREFIX);
+      expect(result[0].hit_rate).toBeCloseTo(0.9);
+      expect(result[0].total_ops).toBe(100);
+    });
+
     it('returns empty when registry is empty', async () => {
       const { service } = await buildService();
       const result = await service.listCaches(CONNECTION_ID);
