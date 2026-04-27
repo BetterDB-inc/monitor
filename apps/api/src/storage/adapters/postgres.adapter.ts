@@ -3958,13 +3958,23 @@ export class PostgresAdapter implements StoragePort {
     input: UpdateProposalStatusInput,
   ): Promise<StoredCacheProposal | null> {
     if (!this.pool) throw new Error('Database not initialized');
-    if (input.proposal_payload !== undefined) {
+    if (input.expected_status !== undefined || input.proposal_payload !== undefined) {
       const existing = await this.getCacheProposal(input.id);
       if (existing === null) {
         return null;
       }
-      const variantSchema = variantPayloadSchemaFor(existing.cache_type, existing.proposal_type);
-      variantSchema.parse(input.proposal_payload);
+      if (input.expected_status !== undefined) {
+        const allowed = Array.isArray(input.expected_status)
+          ? input.expected_status
+          : [input.expected_status];
+        if (allowed.length === 0 || !allowed.includes(existing.status)) {
+          return null;
+        }
+      }
+      if (input.proposal_payload !== undefined) {
+        const variantSchema = variantPayloadSchemaFor(existing.cache_type, existing.proposal_type);
+        variantSchema.parse(input.proposal_payload);
+      }
     }
     const sets: string[] = ['status = $2'];
     const params: unknown[] = [input.id, input.status];
