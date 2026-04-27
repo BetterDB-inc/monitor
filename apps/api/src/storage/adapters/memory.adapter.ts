@@ -1426,24 +1426,17 @@ export class MemoryAdapter implements StoragePort {
   private cacheProposalAudit: Map<string, StoredCacheProposalAudit> = new Map();
 
   private cloneProposal(p: StoredCacheProposal): StoredCacheProposal {
-    return {
-      ...p,
-      proposal_payload: { ...p.proposal_payload },
-      applied_result: p.applied_result == null ? null : { ...p.applied_result },
-    } as StoredCacheProposal;
+    return structuredClone(p);
   }
 
   private cloneAudit(a: StoredCacheProposalAudit): StoredCacheProposalAudit {
-    return {
-      ...a,
-      event_payload: a.event_payload == null ? null : { ...a.event_payload },
-    };
+    return structuredClone(a);
   }
 
   async createCacheProposal(input: CreateCacheProposalInput): Promise<StoredCacheProposal> {
     const proposedAt = input.proposed_at ?? Date.now();
     const expiresAt = input.expires_at ?? proposedAt + PROPOSAL_DEFAULT_EXPIRY_MS;
-    const proposal: StoredCacheProposal = {
+    const proposal: StoredCacheProposal = structuredClone({
       ...input,
       reasoning: input.reasoning ?? null,
       status: 'pending',
@@ -1454,7 +1447,7 @@ export class MemoryAdapter implements StoragePort {
       applied_at: null,
       applied_result: null,
       expires_at: expiresAt,
-    };
+    });
     this.cacheProposals.set(proposal.id, proposal);
     return this.cloneProposal(proposal);
   }
@@ -1496,7 +1489,8 @@ export class MemoryAdapter implements StoragePort {
     if (!existing) {
       return null;
     }
-    const updated = { ...existing, status: input.status } as StoredCacheProposal;
+    const updated = structuredClone(existing);
+    updated.status = input.status;
     if (input.reviewed_by !== undefined) {
       updated.reviewed_by = input.reviewed_by;
     }
@@ -1507,11 +1501,12 @@ export class MemoryAdapter implements StoragePort {
       updated.applied_at = input.applied_at;
     }
     if (input.applied_result !== undefined) {
-      updated.applied_result = input.applied_result;
+      updated.applied_result =
+        input.applied_result === null ? null : structuredClone(input.applied_result);
     }
     if (input.proposal_payload !== undefined) {
       (updated as { proposal_payload: typeof input.proposal_payload }).proposal_payload =
-        input.proposal_payload;
+        structuredClone(input.proposal_payload);
     }
     this.cacheProposals.set(input.id, updated);
     return this.cloneProposal(updated);
@@ -1532,7 +1527,7 @@ export class MemoryAdapter implements StoragePort {
   async appendCacheProposalAudit(
     input: AppendProposalAuditInput,
   ): Promise<StoredCacheProposalAudit> {
-    const audit: StoredCacheProposalAudit = {
+    const audit: StoredCacheProposalAudit = structuredClone({
       id: input.id,
       proposal_id: input.proposal_id,
       event_type: input.event_type,
@@ -1540,7 +1535,7 @@ export class MemoryAdapter implements StoragePort {
       event_at: input.event_at ?? Date.now(),
       actor: input.actor ?? null,
       actor_source: input.actor_source,
-    };
+    });
     this.cacheProposalAudit.set(audit.id, audit);
     return this.cloneAudit(audit);
   }

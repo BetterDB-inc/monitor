@@ -357,6 +357,8 @@ describe('Cache proposal storage', () => {
       if (created.cache_type === 'agent_cache' && created.proposal_type === 'invalidate') {
         expect(created.proposal_payload.filter_kind).toBe('tool');
         expect(created.proposal_payload.filter_value).toBe('get_weather');
+      } else {
+        throw new Error('discriminated union narrowing failed');
       }
     });
   });
