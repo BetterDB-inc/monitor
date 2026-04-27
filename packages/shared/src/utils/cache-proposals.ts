@@ -236,3 +236,24 @@ export const AppendProposalAuditInputSchema = z.object({
 export type AppendProposalAuditInput = z.infer<typeof AppendProposalAuditInputSchema>;
 
 export const PROPOSAL_DEFAULT_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
+export function variantPayloadSchemaFor(
+  cacheType: CacheType,
+  proposalType: ProposalType,
+): z.ZodType<ProposalPayload> {
+  if (cacheType === 'semantic_cache' && proposalType === 'threshold_adjust') {
+    return SemanticThresholdAdjustPayloadSchema;
+  }
+  if (cacheType === 'semantic_cache' && proposalType === 'invalidate') {
+    return SemanticInvalidatePayloadSchema;
+  }
+  if (cacheType === 'agent_cache' && proposalType === 'tool_ttl_adjust') {
+    return AgentToolTtlAdjustPayloadSchema;
+  }
+  if (cacheType === 'agent_cache' && proposalType === 'invalidate') {
+    return AgentInvalidatePayloadSchema;
+  }
+  throw new Error(
+    `Unknown (cache_type, proposal_type) combination: ${cacheType}/${proposalType}`,
+  );
+}

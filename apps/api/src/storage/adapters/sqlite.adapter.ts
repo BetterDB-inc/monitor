@@ -64,6 +64,7 @@ import {
   PROPOSAL_DEFAULT_EXPIRY_MS,
   StoredCacheProposalSchema,
   StoredCacheProposalAuditSchema,
+  variantPayloadSchemaFor,
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 
@@ -3645,10 +3646,13 @@ export class SqliteAdapter implements StoragePort {
 
   async listCacheProposals(options: ListCacheProposalsOptions): Promise<StoredCacheProposal[]> {
     if (!this.db) throw new Error('Database not initialized');
+    if (Array.isArray(options.status) && options.status.length === 0) {
+      return [];
+    }
     const conditions: string[] = ['connection_id = ?'];
     const params: (string | number)[] = [options.connection_id];
 
-    if (options.status) {
+    if (options.status !== undefined) {
       const statuses = Array.isArray(options.status) ? options.status : [options.status];
       const placeholders = statuses.map(() => '?').join(', ');
       conditions.push(`status IN (${placeholders})`);
@@ -3684,6 +3688,14 @@ export class SqliteAdapter implements StoragePort {
     input: UpdateProposalStatusInput,
   ): Promise<StoredCacheProposal | null> {
     if (!this.db) throw new Error('Database not initialized');
+    if (input.proposal_payload !== undefined) {
+      const existing = await this.getCacheProposal(input.id);
+      if (existing === null) {
+        return null;
+      }
+      const variantSchema = variantPayloadSchemaFor(existing.cache_type, existing.proposal_type);
+      variantSchema.parse(input.proposal_payload);
+    }
     const sets: string[] = ['status = ?'];
     const params: (string | number | null)[] = [input.status];
 
@@ -3721,37 +3733,15 @@ export class SqliteAdapter implements StoragePort {
 
   async expireCacheProposalsBefore(now: number): Promise<StoredCacheProposal[]> {
     if (!this.db) throw new Error('Database not initialized');
-    const expire = this.db.transaction((cutoff: number) => {
-      const candidates = this.db!
-        .prepare(
-          `SELECT * FROM cache_proposals
-           WHERE status = 'pending' AND expires_at <= ?`,
-        )
-        .all(cutoff) as CacheProposalRow[];
-      if (candidates.length === 0) {
-        return [];
-      }
-      const placeholders = candidates.map(() => '?').join(', ');
-      const ids = candidates.map((row) => row.id);
-      const info = this.db!
-        .prepare(
-          `UPDATE cache_proposals SET status = 'expired'
-           WHERE status = 'pending' AND id IN (${placeholders})`,
-        )
-        .run(...ids);
-      if (info.changes !== candidates.length) {
-        const stillExpired = this.db!
-          .prepare(
-            `SELECT * FROM cache_proposals
-             WHERE status = 'expired' AND id IN (${placeholders})`,
-          )
-          .all(...ids) as CacheProposalRow[];
-        return stillExpired;
-      }
-      return candidates.map((row) => ({ ...row, status: 'expired' as const }));
-    });
-    const expired = expire(now);
-    return expired.map((row) => this.mapCacheProposalRow(row));
+    const rows = this.db
+      .prepare(
+        `UPDATE cache_proposals
+         SET status = 'expired'
+         WHERE status = 'pending' AND expires_at <= ?
+         RETURNING *`,
+      )
+      .all(now) as CacheProposalRow[];
+    return rows.map((row) => this.mapCacheProposalRow(row));
   }
 
   async appendCacheProposalAudit(

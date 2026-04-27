@@ -48,7 +48,7 @@ import type {
   UpdateProposalStatusInput,
   AppendProposalAuditInput,
 } from '@betterdb/shared';
-import { PROPOSAL_DEFAULT_EXPIRY_MS } from '@betterdb/shared';
+import { PROPOSAL_DEFAULT_EXPIRY_MS, variantPayloadSchemaFor } from '@betterdb/shared';
 
 export class MemoryAdapter implements StoragePort {
   private aclEntries: StoredAclEntry[] = [];
@@ -1458,11 +1458,15 @@ export class MemoryAdapter implements StoragePort {
   }
 
   async listCacheProposals(options: ListCacheProposalsOptions): Promise<StoredCacheProposal[]> {
+    if (Array.isArray(options.status) && options.status.length === 0) {
+      return [];
+    }
+
     let filtered = [...this.cacheProposals.values()].filter(
       (p) => p.connection_id === options.connection_id,
     );
 
-    if (options.status) {
+    if (options.status !== undefined) {
       const statuses = Array.isArray(options.status) ? options.status : [options.status];
       filtered = filtered.filter((p) => statuses.includes(p.status));
     }
@@ -1488,6 +1492,10 @@ export class MemoryAdapter implements StoragePort {
     const existing = this.cacheProposals.get(input.id);
     if (!existing) {
       return null;
+    }
+    if (input.proposal_payload !== undefined) {
+      const variantSchema = variantPayloadSchemaFor(existing.cache_type, existing.proposal_type);
+      variantSchema.parse(input.proposal_payload);
     }
     const updated = structuredClone(existing);
     updated.status = input.status;

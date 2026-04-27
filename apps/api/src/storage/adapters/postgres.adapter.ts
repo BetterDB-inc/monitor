@@ -60,6 +60,7 @@ import {
   PROPOSAL_DEFAULT_EXPIRY_MS,
   StoredCacheProposalSchema,
   StoredCacheProposalAuditSchema,
+  variantPayloadSchemaFor,
 } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 
@@ -3895,11 +3896,14 @@ export class PostgresAdapter implements StoragePort {
 
   async listCacheProposals(options: ListCacheProposalsOptions): Promise<StoredCacheProposal[]> {
     if (!this.pool) throw new Error('Database not initialized');
+    if (Array.isArray(options.status) && options.status.length === 0) {
+      return [];
+    }
     const conditions: string[] = ['connection_id = $1'];
     const params: unknown[] = [options.connection_id];
     let idx = 2;
 
-    if (options.status) {
+    if (options.status !== undefined) {
       const statuses = Array.isArray(options.status) ? options.status : [options.status];
       const placeholders = statuses.map(() => `$${idx++}`).join(', ');
       conditions.push(`status IN (${placeholders})`);
@@ -3938,6 +3942,14 @@ export class PostgresAdapter implements StoragePort {
     input: UpdateProposalStatusInput,
   ): Promise<StoredCacheProposal | null> {
     if (!this.pool) throw new Error('Database not initialized');
+    if (input.proposal_payload !== undefined) {
+      const existing = await this.getCacheProposal(input.id);
+      if (existing === null) {
+        return null;
+      }
+      const variantSchema = variantPayloadSchemaFor(existing.cache_type, existing.proposal_type);
+      variantSchema.parse(input.proposal_payload);
+    }
     const sets: string[] = ['status = $2'];
     const params: unknown[] = [input.id, input.status];
     let nextPlaceholder = 3;
