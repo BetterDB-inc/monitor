@@ -222,7 +222,8 @@ export class CacheReadonlyService {
       recommendation = THRESHOLD_RECOMMENDATIONS.TIGHTEN;
       recommendedThreshold = Math.max(0, threshold - config.uncertainty_band * 1.5);
       reasoning = THRESHOLD_REASONINGS.tighten(uncertainHitRate);
-    } else if (nearMissRate > 0.3 && avgNearMissDelta < 0.03) {
+    } else if (nearMissRate > 0.3) {
+      // avgNearMissDelta is constrained to (0, 0.03] by the nearMisses filter.
       recommendation = THRESHOLD_RECOMMENDATIONS.LOOSEN;
       recommendedThreshold = threshold + avgNearMissDelta;
       reasoning = THRESHOLD_REASONINGS.loosen(nearMissRate);
