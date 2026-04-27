@@ -37,10 +37,11 @@ export class SlidingWindowRateLimiter {
 
   reserve(key: string): RateLimiterCheck {
     const result = this.check(key);
-    if (result.allowed) {
-      this.record(key);
+    if (!result.allowed) {
+      return result;
     }
-    return result;
+    this.record(key);
+    return { ...result, remaining: Math.max(0, result.remaining - 1) };
   }
 
   reset(key?: string): void {

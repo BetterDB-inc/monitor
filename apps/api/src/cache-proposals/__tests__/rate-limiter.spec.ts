@@ -34,6 +34,21 @@ describe('SlidingWindowRateLimiter', () => {
     expect(limiter.check('b').allowed).toBe(true);
   });
 
+  it('reserve() returns post-record remaining when allowed', () => {
+    let now = 1_000;
+    const limiter = new SlidingWindowRateLimiter(3, 1_000, () => now);
+
+    expect(limiter.reserve('k').remaining).toBe(2);
+    now += 1;
+    expect(limiter.reserve('k').remaining).toBe(1);
+    now += 1;
+    expect(limiter.reserve('k').remaining).toBe(0);
+    now += 1;
+    const blocked = limiter.reserve('k');
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.remaining).toBe(0);
+  });
+
   it('reset(key) clears only that key', () => {
     const now = 0;
     const limiter = new SlidingWindowRateLimiter(1, 1_000, () => now);
