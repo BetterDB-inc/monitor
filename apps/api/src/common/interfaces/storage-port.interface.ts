@@ -30,6 +30,21 @@ export type {
   VectorIndexSnapshotQueryOptions,
 } from '@betterdb/shared';
 export type { MetricForecastSettings, MetricKind } from '@betterdb/shared';
+export type {
+  CacheType,
+  ProposalType,
+  ProposalStatus,
+  ProposalAuditEvent,
+  ActorSource,
+  ProposalPayload,
+  StoredCacheProposal,
+  StoredCacheProposalAudit,
+  CreateCacheProposalInput,
+  ListCacheProposalsOptions,
+  UpdateProposalStatusInput,
+  AppendProposalAuditInput,
+  AppliedResult,
+} from '@betterdb/shared';
 import type {
   AppSettings,
   AuditQueryOptions,
@@ -53,6 +68,12 @@ import type {
   Webhook,
   WebhookDelivery,
   WebhookEventType,
+  StoredCacheProposal,
+  StoredCacheProposalAudit,
+  CreateCacheProposalInput,
+  ListCacheProposalsOptions,
+  UpdateProposalStatusInput,
+  AppendProposalAuditInput,
 } from '@betterdb/shared';
 
 // Anomaly Event Types
@@ -480,4 +501,13 @@ export interface StoragePort {
   saveMetricForecastSettings(settings: MetricForecastSettings): Promise<MetricForecastSettings>;
   deleteMetricForecastSettings(connectionId: string, metricKind: MetricKind): Promise<boolean>;
   getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]>;
+
+  // Cache Proposal Methods
+  createCacheProposal(input: CreateCacheProposalInput): Promise<StoredCacheProposal>;
+  getCacheProposal(id: string): Promise<StoredCacheProposal | null>;
+  listCacheProposals(options: ListCacheProposalsOptions): Promise<StoredCacheProposal[]>;
+  updateCacheProposalStatus(input: UpdateProposalStatusInput): Promise<StoredCacheProposal | null>;
+  expireCacheProposalsBefore(now: number): Promise<StoredCacheProposal[]>;
+  appendCacheProposalAudit(input: AppendProposalAuditInput): Promise<StoredCacheProposalAudit>;
+  getCacheProposalAudit(proposalId: string): Promise<StoredCacheProposalAudit[]>;
 }

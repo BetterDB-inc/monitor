@@ -18,3 +18,4 @@ export * from './types/metric-forecasting.types';
 export * from './types/telemetry';
 export * from './types/cli.types';
 export * from './types/command-safety';
+export * from './utils/cache-proposals';
