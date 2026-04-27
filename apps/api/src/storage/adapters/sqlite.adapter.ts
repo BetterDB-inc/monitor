@@ -1315,18 +1315,20 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_cache_proposals_expires_at
         ON cache_proposals(expires_at)
         WHERE status = 'pending';
+      DROP INDEX IF EXISTS uniq_cache_proposals_pending_threshold;
+      DROP INDEX IF EXISTS uniq_cache_proposals_pending_tool_ttl;
       CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_threshold
         ON cache_proposals(
           connection_id,
           cache_name,
-          json_extract(proposal_payload, '$.category')
+          COALESCE(json_extract(proposal_payload, '$.category'), '__betterdb_null__')
         )
         WHERE status = 'pending' AND proposal_type = 'threshold_adjust';
       CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_tool_ttl
         ON cache_proposals(
           connection_id,
           cache_name,
-          json_extract(proposal_payload, '$.tool_name')
+          COALESCE(json_extract(proposal_payload, '$.tool_name'), '__betterdb_null__')
         )
         WHERE status = 'pending' AND proposal_type = 'tool_ttl_adjust';
 

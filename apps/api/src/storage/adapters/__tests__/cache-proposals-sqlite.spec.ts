@@ -126,6 +126,24 @@ describe('Cache proposal storage (SQLite)', () => {
     ).rejects.toThrow(/UNIQUE constraint/i);
   });
 
+  it('rejects a second pending threshold_adjust with NULL category for same (connection, cache)', async () => {
+    const baseInput = {
+      connection_id: CONNECTION_ID,
+      cache_name: 'sc:default',
+      cache_type: 'semantic_cache' as const,
+      proposal_type: 'threshold_adjust' as const,
+      proposal_payload: {
+        category: null,
+        current_threshold: 0.1,
+        new_threshold: 0.08,
+      },
+    };
+    await storage.createCacheProposal({ id: randomUUID(), ...baseInput });
+    await expect(
+      storage.createCacheProposal({ id: randomUUID(), ...baseInput }),
+    ).rejects.toThrow(/UNIQUE constraint/i);
+  });
+
   it('allows a second pending threshold_adjust on a different category', async () => {
     const common = {
       connection_id: CONNECTION_ID,
@@ -198,7 +216,7 @@ describe('Cache proposal storage (SQLite)', () => {
       cache_name: 'sc:default',
       cache_type: 'semantic_cache',
       proposal_type: 'threshold_adjust',
-      proposal_payload: { category: null, current_threshold: 0.1, new_threshold: 0.08 },
+      proposal_payload: { category: 'faq', current_threshold: 0.1, new_threshold: 0.08 },
       expires_at: 100,
     });
     await storage.createCacheProposal({
@@ -207,7 +225,7 @@ describe('Cache proposal storage (SQLite)', () => {
       cache_name: 'sc:default',
       cache_type: 'semantic_cache',
       proposal_type: 'threshold_adjust',
-      proposal_payload: { category: null, current_threshold: 0.1, new_threshold: 0.08 },
+      proposal_payload: { category: 'support', current_threshold: 0.1, new_threshold: 0.08 },
       expires_at: 9_999_999_999_999,
     });
 
