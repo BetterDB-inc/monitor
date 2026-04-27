@@ -1575,16 +1575,19 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_cache_proposals_expires_at
         ON cache_proposals(expires_at)
         WHERE status = 'pending';
+      -- Drop legacy indexes that did NOT COALESCE NULL category/tool_name.
+      -- These were never released; the DROP fires once on dev DBs created
+      -- before the rename and is a no-op afterwards.
       DROP INDEX IF EXISTS uniq_cache_proposals_pending_threshold;
       DROP INDEX IF EXISTS uniq_cache_proposals_pending_tool_ttl;
-      CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_threshold
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_threshold_v2
         ON cache_proposals(
           connection_id,
           cache_name,
           COALESCE(proposal_payload->>'category', '__betterdb_null__')
         )
         WHERE status = 'pending' AND proposal_type = 'threshold_adjust';
-      CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_tool_ttl
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_tool_ttl_v2
         ON cache_proposals(
           connection_id,
           cache_name,

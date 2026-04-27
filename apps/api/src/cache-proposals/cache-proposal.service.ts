@@ -347,13 +347,16 @@ export class CacheProposalService {
     try {
       proposal = await this.storage.createCacheProposal(input);
     } catch (err) {
-      if (releaseToken !== undefined) {
-        this.rateLimiter.release(connectionId, releaseToken);
-      }
+      // Duplicate-pending is a client error — keep the rate-limit slot consumed
+      // so callers cannot spam the endpoint without budget cost.
       if (isUniqueConstraintViolation(err)) {
         throw new DuplicatePendingProposalError(args.cacheName, args.proposal_type, {
           reason: 'concurrent insert lost the race against an existing pending proposal',
         });
+      }
+      // Genuine storage failure — refund the slot so the caller can retry.
+      if (releaseToken !== undefined) {
+        this.rateLimiter.release(connectionId, releaseToken);
       }
       throw err;
     }
