@@ -1,16 +1,16 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import type Valkey from 'iovalkey';
 import type { CacheType, StoredCacheProposal } from '@betterdb/shared';
 import { REGISTRY_KEY, heartbeatKeyFor } from '@betterdb/shared';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { CacheNotFoundError, InvalidCacheTypeError } from './errors';
+import { readHashInt } from '../common/utils/valkey-fields';
 import type {
   CacheHealth,
   CacheHealthWarning,
   CacheListEntry,
-  SemanticCacheHealth,
-  AgentCacheHealth,
   SimilarityDistribution,
   SimilarityDistributionBucket,
   ThresholdRecommendation,
@@ -18,6 +18,7 @@ import type {
   ToolEffectivenessEntry,
   ToolEffectivenessRecommendation,
 } from './cache-readonly.types';
+import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 
 export type {
   CacheHealth,
@@ -40,6 +41,9 @@ const DISTRIBUTION_BUCKET_WIDTH = 0.1;
 const DEFAULT_RECENT_CHANGES_LIMIT = 20;
 const RECENT_CHANGES_MAX_LIMIT = 200;
 
+const DEFAULT_SEMANTIC_THRESHOLD = 0.1;
+const DEFAULT_UNCERTAINTY_BAND = 0.05;
+
 interface MarkerRecord {
   name: string;
   type: CacheType;
@@ -54,9 +58,6 @@ interface SemanticConfig {
   uncertainty_band: number;
 }
 
-const DEFAULT_SEMANTIC_THRESHOLD = 0.1;
-const DEFAULT_UNCERTAINTY_BAND = 0.05;
-
 @Injectable()
 export class CacheReadonlyService {
   private readonly logger = new Logger(CacheReadonlyService.name);
@@ -68,7 +69,7 @@ export class CacheReadonlyService {
   ) {}
 
   async listCaches(connectionId: string): Promise<CacheListEntry[]> {
-    const client = this.registry.get(connectionId).getClient();
+    const client = this.getClient(connectionId);
     const raw = await client.hgetall(REGISTRY_KEY);
     const markers = this.parseRegistry(raw ?? {});
     if (markers.length === 0) {
@@ -79,8 +80,7 @@ export class CacheReadonlyService {
     for (const marker of markers) {
       const stats = await this.readBaseStats(client, marker.name);
       const heartbeat = await client.get(heartbeatKeyFor(marker.name));
-      const status: CacheListEntry['status'] =
-        heartbeat === null ? 'stale' : 'live';
+      const status: CacheListEntry['status'] = heartbeat === null ? 'stale' : 'live';
       entries.push({
         name: marker.name,
         type: marker.type,
@@ -96,15 +96,15 @@ export class CacheReadonlyService {
 
   async cacheHealth(connectionId: string, cacheName: string): Promise<CacheHealth> {
     const cache = await this.requireCache(connectionId, cacheName);
-    const client = this.registry.get(connectionId).getClient();
+    const client = this.getClient(connectionId);
     const statsKey = `${cache.prefix}:__stats`;
     const raw = (await client.hgetall(statsKey)) ?? {};
 
     if (cache.type === 'semantic_cache') {
-      const hits = readInt(raw, 'hits');
-      const misses = readInt(raw, 'misses');
-      const total = readInt(raw, 'total') || hits + misses;
-      const costSavedMicros = readInt(raw, 'cost_saved_micros');
+      const hits = readHashInt(raw, 'hits');
+      const misses = readHashInt(raw, 'misses');
+      const total = readHashInt(raw, 'total') || hits + misses;
+      const costSavedMicros = readHashInt(raw, 'cost_saved_micros');
       const samples = await this.readSimilarityWindow(client, cache.prefix);
       const config = await this.readSemanticConfig(client, cache.prefix);
       const hitRate = total === 0 ? 0 : hits / total;
@@ -117,7 +117,7 @@ export class CacheReadonlyService {
       const categoryBreakdown = this.computeCategoryBreakdown(samples);
       const warnings = this.deriveSemanticWarnings(hitRate, uncertainHitRate, total);
 
-      const health: SemanticCacheHealth = {
+      return {
         type: 'semantic_cache',
         name: cache.name,
         hit_rate: hitRate,
@@ -128,17 +128,16 @@ export class CacheReadonlyService {
         category_breakdown: categoryBreakdown,
         warnings,
       };
-      return health;
     }
 
-    const llmHits = readInt(raw, 'llm:hits');
-    const llmMisses = readInt(raw, 'llm:misses');
-    const toolHits = readInt(raw, 'tool:hits');
-    const toolMisses = readInt(raw, 'tool:misses');
+    const llmHits = readHashInt(raw, 'llm:hits');
+    const llmMisses = readHashInt(raw, 'llm:misses');
+    const toolHits = readHashInt(raw, 'tool:hits');
+    const toolMisses = readHashInt(raw, 'tool:misses');
     const totalHits = llmHits + toolHits;
     const totalMisses = llmMisses + toolMisses;
     const total = totalHits + totalMisses;
-    const costSavedMicros = readInt(raw, 'cost_saved_micros');
+    const costSavedMicros = readHashInt(raw, 'cost_saved_micros');
     const tools = this.extractAgentToolStats(raw);
     const toolBreakdown = Object.entries(tools)
       .map(([tool, s]) => ({
@@ -150,7 +149,7 @@ export class CacheReadonlyService {
       .sort((a, b) => b.cost_saved_usd - a.cost_saved_usd);
     const warnings = this.deriveAgentWarnings(totalHits, total);
 
-    const health: AgentCacheHealth = {
+    return {
       type: 'agent_cache',
       name: cache.name,
       hit_rate: total === 0 ? 0 : totalHits / total,
@@ -160,7 +159,6 @@ export class CacheReadonlyService {
       tool_breakdown: toolBreakdown,
       warnings,
     };
-    return health;
   }
 
   async thresholdRecommendation(
@@ -169,14 +167,12 @@ export class CacheReadonlyService {
     options: { category?: string; minSamples?: number } = {},
   ): Promise<ThresholdRecommendation> {
     const cache = await this.requireCacheOfType(connectionId, cacheName, 'semantic_cache');
-    const client = this.registry.get(connectionId).getClient();
+    const client = this.getClient(connectionId);
     const samples = await this.readSimilarityWindow(client, cache.prefix);
     const config = await this.readSemanticConfig(client, cache.prefix);
     const minSamples = options.minSamples ?? DEFAULT_THRESHOLD_MIN_SAMPLES;
     const category = options.category;
-    const filtered = category
-      ? samples.filter((s) => s.category === category)
-      : samples;
+    const filtered = category ? samples.filter((s) => s.category === category) : samples;
     const threshold =
       category !== undefined && config.category_thresholds[category] !== undefined
         ? config.category_thresholds[category]
@@ -201,9 +197,7 @@ export class CacheReadonlyService {
     const hits = filtered.filter((s) => s.result === 'hit');
     const misses = filtered.filter((s) => s.result === 'miss');
     const hitRate = hits.length / sampleCount;
-    const uncertainHits = hits.filter(
-      (s) => s.score >= threshold - config.uncertainty_band,
-    );
+    const uncertainHits = hits.filter((s) => s.score >= threshold - config.uncertainty_band);
     const uncertainHitRate = hits.length === 0 ? 0 : uncertainHits.length / hits.length;
     const nearMisses = misses.filter((s) => s.score > threshold && s.score <= threshold + 0.03);
     const nearMissRate = misses.length === 0 ? 0 : nearMisses.length / misses.length;
@@ -252,7 +246,7 @@ export class CacheReadonlyService {
     cacheName: string,
   ): Promise<ToolEffectivenessEntry[]> {
     const cache = await this.requireCacheOfType(connectionId, cacheName, 'agent_cache');
-    const client = this.registry.get(connectionId).getClient();
+    const client = this.getClient(connectionId);
     const raw = (await client.hgetall(`${cache.prefix}:__stats`)) ?? {};
     const tools = this.extractAgentToolStats(raw);
 
@@ -263,8 +257,7 @@ export class CacheReadonlyService {
       const policyTtl = await this.readToolPolicyTtl(client, cache.prefix, toolName);
       let recommendation: ToolEffectivenessRecommendation;
       if (hitRate > 0.8) {
-        recommendation =
-          policyTtl !== null && policyTtl < 3600 ? 'increase_ttl' : 'optimal';
+        recommendation = policyTtl !== null && policyTtl < 3600 ? 'increase_ttl' : 'optimal';
       } else if (hitRate >= 0.4) {
         recommendation = 'optimal';
       } else {
@@ -288,19 +281,15 @@ export class CacheReadonlyService {
     options: { category?: string; windowHours?: number } = {},
   ): Promise<SimilarityDistribution> {
     const cache = await this.requireCacheOfType(connectionId, cacheName, 'semantic_cache');
-    const client = this.registry.get(connectionId).getClient();
+    const client = this.getClient(connectionId);
     const samples = await this.readSimilarityWindow(client, cache.prefix);
     const cutoff =
-      Date.now() -
-      (options.windowHours ?? DEFAULT_DISTRIBUTION_WINDOW_HOURS) * 60 * 60 * 1000;
+      Date.now() - (options.windowHours ?? DEFAULT_DISTRIBUTION_WINDOW_HOURS) * 60 * 60 * 1000;
     const filtered = samples.filter((s) => {
       if (s.recordedAt < cutoff) {
         return false;
       }
-      if (options.category !== undefined && s.category !== options.category) {
-        return false;
-      }
-      return true;
+      return options.category === undefined || s.category === options.category;
     });
 
     const buckets: SimilarityDistributionBucket[] = [];
@@ -392,21 +381,24 @@ export class CacheReadonlyService {
   }
 
   private async readBaseStats(
-    client: ReturnType<ConnectionRegistry['get']>['getClient'] extends () => infer C ? C : never,
+    client: Valkey,
     prefix: string,
   ): Promise<{ hits: number; misses: number; total: number }> {
     const raw = (await client.hgetall(`${prefix}:__stats`)) ?? {};
-    const hits = readInt(raw, 'hits') + readInt(raw, 'llm:hits') + readInt(raw, 'tool:hits');
+    const hits =
+      readHashInt(raw, 'hits') + readHashInt(raw, 'llm:hits') + readHashInt(raw, 'tool:hits');
     const misses =
-      readInt(raw, 'misses') + readInt(raw, 'llm:misses') + readInt(raw, 'tool:misses');
-    const explicitTotal = readInt(raw, 'total');
+      readHashInt(raw, 'misses') + readHashInt(raw, 'llm:misses') + readHashInt(raw, 'tool:misses');
+    const explicitTotal = readHashInt(raw, 'total');
     return { hits, misses, total: explicitTotal === 0 ? hits + misses : explicitTotal };
   }
 
   private async readSimilarityWindow(
-    client: ReturnType<ConnectionRegistry['get']>['getClient'] extends () => infer C ? C : never,
+    client: Valkey,
     prefix: string,
-  ): Promise<Array<{ score: number; result: 'hit' | 'miss'; category: string; recordedAt: number }>> {
+  ): Promise<
+    Array<{ score: number; result: 'hit' | 'miss'; category: string; recordedAt: number }>
+  > {
     let raw: Array<string | number>;
     try {
       raw = (await client.zrange(
@@ -449,10 +441,7 @@ export class CacheReadonlyService {
     return out;
   }
 
-  private async readSemanticConfig(
-    client: ReturnType<ConnectionRegistry['get']>['getClient'] extends () => infer C ? C : never,
-    prefix: string,
-  ): Promise<SemanticConfig> {
+  private async readSemanticConfig(client: Valkey, prefix: string): Promise<SemanticConfig> {
     const raw = (await client.hgetall(`${prefix}:__config`)) ?? {};
     const defaultThreshold = Number(raw.default_threshold);
     const uncertaintyBand = Number(raw.uncertainty_band);
@@ -471,14 +460,18 @@ export class CacheReadonlyService {
       }
     }
     return {
-      default_threshold: Number.isFinite(defaultThreshold) ? defaultThreshold : DEFAULT_SEMANTIC_THRESHOLD,
-      uncertainty_band: Number.isFinite(uncertaintyBand) ? uncertaintyBand : DEFAULT_UNCERTAINTY_BAND,
+      default_threshold: Number.isFinite(defaultThreshold)
+        ? defaultThreshold
+        : DEFAULT_SEMANTIC_THRESHOLD,
+      uncertainty_band: Number.isFinite(uncertaintyBand)
+        ? uncertaintyBand
+        : DEFAULT_UNCERTAINTY_BAND,
       category_thresholds: categoryThresholds,
     };
   }
 
   private async readToolPolicyTtl(
-    client: ReturnType<ConnectionRegistry['get']>['getClient'] extends () => infer C ? C : never,
+    client: Valkey,
     prefix: string,
     toolName: string,
   ): Promise<number | null> {
@@ -495,10 +488,9 @@ export class CacheReadonlyService {
     }
   }
 
-  private extractAgentToolStats(raw: Record<string, string>): Record<
-    string,
-    { hits: number; misses: number; costSavedMicros: number }
-  > {
+  private extractAgentToolStats(
+    raw: Record<string, string>,
+  ): Record<string, { hits: number; misses: number; costSavedMicros: number }> {
     const out: Record<string, { hits: number; misses: number; costSavedMicros: number }> = {};
     const pattern = /^tool:([^:]+):(hits|misses|cost_saved_micros)$/;
     for (const [key, value] of Object.entries(raw)) {
@@ -592,13 +584,8 @@ export class CacheReadonlyService {
     }
     return warnings;
   }
-}
 
-function readInt(raw: Record<string, string>, field: string): number {
-  const value = raw[field];
-  if (value === undefined || value === '') {
-    return 0;
+  private getClient(connectionId: string): ReturnType<DatabasePort['getClient']> {
+    return this.registry.get(connectionId).getClient();
   }
-  const parsed = parseInt(value, 10);
-  return Number.isNaN(parsed) ? 0 : parsed;
 }
