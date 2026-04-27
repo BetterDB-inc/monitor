@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-27
+
+### Added
+
+- **Discovery marker protocol** — on construction, the cache registers itself in a Valkey-side `__betterdb:caches` hash (one entry per cache `name`) and writes a periodic `__betterdb:heartbeat:<name>` key (default 30s). Lets BetterDB Monitor enumerate live caches without inspecting application config. Marker payload contains `type=agent_cache`, `version`, `prefix`, `protocol_version`, and a `capabilities` array. Caller can wait for registration to finish via `await cache.ensureDiscoveryReady()`. New `discovery` option to disable or override the heartbeat interval. New Prometheus counter `{prefix}_discovery_write_failed_total`. `shutdown()` stops the heartbeat and deletes the heartbeat key without touching cached entries.
+
 ## [0.4.0] - 2026-04-23
 
 ### Added
