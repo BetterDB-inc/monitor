@@ -208,7 +208,7 @@ export class CacheApplyDispatcher {
       };
     }
     if (payload.filter_kind === 'key_prefix') {
-      const pattern = `${escapeGlob(payload.filter_value)}*`;
+      const pattern = `${escapeGlob(cache.name)}:${escapeGlob(payload.filter_value)}*`;
       const deleted = await scanAndDelete(client, pattern);
       return {
         actualAffected: deleted,

@@ -20,8 +20,12 @@ class FakeClient {
     return keys.length;
   }
 
-  async scan(cursor: string, _match: string, _pattern: string, _count: string, _n: number): Promise<[string, string[]]> {
-    return [cursor === '0' ? '0' : '0', []];
+  public scanCalls: string[] = [];
+  public scanResults: string[] = [];
+
+  async scan(_cursor: string, _match: string, pattern: string, _count: string, _n: number): Promise<[string, string[]]> {
+    this.scanCalls.push(pattern);
+    return ['0', this.scanResults];
   }
 
   public ftSearchResponse: unknown = [0];
@@ -151,6 +155,24 @@ describe('CacheApplyDispatcher', () => {
     );
     expect(client.deletes).toEqual(['sc:prod:k1', 'sc:prod:k2', 'sc:prod:k3']);
     expect(out.actualAffected).toBe(3);
+  });
+
+  it('agent invalidate by key_prefix scopes the SCAN pattern to the cache namespace', async () => {
+    const client = new FakeClient();
+    const dispatcher = buildDispatcher(AGENT_CACHE, client);
+    await dispatcher.dispatch(
+      proposal({
+        cache_name: 'ac:prod',
+        cache_type: 'agent_cache',
+        proposal_type: 'invalidate',
+        proposal_payload: {
+          filter_kind: 'key_prefix',
+          filter_value: 'memo:',
+          estimated_affected: 5,
+        },
+      }),
+    );
+    expect(client.scanCalls).toEqual(['ac:prod:memo:*']);
   });
 
   it('fails when cache type changed since proposal creation', async () => {
