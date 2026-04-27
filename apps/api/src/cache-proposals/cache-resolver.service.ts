@@ -1,9 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { CacheType } from '@betterdb/shared';
+import { REGISTRY_KEY, heartbeatKeyFor } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 
-const REGISTRY_HASH = '__betterdb:caches';
-const HEARTBEAT_PREFIX = '__betterdb:heartbeat:';
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_NEGATIVE_TTL_MS = 2_000;
 
@@ -90,7 +89,7 @@ export class CacheResolverService {
     const adapter = this.registry.get(connectionId);
     const client = adapter.getClient();
 
-    const raw = await client.hget(REGISTRY_HASH, name);
+    const raw = await client.hget(REGISTRY_KEY, name);
     if (raw === null) {
       return null;
     }
@@ -122,7 +121,7 @@ export class CacheResolverService {
     const protocolVersion =
       typeof parsed.protocol_version === 'number' ? parsed.protocol_version : 1;
 
-    const heartbeat = await client.get(`${HEARTBEAT_PREFIX}${name}`);
+    const heartbeat = await client.get(heartbeatKeyFor(name));
     const live = heartbeat !== null;
 
     return {
