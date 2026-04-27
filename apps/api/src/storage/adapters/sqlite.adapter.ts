@@ -1315,6 +1315,20 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_cache_proposals_expires_at
         ON cache_proposals(expires_at)
         WHERE status = 'pending';
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_threshold
+        ON cache_proposals(
+          connection_id,
+          cache_name,
+          json_extract(proposal_payload, '$.category')
+        )
+        WHERE status = 'pending' AND proposal_type = 'threshold_adjust';
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_tool_ttl
+        ON cache_proposals(
+          connection_id,
+          cache_name,
+          json_extract(proposal_payload, '$.tool_name')
+        )
+        WHERE status = 'pending' AND proposal_type = 'tool_ttl_adjust';
 
       CREATE TABLE IF NOT EXISTS cache_proposal_audit (
         id TEXT PRIMARY KEY,
@@ -3698,6 +3712,8 @@ export class SqliteAdapter implements StoragePort {
     }
     const sets: string[] = ['status = ?'];
     const params: (string | number | null)[] = [input.status];
+    const whereClauses: string[] = ['id = ?'];
+    const whereParams: (string | number)[] = [];
 
     if (input.reviewed_by !== undefined) {
       sets.push('reviewed_by = ?');
@@ -3720,11 +3736,22 @@ export class SqliteAdapter implements StoragePort {
       params.push(JSON.stringify(input.proposal_payload));
     }
 
-    params.push(input.id);
+    whereParams.push(input.id);
+
+    if (input.expected_status !== undefined) {
+      const expected = Array.isArray(input.expected_status)
+        ? input.expected_status
+        : [input.expected_status];
+      const placeholders = expected.map(() => '?').join(', ');
+      whereClauses.push(`status IN (${placeholders})`);
+      whereParams.push(...expected);
+    }
 
     const result = this.db
-      .prepare(`UPDATE cache_proposals SET ${sets.join(', ')} WHERE id = ?`)
-      .run(...params);
+      .prepare(
+        `UPDATE cache_proposals SET ${sets.join(', ')} WHERE ${whereClauses.join(' AND ')}`,
+      )
+      .run(...params, ...whereParams);
     if (result.changes === 0) {
       return null;
     }

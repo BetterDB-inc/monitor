@@ -5,6 +5,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 const REGISTRY_HASH = '__betterdb:caches';
 const HEARTBEAT_PREFIX = '__betterdb:heartbeat:';
 const DEFAULT_TTL_MS = 30_000;
+const DEFAULT_NEGATIVE_TTL_MS = 2_000;
 
 export interface ResolvedCache {
   name: string;
@@ -32,13 +33,21 @@ export class CacheResolverService {
   private readonly logger = new Logger(CacheResolverService.name);
   private readonly cache = new Map<string, CacheEntry>();
   private ttlMs = DEFAULT_TTL_MS;
+  private negativeTtlMs = DEFAULT_NEGATIVE_TTL_MS;
   private now: () => number = Date.now;
 
   constructor(private readonly registry: ConnectionRegistry) {}
 
-  configureForTesting(options: { ttlMs?: number; now?: () => number }): void {
+  configureForTesting(options: {
+    ttlMs?: number;
+    negativeTtlMs?: number;
+    now?: () => number;
+  }): void {
     if (options.ttlMs !== undefined) {
       this.ttlMs = options.ttlMs;
+    }
+    if (options.negativeTtlMs !== undefined) {
+      this.negativeTtlMs = options.negativeTtlMs;
     }
     if (options.now !== undefined) {
       this.now = options.now;
@@ -49,8 +58,11 @@ export class CacheResolverService {
     const key = `${connectionId}:${name}`;
     const cached = this.cache.get(key);
     const ts = this.now();
-    if (cached && ts - cached.fetchedAt < this.ttlMs) {
-      return cached.resolved;
+    if (cached !== undefined) {
+      const ttl = cached.resolved === null ? this.negativeTtlMs : this.ttlMs;
+      if (ts - cached.fetchedAt < ttl) {
+        return cached.resolved;
+      }
     }
 
     const resolved = await this.fetchFromRegistry(connectionId, name);

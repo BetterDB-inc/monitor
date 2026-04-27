@@ -1493,6 +1493,14 @@ export class MemoryAdapter implements StoragePort {
     if (!existing) {
       return null;
     }
+    if (input.expected_status !== undefined) {
+      const allowed = Array.isArray(input.expected_status)
+        ? input.expected_status
+        : [input.expected_status];
+      if (!allowed.includes(existing.status)) {
+        return null;
+      }
+    }
     if (input.proposal_payload !== undefined) {
       const variantSchema = variantPayloadSchemaFor(existing.cache_type, existing.proposal_type);
       variantSchema.parse(input.proposal_payload);

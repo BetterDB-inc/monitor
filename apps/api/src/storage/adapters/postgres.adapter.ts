@@ -1575,6 +1575,20 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_cache_proposals_expires_at
         ON cache_proposals(expires_at)
         WHERE status = 'pending';
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_threshold
+        ON cache_proposals(
+          connection_id,
+          cache_name,
+          (proposal_payload->>'category')
+        )
+        WHERE status = 'pending' AND proposal_type = 'threshold_adjust';
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_tool_ttl
+        ON cache_proposals(
+          connection_id,
+          cache_name,
+          (proposal_payload->>'tool_name')
+        )
+        WHERE status = 'pending' AND proposal_type = 'tool_ttl_adjust';
 
       CREATE TABLE IF NOT EXISTS cache_proposal_audit (
         id TEXT PRIMARY KEY,
@@ -3953,6 +3967,16 @@ export class PostgresAdapter implements StoragePort {
     const sets: string[] = ['status = $2'];
     const params: unknown[] = [input.id, input.status];
     let nextPlaceholder = 3;
+    const whereClauses: string[] = ['id = $1'];
+
+    if (input.expected_status !== undefined) {
+      const expected = Array.isArray(input.expected_status)
+        ? input.expected_status
+        : [input.expected_status];
+      const placeholders = expected.map(() => `$${nextPlaceholder++}`).join(', ');
+      whereClauses.push(`status IN (${placeholders})`);
+      params.push(...expected);
+    }
 
     const pushSet = (column: string, value: unknown): void => {
       sets.push(`${column} = $${nextPlaceholder}`);
@@ -3980,7 +4004,7 @@ export class PostgresAdapter implements StoragePort {
     }
 
     const result = await this.pool.query(
-      `UPDATE cache_proposals SET ${sets.join(', ')} WHERE id = $1 RETURNING *`,
+      `UPDATE cache_proposals SET ${sets.join(', ')} WHERE ${whereClauses.join(' AND ')} RETURNING *`,
       params,
     );
     if (result.rows.length === 0) {

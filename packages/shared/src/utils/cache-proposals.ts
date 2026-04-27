@@ -215,6 +215,7 @@ export type ListCacheProposalsOptions = z.infer<typeof ListCacheProposalsOptions
 
 export const UpdateProposalStatusInputSchema = z.object({
   id: z.string(),
+  expected_status: z.union([ProposalStatusSchema, z.array(ProposalStatusSchema)]).optional(),
   status: ProposalStatusSchema,
   reviewed_by: z.string().nullish(),
   reviewed_at: z.number().nullish(),

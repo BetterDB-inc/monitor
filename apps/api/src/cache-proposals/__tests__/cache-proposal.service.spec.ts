@@ -311,6 +311,23 @@ describe('CacheProposalService', () => {
       ).rejects.toBeInstanceOf(RateLimitedError);
     });
 
+    it('maps a unique-constraint violation to DuplicatePendingProposalError', async () => {
+      const { service, storage } = buildService();
+      storage.createCacheProposal = async () => {
+        throw Object.assign(new Error('SQLITE_CONSTRAINT_UNIQUE: UNIQUE constraint failed'), {
+          code: 'SQLITE_CONSTRAINT_UNIQUE',
+        });
+      };
+      await expect(
+        service.proposeToolTtlAdjust(CONNECTION_ID, {
+          cacheName: AGENT_CACHE,
+          toolName: 'tool-x',
+          newTtlSeconds: 60,
+          reasoning: VALID_REASON,
+        }),
+      ).rejects.toBeInstanceOf(DuplicatePendingProposalError);
+    });
+
     it('releases the rate-limit slot when storage write fails', async () => {
       const { service, storage } = buildService();
       const original = storage.createCacheProposal.bind(storage);

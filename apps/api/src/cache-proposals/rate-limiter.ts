@@ -4,8 +4,18 @@ export interface RateLimiterCheck {
   remaining: number;
 }
 
+export interface RateLimiterReservation extends RateLimiterCheck {
+  releaseToken?: number;
+}
+
+interface BucketEntry {
+  ts: number;
+  token: number;
+}
+
 export class SlidingWindowRateLimiter {
-  private readonly buckets = new Map<string, number[]>();
+  private readonly buckets = new Map<string, BucketEntry[]>();
+  private nextToken = 1;
 
   constructor(
     private readonly limit: number,
@@ -19,7 +29,7 @@ export class SlidingWindowRateLimiter {
     const events = this.prune(key, cutoff);
 
     if (events.length >= this.limit) {
-      const oldest = events[0];
+      const oldest = events[0].ts;
       const retryAfterMs = Math.max(0, oldest + this.windowMs - ts);
       return { allowed: false, retryAfterMs, remaining: 0 };
     }
@@ -27,29 +37,40 @@ export class SlidingWindowRateLimiter {
     return { allowed: true, retryAfterMs: 0, remaining: this.limit - events.length };
   }
 
-  record(key: string): void {
+  record(key: string): number {
     const ts = this.now();
     const cutoff = ts - this.windowMs;
     const events = this.prune(key, cutoff);
-    events.push(ts);
+    const token = this.nextToken;
+    this.nextToken += 1;
+    events.push({ ts, token });
     this.buckets.set(key, events);
+    return token;
   }
 
-  reserve(key: string): RateLimiterCheck {
+  reserve(key: string): RateLimiterReservation {
     const result = this.check(key);
     if (!result.allowed) {
       return result;
     }
-    this.record(key);
-    return { ...result, remaining: Math.max(0, result.remaining - 1) };
+    const releaseToken = this.record(key);
+    return {
+      ...result,
+      remaining: Math.max(0, result.remaining - 1),
+      releaseToken,
+    };
   }
 
-  release(key: string): void {
+  release(key: string, token: number): void {
     const events = this.buckets.get(key);
     if (events === undefined || events.length === 0) {
       return;
     }
-    events.pop();
+    const idx = events.findIndex((e) => e.token === token);
+    if (idx < 0) {
+      return;
+    }
+    events.splice(idx, 1);
     if (events.length === 0) {
       this.buckets.delete(key);
     }
@@ -63,10 +84,10 @@ export class SlidingWindowRateLimiter {
     this.buckets.delete(key);
   }
 
-  private prune(key: string, cutoff: number): number[] {
+  private prune(key: string, cutoff: number): BucketEntry[] {
     const existing = this.buckets.get(key) ?? [];
     let firstFresh = 0;
-    while (firstFresh < existing.length && existing[firstFresh] <= cutoff) {
+    while (firstFresh < existing.length && existing[firstFresh].ts <= cutoff) {
       firstFresh += 1;
     }
     if (firstFresh === 0) {

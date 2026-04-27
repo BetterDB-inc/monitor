@@ -25,6 +25,23 @@ const PROPOSAL_RATE_LIMIT = 30;
 const PROPOSAL_RATE_WINDOW_MS = 60 * 60 * 1000;
 const ESTIMATED_AFFECTED_WARN_THRESHOLD = 10_000;
 
+function isUniqueConstraintViolation(err: unknown): boolean {
+  if (err === null || typeof err !== 'object') {
+    return false;
+  }
+  const e = err as { code?: unknown; message?: unknown };
+  if (typeof e.code === 'string' && e.code === '23505') {
+    return true;
+  }
+  if (typeof e.code === 'string' && e.code.startsWith('SQLITE_CONSTRAINT')) {
+    return true;
+  }
+  if (typeof e.message === 'string' && /UNIQUE constraint failed/i.test(e.message)) {
+    return true;
+  }
+  return false;
+}
+
 export interface ProposeThresholdAdjustInput {
   cacheName: string;
   category?: string | null;
@@ -290,11 +307,19 @@ export class CacheProposalService {
       expires_at: expiresAt,
     } as CreateCacheProposalInput;
 
+    const releaseToken = reservation.releaseToken;
     let proposal: StoredCacheProposal;
     try {
       proposal = await this.storage.createCacheProposal(input);
     } catch (err) {
-      this.rateLimiter.release(connectionId);
+      if (releaseToken !== undefined) {
+        this.rateLimiter.release(connectionId, releaseToken);
+      }
+      if (isUniqueConstraintViolation(err)) {
+        throw new DuplicatePendingProposalError(args.cacheName, args.proposal_type, {
+          reason: 'concurrent insert lost the race against an existing pending proposal',
+        });
+      }
       throw err;
     }
     this.logger.log(
