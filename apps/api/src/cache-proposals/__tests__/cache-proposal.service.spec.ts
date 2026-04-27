@@ -311,6 +311,37 @@ describe('CacheProposalService', () => {
       ).rejects.toBeInstanceOf(RateLimitedError);
     });
 
+    it('releases the rate-limit slot when storage write fails', async () => {
+      const { service, storage } = buildService();
+      const original = storage.createCacheProposal.bind(storage);
+      let callCount = 0;
+      storage.createCacheProposal = async (input) => {
+        callCount += 1;
+        if (callCount === 1) {
+          throw new Error('simulated storage failure');
+        }
+        return original(input);
+      };
+
+      await expect(
+        service.proposeToolTtlAdjust(CONNECTION_ID, {
+          cacheName: AGENT_CACHE,
+          toolName: 'tool-1',
+          newTtlSeconds: 60,
+          reasoning: VALID_REASON,
+        }),
+      ).rejects.toThrow('simulated storage failure');
+
+      for (let i = 0; i < 30; i++) {
+        await service.proposeToolTtlAdjust(CONNECTION_ID, {
+          cacheName: AGENT_CACHE,
+          toolName: `retry-${i}`,
+          newTtlSeconds: 60,
+          reasoning: VALID_REASON,
+        });
+      }
+    });
+
     it('does not count proposals against other connections', async () => {
       const { service, resolver } = buildService();
       const OTHER_CONNECTION_ID = 'conn-other';

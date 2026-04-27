@@ -44,6 +44,17 @@ export class SlidingWindowRateLimiter {
     return { ...result, remaining: Math.max(0, result.remaining - 1) };
   }
 
+  release(key: string): void {
+    const events = this.buckets.get(key);
+    if (events === undefined || events.length === 0) {
+      return;
+    }
+    events.pop();
+    if (events.length === 0) {
+      this.buckets.delete(key);
+    }
+  }
+
   reset(key?: string): void {
     if (key === undefined) {
       this.buckets.clear();

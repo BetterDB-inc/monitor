@@ -290,7 +290,13 @@ export class CacheProposalService {
       expires_at: expiresAt,
     } as CreateCacheProposalInput;
 
-    const proposal = await this.storage.createCacheProposal(input);
+    let proposal: StoredCacheProposal;
+    try {
+      proposal = await this.storage.createCacheProposal(input);
+    } catch (err) {
+      this.rateLimiter.release(connectionId);
+      throw err;
+    }
     this.logger.log(
       `Created ${args.cache_type}/${args.proposal_type} proposal ${proposal.id} for ${args.cacheName} on ${connectionId}`,
     );
