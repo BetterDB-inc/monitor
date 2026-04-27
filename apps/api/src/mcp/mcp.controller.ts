@@ -11,16 +11,8 @@ import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CacheProposalService } from '../cache-proposals/cache-proposal.service';
 import { CacheReadonlyService } from '../cache-proposals/cache-readonly.service';
-import {
-  CacheNotFoundError,
-  CacheProposalError,
-  CacheProposalValidationError,
-  DuplicatePendingProposalError,
-  InvalidCacheTypeError,
-  RateLimitedError,
-} from '../cache-proposals/errors';
+import { mapCacheProposalErrorToHttp } from '../cache-proposals/errors-http';
 import type { StoredCacheProposal } from '@betterdb/shared';
-import { ZodError } from 'zod';
 
 const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 const EVENT_NAME_RE = /^[a-zA-Z0-9_.-]+$/;
@@ -62,6 +54,7 @@ function msToSeconds(value: string | undefined): number | undefined {
 @UseGuards(AgentTokenGuard)
 export class McpController {
   private readonly logger = new Logger(McpController.name);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly anomalyService: any;
 
   private readonly telemetryService: UsageTelemetryService | null;
@@ -76,6 +69,7 @@ export class McpController {
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
     private readonly cacheProposalService: CacheProposalService,
     private readonly cacheReadonlyService: CacheReadonlyService,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     @Optional() @Inject(ANOMALY_SERVICE) anomalyService?: any,
     @Optional() telemetryService?: UsageTelemetryService,
   ) {
@@ -470,7 +464,7 @@ export class McpController {
       const caches = await this.cacheReadonlyService.listCaches(id);
       return { caches };
     } catch (err) {
-      throw mapCacheProposalError(err);
+      throw mapCacheProposalErrorToHttp(err);
     }
   }
 
@@ -482,7 +476,7 @@ export class McpController {
     try {
       return await this.cacheReadonlyService.cacheHealth(id, requireCacheName(name));
     } catch (err) {
-      throw mapCacheProposalError(err);
+      throw mapCacheProposalErrorToHttp(err);
     }
   }
 
@@ -503,7 +497,7 @@ export class McpController {
         },
       );
     } catch (err) {
-      throw mapCacheProposalError(err);
+      throw mapCacheProposalErrorToHttp(err);
     }
   }
 
@@ -519,7 +513,7 @@ export class McpController {
       );
       return { tools };
     } catch (err) {
-      throw mapCacheProposalError(err);
+      throw mapCacheProposalErrorToHttp(err);
     }
   }
 
@@ -540,7 +534,7 @@ export class McpController {
         },
       );
     } catch (err) {
-      throw mapCacheProposalError(err);
+      throw mapCacheProposalErrorToHttp(err);
     }
   }
 
@@ -558,7 +552,7 @@ export class McpController {
       );
       return { proposals };
     } catch (err) {
-      throw mapCacheProposalError(err);
+      throw mapCacheProposalErrorToHttp(err);
     }
   }
 
@@ -590,7 +584,7 @@ export class McpController {
       });
       return formatProposalResult(result);
     } catch (err) {
-      throw mapCacheProposalError(err);
+      throw mapCacheProposalErrorToHttp(err);
     }
   }
 
@@ -622,7 +616,7 @@ export class McpController {
       });
       return formatProposalResult(result);
     } catch (err) {
-      throw mapCacheProposalError(err);
+      throw mapCacheProposalErrorToHttp(err);
     }
   }
 
@@ -677,7 +671,102 @@ export class McpController {
         `filter_kind must be one of 'valkey_search' | 'tool' | 'key_prefix' | 'session', got '${filterKind}'`,
       );
     } catch (err) {
-      throw mapCacheProposalError(err);
+      throw mapCacheProposalErrorToHttp(err);
+    }
+  }
+
+  @Get('instance/:id/cache-proposals/pending')
+  async listPendingCacheProposals(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Query('cache_name') cacheName?: string,
+    @Query('limit') limit?: string,
+  ) {
+    try {
+      const parsedLimit = limit ? safeLimit(limit, 100) : 100;
+      return await this.cacheProposalService.listProposals({
+        connection_id: id,
+        status: 'pending',
+        cache_name: cacheName,
+        limit: parsedLimit,
+      });
+    } catch (err) {
+      throw mapCacheProposalErrorToHttp(err);
+    }
+  }
+
+  @Get('cache-proposals/:proposalId')
+  async getCacheProposal(@Param('proposalId') proposalId: string) {
+    try {
+      return await this.cacheProposalService.getProposalWithAudit(proposalId);
+    } catch (err) {
+      throw mapCacheProposalErrorToHttp(err);
+    }
+  }
+
+  @Post('cache-proposals/:proposalId/approve')
+  async approveCacheProposal(
+    @Param('proposalId') proposalId: string,
+    @Body() body?: { actor?: unknown },
+  ) {
+    try {
+      const actor = optionalString(body?.actor, 'actor') ?? null;
+      const result = await this.cacheProposalService.approve({
+        proposalId,
+        actor,
+        actorSource: 'mcp',
+      });
+      return formatApprovalResult(result);
+    } catch (err) {
+      throw mapCacheProposalErrorToHttp(err);
+    }
+  }
+
+  @Post('cache-proposals/:proposalId/reject')
+  async rejectCacheProposal(
+    @Param('proposalId') proposalId: string,
+    @Body() body?: { reason?: unknown; actor?: unknown },
+  ) {
+    try {
+      const reason = optionalString(body?.reason, 'reason') ?? null;
+      const actor = optionalString(body?.actor, 'actor') ?? null;
+      const proposal = await this.cacheProposalService.reject({
+        proposalId,
+        reason,
+        actor,
+        actorSource: 'mcp',
+      });
+      return { proposal_id: proposal.id, status: proposal.status };
+    } catch (err) {
+      throw mapCacheProposalErrorToHttp(err);
+    }
+  }
+
+  @Post('cache-proposals/:proposalId/edit-and-approve')
+  async editAndApproveCacheProposal(
+    @Param('proposalId') proposalId: string,
+    @Body()
+    body: {
+      new_threshold?: unknown;
+      new_ttl_seconds?: unknown;
+      actor?: unknown;
+    },
+  ) {
+    try {
+      const newThreshold = optionalFiniteNumber(body?.new_threshold, 'new_threshold');
+      const newTtlSeconds = optionalFiniteNumber(body?.new_ttl_seconds, 'new_ttl_seconds');
+      const actor = optionalString(body?.actor, 'actor') ?? null;
+      if (newThreshold === undefined && newTtlSeconds === undefined) {
+        throw new BadRequestException('Either new_threshold or new_ttl_seconds is required');
+      }
+      const result = await this.cacheProposalService.editAndApprove({
+        proposalId,
+        edits: { newThreshold, newTtlSeconds },
+        actor,
+        actorSource: 'mcp',
+      });
+      return formatApprovalResult(result);
+    } catch (err) {
+      throw mapCacheProposalErrorToHttp(err);
     }
   }
 }
@@ -740,64 +829,24 @@ function formatProposalResult(result: { proposal: StoredCacheProposal; warnings:
   };
 }
 
-function mapCacheProposalError(err: unknown): HttpException {
-  if (err instanceof HttpException) {
-    return err;
-  }
-  if (err instanceof ZodError) {
-    return new HttpException(
-      {
-        statusCode: HttpStatus.BAD_REQUEST,
-        code: 'VALIDATION_ERROR',
-        message: 'Request payload failed schema validation',
-        issues: err.issues.map((issue) => ({
-          path: issue.path.join('.'),
-          code: issue.code,
-          message: issue.message,
-        })),
-      },
-      HttpStatus.BAD_REQUEST,
-    );
-  }
-  if (err instanceof RateLimitedError) {
-    return new HttpException(
-      {
-        statusCode: HttpStatus.TOO_MANY_REQUESTS,
-        code: err.code,
-        message: err.message,
-        retry_after_ms: err.retryAfterMs,
-        details: err.details,
-      },
-      HttpStatus.TOO_MANY_REQUESTS,
-    );
-  }
-  if (err instanceof CacheNotFoundError) {
-    return new HttpException(
-      { statusCode: HttpStatus.NOT_FOUND, code: err.code, message: err.message, details: err.details },
-      HttpStatus.NOT_FOUND,
-    );
-  }
-  if (err instanceof DuplicatePendingProposalError) {
-    return new HttpException(
-      { statusCode: HttpStatus.CONFLICT, code: err.code, message: err.message, details: err.details },
-      HttpStatus.CONFLICT,
-    );
-  }
-  if (err instanceof InvalidCacheTypeError || err instanceof CacheProposalValidationError) {
-    return new HttpException(
-      { statusCode: HttpStatus.BAD_REQUEST, code: err.code, message: err.message, details: err.details },
-      HttpStatus.BAD_REQUEST,
-    );
-  }
-  if (err instanceof CacheProposalError) {
-    return new HttpException(
-      { statusCode: HttpStatus.BAD_REQUEST, code: err.code, message: err.message, details: err.details },
-      HttpStatus.BAD_REQUEST,
-    );
-  }
-  const message = err instanceof Error ? err.message : String(err);
-  return new HttpException(
-    { statusCode: HttpStatus.INTERNAL_SERVER_ERROR, message },
-    HttpStatus.INTERNAL_SERVER_ERROR,
-  );
+function formatApprovalResult(result: {
+  proposal: StoredCacheProposal;
+  appliedResult: { success: boolean; error?: string; details?: Record<string, unknown> } | null;
+}) {
+  return {
+    proposal_id: result.proposal.id,
+    status: result.proposal.status,
+    applied_result: result.appliedResult,
+  };
 }
+
+function optionalFiniteNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new BadRequestException(`${field} must be a finite number when provided`);
+  }
+  return value;
+}
+
