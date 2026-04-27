@@ -17,6 +17,7 @@ import { ConnectionId } from '../common/decorators';
 import { parseOptionalInt } from '../common/utils/parse-query-param';
 import { CacheProposalService } from './cache-proposal.service';
 import { mapCacheProposalErrorToHttp } from './errors-http';
+import { formatApprovalResult, optionalFiniteNumber, optionalString } from './controller-helpers';
 
 const ACTOR_SOURCE_UI = 'ui' as const;
 
@@ -129,8 +130,8 @@ export class CacheProposalController {
     },
   ): Promise<unknown> {
     try {
-      const newThreshold = optionalNumber(body?.new_threshold, 'new_threshold');
-      const newTtlSeconds = optionalNumber(body?.new_ttl_seconds, 'new_ttl_seconds');
+      const newThreshold = optionalFiniteNumber(body?.new_threshold, 'new_threshold');
+      const newTtlSeconds = optionalFiniteNumber(body?.new_ttl_seconds, 'new_ttl_seconds');
       const actor = optionalString(body?.actor, 'actor') ?? null;
       if (newThreshold === undefined && newTtlSeconds === undefined) {
         throw new BadRequestException('Either new_threshold or new_ttl_seconds is required');
@@ -146,36 +147,5 @@ export class CacheProposalController {
       throw mapCacheProposalErrorToHttp(err);
     }
   }
-}
-
-function optionalString(value: unknown, field: string): string | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== 'string') {
-    throw new BadRequestException(`${field} must be a string when provided`);
-  }
-  return value;
-}
-
-function optionalNumber(value: unknown, field: string): number | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new BadRequestException(`${field} must be a finite number when provided`);
-  }
-  return value;
-}
-
-function formatApprovalResult(result: {
-  proposal: StoredCacheProposal;
-  appliedResult: { success: boolean; error?: string; details?: Record<string, unknown> } | null;
-}): unknown {
-  return {
-    proposal_id: result.proposal.id,
-    status: result.proposal.status,
-    applied_result: result.appliedResult,
-  };
 }
 

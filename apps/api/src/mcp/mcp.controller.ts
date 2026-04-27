@@ -12,6 +12,11 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CacheProposalService } from '../cache-proposals/cache-proposal.service';
 import { CacheReadonlyService } from '../cache-proposals/cache-readonly.service';
 import { mapCacheProposalErrorToHttp } from '../cache-proposals/errors-http';
+import {
+  formatApprovalResult,
+  optionalFiniteNumber,
+  optionalString,
+} from '../cache-proposals/controller-helpers';
 import type { StoredCacheProposal } from '@betterdb/shared';
 
 const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
@@ -789,16 +794,6 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
-function optionalString(value: unknown, field: string): string | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== 'string') {
-    throw new BadRequestException(`${field} must be a string when provided`);
-  }
-  return value;
-}
-
 function optionalNullableString(value: unknown, field: string): string | null | undefined {
   if (value === undefined) {
     return undefined;
@@ -829,24 +824,4 @@ function formatProposalResult(result: { proposal: StoredCacheProposal; warnings:
   };
 }
 
-function formatApprovalResult(result: {
-  proposal: StoredCacheProposal;
-  appliedResult: { success: boolean; error?: string; details?: Record<string, unknown> } | null;
-}) {
-  return {
-    proposal_id: result.proposal.id,
-    status: result.proposal.status,
-    applied_result: result.appliedResult,
-  };
-}
-
-function optionalFiniteNumber(value: unknown, field: string): number | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new BadRequestException(`${field} must be a finite number when provided`);
-  }
-  return value;
-}
 

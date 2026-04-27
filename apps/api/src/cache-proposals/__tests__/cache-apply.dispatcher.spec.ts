@@ -24,8 +24,10 @@ class FakeClient {
     return [cursor === '0' ? '0' : '0', []];
   }
 
+  public ftSearchResponse: unknown = [0];
+
   async call(): Promise<unknown> {
-    return [0];
+    return this.ftSearchResponse;
   }
 }
 
@@ -131,6 +133,24 @@ describe('CacheApplyDispatcher', () => {
         value: JSON.stringify({ ttl: 600 }),
       },
     ]);
+  });
+
+  it('semantic invalidate parses FT.SEARCH RETURN 0 response without skipping keys', async () => {
+    const client = new FakeClient();
+    client.ftSearchResponse = [3, 'sc:prod:k1', 'sc:prod:k2', 'sc:prod:k3'];
+    const dispatcher = buildDispatcher(SEMANTIC_CACHE, client);
+    const out = await dispatcher.dispatch(
+      proposal({
+        proposal_type: 'invalidate',
+        proposal_payload: {
+          filter_kind: 'valkey_search',
+          filter_expression: '@model:{gpt}',
+          estimated_affected: 10,
+        },
+      }),
+    );
+    expect(client.deletes).toEqual(['sc:prod:k1', 'sc:prod:k2', 'sc:prod:k3']);
+    expect(out.actualAffected).toBe(3);
   });
 
   it('fails when cache type changed since proposal creation', async () => {

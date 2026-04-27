@@ -235,7 +235,7 @@ function parseFtSearchKeys(raw: unknown): string[] {
     return [];
   }
   const keys: string[] = [];
-  for (let i = 1; i < raw.length; i += 2) {
+  for (let i = 1; i < raw.length; i += 1) {
     const key = raw[i];
     if (typeof key === 'string') {
       keys.push(key);
