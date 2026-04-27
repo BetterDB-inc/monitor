@@ -1,4 +1,4 @@
-import type { CacheType } from '@betterdb/shared';
+import type { CacheType, AGENT_CACHE, SEMANTIC_CACHE } from '@betterdb/shared';
 
 export interface CacheListEntry {
   name: string;
@@ -24,13 +24,13 @@ interface CacheHealthCommon {
 }
 
 export interface SemanticCacheHealth extends CacheHealthCommon {
-  type: 'semantic_cache';
+  type: typeof SEMANTIC_CACHE;
   uncertain_hit_rate: number;
   category_breakdown: Array<{ category: string; hit_rate: number; ops: number }>;
 }
 
 export interface AgentCacheHealth extends CacheHealthCommon {
-  type: 'agent_cache';
+  type: typeof AGENT_CACHE;
   tool_breakdown: Array<{
     tool: string;
     hit_rate: number;

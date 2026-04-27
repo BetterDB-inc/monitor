@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type Valkey from 'iovalkey';
 import type { CacheType, StoredCacheProposal } from '@betterdb/shared';
-import { REGISTRY_KEY, heartbeatKeyFor } from '@betterdb/shared';
+import { AGENT_CACHE, REGISTRY_KEY, SEMANTIC_CACHE, heartbeatKeyFor } from '@betterdb/shared';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
@@ -100,7 +100,7 @@ export class CacheReadonlyService {
     const statsKey = `${cache.prefix}:__stats`;
     const raw = (await client.hgetall(statsKey)) ?? {};
 
-    if (cache.type === 'semantic_cache') {
+    if (cache.type === SEMANTIC_CACHE) {
       const hits = readHashInt(raw, 'hits');
       const misses = readHashInt(raw, 'misses');
       const total = readHashInt(raw, 'total') || hits + misses;
@@ -118,7 +118,7 @@ export class CacheReadonlyService {
       const warnings = this.deriveSemanticWarnings(hitRate, uncertainHitRate, total);
 
       return {
-        type: 'semantic_cache',
+        type: SEMANTIC_CACHE,
         name: cache.name,
         hit_rate: hitRate,
         miss_rate: total === 0 ? 0 : misses / total,
@@ -150,7 +150,7 @@ export class CacheReadonlyService {
     const warnings = this.deriveAgentWarnings(totalHits, total);
 
     return {
-      type: 'agent_cache',
+      type: AGENT_CACHE,
       name: cache.name,
       hit_rate: total === 0 ? 0 : totalHits / total,
       miss_rate: total === 0 ? 0 : totalMisses / total,
@@ -166,7 +166,7 @@ export class CacheReadonlyService {
     cacheName: string,
     options: { category?: string; minSamples?: number } = {},
   ): Promise<ThresholdRecommendation> {
-    const cache = await this.requireCacheOfType(connectionId, cacheName, 'semantic_cache');
+    const cache = await this.requireCacheOfType(connectionId, cacheName, SEMANTIC_CACHE);
     const client = this.getClient(connectionId);
     const samples = await this.readSimilarityWindow(client, cache.prefix);
     const config = await this.readSemanticConfig(client, cache.prefix);
@@ -245,7 +245,7 @@ export class CacheReadonlyService {
     connectionId: string,
     cacheName: string,
   ): Promise<ToolEffectivenessEntry[]> {
-    const cache = await this.requireCacheOfType(connectionId, cacheName, 'agent_cache');
+    const cache = await this.requireCacheOfType(connectionId, cacheName, AGENT_CACHE);
     const client = this.getClient(connectionId);
     const raw = (await client.hgetall(`${cache.prefix}:__stats`)) ?? {};
     const tools = this.extractAgentToolStats(raw);
@@ -280,7 +280,7 @@ export class CacheReadonlyService {
     cacheName: string,
     options: { category?: string; windowHours?: number } = {},
   ): Promise<SimilarityDistribution> {
-    const cache = await this.requireCacheOfType(connectionId, cacheName, 'semantic_cache');
+    const cache = await this.requireCacheOfType(connectionId, cacheName, SEMANTIC_CACHE);
     const client = this.getClient(connectionId);
     const samples = await this.readSimilarityWindow(client, cache.prefix);
     const cutoff =
@@ -357,7 +357,7 @@ export class CacheReadonlyService {
     for (const [name, json] of Object.entries(raw)) {
       try {
         const parsed = JSON.parse(json) as Record<string, unknown>;
-        if (parsed.type !== 'agent_cache' && parsed.type !== 'semantic_cache') {
+        if (parsed.type !== AGENT_CACHE && parsed.type !== SEMANTIC_CACHE) {
           continue;
         }
         if (typeof parsed.prefix !== 'string' || parsed.prefix.length === 0) {
@@ -365,7 +365,7 @@ export class CacheReadonlyService {
         }
         out.push({
           name,
-          type: parsed.type,
+          type: parsed.type as CacheType,
           prefix: parsed.prefix,
           capabilities: Array.isArray(parsed.capabilities)
             ? parsed.capabilities.filter((c): c is string => typeof c === 'string')
