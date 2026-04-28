@@ -147,11 +147,15 @@ function getLastSeenSnapshot(): number | null {
 }
 
 function setLastSeenAt(timestamp: number | null): void {
-  if (lastSeenAtSnapshot === timestamp) {
+  const next =
+    timestamp !== null && lastSeenAtSnapshot !== null
+      ? Math.max(lastSeenAtSnapshot, timestamp)
+      : timestamp;
+  if (lastSeenAtSnapshot === next) {
     return;
   }
-  lastSeenAtSnapshot = timestamp;
-  writeLastSeenAt(timestamp);
+  lastSeenAtSnapshot = next;
+  writeLastSeenAt(next);
   for (const listener of lastSeenListeners) {
     listener();
   }
