@@ -99,35 +99,40 @@ export function useEditAndApproveProposal(): UseMutationResult<
   });
 }
 
-const STORAGE_KEY = 'cache-proposals.last-seen-id';
+const STORAGE_KEY = 'cache-proposals.last-seen-at';
 
-function readLastSeenId(): string | null {
+function readLastSeenAt(): number | null {
   if (typeof window === 'undefined') {
     return null;
   }
   try {
-    return window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
   } catch {
     return null;
   }
 }
 
-function writeLastSeenId(id: string | null): void {
+function writeLastSeenAt(timestamp: number | null): void {
   if (typeof window === 'undefined') {
     return;
   }
   try {
-    if (id) {
-      window.localStorage.setItem(STORAGE_KEY, id);
-    } else {
+    if (timestamp === null) {
       window.localStorage.removeItem(STORAGE_KEY);
+    } else {
+      window.localStorage.setItem(STORAGE_KEY, String(timestamp));
     }
   } catch {
     // ignore storage failures (Safari private mode, etc.)
   }
 }
 
-let lastSeenIdSnapshot: string | null = readLastSeenId();
+let lastSeenAtSnapshot: number | null = readLastSeenAt();
 const lastSeenListeners = new Set<() => void>();
 
 function subscribeLastSeen(listener: () => void): () => void {
@@ -137,16 +142,16 @@ function subscribeLastSeen(listener: () => void): () => void {
   };
 }
 
-function getLastSeenSnapshot(): string | null {
-  return lastSeenIdSnapshot;
+function getLastSeenSnapshot(): number | null {
+  return lastSeenAtSnapshot;
 }
 
-function setLastSeenId(id: string | null): void {
-  if (lastSeenIdSnapshot === id) {
+function setLastSeenAt(timestamp: number | null): void {
+  if (lastSeenAtSnapshot === timestamp) {
     return;
   }
-  lastSeenIdSnapshot = id;
-  writeLastSeenId(id);
+  lastSeenAtSnapshot = timestamp;
+  writeLastSeenAt(timestamp);
   for (const listener of lastSeenListeners) {
     listener();
   }
@@ -159,7 +164,7 @@ interface UnreadIndicatorState {
 
 export function useCacheProposalsUnread(): UnreadIndicatorState {
   const { data: pending } = usePendingProposals();
-  const lastSeenId = useSyncExternalStore(
+  const lastSeenAt = useSyncExternalStore(
     subscribeLastSeen,
     getLastSeenSnapshot,
     getLastSeenSnapshot,
@@ -169,23 +174,22 @@ export function useCacheProposalsUnread(): UnreadIndicatorState {
     if (!pending || pending.length === 0) {
       return 0;
     }
-    if (!lastSeenId) {
+    if (lastSeenAt === null) {
       return pending.length;
     }
-    const idx = pending.findIndex((p) => p.id === lastSeenId);
-    if (idx === -1) {
-      return pending.length;
-    }
-    return idx;
-  }, [pending, lastSeenId]);
+    return pending.filter((p) => p.proposed_at > lastSeenAt).length;
+  }, [pending, lastSeenAt]);
 
-  const newestPendingId = pending && pending.length > 0 ? pending[0].id : null;
+  const newestPendingAt =
+    pending && pending.length > 0
+      ? pending.reduce((max, p) => (p.proposed_at > max ? p.proposed_at : max), 0)
+      : null;
   const markAllRead = useCallback(() => {
-    if (!newestPendingId) {
+    if (newestPendingAt === null) {
       return;
     }
-    setLastSeenId(newestPendingId);
-  }, [newestPendingId]);
+    setLastSeenAt(newestPendingAt);
+  }, [newestPendingAt]);
 
   return { unreadCount, markAllRead };
 }

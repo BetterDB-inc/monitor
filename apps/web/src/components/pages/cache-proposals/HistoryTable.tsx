@@ -61,10 +61,10 @@ function proposalSource(proposal: StoredCacheProposal): string {
   if (proposal.proposed_by?.startsWith('mcp:')) {
     return 'mcp';
   }
-  if (proposal.reviewed_by?.startsWith('ui:')) {
+  if (proposal.proposed_by?.startsWith('ui:')) {
     return 'ui';
   }
-  return proposal.reviewed_by?.startsWith('mcp:') ? 'mcp' : 'ui';
+  return '—';
 }
 
 export function HistoryTable() {
