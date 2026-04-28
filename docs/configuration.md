@@ -103,6 +103,20 @@ curl -X POST http://localhost:3001/webhooks \
   -d '{"name": "Prod Alert", "url": "https://...", "events": ["instance.down"]}'
 ```
 
+### Cloud: Direct Connection Network Requirements
+
+When using **BetterDB Cloud**, each workspace runs in an isolated container with a restricted outbound network policy. Only the following ports are permitted for direct database connections:
+
+| Port | Protocol | Use case |
+|------|----------|----------|
+| `6379` | TCP | Standard Redis/Valkey (including Upstash, Redis Cloud, Aiven, etc.) |
+| `6380` | TCP | Redis/Valkey with TLS (some managed providers use this port) |
+| `443` | TCP | HTTPS/TLS connections |
+
+**Ports outside this list will time out silently.** If your database runs on a non-standard port (e.g. 6380+, 6390, custom), use the [BetterDB Agent](./agent-connection.md) instead — the agent runs in your own network and connects outbound on port 443, so there are no port restrictions on your side.
+
+> **Tip**: Managed services like Upstash, Redis Cloud, and Aiven all use port 6379 with TLS — enable the **Use TLS** toggle in the connection form and they will work with direct connection.
+
 ### Data Isolation
 
 All stored data is isolated by connection:

@@ -5,6 +5,7 @@ import { TenantStatus } from '@prisma/client';
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
+import { Route53Client, ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand } from '@aws-sdk/client-route-53';
 
 @Injectable()
 export class ProvisioningService {
@@ -20,6 +21,8 @@ export class ProvisioningService {
   private readonly acmCertArn: string;
   private readonly albGroupName: string;
   private readonly appDomain: string;
+  private readonly route53ZoneId: string;
+  private readonly route53Client: Route53Client;
 
   // RDS connection info (used to build connection URL for K8s Jobs)
   private readonly rdsHost: string;
@@ -51,6 +54,11 @@ export class ProvisioningService {
     this.acmCertArn = this.config.get<string>('ACM_CERT_ARN', 'arn:aws:acm:us-east-1:811740411689:certificate/5124962a-e39c-4629-93d0-04275ba4167e');
     this.albGroupName = this.config.get<string>('ALB_GROUP_NAME', 'betterdb-tenants');
     this.appDomain = this.config.get<string>('APP_DOMAIN', 'app.betterdb.com');
+    this.route53ZoneId = this.config.get<string>('ROUTE53_ZONE_ID', '');
+    this.route53Client = new Route53Client({ region: 'us-east-1' });
+    if (!this.route53ZoneId) {
+      this.logger.warn('ROUTE53_ZONE_ID not set - tenant DNS records will not be created automatically');
+    }
 
     // Load RDS config (used to build connection URL for schema Jobs)
     const isCloudMode = this.config.get<string>('CLOUD_MODE') === 'true';
@@ -153,11 +161,17 @@ export class ProvisioningService {
       this.logger.log(`[${tenant.subdomain}] Creating K8s ingress for ${hostname}`);
       await this.createIngress(namespace, tenant.subdomain, hostname);
 
-      // Step 10: Wait for deployment readiness
+      // Step 10: Wait for ALB to assign a hostname and create Route53 CNAME
+      this.logger.log(`[${tenant.subdomain}] Waiting for ALB hostname...`);
+      const albHostname = await this.waitForIngressHostname(namespace, 3 * 60 * 1000);
+      this.logger.log(`[${tenant.subdomain}] Creating Route53 CNAME → ${albHostname}`);
+      await this.createRoute53Record(tenant.subdomain, albHostname);
+
+      // Step 11: Wait for deployment readiness
       this.logger.log(`[${tenant.subdomain}] Waiting for deployment readiness...`);
       await this.waitForDeploymentReady(namespace, 6 * 60 * 1000);
 
-      // Step 11: Update status to ready
+      // Step 12: Update status to ready
       await this.updateTenantStatus(tenantId, 'ready');
       this.logger.log(`[${tenant.subdomain}] Provisioning complete! Tenant is ready at https://${hostname}`);
 
@@ -197,11 +211,15 @@ export class ProvisioningService {
         }
       }
 
-      // Step 3: Delete K8s Namespace (cascades to all resources)
+      // Step 3: Delete Route53 CNAME record
+      this.logger.log(`[${tenant.subdomain}] Deleting Route53 CNAME record`);
+      await this.deleteRoute53Record(tenant.subdomain);
+
+      // Step 4: Delete K8s Namespace (cascades to all resources)
       this.logger.log(`[${tenant.subdomain}] Deleting K8s namespace: ${namespace}`);
       await this.deleteNamespace(namespace);
 
-      // Step 4: Hard delete tenant record
+      // Step 5: Hard delete tenant record
       this.logger.log(`[${tenant.subdomain}] Deleting tenant record`);
       await this.prisma.tenant.delete({ where: { id: tenantId } });
 
@@ -840,6 +858,20 @@ export class ProvisioningService {
                 ],
               },
               {
+                // External Redis/Valkey connections (Upstash, Redis Cloud, etc.)
+                to: [
+                  {
+                    ipBlock: {
+                      cidr: '0.0.0.0/0',
+                    },
+                  },
+                ],
+                ports: [
+                  { protocol: 'TCP', port: 6379 },
+                  { protocol: 'TCP', port: 6380 },
+                ],
+              },
+              {
                 // Entitlement service in system namespace
                 to: [
                   {
@@ -865,6 +897,66 @@ export class ProvisioningService {
         throw error;
       }
     }
+  }
+
+  private async waitForIngressHostname(namespace: string, timeoutMs: number): Promise<string> {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      const ingress = await this.networkingApi.readNamespacedIngress({ name: 'betterdb', namespace });
+      const hostname = ingress.status?.loadBalancer?.ingress?.[0]?.hostname;
+      if (hostname) return hostname;
+      await this.sleep(5000);
+    }
+    throw new Error(`ALB hostname not assigned after ${timeoutMs / 1000}s`);
+  }
+
+  private async createRoute53Record(subdomain: string, albHostname: string): Promise<void> {
+    if (!this.route53ZoneId) return;
+
+    await this.route53Client.send(new ChangeResourceRecordSetsCommand({
+      HostedZoneId: this.route53ZoneId,
+      ChangeBatch: {
+        Changes: [{
+          Action: 'UPSERT',
+          ResourceRecordSet: {
+            Name: `${subdomain}.${this.appDomain}`,
+            Type: 'CNAME',
+            TTL: 300,
+            ResourceRecords: [{ Value: albHostname }],
+          },
+        }],
+      },
+    }));
+    this.logger.log(`[${subdomain}] Route53 CNAME created: ${subdomain}.${this.appDomain} → ${albHostname}`);
+  }
+
+  private async deleteRoute53Record(subdomain: string): Promise<void> {
+    if (!this.route53ZoneId) return;
+
+    // Look up the current record value before deleting (required by Route53 API)
+    const listResp = await this.route53Client.send(new ListResourceRecordSetsCommand({
+      HostedZoneId: this.route53ZoneId,
+      StartRecordName: `${subdomain}.${this.appDomain}`,
+      StartRecordType: 'CNAME',
+      MaxItems: 1,
+    }));
+
+    const record = listResp.ResourceRecordSets?.[0];
+    if (!record || record.Name !== `${subdomain}.${this.appDomain}.`) {
+      this.logger.warn(`[${subdomain}] No Route53 CNAME found to delete`);
+      return;
+    }
+
+    await this.route53Client.send(new ChangeResourceRecordSetsCommand({
+      HostedZoneId: this.route53ZoneId,
+      ChangeBatch: {
+        Changes: [{
+          Action: 'DELETE',
+          ResourceRecordSet: record,
+        }],
+      },
+    }));
+    this.logger.log(`[${subdomain}] Route53 CNAME deleted`);
   }
 
   private sleep(ms: number): Promise<void> {

@@ -40,6 +40,7 @@ export interface UnifiedDatabaseAdapterConfig {
   username: string;
   password: string;
   connectionName?: string;
+  tls?: boolean;
 }
 
 export class UnifiedDatabaseAdapter implements DatabasePort {
@@ -59,6 +60,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       lazyConnect: true,
       enableOfflineQueue: false,
       connectionName,
+      tls: this.config.tls ? {} : undefined,
     });
   }
 
