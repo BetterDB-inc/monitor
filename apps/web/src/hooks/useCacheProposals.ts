@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import {
   useMutation,
   useQuery,
@@ -26,8 +26,6 @@ const queryKeys = {
     ['cache-proposals', 'history', connectionId, params] as const,
   detail: (id: string) => ['cache-proposals', 'detail', id] as const,
 };
-
-export const cacheProposalQueryKeys = queryKeys;
 
 export function usePendingProposals(params: ListProposalsParams = {}) {
   const { currentConnection } = useConnection();
@@ -129,6 +127,31 @@ function writeLastSeenId(id: string | null): void {
   }
 }
 
+let lastSeenIdSnapshot: string | null = readLastSeenId();
+const lastSeenListeners = new Set<() => void>();
+
+function subscribeLastSeen(listener: () => void): () => void {
+  lastSeenListeners.add(listener);
+  return () => {
+    lastSeenListeners.delete(listener);
+  };
+}
+
+function getLastSeenSnapshot(): string | null {
+  return lastSeenIdSnapshot;
+}
+
+function setLastSeenId(id: string | null): void {
+  if (lastSeenIdSnapshot === id) {
+    return;
+  }
+  lastSeenIdSnapshot = id;
+  writeLastSeenId(id);
+  for (const listener of lastSeenListeners) {
+    listener();
+  }
+}
+
 interface UnreadIndicatorState {
   unreadCount: number;
   markAllRead: () => void;
@@ -136,7 +159,11 @@ interface UnreadIndicatorState {
 
 export function useCacheProposalsUnread(): UnreadIndicatorState {
   const { data: pending } = usePendingProposals();
-  const [lastSeenId, setLastSeenId] = useState<string | null>(() => readLastSeenId());
+  const lastSeenId = useSyncExternalStore(
+    subscribeLastSeen,
+    getLastSeenSnapshot,
+    getLastSeenSnapshot,
+  );
 
   const unreadCount = useMemo(() => {
     if (!pending || pending.length === 0) {
@@ -152,14 +179,13 @@ export function useCacheProposalsUnread(): UnreadIndicatorState {
     return idx;
   }, [pending, lastSeenId]);
 
-  const markAllRead = () => {
-    if (!pending || pending.length === 0) {
+  const newestPendingId = pending && pending.length > 0 ? pending[0].id : null;
+  const markAllRead = useCallback(() => {
+    if (!newestPendingId) {
       return;
     }
-    const newestId = pending[0].id;
-    setLastSeenId(newestId);
-    writeLastSeenId(newestId);
-  };
+    setLastSeenId(newestPendingId);
+  }, [newestPendingId]);
 
   return { unreadCount, markAllRead };
 }
