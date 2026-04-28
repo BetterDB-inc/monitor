@@ -7,7 +7,7 @@
   },
   "dependencies": {
     "@betterdb/agent-cache": "^0.2.0",
-    "@langchain/core": "^1.1.0",
+    "@langchain/core": "^1.1.42",
     "@langchain/openai": "^1.4.0",
     "iovalkey": "^0.3.0"
   },
