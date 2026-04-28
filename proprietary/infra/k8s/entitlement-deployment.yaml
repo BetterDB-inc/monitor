@@ -22,7 +22,7 @@ spec:
       serviceAccountName: entitlement
       containers:
         - name: entitlement
-          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v1.2.1
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v1.2.4
           imagePullPolicy: Always
           ports:
             - containerPort: 3002
@@ -42,11 +42,13 @@ spec:
             - name: ACM_CERT_ARN
               value: "arn:aws:acm:us-east-1:811740411689:certificate/5124962a-e39c-4629-93d0-04275ba4167e"
             - name: ALB_GROUP_NAME
-              value: "betterdb-tenants"
+              value: "betterdb-tenants-2"
             - name: APP_DOMAIN
               value: "app.betterdb.com"
+            - name: ROUTE53_ZONE_ID
+              value: "Z071377925BCBHU7WUE59"
             - name: DEFAULT_IMAGE_TAG
-              value: "v0.15.0"
+              value: "v0.16.0"
             - name: RESEND_API_KEY
               valueFrom:
                 secretKeyRef:

@@ -12,6 +12,7 @@
     "prisma:studio": "prisma studio"
   },
   "dependencies": {
+    "@aws-sdk/client-route-53": "^3.1038.0",
     "@betterdb/shared": "workspace:*",
     "@kubernetes/client-node": "^1.4.0",
     "@nestjs/common": "^11.1.17",

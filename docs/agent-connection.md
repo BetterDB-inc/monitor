@@ -29,6 +29,18 @@ docker logs -f betterdb-agent
 
 The BetterDB Agent is a lightweight process that runs alongside your Valkey or Redis instance. It connects **outbound** to BetterDB Cloud via WebSocket, so your database is never exposed to the internet. The agent relays monitoring commands and metrics between BetterDB Cloud and your instance.
 
+## When to Use the Agent vs Direct Connection
+
+| Scenario | Recommended |
+|----------|-------------|
+| Database on port 6379 or 6380, publicly accessible | Direct connection |
+| Database on a non-standard port | **Agent** |
+| Database inside a private VPC (AWS, GCP, Azure) | **Agent** |
+| AWS ElastiCache, GCP Memorystore (VPC-only) | **Agent** |
+| Upstash, Redis Cloud, Aiven (public endpoint) | Direct connection |
+
+> BetterDB Cloud workspaces allow outbound connections on ports **6379**, **6380**, and **443** only. Any other port requires the agent.
+
 ## Prerequisites
 
 - A BetterDB Cloud account with a workspace

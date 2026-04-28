@@ -3,6 +3,8 @@ kind: ServiceAccount
 metadata:
   name: entitlement
   namespace: system
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::811740411689:role/betterdb-entitlement
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

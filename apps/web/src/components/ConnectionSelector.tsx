@@ -50,6 +50,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   const [addTab, setAddTab] = useState<AddTab>('direct');
 
   const handleInputChange = (field: keyof ConnectionFormData, value: string | number | boolean) => {
+    if (field === 'host' && typeof value === 'string') {
+      value = value.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    }
     setFormData(prev => ({ ...prev, [field]: value }));
     setTestResult(null);
   };
