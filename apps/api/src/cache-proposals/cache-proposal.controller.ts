@@ -52,17 +52,21 @@ export class CacheProposalController {
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
   ): Promise<StoredCacheProposal[]> {
-    let parsedStatus: ProposalStatus | ProposalStatus[] | undefined;
-    if (status !== undefined && status.length > 0) {
-      parsedStatus = ProposalStatusSchema.parse(status);
+    try {
+      let parsedStatus: ProposalStatus | ProposalStatus[] | undefined;
+      if (status !== undefined && status.length > 0) {
+        parsedStatus = ProposalStatusSchema.parse(status);
+      }
+      return await this.service.listProposals({
+        connection_id: connectionId,
+        status: parsedStatus,
+        cache_name: cacheName,
+        limit: parseOptionalInt(limit, 'limit') ?? 50,
+        offset: parseOptionalInt(offset, 'offset'),
+      });
+    } catch (err) {
+      throw mapCacheProposalErrorToHttp(err);
     }
-    return this.service.listProposals({
-      connection_id: connectionId,
-      status: parsedStatus,
-      cache_name: cacheName,
-      limit: parseOptionalInt(limit, 'limit') ?? 50,
-      offset: parseOptionalInt(offset, 'offset'),
-    });
   }
 
   @Get(':id')
