@@ -568,6 +568,12 @@ export class CacheProposalService {
         ...existing.proposal_payload,
         new_ttl_seconds: input.edits.newTtlSeconds,
       });
+    } else {
+      const exhaustive = existing as { proposal_type: string };
+      throw new ProposalEditNotAllowedError(
+        input.proposalId,
+        `Editing is not supported for proposal_type='${exhaustive.proposal_type}'`,
+      );
     }
 
     const reviewedAt = Date.now();
