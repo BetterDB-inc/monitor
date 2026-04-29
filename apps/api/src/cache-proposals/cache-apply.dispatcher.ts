@@ -84,13 +84,26 @@ export class CacheApplyDispatcher {
       return { ...out, durationMs: Date.now() - startedAt };
     }
 
-    const out = await this.applyAgentInvalidate(
-      client,
-      cache,
-      proposal.proposal_payload,
-      proposal.id,
+    if (proposal.cache_type === AGENT_CACHE && proposal.proposal_type === 'invalidate') {
+      const out = await this.applyAgentInvalidate(
+        client,
+        cache,
+        proposal.proposal_payload,
+        proposal.id,
+      );
+      return { ...out, durationMs: Date.now() - startedAt };
+    }
+
+    const exhaustive: { id: string; cache_type: string; proposal_type: string } = proposal;
+    throw new ApplyFailedError(
+      exhaustive.id,
+      `Unsupported (cache_type, proposal_type) combination: ${exhaustive.cache_type}/${exhaustive.proposal_type}`,
+      {
+        reason: 'unsupported_combination',
+        cacheType: exhaustive.cache_type,
+        proposalType: exhaustive.proposal_type,
+      },
     );
-    return { ...out, durationMs: Date.now() - startedAt };
   }
 
   private async applySemanticThresholdAdjust(
