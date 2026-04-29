@@ -604,8 +604,9 @@ export class CacheProposalService {
       );
       return { proposal, appliedResult: null };
     }
+    const wasAlreadyTerminal = proposal.status === 'applied' || proposal.status === 'failed';
     const result = await this.applyService.apply(proposal, context);
-    if (!result.appliedResult.success) {
+    if (!result.appliedResult.success && !wasAlreadyTerminal) {
       throw new ApplyFailedError(
         proposal.id,
         result.appliedResult.error ?? 'apply failed',
