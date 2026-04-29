@@ -50,6 +50,23 @@ import type {
 } from '@betterdb/shared';
 import { PROPOSAL_DEFAULT_EXPIRY_MS, variantPayloadSchemaFor } from '@betterdb/shared';
 
+const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
+
+function pendingProposalSubDiscriminator(
+  p: { proposal_type: string; proposal_payload: unknown },
+): string | null {
+  const payload = p.proposal_payload as Record<string, unknown> | null | undefined;
+  if (p.proposal_type === 'threshold_adjust') {
+    const category = payload?.category;
+    return typeof category === 'string' ? category : NULL_SUB_DISCRIMINATOR;
+  }
+  if (p.proposal_type === 'tool_ttl_adjust') {
+    const toolName = payload?.tool_name;
+    return typeof toolName === 'string' ? toolName : NULL_SUB_DISCRIMINATOR;
+  }
+  return null;
+}
+
 export class MemoryAdapter implements StoragePort {
   private aclEntries: StoredAclEntry[] = [];
   private clientSnapshots: StoredClientSnapshot[] = [];
@@ -1425,6 +1442,7 @@ export class MemoryAdapter implements StoragePort {
   private cacheProposals: Map<string, StoredCacheProposal> = new Map();
   private cacheProposalAudit: Map<string, StoredCacheProposalAudit> = new Map();
 
+
   private cloneProposal(p: StoredCacheProposal): StoredCacheProposal {
     return structuredClone(p);
   }
@@ -1434,16 +1452,20 @@ export class MemoryAdapter implements StoragePort {
   }
 
   async createCacheProposal(input: CreateCacheProposalInput): Promise<StoredCacheProposal> {
-    for (const existing of this.cacheProposals.values()) {
-      if (
-        existing.status === 'pending' &&
-        existing.connection_id === input.connection_id &&
-        existing.cache_name === input.cache_name &&
-        existing.proposal_type === input.proposal_type
-      ) {
-        throw new Error(
-          `UNIQUE constraint failed: cache_proposals.connection_id, cache_proposals.cache_name, cache_proposals.proposal_type (status='pending')`,
-        );
+    const subDiscriminator = pendingProposalSubDiscriminator(input);
+    if (subDiscriminator !== null) {
+      for (const existing of this.cacheProposals.values()) {
+        if (
+          existing.status === 'pending' &&
+          existing.connection_id === input.connection_id &&
+          existing.cache_name === input.cache_name &&
+          existing.proposal_type === input.proposal_type &&
+          pendingProposalSubDiscriminator(existing) === subDiscriminator
+        ) {
+          throw new Error(
+            `UNIQUE constraint failed: cache_proposals (connection_id, cache_name, proposal_type, sub_discriminator) where status='pending'`,
+          );
+        }
       }
     }
     const proposedAt = input.proposed_at ?? Date.now();
