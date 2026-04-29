@@ -1566,7 +1566,7 @@ export class MemoryAdapter implements StoragePort {
     const expired: StoredCacheProposal[] = [];
     for (const proposal of this.cacheProposals.values()) {
       if (proposal.status === 'pending' && proposal.expires_at <= now) {
-        const updated = { ...proposal, status: 'expired' } as StoredCacheProposal;
+        const updated = structuredClone({ ...proposal, status: 'expired' }) as StoredCacheProposal;
         this.cacheProposals.set(proposal.id, updated);
         expired.push(this.cloneProposal(updated));
       }
