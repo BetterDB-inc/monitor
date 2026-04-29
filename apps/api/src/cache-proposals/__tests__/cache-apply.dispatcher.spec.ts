@@ -185,6 +185,43 @@ describe('CacheApplyDispatcher', () => {
     expect(client.scanCalls).toEqual(['ac:prod:memo:*']);
   });
 
+  it('uses cache.prefix (not cache.name) when constructing Valkey keys', async () => {
+    const client = new FakeClient();
+    const renamedCache: ResolvedCache = {
+      ...SEMANTIC_CACHE,
+      name: 'sc:prod',
+      prefix: 'sc:custom-prefix',
+    };
+    const dispatcher = buildDispatcher(renamedCache, client);
+    await dispatcher.dispatch(proposal({}));
+    expect(client.hsets).toEqual([
+      { key: 'sc:custom-prefix:__config', field: 'threshold', value: '0.5' },
+    ]);
+  });
+
+  it('agent invalidate scans cache.prefix namespace, not cache.name', async () => {
+    const client = new FakeClient();
+    const renamedCache: ResolvedCache = {
+      ...AGENT_CACHE,
+      name: 'ac:prod',
+      prefix: 'ac:custom-prefix',
+    };
+    const dispatcher = buildDispatcher(renamedCache, client);
+    await dispatcher.dispatch(
+      proposal({
+        cache_name: 'ac:prod',
+        cache_type: 'agent_cache',
+        proposal_type: 'invalidate',
+        proposal_payload: {
+          filter_kind: 'tool',
+          filter_value: 'search_index',
+          estimated_affected: 5,
+        },
+      }),
+    );
+    expect(client.scanCalls).toEqual(['ac:custom-prefix:tool:search_index:*']);
+  });
+
   it('fails when cache type changed since proposal creation', async () => {
     const client = new FakeClient();
     const dispatcher = buildDispatcher(AGENT_CACHE, client);

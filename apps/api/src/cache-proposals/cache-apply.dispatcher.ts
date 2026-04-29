@@ -106,7 +106,7 @@ export class CacheApplyDispatcher {
         { reason: 'capability_missing', cacheName: cache.name },
       );
     }
-    const configKey = `${cache.name}:__config`;
+    const configKey = `${cache.prefix}:__config`;
     const field = payload.category === null
       ? 'threshold'
       : `threshold:${payload.category}`;
@@ -136,7 +136,7 @@ export class CacheApplyDispatcher {
     payload: AgentToolTtlAdjustPayload,
     proposalId: string,
   ): Promise<Omit<ApplyOutcome, 'durationMs'>> {
-    const policiesKey = `${cache.name}:__tool_policies`;
+    const policiesKey = `${cache.prefix}:__tool_policies`;
     const policy = JSON.stringify({ ttl: payload.new_ttl_seconds });
     try {
       await client.hset(policiesKey, payload.tool_name, policy);
@@ -222,7 +222,7 @@ export class CacheApplyDispatcher {
     proposalId: string,
   ): Promise<Omit<ApplyOutcome, 'durationMs'>> {
     if (payload.filter_kind === 'tool') {
-      const pattern = `${escapeGlob(cache.name)}:tool:${escapeGlob(payload.filter_value)}:*`;
+      const pattern = `${escapeGlob(cache.prefix)}:tool:${escapeGlob(payload.filter_value)}:*`;
       const deleted = await scanAndDelete(client, pattern);
       return {
         actualAffected: deleted,
@@ -230,7 +230,7 @@ export class CacheApplyDispatcher {
       };
     }
     if (payload.filter_kind === 'key_prefix') {
-      const pattern = `${escapeGlob(cache.name)}:${escapeGlob(payload.filter_value)}*`;
+      const pattern = `${escapeGlob(cache.prefix)}:${escapeGlob(payload.filter_value)}*`;
       const deleted = await scanAndDelete(client, pattern);
       return {
         actualAffected: deleted,
@@ -238,7 +238,7 @@ export class CacheApplyDispatcher {
       };
     }
     if (payload.filter_kind === 'session') {
-      const pattern = `${escapeGlob(cache.name)}:session:${escapeGlob(payload.filter_value)}*`;
+      const pattern = `${escapeGlob(cache.prefix)}:session:${escapeGlob(payload.filter_value)}*`;
       const deleted = await scanAndDelete(client, pattern);
       return {
         actualAffected: deleted,
