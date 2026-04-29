@@ -3,7 +3,12 @@ export type CacheProposalErrorCode =
   | 'INVALID_CACHE_TYPE'
   | 'CACHE_NOT_FOUND'
   | 'DUPLICATE_PENDING_PROPOSAL'
-  | 'RATE_LIMITED';
+  | 'RATE_LIMITED'
+  | 'PROPOSAL_NOT_FOUND'
+  | 'PROPOSAL_EXPIRED'
+  | 'PROPOSAL_NOT_PENDING'
+  | 'PROPOSAL_EDIT_NOT_ALLOWED'
+  | 'APPLY_FAILED';
 
 export class CacheProposalError extends Error {
   readonly code: CacheProposalErrorCode;
@@ -54,6 +59,49 @@ export class DuplicatePendingProposalError extends CacheProposalError {
       { cacheName, proposalType, scope },
     );
     this.name = 'DuplicatePendingProposalError';
+  }
+}
+
+export class ProposalNotFoundError extends CacheProposalError {
+  constructor(proposalId: string) {
+    super('PROPOSAL_NOT_FOUND', `Proposal '${proposalId}' not found`, { proposalId });
+    this.name = 'ProposalNotFoundError';
+  }
+}
+
+export class ProposalExpiredError extends CacheProposalError {
+  constructor(proposalId: string, expiresAt: number) {
+    super(
+      'PROPOSAL_EXPIRED',
+      `Proposal '${proposalId}' expired at ${new Date(expiresAt).toISOString()}`,
+      { proposalId, expiresAt },
+    );
+    this.name = 'ProposalExpiredError';
+  }
+}
+
+export class ProposalNotPendingError extends CacheProposalError {
+  constructor(proposalId: string, currentStatus: string) {
+    super(
+      'PROPOSAL_NOT_PENDING',
+      `Proposal '${proposalId}' is not pending (current status: '${currentStatus}')`,
+      { proposalId, currentStatus },
+    );
+    this.name = 'ProposalNotPendingError';
+  }
+}
+
+export class ProposalEditNotAllowedError extends CacheProposalError {
+  constructor(proposalId: string, reason: string) {
+    super('PROPOSAL_EDIT_NOT_ALLOWED', reason, { proposalId });
+    this.name = 'ProposalEditNotAllowedError';
+  }
+}
+
+export class ApplyFailedError extends CacheProposalError {
+  constructor(proposalId: string, message: string, details?: Record<string, unknown>) {
+    super('APPLY_FAILED', message, { ...details, proposalId });
+    this.name = 'ApplyFailedError';
   }
 }
 

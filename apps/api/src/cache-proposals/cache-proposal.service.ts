@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import {
   AGENT_CACHE,
@@ -8,20 +8,32 @@ import {
   SEMANTIC_CACHE,
   SemanticInvalidatePayloadSchema,
   SemanticThresholdAdjustPayloadSchema,
+  type ActorSource,
+  type AppliedResult,
   type CacheType,
   type CreateCacheProposalInput,
+  type ListCacheProposalsOptions,
+  type ProposalStatus,
   type StoredCacheProposal,
+  type StoredCacheProposalAudit,
+  type UpdateProposalStatusInput,
 } from '@betterdb/shared';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
 import {
+  ApplyFailedError,
   CacheNotFoundError,
   CacheProposalValidationError,
   DuplicatePendingProposalError,
   InvalidCacheTypeError,
+  ProposalEditNotAllowedError,
+  ProposalExpiredError,
+  ProposalNotFoundError,
+  ProposalNotPendingError,
   RateLimitedError,
 } from './errors';
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { SlidingWindowRateLimiter } from './rate-limiter';
+import { CacheApplyService, type ApplyContext } from './cache-apply.service';
 
 const REASONING_MIN_LENGTH = 20;
 const PROPOSAL_RATE_LIMIT = 30;
@@ -97,6 +109,7 @@ export class CacheProposalService {
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly resolver: CacheResolverService,
+    @Optional() private readonly applyService?: CacheApplyService,
   ) {
     this.rateLimiter = new SlidingWindowRateLimiter(
       PROPOSAL_RATE_LIMIT,
@@ -376,4 +389,264 @@ export class CacheProposalService {
   private async readCurrentToolTtl(_cache: ResolvedCache, _toolName: string): Promise<number> {
     return 0;
   }
+
+  async getProposal(proposalId: string): Promise<StoredCacheProposal> {
+    const proposal = await this.storage.getCacheProposal(proposalId);
+    if (proposal === null) {
+      throw new ProposalNotFoundError(proposalId);
+    }
+    return proposal;
+  }
+
+  async getProposalWithAudit(
+    proposalId: string,
+  ): Promise<{ proposal: StoredCacheProposal; audit: StoredCacheProposalAudit[] }> {
+    const proposal = await this.getProposal(proposalId);
+    const audit = await this.storage.getCacheProposalAudit(proposalId);
+    return { proposal, audit };
+  }
+
+  listProposals(options: ListCacheProposalsOptions): Promise<StoredCacheProposal[]> {
+    return this.storage.listCacheProposals(options);
+  }
+
+  async approve(input: {
+    proposalId: string;
+    actor: string | null;
+    actorSource: ActorSource;
+  }): Promise<{ proposal: StoredCacheProposal; appliedResult: AppliedResult | null }> {
+    const proposal = await this.transitionToApproved(input);
+    return this.runApply(proposal, { actor: input.actor, actorSource: input.actorSource });
+  }
+
+  async reject(input: {
+    proposalId: string;
+    reason?: string | null;
+    actor: string | null;
+    actorSource: ActorSource;
+  }): Promise<StoredCacheProposal> {
+    const existing = await this.requireFreshPending(input.proposalId);
+    const reviewedAt = Date.now();
+    const updated = await this.storage.updateCacheProposalStatus({
+      id: existing.id,
+      expected_status: ['pending'],
+      status: 'rejected',
+      reviewed_by: input.actor,
+      reviewed_at: reviewedAt,
+    });
+    if (updated === null) {
+      const reread = await this.storage.getCacheProposal(input.proposalId);
+      throw new ProposalNotPendingError(input.proposalId, reread?.status ?? 'unknown');
+    }
+    await this.appendAudit({
+      proposalId: updated.id,
+      eventType: 'rejected',
+      eventPayload: input.reason ? { reason: input.reason } : null,
+      actor: input.actor,
+      actorSource: input.actorSource,
+      eventAt: reviewedAt,
+    });
+    return updated;
+  }
+
+  async editAndApprove(input: {
+    proposalId: string;
+    edits: { newThreshold?: number; newTtlSeconds?: number };
+    actor: string | null;
+    actorSource: ActorSource;
+  }): Promise<{ proposal: StoredCacheProposal; appliedResult: AppliedResult | null }> {
+    const existing = await this.requireFreshPending(input.proposalId);
+
+    if (existing.proposal_type === 'invalidate') {
+      throw new ProposalEditNotAllowedError(
+        input.proposalId,
+        'Invalidate proposals cannot be edited in v1 — reject and re-propose',
+      );
+    }
+
+    let newPayload: UpdateProposalStatusInput['proposal_payload'];
+    if (existing.proposal_type === 'threshold_adjust') {
+      if (typeof input.edits.newThreshold !== 'number') {
+        throw new CacheProposalValidationError(
+          'new_threshold is required for editing a threshold_adjust proposal',
+          { proposalType: existing.proposal_type },
+        );
+      }
+      if (input.edits.newTtlSeconds !== undefined) {
+        throw new CacheProposalValidationError(
+          'new_ttl_seconds is not valid for a threshold_adjust proposal',
+          { proposalType: existing.proposal_type },
+        );
+      }
+      newPayload = SemanticThresholdAdjustPayloadSchema.parse({
+        ...existing.proposal_payload,
+        new_threshold: input.edits.newThreshold,
+      });
+    } else if (existing.proposal_type === 'tool_ttl_adjust') {
+      if (typeof input.edits.newTtlSeconds !== 'number') {
+        throw new CacheProposalValidationError(
+          'new_ttl_seconds is required for editing a tool_ttl_adjust proposal',
+          { proposalType: existing.proposal_type },
+        );
+      }
+      if (input.edits.newThreshold !== undefined) {
+        throw new CacheProposalValidationError(
+          'new_threshold is not valid for a tool_ttl_adjust proposal',
+          { proposalType: existing.proposal_type },
+        );
+      }
+      newPayload = AgentToolTtlAdjustPayloadSchema.parse({
+        ...existing.proposal_payload,
+        new_ttl_seconds: input.edits.newTtlSeconds,
+      });
+    }
+
+    const reviewedAt = Date.now();
+    const approved = await this.storage.updateCacheProposalStatus({
+      id: existing.id,
+      expected_status: ['pending'],
+      status: 'approved',
+      reviewed_by: input.actor,
+      reviewed_at: reviewedAt,
+      proposal_payload: newPayload,
+    });
+    if (approved === null) {
+      const reread = await this.storage.getCacheProposal(input.proposalId);
+      throw new ProposalNotPendingError(input.proposalId, reread?.status ?? 'unknown');
+    }
+    await this.appendAudit({
+      proposalId: approved.id,
+      eventType: 'edited_and_approved',
+      eventPayload: { edits: input.edits },
+      actor: input.actor,
+      actorSource: input.actorSource,
+      eventAt: reviewedAt,
+    });
+    return this.runApply(approved, { actor: input.actor, actorSource: input.actorSource });
+  }
+
+  async expireProposals(now: number, actorSource: ActorSource = 'system'): Promise<number> {
+    const expired = await this.storage.expireCacheProposalsBefore(now);
+    for (const proposal of expired) {
+      try {
+        await this.appendAudit({
+          proposalId: proposal.id,
+          eventType: 'expired',
+          eventPayload: { expires_at: proposal.expires_at },
+          actor: 'system',
+          actorSource,
+          eventAt: now,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Failed to write expired audit for ${proposal.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return expired.length;
+  }
+
+  private async transitionToApproved(input: {
+    proposalId: string;
+    actor: string | null;
+    actorSource: ActorSource;
+  }): Promise<StoredCacheProposal> {
+    const existing = await this.storage.getCacheProposal(input.proposalId);
+    if (existing === null) {
+      throw new ProposalNotFoundError(input.proposalId);
+    }
+    if (existing.status === 'approved' || existing.status === 'applied' || existing.status === 'failed') {
+      return existing;
+    }
+    if (existing.status !== 'pending') {
+      throw new ProposalNotPendingError(input.proposalId, existing.status);
+    }
+    if (existing.expires_at < Date.now()) {
+      throw new ProposalExpiredError(input.proposalId, existing.expires_at);
+    }
+
+    const reviewedAt = Date.now();
+    const approved = await this.storage.updateCacheProposalStatus({
+      id: existing.id,
+      expected_status: ['pending'],
+      status: 'approved',
+      reviewed_by: input.actor,
+      reviewed_at: reviewedAt,
+    });
+    if (approved === null) {
+      const reread = await this.storage.getCacheProposal(input.proposalId);
+      if (
+        reread !== null &&
+        (reread.status === 'approved' || reread.status === 'applied' || reread.status === 'failed')
+      ) {
+        return reread;
+      }
+      throw new ProposalNotPendingError(input.proposalId, reread?.status ?? 'unknown');
+    }
+    await this.appendAudit({
+      proposalId: approved.id,
+      eventType: 'approved',
+      eventPayload: null,
+      actor: input.actor,
+      actorSource: input.actorSource,
+      eventAt: reviewedAt,
+    });
+    return approved;
+  }
+
+  private async runApply(
+    proposal: StoredCacheProposal,
+    context: ApplyContext,
+  ): Promise<{ proposal: StoredCacheProposal; appliedResult: AppliedResult | null }> {
+    if (this.applyService === undefined) {
+      this.logger.warn(
+        `CacheApplyService not wired — proposal ${proposal.id} stays in 'approved' without dispatch`,
+      );
+      return { proposal, appliedResult: null };
+    }
+    const result = await this.applyService.apply(proposal, context);
+    if (!result.appliedResult.success) {
+      throw new ApplyFailedError(
+        proposal.id,
+        result.appliedResult.error ?? 'apply failed',
+        result.appliedResult.details,
+      );
+    }
+    return { proposal: result.proposal, appliedResult: result.appliedResult };
+  }
+
+  private async requireFreshPending(proposalId: string): Promise<StoredCacheProposal> {
+    const existing = await this.storage.getCacheProposal(proposalId);
+    if (existing === null) {
+      throw new ProposalNotFoundError(proposalId);
+    }
+    if (existing.status !== 'pending') {
+      throw new ProposalNotPendingError(proposalId, existing.status);
+    }
+    if (existing.expires_at < Date.now()) {
+      throw new ProposalExpiredError(proposalId, existing.expires_at);
+    }
+    return existing;
+  }
+
+  private async appendAudit(args: {
+    proposalId: string;
+    eventType: 'approved' | 'rejected' | 'edited_and_approved' | 'expired' | 'applied' | 'failed';
+    eventPayload: Record<string, unknown> | null;
+    actor: string | null;
+    actorSource: ActorSource;
+    eventAt: number;
+  }): Promise<void> {
+    await this.storage.appendCacheProposalAudit({
+      id: randomUUID(),
+      proposal_id: args.proposalId,
+      event_type: args.eventType,
+      event_payload: args.eventPayload,
+      event_at: args.eventAt,
+      actor: args.actor,
+      actor_source: args.actorSource,
+    });
+  }
 }
+
+export type { ProposalStatus };
