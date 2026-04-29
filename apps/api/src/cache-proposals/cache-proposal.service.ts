@@ -392,6 +392,17 @@ export class CacheProposalService {
     try {
       const client = this.registry.get(connectionId).getClient();
       const raw = (await client.hgetall(`${cache.prefix}:__config`)) ?? {};
+      // Prefer dispatcher-written override fields (threshold / threshold:<category>),
+      // which reflect the actually effective value after a prior apply. Fall back
+      // to the SDK-published baseline (default_threshold / category_thresholds JSON).
+      const overrideField = category === null ? 'threshold' : `threshold:${category}`;
+      const overrideRaw = raw[overrideField];
+      if (typeof overrideRaw === 'string' && overrideRaw.length > 0) {
+        const overrideValue = Number(overrideRaw);
+        if (Number.isFinite(overrideValue)) {
+          return overrideValue;
+        }
+      }
       if (category !== null) {
         const categoryRaw = raw.category_thresholds;
         if (typeof categoryRaw === 'string' && categoryRaw.length > 0) {
