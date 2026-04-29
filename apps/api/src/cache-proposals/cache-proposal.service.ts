@@ -392,7 +392,6 @@ export class CacheProposalService {
     try {
       const client = this.registry.get(connectionId).getClient();
       const raw = (await client.hgetall(`${cache.prefix}:__config`)) ?? {};
-      const field = category === null ? 'default_threshold' : null;
       if (category !== null) {
         const categoryRaw = raw.category_thresholds;
         if (typeof categoryRaw === 'string' && categoryRaw.length > 0) {
@@ -406,8 +405,8 @@ export class CacheProposalService {
             // fall through
           }
         }
-      } else if (field !== null) {
-        const value = Number(raw[field]);
+      } else {
+        const value = Number(raw.default_threshold);
         if (Number.isFinite(value)) {
           return value;
         }
