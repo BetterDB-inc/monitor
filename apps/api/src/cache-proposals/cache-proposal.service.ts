@@ -636,7 +636,7 @@ export class CacheProposalService {
     if (existing.status !== 'pending') {
       throw new ProposalNotPendingError(input.proposalId, existing.status);
     }
-    if (existing.expires_at < Date.now()) {
+    if (existing.expires_at <= Date.now()) {
       throw new ProposalExpiredError(input.proposalId, existing.expires_at);
     }
 
