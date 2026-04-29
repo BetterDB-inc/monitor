@@ -1,5 +1,6 @@
 import { useLocation } from 'react-router-dom';
 import { useCapabilities } from '../../hooks/useCapabilities';
+import { useCacheProposalsUnread } from '../../hooks/useCacheProposals';
 import { ConnectionSelector } from '../ConnectionSelector';
 import { ModeToggle } from '../ModeToggle';
 import { CloudUser } from '../../api/workspace';
@@ -22,6 +23,7 @@ interface SidebarProps {
 export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
   const location = useLocation();
   const { hasVectorSearch } = useCapabilities();
+  const { unreadCount: cacheProposalsUnread } = useCacheProposalsUnread();
 
   return (
     <Sidebar className="bg-card">
@@ -95,6 +97,19 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
           </NavItem>
           <NavItem to="/migration" active={location.pathname === '/migration'}>
             Migration
+          </NavItem>
+          <NavItem to="/cache-proposals" active={location.pathname === '/cache-proposals'}>
+            <span className="flex items-center justify-between w-full">
+              Cache Proposals
+              {cacheProposalsUnread > 0 && (
+                <span
+                  data-testid="cache-proposals-unread-badge"
+                  className="ml-2 inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold"
+                >
+                  {cacheProposalsUnread > 99 ? '99+' : cacheProposalsUnread}
+                </span>
+              )}
+            </span>
           </NavItem>
           {!cloudUser && (
             <NavItem to="/helper" active={location.pathname === '/helper'}>
