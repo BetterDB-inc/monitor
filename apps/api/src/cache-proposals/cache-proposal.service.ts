@@ -34,6 +34,7 @@ import {
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { SlidingWindowRateLimiter } from './rate-limiter';
 import { CacheApplyService, type ApplyContext } from './cache-apply.service';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 const REASONING_MIN_LENGTH = 20;
 const PROPOSAL_RATE_LIMIT = 30;
@@ -110,6 +111,7 @@ export class CacheProposalService {
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly resolver: CacheResolverService,
     @Optional() private readonly applyService?: CacheApplyService,
+    @Optional() private readonly registry?: ConnectionRegistry,
   ) {
     this.rateLimiter = new SlidingWindowRateLimiter(
       PROPOSAL_RATE_LIMIT,
@@ -125,7 +127,7 @@ export class CacheProposalService {
     const cache = await this.requireCache(connectionId, input.cacheName, SEMANTIC_CACHE);
 
     const category = input.category ?? null;
-    const currentThreshold = await this.readCurrentThreshold(cache, category);
+    const currentThreshold = await this.readCurrentThreshold(connectionId, cache, category);
     const payload = SemanticThresholdAdjustPayloadSchema.parse({
       category,
       current_threshold: currentThreshold,
@@ -157,7 +159,7 @@ export class CacheProposalService {
     this.requireReasoning(input.reasoning);
     const cache = await this.requireCache(connectionId, input.cacheName, AGENT_CACHE);
 
-    const currentTtlSeconds = await this.readCurrentToolTtl(cache, input.toolName);
+    const currentTtlSeconds = await this.readCurrentToolTtl(connectionId, cache, input.toolName);
     const payload = AgentToolTtlAdjustPayloadSchema.parse({
       tool_name: input.toolName,
       current_ttl_seconds: currentTtlSeconds,
@@ -380,13 +382,70 @@ export class CacheProposalService {
   }
 
   private async readCurrentThreshold(
-    _cache: ResolvedCache,
-    _category: string | null,
+    connectionId: string,
+    cache: ResolvedCache,
+    category: string | null,
   ): Promise<number> {
+    if (this.registry === undefined) {
+      return 0;
+    }
+    try {
+      const client = this.registry.get(connectionId).getClient();
+      const raw = (await client.hgetall(`${cache.prefix}:__config`)) ?? {};
+      const field = category === null ? 'default_threshold' : null;
+      if (category !== null) {
+        const categoryRaw = raw.category_thresholds;
+        if (typeof categoryRaw === 'string' && categoryRaw.length > 0) {
+          try {
+            const parsed = JSON.parse(categoryRaw) as Record<string, unknown>;
+            const value = parsed[category];
+            if (typeof value === 'number' && Number.isFinite(value)) {
+              return value;
+            }
+          } catch {
+            // fall through
+          }
+        }
+      } else if (field !== null) {
+        const value = Number(raw[field]);
+        if (Number.isFinite(value)) {
+          return value;
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read current threshold for ${cache.name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return 0;
   }
 
-  private async readCurrentToolTtl(_cache: ResolvedCache, _toolName: string): Promise<number> {
+  private async readCurrentToolTtl(
+    connectionId: string,
+    cache: ResolvedCache,
+    toolName: string,
+  ): Promise<number> {
+    if (this.registry === undefined) {
+      return 0;
+    }
+    try {
+      const client = this.registry.get(connectionId).getClient();
+      const raw = await client.hget(`${cache.prefix}:__tool_policies`, toolName);
+      if (raw !== null) {
+        try {
+          const parsed = JSON.parse(raw) as { ttl?: unknown };
+          if (typeof parsed.ttl === 'number' && Number.isFinite(parsed.ttl)) {
+            return parsed.ttl;
+          }
+        } catch {
+          // fall through
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read current TTL for ${cache.name}/${toolName}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return 0;
   }
 
