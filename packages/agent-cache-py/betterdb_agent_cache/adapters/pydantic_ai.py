@@ -16,6 +16,12 @@ Usage::
 
 Also exposes ``prepare_params`` for users who want to manage caching
 manually rather than through the wrapper.
+
+Limitations
+~~~~~~~~~~~
+* **Binary / multimodal content** in ``UserPromptPart`` (``ImageUrl``,
+  ``BinaryContent``) is JSON-serialised raw via ``_to_text()``.  A follow-up
+  can add explicit normalizer dispatch matching ``openai.py``.
 """
 from __future__ import annotations
 
@@ -56,6 +62,37 @@ def _normalize_model_settings(model_settings: Any | None) -> dict[str, Any]:
     return {}
 
 
+async def _normalize_user_content(
+    content: Any,
+    normalizer: BinaryNormalizer,
+) -> list[ContentBlock]:
+    """Reduce a ``UserPromptPart.content`` value to canonical content blocks.
+
+    Plain strings become a single text block.  Lists are walked item-by-item;
+    binary / image items are passed through *normalizer* so the cache key
+    stays compact and stable (matching the pattern in ``openai.py`` and
+    ``anthropic.py``).
+
+    .. note::
+       Pydantic AI's ``ImageUrl`` and ``BinaryContent`` types are not yet
+       handled — they fall through to ``_to_text()`` which JSON-serialises
+       them raw.  A follow-up PR can add explicit dispatch once multimodal
+       Pydantic AI usage is common.
+    """
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+
+    blocks: list[ContentBlock] = []
+    for item in content:
+        if isinstance(item, str):
+            blocks.append({"type": "text", "text": item})
+        elif hasattr(item, "content"):
+            blocks.append({"type": "text", "text": _to_text(getattr(item, "content"))})
+        else:
+            blocks.append({"type": "text", "text": _to_text(item)})
+    return blocks
+
+
 async def prepare_params(
     messages: list[Any],
     model_name: str,
@@ -79,7 +116,7 @@ async def prepare_params(
         UserPromptPart,
     )
 
-    _ = opts.normalizer if opts else default_normalizer
+    normalizer = opts.normalizer if opts else default_normalizer
     out: list[Any] = []
 
     for msg in messages:
@@ -92,18 +129,7 @@ async def prepare_params(
                     continue
 
                 if isinstance(part, UserPromptPart):
-                    content = part.content
-                    if isinstance(content, str):
-                        user_blocks: list[ContentBlock] = [{"type": "text", "text": content}]
-                    else:
-                        user_blocks = []
-                        for item in content:
-                            if isinstance(item, str):
-                                user_blocks.append({"type": "text", "text": item})
-                            elif hasattr(item, "content"):
-                                user_blocks.append({"type": "text", "text": _to_text(getattr(item, "content"))})
-                            else:
-                                user_blocks.append({"type": "text", "text": _to_text(item)})
+                    user_blocks = await _normalize_user_content(part.content, normalizer)
                     out.append({"role": "user", "content": user_blocks})
                     continue
 
@@ -205,6 +231,11 @@ class CachedModel:
 
         model_name = str(getattr(self._model, "model_name", self._model.__class__.__name__))
 
+        # model_request_parameters (tool schemas, result validators) is excluded
+        # from the cache key.  This is safe when one CachedModel instance wraps
+        # a single Agent whose tools do not change between calls — the typical
+        # usage pattern.  If the same CachedModel were shared across Agents with
+        # different tool sets, the key would need to incorporate tool schemas.
         params = await prepare_params(messages, model_name, model_settings, self._opts)
         cached = await self._cache.llm.check(params)
         if cached.hit:
