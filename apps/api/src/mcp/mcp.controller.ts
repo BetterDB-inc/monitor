@@ -645,6 +645,17 @@ export class McpController {
     const reasoning = requireString(body?.reasoning, 'reasoning');
     const proposedBy = optionalString(body?.proposed_by, 'proposed_by');
 
+    if (
+      filterKind !== 'valkey_search' &&
+      filterKind !== 'tool' &&
+      filterKind !== 'key_prefix' &&
+      filterKind !== 'session'
+    ) {
+      throw new BadRequestException(
+        `filter_kind must be one of 'valkey_search' | 'tool' | 'key_prefix' | 'session', got '${filterKind}'`,
+      );
+    }
+
     try {
       if (filterKind === 'valkey_search') {
         const filterExpression = requireString(body?.filter_expression, 'filter_expression');
@@ -659,22 +670,16 @@ export class McpController {
         return formatProposalResult(result);
       }
 
-      if (filterKind === 'tool' || filterKind === 'key_prefix' || filterKind === 'session') {
-        const filterValue = requireString(body?.filter_value, 'filter_value');
-        const result = await this.cacheProposalService.proposeInvalidate(id, {
-          cacheName,
-          filterKind,
-          filterValue,
-          estimatedAffected,
-          reasoning,
-          proposedBy,
-        });
-        return formatProposalResult(result);
-      }
-
-      throw new BadRequestException(
-        `filter_kind must be one of 'valkey_search' | 'tool' | 'key_prefix' | 'session', got '${filterKind}'`,
-      );
+      const filterValue = requireString(body?.filter_value, 'filter_value');
+      const result = await this.cacheProposalService.proposeInvalidate(id, {
+        cacheName,
+        filterKind,
+        filterValue,
+        estimatedAffected,
+        reasoning,
+        proposedBy,
+      });
+      return formatProposalResult(result);
     } catch (err) {
       throw mapCacheProposalErrorToHttp(err);
     }

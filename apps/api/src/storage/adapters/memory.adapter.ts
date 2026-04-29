@@ -1434,6 +1434,18 @@ export class MemoryAdapter implements StoragePort {
   }
 
   async createCacheProposal(input: CreateCacheProposalInput): Promise<StoredCacheProposal> {
+    for (const existing of this.cacheProposals.values()) {
+      if (
+        existing.status === 'pending' &&
+        existing.connection_id === input.connection_id &&
+        existing.cache_name === input.cache_name &&
+        existing.proposal_type === input.proposal_type
+      ) {
+        throw new Error(
+          `UNIQUE constraint failed: cache_proposals.connection_id, cache_proposals.cache_name, cache_proposals.proposal_type (status='pending')`,
+        );
+      }
+    }
     const proposedAt = input.proposed_at ?? Date.now();
     const expiresAt = input.expires_at ?? proposedAt + PROPOSAL_DEFAULT_EXPIRY_MS;
     const proposal: StoredCacheProposal = structuredClone({

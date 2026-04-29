@@ -269,7 +269,7 @@ describe('CacheProposalService.expireProposals', () => {
       ...original,
       expires_at: Date.now() - 1000,
     });
-    const expired = await h.service.expireProposals(Date.now());
+    const expired = await h.service.expireProposals(Date.now(), 'system');
     expect(expired).toBe(1);
     const reread = await h.storage.getCacheProposal(id);
     expect(reread?.status).toBe('expired');
