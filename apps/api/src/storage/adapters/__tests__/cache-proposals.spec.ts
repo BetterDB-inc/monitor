@@ -131,7 +131,11 @@ describe('Cache proposal storage', () => {
 
     it('filters by status (single and array)', async () => {
       const a = await storage.createCacheProposal(buildSemanticThreshold());
-      const b = await storage.createCacheProposal(buildSemanticThreshold());
+      const b = await storage.createCacheProposal(
+        buildSemanticThreshold({
+          proposal_payload: { category: 'support', current_threshold: 0.1, new_threshold: 0.08 },
+        }),
+      );
       await storage.updateCacheProposalStatus({ id: b.id, status: 'approved' });
 
       const pending = await storage.listCacheProposals({ connection_id: CONNECTION_ID, status: 'pending' });
@@ -163,13 +167,22 @@ describe('Cache proposal storage', () => {
 
     it('orders by proposed_at desc and respects pagination', async () => {
       const old = await storage.createCacheProposal(
-        buildSemanticThreshold({ proposed_at: 100 }),
+        buildSemanticThreshold({
+          proposed_at: 100,
+          proposal_payload: { category: 'a', current_threshold: 0.1, new_threshold: 0.08 },
+        }),
       );
       const mid = await storage.createCacheProposal(
-        buildSemanticThreshold({ proposed_at: 200 }),
+        buildSemanticThreshold({
+          proposed_at: 200,
+          proposal_payload: { category: 'b', current_threshold: 0.1, new_threshold: 0.08 },
+        }),
       );
       const fresh = await storage.createCacheProposal(
-        buildSemanticThreshold({ proposed_at: 300 }),
+        buildSemanticThreshold({
+          proposed_at: 300,
+          proposal_payload: { category: 'c', current_threshold: 0.1, new_threshold: 0.08 },
+        }),
       );
 
       const all = await storage.listCacheProposals({ connection_id: CONNECTION_ID });
@@ -240,13 +253,22 @@ describe('Cache proposal storage', () => {
   describe('expireCacheProposalsBefore', () => {
     it('marks pending proposals past expiry as expired and leaves others alone', async () => {
       const expired = await storage.createCacheProposal(
-        buildSemanticThreshold({ expires_at: 100 }),
+        buildSemanticThreshold({
+          expires_at: 100,
+          proposal_payload: { category: 'a', current_threshold: 0.1, new_threshold: 0.08 },
+        }),
       );
       const fresh = await storage.createCacheProposal(
-        buildSemanticThreshold({ expires_at: 1_000_000_000_000 }),
+        buildSemanticThreshold({
+          expires_at: 1_000_000_000_000,
+          proposal_payload: { category: 'b', current_threshold: 0.1, new_threshold: 0.08 },
+        }),
       );
       const approved = await storage.createCacheProposal(
-        buildSemanticThreshold({ expires_at: 100 }),
+        buildSemanticThreshold({
+          expires_at: 100,
+          proposal_payload: { category: 'c', current_threshold: 0.1, new_threshold: 0.08 },
+        }),
       );
       await storage.updateCacheProposalStatus({ id: approved.id, status: 'approved' });
 
@@ -296,7 +318,11 @@ describe('Cache proposal storage', () => {
 
     it('does not return audit events for other proposals', async () => {
       const a = await storage.createCacheProposal(buildSemanticThreshold());
-      const b = await storage.createCacheProposal(buildSemanticThreshold());
+      const b = await storage.createCacheProposal(
+        buildSemanticThreshold({
+          proposal_payload: { category: 'support', current_threshold: 0.1, new_threshold: 0.08 },
+        }),
+      );
       await storage.appendCacheProposalAudit({
         id: randomUUID(),
         proposal_id: a.id,
