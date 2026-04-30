@@ -1,5 +1,9 @@
 import { SemanticCache } from '@betterdb/semantic-cache';
-import { createValkeyClient, flushCacheNamespace } from '../util/valkey.js';
+import {
+  createValkeyClient,
+  flushCacheNamespace,
+  publishDiscoveryMarker,
+} from '../util/valkey.js';
 import { generateFaqPrompts } from '../data/faq-prompts.js';
 import type { Scenario, ScenarioContext, ScenarioResult } from '../types.js';
 
@@ -24,6 +28,11 @@ async function run(ctx: ScenarioContext): Promise<ScenarioResult> {
   await cache.initialize();
 
   await client.hset(`${ctx.cacheName}:__config`, 'threshold', String(DEFAULT_THRESHOLD));
+  await publishDiscoveryMarker(client, ctx.cacheName, {
+    type: 'semantic_cache',
+    prefix: ctx.cacheName,
+    capabilities: ['threshold_adjust', 'invalidate'],
+  });
 
   const perTopic = PER_TOPIC_DEFAULT;
   const prompts = generateFaqPrompts(perTopic);

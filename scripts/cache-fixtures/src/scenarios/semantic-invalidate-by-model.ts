@@ -1,13 +1,18 @@
 import { SemanticCache } from '@betterdb/semantic-cache';
-import { createValkeyClient, flushCacheNamespace } from '../util/valkey.js';
+import {
+  createValkeyClient,
+  flushCacheNamespace,
+  publishDiscoveryMarker,
+} from '../util/valkey.js';
 import type { Scenario, ScenarioContext, ScenarioResult } from '../types.js';
 
-const TOTAL = Number(process.env.SEMANTIC_INVALIDATE_TOTAL ?? '500');
 const TARGET_MODEL = 'gpt-4o-mini';
 const OTHER_MODEL = 'gpt-4o';
 const TARGET_RATIO = 0.6;
 
 async function run(ctx: ScenarioContext): Promise<ScenarioResult> {
+  const total = Number(process.env.SEMANTIC_INVALIDATE_TOTAL ?? '500');
+
   const client = createValkeyClient({
     host: ctx.valkeyHost,
     port: ctx.valkeyPort,
@@ -24,9 +29,15 @@ async function run(ctx: ScenarioContext): Promise<ScenarioResult> {
   });
   await cache.initialize();
 
-  const targetCount = Math.floor(TOTAL * TARGET_RATIO);
+  await publishDiscoveryMarker(client, ctx.cacheName, {
+    type: 'semantic_cache',
+    prefix: ctx.cacheName,
+    capabilities: ['threshold_adjust', 'invalidate'],
+  });
+
+  const targetCount = Math.floor(total * TARGET_RATIO);
   let stored = 0;
-  for (let i = 0; i < TOTAL; i += 1) {
+  for (let i = 0; i < total; i += 1) {
     const isTarget = i < targetCount;
     await cache.store(`Distinct prompt number ${i}`, `Response ${i}`, {
       model: isTarget ? TARGET_MODEL : OTHER_MODEL,
@@ -40,11 +51,11 @@ async function run(ctx: ScenarioContext): Promise<ScenarioResult> {
   return {
     entries: stored,
     details: {
-      total: TOTAL,
+      total,
       target_model: TARGET_MODEL,
       target_count: targetCount,
       other_model: OTHER_MODEL,
-      other_count: TOTAL - targetCount,
+      other_count: total - targetCount,
     },
   };
 }
