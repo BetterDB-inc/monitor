@@ -2,11 +2,11 @@ import { AgentCache } from '@betterdb/agent-cache';
 import { createValkeyClient, flushCacheNamespace } from '../util/valkey.js';
 import type { Scenario, ScenarioContext, ScenarioResult } from '../types.js';
 
-const ENTRIES_PER_TOOL = Number(process.env.AGENT_INVALIDATE_PER_TOOL ?? '100');
-
 const TOOLS = ['classify_intent', 'sentiment_score', 'translate_text'];
 
 async function run(ctx: ScenarioContext): Promise<ScenarioResult> {
+  const entriesPerTool = Number(process.env.AGENT_INVALIDATE_PER_TOOL ?? '100');
+
   const client = createValkeyClient({
     host: ctx.valkeyHost,
     port: ctx.valkeyPort,
@@ -20,7 +20,7 @@ async function run(ctx: ScenarioContext): Promise<ScenarioResult> {
   const perTool: Record<string, number> = {};
   for (const tool of TOOLS) {
     let count = 0;
-    for (let i = 0; i < ENTRIES_PER_TOOL; i += 1) {
+    for (let i = 0; i < entriesPerTool; i += 1) {
       await agent.tool.store(tool, { i }, JSON.stringify({ tool, i }));
       count += 1;
     }
