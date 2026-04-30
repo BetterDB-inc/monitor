@@ -2,7 +2,6 @@ import {
   BadRequestException,
   Controller,
   Get,
-  NotFoundException,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -12,6 +11,7 @@ import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { ConnectionId } from '@app/common/decorators';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
+import { requireConnectionId } from '@app/connections/require-connection-id';
 import {
   InferenceLatencyService,
   InferenceLatencyValidationError,
@@ -67,7 +67,7 @@ export class InferenceLatencyProController {
       throw new BadRequestException('bucketMs must be a positive number');
     }
 
-    const resolvedId = this.requireConnectionId(connectionId);
+    const resolvedId = requireConnectionId(this.connectionRegistry, connectionId);
     try {
       return await this.service.getTrend(resolvedId, bucket, startMs, endMs, parsedBucketMs);
     } catch (err) {
@@ -76,19 +76,5 @@ export class InferenceLatencyProController {
       }
       throw err;
     }
-  }
-
-  private requireConnectionId(requestedId: string | undefined): string {
-    if (requestedId) {
-      this.connectionRegistry.get(requestedId);
-      return requestedId;
-    }
-    const defaultId = this.connectionRegistry.getDefaultId();
-    if (!defaultId) {
-      throw new NotFoundException(
-        'No connection available. Pass x-connection-id header or configure a default connection.',
-      );
-    }
-    return defaultId;
   }
 }

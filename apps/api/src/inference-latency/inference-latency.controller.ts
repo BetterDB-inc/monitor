@@ -2,13 +2,13 @@ import {
   BadRequestException,
   Controller,
   Get,
-  NotFoundException,
   Query,
 } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { InferenceLatencyProfile } from '@betterdb/shared';
 import { ConnectionId } from '../common/decorators';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { requireConnectionId } from '../connections/require-connection-id';
 import {
   InferenceLatencyService,
   InferenceLatencyValidationError,
@@ -59,7 +59,7 @@ export class InferenceLatencyController {
     @Query('endTime') endTime?: string,
     @ConnectionId() connectionId?: string,
   ): Promise<InferenceLatencyProfile> {
-    const resolvedId = this.requireConnectionId(connectionId);
+    const resolvedId = requireConnectionId(this.connectionRegistry, connectionId);
 
     const hasStart = startTime !== undefined && startTime !== '';
     const hasEnd = endTime !== undefined && endTime !== '';
@@ -93,19 +93,5 @@ export class InferenceLatencyController {
       }
       throw err;
     }
-  }
-
-  private requireConnectionId(requestedId: string | undefined): string {
-    if (requestedId) {
-      this.connectionRegistry.get(requestedId);
-      return requestedId;
-    }
-    const defaultId = this.connectionRegistry.getDefaultId();
-    if (!defaultId) {
-      throw new NotFoundException(
-        'No connection available. Pass x-connection-id header or configure a default connection.',
-      );
-    }
-    return defaultId;
   }
 }
