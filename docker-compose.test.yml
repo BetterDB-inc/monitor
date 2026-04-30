@@ -19,6 +19,19 @@ services:
       timeout: 3s
       retries: 3
 
+  valkey-bundle:
+    # valkey-bundle ships valkey-search; required for semantic-cache integration tests.
+    image: valkey/valkey-bundle:unstable
+    container_name: betterdb-test-valkey-bundle
+    ports:
+      - "6391:6379"
+    command: ["valkey-server", "--loglevel", "notice"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   redis:
     image: redis:8-alpine
     container_name: betterdb-test-redis

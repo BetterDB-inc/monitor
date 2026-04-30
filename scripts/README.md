@@ -30,6 +30,12 @@ Demo scripts for testing BetterDB features.
 |--------|-------------|
 | `spike-anomalies.sh` | Generates various metric anomalies for testing anomaly detection |
 
+### cache-fixtures/
+Workspace package (`@betterdb/cache-fixtures`) that seeds Valkey with realistic
+semantic-cache and agent-cache state for cache-proposals integration tests and
+dogfood walkthroughs. See `scripts/cache-fixtures/README.md` for scenarios and
+prerequisites (valkey-bundle + Ollama).
+
 ## Usage Examples
 
 ### Run a slot migration demo

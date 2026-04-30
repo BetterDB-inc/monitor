@@ -1,0 +1,22 @@
+{
+  "name": "@betterdb/cache-fixtures",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Seed scripts that populate Valkey with realistic cache state for cache-proposals integration tests and dogfood walkthroughs.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "seed": "tsx src/cli.ts",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "@betterdb/agent-cache": "workspace:*",
+    "@betterdb/semantic-cache": "workspace:*",
+    "iovalkey": "^0.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  }
+}

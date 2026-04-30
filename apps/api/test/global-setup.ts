@@ -6,6 +6,7 @@ const PROJECT_NAME = 'betterdb-test';
 
 const CONTAINER_NAMES = [
   'betterdb-test-valkey',
+  'betterdb-test-valkey-bundle',
   'betterdb-test-redis',
   'betterdb-test-postgres',
   'betterdb-test-cluster-1',
@@ -60,9 +61,9 @@ export default async function globalSetup() {
     }
 
     // Start test Docker containers
-    console.log('   Starting valkey, redis, postgres, and cluster (test containers)...');
+    console.log('   Starting valkey, valkey-bundle, redis, postgres, and cluster (test containers)...');
     execSync(
-      `docker compose -p ${PROJECT_NAME} -f ${COMPOSE_FILE} up -d valkey redis postgres valkey-cluster-1 valkey-cluster-2 valkey-cluster-3 valkey-cluster-init`,
+      `docker compose -p ${PROJECT_NAME} -f ${COMPOSE_FILE} up -d valkey valkey-bundle redis postgres valkey-cluster-1 valkey-cluster-2 valkey-cluster-3 valkey-cluster-init`,
       {
         cwd: projectRoot,
         stdio: 'inherit',
@@ -82,6 +83,11 @@ export default async function globalSetup() {
           { encoding: 'utf-8' },
         ).trim();
 
+        const valkeyBundleHealth = execSync(
+          'docker inspect --format="{{.State.Health.Status}}" betterdb-test-valkey-bundle 2>/dev/null || echo "none"',
+          { encoding: 'utf-8' },
+        ).trim();
+
         const redisHealth = execSync(
           'docker inspect --format="{{.State.Health.Status}}" betterdb-test-redis 2>/dev/null || echo "none"',
           { encoding: 'utf-8' },
@@ -93,15 +99,17 @@ export default async function globalSetup() {
         ).trim();
 
         const valkeyReady = valkeyHealth === 'healthy';
+        const valkeyBundleReady = valkeyBundleHealth === 'healthy';
         const redisReady = redisHealth === 'healthy';
         const postgresReady = postgresHealth === 'healthy';
 
-        if (valkeyReady && redisReady && postgresReady) {
+        if (valkeyReady && valkeyBundleReady && redisReady && postgresReady) {
           allHealthy = true;
           console.log('   All services are healthy');
         } else {
           const status = [];
           if (!valkeyReady) status.push(`valkey: ${valkeyHealth}`);
+          if (!valkeyBundleReady) status.push(`valkey-bundle: ${valkeyBundleHealth}`);
           if (!redisReady) status.push(`redis: ${redisHealth}`);
           if (!postgresReady) status.push(`postgres: ${postgresHealth}`);
           process.stdout.write(`   Waiting... ${status.join(', ')}\r`);
