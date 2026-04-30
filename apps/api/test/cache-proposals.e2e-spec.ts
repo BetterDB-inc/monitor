@@ -4,6 +4,7 @@ import Redis from 'iovalkey';
 import {
   prodAgentThreeTools,
   agentInvalidateByTool,
+  agentInvalidateBySession,
 } from '@betterdb/cache-fixtures';
 import { createTestApp } from './test-utils';
 import { CacheProposalService } from '../src/cache-proposals/cache-proposal.service';
@@ -192,6 +193,170 @@ describe('Cache Proposals E2E', () => {
     });
   });
 
+  describe('agent_cache invalidate by session', () => {
+    const cacheName = 'e2e-invalidate-by-session';
+    const TARGET_SESSION = 'sess-alpha';
+
+    beforeAll(async () => {
+      await agentInvalidateBySession.run({
+        valkeyHost: VALKEY_BUNDLE_HOST,
+        valkeyPort: VALKEY_BUNDLE_PORT,
+        cacheName,
+        embedFn: NOOP_EMBED,
+      });
+    });
+
+    it('removes only the targeted session and leaves the others intact', async () => {
+      const service = app.get(CacheProposalService);
+
+      const beforeAlpha = await countSessionKeys(cacheValkey, cacheName, TARGET_SESSION);
+      const beforeBravo = await countSessionKeys(cacheValkey, cacheName, 'sess-bravo');
+      expect(beforeAlpha).toBeGreaterThan(0);
+      expect(beforeBravo).toBeGreaterThan(0);
+
+      const proposeResult = await service.proposeInvalidate(connectionId, {
+        cacheName,
+        filterKind: 'session',
+        filterValue: TARGET_SESSION,
+        estimatedAffected: beforeAlpha,
+        reasoning: 'Test session ended; clearing turn history.',
+      });
+
+      const approveRes = await request(app.getHttpServer())
+        .post(`/cache-proposals/${proposeResult.proposal.id}/approve`)
+        .set('X-Connection-Id', connectionId);
+      expect([200, 201]).toContain(approveRes.status);
+      expect(approveRes.body.status).toBe('applied');
+      expect(approveRes.body.applied_result.details).toMatchObject({
+        filter_kind: 'session',
+        session_id: TARGET_SESSION,
+      });
+
+      const afterAlpha = await countSessionKeys(cacheValkey, cacheName, TARGET_SESSION);
+      const afterBravo = await countSessionKeys(cacheValkey, cacheName, 'sess-bravo');
+      expect(afterAlpha).toBe(0);
+      expect(afterBravo).toBe(beforeBravo);
+    });
+  });
+
+  describe('agent_cache invalidate by key_prefix', () => {
+    const cacheName = 'e2e-invalidate-by-key-prefix';
+
+    beforeAll(async () => {
+      await prodAgentThreeTools.run({
+        valkeyHost: VALKEY_BUNDLE_HOST,
+        valkeyPort: VALKEY_BUNDLE_PORT,
+        cacheName,
+        embedFn: NOOP_EMBED,
+      });
+    });
+
+    it('removes only entries under the prefix and leaves siblings intact', async () => {
+      const service = app.get(CacheProposalService);
+
+      const beforeWeather = await countToolEntries(cacheValkey, cacheName, 'weather_lookup');
+      const beforeOther = await countToolEntries(cacheValkey, cacheName, 'classify_intent');
+      expect(beforeWeather).toBeGreaterThan(0);
+      expect(beforeOther).toBeGreaterThan(0);
+
+      const proposeResult = await service.proposeInvalidate(connectionId, {
+        cacheName,
+        filterKind: 'key_prefix',
+        filterValue: 'tool:weather_lookup',
+        estimatedAffected: beforeWeather,
+        reasoning: 'Drop the weather_lookup keyspace; provider rotated and cached values are stale.',
+      });
+
+      const approveRes = await request(app.getHttpServer())
+        .post(`/cache-proposals/${proposeResult.proposal.id}/approve`)
+        .set('X-Connection-Id', connectionId);
+      expect([200, 201]).toContain(approveRes.status);
+      expect(approveRes.body.status).toBe('applied');
+      expect(approveRes.body.applied_result.details).toMatchObject({
+        filter_kind: 'key_prefix',
+        prefix: 'tool:weather_lookup',
+      });
+
+      expect(await countToolEntries(cacheValkey, cacheName, 'weather_lookup')).toBe(0);
+      expect(await countToolEntries(cacheValkey, cacheName, 'classify_intent')).toBe(beforeOther);
+    });
+  });
+
+  describe('expire flow', () => {
+    const cacheName = 'e2e-expire';
+
+    beforeAll(async () => {
+      await prodAgentThreeTools.run({
+        valkeyHost: VALKEY_BUNDLE_HOST,
+        valkeyPort: VALKEY_BUNDLE_PORT,
+        cacheName,
+        embedFn: NOOP_EMBED,
+      });
+    });
+
+    it('marks an overdue proposal as expired and writes an expired audit entry', async () => {
+      const service = app.get(CacheProposalService);
+
+      const proposeResult = await service.proposeToolTtlAdjust(connectionId, {
+        cacheName,
+        toolName: 'classify_intent',
+        newTtlSeconds: 1200,
+        reasoning: 'This proposal is going to be left to expire by the test.',
+      });
+      const proposalId = proposeResult.proposal.id;
+
+      const farFuture = Date.now() + 100 * 24 * 60 * 60 * 1000;
+      const expiredCount = await service.expireProposals(farFuture);
+      expect(expiredCount).toBeGreaterThanOrEqual(1);
+
+      const detailRes = await request(app.getHttpServer())
+        .get(`/cache-proposals/${proposalId}`)
+        .set('X-Connection-Id', connectionId)
+        .expect(200);
+
+      expect(detailRes.body.proposal.status).toBe('expired');
+      const expiredAudit = (detailRes.body.audit as Array<{ event_type: string }>).find(
+        (e) => e.event_type === 'expired',
+      );
+      expect(expiredAudit).toBeDefined();
+    });
+  });
+
+  describe('estimated vs actual mismatch', () => {
+    const cacheName = 'e2e-estimate-mismatch';
+    const TARGET_TOOL = 'classify_intent';
+
+    beforeAll(async () => {
+      process.env.AGENT_INVALIDATE_PER_TOOL = '50';
+      await agentInvalidateByTool.run({
+        valkeyHost: VALKEY_BUNDLE_HOST,
+        valkeyPort: VALKEY_BUNDLE_PORT,
+        cacheName,
+        embedFn: NOOP_EMBED,
+      });
+    });
+
+    it('still applies when actual_affected is far above estimated_affected', async () => {
+      const service = app.get(CacheProposalService);
+
+      const proposeResult = await service.proposeInvalidate(connectionId, {
+        cacheName,
+        filterKind: 'tool',
+        filterValue: TARGET_TOOL,
+        estimatedAffected: 5,
+        reasoning: 'Estimate intentionally low — test that apply still succeeds.',
+      });
+
+      const approveRes = await request(app.getHttpServer())
+        .post(`/cache-proposals/${proposeResult.proposal.id}/approve`)
+        .set('X-Connection-Id', connectionId);
+      expect([200, 201]).toContain(approveRes.status);
+      expect(approveRes.body.status).toBe('applied');
+      const remaining = await countToolEntries(cacheValkey, cacheName, TARGET_TOOL);
+      expect(remaining).toBe(0);
+    });
+  });
+
   describe('edit-and-approve', () => {
     const cacheName = 'e2e-edit-and-approve';
 
@@ -250,12 +415,25 @@ async function countToolEntries(
   toolName: string,
 ): Promise<number> {
   const pattern = `${cacheName}:tool:${toolName}:*`;
+  return (await listKeys(client, pattern)).length;
+}
+
+async function countSessionKeys(
+  client: Redis,
+  cacheName: string,
+  sessionId: string,
+): Promise<number> {
+  const pattern = `${cacheName}:session:${sessionId}*`;
+  return (await listKeys(client, pattern)).length;
+}
+
+async function listKeys(client: Redis, pattern: string): Promise<string[]> {
   let cursor = '0';
-  let total = 0;
+  const out: string[] = [];
   do {
     const [next, keys] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
     cursor = next;
-    total += keys.length;
+    out.push(...keys);
   } while (cursor !== '0');
-  return total;
+  return out;
 }
