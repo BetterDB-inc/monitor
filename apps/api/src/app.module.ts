@@ -28,6 +28,7 @@ let LicenseModule: any = null;
 let KeyAnalyticsModule: any = null;
 let AnomalyModule: any = null;
 let WebhookProModule: any = null;
+let InferenceLatencyProModule: any = null;
 let AgentModule: any = null;
 let DataRetentionModule: any = null;
 
@@ -68,6 +69,14 @@ try {
   const webhookProModule = require('../../../proprietary/webhook-pro');
   WebhookProModule = webhookProModule.WebhookProModule;
   console.log('[WebhookPro] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
+  const inferenceLatencyProModule = require('../../../proprietary/inference-latency-pro/inference-latency-pro.module');
+  InferenceLatencyProModule = inferenceLatencyProModule.InferenceLatencyProModule;
+  console.log('[InferenceLatencyPro] Proprietary module loaded');
 } catch {
   // Proprietary module not available
 }
@@ -134,6 +143,7 @@ const proprietaryImports = [
   KeyAnalyticsModule,
   AnomalyModule,
   WebhookProModule,
+  InferenceLatencyProModule,
   AiModule,
   AgentModule,
   DataRetentionModule,

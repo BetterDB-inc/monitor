@@ -26,7 +26,9 @@ export function evaluateSla(params: EvaluateSlaParams): EvaluateSlaResult {
   // The configured threshold is the allowed ceiling: a p99 exactly at the
   // threshold is still passing. Only a strictly greater value is a breach.
   if (currentP99Us <= thresholdUs) {
-    if (prior) prior.resolved = true;
+    if (prior) {
+      prior.resolved = true;
+    }
     return { fired: false };
   }
 

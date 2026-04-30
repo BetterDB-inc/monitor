@@ -52,3 +52,24 @@ export interface InferenceLatencyTrend {
   source: InferenceLatencySource;
   points: InferenceLatencyTrendPoint[];
 }
+
+/**
+ * Hook the OSS InferenceLatencyService calls after each poll tick.
+ * Implemented by proprietary/inference-latency-pro/inference-latency-pro.service.ts.
+ * Owns SLA evaluation, debounce state, and inference_sla_breach gauge updates.
+ */
+export interface InferenceProfileTickContext {
+  connectionId: string;
+  host: string;
+  port: number;
+}
+
+export interface IInferenceLatencyProService {
+  onProfileTick(
+    ctx: InferenceProfileTickContext,
+    profile: InferenceLatencyProfile,
+  ): Promise<void>;
+  onConnectionRemoved(connectionId: string): void;
+}
+
+export const INFERENCE_LATENCY_PRO_SERVICE = 'INFERENCE_LATENCY_PRO_SERVICE';
