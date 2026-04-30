@@ -82,6 +82,7 @@
     "@nestjs/schematics": "^11.0.9",
     "@nestjs/testing": "^11.1.17",
     "@types/jest": "^30.0.0",
+    "@betterdb/cache-fixtures": "workspace:*",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.19.15",
     "@types/pg": "^8.20.0",

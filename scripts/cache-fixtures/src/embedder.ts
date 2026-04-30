@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, createReadStream, appendFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { EmbedFn } from '@betterdb/semantic-cache';
 
@@ -16,13 +15,17 @@ interface CacheEntry {
   vec: number[];
 }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_CACHE_DIR = join(__dirname, '..', '.embeddings');
+function defaultCacheDir(): string {
+  if (process.env.CACHE_FIXTURES_EMBED_DIR) {
+    return process.env.CACHE_FIXTURES_EMBED_DIR;
+  }
+  return resolve(process.cwd(), 'scripts', 'cache-fixtures', '.embeddings');
+}
 
 export async function createEmbedder(opts: EmbedderOptions = {}): Promise<EmbedFn & { stats: () => { hits: number; misses: number } }> {
   const ollamaUrl = opts.ollamaUrl ?? process.env.OLLAMA_HOST ?? 'http://localhost:11434';
   const model = opts.model ?? process.env.EMBED_MODEL ?? 'nomic-embed-text';
-  const cacheDir = opts.cacheDir ?? DEFAULT_CACHE_DIR;
+  const cacheDir = opts.cacheDir ?? defaultCacheDir();
   const cacheFile = join(cacheDir, `${sanitize(model)}.jsonl`);
 
   if (!existsSync(cacheDir)) {
