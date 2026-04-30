@@ -1,6 +1,5 @@
 import { PosthogTelemetryClientAdapter } from '../adapters/posthog-telemetry-client.adapter';
-
-const TEST_VERSION = '1.0.0-test';
+import { TEST_VERSION } from './constants';
 
 const mockCapture = jest.fn();
 const mockIdentify = jest.fn();

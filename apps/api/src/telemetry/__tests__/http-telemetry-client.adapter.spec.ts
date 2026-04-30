@@ -1,6 +1,5 @@
 import { HttpTelemetryClientAdapter } from '../adapters/http-telemetry-client.adapter';
-
-const TEST_VERSION = '1.0.0-test';
+import { TEST_VERSION } from './constants';
 
 describe('HttpTelemetryClientAdapter', () => {
   let adapter: HttpTelemetryClientAdapter;
@@ -19,12 +18,7 @@ describe('HttpTelemetryClientAdapter', () => {
     adapter.capture({
       distinctId: 'inst-123',
       event: 'app_start',
-      properties: {
-        version: TEST_VERSION,
-        tier: 'community',
-        deploymentMode: 'self-hosted',
-        timestamp: 1000,
-      },
+      properties: { version: TEST_VERSION , tier: 'community', deploymentMode: 'self-hosted', timestamp: 1000 },
     });
 
     expect(fetchSpy).toHaveBeenCalledWith(
@@ -61,10 +55,7 @@ describe('HttpTelemetryClientAdapter', () => {
     });
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.payload).toEqual({
-      connectionType: 'standalone',
-      success: true,
-    });
+    expect(body.payload).toEqual({ connectionType: 'standalone', success: true });
   });
 
   it('should use a 5s timeout signal', () => {
@@ -79,6 +70,7 @@ describe('HttpTelemetryClientAdapter', () => {
 
     adapter.capture({ distinctId: 'inst-123', event: 'app_start' });
 
+    // Drain microtask queue so the rejection + .catch() handler execute
     await Promise.resolve();
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -90,6 +82,7 @@ describe('HttpTelemetryClientAdapter', () => {
   });
 
   it('should abort in-flight requests on shutdown', async () => {
+    // Make fetch hang (never resolve)
     fetchSpy.mockReturnValue(new Promise(() => {}));
 
     adapter.capture({ distinctId: 'inst-123', event: 'app_start' });

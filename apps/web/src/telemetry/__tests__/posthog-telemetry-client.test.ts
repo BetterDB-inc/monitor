@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {TEST_VERSION} from './constants'
 
-const TEST_VERSION = '1.0.0-test';
 
 const { mockInstance } = vi.hoisted(() => ({
   mockInstance: {
@@ -30,12 +30,9 @@ describe('PosthogTelemetryClient', () => {
   it('should initialize posthog with API key and host', () => {
     const _client = new PosthogTelemetryClient('phc_test_key', 'https://ph.example.com');
 
-    expect(mockInit).toHaveBeenCalledWith(
-      'phc_test_key',
-      expect.objectContaining({
-        api_host: 'https://ph.example.com',
-      }),
-    );
+    expect(mockInit).toHaveBeenCalledWith('phc_test_key', expect.objectContaining({
+      api_host: 'https://ph.example.com',
+    }));
   });
 
   it('should map page_view to $pageview on capture', () => {
@@ -49,20 +46,14 @@ describe('PosthogTelemetryClient', () => {
     const client = new PosthogTelemetryClient('phc_key');
     client.capture('interaction_after_idle', { idleDurationMs: 300000 });
 
-    expect(mockInstance.capture).toHaveBeenCalledWith(
-      'interaction_after_idle',
-      { idleDurationMs: 300000 },
-    );
+    expect(mockInstance.capture).toHaveBeenCalledWith('interaction_after_idle', { idleDurationMs: 300000 });
   });
 
   it('should delegate identify to posthog.identify', () => {
     const client = new PosthogTelemetryClient('phc_key');
     client.identify('inst-123', { tier: 'pro', version: TEST_VERSION });
 
-    expect(mockInstance.identify).toHaveBeenCalledWith(
-      'inst-123',
-      { tier: 'pro', version: TEST_VERSION },
-    );
+    expect(mockInstance.identify).toHaveBeenCalledWith('inst-123', { tier: 'pro', version: TEST_VERSION });
   });
 
   it('should call reset on shutdown', () => {
