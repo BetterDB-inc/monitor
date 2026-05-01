@@ -153,6 +153,64 @@ export class WebhookEventsProService implements OnModuleInit {
   }
 
   /**
+   * Dispatch failover started event (PRO+)
+   * Called when a node transitions from master to replica (demotion detected)
+   */
+  async dispatchFailoverStarted(data: {
+    previousRole: string;
+    newRole: string;
+    timestamp: number;
+    instance: { host: string; port: number };
+    connectionId?: string;
+  }): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Failover started event skipped - requires PRO license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.FAILOVER_STARTED,
+      {
+        previousRole: data.previousRole,
+        newRole: data.newRole,
+        message: `Failover started: node role changed from ${data.previousRole} to ${data.newRole}`,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  /**
+   * Dispatch failover completed event (PRO+)
+   * Called when a node transitions from replica to master (promotion detected)
+   */
+  async dispatchFailoverCompleted(data: {
+    previousRole: string;
+    newRole: string;
+    timestamp: number;
+    instance: { host: string; port: number };
+    connectionId?: string;
+  }): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Failover completed event skipped - requires PRO license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.FAILOVER_COMPLETED,
+      {
+        previousRole: data.previousRole,
+        newRole: data.newRole,
+        message: `Failover completed: node promoted from ${data.previousRole} to ${data.newRole}`,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  /**
    * Dispatch anomaly detected event (PRO+)
    * Called by anomaly detection service when anomaly found
    */

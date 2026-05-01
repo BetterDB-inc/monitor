@@ -1,10 +1,11 @@
-import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
 import { SlowLogAnalyticsService } from '@app/slowlog-analytics/slowlog-analytics.service';
 import { MultiConnectionPoller, ConnectionContext } from '@app/common/services/multi-connection-poller';
+import { WEBHOOK_EVENTS_PRO_SERVICE, IWebhookEventsProService } from '@betterdb/shared';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
@@ -38,6 +39,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private recentGroups: CorrelatedAnomalyGroup[] = [];
   private lastSlowlogId = new Map<string, number>();
   private lastReplicationRole = new Map<string, number>();
+  private lastClusterState = new Map<string, string>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
@@ -55,6 +57,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     private readonly prometheusService: PrometheusService,
     private readonly settingsService: SettingsService,
     private readonly slowLogAnalytics: SlowLogAnalyticsService,
+    @Optional()
+    @Inject(WEBHOOK_EVENTS_PRO_SERVICE)
+    private readonly webhookEventsProService?: IWebhookEventsProService,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs);
@@ -185,8 +190,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
-      // REPLICATION_ROLE, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
+      // REPLICATION_ROLE, CLUSTER_STATE, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
+      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -201,6 +206,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.detectors.delete(connectionId);
     this.lastSlowlogId.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
+    this.lastClusterState.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
@@ -305,26 +311,136 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         const currentRole = roleStr === 'master' ? 1 : (roleStr === 'slave' || roleStr === 'replica') ? 0 : -1;
         if (currentRole !== -1) {
           const lastRole = this.lastReplicationRole.get(ctx.connectionId);
-          if (lastRole !== undefined && currentRole !== lastRole && currentRole === 0) {
-            const failoverEvent: AnomalyEvent = {
-              id: `${ctx.connectionId}-failover-${timestamp}`,
-              timestamp,
-              metricType: MetricType.REPLICATION_ROLE,
-              anomalyType: AnomalyType.DROP,
-              severity: AnomalySeverity.CRITICAL,
-              value: 0,
-              baseline: 1,
-              zScore: 0,
-              stdDev: 0,
-              threshold: 0,
-              message: 'CRITICAL: Node role changed from master to replica — possible failover or split-brain detected',
-              resolved: false,
-              connectionId: ctx.connectionId,
-            };
-            this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${failoverEvent.message}`);
-            await this.addAnomaly(failoverEvent, ctx);
+          if (lastRole !== undefined && currentRole !== lastRole) {
+            if (currentRole === 0) {
+              // master → replica demotion (failover started)
+              const failoverEvent: AnomalyEvent = {
+                id: `${ctx.connectionId}-failover-${timestamp}`,
+                timestamp,
+                metricType: MetricType.REPLICATION_ROLE,
+                anomalyType: AnomalyType.DROP,
+                severity: AnomalySeverity.CRITICAL,
+                value: 0,
+                baseline: 1,
+                zScore: 0,
+                stdDev: 0,
+                threshold: 0,
+                message: 'CRITICAL: Node role changed from master to replica — possible failover or split-brain detected',
+                resolved: false,
+                connectionId: ctx.connectionId,
+              };
+              this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${failoverEvent.message}`);
+              await this.addAnomaly(failoverEvent, ctx);
+
+              // Dispatch failover.started webhook
+              if (this.webhookEventsProService) {
+                this.webhookEventsProService
+                  .dispatchFailoverStarted({
+                    previousRole: 'master',
+                    newRole: roleStr,
+                    timestamp: Date.now(),
+                    instance: { host: ctx.host, port: ctx.port },
+                    connectionId: ctx.connectionId,
+                  })
+                  .catch((err) => {
+                    this.logger.error('Failed to dispatch failover.started webhook', err);
+                  });
+              }
+            } else if (currentRole === 1) {
+              // replica → master promotion (failover completed)
+              const promotionEvent: AnomalyEvent = {
+                id: `${ctx.connectionId}-promotion-${timestamp}`,
+                timestamp,
+                metricType: MetricType.REPLICATION_ROLE,
+                anomalyType: AnomalyType.SPIKE,
+                severity: AnomalySeverity.WARNING,
+                value: 1,
+                baseline: 0,
+                zScore: 0,
+                stdDev: 0,
+                threshold: 0,
+                message: 'WARNING: Node promoted from replica to master — failover completed',
+                resolved: false,
+                connectionId: ctx.connectionId,
+              };
+              this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${promotionEvent.message}`);
+              await this.addAnomaly(promotionEvent, ctx);
+
+              // Dispatch failover.completed webhook
+              if (this.webhookEventsProService) {
+                this.webhookEventsProService
+                  .dispatchFailoverCompleted({
+                    previousRole: 'replica',
+                    newRole: 'master',
+                    timestamp: Date.now(),
+                    instance: { host: ctx.host, port: ctx.port },
+                    connectionId: ctx.connectionId,
+                  })
+                  .catch((err) => {
+                    this.logger.error('Failed to dispatch failover.completed webhook', err);
+                  });
+              }
+            }
           }
           this.lastReplicationRole.set(ctx.connectionId, currentRole);
+        }
+      }
+
+      // Cluster state transition detection
+      const clusterEnabled = info['cluster_enabled'];
+      if (clusterEnabled === '1') {
+        try {
+          const clusterInfo = await ctx.client.getClusterInfo();
+          const clusterState = clusterInfo?.cluster_state;
+          if (clusterState) {
+            const lastState = this.lastClusterState.get(ctx.connectionId);
+            if (lastState !== undefined && clusterState !== lastState) {
+              const isRecovery = lastState === 'fail' && clusterState === 'ok';
+              const isFailure = lastState === 'ok' && clusterState === 'fail';
+              if (isRecovery || isFailure) {
+                const clusterEvent: AnomalyEvent = {
+                  id: `${ctx.connectionId}-cluster-state-${timestamp}`,
+                  timestamp,
+                  metricType: MetricType.CLUSTER_STATE,
+                  anomalyType: isFailure ? AnomalyType.DROP : AnomalyType.SPIKE,
+                  severity: isFailure ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+                  value: clusterState === 'ok' ? 1 : 0,
+                  baseline: lastState === 'ok' ? 1 : 0,
+                  zScore: 0,
+                  stdDev: 0,
+                  threshold: 0,
+                  message: isFailure
+                    ? `CRITICAL: Cluster state changed from ok to fail — slots may be uncovered`
+                    : `WARNING: Cluster state recovered from fail to ok`,
+                  resolved: false,
+                  connectionId: ctx.connectionId,
+                };
+                this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${clusterEvent.message}`);
+                await this.addAnomaly(clusterEvent, ctx);
+
+                // Dispatch cluster.failover webhook (PRO tier)
+                if (this.webhookEventsProService) {
+                  this.webhookEventsProService
+                    .dispatchClusterFailover({
+                      clusterState,
+                      previousState: lastState,
+                      slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
+                      slotsFailed: parseInt(clusterInfo.cluster_slots_fail) || 0,
+                      knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
+                      timestamp: Date.now(),
+                      instance: { host: ctx.host, port: ctx.port },
+                      connectionId: ctx.connectionId,
+                    })
+                    .catch((err) => {
+                      this.logger.error('Failed to dispatch cluster.failover webhook', err);
+                    });
+                }
+              }
+            }
+            this.lastClusterState.set(ctx.connectionId, clusterState);
+          }
+        } catch (clusterErr) {
+          this.logger.debug(`Failed to get cluster info for ${ctx.connectionName}: ${clusterErr instanceof Error ? clusterErr.message : clusterErr}`);
         }
       }
     } catch (error) {
