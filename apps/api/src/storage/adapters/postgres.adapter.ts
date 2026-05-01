@@ -1165,6 +1165,7 @@ export class PostgresAdapter implements StoragePort {
         throughput_forecasting_enabled BOOLEAN NOT NULL DEFAULT true,
         throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
+        inference_sla_config JSONB NOT NULL DEFAULT '{}'::JSONB,
         updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT,
         created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
       );
@@ -1173,6 +1174,7 @@ export class PostgresAdapter implements StoragePort {
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_enabled BOOLEAN NOT NULL DEFAULT true;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000;
       ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000;
+      ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS inference_sla_config JSONB NOT NULL DEFAULT '{}'::JSONB;
 
       CREATE TABLE IF NOT EXISTS metric_forecast_settings (
         connection_id TEXT NOT NULL,
@@ -2272,8 +2274,9 @@ export class PostgresAdapter implements StoragePort {
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
         throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
+        inference_sla_config,
         updated_at, created_at
-      ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = EXCLUDED.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = EXCLUDED.client_analytics_poll_interval_ms,
@@ -2283,6 +2286,7 @@ export class PostgresAdapter implements StoragePort {
         throughput_forecasting_enabled = EXCLUDED.throughput_forecasting_enabled,
         throughput_forecasting_default_rolling_window_ms = EXCLUDED.throughput_forecasting_default_rolling_window_ms,
         throughput_forecasting_default_alert_threshold_ms = EXCLUDED.throughput_forecasting_default_alert_threshold_ms,
+        inference_sla_config = EXCLUDED.inference_sla_config,
         updated_at = EXCLUDED.updated_at`,
       [
         settings.auditPollIntervalMs,
@@ -2293,6 +2297,7 @@ export class PostgresAdapter implements StoragePort {
         settings.metricForecastingEnabled,
         settings.metricForecastingDefaultRollingWindowMs,
         settings.metricForecastingDefaultAlertThresholdMs,
+        JSON.stringify(settings.inferenceSlaConfig ?? {}),
         now,
         settings.createdAt || now,
       ],

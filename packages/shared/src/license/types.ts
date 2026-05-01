@@ -35,6 +35,7 @@ export enum Feature {
   WEBHOOK_CUSTOM_HEADERS = 'webhookCustomHeaders',
   WEBHOOK_DELIVERY_PAYLOAD = 'webhookDeliveryPayload',
   WEBHOOK_CONFIGURABLE_RETRY = 'webhookConfigurableRetry',
+  INFERENCE_SLA = 'inferenceSla',
   // Enterprise-only features
   SSO_SAML = 'ssoSaml',
   COMPLIANCE_EXPORT = 'complianceExport',
@@ -58,6 +59,7 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
     Feature.WEBHOOK_DELIVERY_PAYLOAD,
     Feature.WEBHOOK_CONFIGURABLE_RETRY,
     Feature.MIGRATION_EXECUTION,
+    Feature.INFERENCE_SLA,
   ],
   [Tier.enterprise]: Object.values(Feature),
 };

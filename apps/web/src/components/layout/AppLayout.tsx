@@ -5,6 +5,7 @@ import { useNavigationTracker } from '../../hooks/useNavigationTracker';
 import { useCliPanel } from '../../hooks/useCliPanel';
 import { UpdateBanner } from '../UpdateBanner';
 import { NoConnectionsGuard } from '../NoConnectionsGuard';
+import { VectorSearchGuard } from '../VectorSearchGuard';
 import { CliPanel } from '../CliPanel';
 import { Dashboard } from '../../pages/Dashboard';
 import { SlowLog } from '../../pages/SlowLog';
@@ -22,6 +23,7 @@ import { Webhooks } from '../../pages/Webhooks';
 import { MigrationPage } from '../../pages/MigrationPage';
 import { VectorSearch } from '../../pages/VectorSearch';
 import { VectorAi } from '../../pages/VectorAi';
+import { InferenceLatency } from '../../pages/InferenceLatency';
 import { MetricForecasting } from '../../pages/MetricForecasting';
 import { Members } from '../../pages/Members';
 import { CloudUser } from '../../api/workspace';
@@ -123,6 +125,24 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <VectorAi />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/inference-latency"
+                element={
+                  <NoConnectionsGuard>
+                    <VectorSearchGuard
+                      featureName="Inference Latency"
+                      description={
+                        <>
+                          The Valkey/Redis Search module is not available on this connection, so
+                          there is no inference workload to analyse.
+                        </>
+                      }
+                    >
+                      <InferenceLatency />
+                    </VectorSearchGuard>
                   </NoConnectionsGuard>
                 }
               />

@@ -119,12 +119,14 @@ export class SqliteAdapter implements StoragePort {
       }
     }
 
-    // Add throughput forecasting columns to app_settings if they don't exist
+    // Lazy ALTERs for app_settings columns added after the initial schema.
+    // Add new entries here as additional feature-scoped columns land; each
+    // entry is idempotent and only runs when the column is missing.
     const settingsInfo = this.db.prepare('PRAGMA table_info(app_settings)').all() as {
       name: string;
     }[];
     const settingsColumns = new Set(settingsInfo.map((col) => col.name));
-    const throughputColumns = [
+    const appSettingsMigrations = [
       { name: 'throughput_forecasting_enabled', type: 'INTEGER NOT NULL DEFAULT 1' },
       {
         name: 'throughput_forecasting_default_rolling_window_ms',
@@ -134,8 +136,9 @@ export class SqliteAdapter implements StoragePort {
         name: 'throughput_forecasting_default_alert_threshold_ms',
         type: 'INTEGER NOT NULL DEFAULT 7200000',
       },
+      { name: 'inference_sla_config', type: "TEXT NOT NULL DEFAULT '{}'" },
     ];
-    for (const col of throughputColumns) {
+    for (const col of appSettingsMigrations) {
       if (!settingsColumns.has(col.name)) {
         this.db.exec(`ALTER TABLE app_settings ADD COLUMN ${col.name} ${col.type}`);
       }
@@ -1058,6 +1061,7 @@ export class SqliteAdapter implements StoragePort {
         throughput_forecasting_enabled INTEGER NOT NULL DEFAULT 1,
         throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
+        inference_sla_config TEXT NOT NULL DEFAULT '{}',
         updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
         created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
       );
@@ -2008,8 +2012,9 @@ export class SqliteAdapter implements StoragePort {
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
         throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
+        inference_sla_config,
         updated_at, created_at
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = excluded.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = excluded.client_analytics_poll_interval_ms,
@@ -2019,6 +2024,7 @@ export class SqliteAdapter implements StoragePort {
         throughput_forecasting_enabled = excluded.throughput_forecasting_enabled,
         throughput_forecasting_default_rolling_window_ms = excluded.throughput_forecasting_default_rolling_window_ms,
         throughput_forecasting_default_alert_threshold_ms = excluded.throughput_forecasting_default_alert_threshold_ms,
+        inference_sla_config = excluded.inference_sla_config,
         updated_at = excluded.updated_at
     `);
 
@@ -2031,6 +2037,7 @@ export class SqliteAdapter implements StoragePort {
       settings.metricForecastingEnabled ? 1 : 0,
       settings.metricForecastingDefaultRollingWindowMs,
       settings.metricForecastingDefaultAlertThresholdMs,
+      JSON.stringify(settings.inferenceSlaConfig ?? {}),
       now,
       settings.createdAt || now,
     );

@@ -16,6 +16,7 @@ export enum WebhookEventType {
   AUDIT_POLICY_VIOLATION = 'audit.policy.violation',
   COMPLIANCE_ALERT = 'compliance.alert',
   METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
+  INFERENCE_SLA_BREACH = 'inference.sla.breach',
 }
 
 // Injection tokens for proprietary webhook services
@@ -39,6 +40,7 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.LATENCY_SPIKE,
   WebhookEventType.CONNECTION_SPIKE,
   WebhookEventType.METRIC_FORECAST_LIMIT,
+  WebhookEventType.INFERENCE_SLA_BREACH,
 ];
 
 export const ENTERPRISE_EVENTS: WebhookEventType[] = [
@@ -77,6 +79,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.LATENCY_SPIKE]: Tier.pro,
   [WebhookEventType.CONNECTION_SPIKE]: Tier.pro,
   [WebhookEventType.METRIC_FORECAST_LIMIT]: Tier.pro,
+  [WebhookEventType.INFERENCE_SLA_BREACH]: Tier.pro,
 
   // Enterprise tier events
   [WebhookEventType.AUDIT_POLICY_VIOLATION]: Tier.enterprise,
@@ -325,6 +328,16 @@ export interface IWebhookEventsProService {
     timestamp: number;
     instance?: { host: string; port: number };
     connectionId: string;
+  }): Promise<void>;
+
+  dispatchInferenceSlaBreach(data: {
+    indexName: string;
+    currentP99Us: number;
+    thresholdUs: number;
+    windowMs: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+    connectionId?: string;
   }): Promise<void>;
 }
 
