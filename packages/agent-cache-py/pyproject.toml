@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "betterdb-agent-cache"
 version = "0.4.0"
 description = "Multi-tier exact-match cache for AI agent workloads backed by Valkey. LLM responses, tool results, and session state with built-in OpenTelemetry and Prometheus instrumentation."
-keywords = ["valkey", "redis", "agent", "cache", "llm", "opentelemetry", "prometheus", "langchain", "langgraph"]
+keywords = ["valkey", "redis", "agent", "cache", "llm", "opentelemetry", "prometheus", "langchain", "langgraph", "pydantic-ai"]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,11 +22,13 @@ anthropic = ["anthropic>=0.20.0"]
 langchain = ["langchain-core>=0.1.0"]
 langgraph = ["langgraph>=0.1.0"]
 llamaindex = ["llama-index-core>=0.10.0"]
+pydantic_ai = ["pydantic-ai-slim>=0.0.14"]
 analytics = ["posthog>=3.0.0"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "fakeredis[aioredis]>=2.20.0",
+    "pydantic-ai-slim>=0.0.14",
 ]
 all = [
     "openai>=1.0.0",
@@ -34,6 +36,7 @@ all = [
     "langchain-core>=0.1.0",
     "langgraph>=0.1.0",
     "llama-index-core>=0.10.0",
+    "pydantic-ai-slim>=0.0.14",
     "posthog>=3.0.0",
 ]
 
