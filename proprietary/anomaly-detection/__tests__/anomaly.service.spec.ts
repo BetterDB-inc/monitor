@@ -8,12 +8,14 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { MetricType, AnomalySeverity, AnomalyType } from '../types';
+import { WEBHOOK_EVENTS_PRO_SERVICE } from '@betterdb/shared';
 
 describe('AnomalyService', () => {
   let service: AnomalyService;
   let slowLogAnalytics: { getLastSeenId: jest.Mock };
   let storage: Record<string, jest.Mock>;
   let prometheusService: Record<string, jest.Mock>;
+  let webhookEventsProService: Record<string, jest.Mock>;
   let dbClient: jest.Mocked<Partial<DatabasePort>>;
   let mockCtx: ConnectionContext;
 
@@ -37,6 +39,18 @@ describe('AnomalyService', () => {
       incrementCorrelatedGroup: jest.fn(),
       updateAnomalySummary: jest.fn(),
       updateAnomalyBufferStats: jest.fn(),
+    };
+
+    webhookEventsProService = {
+      dispatchFailoverStarted: jest.fn().mockResolvedValue(undefined),
+      dispatchFailoverCompleted: jest.fn().mockResolvedValue(undefined),
+      dispatchClusterFailover: jest.fn().mockResolvedValue(undefined),
+      dispatchAnomalyDetected: jest.fn().mockResolvedValue(undefined),
+      dispatchSlowlogThreshold: jest.fn().mockResolvedValue(undefined),
+      dispatchReplicationLag: jest.fn().mockResolvedValue(undefined),
+      dispatchLatencySpike: jest.fn().mockResolvedValue(undefined),
+      dispatchConnectionSpike: jest.fn().mockResolvedValue(undefined),
+      dispatchMetricForecastLimit: jest.fn().mockResolvedValue(undefined),
     };
 
     dbClient = {
@@ -97,6 +111,7 @@ describe('AnomalyService', () => {
           },
         },
         { provide: SlowLogAnalyticsService, useValue: slowLogAnalytics },
+        { provide: WEBHOOK_EVENTS_PRO_SERVICE, useValue: webhookEventsProService },
       ],
     }).compile();
 
@@ -390,7 +405,7 @@ describe('AnomalyService', () => {
       expect(failoverEvents[0].severity).toBe(AnomalySeverity.CRITICAL);
     });
 
-    it('does not fire anomaly on replica→master (promotion)', async () => {
+    it('fires WARNING anomaly on replica→master promotion', async () => {
       // First poll: replica
       dbClient.getInfoParsed = jest.fn().mockResolvedValue({
         server: { role: 'replica' },
@@ -429,7 +444,10 @@ describe('AnomalyService', () => {
       const failoverEvents = events.filter(
         (e) => e.metricType === MetricType.REPLICATION_ROLE,
       );
-      expect(failoverEvents).toHaveLength(0);
+      expect(failoverEvents).toHaveLength(1);
+      expect(failoverEvents[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(failoverEvents[0].anomalyType).toBe(AnomalyType.SPIKE);
+      expect(failoverEvents[0].message).toContain('promoted from replica to master');
     });
 
     it('ignores unknown roles (e.g. sentinel)', async () => {
@@ -452,6 +470,80 @@ describe('AnomalyService', () => {
 
       const lastRole = (service as any).lastReplicationRole.get('conn-1');
       expect(lastRole).toBeUndefined();
+    });
+
+    it('dispatches failover.started webhook on master→replica demotion', async () => {
+      // First poll: master
+      await poll();
+
+      // Second poll: replica
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'replica' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+      });
+      await poll();
+
+      expect(webhookEventsProService.dispatchFailoverStarted).toHaveBeenCalledWith(
+        expect.objectContaining({
+          previousRole: 'master',
+          newRole: 'replica',
+          connectionId: 'conn-1',
+        }),
+      );
+    });
+
+    it('dispatches failover.completed webhook on replica→master promotion', async () => {
+      // First poll: replica
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'replica' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+      });
+      await poll();
+
+      // Second poll: master (promotion)
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+      });
+      await poll();
+
+      expect(webhookEventsProService.dispatchFailoverCompleted).toHaveBeenCalledWith(
+        expect.objectContaining({
+          previousRole: 'replica',
+          newRole: 'master',
+          connectionId: 'conn-1',
+        }),
+      );
     });
   });
 
@@ -558,6 +650,12 @@ describe('AnomalyService', () => {
       expect(buffers.has(MetricType.REPLICATION_ROLE)).toBe(false);
     });
 
+    it('excludes CLUSTER_STATE from initial buffer loop', async () => {
+      await poll();
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      expect(buffers.has(MetricType.CLUSTER_STATE)).toBe(false);
+    });
+
     it('excludes SLOWLOG_LAST_ID from initial buffer loop', async () => {
       await poll();
       // Without slowlog data, SLOWLOG_LAST_ID should not be present
@@ -570,7 +668,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
+        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -581,7 +679,7 @@ describe('AnomalyService', () => {
   // ─── Connection Cleanup ─────────────────────────────────────────────────
 
   describe('connection cleanup (onConnectionRemoved)', () => {
-    it('clears lastSlowlogId and lastReplicationRole maps', async () => {
+    it('clears lastSlowlogId, lastReplicationRole, and lastClusterState maps', async () => {
       slowLogAnalytics.getLastSeenId.mockReturnValue(100);
       await poll(); // populates state
 
@@ -593,8 +691,64 @@ describe('AnomalyService', () => {
 
       expect((service as any).lastSlowlogId.has('conn-1')).toBe(false);
       expect((service as any).lastReplicationRole.has('conn-1')).toBe(false);
+      expect((service as any).lastClusterState.has('conn-1')).toBe(false);
       expect((service as any).buffers.has('conn-1')).toBe(false);
       expect((service as any).detectors.has('conn-1')).toBe(false);
+    });
+  });
+
+  // ─── Cluster State Webhook Dispatch ──────────────────────────────────────
+
+  describe('cluster state webhook dispatch', () => {
+    it('dispatches cluster.failover webhook on ok→fail transition', async () => {
+      // First poll: establish cluster state as 'ok'
+      dbClient.getInfoParsed.mockResolvedValue({
+        server: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: {
+          used_memory: '1000000',
+          allocator_frag_ratio: '1.1',
+          mem_fragmentation_ratio: '1.5',
+        },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+          cluster_enabled: '1',
+        },
+      });
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({
+        cluster_state: 'ok',
+        cluster_slots_assigned: '16384',
+        cluster_slots_fail: '0',
+        cluster_known_nodes: '6',
+      });
+      await poll();
+
+      // Second poll: cluster state transitions to 'fail'
+      dbClient.getClusterInfo.mockResolvedValue({
+        cluster_state: 'fail',
+        cluster_slots_assigned: '16384',
+        cluster_slots_fail: '2048',
+        cluster_known_nodes: '6',
+      });
+      await poll();
+
+      expect(webhookEventsProService.dispatchClusterFailover).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clusterState: 'fail',
+          previousState: 'ok',
+          slotsAssigned: 16384,
+          slotsFailed: 2048,
+          knownNodes: 6,
+          instance: { host: 'localhost', port: 6379 },
+          connectionId: 'conn-1',
+        }),
+      );
     });
   });
 });
