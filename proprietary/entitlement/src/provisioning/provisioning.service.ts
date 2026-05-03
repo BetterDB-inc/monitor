@@ -263,7 +263,7 @@ export class ProvisioningService {
 
     this.logger.log(`[${namespace}] Creating schema via K8s Job`);
 
-    await this.runPostgresJob(namespace, jobName, connectionUrl, sqlCommand, 60000);
+    await this.runPostgresJob(namespace, jobName, connectionUrl, sqlCommand, 300000);
 
     this.logger.log(`[${namespace}] Schema creation job completed successfully`);
   }
