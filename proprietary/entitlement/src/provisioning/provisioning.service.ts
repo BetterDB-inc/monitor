@@ -425,7 +425,7 @@ export class ProvisioningService {
         },
       });
     } catch (error: any) {
-      if (error.response?.statusCode === 409) {
+      if ((error.statusCode ?? error.response?.statusCode) === 409) {
         this.logger.warn(`Namespace ${namespace} already exists, continuing...`);
       } else {
         throw error;
@@ -488,7 +488,7 @@ export class ProvisioningService {
         },
       });
     } catch (error: any) {
-      if (error.response?.statusCode === 409) {
+      if ((error.statusCode ?? error.response?.statusCode) === 409) {
         this.logger.warn(`Secret db-credentials already exists in ${namespace}, continuing...`);
       } else {
         throw error;
@@ -516,7 +516,7 @@ export class ProvisioningService {
         },
       });
     } catch (error: any) {
-      if (error.response?.statusCode === 409) {
+      if ((error.statusCode ?? error.response?.statusCode) === 409) {
         this.logger.warn(`ResourceQuota already exists in ${namespace}, continuing...`);
       } else {
         throw error;
@@ -675,7 +675,7 @@ export class ProvisioningService {
         },
       });
     } catch (error: any) {
-      if (error.response?.statusCode === 409) {
+      if ((error.statusCode ?? error.response?.statusCode) === 409) {
         this.logger.warn(`Deployment already exists in ${namespace}, continuing...`);
       } else {
         throw error;
@@ -706,7 +706,7 @@ export class ProvisioningService {
         },
       });
     } catch (error: any) {
-      if (error.response?.statusCode === 409) {
+      if ((error.statusCode ?? error.response?.statusCode) === 409) {
         this.logger.warn(`Service already exists in ${namespace}, continuing...`);
       } else {
         throw error;
@@ -755,7 +755,7 @@ export class ProvisioningService {
         },
       });
     } catch (error: any) {
-      if (error.response?.statusCode === 409) {
+      if ((error.statusCode ?? error.response?.statusCode) === 409) {
         this.logger.warn(`Ingress already exists in ${namespace}, continuing...`);
       } else {
         throw error;
@@ -891,7 +891,7 @@ export class ProvisioningService {
         },
       });
     } catch (error: any) {
-      if (error.response?.statusCode === 409) {
+      if ((error.statusCode ?? error.response?.statusCode) === 409) {
         this.logger.warn(`NetworkPolicy already exists in ${namespace}, continuing...`);
       } else {
         throw error;
