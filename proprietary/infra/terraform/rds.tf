@@ -21,7 +21,13 @@ resource "aws_security_group" "rds" {
 # Subnet group — places RDS in private subnets
 resource "aws_db_subnet_group" "this" {
   name       = "${var.project_name}-db"
-  subnet_ids = module.vpc.private_subnets
+  subnet_ids = concat(
+    module.vpc.private_subnets,
+    [
+      aws_subnet.private_large_1a.id,
+      aws_subnet.private_large_1b.id,
+    ]
+  )
 
   tags = {
     Project   = var.project_name
