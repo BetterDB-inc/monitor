@@ -43,6 +43,7 @@ resource "aws_subnet" "private_large_1a" {
     ManagedBy                                = "terraform"
     "kubernetes.io/cluster/betterdb-cluster" = "shared"
     "kubernetes.io/role/internal-elb"        = "1"
+    "karpenter.sh/discovery"                 = "betterdb-cluster"
   }
 }
 
@@ -57,6 +58,7 @@ resource "aws_subnet" "private_large_1b" {
     ManagedBy                                = "terraform"
     "kubernetes.io/cluster/betterdb-cluster" = "shared"
     "kubernetes.io/role/internal-elb"        = "1"
+    "karpenter.sh/discovery"                 = "betterdb-cluster"
   }
 }
 
