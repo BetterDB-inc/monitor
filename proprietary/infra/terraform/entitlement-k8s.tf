@@ -66,5 +66,6 @@ resource "kubernetes_secret" "entitlement_config" {
     # Auth keys for workspace token signing/verification
     AUTH_PRIVATE_KEY         = var.auth_private_key
     AUTH_PUBLIC_KEY          = var.auth_public_key
+    RESEND_API_KEY           = var.resend_api_key
   }
 }
