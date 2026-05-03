@@ -6,7 +6,13 @@ module "eks" {
   cluster_version = "1.31"
 
   vpc_id     = module.vpc.vpc_id
-  subnet_ids = module.vpc.private_subnets
+  subnet_ids = concat(
+    module.vpc.private_subnets,
+    [
+      aws_subnet.private_large_1a.id,
+      aws_subnet.private_large_1b.id,
+    ]
+  )
 
   # Makes the cluster API endpoint accessible from your machine
   cluster_endpoint_public_access = true
@@ -22,6 +28,9 @@ module "eks" {
       min_size       = 1
       max_size       = 2
       desired_size   = 1
+
+      # Pin to original /24 subnets - the new /20 subnets are for Karpenter nodes only
+      subnet_ids = module.vpc.private_subnets
 
       labels = {
         "node-role" = "system"
