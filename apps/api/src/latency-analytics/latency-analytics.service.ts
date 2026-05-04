@@ -81,7 +81,24 @@ export class LatencyAnalyticsService extends MultiConnectionPoller implements On
         this.logger.debug(`Saved latency histogram for ${ctx.connectionName}`);
       }
     } catch (error) {
-      this.logger.error(`Error capturing latency histogram for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      
+      const msg = error instanceof Error ? error.message : String(error);
+
+      if (this.runtimeCapabilityTracker.recordFailure(
+            ctx.connectionId,
+            'canLatency',
+             error instanceof Error ? error : String(error)
+         )) {
+            this.logger.warn(
+              `Disabled latency histogram polling for ${ctx.connectionName} after repeated failures`
+        );
+      } else {
+            this.logger.error(
+              `Error capturing latency histogram for ${ctx.connectionName}: ${msg}`
+    );
+  }
+
+
     }
 
     // Store system-level latency events
