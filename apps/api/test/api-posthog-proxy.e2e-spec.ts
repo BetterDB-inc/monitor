@@ -2,6 +2,8 @@ import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import request from 'supertest';
 import { createTestApp } from './test-utils';
 
+const POSTHOG_HOST = process.env.POSTHOG_HOST ?? 'https://eu.i.posthog.com';
+
 function mockPosthog(status: number, body: string) {
   return jest.spyOn(global, 'fetch').mockResolvedValueOnce({
     status,
@@ -36,7 +38,7 @@ describe('PostHog Proxy (E2E)', () => {
 
       expect(res.body).toEqual({ status: 1 });
       expect(fetchSpy).toHaveBeenCalledWith(
-        'https://eu.i.posthog.com/e/',
+        `${POSTHOG_HOST}/e/`,
         expect.objectContaining({ method: 'POST' }),
       );
     });
@@ -64,7 +66,7 @@ describe('PostHog Proxy (E2E)', () => {
         .expect(200);
 
       expect(res.body).toHaveProperty('featureFlags');
-      expect(fetchSpy).toHaveBeenCalledWith('https://eu.i.posthog.com/decide', expect.any(Object));
+      expect(fetchSpy).toHaveBeenCalledWith(`${POSTHOG_HOST}/decide`, expect.any(Object));
     });
   });
 
@@ -77,7 +79,7 @@ describe('PostHog Proxy (E2E)', () => {
         .send({ batch: [{ event: 'e1', distinct_id: 'u1' }] })
         .expect(200);
 
-      expect(fetchSpy).toHaveBeenCalledWith('https://eu.i.posthog.com/batch/', expect.any(Object));
+      expect(fetchSpy).toHaveBeenCalledWith(`${POSTHOG_HOST}/batch/`, expect.any(Object));
     });
   });
 
