@@ -12,6 +12,7 @@ export default defineConfig({
       '/ingest': {
         target: 'https://eu.i.posthog.com',
         changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/ingest/, ''),
       },
     },
   },
