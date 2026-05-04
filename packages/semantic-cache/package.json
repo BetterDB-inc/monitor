@@ -1,6 +1,6 @@
 {
   "name": "@betterdb/semantic-cache",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Valkey-native semantic cache for LLM applications with built-in OpenTelemetry and Prometheus instrumentation",
   "keywords": [
     "valkey",
