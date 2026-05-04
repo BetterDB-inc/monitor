@@ -1,3 +1,48 @@
+# IAM role for the entitlement service — allows it to manage Route53 records
+# for tenant subdomains via IRSA (no long-lived credentials needed)
+resource "aws_iam_role" "entitlement" {
+  name = "${var.project_name}-entitlement"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = module.eks.oidc_provider_arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${module.eks.oidc_provider}:sub" = "system:serviceaccount:system:entitlement"
+          "${module.eks.oidc_provider}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+
+  tags = {
+    Project   = var.project_name
+    ManagedBy = "terraform"
+  }
+}
+
+resource "aws_iam_role_policy" "entitlement_route53" {
+  name = "route53-tenant-dns"
+  role = aws_iam_role.entitlement.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "route53:ChangeResourceRecordSets",
+        "route53:ListResourceRecordSets",
+      ]
+      Resource = "arn:aws:route53:::hostedzone/${aws_route53_zone.app.zone_id}"
+    }]
+  })
+}
+
 resource "kubernetes_namespace" "system" {
   metadata {
     name = "system"

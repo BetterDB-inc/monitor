@@ -161,6 +161,24 @@ Cost savings scale with the model. Observed values from live examples:
 | `@betterdb/semantic-cache/embed/cohere` | `embed-english-v3.0` | 1024 |
 | `@betterdb/semantic-cache/embed/ollama` | `nomic-embed-text` | 768 |
 
+### Discovery markers
+
+Starting in `0.2.0`, `initialize()` writes a small advisory record to a shared `__betterdb:caches` hash on the Valkey instance so Monitor (and other tooling) can enumerate caches without configuration. A 60s-TTL heartbeat key is refreshed every 30s; `flush()` and `dispose()` remove the heartbeat immediately. No sensitive data is ever written — only cache metadata (type, prefix, version, capabilities, configured thresholds).
+
+Opt out by passing `discovery: { enabled: false }`. See `SemanticCacheOptions.discovery` for the full set of knobs.
+
+If your Valkey runs with ACLs, grant the library's user access to the `__betterdb:*` prefix:
+
+```
+ACL SETUSER <user> +@write +@read ~__betterdb:* ~<your-cache-prefix>:*
+```
+
+Discovery writes are best-effort — if the ACL denies them, the cache still functions and the `semantic_cache_discovery_write_failed_total` counter increments so operators can alert.
+
+### `cache.dispose()`
+
+Graceful shutdown: stops the heartbeat and deletes this instance's heartbeat key so Monitor marks the cache offline immediately. Does not drop the index or delete entries. Call from your SIGTERM handler alongside `client.quit()`.
+
 ## API
 
 ### `cache.initialize()`
@@ -215,7 +233,15 @@ Returns `{ name, numDocs, dimension, indexingState }`.
 
 ### `cache.flush()`
 
-Drops the index and all keys. Call `initialize()` again to rebuild.
+Drops the index and all entries. Call `initialize()` again to rebuild. Also stops the discovery heartbeat and deletes its heartbeat key, but preserves the registry entry in `__betterdb:caches` so Monitor retains history.
+
+### `cache.shutdown()`
+
+Stops the analytics client, cancels the stats snapshot timer, and disposes the discovery heartbeat. Safe to call multiple times.
+
+### `cache.dispose()`
+
+Graceful shutdown of the discovery layer for in-process caches without destroying data. Stops the discovery heartbeat and deletes the heartbeat key; does not touch the index or entries.
 
 ### `cache.thresholdEffectiveness(options?)`
 

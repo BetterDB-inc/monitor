@@ -1,6 +1,8 @@
 import type Valkey from 'iovalkey';
 import type { Registry } from 'prom-client';
 
+import type { DiscoveryOptions } from './discovery';
+
 export type { Valkey };
 
 export type EmbedFn = (text: string) => Promise<number[]>;
@@ -96,6 +98,12 @@ export interface SemanticCacheOptions {
     /** Interval in ms for periodic stats snapshots. Default: 300_000 (5 min). 0 to disable. */
     statsIntervalMs?: number;
   };
+  /**
+   * Discovery-marker protocol controls. See
+   * docs/plans/specs/spec-semantic-cache-discovery-markers.md.
+   * Defaults: enabled=true, heartbeatIntervalMs=30000, includeCategories=true.
+   */
+  discovery?: DiscoveryOptions;
 }
 
 export interface RerankOptions {

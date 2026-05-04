@@ -89,6 +89,14 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
               Vector / AI
             </NavItem>
           )}
+          {hasVectorSearch && (
+            <NavItem
+              to="/inference-latency"
+              active={location.pathname === '/inference-latency'}
+            >
+              Inference Latency
+            </NavItem>
+          )}
           <NavItem to="/audit" active={location.pathname === '/audit'}>
             Audit Trail
           </NavItem>

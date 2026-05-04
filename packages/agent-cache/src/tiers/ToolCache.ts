@@ -252,6 +252,11 @@ export class ToolCache {
     return this.policies.get(toolName);
   }
 
+  /** Returns the names of tools with persisted policies. Used by the discovery marker. */
+  listPolicyNames(): string[] {
+    return Array.from(this.policies.keys());
+  }
+
   async invalidateByTool(toolName: string): Promise<number> {
     return this.telemetry.tracer.startActiveSpan('agent_cache.tool.invalidateByTool', async (span) => {
       try {

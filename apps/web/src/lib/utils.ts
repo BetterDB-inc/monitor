@@ -12,3 +12,9 @@ export function formatBytes(bytes: number): string {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
 }
+
+export function formatDurationUs(us: number): string {
+  if (us < 1_000) return `${us.toFixed(0)}µs`;
+  if (us < 1_000_000) return `${(us / 1_000).toFixed(1)}ms`;
+  return `${(us / 1_000_000).toFixed(2)}s`;
+}

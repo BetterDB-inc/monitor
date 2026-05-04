@@ -458,6 +458,26 @@ Every public method emits an OTel span. Spans require an OpenTelemetry SDK to be
 
 Connect [BetterDB Monitor](https://github.com/BetterDB-inc/monitor) to the same Valkey instance and it will automatically detect the agent cache stats hash and surface hit rates, cost savings, and per-tool effectiveness in the dashboard.
 
+### Discovery markers
+
+Starting in `0.5.0`, each `AgentCache` registers itself in a shared `__betterdb:caches` hash on the Valkey instance so Monitor (and other tooling) can enumerate caches without configuration. A 60s-TTL heartbeat is refreshed every 30s, and the registry metadata is re-written on each heartbeat so newly-added tool policies (via `cache.tool.setPolicy(...)`) become visible within 30s. `shutdown()` removes the heartbeat immediately. No sensitive data is ever written — only cache metadata (type, prefix, version, capabilities, tier TTL defaults, tool names with policies).
+
+Registration is fire-and-forget from the constructor — the cache is usable immediately, even if discovery writes fail. For strict collision enforcement (reject construction when another cache type already holds the same `name` on this Valkey), `await cache.ensureDiscoveryReady()` after construction.
+
+Opt out via `AgentCacheOptions.discovery = { enabled: false }`. `heartbeatIntervalMs` and `includeToolPolicies` are also exposed.
+
+If your Valkey runs with ACLs, grant the library's user access to the `__betterdb:*` prefix:
+
+```
+ACL SETUSER <user> +@write +@read ~__betterdb:* ~<your-cache-prefix>:*
+```
+
+Discovery writes are best-effort — if the ACL denies them, the cache still functions and the `agent_cache_discovery_write_failed_total` counter increments so operators can alert.
+
+### `cache.ensureDiscoveryReady()`
+
+Awaits the in-flight discovery registration. Rejects with `AgentCacheUsageError` if another cache type is registered under the same `name` on this Valkey. Use immediately after construction when you want strict collision enforcement.
+
 ## Known limitations
 
 - **Streaming responses:** Not cached by the Vercel AI SDK adapter. Accumulate the full response before caching.

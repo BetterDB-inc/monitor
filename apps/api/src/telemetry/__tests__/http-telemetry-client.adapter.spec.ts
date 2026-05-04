@@ -1,4 +1,5 @@
 import { HttpTelemetryClientAdapter } from '../adapters/http-telemetry-client.adapter';
+import { TEST_VERSION } from './constants';
 
 describe('HttpTelemetryClientAdapter', () => {
   let adapter: HttpTelemetryClientAdapter;
@@ -17,7 +18,7 @@ describe('HttpTelemetryClientAdapter', () => {
     adapter.capture({
       distinctId: 'inst-123',
       event: 'app_start',
-      properties: { version: '0.13.0', tier: 'community', deploymentMode: 'self-hosted', timestamp: 1000 },
+      properties: { version: TEST_VERSION , tier: 'community', deploymentMode: 'self-hosted', timestamp: 1000 },
     });
 
     expect(fetchSpy).toHaveBeenCalledWith(
@@ -32,7 +33,7 @@ describe('HttpTelemetryClientAdapter', () => {
     expect(body).toEqual({
       instanceId: 'inst-123',
       eventType: 'app_start',
-      version: '0.13.0',
+      version: TEST_VERSION,
       tier: 'community',
       deploymentMode: 'self-hosted',
       timestamp: 1000,
@@ -44,7 +45,7 @@ describe('HttpTelemetryClientAdapter', () => {
       distinctId: 'inst-123',
       event: 'db_connect',
       properties: {
-        version: '0.13.0',
+        version: TEST_VERSION,
         tier: 'community',
         deploymentMode: 'self-hosted',
         timestamp: 1000,

@@ -13,11 +13,19 @@ import { DEFAULT_COST_TABLE } from './defaultCostTable';
 import { LlmCache } from './tiers/LlmCache';
 import { ToolCache } from './tiers/ToolCache';
 import { SessionStore } from './tiers/SessionStore';
-import { createTelemetry } from './telemetry';
+import { createTelemetry, type Telemetry } from './telemetry';
 import { createAnalytics, NOOP_ANALYTICS, type Analytics } from './analytics';
 import { ValkeyCommandError } from './errors';
 import { escapeGlobPattern } from './utils';
 import { clusterScan } from './cluster';
+import {
+  DiscoveryManager,
+  buildAgentMetadata,
+  type DiscoveryOptions,
+  type MarkerMetadata,
+} from './discovery';
+
+const PACKAGE_VERSION = (require('../package.json') as { version: string }).version;
 
 export class AgentCache {
   public readonly llm: LlmCache;
@@ -33,12 +41,30 @@ export class AgentCache {
   private statsTimer: ReturnType<typeof setInterval> | undefined;
   private shutdownCalled = false;
 
+  private discovery: DiscoveryManager | null = null;
+  private discoveryReady: Promise<void> | null = null;
+  private discoveryError: Error | null = null;
+  private readonly startedAtIso: string;
+  private readonly tierTtls: {
+    llm: number | undefined;
+    tool: number | undefined;
+    session: number | undefined;
+  };
+  private readonly hasCostTable: boolean;
+  private readonly usesDefaultCostTable: boolean;
+
   constructor(options: AgentCacheOptions) {
     this.client = options.client;
     this.name = options.name ?? 'betterdb_ac';
     this.statsKey = `${this.name}:__stats`;
     this.defaultTtl = options.defaultTtl;
     this.toolTierTtl = options.tierDefaults?.tool?.ttl;
+    this.startedAtIso = new Date().toISOString();
+    this.tierTtls = {
+      llm: options.tierDefaults?.llm?.ttl,
+      tool: options.tierDefaults?.tool?.ttl,
+      session: options.tierDefaults?.session?.ttl,
+    };
 
     const telemetry = createTelemetry({
       prefix: options.telemetry?.metricsPrefix ?? 'agent_cache',
@@ -49,6 +75,8 @@ export class AgentCache {
     const defaultTtl = options.defaultTtl;
 
     const useDefault = options.useDefaultCostTable ?? true;
+    this.hasCostTable = !!options.costTable;
+    this.usesDefaultCostTable = useDefault;
     const effectiveCostTable: Record<string, ModelCost> | undefined = useDefault
       ? { ...DEFAULT_COST_TABLE, ...(options.costTable ?? {}) }
       : options.costTable;
@@ -83,6 +111,8 @@ export class AgentCache {
 
     // Fire-and-forget: load persisted tool policies from Valkey
     this.tool.loadPolicies().catch(() => {});
+
+    this.registerDiscovery(options.discovery, telemetry);
 
     // Fire-and-forget: initialize product analytics
     const analyticsOpts = options.analytics;
@@ -281,7 +311,73 @@ export class AgentCache {
       clearInterval(this.statsTimer);
       this.statsTimer = undefined;
     }
+    if (this.discoveryReady) {
+      await this.discoveryReady;
+    }
+    if (this.discovery) {
+      await this.discovery.stop({ deleteHeartbeat: true });
+      this.discovery = null;
+    }
     await this.analytics.shutdown();
+  }
+
+  async ensureDiscoveryReady(): Promise<void> {
+    if (this.discoveryError) {
+      throw this.discoveryError;
+    }
+    if (this.discoveryReady) {
+      await this.discoveryReady;
+      if (this.discoveryError) {
+        throw this.discoveryError;
+      }
+    }
+  }
+
+  private registerDiscovery(options: DiscoveryOptions | undefined, telemetry: Telemetry): void {
+    if (options?.enabled === false) {
+      return;
+    }
+    const includeToolPolicies = options?.includeToolPolicies ?? true;
+    const buildMetadata = (): MarkerMetadata =>
+      buildAgentMetadata({
+        name: this.name,
+        version: PACKAGE_VERSION,
+        tiers: {
+          llm: { ttl: this.tierTtls.llm },
+          tool: { ttl: this.tierTtls.tool },
+          session: { ttl: this.tierTtls.session },
+        },
+        defaultTtl: this.defaultTtl,
+        toolPolicyNames: includeToolPolicies ? this.tool.listPolicyNames() : [],
+        hasCostTable: this.hasCostTable,
+        usesDefaultCostTable: this.usesDefaultCostTable,
+        startedAt: this.startedAtIso,
+        includeToolPolicies,
+      });
+
+    const manager = new DiscoveryManager({
+      client: this.client,
+      name: this.name,
+      buildMetadata,
+      heartbeatIntervalMs: options?.heartbeatIntervalMs,
+      onWriteFailed: () => {
+        telemetry.metrics.discoveryWriteFailed
+          .labels({ cache_name: this.name })
+          .inc();
+      },
+    });
+
+    this.discoveryReady = manager
+      .register()
+      .then(() => {
+        if (this.shutdownCalled) {
+          return manager.stop({ deleteHeartbeat: true });
+        }
+        this.discovery = manager;
+      })
+      .catch((err: unknown) => {
+        this.discoveryError = err instanceof Error ? err : new Error(String(err));
+      });
   }
 
   async flush(): Promise<void> {

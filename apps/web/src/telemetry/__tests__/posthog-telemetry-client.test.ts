@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {TEST_VERSION} from './constants'
+
 
 const { mockInstance } = vi.hoisted(() => ({
   mockInstance: {
@@ -49,9 +51,9 @@ describe('PosthogTelemetryClient', () => {
 
   it('should delegate identify to posthog.identify', () => {
     const client = new PosthogTelemetryClient('phc_key');
-    client.identify('inst-123', { tier: 'pro', version: '0.13.0' });
+    client.identify('inst-123', { tier: 'pro', version: TEST_VERSION });
 
-    expect(mockInstance.identify).toHaveBeenCalledWith('inst-123', { tier: 'pro', version: '0.13.0' });
+    expect(mockInstance.identify).toHaveBeenCalledWith('inst-123', { tier: 'pro', version: TEST_VERSION });
   });
 
   it('should call reset on shutdown', () => {

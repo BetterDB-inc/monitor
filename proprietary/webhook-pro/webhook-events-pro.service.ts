@@ -1,6 +1,10 @@
 import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
 import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
-import { WebhookEventType, type MetricKind } from '@betterdb/shared';
+import {
+  WebhookEventType,
+  type MetricKind,
+  type WebhookInstanceInfo,
+} from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
 
 /**
@@ -293,6 +297,41 @@ export class WebhookEventsProService implements OnModuleInit {
         timeToLimitMs: data.timeToLimitMs,
         growthRate: data.growthRate,
         message: `${data.metricKind} projected to reach ceiling (${ceilingLabel}) in ~${timeHours}h at current growth rate`,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  /**
+   * Dispatch inference SLA breach event (PRO+)
+   * Called when a configured per-index p99 SLA is breached. Debounce + resolution
+   * re-arm are owned by InferenceLatencyService, so this goes directly through
+   * dispatchEvent and does not use dispatchThresholdAlert's own alert-state.
+   */
+  async dispatchInferenceSlaBreach(data: {
+    indexName: string;
+    currentP99Us: number;
+    thresholdUs: number;
+    windowMs: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+    connectionId?: string;
+  }): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Inference SLA breach event skipped - requires PRO license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.INFERENCE_SLA_BREACH,
+      {
+        indexName: data.indexName,
+        currentP99Us: data.currentP99Us,
+        thresholdUs: data.thresholdUs,
+        windowMs: data.windowMs,
+        message: `Inference SLA breach on ${data.indexName}: p99 ${data.currentP99Us}µs > threshold ${data.thresholdUs}µs`,
         timestamp: data.timestamp,
         instance: data.instance,
       },

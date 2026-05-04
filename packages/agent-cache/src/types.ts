@@ -1,6 +1,7 @@
 import type Valkey from 'iovalkey';
 import type { Registry } from 'prom-client';
 import type { ContentBlock } from './utils';
+import type { DiscoveryOptions } from './discovery';
 
 export type { Valkey };
 
@@ -47,6 +48,12 @@ export interface AgentCacheOptions {
     /** Interval in ms for periodic stats snapshots. Default: 300_000 (5 min). 0 to disable. */
     statsIntervalMs?: number;
   };
+  /**
+   * Discovery-marker protocol controls. See
+   * docs/plans/specs/spec-agent-cache-discovery-markers.md.
+   * Defaults: enabled=true, heartbeatIntervalMs=30000, includeToolPolicies=true.
+   */
+  discovery?: DiscoveryOptions;
 }
 
 // --- LLM tier ---

@@ -67,6 +67,7 @@ import {
   variantPayloadSchemaFor,
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
+import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
 
 export interface SqliteAdapterConfig {
   filepath: string;
@@ -114,6 +115,7 @@ export class SqliteAdapter implements StoragePort {
   private db: Database.Database | null = null;
   private ready: boolean = false;
   private readonly mappers = new RowMappers(SqliteDialect);
+  private webhookRepo!: WebhookSqliteRepository;
 
   constructor(private config: SqliteAdapterConfig) {}
 
@@ -134,6 +136,7 @@ export class SqliteAdapter implements StoragePort {
       this.createSchema();
       // Run migrations for existing databases
       this.runMigrations();
+      this.webhookRepo = new WebhookSqliteRepository(this.db, this.mappers);
       this.ready = true;
     } catch (error) {
       this.ready = false;
@@ -166,12 +169,14 @@ export class SqliteAdapter implements StoragePort {
       }
     }
 
-    // Add throughput forecasting columns to app_settings if they don't exist
+    // Lazy ALTERs for app_settings columns added after the initial schema.
+    // Add new entries here as additional feature-scoped columns land; each
+    // entry is idempotent and only runs when the column is missing.
     const settingsInfo = this.db.prepare('PRAGMA table_info(app_settings)').all() as {
       name: string;
     }[];
     const settingsColumns = new Set(settingsInfo.map((col) => col.name));
-    const throughputColumns = [
+    const appSettingsMigrations = [
       { name: 'throughput_forecasting_enabled', type: 'INTEGER NOT NULL DEFAULT 1' },
       {
         name: 'throughput_forecasting_default_rolling_window_ms',
@@ -181,8 +186,9 @@ export class SqliteAdapter implements StoragePort {
         name: 'throughput_forecasting_default_alert_threshold_ms',
         type: 'INTEGER NOT NULL DEFAULT 7200000',
       },
+      { name: 'inference_sla_config', type: "TEXT NOT NULL DEFAULT '{}'" },
     ];
-    for (const col of throughputColumns) {
+    for (const col of appSettingsMigrations) {
       if (!settingsColumns.has(col.name)) {
         this.db.exec(`ALTER TABLE app_settings ADD COLUMN ${col.name} ${col.type}`);
       }
@@ -1105,6 +1111,7 @@ export class SqliteAdapter implements StoragePort {
         throughput_forecasting_enabled INTEGER NOT NULL DEFAULT 1,
         throughput_forecasting_default_rolling_window_ms INTEGER NOT NULL DEFAULT 21600000,
         throughput_forecasting_default_alert_threshold_ms INTEGER NOT NULL DEFAULT 7200000,
+        inference_sla_config TEXT NOT NULL DEFAULT '{}',
         updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
         created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
       );
@@ -2116,8 +2123,9 @@ export class SqliteAdapter implements StoragePort {
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
         throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
+        inference_sla_config,
         updated_at, created_at
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = excluded.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = excluded.client_analytics_poll_interval_ms,
@@ -2127,6 +2135,7 @@ export class SqliteAdapter implements StoragePort {
         throughput_forecasting_enabled = excluded.throughput_forecasting_enabled,
         throughput_forecasting_default_rolling_window_ms = excluded.throughput_forecasting_default_rolling_window_ms,
         throughput_forecasting_default_alert_threshold_ms = excluded.throughput_forecasting_default_alert_threshold_ms,
+        inference_sla_config = excluded.inference_sla_config,
         updated_at = excluded.updated_at
     `);
 
@@ -2139,6 +2148,7 @@ export class SqliteAdapter implements StoragePort {
       settings.metricForecastingEnabled ? 1 : 0,
       settings.metricForecastingDefaultRollingWindowMs,
       settings.metricForecastingDefaultAlertThresholdMs,
+      JSON.stringify(settings.inferenceSlaConfig ?? {}),
       now,
       settings.createdAt || now,
     );
@@ -2169,99 +2179,22 @@ export class SqliteAdapter implements StoragePort {
 
   async createWebhook(webhook: Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>): Promise<Webhook> {
     if (!this.db) throw new Error('Database not initialized');
-
-    const id = randomUUID();
-    const now = Date.now();
-    const stmt = this.db.prepare(`
-      INSERT INTO webhooks (id, name, url, secret, enabled, events, headers, retry_policy, delivery_config, alert_config, thresholds, connection_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    stmt.run(
-      id,
-      webhook.name,
-      webhook.url,
-      webhook.secret,
-      webhook.enabled ? 1 : 0,
-      JSON.stringify(webhook.events),
-      JSON.stringify(webhook.headers || {}),
-      JSON.stringify(webhook.retryPolicy),
-      webhook.deliveryConfig ? JSON.stringify(webhook.deliveryConfig) : null,
-      webhook.alertConfig ? JSON.stringify(webhook.alertConfig) : null,
-      webhook.thresholds ? JSON.stringify(webhook.thresholds) : null,
-      webhook.connectionId || null,
-      now,
-      now,
-    );
-
-    return {
-      id,
-      name: webhook.name,
-      url: webhook.url,
-      secret: webhook.secret,
-      enabled: webhook.enabled,
-      events: webhook.events,
-      headers: webhook.headers,
-      retryPolicy: webhook.retryPolicy,
-      deliveryConfig: webhook.deliveryConfig,
-      alertConfig: webhook.alertConfig,
-      thresholds: webhook.thresholds,
-      connectionId: webhook.connectionId,
-      createdAt: now,
-      updatedAt: now,
-    };
+    return this.webhookRepo.createWebhook(webhook);
   }
 
   async getWebhook(id: string): Promise<Webhook | null> {
     if (!this.db) throw new Error('Database not initialized');
-
-    const row = this.db.prepare('SELECT * FROM webhooks WHERE id = ?').get(id) as any;
-    if (!row) return null;
-
-    return this.mappers.mapWebhookRow(row);
+    return this.webhookRepo.getWebhook(id);
   }
 
   async getWebhooksByInstance(connectionId?: string): Promise<Webhook[]> {
     if (!this.db) throw new Error('Database not initialized');
-
-    if (connectionId) {
-      const rows = this.db
-        .prepare(
-          'SELECT * FROM webhooks WHERE connection_id = ? OR connection_id IS NULL ORDER BY created_at DESC',
-        )
-        .all(connectionId) as any[];
-      return rows.map((row) => this.mappers.mapWebhookRow(row));
-    }
-
-    // No connectionId provided - only return global webhooks (not scoped to any connection)
-    const rows = this.db
-      .prepare('SELECT * FROM webhooks WHERE connection_id IS NULL ORDER BY created_at DESC')
-      .all() as any[];
-    return rows.map((row) => this.mappers.mapWebhookRow(row));
+    return this.webhookRepo.getWebhooksByInstance(connectionId);
   }
 
   async getWebhooksByEvent(event: WebhookEventType, connectionId?: string): Promise<Webhook[]> {
     if (!this.db) throw new Error('Database not initialized');
-
-    if (connectionId) {
-      // Return webhooks scoped to this connection OR global webhooks (no connectionId)
-      const rows = this.db
-        .prepare(
-          'SELECT * FROM webhooks WHERE enabled = 1 AND (connection_id = ? OR connection_id IS NULL)',
-        )
-        .all(connectionId) as any[];
-      return rows
-        .map((row) => this.mappers.mapWebhookRow(row))
-        .filter((webhook) => webhook.events.includes(event));
-    }
-
-    // No connectionId provided - only return global webhooks (not scoped to any connection)
-    const rows = this.db
-      .prepare('SELECT * FROM webhooks WHERE enabled = 1 AND connection_id IS NULL')
-      .all() as any[];
-    return rows
-      .map((row) => this.mappers.mapWebhookRow(row))
-      .filter((webhook) => webhook.events.includes(event));
+    return this.webhookRepo.getWebhooksByEvent(event, connectionId);
   }
 
   async updateWebhook(
@@ -2269,132 +2202,24 @@ export class SqliteAdapter implements StoragePort {
     updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>,
   ): Promise<Webhook | null> {
     if (!this.db) throw new Error('Database not initialized');
-
-    const setClauses: string[] = [];
-    const params: any[] = [];
-
-    if (updates.name !== undefined) {
-      setClauses.push('name = ?');
-      params.push(updates.name);
-    }
-    if (updates.url !== undefined) {
-      setClauses.push('url = ?');
-      params.push(updates.url);
-    }
-    if (updates.secret !== undefined) {
-      setClauses.push('secret = ?');
-      params.push(updates.secret);
-    }
-    if (updates.enabled !== undefined) {
-      setClauses.push('enabled = ?');
-      params.push(updates.enabled ? 1 : 0);
-    }
-    if (updates.events !== undefined) {
-      setClauses.push('events = ?');
-      params.push(JSON.stringify(updates.events));
-    }
-    if (updates.headers !== undefined) {
-      setClauses.push('headers = ?');
-      params.push(JSON.stringify(updates.headers));
-    }
-    if (updates.retryPolicy !== undefined) {
-      setClauses.push('retry_policy = ?');
-      params.push(JSON.stringify(updates.retryPolicy));
-    }
-    if (updates.deliveryConfig !== undefined) {
-      setClauses.push('delivery_config = ?');
-      params.push(JSON.stringify(updates.deliveryConfig));
-    }
-    if (updates.alertConfig !== undefined) {
-      setClauses.push('alert_config = ?');
-      params.push(JSON.stringify(updates.alertConfig));
-    }
-    if (updates.thresholds !== undefined) {
-      setClauses.push('thresholds = ?');
-      params.push(JSON.stringify(updates.thresholds));
-    }
-    if (updates.connectionId !== undefined) {
-      setClauses.push('connection_id = ?');
-      params.push(updates.connectionId);
-    }
-
-    if (setClauses.length === 0) {
-      return this.getWebhook(id);
-    }
-
-    setClauses.push('updated_at = ?');
-    params.push(Date.now());
-    params.push(id);
-
-    const stmt = this.db.prepare(`UPDATE webhooks SET ${setClauses.join(', ')} WHERE id = ?`);
-    const result = stmt.run(...params);
-
-    if (result.changes === 0) return null;
-    return this.getWebhook(id);
+    return this.webhookRepo.updateWebhook(id, updates);
   }
 
   async deleteWebhook(id: string): Promise<boolean> {
     if (!this.db) throw new Error('Database not initialized');
-
-    const result = this.db.prepare('DELETE FROM webhooks WHERE id = ?').run(id);
-    return result.changes > 0;
+    return this.webhookRepo.deleteWebhook(id);
   }
 
   async createDelivery(
     delivery: Omit<WebhookDelivery, 'id' | 'createdAt'>,
   ): Promise<WebhookDelivery> {
     if (!this.db) throw new Error('Database not initialized');
-
-    const id = randomUUID();
-    const now = Date.now();
-    const stmt = this.db.prepare(`
-      INSERT INTO webhook_deliveries (
-        id, webhook_id, event_type, payload, status, status_code, response_body,
-        attempts, next_retry_at, completed_at, duration_ms, connection_id, created_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    stmt.run(
-      id,
-      delivery.webhookId,
-      delivery.eventType,
-      JSON.stringify(delivery.payload),
-      delivery.status,
-      delivery.statusCode || null,
-      delivery.responseBody || null,
-      delivery.attempts,
-      delivery.nextRetryAt || null,
-      delivery.completedAt || null,
-      delivery.durationMs || null,
-      delivery.connectionId || null,
-      now,
-    );
-
-    return {
-      id,
-      webhookId: delivery.webhookId,
-      eventType: delivery.eventType,
-      payload: delivery.payload,
-      status: delivery.status,
-      statusCode: delivery.statusCode,
-      responseBody: delivery.responseBody,
-      attempts: delivery.attempts,
-      nextRetryAt: delivery.nextRetryAt,
-      connectionId: delivery.connectionId,
-      createdAt: now,
-      completedAt: delivery.completedAt,
-      durationMs: delivery.durationMs,
-    };
+    return this.webhookRepo.createDelivery(delivery);
   }
 
   async getDelivery(id: string): Promise<WebhookDelivery | null> {
     if (!this.db) throw new Error('Database not initialized');
-
-    const row = this.db.prepare('SELECT * FROM webhook_deliveries WHERE id = ?').get(id) as any;
-    if (!row) return null;
-
-    return this.mappers.mapDeliveryRow(row);
+    return this.webhookRepo.getDelivery(id);
   }
 
   async getDeliveriesByWebhook(
@@ -2403,14 +2228,7 @@ export class SqliteAdapter implements StoragePort {
     offset: number = 0,
   ): Promise<WebhookDelivery[]> {
     if (!this.db) throw new Error('Database not initialized');
-
-    const rows = this.db
-      .prepare(
-        'SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
-      )
-      .all(webhookId, limit, offset) as any[];
-
-    return rows.map((row) => this.mappers.mapDeliveryRow(row));
+    return this.webhookRepo.getDeliveriesByWebhook(webhookId, limit, offset);
   }
 
   async updateDelivery(
@@ -2418,49 +2236,7 @@ export class SqliteAdapter implements StoragePort {
     updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>>,
   ): Promise<boolean> {
     if (!this.db) throw new Error('Database not initialized');
-
-    const setClauses: string[] = [];
-    const params: any[] = [];
-
-    if (updates.status !== undefined) {
-      setClauses.push('status = ?');
-      params.push(updates.status);
-    }
-    if (updates.statusCode !== undefined) {
-      setClauses.push('status_code = ?');
-      params.push(updates.statusCode);
-    }
-    if (updates.responseBody !== undefined) {
-      setClauses.push('response_body = ?');
-      params.push(updates.responseBody);
-    }
-    if (updates.attempts !== undefined) {
-      setClauses.push('attempts = ?');
-      params.push(updates.attempts);
-    }
-    if (updates.nextRetryAt !== undefined) {
-      setClauses.push('next_retry_at = ?');
-      params.push(updates.nextRetryAt !== undefined ? updates.nextRetryAt : null);
-    }
-    if (updates.completedAt !== undefined) {
-      setClauses.push('completed_at = ?');
-      params.push(updates.completedAt !== undefined ? updates.completedAt : null);
-    }
-    if (updates.durationMs !== undefined) {
-      setClauses.push('duration_ms = ?');
-      params.push(updates.durationMs);
-    }
-
-    if (setClauses.length === 0) return true;
-
-    params.push(id);
-
-    const stmt = this.db.prepare(
-      `UPDATE webhook_deliveries SET ${setClauses.join(', ')} WHERE id = ?`,
-    );
-    const result = stmt.run(...params);
-
-    return result.changes > 0;
+    return this.webhookRepo.updateDelivery(id, updates);
   }
 
   async getRetriableDeliveries(
@@ -2468,47 +2244,12 @@ export class SqliteAdapter implements StoragePort {
     connectionId?: string,
   ): Promise<WebhookDelivery[]> {
     if (!this.db) throw new Error('Database not initialized');
-
-    const now = Date.now();
-
-    if (connectionId) {
-      const rows = this.db
-        .prepare(
-          `SELECT * FROM webhook_deliveries
-         WHERE status = 'retrying' AND next_retry_at <= ? AND connection_id = ?
-         ORDER BY next_retry_at ASC
-         LIMIT ?`,
-        )
-        .all(now, connectionId, limit) as any[];
-      return rows.map((row) => this.mappers.mapDeliveryRow(row));
-    }
-
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM webhook_deliveries
-       WHERE status = 'retrying' AND next_retry_at <= ?
-       ORDER BY next_retry_at ASC
-       LIMIT ?`,
-      )
-      .all(now, limit) as any[];
-
-    return rows.map((row) => this.mappers.mapDeliveryRow(row));
+    return this.webhookRepo.getRetriableDeliveries(limit, connectionId);
   }
 
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
-
-    if (connectionId) {
-      const result = this.db
-        .prepare('DELETE FROM webhook_deliveries WHERE created_at < ? AND connection_id = ?')
-        .run(cutoffTimestamp, connectionId);
-      return result.changes;
-    }
-
-    const result = this.db
-      .prepare('DELETE FROM webhook_deliveries WHERE created_at < ?')
-      .run(cutoffTimestamp);
-    return result.changes;
+    return this.webhookRepo.pruneOldDeliveries(cutoffTimestamp, connectionId);
   }
 
   // Slow Log Methods

@@ -20,6 +20,7 @@ import { MigrationModule } from './migration/migration.module';
 import { CloudAuthModule } from './auth/cloud-auth.module';
 import { McpModule } from './mcp/mcp.module';
 import { MetricForecastingModule } from './metric-forecasting/metric-forecasting.module';
+import { InferenceLatencyModule } from './inference-latency/inference-latency.module';
 import { CliModule } from './cli/cli.module';
 import { CacheProposalsModule } from './cache-proposals/cache-proposals.module';
 
@@ -28,6 +29,7 @@ let LicenseModule: any = null;
 let KeyAnalyticsModule: any = null;
 let AnomalyModule: any = null;
 let WebhookProModule: any = null;
+let InferenceLatencyProModule: any = null;
 let AgentModule: any = null;
 let DataRetentionModule: any = null;
 
@@ -68,6 +70,14 @@ try {
   const webhookProModule = require('../../../proprietary/webhook-pro');
   WebhookProModule = webhookProModule.WebhookProModule;
   console.log('[WebhookPro] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
+  const inferenceLatencyProModule = require('../../../proprietary/inference-latency-pro/inference-latency-pro.module');
+  InferenceLatencyProModule = inferenceLatencyProModule.InferenceLatencyProModule;
+  console.log('[InferenceLatencyPro] Proprietary module loaded');
 } catch {
   // Proprietary module not available
 }
@@ -125,6 +135,7 @@ const baseImports = [
   VectorSearchModule,
   MigrationModule,
   MetricForecastingModule,
+  InferenceLatencyModule,
   CliModule,
   CacheProposalsModule,
 ];
@@ -134,6 +145,7 @@ const proprietaryImports = [
   KeyAnalyticsModule,
   AnomalyModule,
   WebhookProModule,
+  InferenceLatencyProModule,
   AiModule,
   AgentModule,
   DataRetentionModule,
