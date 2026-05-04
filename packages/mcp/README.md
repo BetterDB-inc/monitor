@@ -83,6 +83,8 @@ Once connected, your AI assistant can query your databases directly:
 - *"Are there any hot keys causing uneven load?"*
 - *"Which cluster node has the highest memory usage?"*
 - *"Have there been any anomalies in the last 24 hours?"*
+- *"Tune the threshold on my faq-cache — propose a change for me to review"*
+- *"Why is the weather_lookup tool's hit rate so low?"*
 
 ## Configuration
 
@@ -147,6 +149,39 @@ Once connected, your AI assistant can query your databases directly:
 |---|---|
 | `start_monitor` | Start a persistent BetterDB monitor background process |
 | `stop_monitor` | Stop a previously started persistent monitor process |
+
+### Cache Intelligence Tools
+
+For deployments running [`@betterdb/semantic-cache`](https://www.npmjs.com/package/@betterdb/semantic-cache) or [`@betterdb/agent-cache`](https://www.npmjs.com/package/@betterdb/agent-cache). Caches register themselves in a Valkey-side discovery hash; Monitor exposes them through the tools below.
+
+**Read-only:**
+
+| Tool | Description |
+|---|---|
+| `cache_list` | List all caches registered for the active instance with hit rate and total ops |
+| `cache_health` | Detailed health for one cache; response branches on `cache_type` (semantic_cache vs agent_cache) |
+| `cache_threshold_recommendation` | Threshold-tuning recommendation for a semantic_cache, derived from the rolling similarity window |
+| `cache_tool_effectiveness` | Per-tool hit rate, cost saved, and TTL recommendation for an agent_cache |
+| `cache_similarity_distribution` | Histogram of recent similarity scores for a semantic_cache (20 buckets, width 0.1) |
+| `cache_recent_changes` | Recent proposals (any status) for a single cache, so agents can avoid re-proposing |
+
+**Propose changes (advisory — no Valkey writes until approved):**
+
+| Tool | Description |
+|---|---|
+| `cache_propose_threshold_adjust` | Propose a similarity-threshold change on a semantic_cache (per-category or global) |
+| `cache_propose_tool_ttl_adjust` | Propose a per-tool TTL change on an agent_cache |
+| `cache_propose_invalidate` | Propose an invalidation; filter shape branches on cache type |
+
+**Approve / reject / list:**
+
+| Tool | Description |
+|---|---|
+| `cache_list_pending_proposals` | List pending proposals on the active instance, optionally filtered by cache_name |
+| `cache_get_proposal` | Fetch a single proposal by id, including its audit trail |
+| `cache_approve_proposal` | Approve a pending proposal; synchronously applies the change to Valkey |
+| `cache_reject_proposal` | Reject a pending proposal with an optional reason |
+| `cache_edit_and_approve_proposal` | Edit a proposal's value (threshold or TTL) and approve in one step; invalidate proposals are not editable |
 
 ## Requirements
 
