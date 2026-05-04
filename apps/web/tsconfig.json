@@ -21,7 +21,9 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@betterdb/shared": ["../../packages/shared/src/index.ts"],
+      "@betterdb/shared/license": ["../../packages/shared/src/license/index.ts"]
     }
   },
   "include": ["src"],
