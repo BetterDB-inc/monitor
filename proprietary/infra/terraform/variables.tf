@@ -31,6 +31,11 @@ variable "service_layer_admin_key" {
   sensitive   = true
 }
 
+variable "resend_api_key" {
+  description = "Resend API key for transactional email"
+  sensitive   = true
+}
+
 variable "nlb_ip_address" {
   description = "Internal NLB hostname for the entitlement service"
   sensitive   = true

@@ -49,3 +49,8 @@ output "ecr_repository_url" {
 output "entitlement_ecr_url" {
   value = aws_ecr_repository.entitlement.repository_url
 }
+
+output "private_large_subnet_ids" {
+  description = "IP-rich /20 subnets for EKS workers (added to address /24 exhaustion)"
+  value       = [aws_subnet.private_large_1a.id, aws_subnet.private_large_1b.id]
+}
