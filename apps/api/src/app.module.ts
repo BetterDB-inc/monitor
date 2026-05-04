@@ -22,6 +22,7 @@ import { McpModule } from './mcp/mcp.module';
 import { MetricForecastingModule } from './metric-forecasting/metric-forecasting.module';
 import { InferenceLatencyModule } from './inference-latency/inference-latency.module';
 import { CliModule } from './cli/cli.module';
+import { PosthogProxyModule } from './posthog-proxy/posthog-proxy.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -136,6 +137,7 @@ const baseImports = [
   MetricForecastingModule,
   InferenceLatencyModule,
   CliModule,
+  PosthogProxyModule,
 ];
 
 const proprietaryImports = [
