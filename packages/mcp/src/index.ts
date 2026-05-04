@@ -1018,6 +1018,172 @@ server.tool(
   }),
 );
 
+server.tool(
+  'cache_list_pending_proposals',
+  'List pending cache proposals for the active instance, newest first. Optionally filter by cache_name.',
+  {
+    cache_name: z.string().min(1).optional().describe('Restrict to a single cache'),
+    limit: z.number().int().min(1).max(200).optional().describe('Max proposals to return (default 100, max 200)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_list_pending_proposals', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const qs = new URLSearchParams();
+      if (params.cache_name !== undefined) {
+        qs.set('cache_name', params.cache_name);
+      }
+      if (params.limit !== undefined) {
+        qs.set('limit', String(params.limit));
+      }
+      const path = `/mcp/instance/${id}/cache-proposals/pending${qs.size > 0 ? `?${qs}` : ''}`;
+      const data = await apiFetch(path);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_get_proposal',
+  'Fetch a single cache proposal by id, including its audit trail.',
+  {
+    proposal_id: z.string().min(1).describe('Proposal id (returned by cache_propose_*)'),
+  },
+  async (params) => withTelemetry('cache_get_proposal', async () => {
+    try {
+      const data = await apiFetch(`/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_approve_proposal',
+  'Approve a pending proposal. Synchronously applies the change to Valkey and returns the terminal status (applied|failed). Idempotent: a second call on an already-applied proposal returns the cached result.',
+  {
+    proposal_id: z.string().min(1).describe('Proposal id'),
+    actor: z.string().min(1).optional().describe('Optional actor identity stamped into the audit trail'),
+  },
+  async (params) => withTelemetry('cache_approve_proposal', async () => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (params.actor !== undefined) {
+        body.actor = params.actor;
+      }
+      const data = await apiRequest(
+        'POST',
+        `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/approve`,
+        body,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_reject_proposal',
+  'Reject a pending proposal. Optionally records a reason in the audit trail.',
+  {
+    proposal_id: z.string().min(1).describe('Proposal id'),
+    reason: z.string().min(1).optional().describe('Optional rejection reason recorded on the audit row'),
+    actor: z.string().min(1).optional().describe('Optional actor identity stamped into the audit trail'),
+  },
+  async (params) => withTelemetry('cache_reject_proposal', async () => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (params.reason !== undefined) {
+        body.reason = params.reason;
+      }
+      if (params.actor !== undefined) {
+        body.actor = params.actor;
+      }
+      const data = await apiRequest(
+        'POST',
+        `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/reject`,
+        body,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_edit_and_approve_proposal',
+  'Edit an existing pending proposal and approve it in one step. Provide exactly one edit field matching the proposal type: new_threshold for threshold_adjust, new_ttl_seconds for tool_ttl_adjust. Invalidate proposals are not editable.',
+  {
+    proposal_id: z.string().min(1).describe('Proposal id'),
+    new_threshold: z.number().min(0).max(2).optional().describe('For threshold_adjust proposals'),
+    new_ttl_seconds: z.number().int().min(10).max(86400).optional().describe('For tool_ttl_adjust proposals'),
+    actor: z.string().min(1).optional().describe('Optional actor identity stamped into the audit trail'),
+  },
+  async (params) => withTelemetry('cache_edit_and_approve_proposal', async () => {
+    try {
+      if (params.new_threshold === undefined && params.new_ttl_seconds === undefined) {
+        return {
+          content: [{ type: 'text' as const, text: 'Either new_threshold or new_ttl_seconds is required' }],
+          isError: true,
+        };
+      }
+      const body: Record<string, unknown> = {};
+      if (params.new_threshold !== undefined) {
+        body.new_threshold = params.new_threshold;
+      }
+      if (params.new_ttl_seconds !== undefined) {
+        body.new_ttl_seconds = params.new_ttl_seconds;
+      }
+      if (params.actor !== undefined) {
+        body.actor = params.actor;
+      }
+      const data = await apiRequest(
+        'POST',
+        `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/edit-and-approve`,
+        body,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
 function formatProposalText(data: { proposal_id: string; status: string; expires_at: number; warnings: string[] }): ToolResult {
   const expiresAtIso = new Date(data.expires_at).toISOString();
   const lines = [
