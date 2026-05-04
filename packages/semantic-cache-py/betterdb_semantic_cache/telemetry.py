@@ -73,6 +73,8 @@ class SemanticCacheMetrics:
     cost_saved_total: Counter
     embedding_cache_total: Counter
     stale_model_evictions: Counter
+    config_refresh_failed: Counter
+    discovery_write_failed: Counter
 
 
 @dataclass
@@ -133,6 +135,18 @@ def create_telemetry(
             reg,
             f"{prefix}_stale_model_evictions_total",
             "Entries evicted due to stale_after_model_change detection",
+            ["cache_name"],
+        ),
+        config_refresh_failed=_get_or_create_counter(
+            reg,
+            f"{prefix}_config_refresh_failed_total",
+            "Count of failed periodic config refreshes (HGETALL on __config).",
+            ["cache_name"],
+        ),
+        discovery_write_failed=_get_or_create_counter(
+            reg,
+            f"{prefix}_discovery_write_failed_total",
+            "Count of failed discovery marker writes (HSET registry, SET heartbeat).",
             ["cache_name"],
         ),
     )

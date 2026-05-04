@@ -16,10 +16,12 @@ from .normalizer import (
 from .semantic_cache import SemanticCache
 from .types import (
     CacheCheckOptions,
+    ConfigRefreshOptions,
     CacheCheckResult,
     CacheConfidence,
     CacheStats,
     CacheStoreOptions,
+    DiscoveryOptions,
     EmbedFn,
     EmbeddingCacheOptions,
     IndexInfo,
@@ -40,6 +42,7 @@ from .utils import (
     ToolResultBlock,
     decode_float32,
     encode_float32,
+    escape_tag,
     extract_binary_refs,
     extract_text,
     parse_ft_search_response,
@@ -49,6 +52,8 @@ from .utils import (
 __all__ = [
     "SemanticCache",
     "SemanticCacheOptions",
+    "ConfigRefreshOptions",
+    "DiscoveryOptions",
     "CacheCheckOptions",
     "CacheStoreOptions",
     "CacheCheckResult",
@@ -88,6 +93,7 @@ __all__ = [
     # utils
     "encode_float32",
     "decode_float32",
+    "escape_tag",
     "extract_text",
     "extract_binary_refs",
     "parse_ft_search_response",

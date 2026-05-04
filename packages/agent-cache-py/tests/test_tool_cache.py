@@ -194,6 +194,96 @@ async def test_load_policies_ignores_corrupt_entries():
     assert cache.get_policy("bad_tool") is None
 
 
+# ─── refresh_policies ─────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_refresh_policies_returns_true_on_success():
+    cache, client = _make_cache()
+    client.hgetall = AsyncMock(return_value={
+        b"get_weather": json.dumps({"ttl": 120}).encode()
+    })
+
+    ok = await cache.refresh_policies()
+
+    assert ok is True
+    assert cache.get_policy("get_weather") == ToolPolicy(ttl=120)
+
+
+@pytest.mark.asyncio
+async def test_refresh_policies_returns_false_on_hgetall_error():
+    cache, client = _make_cache()
+    client.hgetall = AsyncMock(side_effect=Exception("NOAUTH"))
+
+    ok = await cache.refresh_policies()
+
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_policies_removes_deleted_entries():
+    """Policies absent from Valkey are evicted (atomic swap, not additive merge)."""
+    cache, client = _make_cache()
+    client.hgetall = AsyncMock(return_value={
+        b"get_weather": json.dumps({"ttl": 120}).encode(),
+        b"search": json.dumps({"ttl": 60}).encode(),
+    })
+    await cache.refresh_policies()
+    assert cache.get_policy("search") == ToolPolicy(ttl=60)
+
+    # Second refresh — "search" is gone from Valkey
+    client.hgetall = AsyncMock(return_value={
+        b"get_weather": json.dumps({"ttl": 120}).encode(),
+    })
+    await cache.refresh_policies()
+
+    assert cache.get_policy("get_weather") == ToolPolicy(ttl=120)
+    assert cache.get_policy("search") is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_policies_updates_changed_ttl():
+    cache, client = _make_cache()
+    client.hgetall = AsyncMock(return_value={
+        b"get_weather": json.dumps({"ttl": 60}).encode()
+    })
+    await cache.refresh_policies()
+    assert cache.get_policy("get_weather") == ToolPolicy(ttl=60)
+
+    client.hgetall = AsyncMock(return_value={
+        b"get_weather": json.dumps({"ttl": 600}).encode()
+    })
+    await cache.refresh_policies()
+    assert cache.get_policy("get_weather") == ToolPolicy(ttl=600)
+
+
+@pytest.mark.asyncio
+async def test_refresh_policies_skips_corrupt_entries():
+    cache, client = _make_cache()
+    client.hgetall = AsyncMock(return_value={
+        b"get_weather": json.dumps({"ttl": 120}).encode(),
+        b"broken": b"not valid json",
+    })
+
+    ok = await cache.refresh_policies()
+
+    assert ok is True
+    assert cache.get_policy("get_weather") == ToolPolicy(ttl=120)
+    assert cache.get_policy("broken") is None
+
+
+@pytest.mark.asyncio
+async def test_load_policies_delegates_to_refresh_policies():
+    """load_policies() is now a thin wrapper around refresh_policies()."""
+    cache, client = _make_cache()
+    client.hgetall = AsyncMock(return_value={
+        b"search": json.dumps({"ttl": 300}).encode()
+    })
+
+    await cache.load_policies()
+
+    assert cache.get_policy("search") == ToolPolicy(ttl=300)
+
+
 # ─── reset_policies ───────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

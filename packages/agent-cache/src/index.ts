@@ -18,6 +18,7 @@ export type {
   ToolRecommendation,
   ModelCost,
   TierDefaults,
+  ConfigRefreshOptions,
 } from './types';
 export {
   AgentCacheError,

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.0] - 2026-05-04
+
+### Added
+- **Discovery marker protocol** — on `initialize()` the cache registers itself in a Valkey-side `__betterdb:caches` hash and writes a periodic `__betterdb:heartbeat:{name}` key (default 30s). Lets BetterDB Monitor enumerate live caches. Marker payload includes `type=semantic_cache`, `capabilities` (`invalidate`, `similarity_distribution`, `threshold_adjust`), threshold config, and category thresholds. New `discovery` option. New Prometheus counter `{prefix}_discovery_write_failed_total`. `shutdown()` stops the heartbeat.
+
 ## 0.1.0 — 2026-04-24
 
 Initial release. Full async Python port of `@betterdb/semantic-cache` v0.2.0,

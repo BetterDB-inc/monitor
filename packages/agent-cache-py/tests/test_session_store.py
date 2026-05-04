@@ -204,6 +204,194 @@ async def test_touch_scans_and_expires_keys():
     pipe.expire.assert_called()
 
 
+# ─── get_all ──────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_all_returns_all_fields_for_thread():
+    store, client = _make_store()
+    client.scan = AsyncMock(return_value=(
+        0,
+        [b"test:session:thread-1:field_a", b"test:session:thread-1:field_b"],
+    ))
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[b"val_a", b"val_b"])
+
+    result = await store.get_all("thread-1")
+
+    assert result == {"field_a": "val_a", "field_b": "val_b"}
+
+
+@pytest.mark.asyncio
+async def test_get_all_returns_empty_dict_when_no_keys():
+    store, client = _make_store()
+    client.scan = AsyncMock(return_value=(0, []))
+
+    result = await store.get_all("thread-1")
+
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_get_all_skips_none_values():
+    store, client = _make_store()
+    client.scan = AsyncMock(return_value=(
+        0,
+        [b"test:session:thread-1:field_a", b"test:session:thread-1:field_b"],
+    ))
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[b"val_a", None])
+
+    result = await store.get_all("thread-1")
+
+    assert result == {"field_a": "val_a"}
+
+
+@pytest.mark.asyncio
+async def test_get_all_refreshes_ttl_when_configured():
+    store, client = _make_store(default_ttl=300)
+    client.scan = AsyncMock(return_value=(
+        0,
+        [b"test:session:thread-1:field_a"],
+    ))
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[b"val_a"])
+
+    await store.get_all("thread-1")
+
+    # TTL refresh uses a second pipeline — both pipelines share the mock
+    pipe.expire.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_get_all_does_not_refresh_ttl_when_not_configured():
+    store, client = _make_store()  # no TTL
+    client.scan = AsyncMock(return_value=(
+        0,
+        [b"test:session:thread-1:field_a"],
+    ))
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[b"val_a"])
+
+    await store.get_all("thread-1")
+
+    pipe.expire.assert_not_called()
+
+
+# ─── scan_fields_by_prefix ────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_scan_fields_by_prefix_returns_matching_fields():
+    store, client = _make_store()
+    client.scan = AsyncMock(return_value=(
+        0,
+        [b"test:session:thread-1:checkpoint_ts:1000", b"test:session:thread-1:checkpoint_ts:2000"],
+    ))
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[b"data_1", b"data_2"])
+
+    result = await store.scan_fields_by_prefix("thread-1", "checkpoint_ts:")
+
+    assert result == {"checkpoint_ts:1000": "data_1", "checkpoint_ts:2000": "data_2"}
+
+
+@pytest.mark.asyncio
+async def test_scan_fields_by_prefix_returns_empty_when_no_match():
+    store, client = _make_store()
+    client.scan = AsyncMock(return_value=(0, []))
+
+    result = await store.scan_fields_by_prefix("thread-1", "nonexistent:")
+
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_scan_fields_by_prefix_skips_none_values():
+    store, client = _make_store()
+    client.scan = AsyncMock(return_value=(
+        0,
+        [b"test:session:thread-1:msg:1", b"test:session:thread-1:msg:2"],
+    ))
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[b"content", None])
+
+    result = await store.scan_fields_by_prefix("thread-1", "msg:")
+
+    assert result == {"msg:1": "content"}
+
+
+@pytest.mark.asyncio
+async def test_scan_fields_by_prefix_does_not_refresh_ttl():
+    """scan_fields_by_prefix is a read-only scan — it must not call expire."""
+    store, client = _make_store(default_ttl=300)
+    client.scan = AsyncMock(return_value=(
+        0,
+        [b"test:session:thread-1:msg:1"],
+    ))
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[b"content"])
+
+    await store.scan_fields_by_prefix("thread-1", "msg:")
+
+    pipe.expire.assert_not_called()
+
+
+# ─── destroy_thread ───────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_destroy_thread_deletes_all_keys_and_returns_count():
+    store, client = _make_store()
+    client.scan = AsyncMock(return_value=(
+        0,
+        [b"test:session:thread-1:field_a", b"test:session:thread-1:field_b"],
+    ))
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[1, 1])
+
+    deleted = await store.destroy_thread("thread-1")
+
+    assert deleted == 2
+    pipe.delete.assert_any_call("test:session:thread-1:field_a")
+    pipe.delete.assert_any_call("test:session:thread-1:field_b")
+
+
+@pytest.mark.asyncio
+async def test_destroy_thread_returns_zero_when_no_keys():
+    store, client = _make_store()
+    client.scan = AsyncMock(return_value=(0, []))
+
+    deleted = await store.destroy_thread("thread-1")
+
+    assert deleted == 0
+
+
+@pytest.mark.asyncio
+async def test_destroy_thread_removes_from_tracker_and_decrements_active_sessions():
+    store, client = _make_store()
+    # Seed the tracker so the thread is known
+    store._tracker.add("thread-1")
+    client.scan = AsyncMock(return_value=(0, [b"test:session:thread-1:field_a"]))
+    pipe = client.pipeline()
+    pipe.execute = AsyncMock(return_value=[1])
+    gauge = store._telemetry.metrics.active_sessions.labels(store._name)
+
+    await store.destroy_thread("thread-1")
+
+    assert store._tracker.remove("thread-1") is False  # already removed
+    gauge.dec.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_destroy_thread_does_not_decrement_gauge_for_unknown_thread():
+    """destroy_thread on a thread not in the tracker must not touch the gauge."""
+    store, client = _make_store()
+    client.scan = AsyncMock(return_value=(0, []))
+    gauge = store._telemetry.metrics.active_sessions.labels(store._name)
+
+    await store.destroy_thread("unknown-thread")
+
+    gauge.dec.assert_not_called()
+
+
 # ─── reset_tracker ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

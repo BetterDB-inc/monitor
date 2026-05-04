@@ -7,6 +7,7 @@ import pytest
 
 from betterdb_semantic_cache.semantic_cache import SemanticCache
 from betterdb_semantic_cache.types import (
+    DiscoveryOptions,
     EmbeddingCacheOptions,
     SemanticCacheOptions,
     TelemetryOptions,
@@ -26,6 +27,7 @@ def _make_cache(*, embedding_cache_enabled: bool = True) -> tuple[SemanticCache,
         embedding_cache=EmbeddingCacheOptions(enabled=embedding_cache_enabled, ttl=3600),
         telemetry=TelemetryOptions(tracer_name="t", metrics_prefix="sc_emb"),
         use_default_cost_table=False,
+        discovery=DiscoveryOptions(enabled=False),
     )
     cache = SemanticCache(opts)
     cache._telemetry = make_telemetry()

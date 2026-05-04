@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Any
 
 from .analytics import NOOP_ANALYTICS, Analytics, create_analytics
 from .cluster import cluster_scan
 from .default_cost_table import DEFAULT_COST_TABLE
-from .errors import ValkeyCommandError
+from .discovery import BuildAgentMetadataInput, DiscoveryManager, build_agent_metadata
+from .errors import AgentCacheUsageError, ValkeyCommandError
 from .telemetry import create_telemetry
 from .tiers.llm_cache import LlmCache, LlmCacheConfig
 from .tiers.session_store import SessionStore, SessionStoreConfig
@@ -22,6 +25,11 @@ from .types import (
     ToolStats,
 )
 from .utils import escape_glob_pattern
+
+try:
+    _PACKAGE_VERSION = _pkg_version("betterdb-agent-cache")
+except PackageNotFoundError:
+    _PACKAGE_VERSION = "0.0.0"
 
 
 class AgentCache:
@@ -44,8 +52,13 @@ class AgentCache:
         self._analytics_opts = options.analytics
         self._analytics: Analytics = NOOP_ANALYTICS
         self._stats_task: asyncio.Task[None] | None = None
+        self._config_refresh_task: asyncio.Task[None] | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._shutdown = False
+        self._started_at_iso = datetime.now(timezone.utc).isoformat()
+        self._discovery: DiscoveryManager | None = None
+        self._discovery_ready: asyncio.Future[None] | None = None
+        self._discovery_error: Exception | None = None
 
         use_default = options.use_default_cost_table
         effective_cost_table: dict[str, ModelCost] | None
@@ -59,6 +72,11 @@ class AgentCache:
             tracer_name=options.telemetry.tracer_name,
             registry=options.telemetry.registry,
         )
+        self._telemetry = telemetry
+
+        refresh = options.config_refresh
+        self._config_refresh_enabled = refresh.enabled
+        self._config_refresh_interval_s = max(1.0, refresh.interval_ms / 1000)
 
         self.llm = LlmCache(LlmCacheConfig(
             client=self._client,
@@ -91,22 +109,41 @@ class AgentCache:
             stats_key=self._stats_key,
         ))
 
-        # Fire-and-forget: load persisted tool policies and initialise analytics.
+        # Fire-and-forget: start config refresh loop, initialise analytics,
+        # and register the discovery marker.
         # Uses get_running_loop() so this is a no-op when AgentCache is created
-        # outside an async context (policies will be empty until next load).
+        # outside an async context.
         try:
             loop = asyncio.get_running_loop()
-            for coro in (self._load_policies_safe(), self._init_analytics_safe()):
-                t = loop.create_task(coro)
+            if self._config_refresh_enabled:
+                t = loop.create_task(self._config_refresh_loop())
+                self._config_refresh_task = t
                 self._background_tasks.add(t)
                 t.add_done_callback(self._background_tasks.discard)
+            t2 = loop.create_task(self._init_analytics_safe())
+            self._background_tasks.add(t2)
+            t2.add_done_callback(self._background_tasks.discard)
+            t3 = loop.create_task(self._register_discovery(options))
+            self._background_tasks.add(t3)
+            t3.add_done_callback(self._background_tasks.discard)
         except RuntimeError:
             pass
 
-    async def _load_policies_safe(self) -> None:
+    async def _config_refresh_loop(self) -> None:
+        """Periodically refresh tool policies from Valkey.
+
+        First refresh fires immediately (before the first sleep) so a process
+        started right after a proposal is applied picks up the change without
+        waiting a full interval. Subsequent refreshes fire every
+        ``config_refresh_interval_s`` seconds.
+        """
         try:
-            await self.tool.load_policies()
-        except Exception:
+            while not self._shutdown:
+                ok = await self.tool.refresh_policies()
+                if not ok:
+                    self._telemetry.metrics.config_refresh_failed.labels(self._name).inc()
+                await asyncio.sleep(self._config_refresh_interval_s)
+        except asyncio.CancelledError:
             pass
 
     async def _init_analytics_safe(self) -> None:
@@ -126,6 +163,63 @@ class AgentCache:
                 self._stats_task = asyncio.create_task(self._stats_loop(opts.stats_interval_s))
         except Exception:
             pass
+
+    async def _register_discovery(self, options: AgentCacheOptions) -> None:
+        disc_opts = options.discovery
+        if not disc_opts.enabled:
+            return
+
+        include_tool_policies = disc_opts.include_tool_policies
+
+        def build_metadata() -> dict:
+            return build_agent_metadata(BuildAgentMetadataInput(
+                name=self._name,
+                version=_PACKAGE_VERSION,
+                tiers={
+                    'llm': {'ttl': options.tier_defaults.get('llm', None) and options.tier_defaults['llm'].ttl},
+                    'tool': {'ttl': options.tier_defaults.get('tool', None) and options.tier_defaults['tool'].ttl},
+                    'session': {'ttl': options.tier_defaults.get('session', None) and options.tier_defaults['session'].ttl},
+                },
+                default_ttl=self._default_ttl,
+                tool_policy_names=self.tool.list_policy_names() if include_tool_policies else [],
+                has_cost_table=bool(self._cost_table),
+                uses_default_cost_table=self._use_default_cost_table,
+                started_at=self._started_at_iso,
+                include_tool_policies=include_tool_policies,
+            ))
+
+        manager = DiscoveryManager(
+            client=self._client,
+            name=self._name,
+            build_metadata=build_metadata,
+            heartbeat_interval_s=disc_opts.heartbeat_interval_ms / 1000.0,
+            on_write_failed=lambda: self._telemetry.metrics.discovery_write_failed.labels(self._name).inc(),
+        )
+
+        try:
+            await manager.register()
+            if self._shutdown:
+                await manager.stop(delete_heartbeat=True)
+                return
+            self._discovery = manager
+        except AgentCacheUsageError as exc:
+            self._discovery_error = exc
+        except Exception as exc:
+            self._discovery_error = exc
+
+    async def ensure_discovery_ready(self) -> None:
+        """Wait for the background discovery registration to complete.
+
+        Raises the stored error if registration failed (e.g. cross-type
+        collision).
+        """
+        if self._discovery_error is not None:
+            raise self._discovery_error
+        # Wait for all background tasks that may include the discovery task
+        if self._background_tasks:
+            await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
+        if self._discovery_error is not None:
+            raise self._discovery_error
 
     async def _stats_loop(self, interval_s: float) -> None:
         while not self._shutdown:
@@ -256,7 +350,13 @@ class AgentCache:
 
     async def shutdown(self) -> None:
         self._shutdown = True
+        if self._config_refresh_task is not None:
+            self._config_refresh_task.cancel()
+            self._config_refresh_task = None
         if self._stats_task is not None:
             self._stats_task.cancel()
             self._stats_task = None
+        if self._discovery is not None:
+            await self._discovery.stop(delete_heartbeat=True)
+            self._discovery = None
         await self._analytics.shutdown()

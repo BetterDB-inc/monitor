@@ -7,6 +7,13 @@ export type { Valkey };
 
 // --- Constructor options ---
 
+export interface ConfigRefreshOptions {
+  /** Enable periodic config refresh from Valkey. Default: true. */
+  enabled?: boolean;
+  /** Refresh interval in milliseconds. Default: 30000. Minimum: 1000. */
+  intervalMs?: number;
+}
+
 export interface ModelCost {
   inputPer1k: number;
   outputPer1k: number;
@@ -54,6 +61,14 @@ export interface AgentCacheOptions {
    * Defaults: enabled=true, heartbeatIntervalMs=30000, includeToolPolicies=true.
    */
   discovery?: DiscoveryOptions;
+  /**
+   * Periodic refresh of in-memory state from Valkey-side config.
+   * When enabled, the cache re-reads `{name}:__tool_policies` on the configured
+   * interval so externally-applied policy changes (e.g. from BetterDB Monitor's
+   * cache proposal feature) take effect without a process restart.
+   * Defaults: enabled=true, intervalMs=30000.
+   */
+  configRefresh?: ConfigRefreshOptions;
 }
 
 // --- LLM tier ---

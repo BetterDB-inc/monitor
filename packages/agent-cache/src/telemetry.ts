@@ -23,6 +23,7 @@ interface AgentCacheMetrics {
   storedBytes: Counter;
   activeSessions: Gauge;
   discoveryWriteFailed: Counter;
+  configRefreshFailed: Counter;
 }
 
 export interface Telemetry {
@@ -100,6 +101,12 @@ export function createTelemetry(opts: TelemetryFactoryOptions): Telemetry {
     labelNames: ['cache_name'],
   });
 
+  const configRefreshFailed = getOrCreateCounter(registry, {
+    name: `${opts.prefix}_config_refresh_failed_total`,
+    help: 'Count of failed periodic config refreshes (HGETALL on __tool_policies).',
+    labelNames: ['cache_name'],
+  });
+
   return {
     tracer,
     metrics: {
@@ -109,6 +116,7 @@ export function createTelemetry(opts: TelemetryFactoryOptions): Telemetry {
       storedBytes,
       activeSessions,
       discoveryWriteFailed,
+      configRefreshFailed,
     },
   };
 }

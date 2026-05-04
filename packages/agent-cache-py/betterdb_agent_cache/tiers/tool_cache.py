@@ -191,6 +191,9 @@ class ToolCache:
     def get_policy(self, tool_name: str) -> ToolPolicy | None:
         return self._policies.get(tool_name)
 
+    def list_policy_names(self) -> list[str]:
+        return list(self._policies.keys())
+
     async def invalidate_by_tool(self, tool_name: str) -> int:
         with self._telemetry.tracer.start_as_current_span(
             "agent_cache.tool.invalidate_by_tool"
@@ -232,24 +235,43 @@ class ToolCache:
         except Exception as exc:
             raise ValkeyCommandError("DEL", exc) from exc
 
-    async def load_policies(self) -> None:
+    async def refresh_policies(self) -> bool:
+        """Refresh policies from Valkey with an atomic swap.
+
+        Clears the in-memory map and repopulates it from HGETALL so that
+        policies deleted externally (HDEL) are also removed locally.
+
+        Returns ``True`` on a successful HGETALL, ``False`` if the call threw.
+        Used by the periodic refresh loop to drive the
+        ``config_refresh_failed`` counter.
+        """
         try:
             raw = await self._client.hgetall(self._policies_key)
-            if raw:
-                for tool_name, policy_json in raw.items():
-                    tool_name_str = (
-                        tool_name.decode() if isinstance(tool_name, bytes) else tool_name
-                    )
-                    policy_str = (
-                        policy_json.decode() if isinstance(policy_json, bytes) else policy_json
-                    )
-                    try:
-                        data = json.loads(policy_str)
-                        self._policies[tool_name_str] = ToolPolicy(ttl=data["ttl"])
-                    except (json.JSONDecodeError, KeyError):
-                        pass
         except Exception:
-            pass  # Non-blocking: failure to load policies should not break init
+            return False
+
+        next_policies: dict[str, ToolPolicy] = {}
+        if raw:
+            for tool_name, policy_json in raw.items():
+                tool_name_str = (
+                    tool_name.decode() if isinstance(tool_name, bytes) else tool_name
+                )
+                policy_str = (
+                    policy_json.decode() if isinstance(policy_json, bytes) else policy_json
+                )
+                try:
+                    data = json.loads(policy_str)
+                    next_policies[tool_name_str] = ToolPolicy(ttl=data["ttl"])
+                except (json.JSONDecodeError, KeyError):
+                    pass  # Skip corrupt entries
+
+        self._policies.clear()
+        self._policies.update(next_policies)
+        return True
+
+    async def load_policies(self) -> None:
+        """Load policies from Valkey. Delegates to refresh_policies()."""
+        await self.refresh_policies()
 
     def reset_policies(self) -> None:
         """Clear in-memory policies. Called by AgentCache.flush()."""
