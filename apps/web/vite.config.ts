@@ -10,7 +10,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/ingest': {
-        target: 'https://us.i.posthog.com',
+        target: 'https://eu.i.posthog.com',
         changeOrigin: true,
       },
     },

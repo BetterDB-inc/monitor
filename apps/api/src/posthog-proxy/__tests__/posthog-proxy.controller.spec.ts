@@ -38,28 +38,28 @@ describe('PosthogProxyController', () => {
   });
 
   describe('URL routing', () => {
-    it('forwards /ingest/e/ → https://us.i.posthog.com/e/', async () => {
+    it('forwards /ingest/e/ → https://eu.i.posthog.com/e/', async () => {
       const fetchSpy = mockFetchResponse(200, '{"status":1}');
       await controller.proxy(makeReq({ url: '/ingest/e/' }), makeReply() as any);
-      expect(fetchSpy).toHaveBeenCalledWith('https://us.i.posthog.com/e/', expect.any(Object));
+      expect(fetchSpy).toHaveBeenCalledWith('https://eu.i.posthog.com/e/', expect.any(Object));
     });
 
-    it('forwards /ingest/decide → https://us.i.posthog.com/decide', async () => {
+    it('forwards /ingest/decide → https://eu.i.posthog.com/decide', async () => {
       const fetchSpy = mockFetchResponse(200, '{}');
       await controller.proxy(makeReq({ url: '/ingest/decide', method: 'POST' }), makeReply() as any);
-      expect(fetchSpy).toHaveBeenCalledWith('https://us.i.posthog.com/decide', expect.any(Object));
+      expect(fetchSpy).toHaveBeenCalledWith('https://eu.i.posthog.com/decide', expect.any(Object));
     });
 
     it('strips /api/ingest prefix in production', async () => {
       const fetchSpy = mockFetchResponse(200, '{}');
       await controller.proxy(makeReq({ url: '/api/ingest/batch/', method: 'POST' }), makeReply() as any);
-      expect(fetchSpy).toHaveBeenCalledWith('https://us.i.posthog.com/batch/', expect.any(Object));
+      expect(fetchSpy).toHaveBeenCalledWith('https://eu.i.posthog.com/batch/', expect.any(Object));
     });
 
     it('preserves query strings', async () => {
       const fetchSpy = mockFetchResponse(200, '{}');
       await controller.proxy(makeReq({ url: '/ingest/decide?v=1&token=abc', method: 'POST' }), makeReply() as any);
-      expect(fetchSpy).toHaveBeenCalledWith('https://us.i.posthog.com/decide?v=1&token=abc', expect.any(Object));
+      expect(fetchSpy).toHaveBeenCalledWith('https://eu.i.posthog.com/decide?v=1&token=abc', expect.any(Object));
     });
   });
 

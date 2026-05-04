@@ -2,7 +2,7 @@ import { All, Controller, Req, Res } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { FastifyRequest, FastifyReply } from 'fastify';
 
-const POSTHOG_HOST = 'https://us.i.posthog.com';
+const POSTHOG_HOST = 'https://eu.i.posthog.com';
 
 @SkipThrottle()
 @Controller('ingest')

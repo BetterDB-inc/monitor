@@ -36,7 +36,7 @@ describe('PostHog Proxy (E2E)', () => {
 
       expect(res.body).toEqual({ status: 1 });
       expect(fetchSpy).toHaveBeenCalledWith(
-        'https://us.i.posthog.com/e/',
+        'https://eu.i.posthog.com/e/',
         expect.objectContaining({ method: 'POST' }),
       );
     });
@@ -64,7 +64,7 @@ describe('PostHog Proxy (E2E)', () => {
         .expect(200);
 
       expect(res.body).toHaveProperty('featureFlags');
-      expect(fetchSpy).toHaveBeenCalledWith('https://us.i.posthog.com/decide', expect.any(Object));
+      expect(fetchSpy).toHaveBeenCalledWith('https://eu.i.posthog.com/decide', expect.any(Object));
     });
   });
 
@@ -77,7 +77,7 @@ describe('PostHog Proxy (E2E)', () => {
         .send({ batch: [{ event: 'e1', distinct_id: 'u1' }] })
         .expect(200);
 
-      expect(fetchSpy).toHaveBeenCalledWith('https://us.i.posthog.com/batch/', expect.any(Object));
+      expect(fetchSpy).toHaveBeenCalledWith('https://eu.i.posthog.com/batch/', expect.any(Object));
     });
   });
 
