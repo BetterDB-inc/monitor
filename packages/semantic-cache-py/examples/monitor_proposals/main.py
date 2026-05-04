@@ -68,12 +68,6 @@ _STOPWORDS = {
 
 async def mock_embed(text: str) -> list[float]:
     dim = 64
-    words = list({
-        w for w in text.lower().split()
-        if len(w) > 1 and w.strip("'s?.,!") not in _STOPWORDS
-        # strip possessives / punctuation before checking
-    })
-    # Clean each word of trailing punctuation then re-filter
     cleaned: list[str] = []
     for w in text.lower().split():
         w = w.strip("'s?.,!\"")

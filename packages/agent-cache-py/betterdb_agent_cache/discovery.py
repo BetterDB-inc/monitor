@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .errors import AgentCacheUsageError
+from .types import DiscoveryOptions  # single source of truth
 
 PROTOCOL_VERSION = 1
 
@@ -22,13 +23,6 @@ HEARTBEAT_TTL_SECONDS = 60
 TOOL_POLICIES_LIMIT = 500
 
 CACHE_TYPE = 'agent_cache'
-
-
-@dataclass
-class DiscoveryOptions:
-    enabled: bool = True
-    heartbeat_interval_ms: int = 30_000
-    include_tool_policies: bool = True
 
 
 @dataclass

@@ -57,7 +57,7 @@ class AgentCache:
         self._shutdown = False
         self._started_at_iso = datetime.now(timezone.utc).isoformat()
         self._discovery: DiscoveryManager | None = None
-        self._discovery_ready: asyncio.Future[None] | None = None
+        self._discovery_task: asyncio.Task[None] | None = None
         self._discovery_error: Exception | None = None
 
         use_default = options.use_default_cost_table
@@ -124,6 +124,7 @@ class AgentCache:
             self._background_tasks.add(t2)
             t2.add_done_callback(self._background_tasks.discard)
             t3 = loop.create_task(self._register_discovery(options))
+            self._discovery_task = t3
             self._background_tasks.add(t3)
             t3.add_done_callback(self._background_tasks.discard)
         except RuntimeError:
@@ -215,9 +216,10 @@ class AgentCache:
         """
         if self._discovery_error is not None:
             raise self._discovery_error
-        # Wait for all background tasks that may include the discovery task
-        if self._background_tasks:
-            await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
+        # Await only the one-shot discovery task, not _background_tasks which
+        # includes the infinite config-refresh loop that never completes on its own.
+        if self._discovery_task is not None and not self._discovery_task.done():
+            await asyncio.gather(self._discovery_task, return_exceptions=True)
         if self._discovery_error is not None:
             raise self._discovery_error
 
