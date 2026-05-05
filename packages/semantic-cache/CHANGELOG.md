@@ -11,15 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Periodic config refresh** — `SemanticCache` polls `{name}:__config` on a
   configurable interval (default 30s) and updates `defaultThreshold` and
-  `categoryThresholds` in-memory. Configure via the new `configRefresh` option;
-  opt out with `configRefresh: { enabled: false }`. New Prometheus counter
+  `categoryThresholds` in-memory. The first refresh fires synchronously on
+  `initialize()` so a freshly-started process picks up an already-applied
+  proposal without waiting for the first tick. Configure via the new
+  `configRefresh` option; opt out with `configRefresh: { enabled: false }`.
+  Hash field semantics: `threshold` → `defaultThreshold`,
+  `threshold:{category}` → `categoryThresholds[category]`; out-of-range values
+  (`< 0`, `> 2`, NaN) are ignored. New Prometheus counter
   `{prefix}_config_refresh_failed_total`.
-- **Runtime threshold overrides** — `check()` and `checkBatch()` also read
-  `{prefix}:__config` on each call (cached for 5s in-process) and honor
-  `threshold` / `threshold:{category}` fields. Resolution order:
-  `options.threshold` > runtime override > `categoryThresholds` > `defaultThreshold`.
-  Read failures fall back silently to constructor values; out-of-range values
-  (`< 0`, `> 2`, NaN) are dropped.
 - **`refreshConfig()`** — public method returning `boolean` for manual refresh.
 - **`threshold_adjust` capability** — added to the discovery marker's
   `capabilities` array. Monitor's apply dispatcher gates on this before writing
@@ -33,8 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behavior change
 
-- A `{prefix}:__config` Valkey hash that previously had no effect now influences
-  `check()` thresholds. Audit existing keys before upgrading.
+- A `{prefix}:__config` Valkey hash that previously had no effect now drives
+  `defaultThreshold` and `categoryThresholds` at runtime. Audit existing keys
+  before upgrading, or set `configRefresh: { enabled: false }` to keep the
+  constructor values authoritative.
 
 ## [0.3.0] - 2026-04-27
 
