@@ -13,6 +13,7 @@ export type {
   EmbedFn,
   ModelCost,
   RerankOptions,
+  ConfigRefreshOptions,
 } from './types';
 export {
   SemanticCacheUsageError,
@@ -28,6 +29,7 @@ export type {
   ReasoningBlock,
   BlockHints,
 } from './utils';
+export { escapeTag } from './utils';
 export type { BinaryRef, BinaryNormalizer, NormalizerConfig } from './normalizer';
 export {
   hashBase64,

@@ -44,6 +44,8 @@ def make_telemetry() -> Telemetry:
         cost_saved_total=_counter(),
         embedding_cache_total=_counter(),
         stale_model_evictions=_counter(),
+        config_refresh_failed=_counter(),
+        discovery_write_failed=_counter(),
     )
     return Telemetry(tracer=tracer, metrics=metrics)
 
@@ -78,6 +80,7 @@ def make_client(
     client.delete = AsyncMock(return_value=1)
     client.expire = AsyncMock(return_value=1)
     client.hincrby = AsyncMock(return_value=1)
+    client.hget = AsyncMock(return_value=None)
     client.hgetall = AsyncMock(return_value={})
     client.hset = AsyncMock(return_value=1)
     client.scan = AsyncMock(return_value=(0, []))

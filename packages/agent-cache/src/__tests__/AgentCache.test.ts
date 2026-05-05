@@ -1,4 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { Registry } from 'prom-client';
 import { AgentCache } from '../AgentCache';
 import { DEFAULT_COST_TABLE } from '../defaultCostTable';
 
@@ -120,6 +121,160 @@ describe('AgentCache', () => {
 
     // A second call still throws — the error is captured, not one-shot.
     await expect(cache.ensureDiscoveryReady()).rejects.toThrow(/semantic_cache/);
+  });
+});
+
+describe('AgentCache config refresh', () => {
+  beforeEach(() => {
+    createAnalyticsMock.mockResolvedValue({
+      init: vi.fn().mockResolvedValue(undefined),
+      capture: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
+  });
+
+  afterEach(() => {
+    createAnalyticsMock.mockReset();
+  });
+
+  it('runs a synchronous first refresh during construction', async () => {
+    const client = createFullMockClient();
+    new AgentCache({ client: client as any });
+    await flushMicrotasks(5);
+    expect(client.hgetall).toHaveBeenCalledWith(expect.stringContaining('__tool_policies'));
+  });
+
+  it('refreshes policies on the configured interval', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createFullMockClient();
+      new AgentCache({
+        client: client as any,
+        configRefresh: { intervalMs: 5000 },
+      });
+      await flushMicrotasks(5);
+      const initialCalls = (client.hgetall as ReturnType<typeof vi.fn>).mock.calls.length;
+
+      vi.advanceTimersByTime(5000);
+      await flushMicrotasks(5);
+      expect((client.hgetall as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(initialCalls);
+
+      const afterFirstTick = (client.hgetall as ReturnType<typeof vi.fn>).mock.calls.length;
+      vi.advanceTimersByTime(5000);
+      await flushMicrotasks(5);
+      expect((client.hgetall as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(afterFirstTick);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not start the timer when configRefresh.enabled is false', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createFullMockClient();
+      new AgentCache({
+        client: client as any,
+        configRefresh: { enabled: false },
+      });
+      await flushMicrotasks(5);
+      const policyCalls = (client.hgetall as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (args) => typeof args[0] === 'string' && args[0].includes('__tool_policies'),
+      );
+      expect(policyCalls.length).toBe(0);
+
+      vi.advanceTimersByTime(60_000);
+      await flushMicrotasks(5);
+      const policyCallsAfter = (client.hgetall as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (args) => typeof args[0] === 'string' && args[0].includes('__tool_policies'),
+      );
+      expect(policyCallsAfter.length).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clamps intervalMs to a 1000ms minimum', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createFullMockClient();
+      new AgentCache({
+        client: client as any,
+        configRefresh: { intervalMs: 100 },
+      });
+      await flushMicrotasks(5);
+      const initialCalls = (client.hgetall as ReturnType<typeof vi.fn>).mock.calls.length;
+
+      vi.advanceTimersByTime(500);
+      await flushMicrotasks(5);
+      expect((client.hgetall as ReturnType<typeof vi.fn>).mock.calls.length).toBe(initialCalls);
+
+      vi.advanceTimersByTime(500);
+      await flushMicrotasks(5);
+      expect((client.hgetall as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(initialCalls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the timer on shutdown()', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createFullMockClient();
+      const cache = new AgentCache({
+        client: client as any,
+        configRefresh: { intervalMs: 1000 },
+      });
+      await flushMicrotasks(5);
+      await cache.shutdown();
+      const callsAfterShutdown = (client.hgetall as ReturnType<typeof vi.fn>).mock.calls.length;
+
+      vi.advanceTimersByTime(60_000);
+      await flushMicrotasks(5);
+      expect((client.hgetall as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterShutdown);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('externally-written tool policy is visible after one refresh interval', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createFullMockClient();
+      (client.hgetall as ReturnType<typeof vi.fn>).mockResolvedValueOnce({});
+      const cache = new AgentCache({
+        client: client as any,
+        configRefresh: { intervalMs: 1000 },
+      });
+      await flushMicrotasks(5);
+      expect(cache.tool.getPolicy('search')).toBeUndefined();
+
+      (client.hgetall as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        search: JSON.stringify({ ttl: 600 }),
+      });
+      vi.advanceTimersByTime(1000);
+      await flushMicrotasks(5);
+
+      expect(cache.tool.getPolicy('search')).toEqual({ ttl: 600 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('increments configRefreshFailed counter when hgetall throws', async () => {
+    const registry = new Registry();
+    const client = createFullMockClient();
+    (client.hgetall as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('NOAUTH'));
+
+    new AgentCache({
+      client: client as any,
+      telemetry: { registry },
+    });
+    await flushMicrotasks(5);
+
+    const text = await registry.metrics();
+    // Counter must be > 0; the exact value depends on how many ticks fired,
+    // but the synchronous first tick is guaranteed.
+    expect(text).toMatch(/agent_cache_config_refresh_failed_total\{cache_name="betterdb_ac"\} [1-9]/);
   });
 });
 

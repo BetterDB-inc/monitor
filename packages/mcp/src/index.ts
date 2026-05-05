@@ -1156,6 +1156,12 @@ server.tool(
           isError: true,
         };
       }
+      if (params.new_threshold !== undefined && params.new_ttl_seconds !== undefined) {
+        return {
+          content: [{ type: 'text' as const, text: 'new_threshold and new_ttl_seconds are mutually exclusive — provide exactly one' }],
+          isError: true,
+        };
+      }
       const body: Record<string, unknown> = {};
       if (params.new_threshold !== undefined) {
         body.new_threshold = params.new_threshold;

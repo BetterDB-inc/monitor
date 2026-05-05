@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-04
+
+### Added
+
+- **Periodic config refresh** — `AgentCache` now polls `{name}:__tool_policies`
+  on a configurable interval (default 30s) and atomically swaps the in-memory
+  policy map. Externally-applied policy changes (e.g. from BetterDB Monitor's
+  cache proposal feature) take effect without a process restart. Configure via
+  the new `configRefresh` option (`enabled`, `intervalMs`); opt out with
+  `configRefresh: { enabled: false }`. New Prometheus counter
+  `{prefix}_config_refresh_failed_total`.
+- **`ToolCache.refreshPolicies()`** — public method returning `boolean` for
+  consumers who want to drive the refresh manually.
+
+### Changed
+
+- **`ToolCache.loadPolicies()`** now removes policies that no longer exist in
+  Valkey (atomic swap rather than additive merge). Previous behavior left
+  stale local entries when a policy was HDEL'd externally.
+
 ## [0.5.0] - 2026-04-27
 
 ### Added

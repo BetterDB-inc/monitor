@@ -83,6 +83,8 @@ class AgentCacheMetrics:
     cost_saved: Counter
     stored_bytes: Counter
     active_sessions: Gauge
+    config_refresh_failed: Counter
+    discovery_write_failed: Counter
 
 
 @dataclass
@@ -98,6 +100,20 @@ def create_telemetry(
 ) -> Telemetry:
     reg = registry or _DEFAULT_REGISTRY
     tracer = trace.get_tracer(tracer_name)
+
+    config_refresh_failed = _get_or_create_counter(
+        reg,
+        f"{prefix}_config_refresh_failed_total",
+        "Count of failed periodic config refreshes (HGETALL on __tool_policies).",
+        ["cache_name"],
+    )
+
+    discovery_write_failed = _get_or_create_counter(
+        reg,
+        f"{prefix}_discovery_write_failed_total",
+        "Count of failed discovery-marker writes.",
+        ["cache_name"],
+    )
 
     metrics = AgentCacheMetrics(
         requests_total=_get_or_create_counter(
@@ -131,6 +147,8 @@ def create_telemetry(
             "Approximate number of active session threads",
             ["cache_name"],
         ),
+        config_refresh_failed=config_refresh_failed,
+        discovery_write_failed=discovery_write_failed,
     )
 
     return Telemetry(tracer=tracer, metrics=metrics)

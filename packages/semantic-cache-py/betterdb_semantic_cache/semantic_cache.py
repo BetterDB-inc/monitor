@@ -13,6 +13,12 @@ from opentelemetry.trace import StatusCode
 from .analytics import NOOP_ANALYTICS, Analytics, create_analytics
 from .cluster import cluster_scan
 from .default_cost_table import DEFAULT_COST_TABLE
+from .discovery import (
+    BuildSemanticMetadataInput,
+    DiscoveryManager,
+    DiscoveryOptions,
+    build_semantic_metadata,
+)
 from .errors import EmbeddingError, SemanticCacheUsageError, ValkeyCommandError
 from .telemetry import Telemetry, create_telemetry
 from .types import (
@@ -54,8 +60,17 @@ class SemanticCache:
         self._embed_key_prefix = f"{options.name}:embed:"
         self._default_threshold = options.default_threshold
         self._default_ttl = options.default_ttl
-        self._category_thresholds = options.category_thresholds
+        self._category_thresholds: dict[str, float] = dict(options.category_thresholds)
         self._uncertainty_band = options.uncertainty_band
+
+        # Capture constructor values as fallbacks when __config fields are absent
+        self._initial_default_threshold = options.default_threshold
+        self._initial_category_thresholds = dict(options.category_thresholds)
+        self._config_key = f"{options.name}:__config"
+
+        refresh = options.config_refresh
+        self._config_refresh_enabled = refresh.enabled
+        self._config_refresh_interval_s = max(1.0, refresh.interval_ms / 1000)
 
         # Build effective cost table
         if not options.use_default_cost_table and not options.cost_table:
@@ -94,6 +109,9 @@ class SemanticCache:
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._shutdown = False
         self._analytics_initiated = False
+        self._config_refresh_task: asyncio.Task[None] | None = None
+        self._discovery: DiscoveryManager | None = None
+        self._discovery_opts: DiscoveryOptions = options.discovery
 
     # -- Lifecycle --
 
@@ -121,6 +139,14 @@ class SemanticCache:
             self._stats_task.cancel()
             self._stats_task = None
 
+        # Capture and null the discovery ref synchronously before any await, so a
+        # concurrent _do_initialize() (started after this flush) cannot race and have
+        # its new manager overwritten by this flush's stop().
+        discovery_to_stop = self._discovery
+        self._discovery = None
+        if discovery_to_stop is not None:
+            await discovery_to_stop.stop(delete_heartbeat=True)
+
         try:
             await self._client.execute_command("FT.DROPINDEX", self._index_name)
         except Exception as err:
@@ -147,11 +173,17 @@ class SemanticCache:
         self._analytics.capture("cache_flush")
 
     async def shutdown(self) -> None:
-        """Shut down the analytics client and cancel the stats timer."""
+        """Shut down the analytics client, cancel the stats and config-refresh timers."""
         self._shutdown = True
+        if self._config_refresh_task is not None:
+            self._config_refresh_task.cancel()
+            self._config_refresh_task = None
         if self._stats_task is not None:
             self._stats_task.cancel()
             self._stats_task = None
+        if self._discovery is not None:
+            await self._discovery.stop(delete_heartbeat=True)
+            self._discovery = None
         await self._analytics.shutdown()
 
     # -- Public operations --
@@ -964,6 +996,78 @@ class SemanticCache:
         except Exception as exc:
             raise ValkeyCommandError("FT.SEARCH", exc) from exc
 
+    async def refresh_config(self) -> bool:
+        """Refresh threshold config from Valkey. Returns True on success.
+
+        Field semantics:
+        - ``threshold``            → updates ``_default_threshold``
+        - ``threshold:{category}`` → updates ``_category_thresholds[category]``
+        - ``threshold:`` (empty)   → ignored
+        - non-numeric values       → ignored
+        - out-of-range (< 0 or > 2) → ignored
+
+        Constructor values are used as fallbacks when fields are absent from
+        the hash, so a previously applied override can be cleared by removing
+        the field from ``__config``.
+        """
+        try:
+            raw = await self._client.hgetall(self._config_key)
+        except Exception:
+            return False
+
+        next_default = self._initial_default_threshold
+        next_category = dict(self._initial_category_thresholds)
+
+        if raw:
+            for field_key, value in raw.items():
+                field_str = field_key.decode() if isinstance(field_key, bytes) else field_key
+                value_str = value.decode() if isinstance(value, bytes) else value
+                try:
+                    parsed = float(value_str)
+                except (ValueError, TypeError):
+                    continue
+                if not math.isfinite(parsed) or parsed < 0 or parsed > 2:
+                    continue
+                if field_str == "threshold":
+                    next_default = parsed
+                elif field_str.startswith("threshold:"):
+                    category = field_str[len("threshold:"):]
+                    if category:
+                        next_category[category] = parsed
+
+        self._default_threshold = next_default
+        self._category_thresholds = next_category
+        return True
+
+    def _start_config_refresh(self) -> None:
+        if not self._config_refresh_enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            t = loop.create_task(self._config_refresh_loop())
+            self._config_refresh_task = t
+            self._background_tasks.add(t)
+            t.add_done_callback(self._background_tasks.discard)
+        except RuntimeError:
+            pass
+
+    async def _config_refresh_loop(self) -> None:
+        """Periodically refresh threshold config from Valkey.
+
+        First refresh fires immediately so a process started right after a
+        proposal is applied picks up the change without waiting a full interval.
+        """
+        try:
+            while not self._shutdown:
+                ok = await self.refresh_config()
+                if not ok:
+                    self._telemetry.metrics.config_refresh_failed.labels(
+                        cache_name=self._name
+                    ).inc()
+                await asyncio.sleep(self._config_refresh_interval_s)
+        except asyncio.CancelledError:
+            pass
+
     async def _do_initialize(self) -> None:
         with self._telemetry.tracer.start_as_current_span("semantic_cache.initialize") as span:
             try:
@@ -971,6 +1075,8 @@ class SemanticCache:
                 self._dimension = dim
                 self._has_binary_refs = has_binary_refs
                 self._initialized = True
+                self._start_config_refresh()
+                await self._register_discovery()
                 span.set_status(StatusCode.OK)
                 # Fire analytics init once — skip on flush()+initialize() re-runs
                 if not self._analytics_initiated:
@@ -984,6 +1090,54 @@ class SemanticCache:
             except Exception as e:
                 span.set_status(StatusCode.ERROR, str(e))
                 raise
+
+    async def _register_discovery(self) -> None:
+        """Register the discovery marker in Valkey. Called from _do_initialize().
+
+        If discovery is disabled this is a no-op. On a cross-type collision
+        SemanticCacheUsageError is re-raised so initialize() fails immediately.
+        All other Valkey errors are swallowed and counted via the
+        discovery_write_failed counter.
+        """
+        if not self._discovery_opts.enabled:
+            return
+
+        version: str
+        try:
+            from importlib.metadata import version as _pkg_version
+            version = _pkg_version('betterdb-semantic-cache')
+        except Exception:
+            version = '0.0.0'
+
+        def _build_metadata() -> dict:
+            return build_semantic_metadata(
+                BuildSemanticMetadataInput(
+                    name=self._name,
+                    version=version,
+                    default_threshold=self._default_threshold,
+                    category_thresholds=dict(self._category_thresholds),
+                    uncertainty_band=self._uncertainty_band,
+                    include_categories=self._discovery_opts.include_categories,
+                )
+            )
+
+        def _on_write_failed() -> None:
+            self._telemetry.metrics.discovery_write_failed.labels(
+                cache_name=self._name
+            ).inc()
+
+        manager = DiscoveryManager(
+            client=self._client,
+            name=self._name,
+            build_metadata=_build_metadata,
+            heartbeat_interval_s=self._discovery_opts.heartbeat_interval_ms / 1000,
+            on_write_failed=_on_write_failed,
+        )
+
+        # SemanticCacheUsageError (cross-type collision) propagates — initialize() fails.
+        # All other errors are swallowed inside DiscoveryManager.register().
+        await manager.register()
+        self._discovery = manager
 
     async def _init_analytics_safe(self) -> None:
         if self._analytics_initiated:

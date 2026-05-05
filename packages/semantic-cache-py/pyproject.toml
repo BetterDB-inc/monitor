@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "betterdb-semantic-cache"
-version = "0.1.3"
+version = "0.2.0"
 description = "Semantic cache for AI workloads backed by Valkey vector search. Embeddings-based similarity matching with OpenTelemetry and Prometheus instrumentation."
 keywords = ["valkey", "redis", "semantic-cache", "vector-search", "embeddings", "llm", "opentelemetry", "prometheus", "langchain", "langgraph"]
 license = { text = "MIT" }
