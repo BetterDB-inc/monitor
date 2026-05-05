@@ -1,6 +1,7 @@
 import { useConnection } from '../hooks/useConnection';
 import { ReactNode, ReactElement } from 'react';
 import { useIsDemo } from '../contexts/DemoContext';
+import { useTelemetry } from '../hooks/useTelemetry';
 
 
 function openAddConnectionDialog() {
@@ -14,6 +15,7 @@ interface NoConnectionsGuardProps {
 export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): ReactElement | null {
   const { hasNoConnections, loading, error } = useConnection();
   const isDemo = useIsDemo();
+  const { client: telemetry } = useTelemetry();
 
   const isCloudDomain =
     typeof window !== 'undefined' &&
@@ -82,6 +84,7 @@ export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): React
                   href="https://demo.app.betterdb.com"
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => telemetry.capture('demo_link_clicked', { source: 'empty_state' })}
                   className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline underline-offset-4 transition-colors"
                 >
                   Try the live demo first
