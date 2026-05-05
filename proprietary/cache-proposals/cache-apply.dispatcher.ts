@@ -176,7 +176,7 @@ export class CacheApplyDispatcher {
     payload: SemanticInvalidatePayload,
     proposalId: string,
   ): Promise<Omit<ApplyOutcome, 'durationMs'>> {
-    const indexName = `${cache.prefix}:__index`;
+    const indexName = `${cache.prefix}:idx`;
     let raw: unknown;
     try {
       raw = await client.call(

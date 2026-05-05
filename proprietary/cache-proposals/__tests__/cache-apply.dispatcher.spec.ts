@@ -29,8 +29,10 @@ class FakeClient {
   }
 
   public ftSearchResponse: unknown = [0];
+  public callArgs: Array<unknown[]> = [];
 
-  async call(): Promise<unknown> {
+  async call(...args: unknown[]): Promise<unknown> {
+    this.callArgs.push(args);
     return this.ftSearchResponse;
   }
 }
@@ -230,5 +232,102 @@ describe('CacheApplyDispatcher', () => {
         proposal({ cache_name: 'ac:prod', cache_type: 'semantic_cache' }),
       ),
     ).rejects.toBeInstanceOf(ApplyFailedError);
+  });
+
+  it('semantic invalidate queries {prefix}:idx — the index SemanticCache creates', async () => {
+    // Regression test: the index SemanticCache creates is `${name}:idx`, not `${prefix}:__index`.
+    // If this suffix is wrong, FT.SEARCH will target a non-existent index and delete nothing.
+    const client = new FakeClient();
+    client.ftSearchResponse = ['0'];
+    const dispatcher = buildDispatcher(SEMANTIC_CACHE, client);
+    await dispatcher.dispatch(
+      proposal({
+        proposal_type: 'invalidate',
+        proposal_payload: {
+          filter_kind: 'valkey_search',
+          filter_expression: '@model:{gpt-4o}',
+          estimated_affected: 0,
+        },
+      }),
+    );
+    // callArgs[0] = ['FT.SEARCH', indexName, filterExpression, ...]
+    expect(client.callArgs[0][1]).toBe('sc:prod:idx');
+  });
+
+  it('semantic invalidate forwards filter_expression from the payload verbatim to FT.SEARCH', async () => {
+    const client = new FakeClient();
+    client.ftSearchResponse = ['0'];
+    const dispatcher = buildDispatcher(SEMANTIC_CACHE, client);
+    const filterExpression = '@category:{faq} @model:{gpt-4o}';
+    await dispatcher.dispatch(
+      proposal({
+        proposal_type: 'invalidate',
+        proposal_payload: {
+          filter_kind: 'valkey_search',
+          filter_expression: filterExpression,
+          estimated_affected: 0,
+        },
+      }),
+    );
+    expect(client.callArgs[0][2]).toBe(filterExpression);
+  });
+
+  it('semantic invalidate with a non-default prefix queries {prefix}:idx', async () => {
+    const client = new FakeClient();
+    client.ftSearchResponse = ['0'];
+    const customCache: ResolvedCache = { ...SEMANTIC_CACHE, prefix: 'myapp:sc' };
+    const dispatcher = buildDispatcher(customCache, client);
+    await dispatcher.dispatch(
+      proposal({
+        proposal_type: 'invalidate',
+        proposal_payload: {
+          filter_kind: 'valkey_search',
+          filter_expression: '*',
+          estimated_affected: 0,
+        },
+      }),
+    );
+    expect(client.callArgs[0][1]).toBe('myapp:sc:idx');
+  });
+
+  it('threshold_adjust writes field=threshold for null category (dispatcher→library contract)', async () => {
+    // Verifies the exact field the library's refreshConfig() expects: "threshold" (no suffix).
+    const client = new FakeClient();
+    const dispatcher = buildDispatcher(SEMANTIC_CACHE, client);
+    await dispatcher.dispatch(
+      proposal({ proposal_payload: { category: null, current_threshold: 0.1, new_threshold: 0.5 } }),
+    );
+    expect(client.hsets[0]).toMatchObject({ field: 'threshold', value: '0.5' });
+  });
+
+  it('threshold_adjust writes field=threshold:{category} for non-null category (dispatcher→library contract)', async () => {
+    // Verifies the exact field the library's refreshConfig() expects: "threshold:{category}".
+    const client = new FakeClient();
+    const dispatcher = buildDispatcher(SEMANTIC_CACHE, client);
+    await dispatcher.dispatch(
+      proposal({ proposal_payload: { category: 'faq', current_threshold: 0.1, new_threshold: 0.07 } }),
+    );
+    expect(client.hsets[0]).toMatchObject({ field: 'threshold:faq', value: '0.07' });
+  });
+
+  it('tool_ttl_adjust writes JSON { ttl: N } policy (dispatcher→library contract)', async () => {
+    // Verifies the exact JSON format the library's refreshPolicies() expects.
+    const client = new FakeClient();
+    const dispatcher = buildDispatcher(AGENT_CACHE, client);
+    await dispatcher.dispatch(
+      proposal({
+        cache_name: 'ac:prod',
+        cache_type: 'agent_cache',
+        proposal_type: 'tool_ttl_adjust',
+        proposal_payload: { tool_name: 'search', current_ttl_seconds: 60, new_ttl_seconds: 300 },
+      }),
+    );
+    expect(client.hsets[0]).toMatchObject({
+      key: 'ac:prod:__tool_policies',
+      field: 'search',
+      value: JSON.stringify({ ttl: 300 }),
+    });
+    // Confirm the library can parse it
+    expect(JSON.parse(client.hsets[0].value)).toEqual({ ttl: 300 });
   });
 });

@@ -15,6 +15,7 @@ from betterdb_semantic_cache.semantic_cache import SemanticCache
 from betterdb_semantic_cache.types import (
     CacheCheckOptions,
     CacheStoreOptions,
+    DiscoveryOptions,
     EmbeddingCacheOptions,
     SemanticCacheOptions,
     TelemetryOptions,
@@ -47,6 +48,7 @@ def _make_cache(
         telemetry=TelemetryOptions(tracer_name="test", metrics_prefix="test_sc"),
         use_default_cost_table=use_default_cost_table,
         cost_table=cost_table or {},
+        discovery=DiscoveryOptions(enabled=False),
     )
     cache = SemanticCache(opts)
 

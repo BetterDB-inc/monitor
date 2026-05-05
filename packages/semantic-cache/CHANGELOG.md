@@ -9,12 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Runtime threshold overrides** — `check()` and `checkBatch()` now read `HGETALL {prefix}:__config` on each call (cached for 5s in-process) and honor `threshold` / `threshold:{category}` fields as runtime overrides. Lets BetterDB Monitor's `threshold_adjust` cache-intelligence proposals take effect at runtime without restarting consumer apps. Resolution order: `options.threshold` > runtime `threshold:{category}` > runtime `threshold` > constructor `categoryThresholds` > `defaultThreshold`. Read failures fall back silently to constructor values (logged at warn level); out-of-range values (`< 0`, `> 2`, NaN) are dropped.
-- **`threshold_adjust` capability** — added to the discovery marker's `capabilities` array. Monitor's apply dispatcher gates on this string before writing the config hash; older versions that lack the runtime read will not advertise it and Monitor will refuse to apply `threshold_adjust` proposals against them.
+- **Periodic config refresh** — `SemanticCache` polls `{name}:__config` on a
+  configurable interval (default 30s) and updates `defaultThreshold` and
+  `categoryThresholds` in-memory. Configure via the new `configRefresh` option;
+  opt out with `configRefresh: { enabled: false }`. New Prometheus counter
+  `{prefix}_config_refresh_failed_total`.
+- **Runtime threshold overrides** — `check()` and `checkBatch()` also read
+  `{prefix}:__config` on each call (cached for 5s in-process) and honor
+  `threshold` / `threshold:{category}` fields. Resolution order:
+  `options.threshold` > runtime override > `categoryThresholds` > `defaultThreshold`.
+  Read failures fall back silently to constructor values; out-of-range values
+  (`< 0`, `> 2`, NaN) are dropped.
+- **`refreshConfig()`** — public method returning `boolean` for manual refresh.
+- **`threshold_adjust` capability** — added to the discovery marker's
+  `capabilities` array. Monitor's apply dispatcher gates on this before writing
+  the config hash.
+- **`ConfigRefreshOptions`** type exported from the package root.
+
+### Changed
+
+- Constructor values for `defaultThreshold` and `categoryThresholds` are now
+  used as fallbacks when corresponding fields are absent from `__config`.
 
 ### Behavior change
 
-- A `{prefix}:__config` Valkey hash that previously had no effect on this library now influences `check()` thresholds. If you have manually populated this key for unrelated reasons in an existing deployment, audit the values before upgrading.
+- A `{prefix}:__config` Valkey hash that previously had no effect now influences
+  `check()` thresholds. Audit existing keys before upgrading.
 
 ## [0.3.0] - 2026-04-27
 

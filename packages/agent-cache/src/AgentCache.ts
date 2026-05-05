@@ -8,6 +8,7 @@ import type {
   SessionStats,
   ToolStats,
   ModelCost,
+  ConfigRefreshOptions,
 } from './types';
 import { DEFAULT_COST_TABLE } from './defaultCostTable';
 import { LlmCache } from './tiers/LlmCache';
@@ -37,8 +38,11 @@ export class AgentCache {
   private readonly statsKey: string;
   private readonly defaultTtl: number | undefined;
   private readonly toolTierTtl: number | undefined;
+  private readonly telemetry: Telemetry;
   private analytics: Analytics = NOOP_ANALYTICS;
   private statsTimer: ReturnType<typeof setInterval> | undefined;
+  private configRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  private readonly configRefreshOptions: Required<ConfigRefreshOptions>;
   private shutdownCalled = false;
 
   private discovery: DiscoveryManager | null = null;
@@ -71,6 +75,13 @@ export class AgentCache {
       tracerName: options.telemetry?.tracerName ?? '@betterdb/agent-cache',
       registry: options.telemetry?.registry,
     });
+    this.telemetry = telemetry;
+
+    const refresh = options.configRefresh ?? {};
+    this.configRefreshOptions = {
+      enabled: refresh.enabled ?? true,
+      intervalMs: Math.max(1000, refresh.intervalMs ?? 30_000),
+    };
 
     const defaultTtl = options.defaultTtl;
 
@@ -109,8 +120,7 @@ export class AgentCache {
       statsKey: this.statsKey,
     });
 
-    // Fire-and-forget: load persisted tool policies from Valkey
-    this.tool.loadPolicies().catch(() => {});
+    this.startConfigRefresh();
 
     this.registerDiscovery(options.discovery, telemetry);
 
@@ -305,8 +315,41 @@ export class AgentCache {
       .catch(() => {});
   }
 
+  private startConfigRefresh(): void {
+    if (!this.configRefreshOptions.enabled) {
+      return;
+    }
+
+    const tick = (): void => {
+      this.tool
+        .refreshPolicies()
+        .then((ok) => {
+          if (!ok) {
+            this.telemetry.metrics.configRefreshFailed.labels(this.name).inc();
+          }
+        })
+        .catch(() => {
+          // refreshPolicies() is designed not to throw, but be defensive.
+          this.telemetry.metrics.configRefreshFailed.labels(this.name).inc();
+        });
+    };
+
+    // Synchronous first refresh: process started immediately after a proposal
+    // was applied picks up the change without waiting for the first tick.
+    tick();
+
+    this.configRefreshTimer = setInterval(tick, this.configRefreshOptions.intervalMs);
+    if (typeof this.configRefreshTimer.unref === 'function') {
+      this.configRefreshTimer.unref();
+    }
+  }
+
   async shutdown(): Promise<void> {
     this.shutdownCalled = true;
+    if (this.configRefreshTimer) {
+      clearInterval(this.configRefreshTimer);
+      this.configRefreshTimer = undefined;
+    }
     if (this.statsTimer) {
       clearInterval(this.statsTimer);
       this.statsTimer = undefined;

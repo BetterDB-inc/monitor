@@ -1,6 +1,7 @@
 import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import { CacheProposalService } from '../cache-proposal.service';
 import { CacheResolverService, type ResolvedCache } from '../cache-resolver.service';
+import type { ConnectionRegistry } from '../../connections/connection-registry.service';
 import {
   CacheNotFoundError,
   CacheProposalValidationError,
@@ -45,6 +46,43 @@ const buildService = (): { service: CacheProposalService; storage: MemoryAdapter
   const service = new CacheProposalService(storage, resolver as unknown as CacheResolverService);
   return { service, storage, resolver };
 };
+
+/**
+ * Build a service with a fake Valkey registry so readCurrentThreshold / readCurrentTtl
+ * can retrieve values the dispatcher would have previously written.
+ */
+function buildServiceWithRegistry(
+  configStore: Record<string, string>,
+  policiesStore: Record<string, string>,
+): { service: CacheProposalService; resolver: StubResolver } {
+  const storage = new MemoryAdapter();
+  const resolver = new StubResolver();
+  resolver.set(SEMANTIC_CACHE, 'semantic_cache');
+  resolver.set(AGENT_CACHE, 'agent_cache');
+
+  const fakeClient = {
+    hgetall: async (key: string) => {
+      if (key.endsWith(':__config')) return { ...configStore };
+      return {};
+    },
+    hget: async (key: string, field: string) => {
+      if (key.endsWith(':__tool_policies')) return policiesStore[field] ?? null;
+      return null;
+    },
+    get: async () => null,
+  };
+  const fakeRegistry = {
+    get: () => ({ getClient: () => fakeClient }),
+  } as unknown as ConnectionRegistry;
+
+  const service = new CacheProposalService(
+    storage,
+    resolver as unknown as CacheResolverService,
+    undefined,   // applyService
+    fakeRegistry,
+  );
+  return { service, resolver };
+}
 
 describe('CacheProposalService', () => {
   describe('proposeThresholdAdjust', () => {
@@ -409,5 +447,64 @@ describe('CacheProposalService', () => {
       expect(result.proposal.status).toBe('pending');
       expect(result.proposal.connection_id).toBe(OTHER_CONNECTION_ID);
     });
+  });
+});
+
+describe('CacheProposalService — readCurrentThreshold reads dispatcher-written values', () => {
+  // These tests verify the full apply→re-propose cycle:
+  // after CacheApplyDispatcher writes a new threshold to {prefix}:__config,
+  // the next proposal's current_threshold should reflect that applied value,
+  // not the SDK-published baseline.
+
+  it('proposeThresholdAdjust uses the threshold field from __config as current_threshold', async () => {
+    // Dispatcher writes: client.hset(`${prefix}:__config`, 'threshold', '0.5')
+    const { service } = buildServiceWithRegistry({ threshold: '0.5' }, {});
+    const result = await service.proposeThresholdAdjust(CONNECTION_ID, {
+      cacheName: SEMANTIC_CACHE,
+      newThreshold: 0.3,
+      reasoning: VALID_REASON,
+    });
+    if (result.proposal.proposal_type !== 'threshold_adjust') throw new Error('wrong type');
+    expect(result.proposal.proposal_payload.current_threshold).toBe(0.5);
+  });
+
+  it('proposeThresholdAdjust uses threshold:{category} field for per-category proposals', async () => {
+    // Dispatcher writes: client.hset(`${prefix}:__config`, 'threshold:faq', '0.07')
+    const { service } = buildServiceWithRegistry({ 'threshold:faq': '0.07' }, {});
+    const result = await service.proposeThresholdAdjust(CONNECTION_ID, {
+      cacheName: SEMANTIC_CACHE,
+      category: 'faq',
+      newThreshold: 0.05,
+      reasoning: VALID_REASON,
+    });
+    if (result.proposal.proposal_type !== 'threshold_adjust') throw new Error('wrong type');
+    expect(result.proposal.proposal_payload.current_threshold).toBe(0.07);
+  });
+
+  it('falls back to 0 when __config has no threshold field yet', async () => {
+    const { service } = buildServiceWithRegistry({}, {});
+    const result = await service.proposeThresholdAdjust(CONNECTION_ID, {
+      cacheName: SEMANTIC_CACHE,
+      newThreshold: 0.1,
+      reasoning: VALID_REASON,
+    });
+    if (result.proposal.proposal_type !== 'threshold_adjust') throw new Error('wrong type');
+    expect(result.proposal.proposal_payload.current_threshold).toBe(0);
+  });
+
+  it('proposeToolTtlAdjust uses the TTL from __tool_policies as current_ttl_seconds', async () => {
+    // Dispatcher writes: client.hset(`${prefix}:__tool_policies`, 'search', JSON.stringify({ ttl: 600 }))
+    const { service } = buildServiceWithRegistry(
+      {},
+      { search: JSON.stringify({ ttl: 600 }) },
+    );
+    const result = await service.proposeToolTtlAdjust(CONNECTION_ID, {
+      cacheName: AGENT_CACHE,
+      toolName: 'search',
+      newTtlSeconds: 300,
+      reasoning: VALID_REASON,
+    });
+    if (result.proposal.proposal_type !== 'tool_ttl_adjust') throw new Error('wrong type');
+    expect(result.proposal.proposal_payload.current_ttl_seconds).toBe(600);
   });
 });

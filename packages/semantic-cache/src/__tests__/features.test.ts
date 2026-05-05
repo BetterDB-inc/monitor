@@ -354,7 +354,10 @@ describe('params-aware filtering', () => {
     });
 
     expect(client.hset).toHaveBeenCalled();
-    const storedFields = client.hashStore.values().next().value as Record<string, string>;
+    // hashStore.values().next() now returns the discovery-marker entry first.
+    // Find the actual cache entry by its key (contains ':entry:').
+    const storedFields = [...client.hashStore.entries()]
+      .find(([k]) => k.includes(':entry:'))?.[1] as Record<string, string>;
     expect(storedFields['temperature']).toBe('0.7');
     expect(storedFields['top_p']).toBe('0.9');
     expect(storedFields['seed']).toBe('42');

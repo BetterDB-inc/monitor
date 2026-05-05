@@ -34,6 +34,33 @@ class AnalyticsOptions:
 
 
 @dataclass
+class ConfigRefreshOptions:
+    """Periodic refresh of in-memory threshold config from Valkey.
+
+    When enabled, the cache re-reads ``{name}:__config`` on the configured
+    interval. Field ``threshold`` updates ``default_threshold``; fields named
+    ``threshold:{category}`` update ``category_thresholds[category]``.
+    Defaults: ``enabled=True``, ``interval_ms=30000``.
+    """
+    enabled: bool = True
+    interval_ms: int = 30_000
+    """Refresh interval in milliseconds. Minimum: 1000."""
+
+
+@dataclass
+class DiscoveryOptions:
+    """Options for the discovery marker protocol.
+
+    When enabled, on ``initialize()`` the cache registers itself in the
+    Valkey-side ``__betterdb:caches`` hash and writes a periodic heartbeat key
+    (default 30 s). BetterDB Monitor uses this to enumerate live caches.
+    """
+    enabled: bool = True
+    heartbeat_interval_ms: int = 30_000
+    include_categories: bool = True
+
+
+@dataclass
 class SemanticCacheOptions:
     client: Any  # valkey.asyncio.Valkey or ValkeyCluster
     embed_fn: EmbedFn
@@ -48,6 +75,8 @@ class SemanticCacheOptions:
     embedding_cache: EmbeddingCacheOptions = field(default_factory=EmbeddingCacheOptions)
     telemetry: TelemetryOptions = field(default_factory=TelemetryOptions)
     analytics: AnalyticsOptions = field(default_factory=AnalyticsOptions)
+    config_refresh: ConfigRefreshOptions = field(default_factory=ConfigRefreshOptions)
+    discovery: DiscoveryOptions = field(default_factory=DiscoveryOptions)
 
 
 @dataclass

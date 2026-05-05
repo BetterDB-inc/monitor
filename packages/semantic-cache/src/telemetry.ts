@@ -23,6 +23,7 @@ interface CacheMetrics {
   embeddingCacheTotal: Counter;
   staleModelEvictions: Counter;
   discoveryWriteFailed: Counter;
+  configRefreshFailed: Counter;
 }
 
 export interface Telemetry {
@@ -105,6 +106,12 @@ export function createTelemetry(opts: TelemetryFactoryOptions): Telemetry {
     labelNames: ['cache_name'],
   });
 
+  const configRefreshFailed = getOrCreateCounter(registry, {
+    name: `${opts.prefix}_config_refresh_failed_total`,
+    help: 'Count of failed periodic config refreshes (HGETALL on __config).',
+    labelNames: ['cache_name'],
+  });
+
   return {
     tracer,
     metrics: {
@@ -116,6 +123,7 @@ export function createTelemetry(opts: TelemetryFactoryOptions): Telemetry {
       embeddingCacheTotal,
       staleModelEvictions,
       discoveryWriteFailed,
+      configRefreshFailed,
     },
   };
 }

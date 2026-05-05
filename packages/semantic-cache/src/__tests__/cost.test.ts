@@ -139,10 +139,15 @@ describe('cost tracking - SemanticCache', () => {
       outputTokens: 5,
     });
 
-    // Verify hset was called with cost_micros
+    // Verify hset was called with cost_micros.
+    // calls[0] is the discovery-marker registration (3-arg hset: key, field, value).
+    // The entry store call uses the 2-arg form (key, fields-object) — find it by
+    // checking that the second argument is a plain object, not a string.
     expect(client.hset).toHaveBeenCalled();
-    const hsetArgs = client.hset.mock.calls[0];
-    const fields = hsetArgs[1] as Record<string, string>;
+    const hsetArgs = client.hset.mock.calls.find(
+      ([, arg]) => typeof arg === 'object' && arg !== null,
+    );
+    const fields = hsetArgs?.[1] as Record<string, string>;
     expect(fields['cost_micros']).toBeDefined();
 
     // cost = (10 * 0.0025/1000 + 5 * 0.01/1000) * 1_000_000

@@ -13,6 +13,7 @@ import type {
   Valkey,
   EmbedFn,
   ModelCost,
+  ConfigRefreshOptions,
 } from './types';
 import {
   SemanticCacheUsageError,
@@ -56,9 +57,9 @@ export class SemanticCache {
   private readonly statsKey: string;
   private readonly similarityWindowKey: string;
   private readonly configKey: string;
-  private readonly defaultThreshold: number;
+  private defaultThreshold: number;
   private readonly defaultTtl: number | undefined;
-  private readonly categoryThresholds: Record<string, number>;
+  private categoryThresholds: Record<string, number>;
   private readonly uncertaintyBand: number;
   private readonly telemetry: Telemetry;
   private readonly costTable: Record<string, ModelCost> | undefined;
@@ -66,6 +67,11 @@ export class SemanticCache {
   private readonly embeddingCacheTtl: number;
   private readonly embedKeyPrefix: string;
   private readonly discoveryOptions: DiscoveryOptions;
+  private readonly configKey: string;
+  private readonly _initialDefaultThreshold: number;
+  private readonly _initialCategoryThresholds: Record<string, number>;
+  private readonly configRefreshOptions: Required<ConfigRefreshOptions>;
+  private configRefreshTimer: ReturnType<typeof setInterval> | undefined;
   private discovery: DiscoveryManager | null = null;
 
   private _initialized = false;
@@ -132,6 +138,20 @@ export class SemanticCache {
     this.analyticsOpts = options.analytics;
     this.usesDefaultCostTable = useDefault;
     this.discoveryOptions = options.discovery ?? {};
+
+    // Capture constructor values as fallback when __config fields are absent
+    this._initialDefaultThreshold = this.defaultThreshold;
+    this._initialCategoryThresholds = { ...this.categoryThresholds };
+
+    // Config-hash key matches the discovery marker's config_key field
+    this.configKey = `${this.name}:__config`;
+
+    // Refresh options
+    const refresh = options.configRefresh ?? {};
+    this.configRefreshOptions = {
+      enabled: refresh.enabled ?? true,
+      intervalMs: Math.max(1000, refresh.intervalMs ?? 30_000),
+    };
   }
 
   // -- Lifecycle --
@@ -195,6 +215,10 @@ export class SemanticCache {
    */
   async shutdown(): Promise<void> {
     this.shutdownCalled = true;
+    if (this.configRefreshTimer) {
+      clearInterval(this.configRefreshTimer);
+      this.configRefreshTimer = undefined;
+    }
     if (this.statsTimer) {
       clearInterval(this.statsTimer);
       this.statsTimer = undefined;
@@ -210,6 +234,10 @@ export class SemanticCache {
    * entries. Safe to call multiple times.
    */
   async dispose(): Promise<void> {
+    if (this.configRefreshTimer) {
+      clearInterval(this.configRefreshTimer);
+      this.configRefreshTimer = undefined;
+    }
     if (this._initPromise) {
       await this._initPromise.catch(() => {});
     }
@@ -969,10 +997,69 @@ export class SemanticCache {
     return results;
   }
 
+  /**
+   * Refresh threshold config from Valkey. Returns true on a successful HGETALL,
+   * false if the call threw.
+   *
+   * Field semantics:
+   *   - "threshold"            -> updates defaultThreshold
+   *   - "threshold:{category}" -> updates categoryThresholds[category]
+   *   - "threshold:" (empty)   -> ignored
+   *   - non-numeric values     -> ignored
+   *   - out-of-range values    -> ignored (must be 0 <= x <= 2)
+   *
+   * Categories present in memory but absent from the hash fall back to their
+   * constructor values (or are removed if no constructor override existed).
+   * The default threshold likewise falls back to its constructor value if
+   * `threshold` is absent from the hash.
+   */
+  async refreshConfig(): Promise<boolean> {
+    let raw: Record<string, string> | null = null;
+    try {
+      raw = await this.client.hgetall(this.configKey);
+    } catch {
+      return false;
+    }
+
+    let nextDefault = this._initialDefaultThreshold;
+    const nextCategory: Record<string, number> = { ...this._initialCategoryThresholds };
+
+    if (raw) {
+      for (const [field, value] of Object.entries(raw)) {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed) || parsed < 0 || parsed > 2) {
+          continue;
+        }
+        if (field === 'threshold') {
+          nextDefault = parsed;
+        } else if (field.startsWith('threshold:')) {
+          const category = field.slice('threshold:'.length);
+          if (category.length > 0) {
+            nextCategory[category] = parsed;
+          }
+        }
+      }
+    }
+
+    this.defaultThreshold = nextDefault;
+    this.categoryThresholds = nextCategory;
+    return true;
+  }
+
   // -- Internal helpers exposed to package adapters --
 
   /** @internal Default similarity threshold. */
   get _defaultThreshold(): number { return this.defaultThreshold; }
+
+  /** @internal Test-only getter. */
+  get _categoryThresholds(): Readonly<Record<string, number>> {
+    return this.categoryThresholds;
+  }
+
+  /** @internal Test-only getter. */
+  get _configRefreshIntervalMs(): number {
+    return this.configRefreshOptions.intervalMs;
+  }
 
   /**
    * Execute a stable FT.SEARCH for use by adapters (e.g. LangGraph).
@@ -998,6 +1085,37 @@ export class SemanticCache {
 
   // -- Private helpers --
 
+  private startConfigRefresh(): void {
+    if (!this.configRefreshOptions.enabled) {
+      return;
+    }
+
+    const tick = (): void => {
+      this.refreshConfig()
+        .then((ok) => {
+          if (!ok) {
+            this.telemetry.metrics.configRefreshFailed
+              .labels({ cache_name: this.name })
+              .inc();
+          }
+        })
+        .catch(() => {
+          this.telemetry.metrics.configRefreshFailed
+            .labels({ cache_name: this.name })
+            .inc();
+        });
+    };
+
+    // Synchronous first refresh: process started immediately after a proposal
+    // was applied picks up the change without waiting for the first tick.
+    tick();
+
+    this.configRefreshTimer = setInterval(tick, this.configRefreshOptions.intervalMs);
+    if (typeof this.configRefreshTimer.unref === 'function') {
+      this.configRefreshTimer.unref();
+    }
+  }
+
   private async _doInitialize(): Promise<void> {
     const gen = this._initGeneration;
     return this.traced('initialize', async () => {
@@ -1020,6 +1138,7 @@ export class SemanticCache {
       }
       this.discovery = manager;
       this._initialized = true;
+      this.startConfigRefresh();
       // Fire analytics init once (not on every flush+initialize cycle)
       this.initAnalyticsSafe().catch(() => {});
     });

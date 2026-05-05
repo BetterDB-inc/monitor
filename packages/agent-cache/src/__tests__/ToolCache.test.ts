@@ -310,6 +310,65 @@ describe('ToolCache', () => {
     });
   });
 
+  describe('refreshPolicies()', () => {
+    it('returns true on successful HGETALL', async () => {
+      (client.hgetall as ReturnType<typeof vi.fn>).mockResolvedValue({
+        get_weather: JSON.stringify({ ttl: 120 }),
+      });
+      const ok = await cache.refreshPolicies();
+      expect(ok).toBe(true);
+      expect(cache.getPolicy('get_weather')).toEqual({ ttl: 120 });
+    });
+
+    it('returns false when HGETALL throws', async () => {
+      (client.hgetall as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('NOAUTH'));
+      const ok = await cache.refreshPolicies();
+      expect(ok).toBe(false);
+    });
+
+    it('removes policies that no longer exist in Valkey', async () => {
+      (client.hgetall as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        get_weather: JSON.stringify({ ttl: 120 }),
+        search: JSON.stringify({ ttl: 60 }),
+      });
+      await cache.refreshPolicies();
+      expect(cache.getPolicy('get_weather')).toEqual({ ttl: 120 });
+      expect(cache.getPolicy('search')).toEqual({ ttl: 60 });
+
+      (client.hgetall as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        get_weather: JSON.stringify({ ttl: 120 }),
+      });
+      await cache.refreshPolicies();
+      expect(cache.getPolicy('get_weather')).toEqual({ ttl: 120 });
+      expect(cache.getPolicy('search')).toBeUndefined();
+    });
+
+    it('updates an existing policy when its value changes', async () => {
+      (client.hgetall as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        get_weather: JSON.stringify({ ttl: 60 }),
+      });
+      await cache.refreshPolicies();
+      expect(cache.getPolicy('get_weather')).toEqual({ ttl: 60 });
+
+      (client.hgetall as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        get_weather: JSON.stringify({ ttl: 600 }),
+      });
+      await cache.refreshPolicies();
+      expect(cache.getPolicy('get_weather')).toEqual({ ttl: 600 });
+    });
+
+    it('skips corrupt policy entries without failing the whole refresh', async () => {
+      (client.hgetall as ReturnType<typeof vi.fn>).mockResolvedValue({
+        get_weather: JSON.stringify({ ttl: 120 }),
+        broken: 'not valid json',
+      });
+      const ok = await cache.refreshPolicies();
+      expect(ok).toBe(true);
+      expect(cache.getPolicy('get_weather')).toEqual({ ttl: 120 });
+      expect(cache.getPolicy('broken')).toBeUndefined();
+    });
+  });
+
   describe('tool name validation', () => {
     it('rejects tool names containing colons in check()', async () => {
       await expect(cache.check('my:tool', {})).rejects.toThrow(AgentCacheUsageError);

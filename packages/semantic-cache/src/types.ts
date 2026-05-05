@@ -5,6 +5,13 @@ import type { DiscoveryOptions } from './discovery';
 
 export type { Valkey };
 
+export interface ConfigRefreshOptions {
+  /** Enable periodic config refresh from Valkey. Default: true. */
+  enabled?: boolean;
+  /** Refresh interval in milliseconds. Default: 30000. Minimum: 1000. */
+  intervalMs?: number;
+}
+
 export type EmbedFn = (text: string) => Promise<number[]>;
 
 export interface ModelCost {
@@ -104,6 +111,14 @@ export interface SemanticCacheOptions {
    * Defaults: enabled=true, heartbeatIntervalMs=30000, includeCategories=true.
    */
   discovery?: DiscoveryOptions;
+  /**
+   * Periodic refresh of in-memory threshold config from Valkey.
+   * When enabled, the cache re-reads `{name}:__config` on the configured
+   * interval. Field `threshold` updates `defaultThreshold`; fields named
+   * `threshold:{category}` update `categoryThresholds[category]`.
+   * Defaults: enabled=true, intervalMs=30000.
+   */
+  configRefresh?: ConfigRefreshOptions;
 }
 
 export interface RerankOptions {

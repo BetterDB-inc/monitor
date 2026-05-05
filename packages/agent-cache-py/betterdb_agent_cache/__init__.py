@@ -16,6 +16,8 @@ from .normalizer import (
 )
 from .types import (
     AgentCacheOptions,
+    ConfigRefreshOptions,
+    DiscoveryOptions,
     AgentCacheStats,
     BinaryBlock,
     BlockHints,
@@ -43,6 +45,8 @@ from .types import (
 __all__ = [
     # Main class
     "AgentCache",
+    "ConfigRefreshOptions",
+    "DiscoveryOptions",
     "DEFAULT_COST_TABLE",
     # Types
     "AgentCacheOptions",

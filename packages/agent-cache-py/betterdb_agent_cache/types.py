@@ -114,6 +114,33 @@ class AnalyticsOptions:
 
 
 @dataclass
+class ConfigRefreshOptions:
+    """Periodic refresh of in-memory state from Valkey-side config.
+
+    When enabled, the cache re-reads ``{name}:__tool_policies`` on the
+    configured interval so externally-applied policy changes (e.g. from
+    BetterDB Monitor's cache proposal feature) take effect without a process
+    restart. Defaults: ``enabled=True``, ``interval_ms=30000``.
+    """
+    enabled: bool = True
+    interval_ms: int = 30_000
+    """Refresh interval in milliseconds. Minimum: 1000."""
+
+
+@dataclass
+class DiscoveryOptions:
+    """Options for the discovery marker protocol.
+
+    When enabled (default), the cache registers itself in a Valkey-side
+    ``__betterdb:caches`` hash on construction and writes a periodic heartbeat
+    key so BetterDB Monitor can enumerate live caches.
+    """
+    enabled: bool = True
+    heartbeat_interval_ms: int = 30_000
+    include_tool_policies: bool = True
+
+
+@dataclass
 class AgentCacheOptions:
     client: Any  # valkey.asyncio.Valkey | ValkeyCluster
     name: str = "betterdb_ac"
@@ -124,6 +151,8 @@ class AgentCacheOptions:
     """Use bundled default cost table from LiteLLM. User cost_table entries override defaults. Default: True."""
     telemetry: TelemetryOptions = field(default_factory=TelemetryOptions)
     analytics: AnalyticsOptions = field(default_factory=AnalyticsOptions)
+    config_refresh: ConfigRefreshOptions = field(default_factory=ConfigRefreshOptions)
+    discovery: DiscoveryOptions = field(default_factory=DiscoveryOptions)
 
 
 @dataclass

@@ -306,23 +306,45 @@ export class ToolCache {
     }
   }
 
-  async loadPolicies(): Promise<void> {
+  /**
+   * Refresh policies from Valkey. Returns true on a successful HGETALL,
+   * false if the call threw. Used by the periodic refresh timer to drive
+   * the configRefreshFailed counter.
+   *
+   * Atomic swap: the existing in-memory map is cleared and repopulated from
+   * the HGETALL response. JS is single-threaded, so any policies.get(toolName)
+   * call sees either the pre-refresh state or the post-refresh state — never
+   * a partial mid-clear state.
+   */
+  async refreshPolicies(): Promise<boolean> {
+    let raw: Record<string, string> | null = null;
     try {
-      const raw = await this.client.hgetall(this.policiesKey);
-      if (raw) {
-        for (const [toolName, policyJson] of Object.entries(raw)) {
-          try {
-            const policy: ToolPolicy = JSON.parse(policyJson);
-            this.policies.set(toolName, policy);
-          } catch {
-            // Skip corrupt policy entries
-          }
+      raw = await this.client.hgetall(this.policiesKey);
+    } catch {
+      return false;
+    }
+
+    const next = new Map<string, ToolPolicy>();
+    if (raw) {
+      for (const [toolName, policyJson] of Object.entries(raw)) {
+        try {
+          const policy: ToolPolicy = JSON.parse(policyJson);
+          next.set(toolName, policy);
+        } catch {
+          // Skip corrupt policy entries
         }
       }
-    } catch {
-      // Non-blocking: failure to load policies should not break initialization.
-      // Silently swallow - libraries should not write to console.
     }
+
+    this.policies.clear();
+    for (const [k, v] of next) {
+      this.policies.set(k, v);
+    }
+    return true;
+  }
+
+  async loadPolicies(): Promise<void> {
+    await this.refreshPolicies();
   }
 
   /**
