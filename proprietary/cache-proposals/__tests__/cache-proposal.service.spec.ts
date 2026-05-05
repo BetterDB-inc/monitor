@@ -1,7 +1,7 @@
 import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import { CacheProposalService } from '../cache-proposal.service';
 import { CacheResolverService, type ResolvedCache } from '../cache-resolver.service';
-import type { ConnectionRegistry } from '../../connections/connection-registry.service';
+import type { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import {
   CacheNotFoundError,
   CacheProposalValidationError,
