@@ -46,9 +46,10 @@ export class CloudAuthGuardImpl implements CanActivate {
           algorithms: ['HS256'],
         }) as any;
 
-        // Verify tenant matches
+        // Verify tenant matches (skip on demo hostname — any valid session is accepted)
+        const isDemoHost = !!process.env.DEMO_HOSTNAME && (request.headers.host || '') === process.env.DEMO_HOSTNAME;
         const expectedSchema = `tenant_${payload.subdomain.replace(/-/g, '_')}`;
-        if (expectedSchema !== this.tenantSchema) {
+        if (!isDemoHost && expectedSchema !== this.tenantSchema) {
           this.redirectToLogin(reply, request);
           return false;
         }

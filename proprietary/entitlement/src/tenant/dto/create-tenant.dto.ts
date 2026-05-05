@@ -1,4 +1,4 @@
-import { IsString, IsEmail, IsOptional, Matches, MinLength, MaxLength } from 'class-validator';
+import { IsString, IsEmail, IsOptional, IsBoolean, Matches, MinLength, MaxLength } from 'class-validator';
 
 export class CreateTenantDto {
   @IsString()
@@ -25,4 +25,8 @@ export class CreateTenantDto {
   @IsString()
   @MaxLength(253)
   domain?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isDemo?: boolean;
 }

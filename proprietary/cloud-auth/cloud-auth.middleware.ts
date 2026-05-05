@@ -47,8 +47,10 @@ export class CloudAuthMiddleware implements NestMiddleware {
           algorithms: ['HS256'],
         }) as any;
 
+        // Skip schema check on demo hostname — any valid session is accepted
+        const isDemoHost = !!process.env.DEMO_HOSTNAME && (req.headers.host || '') === process.env.DEMO_HOSTNAME;
         const expectedSchema = `tenant_${payload.subdomain.replace(/-/g, '_')}`;
-        if (expectedSchema !== this.tenantSchema) {
+        if (!isDemoHost && expectedSchema !== this.tenantSchema) {
           return this.redirectToLogin(res, req);
         }
 

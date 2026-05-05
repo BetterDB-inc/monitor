@@ -1,5 +1,5 @@
-import { Controller, Get, Query, Res, BadRequestException } from '@nestjs/common';
-import { FastifyReply } from 'fastify';
+import { Controller, Get, Query, Req, Res, BadRequestException } from '@nestjs/common';
+import { FastifyRequest, FastifyReply } from 'fastify';
 import * as jwt from 'jsonwebtoken';
 
 @Controller('auth')
@@ -14,17 +14,36 @@ export class CloudAuthCallbackController {
     this.tenantSchema = process.env.DB_SCHEMA || '';
   }
 
+  private isDemoHost(req: FastifyRequest): boolean {
+    const demoHost = process.env.DEMO_HOSTNAME;
+    if (!demoHost) return false;
+    return (req.headers.host || '') === demoHost;
+  }
+
+  /**
+   * Returns the Domain cookie attribute for non-demo hosts only.
+   * On the demo hostname we intentionally omit Domain so the session
+   * cookie is scoped to demo.app.betterdb.com exclusively — this prevents
+   * cross-workspace SESSION_SECRET verification failures (each pod has its
+   * own secret; a cookie signed by one pod cannot be verified by another).
+   */
+  private cookieAttrs(req: FastifyRequest): string {
+    if (this.isDemoHost(req)) return '';
+    const domain = process.env.COOKIE_DOMAIN;
+    return domain ? `Domain=${domain}; ` : '';
+  }
+
   @Get('logout')
-  handleLogout(@Res() reply: FastifyReply) {
+  handleLogout(@Req() request: FastifyRequest, @Res() reply: FastifyReply) {
     reply.header(
       'Set-Cookie',
-      'betterdb_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+      `betterdb_session=; Path=/; ${this.cookieAttrs(request)}HttpOnly; Secure; SameSite=Lax; Max-Age=0`
     );
     reply.status(302).redirect('https://betterdb.com');
   }
 
   @Get('callback')
-  handleCallback(@Query('token') token: string, @Res() reply: FastifyReply) {
+  handleCallback(@Req() request: FastifyRequest, @Query('token') token: string, @Res() reply: FastifyReply) {
     if (!token) {
       throw new BadRequestException('Missing token');
     }
@@ -36,9 +55,9 @@ export class CloudAuthCallbackController {
         issuer: 'betterdb-entitlement',
       }) as any;
 
-      // Verify this token is for THIS tenant
+      // Verify this token is for THIS tenant (skip check on demo hostname)
       const expectedSchema = `tenant_${payload.subdomain.replace(/-/g, '_')}`;
-      if (expectedSchema !== this.tenantSchema) {
+      if (!this.isDemoHost(request) && expectedSchema !== this.tenantSchema) {
         throw new BadRequestException('Token not valid for this workspace');
       }
 
@@ -55,10 +74,10 @@ export class CloudAuthCallbackController {
         { algorithm: 'HS256', expiresIn: '7d' }
       );
 
-      // Set cookie scoped to this subdomain
+      // Set session cookie (domain-scoped on normal workspaces; host-only on demo)
       reply.header(
         'Set-Cookie',
-        `betterdb_session=${sessionToken}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`
+        `betterdb_session=${sessionToken}; Path=/; ${this.cookieAttrs(request)}HttpOnly; Secure; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`
       );
 
       reply.status(302).redirect('/');

@@ -12,6 +12,7 @@ import { UpgradePrompt } from './components/UpgradePrompt';
 import { ServerStartupGuard } from './components/ServerStartupGuard';
 import { AppLayout } from './components/layout/AppLayout';
 import { workspaceApi, CloudUser } from './api/workspace';
+import { DemoProvider } from './contexts/DemoContext';
 
 function App() {
   return (
@@ -51,6 +52,7 @@ function AppContent() {
 
   return (
     <BrowserRouter>
+      <DemoProvider>
       <TooltipProvider>
         <ConnectionContext.Provider value={connectionState}>
           <UpgradePromptContext.Provider value={upgradePromptState}>
@@ -72,6 +74,7 @@ function AppContent() {
           </UpgradePromptContext.Provider>
         </ConnectionContext.Provider>
       </TooltipProvider>
+      </DemoProvider>
     </BrowserRouter>
   );
 }

@@ -219,3 +219,72 @@ Deprovisioning reverses: drop schema (via K8s Job) → delete namespace (cascade
 **`ImagePullBackOff`** — ECR authentication may have expired. Re-run `aws ecr get-login-password` or check the image tag exists in ECR.
 
 **`CrashLoopBackOff`** — Check pod logs with `kubectl logs`. Common causes: missing env vars, RDS connection issues, or TLS certificate rejection.
+
+## Demo Workspace
+
+One internal workspace can be exposed at `demo.app.betterdb.com` as a read-only view accessible to any logged-in BetterDB Cloud user. The same pod and schema serve both URLs; hostname-aware logic enforces read-only behaviour on the demo alias.
+
+### How it works
+
+- The `isDemo` flag on the `Tenant` model marks which workspace is the demo. Only one may have `isDemo=true` at a time (enforced by `TenantService`).
+- During provisioning, the demo tenant gets two extra things:
+  - `COOKIE_DOMAIN=.app.betterdb.com` env var (set on every tenant pod so the auth cookie is shared across subdomains).
+  - `DEMO_HOSTNAME=demo.app.betterdb.com` env var (demo pods only).
+  - A second Ingress rule for `demo.app.betterdb.com` pointing at the same Service.
+  - A Route53 CNAME `demo.app.betterdb.com` → same ALB as the tenant.
+- The `CloudAuthMiddleware` and `CloudAuthGuardImpl` accept any valid BetterDB session on the demo hostname (schema check is relaxed).
+- `DemoModeGuard` 404s mutation endpoints and sensitive read endpoints on the demo hostname.
+- The frontend calls `GET /api/system/demo` to detect demo mode and conditionally hides the `+`/gear buttons, Team, Webhooks, Settings nav items, and guarded routes.
+
+### Setup (run once per demo workspace)
+
+```bash
+# 1. Apply Prisma migration to RDS (run from inside the entitlement pod or a port-forward)
+kubectl exec -n system <entitlement-pod> -- npx prisma migrate deploy
+
+# 2. Build and push entitlement image
+cd proprietary/entitlement
+docker build -t 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:demo-alias .
+docker push 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:demo-alias
+kubectl set image -n system deployment/entitlement entitlement=811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:demo-alias
+
+# 3. Build and push monitor image
+#    ... existing build flow, tag e.g. v0.x.0-demo-alias, push to ECR
+
+# 4. Mark the chosen internal workspace as demo
+curl -X PATCH https://<entitlement>/tenants/<tenant-id> \
+  -H "Authorization: Bearer <ADMIN_API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"isDemo": true}'
+
+# 5. Reprovision so the deployment picks up COOKIE_DOMAIN, DEMO_HOSTNAME,
+#    the ingress alias, and the Route53 demo CNAME.
+#    (Requires either a manual deprovision+provision cycle, or setting status
+#    back to 'pending' in the DB and calling POST /tenants/:id/provision.)
+
+# 6. Smoke test
+# - Original URL still works as a full editable workspace (sign in, add connection, see + button)
+# - demo.app.betterdb.com redirects to login when not signed in
+# - After signing in to *any* workspace, demo.app.betterdb.com loads, shows the demo banner,
+#   hides + and gear, hides Team / Webhooks / Settings
+# - POST https://demo.app.betterdb.com/api/connections → 404
+# - GET  https://demo.app.betterdb.com/api/team        → 404
+# - WSS  wss://<original-subdomain>.app.betterdb.com/agent/ws still works (agents unaffected)
+```
+
+### Self-check
+
+```bash
+# Two host: rules in the Ingress
+kubectl get ingress -n tenant-<demo-subdomain> -o yaml | grep 'host:'
+
+# DEMO_HOSTNAME env var present in the demo deployment
+kubectl get deploy -n tenant-<demo-subdomain> betterdb -o yaml | grep -A1 DEMO_HOSTNAME
+
+# COOKIE_DOMAIN present in the demo deployment (also check a regular tenant — it should be there too)
+kubectl get deploy -n tenant-<demo-subdomain> betterdb -o yaml | grep -A1 COOKIE_DOMAIN
+
+# demo.app.betterdb.com resolves to the same ALB CNAME as the original subdomain
+dig demo.app.betterdb.com
+dig <original-subdomain>.app.betterdb.com
+```

@@ -151,7 +151,7 @@ export class ProvisioningService {
 
       // Step 7: Create K8s Deployment
       this.logger.log(`[${tenant.subdomain}] Creating K8s deployment`);
-      await this.createDeployment(namespace, tenant.subdomain, imageTag, schemaName);
+      await this.createDeployment(namespace, tenant.subdomain, imageTag, schemaName, tenant.isDemo);
 
       // Step 8: Create K8s Service
       this.logger.log(`[${tenant.subdomain}] Creating K8s service`);
@@ -159,13 +159,18 @@ export class ProvisioningService {
 
       // Step 9: Create K8s Ingress
       this.logger.log(`[${tenant.subdomain}] Creating K8s ingress for ${hostname}`);
-      await this.createIngress(namespace, tenant.subdomain, hostname);
+      await this.createIngress(namespace, tenant.subdomain, hostname, tenant.isDemo ? [this.demoHostname()] : []);
 
       // Step 10: Wait for ALB to assign a hostname and create Route53 CNAME
       this.logger.log(`[${tenant.subdomain}] Waiting for ALB hostname...`);
       const albHostname = await this.waitForIngressHostname(namespace, 3 * 60 * 1000);
       this.logger.log(`[${tenant.subdomain}] Creating Route53 CNAME → ${albHostname}`);
       await this.createRoute53Record(tenant.subdomain, albHostname);
+
+      if (tenant.isDemo) {
+        this.logger.log(`[${tenant.subdomain}] Creating demo Route53 CNAME → ${albHostname}`);
+        await this.createRoute53Record('demo', albHostname);
+      }
 
       // Step 11: Wait for deployment readiness
       this.logger.log(`[${tenant.subdomain}] Waiting for deployment readiness...`);
@@ -214,6 +219,11 @@ export class ProvisioningService {
       // Step 3: Delete Route53 CNAME record
       this.logger.log(`[${tenant.subdomain}] Deleting Route53 CNAME record`);
       await this.deleteRoute53Record(tenant.subdomain);
+
+      if (tenant.isDemo) {
+        this.logger.log(`[${tenant.subdomain}] Deleting demo Route53 CNAME record`);
+        await this.deleteRoute53Record('demo');
+      }
 
       // Step 4: Delete K8s Namespace (cascades to all resources)
       this.logger.log(`[${tenant.subdomain}] Deleting K8s namespace: ${namespace}`);
@@ -524,7 +534,7 @@ export class ProvisioningService {
     }
   }
 
-  private async createDeployment(namespace: string, subdomain: string, imageTag: string, dbSchema: string): Promise<void> {
+  private async createDeployment(namespace: string, subdomain: string, imageTag: string, dbSchema: string, isDemo: boolean): Promise<void> {
     const image = `${this.ecrImage}:${imageTag}`;
 
     try {
@@ -580,6 +590,8 @@ export class ProvisioningService {
                       { name: 'STORAGE_TYPE', value: 'postgres' },
                       { name: 'DB_SCHEMA', value: dbSchema },
                       { name: 'NODE_TLS_REJECT_UNAUTHORIZED', value: '0' },
+                      { name: 'COOKIE_DOMAIN', value: `.${this.appDomain}` },
+                      ...(isDemo ? [{ name: 'DEMO_HOSTNAME', value: this.demoHostname() }] : []),
                       {
                         name: 'STORAGE_URL',
                         valueFrom: {
@@ -714,7 +726,8 @@ export class ProvisioningService {
     }
   }
 
-  private async createIngress(namespace: string, _subdomain: string, hostname: string): Promise<void> {
+  private async createIngress(namespace: string, _subdomain: string, hostname: string, extraHosts: string[] = []): Promise<void> {
+    const allHosts = [hostname, ...extraHosts];
     try {
       await this.networkingApi.createNamespacedIngress({
         namespace,
@@ -732,25 +745,23 @@ export class ProvisioningService {
           },
           spec: {
             ingressClassName: 'alb',
-            rules: [
-              {
-                host: hostname,
-                http: {
-                  paths: [
-                    {
-                      path: '/',
-                      pathType: 'Prefix',
-                      backend: {
-                        service: {
-                          name: 'betterdb',
-                          port: { number: 80 },
-                        },
+            rules: allHosts.map(host => ({
+              host,
+              http: {
+                paths: [
+                  {
+                    path: '/',
+                    pathType: 'Prefix',
+                    backend: {
+                      service: {
+                        name: 'betterdb',
+                        port: { number: 80 },
                       },
                     },
-                  ],
-                },
+                  },
+                ],
               },
-            ],
+            })),
           },
         },
       });
@@ -968,6 +979,10 @@ export class ProvisioningService {
       },
     }));
     this.logger.log(`[${subdomain}] Route53 CNAME deleted`);
+  }
+
+  private demoHostname(): string {
+    return `demo.${this.appDomain}`;
   }
 
   private sleep(ms: number): Promise<void> {

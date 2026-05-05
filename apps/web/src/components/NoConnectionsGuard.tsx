@@ -1,5 +1,11 @@
 import { useConnection } from '../hooks/useConnection';
 import { ReactNode, ReactElement } from 'react';
+import { useIsDemo } from '../contexts/DemoContext';
+
+
+function openAddConnectionDialog() {
+  window.dispatchEvent(new CustomEvent('betterdb:open-add-connection'));
+}
 
 interface NoConnectionsGuardProps {
   children: ReactNode;
@@ -7,6 +13,11 @@ interface NoConnectionsGuardProps {
 
 export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): ReactElement | null {
   const { hasNoConnections, loading, error } = useConnection();
+  const isDemo = useIsDemo();
+
+  const isCloudDomain =
+    typeof window !== 'undefined' &&
+    window.location.hostname.endsWith('.app.betterdb.com');
 
   if (loading) {
     return (
@@ -22,7 +33,7 @@ export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): React
   if (error) {
     return (
       <div className="flex items-center justify-center min-h-[60vh] p-8">
-        <div className="text-center max-w-md">
+        <div className="max-w-md">
           <h2 className="text-2xl font-bold mb-4 text-destructive">Connection Error</h2>
           <p className="text-muted-foreground mb-6">
             Failed to load database connections. Please check your configuration and try again.
@@ -37,32 +48,57 @@ export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): React
 
   if (hasNoConnections) {
     return (
-      <div className="flex items-center min-h-[60vh] p-8">
-        {/* Arrow pointing to sidebar */}
-        <div className="flex items-center gap-4 -ml-4">
-          <svg
-            className="w-12 h-12 text-primary animate-pulse"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            aria-label="Arrow pointing left"
-            role="img"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M10 19l-7-7m0 0l7-7m-7 7h18"
-            />
-          </svg>
-          <div className="text-left">
-            <h2 className="text-2xl font-bold mb-2">No Database Connected</h2>
-            <p className="text-muted-foreground">
-              Use the <span className="font-medium text-foreground">Connection</span> selector
-              in the sidebar to add your first database connection.
-            </p>
+      <div className="flex flex-col">
+        <p className="text-[10px] font-bold tracking-[0.2em] uppercase text-primary mb-5 select-none">
+          {isDemo ? 'Demo workspace' : 'No database connected'}
+        </p>
+
+        <h1 className="text-[2.6rem] font-extrabold tracking-tight leading-[1.06] mb-5 text-foreground">
+          {isDemo
+            ? <>Explore the<br />dashboard.</>
+            : <>Connect your<br />database.</>}
+        </h1>
+
+        <p className="text-[15px] text-muted-foreground leading-relaxed mb-7">
+          {isDemo
+            ? "You're in a read-only demo. Select a pre-configured connection from the sidebar to explore live metrics."
+            : 'Add a Valkey or Redis instance to monitor slow queries, latency, client activity, and memory - all in one place.'}
+        </p>
+
+        {!isDemo && (
+          <div className="flex items-center gap-4">
+            <button
+              onClick={openAddConnectionDialog}
+              className="inline-flex items-center gap-2 h-9 px-5 rounded-md bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              <span className="text-[1.1rem] leading-none">+</span>
+              Add Connection
+            </button>
+
+            {isCloudDomain && (
+              <>
+                <span className="text-xs text-muted-foreground">or</span>
+                <a
+                  href="https://demo.app.betterdb.com"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline underline-offset-4 transition-colors"
+                >
+                  Try the live demo first
+                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+                    <path
+                      d="M2 6.5h9M7.5 3l3.5 3.5L7.5 10"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </a>
+              </>
+            )}
           </div>
-        </div>
+        )}
       </div>
     );
   }

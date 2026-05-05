@@ -1,5 +1,7 @@
-import { useState } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { useState, ReactNode } from 'react';
+import { Routes, Route, Navigate } from 'react-router-dom';
+import { useIsDemo } from '../../contexts/DemoContext';
+import { DemoBanner } from '../DemoBanner';
 import { useIdleTracker } from '../../hooks/useIdleTracker';
 import { useNavigationTracker } from '../../hooks/useNavigationTracker';
 import { useCliPanel } from '../../hooks/useCliPanel';
@@ -32,6 +34,12 @@ import { AppSidebar } from './AppSidebar.tsx';
 import { FeedbackModal } from './FeedbackModal';
 import { SidebarProvider } from '@/components/ui/sidebar.tsx';
 
+function DemoGuardedRoute({ children }: { children: ReactNode }) {
+  const isDemo = useIsDemo();
+  if (isDemo) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
 export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
   const [showFeedback, setShowFeedback] = useState(false);
   const cliPanel = useCliPanel();
@@ -46,6 +54,7 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
         {showFeedback && <FeedbackModal onClose={() => setShowFeedback(false)} />}
 
         <main className="min-h-screen  flex flex-col pl-0 transition-[padding] duration-200 ease-linear md:peer-data-[state=expanded]:pl-64">
+          <DemoBanner cloudUser={cloudUser} />
           {!cloudUser && <UpdateBanner />}
           <div className="p-8 flex-1 flex flex-col">
             <Routes>
@@ -182,9 +191,11 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
               <Route
                 path="/webhooks"
                 element={
-                  <NoConnectionsGuard>
-                    <Webhooks />
-                  </NoConnectionsGuard>
+                  <DemoGuardedRoute>
+                    <NoConnectionsGuard>
+                      <Webhooks />
+                    </NoConnectionsGuard>
+                  </DemoGuardedRoute>
                 }
               />
               <Route
@@ -204,7 +215,14 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                 }
               />
               {cloudUser && (
-                <Route path="/workspace/members" element={<Members cloudUser={cloudUser} />} />
+                <Route
+                  path="/workspace/members"
+                  element={
+                    <DemoGuardedRoute>
+                      <Members cloudUser={cloudUser} />
+                    </DemoGuardedRoute>
+                  }
+                />
               )}
               <Route path="/settings" element={<Settings isCloudMode={!!cloudUser} />} />
             </Routes>

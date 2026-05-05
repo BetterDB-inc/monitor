@@ -47,5 +47,6 @@ Dockerfile*
 docker-compose*.yml
 .dockerignore
 
-# SQLite adapter (local development only, excluded from production builds)
+# SQLite adapter and its tests (local development only, excluded from production builds)
 apps/api/src/storage/adapters/sqlite.adapter.ts
+apps/api/src/storage/adapters/__tests__

@@ -58,6 +58,7 @@ model Tenant {
   dbSchema      String       @map("db_schema")
   imageTag      String       @default("latest") @map("image_tag")
   domain        String?      @unique
+  isDemo        Boolean      @default(false) @map("is_demo")
   createdAt     DateTime     @default(now()) @map("created_at")
   updatedAt     DateTime     @updatedAt @map("updated_at")
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useIsDemo } from '../contexts/DemoContext';
 import { useConnection } from '../hooks/useConnection';
 import { fetchApi } from '../api/client';
 import { agentTokensApi, GeneratedToken, TokenListItem } from '../api/agent-tokens';
@@ -40,8 +41,15 @@ const defaultFormData: ConnectionFormData = {
 type AddTab = 'direct' | 'agent';
 
 export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
+  const isDemo = useIsDemo();
   const { currentConnection, connections, loading, error, setConnection, refreshConnections } = useConnection();
   const [showAddDialog, setShowAddDialog] = useState(false);
+
+  useEffect(() => {
+    const handler = () => setShowAddDialog(true);
+    window.addEventListener('betterdb:open-add-connection', handler);
+    return () => window.removeEventListener('betterdb:open-add-connection', handler);
+  }, []);
   const [showManageDialog, setShowManageDialog] = useState(false);
   const [formData, setFormData] = useState<ConnectionFormData>(defaultFormData);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -169,33 +177,39 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       <div className="px-3 py-2">
         <div className="flex items-center justify-between mb-1">
           <label className="text-xs text-muted-foreground">Connection</label>
-          <div className="flex gap-1">
-            <button
-              onClick={() => setShowAddDialog(true)}
-              className="w-7 h-7 flex items-center justify-center rounded-md text-base font-medium text-primary hover:bg-primary/10 transition-colors"
-              title="Add connection"
-            >
-              +
-            </button>
-            {connections.length > 0 && (
+          {!isDemo && (
+            <div className="flex gap-1">
               <button
-                onClick={() => setShowManageDialog(true)}
-                className="w-7 h-7 flex items-center justify-center rounded-md text-base text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                title="Manage connections"
+                onClick={() => setShowAddDialog(true)}
+                className="w-7 h-7 flex items-center justify-center rounded-md text-base font-medium text-primary hover:bg-primary/10 transition-colors"
+                title="Add connection"
               >
-                ⚙
+                +
               </button>
-            )}
-          </div>
+              {connections.length > 0 && (
+                <button
+                  onClick={() => setShowManageDialog(true)}
+                  className="w-7 h-7 flex items-center justify-center rounded-md text-base text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  title="Manage connections"
+                >
+                  ⚙
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {connections.length === 0 ? (
-          <button
-            onClick={() => setShowAddDialog(true)}
-            className="w-full px-2 py-1.5 text-sm border border-dashed rounded-md hover:border-primary hover:text-primary transition-colors"
-          >
-            + Add your first connection
-          </button>
+          isDemo ? (
+            <div className="px-2 py-1.5 text-sm text-muted-foreground">Demo workspace</div>
+          ) : (
+            <button
+              onClick={() => setShowAddDialog(true)}
+              className="w-full px-2 py-1.5 text-sm border border-dashed rounded-md hover:border-primary hover:text-primary transition-colors"
+            >
+              + Add your first connection
+            </button>
+          )
         ) : connections.length === 1 ? (
           <div className="flex items-center gap-2">
             <span

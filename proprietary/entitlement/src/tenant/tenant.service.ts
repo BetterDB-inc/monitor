@@ -14,7 +14,7 @@ export class TenantService {
 
   constructor(private readonly prisma: PrismaService) { }
 
-  async createTenant(data: { name: string; subdomain: string; email: string; imageTag?: string; domain?: string }) {
+  async createTenant(data: { name: string; subdomain: string; email: string; imageTag?: string; domain?: string; isDemo?: boolean }) {
     const subdomain = data.subdomain.toLowerCase();
 
     // Validate subdomain format
@@ -33,6 +33,14 @@ export class TenantService {
     const existing = await this.getTenantBySubdomain(subdomain);
     if (existing) {
       throw new ConflictException(`Subdomain '${subdomain}' is already taken`);
+    }
+
+    // Check isDemo constraint (only one demo tenant allowed)
+    if (data.isDemo) {
+      const existingDemo = await this.prisma.tenant.findFirst({ where: { isDemo: true } });
+      if (existingDemo) {
+        throw new ConflictException('Another tenant is already marked as demo');
+      }
     }
 
     // Handle domain (lowercase and check uniqueness)
@@ -58,6 +66,7 @@ export class TenantService {
         dbSchema,
         imageTag,
         domain,
+        isDemo: data.isDemo ?? false,
         status: 'pending',
       },
     });
@@ -124,7 +133,16 @@ export class TenantService {
     return tenant;
   }
 
-  async updateTenant(id: string, data: { name?: string; email?: string; imageTag?: string }) {
+  async updateTenant(id: string, data: { name?: string; email?: string; imageTag?: string; isDemo?: boolean }) {
+    if (data.isDemo === true) {
+      const existingDemo = await this.prisma.tenant.findFirst({
+        where: { isDemo: true, id: { not: id } },
+      });
+      if (existingDemo) {
+        throw new ConflictException('Another tenant is already marked as demo');
+      }
+    }
+
     const tenant = await this.prisma.tenant.update({
       where: { id },
       data,
