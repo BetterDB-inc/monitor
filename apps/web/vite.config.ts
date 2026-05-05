@@ -8,6 +8,13 @@ export default defineConfig({
   envDir: path.resolve(__dirname, '../..'),
   server: {
     port: 5173,
+    proxy: {
+      '/ingest': {
+        target: process.env.POSTHOG_HOST ?? 'https://eu.i.posthog.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/ingest/, ''),
+      },
+    },
   },
   resolve: {
     alias: {
