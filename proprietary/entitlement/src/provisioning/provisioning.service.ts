@@ -590,7 +590,6 @@ export class ProvisioningService {
                       { name: 'STORAGE_TYPE', value: 'postgres' },
                       { name: 'DB_SCHEMA', value: dbSchema },
                       { name: 'NODE_TLS_REJECT_UNAUTHORIZED', value: '0' },
-                      { name: 'COOKIE_DOMAIN', value: `.${this.appDomain}` },
                       ...(isDemo ? [{ name: 'DEMO_HOSTNAME', value: this.demoHostname() }] : []),
                       {
                         name: 'STORAGE_URL',

@@ -12,6 +12,7 @@ const DENIED_MUTATION_PREFIXES = [
   '/admin',
   '/migration',
   '/cli',
+  '/settings',
 ];
 
 // Path prefixes that 404 on demo for any method (read leaks)
@@ -20,6 +21,7 @@ const DENIED_READ_PREFIXES = [
   '/agent/tokens',
   '/webhooks',
   '/admin',
+  '/settings',
 ];
 
 @Injectable()

@@ -224,7 +224,14 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                   }
                 />
               )}
-              <Route path="/settings" element={<Settings isCloudMode={!!cloudUser} />} />
+              <Route
+                path="/settings"
+                element={
+                  <DemoGuardedRoute>
+                    <Settings isCloudMode={!!cloudUser} />
+                  </DemoGuardedRoute>
+                }
+              />
             </Routes>
           </div>
         </main>
