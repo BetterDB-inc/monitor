@@ -1,7 +1,7 @@
 import { CacheReadonlyService } from '../cache-readonly.service';
 import { CacheResolverService, type ResolvedCache } from '../cache-resolver.service';
-import { ConnectionRegistry } from '../../connections/connection-registry.service';
-import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
+import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import { CacheNotFoundError, InvalidCacheTypeError } from '../errors';
 import { randomUUID } from 'crypto';
 import type { CacheType, CreateCacheProposalInput } from '@betterdb/shared';

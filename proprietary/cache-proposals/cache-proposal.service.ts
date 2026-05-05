@@ -18,7 +18,7 @@ import {
   type StoredCacheProposalAudit,
   type UpdateProposalStatusInput,
 } from '@betterdb/shared';
-import type { StoragePort } from '../common/interfaces/storage-port.interface';
+import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import {
   ApplyFailedError,
   CacheNotFoundError,
@@ -34,7 +34,7 @@ import {
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { SlidingWindowRateLimiter } from './rate-limiter';
 import { CacheApplyService, type ApplyContext } from './cache-apply.service';
-import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 
 const REASONING_MIN_LENGTH = 20;
 const PROPOSAL_RATE_LIMIT = 30;

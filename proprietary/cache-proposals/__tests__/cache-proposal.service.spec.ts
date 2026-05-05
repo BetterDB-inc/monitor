@@ -1,4 +1,4 @@
-import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
+import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import { CacheProposalService } from '../cache-proposal.service';
 import { CacheResolverService, type ResolvedCache } from '../cache-resolver.service';
 import {

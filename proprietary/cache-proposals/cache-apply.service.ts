@@ -5,7 +5,7 @@ import {
   type AppliedResult,
   type StoredCacheProposal,
 } from '@betterdb/shared';
-import type { StoragePort } from '../common/interfaces/storage-port.interface';
+import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import { CacheApplyDispatcher } from './cache-apply.dispatcher';
 import { ApplyFailedError } from './errors';
 

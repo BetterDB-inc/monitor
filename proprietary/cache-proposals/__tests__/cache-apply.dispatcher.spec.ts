@@ -2,7 +2,7 @@ import {
   CacheApplyDispatcher,
 } from '../cache-apply.dispatcher';
 import { CacheResolverService, type ResolvedCache } from '../cache-resolver.service';
-import type { ConnectionRegistry } from '../../connections/connection-registry.service';
+import type { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ApplyFailedError } from '../errors';
 import type { StoredCacheProposal } from '@betterdb/shared';
 

@@ -6,15 +6,19 @@ import {
   Param,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
+  Feature,
   ProposalStatusSchema,
   type ProposalStatus,
   type StoredCacheProposal,
 } from '@betterdb/shared';
-import { ConnectionId } from '../common/decorators';
-import { parseOptionalInt } from '../common/utils/parse-query-param';
+import { LicenseGuard } from '@proprietary/licenses';
+import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
+import { ConnectionId } from '@app/common/decorators';
+import { parseOptionalInt } from '@app/common/utils/parse-query-param';
 import { CacheProposalService } from './cache-proposal.service';
 import { mapCacheProposalErrorToHttp } from './errors-http';
 import { formatApprovalResult, optionalFiniteNumber, optionalString } from './controller-helpers';
@@ -23,6 +27,8 @@ const ACTOR_SOURCE_UI = 'ui' as const;
 
 @ApiTags('cache-proposals')
 @Controller('cache-proposals')
+@UseGuards(LicenseGuard)
+@RequiresFeature(Feature.CACHE_INTELLIGENCE)
 export class CacheProposalController {
   constructor(private readonly service: CacheProposalService) {}
 

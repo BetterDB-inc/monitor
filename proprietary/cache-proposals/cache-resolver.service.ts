@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { CacheType } from '@betterdb/shared';
 import { REGISTRY_KEY, heartbeatKeyFor, AGENT_CACHE, SEMANTIC_CACHE } from '@betterdb/shared';
-import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_NEGATIVE_TTL_MS = 2_000;

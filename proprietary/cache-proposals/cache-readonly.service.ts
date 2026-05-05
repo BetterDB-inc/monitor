@@ -2,11 +2,11 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import type Valkey from 'iovalkey';
 import type { CacheType, StoredCacheProposal } from '@betterdb/shared';
 import { AGENT_CACHE, REGISTRY_KEY, SEMANTIC_CACHE, heartbeatKeyFor } from '@betterdb/shared';
-import type { StoragePort } from '../common/interfaces/storage-port.interface';
-import { ConnectionRegistry } from '../connections/connection-registry.service';
+import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { CacheNotFoundError, InvalidCacheTypeError } from './errors';
-import { readIntField } from '../common/utils/record-fields';
+import { readIntField } from '@app/common/utils/record-fields';
 import {
   THRESHOLD_RECOMMENDATIONS,
   THRESHOLD_REASONINGS,

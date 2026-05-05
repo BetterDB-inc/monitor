@@ -5,7 +5,7 @@ import {
   useQueryClient,
   type UseMutationResult,
 } from '@tanstack/react-query';
-import type { ProposalStatus, StoredCacheProposal } from '@betterdb/shared';
+import { Feature, type ProposalStatus, type StoredCacheProposal } from '@betterdb/shared';
 import {
   cacheProposalsApi,
   type ApprovalResultPayload,
@@ -15,6 +15,7 @@ import {
   type RejectResultPayload,
 } from '../api/cacheProposals';
 import { useConnection } from './useConnection';
+import { useLicense } from './useLicense';
 
 const PENDING_POLL_INTERVAL_MS = 15_000;
 const HISTORY_STALE_MS = 30_000;
@@ -27,13 +28,13 @@ const queryKeys = {
   detail: (id: string) => ['cache-proposals', 'detail', id] as const,
 };
 
-export function usePendingProposals(params: ListProposalsParams = {}) {
+export function usePendingProposals(params: ListProposalsParams = {}, enabled = true) {
   const { currentConnection } = useConnection();
   const connectionId = currentConnection?.id ?? null;
   return useQuery<StoredCacheProposal[]>({
     queryKey: queryKeys.pending(connectionId, params),
     queryFn: () => cacheProposalsApi.listPending(params),
-    enabled: !!connectionId,
+    enabled: enabled && !!connectionId,
     refetchInterval: PENDING_POLL_INTERVAL_MS,
   });
 }
@@ -167,7 +168,9 @@ interface UnreadIndicatorState {
 }
 
 export function useCacheProposalsUnread(): UnreadIndicatorState {
-  const { data: pending } = usePendingProposals();
+  const { hasFeature } = useLicense();
+  const entitled = hasFeature(Feature.CACHE_INTELLIGENCE);
+  const { data: pending } = usePendingProposals({}, entitled);
   const lastSeenAt = useSyncExternalStore(
     subscribeLastSeen,
     getLastSeenSnapshot,

@@ -9,7 +9,7 @@ import {
   type StoredCacheProposal,
 } from '@betterdb/shared';
 import type Valkey from 'iovalkey';
-import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { ApplyFailedError } from './errors';
 

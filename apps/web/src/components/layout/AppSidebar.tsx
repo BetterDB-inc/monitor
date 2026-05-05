@@ -106,7 +106,11 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
           <NavItem to="/migration" active={location.pathname === '/migration'}>
             Migration
           </NavItem>
-          <NavItem to="/cache-proposals" active={location.pathname === '/cache-proposals'}>
+          <NavItem
+            to="/cache-proposals"
+            active={location.pathname === '/cache-proposals'}
+            requiredFeature={Feature.CACHE_INTELLIGENCE}
+          >
             <span className="flex items-center justify-between w-full">
               Cache Proposals
               {cacheProposalsUnread > 0 && (
