@@ -41,8 +41,32 @@ import type {
   VectorIndexSnapshotQueryOptions,
   MetricForecastSettings,
   MetricKind,
+  StoredCacheProposal,
+  StoredCacheProposalAudit,
+  CreateCacheProposalInput,
+  ListCacheProposalsOptions,
+  UpdateProposalStatusInput,
+  AppendProposalAuditInput,
 } from '@betterdb/shared';
+import { PROPOSAL_DEFAULT_EXPIRY_MS, variantPayloadSchemaFor } from '@betterdb/shared';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
+
+const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
+
+function pendingProposalSubDiscriminator(
+  p: { proposal_type: string; proposal_payload: unknown },
+): string | null {
+  const payload = p.proposal_payload as Record<string, unknown> | null | undefined;
+  if (p.proposal_type === 'threshold_adjust') {
+    const category = payload?.category;
+    return typeof category === 'string' ? category : NULL_SUB_DISCRIMINATOR;
+  }
+  if (p.proposal_type === 'tool_ttl_adjust') {
+    const toolName = payload?.tool_name;
+    return typeof toolName === 'string' ? toolName : NULL_SUB_DISCRIMINATOR;
+  }
+  return null;
+}
 
 export class MemoryAdapter implements StoragePort {
   private aclEntries: StoredAclEntry[] = [];
@@ -677,16 +701,11 @@ export class MemoryAdapter implements StoragePort {
     throw new Error('Key analytics not supported in memory adapter');
   }
 
-  async saveHotKeys(
-    _entries: HotKeyEntry[],
-    _connectionId: string,
-  ): Promise<number> {
+  async saveHotKeys(_entries: HotKeyEntry[], _connectionId: string): Promise<number> {
     throw new Error('Hot key stats not supported in memory adapter');
   }
 
-  async getHotKeys(
-    _options?: HotKeyQueryOptions,
-  ): Promise<HotKeyEntry[]> {
+  async getHotKeys(_options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
     throw new Error('Hot key stats not supported in memory adapter');
   }
 
@@ -1185,28 +1204,17 @@ export class MemoryAdapter implements StoragePort {
   }
 
   // Connection Management Methods (in-memory storage)
-  private connections: Map<
-    string,
-    DatabaseConnectionConfig
-  > = new Map();
+  private connections: Map<string, DatabaseConnectionConfig> = new Map();
 
-  async saveConnection(
-    config: DatabaseConnectionConfig,
-  ): Promise<void> {
+  async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
     this.connections.set(config.id, config);
   }
 
-  async getConnections(): Promise<
-    DatabaseConnectionConfig[]
-  > {
+  async getConnections(): Promise<DatabaseConnectionConfig[]> {
     return Array.from(this.connections.values()).sort((a, b) => a.createdAt - b.createdAt);
   }
 
-  async getConnection(
-    id: string,
-  ): Promise<
-    DatabaseConnectionConfig | null
-  > {
+  async getConnection(id: string): Promise<DatabaseConnectionConfig | null> {
     return this.connections.get(id) || null;
   }
 
@@ -1214,12 +1222,7 @@ export class MemoryAdapter implements StoragePort {
     this.connections.delete(id);
   }
 
-  async updateConnection(
-    id: string,
-    updates: Partial<
-      DatabaseConnectionConfig
-    >,
-  ): Promise<void> {
+  async updateConnection(id: string, updates: Partial<DatabaseConnectionConfig>): Promise<void> {
     const config = this.connections.get(id);
     if (config) {
       this.connections.set(id, { ...config, ...updates, updatedAt: Date.now() });
@@ -1255,9 +1258,7 @@ export class MemoryAdapter implements StoragePort {
     this.agentTokens.set(token.id, token);
   }
 
-  async getAgentTokens(
-    type?: 'agent' | 'mcp',
-  ): Promise<
+  async getAgentTokens(type?: 'agent' | 'mcp'): Promise<
     Array<{
       id: string;
       name: string;
@@ -1274,9 +1275,7 @@ export class MemoryAdapter implements StoragePort {
     return tokens.sort((a, b) => b.createdAt - a.createdAt);
   }
 
-  async getAgentTokenByHash(
-    hash: string,
-  ): Promise<{
+  async getAgentTokenByHash(hash: string): Promise<{
     id: string;
     name: string;
     type: 'agent' | 'mcp';
@@ -1316,7 +1315,9 @@ export class MemoryAdapter implements StoragePort {
     connectionId: string,
     metricKind: MetricKind,
   ): Promise<MetricForecastSettings | null> {
-    return this.metricForecastSettings.get(this.metricForecastKey(connectionId, metricKind)) ?? null;
+    return (
+      this.metricForecastSettings.get(this.metricForecastKey(connectionId, metricKind)) ?? null
+    );
   }
 
   async saveMetricForecastSettings(
@@ -1337,8 +1338,164 @@ export class MemoryAdapter implements StoragePort {
   }
 
   async getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]> {
-    return [...this.metricForecastSettings.values()].filter(
-      (s) => s.enabled,
+    return [...this.metricForecastSettings.values()].filter((s) => s.enabled);
+  }
+
+  private cacheProposals: Map<string, StoredCacheProposal> = new Map();
+  private cacheProposalAudit: Map<string, StoredCacheProposalAudit> = new Map();
+
+
+  private cloneProposal(p: StoredCacheProposal): StoredCacheProposal {
+    return structuredClone(p);
+  }
+
+  private cloneAudit(a: StoredCacheProposalAudit): StoredCacheProposalAudit {
+    return structuredClone(a);
+  }
+
+  async createCacheProposal(input: CreateCacheProposalInput): Promise<StoredCacheProposal> {
+    const subDiscriminator = pendingProposalSubDiscriminator(input);
+    if (subDiscriminator !== null) {
+      for (const existing of this.cacheProposals.values()) {
+        if (
+          existing.status === 'pending' &&
+          existing.connection_id === input.connection_id &&
+          existing.cache_name === input.cache_name &&
+          existing.proposal_type === input.proposal_type &&
+          pendingProposalSubDiscriminator(existing) === subDiscriminator
+        ) {
+          throw new Error(
+            `UNIQUE constraint failed: cache_proposals (connection_id, cache_name, proposal_type, sub_discriminator) where status='pending'`,
+          );
+        }
+      }
+    }
+    const proposedAt = input.proposed_at ?? Date.now();
+    const expiresAt = input.expires_at ?? proposedAt + PROPOSAL_DEFAULT_EXPIRY_MS;
+    const proposal: StoredCacheProposal = structuredClone({
+      ...input,
+      reasoning: input.reasoning ?? null,
+      status: 'pending',
+      proposed_by: input.proposed_by ?? null,
+      proposed_at: proposedAt,
+      reviewed_by: null,
+      reviewed_at: null,
+      applied_at: null,
+      applied_result: null,
+      expires_at: expiresAt,
+    });
+    this.cacheProposals.set(proposal.id, proposal);
+    return this.cloneProposal(proposal);
+  }
+
+  async getCacheProposal(id: string): Promise<StoredCacheProposal | null> {
+    const found = this.cacheProposals.get(id);
+    return found ? this.cloneProposal(found) : null;
+  }
+
+  async listCacheProposals(options: ListCacheProposalsOptions): Promise<StoredCacheProposal[]> {
+    if (Array.isArray(options.status) && options.status.length === 0) {
+      return [];
+    }
+
+    let filtered = [...this.cacheProposals.values()].filter(
+      (p) => p.connection_id === options.connection_id,
     );
+
+    if (options.status !== undefined) {
+      const statuses = Array.isArray(options.status) ? options.status : [options.status];
+      filtered = filtered.filter((p) => statuses.includes(p.status));
+    }
+    if (options.cache_name) {
+      filtered = filtered.filter((p) => p.cache_name === options.cache_name);
+    }
+    if (options.cache_type) {
+      filtered = filtered.filter((p) => p.cache_type === options.cache_type);
+    }
+    if (options.proposal_type) {
+      filtered = filtered.filter((p) => p.proposal_type === options.proposal_type);
+    }
+
+    filtered.sort((a, b) => b.proposed_at - a.proposed_at);
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    return filtered.slice(offset, offset + limit).map((p) => this.cloneProposal(p));
+  }
+
+  async updateCacheProposalStatus(
+    input: UpdateProposalStatusInput,
+  ): Promise<StoredCacheProposal | null> {
+    const existing = this.cacheProposals.get(input.id);
+    if (!existing) {
+      return null;
+    }
+    if (input.expected_status !== undefined) {
+      const allowed = Array.isArray(input.expected_status)
+        ? input.expected_status
+        : [input.expected_status];
+      if (allowed.length === 0 || !allowed.includes(existing.status)) {
+        return null;
+      }
+    }
+    if (input.proposal_payload !== undefined) {
+      const variantSchema = variantPayloadSchemaFor(existing.cache_type, existing.proposal_type);
+      variantSchema.parse(input.proposal_payload);
+    }
+    const updated = structuredClone(existing);
+    updated.status = input.status;
+    if (input.reviewed_by !== undefined) {
+      updated.reviewed_by = input.reviewed_by;
+    }
+    if (input.reviewed_at !== undefined) {
+      updated.reviewed_at = input.reviewed_at;
+    }
+    if (input.applied_at !== undefined) {
+      updated.applied_at = input.applied_at;
+    }
+    if (input.applied_result !== undefined) {
+      updated.applied_result =
+        input.applied_result === null ? null : structuredClone(input.applied_result);
+    }
+    if (input.proposal_payload !== undefined) {
+      (updated as { proposal_payload: typeof input.proposal_payload }).proposal_payload =
+        structuredClone(input.proposal_payload);
+    }
+    this.cacheProposals.set(input.id, updated);
+    return this.cloneProposal(updated);
+  }
+
+  async expireCacheProposalsBefore(now: number): Promise<StoredCacheProposal[]> {
+    const expired: StoredCacheProposal[] = [];
+    for (const proposal of this.cacheProposals.values()) {
+      if (proposal.status === 'pending' && proposal.expires_at <= now) {
+        const updated = structuredClone({ ...proposal, status: 'expired' }) as StoredCacheProposal;
+        this.cacheProposals.set(proposal.id, updated);
+        expired.push(this.cloneProposal(updated));
+      }
+    }
+    return expired;
+  }
+
+  async appendCacheProposalAudit(
+    input: AppendProposalAuditInput,
+  ): Promise<StoredCacheProposalAudit> {
+    const audit: StoredCacheProposalAudit = structuredClone({
+      id: input.id,
+      proposal_id: input.proposal_id,
+      event_type: input.event_type,
+      event_payload: input.event_payload ?? null,
+      event_at: input.event_at ?? Date.now(),
+      actor: input.actor ?? null,
+      actor_source: input.actor_source,
+    });
+    this.cacheProposalAudit.set(audit.id, audit);
+    return this.cloneAudit(audit);
+  }
+
+  async getCacheProposalAudit(proposalId: string): Promise<StoredCacheProposalAudit[]> {
+    return [...this.cacheProposalAudit.values()]
+      .filter((a) => a.proposal_id === proposalId)
+      .sort((a, b) => a.event_at - b.event_at)
+      .map((a) => this.cloneAudit(a));
   }
 }

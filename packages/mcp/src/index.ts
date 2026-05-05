@@ -721,6 +721,484 @@ server.tool(
   }),
 );
 
+const CACHE_NAME_DESC = "Cache name as registered in __betterdb:caches (e.g. 'betterdb_scache_prod').";
+
+server.tool(
+  'cache_list',
+  'List all caches (semantic_cache and agent_cache) registered for the active instance, with hit rate and total ops.',
+  {
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_list', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/caches`) as {
+        caches: Array<{ name: string; type: string; hit_rate: number; total_ops: number; status: string }>;
+      };
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      if (data.caches.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No caches registered for this instance.' }] };
+      }
+      const lines = data.caches.map((c) =>
+        `${c.name} (${c.type}, ${c.status}) — hit rate ${(c.hit_rate * 100).toFixed(1)}%, ops ${c.total_ops}`,
+      );
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_health',
+  'Detailed health for a single cache. Response branches by type: semantic_cache reports category_breakdown + uncertain_hit_rate; agent_cache reports tool_breakdown.',
+  {
+    cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_health', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiFetch(
+        `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/health`,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_threshold_recommendation',
+  'Threshold-tuning recommendation for a semantic_cache, based on the rolling similarity-score window. Errors with INVALID_CACHE_TYPE on agent_cache.',
+  {
+    cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
+    category: z.string().optional().describe('Restrict to a single category; omit for the global threshold'),
+    minSamples: z.number().int().min(1).optional().describe('Minimum samples required (default 100)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_threshold_recommendation', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const qs = new URLSearchParams();
+      if (params.category !== undefined) {
+        qs.set('category', params.category);
+      }
+      if (params.minSamples !== undefined) {
+        qs.set('minSamples', String(params.minSamples));
+      }
+      const path = `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/threshold-recommendation${qs.size > 0 ? `?${qs}` : ''}`;
+      const data = await apiFetch(path);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_tool_effectiveness',
+  'Per-tool hit rate, cost saved, and TTL recommendation for an agent_cache. Errors with INVALID_CACHE_TYPE on semantic_cache.',
+  {
+    cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_tool_effectiveness', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiFetch(
+        `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/tool-effectiveness`,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_similarity_distribution',
+  'Histogram of recent similarity scores (20 buckets, width 0.1) for a semantic_cache. Errors on agent_cache.',
+  {
+    cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
+    category: z.string().optional().describe('Restrict to a single category'),
+    window_hours: z.number().int().min(1).max(168).optional().describe('Lookback window (default 24h, max 168h)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_similarity_distribution', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const qs = new URLSearchParams();
+      if (params.category !== undefined) {
+        qs.set('category', params.category);
+      }
+      if (params.window_hours !== undefined) {
+        qs.set('windowHours', String(params.window_hours));
+      }
+      const path = `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/similarity-distribution${qs.size > 0 ? `?${qs}` : ''}`;
+      const data = await apiFetch(path);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_recent_changes',
+  'Recent proposals for a single cache (any status), so agents can avoid re-proposing pending or recently-applied changes. Newest first.',
+  {
+    cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
+    limit: z.number().int().min(1).max(200).optional().describe('Max proposals to return (default 20, max 200)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_recent_changes', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const qs = params.limit !== undefined ? `?limit=${params.limit}` : '';
+      const data = await apiFetch(
+        `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/recent-changes${qs}`,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_propose_threshold_adjust',
+  'Propose a semantic-cache similarity-threshold change for review. Creates a pending proposal that requires human approval before any change is applied. Reasoning must be at least 20 characters.',
+  {
+    cache_name: z.string().min(1).describe("Name of the semantic cache (e.g. 'betterdb_scache_prod')"),
+    new_threshold: z.number().min(0).max(2).describe('Proposed cosine-distance threshold, 0–2'),
+    category: z.string().nullable().optional().describe('Optional per-category override; null/undefined = global threshold'),
+    reasoning: z.string().min(20).describe('Why the change is being proposed (≥20 chars)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_propose_threshold_adjust', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiRequest('POST', `/mcp/instance/${id}/cache-proposals/threshold-adjust`, {
+        cache_name: params.cache_name,
+        new_threshold: params.new_threshold,
+        category: params.category ?? null,
+        reasoning: params.reasoning,
+      }) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return formatProposalText(data);
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_propose_tool_ttl_adjust',
+  'Propose an agent-cache per-tool TTL change for review. Creates a pending proposal that requires human approval. Reasoning must be at least 20 characters.',
+  {
+    cache_name: z.string().min(1).describe("Name of the agent cache (e.g. 'betterdb_agentcache_prod')"),
+    tool_name: z.string().min(1).describe('Tool whose TTL is being changed'),
+    new_ttl_seconds: z.number().int().min(10).max(86400).describe('Proposed TTL in seconds (10–86400)'),
+    reasoning: z.string().min(20).describe('Why the change is being proposed (≥20 chars)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_propose_tool_ttl_adjust', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiRequest('POST', `/mcp/instance/${id}/cache-proposals/tool-ttl-adjust`, {
+        cache_name: params.cache_name,
+        tool_name: params.tool_name,
+        new_ttl_seconds: params.new_ttl_seconds,
+        reasoning: params.reasoning,
+      }) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return formatProposalText(data);
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_propose_invalidate',
+  'Propose a cache invalidation for review. Filter shape depends on cache type: semantic_cache requires filter_kind=valkey_search + filter_expression; agent_cache requires filter_kind in (tool|key_prefix|session) + filter_value. Warns when estimated_affected exceeds 10000.',
+  {
+    cache_name: z.string().min(1).describe('Name of the cache to invalidate'),
+    filter_kind: z.enum(['valkey_search', 'tool', 'key_prefix', 'session']).describe('Discriminator: valkey_search for semantic_cache; tool|key_prefix|session for agent_cache'),
+    filter_expression: z.string().min(1).optional().describe('Required when filter_kind=valkey_search; FT.SEARCH filter'),
+    filter_value: z.string().min(1).optional().describe('Required when filter_kind in (tool|key_prefix|session); the matching value'),
+    estimated_affected: z.number().int().min(0).describe('Caller-estimated number of affected entries'),
+    reasoning: z.string().min(20).describe('Why the invalidation is being proposed (≥20 chars)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_propose_invalidate', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const body: Record<string, unknown> = {
+        cache_name: params.cache_name,
+        filter_kind: params.filter_kind,
+        estimated_affected: params.estimated_affected,
+        reasoning: params.reasoning,
+      };
+      if (params.filter_kind === 'valkey_search') {
+        if (!params.filter_expression) {
+          return {
+            content: [{ type: 'text' as const, text: 'filter_expression is required when filter_kind=valkey_search' }],
+            isError: true,
+          };
+        }
+        body.filter_expression = params.filter_expression;
+      } else {
+        if (!params.filter_value) {
+          return {
+            content: [{ type: 'text' as const, text: `filter_value is required when filter_kind=${params.filter_kind}` }],
+            isError: true,
+          };
+        }
+        body.filter_value = params.filter_value;
+      }
+      const data = await apiRequest('POST', `/mcp/instance/${id}/cache-proposals/invalidate`, body) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return formatProposalText(data);
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_list_pending_proposals',
+  'List pending cache proposals for the active instance, newest first. Optionally filter by cache_name.',
+  {
+    cache_name: z.string().min(1).optional().describe('Restrict to a single cache'),
+    limit: z.number().int().min(1).max(200).optional().describe('Max proposals to return (default 100, max 200)'),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_list_pending_proposals', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const qs = new URLSearchParams();
+      if (params.cache_name !== undefined) {
+        qs.set('cache_name', params.cache_name);
+      }
+      if (params.limit !== undefined) {
+        qs.set('limit', String(params.limit));
+      }
+      const path = `/mcp/instance/${id}/cache-proposals/pending${qs.size > 0 ? `?${qs}` : ''}`;
+      const data = await apiFetch(path);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_get_proposal',
+  'Fetch a single cache proposal by id, including its audit trail.',
+  {
+    proposal_id: z.string().min(1).describe('Proposal id (returned by cache_propose_*)'),
+  },
+  async (params) => withTelemetry('cache_get_proposal', async () => {
+    try {
+      const data = await apiFetch(`/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_approve_proposal',
+  'Approve a pending proposal. Synchronously applies the change to Valkey and returns the terminal status (applied|failed). Idempotent: a second call on an already-applied proposal returns the cached result.',
+  {
+    proposal_id: z.string().min(1).describe('Proposal id'),
+    actor: z.string().min(1).optional().describe('Optional actor identity stamped into the audit trail'),
+  },
+  async (params) => withTelemetry('cache_approve_proposal', async () => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (params.actor !== undefined) {
+        body.actor = params.actor;
+      }
+      const data = await apiRequest(
+        'POST',
+        `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/approve`,
+        body,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_reject_proposal',
+  'Reject a pending proposal. Optionally records a reason in the audit trail.',
+  {
+    proposal_id: z.string().min(1).describe('Proposal id'),
+    reason: z.string().min(1).optional().describe('Optional rejection reason recorded on the audit row'),
+    actor: z.string().min(1).optional().describe('Optional actor identity stamped into the audit trail'),
+  },
+  async (params) => withTelemetry('cache_reject_proposal', async () => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (params.reason !== undefined) {
+        body.reason = params.reason;
+      }
+      if (params.actor !== undefined) {
+        body.actor = params.actor;
+      }
+      const data = await apiRequest(
+        'POST',
+        `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/reject`,
+        body,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
+  'cache_edit_and_approve_proposal',
+  'Edit an existing pending proposal and approve it in one step. Provide exactly one edit field matching the proposal type: new_threshold for threshold_adjust, new_ttl_seconds for tool_ttl_adjust. Invalidate proposals are not editable.',
+  {
+    proposal_id: z.string().min(1).describe('Proposal id'),
+    new_threshold: z.number().min(0).max(2).optional().describe('For threshold_adjust proposals'),
+    new_ttl_seconds: z.number().int().min(10).max(86400).optional().describe('For tool_ttl_adjust proposals'),
+    actor: z.string().min(1).optional().describe('Optional actor identity stamped into the audit trail'),
+  },
+  async (params) => withTelemetry('cache_edit_and_approve_proposal', async () => {
+    try {
+      if (params.new_threshold === undefined && params.new_ttl_seconds === undefined) {
+        return {
+          content: [{ type: 'text' as const, text: 'Either new_threshold or new_ttl_seconds is required' }],
+          isError: true,
+        };
+      }
+      const body: Record<string, unknown> = {};
+      if (params.new_threshold !== undefined) {
+        body.new_threshold = params.new_threshold;
+      }
+      if (params.new_ttl_seconds !== undefined) {
+        body.new_ttl_seconds = params.new_ttl_seconds;
+      }
+      if (params.actor !== undefined) {
+        body.actor = params.actor;
+      }
+      const data = await apiRequest(
+        'POST',
+        `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/edit-and-approve`,
+        body,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+function formatProposalText(data: { proposal_id: string; status: string; expires_at: number; warnings: string[] }): ToolResult {
+  const expiresAtIso = new Date(data.expires_at).toISOString();
+  const lines = [
+    `Proposal created: ${data.proposal_id}`,
+    `Status: ${data.status}`,
+    `Expires at: ${expiresAtIso}`,
+  ];
+  if (data.warnings && data.warnings.length > 0) {
+    lines.push(`Warnings: ${data.warnings.join('; ')}`);
+  }
+  return {
+    content: [{ type: 'text' as const, text: lines.join('\n') }],
+  };
+}
+
 server.tool(
   'stop_monitor',
   'Stop a persistent BetterDB monitor process that was previously started with start_monitor or --autostart --persist.',

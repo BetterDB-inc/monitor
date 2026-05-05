@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-05-04
+
+### Added
+
+- **Runtime threshold overrides** — `check()` and `checkBatch()` now read `HGETALL {prefix}:__config` on each call (cached for 5s in-process) and honor `threshold` / `threshold:{category}` fields as runtime overrides. Lets BetterDB Monitor's `threshold_adjust` cache-intelligence proposals take effect at runtime without restarting consumer apps. Resolution order: `options.threshold` > runtime `threshold:{category}` > runtime `threshold` > constructor `categoryThresholds` > `defaultThreshold`. Read failures fall back silently to constructor values (logged at warn level); out-of-range values (`< 0`, `> 2`, NaN) are dropped.
+- **`threshold_adjust` capability** — added to the discovery marker's `capabilities` array. Monitor's apply dispatcher gates on this string before writing the config hash; older versions that lack the runtime read will not advertise it and Monitor will refuse to apply `threshold_adjust` proposals against them.
+
+### Behavior change
+
+- A `{prefix}:__config` Valkey hash that previously had no effect on this library now influences `check()` thresholds. If you have manually populated this key for unrelated reasons in an existing deployment, audit the values before upgrading.
+
 ## [0.3.0] - 2026-04-27
 
 ### Added

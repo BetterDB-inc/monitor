@@ -25,6 +25,7 @@ import { VectorSearch } from '../../pages/VectorSearch';
 import { VectorAi } from '../../pages/VectorAi';
 import { InferenceLatency } from '../../pages/InferenceLatency';
 import { MetricForecasting } from '../../pages/MetricForecasting';
+import { CacheProposals } from '../../pages/CacheProposals';
 import { Members } from '../../pages/Members';
 import { CloudUser } from '../../api/workspace';
 import { AppSidebar } from './AppSidebar.tsx';
@@ -191,6 +192,14 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <MigrationPage />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/cache-proposals"
+                element={
+                  <NoConnectionsGuard>
+                    <CacheProposals />
                   </NoConnectionsGuard>
                 }
               />

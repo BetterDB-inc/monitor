@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Query, HttpException, HttpStatus, UseGuards, Optional, Inject, BadRequestException, PipeTransform, Injectable, Logger } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, HttpException, HttpStatus, UseGuards, Optional, Inject, BadRequestException, Logger } from '@nestjs/common';
 import { ANOMALY_SERVICE } from '@betterdb/shared';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -9,47 +9,16 @@ import { ClientAnalyticsAnalysisService } from '../client-analytics/client-analy
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { MAX_LIMIT, ValidateInstanceIdPipe, msToSeconds, safeLimit, safeParseInt } from './mcp-helpers';
 
-const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 const EVENT_NAME_RE = /^[a-zA-Z0-9_.-]+$/;
 const VALID_ORDER_BY = new Set(['key-count', 'cpu-usec']);
-const MAX_LIMIT = 10000;
-
-@Injectable()
-class ValidateInstanceIdPipe implements PipeTransform<string, string> {
-  transform(value: string): string {
-    if (!INSTANCE_ID_RE.test(value)) {
-      throw new BadRequestException('Invalid instance ID');
-    }
-    return value;
-  }
-}
-
-function safeParseInt(value: string | undefined, defaultValue: number): number;
-function safeParseInt(value: string | undefined, defaultValue?: undefined): number | undefined;
-function safeParseInt(value: string | undefined, defaultValue?: number): number | undefined {
-  if (value === undefined) return defaultValue;
-  const parsed = parseInt(value, 10);
-  if (isNaN(parsed)) return defaultValue;
-  return parsed;
-}
-
-/** Parse and cap a limit/count query param */
-function safeLimit(value: string | undefined, defaultValue: number): number {
-  return Math.max(1, Math.min(safeParseInt(value, defaultValue), MAX_LIMIT));
-}
-
-/** Convert ms timestamp query param to seconds for commandlog service */
-function msToSeconds(value: string | undefined): number | undefined {
-  const ms = safeParseInt(value);
-  if (ms === undefined || ms < 0) return undefined;
-  return Math.floor(ms / 1000);
-}
 
 @Controller('mcp')
 @UseGuards(AgentTokenGuard)
 export class McpController {
   private readonly logger = new Logger(McpController.name);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly anomalyService: any;
 
   private readonly telemetryService: UsageTelemetryService | null;
@@ -62,6 +31,7 @@ export class McpController {
     private readonly clusterDiscoveryService: ClusterDiscoveryService,
     private readonly clusterMetricsService: ClusterMetricsService,
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     @Optional() @Inject(ANOMALY_SERVICE) anomalyService?: any,
     @Optional() telemetryService?: UsageTelemetryService,
   ) {
@@ -449,4 +419,5 @@ export class McpController {
     ));
     return { ok: true };
   }
+
 }

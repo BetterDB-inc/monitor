@@ -46,6 +46,25 @@ import type {
   VectorIndexSnapshotQueryOptions,
   MetricForecastSettings,
   MetricKind,
+  StoredCacheProposal,
+  StoredCacheProposalAudit,
+  CreateCacheProposalInput,
+  ListCacheProposalsOptions,
+  UpdateProposalStatusInput,
+  AppendProposalAuditInput,
+  ProposalStatus,
+  ProposalPayload,
+  AppliedResult,
+  CacheType,
+  ProposalType,
+  ProposalAuditEvent,
+  ActorSource,
+} from '@betterdb/shared';
+import {
+  PROPOSAL_DEFAULT_EXPIRY_MS,
+  StoredCacheProposalSchema,
+  StoredCacheProposalAuditSchema,
+  variantPayloadSchemaFor,
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
@@ -63,6 +82,34 @@ type MetricForecastSettingsRow = {
   alert_threshold_ms: number;
   updated_at: number;
 };
+
+interface CacheProposalRow {
+  id: string;
+  connection_id: string;
+  cache_name: string;
+  cache_type: CacheType;
+  proposal_type: ProposalType;
+  proposal_payload: string;
+  reasoning: string | null;
+  status: ProposalStatus;
+  proposed_by: string | null;
+  proposed_at: number;
+  reviewed_by: string | null;
+  reviewed_at: number | null;
+  applied_at: number | null;
+  applied_result: string | null;
+  expires_at: number;
+}
+
+interface CacheProposalAuditRow {
+  id: string;
+  proposal_id: string;
+  event_type: ProposalAuditEvent;
+  event_payload: string | null;
+  event_at: number;
+  actor: string | null;
+  actor_source: ActorSource;
+}
 
 export class SqliteAdapter implements StoragePort {
   private db: Database.Database | null = null;
@@ -1244,6 +1291,67 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_vis_timestamp ON vector_index_snapshots(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_vis_connection_index ON vector_index_snapshots(connection_id, index_name);
+
+      CREATE TABLE IF NOT EXISTS cache_proposals (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        cache_name TEXT NOT NULL,
+        cache_type TEXT NOT NULL CHECK (cache_type IN ('agent_cache','semantic_cache')),
+        proposal_type TEXT NOT NULL,
+        proposal_payload TEXT NOT NULL,
+        reasoning TEXT,
+        status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','applied','failed','expired')),
+        proposed_by TEXT,
+        proposed_at INTEGER NOT NULL,
+        reviewed_by TEXT,
+        reviewed_at INTEGER,
+        applied_at INTEGER,
+        applied_result TEXT,
+        expires_at INTEGER NOT NULL,
+        CHECK (
+          (cache_type = 'semantic_cache' AND proposal_type IN ('threshold_adjust','invalidate'))
+          OR (cache_type = 'agent_cache' AND proposal_type IN ('tool_ttl_adjust','invalidate'))
+        )
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cache_proposals_conn_status_proposed
+        ON cache_proposals(connection_id, status, proposed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_cache_proposals_pending_lookup
+        ON cache_proposals(connection_id, cache_name, proposal_type)
+        WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_cache_proposals_expires_at
+        ON cache_proposals(expires_at)
+        WHERE status = 'pending';
+      -- Drop legacy indexes that did NOT COALESCE NULL category/tool_name.
+      DROP INDEX IF EXISTS uniq_cache_proposals_pending_threshold;
+      DROP INDEX IF EXISTS uniq_cache_proposals_pending_tool_ttl;
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_threshold_v2
+        ON cache_proposals(
+          connection_id,
+          cache_name,
+          COALESCE(json_extract(proposal_payload, '$.category'), '__betterdb_null__')
+        )
+        WHERE status = 'pending' AND proposal_type = 'threshold_adjust';
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_cache_proposals_pending_tool_ttl_v2
+        ON cache_proposals(
+          connection_id,
+          cache_name,
+          COALESCE(json_extract(proposal_payload, '$.tool_name'), '__betterdb_null__')
+        )
+        WHERE status = 'pending' AND proposal_type = 'tool_ttl_adjust';
+
+      CREATE TABLE IF NOT EXISTS cache_proposal_audit (
+        id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL REFERENCES cache_proposals(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL CHECK (event_type IN ('proposed','approved','rejected','edited_and_approved','applied','failed','expired')),
+        event_payload TEXT,
+        event_at INTEGER NOT NULL,
+        actor TEXT,
+        actor_source TEXT NOT NULL CHECK (actor_source IN ('ui','mcp','system'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cache_proposal_audit_proposal
+        ON cache_proposal_audit(proposal_id, event_at DESC);
     `);
 
     // Idempotent migration for existing deployments without ops/CPU columns
@@ -3244,5 +3352,215 @@ export class SqliteAdapter implements StoragePort {
       )
       .all() as MetricForecastSettingsRow[];
     return rows.map((row) => this.mapMetricForecastRow(row));
+  }
+
+  private mapCacheProposalRow(row: CacheProposalRow): StoredCacheProposal {
+    return StoredCacheProposalSchema.parse(row);
+  }
+
+  private mapCacheProposalAuditRow(row: CacheProposalAuditRow): StoredCacheProposalAudit {
+    return StoredCacheProposalAuditSchema.parse(row);
+  }
+
+  async createCacheProposal(input: CreateCacheProposalInput): Promise<StoredCacheProposal> {
+    if (!this.db) throw new Error('Database not initialized');
+    const proposedAt = input.proposed_at ?? Date.now();
+    const expiresAt = input.expires_at ?? proposedAt + PROPOSAL_DEFAULT_EXPIRY_MS;
+    this.db
+      .prepare(
+        `INSERT INTO cache_proposals (
+          id, connection_id, cache_name, cache_type, proposal_type,
+          proposal_payload, reasoning, status, proposed_by, proposed_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      )
+      .run(
+        input.id,
+        input.connection_id,
+        input.cache_name,
+        input.cache_type,
+        input.proposal_type,
+        JSON.stringify(input.proposal_payload),
+        input.reasoning ?? null,
+        input.proposed_by ?? null,
+        proposedAt,
+        expiresAt,
+      );
+    const row = this.db
+      .prepare('SELECT * FROM cache_proposals WHERE id = ?')
+      .get(input.id) as CacheProposalRow;
+    return this.mapCacheProposalRow(row);
+  }
+
+  async getCacheProposal(id: string): Promise<StoredCacheProposal | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare('SELECT * FROM cache_proposals WHERE id = ?')
+      .get(id) as CacheProposalRow | undefined;
+    if (!row) {
+      return null;
+    }
+    return this.mapCacheProposalRow(row);
+  }
+
+  async listCacheProposals(options: ListCacheProposalsOptions): Promise<StoredCacheProposal[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (Array.isArray(options.status) && options.status.length === 0) {
+      return [];
+    }
+    const conditions: string[] = ['connection_id = ?'];
+    const params: (string | number)[] = [options.connection_id];
+
+    if (options.status !== undefined) {
+      const statuses = Array.isArray(options.status) ? options.status : [options.status];
+      const placeholders = statuses.map(() => '?').join(', ');
+      conditions.push(`status IN (${placeholders})`);
+      params.push(...statuses);
+    }
+    if (options.cache_name) {
+      conditions.push('cache_name = ?');
+      params.push(options.cache_name);
+    }
+    if (options.cache_type) {
+      conditions.push('cache_type = ?');
+      params.push(options.cache_type);
+    }
+    if (options.proposal_type) {
+      conditions.push('proposal_type = ?');
+      params.push(options.proposal_type);
+    }
+
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM cache_proposals
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY proposed_at DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as CacheProposalRow[];
+    return rows.map((row) => this.mapCacheProposalRow(row));
+  }
+
+  async updateCacheProposalStatus(
+    input: UpdateProposalStatusInput,
+  ): Promise<StoredCacheProposal | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (input.expected_status !== undefined || input.proposal_payload !== undefined) {
+      const existing = await this.getCacheProposal(input.id);
+      if (existing === null) {
+        return null;
+      }
+      if (input.expected_status !== undefined) {
+        const allowed = Array.isArray(input.expected_status)
+          ? input.expected_status
+          : [input.expected_status];
+        if (allowed.length === 0 || !allowed.includes(existing.status)) {
+          return null;
+        }
+      }
+      if (input.proposal_payload !== undefined) {
+        const variantSchema = variantPayloadSchemaFor(existing.cache_type, existing.proposal_type);
+        variantSchema.parse(input.proposal_payload);
+      }
+    }
+    const sets: string[] = ['status = ?'];
+    const params: (string | number | null)[] = [input.status];
+    const whereClauses: string[] = ['id = ?'];
+    const whereParams: (string | number)[] = [];
+
+    if (input.reviewed_by !== undefined) {
+      sets.push('reviewed_by = ?');
+      params.push(input.reviewed_by);
+    }
+    if (input.reviewed_at !== undefined) {
+      sets.push('reviewed_at = ?');
+      params.push(input.reviewed_at);
+    }
+    if (input.applied_at !== undefined) {
+      sets.push('applied_at = ?');
+      params.push(input.applied_at);
+    }
+    if (input.applied_result !== undefined) {
+      sets.push('applied_result = ?');
+      params.push(input.applied_result === null ? null : JSON.stringify(input.applied_result));
+    }
+    if (input.proposal_payload !== undefined) {
+      sets.push('proposal_payload = ?');
+      params.push(JSON.stringify(input.proposal_payload));
+    }
+
+    whereParams.push(input.id);
+
+    if (input.expected_status !== undefined) {
+      const expected = Array.isArray(input.expected_status)
+        ? input.expected_status
+        : [input.expected_status];
+      if (expected.length === 0) {
+        return null;
+      }
+      const placeholders = expected.map(() => '?').join(', ');
+      whereClauses.push(`status IN (${placeholders})`);
+      whereParams.push(...expected);
+    }
+
+    const result = this.db
+      .prepare(
+        `UPDATE cache_proposals SET ${sets.join(', ')} WHERE ${whereClauses.join(' AND ')}`,
+      )
+      .run(...params, ...whereParams);
+    if (result.changes === 0) {
+      return null;
+    }
+    return this.getCacheProposal(input.id);
+  }
+
+  async expireCacheProposalsBefore(now: number): Promise<StoredCacheProposal[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        `UPDATE cache_proposals
+         SET status = 'expired'
+         WHERE status = 'pending' AND expires_at <= ?
+         RETURNING *`,
+      )
+      .all(now) as CacheProposalRow[];
+    return rows.map((row) => this.mapCacheProposalRow(row));
+  }
+
+  async appendCacheProposalAudit(
+    input: AppendProposalAuditInput,
+  ): Promise<StoredCacheProposalAudit> {
+    if (!this.db) throw new Error('Database not initialized');
+    const eventAt = input.event_at ?? Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO cache_proposal_audit (
+          id, proposal_id, event_type, event_payload, event_at, actor, actor_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.id,
+        input.proposal_id,
+        input.event_type,
+        input.event_payload == null ? null : JSON.stringify(input.event_payload),
+        eventAt,
+        input.actor ?? null,
+        input.actor_source,
+      );
+    const row = this.db
+      .prepare('SELECT * FROM cache_proposal_audit WHERE id = ?')
+      .get(input.id) as CacheProposalAuditRow;
+    return this.mapCacheProposalAuditRow(row);
+  }
+
+  async getCacheProposalAudit(proposalId: string): Promise<StoredCacheProposalAudit[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM cache_proposal_audit WHERE proposal_id = ? ORDER BY event_at ASC',
+      )
+      .all(proposalId) as CacheProposalAuditRow[];
+    return rows.map((row) => this.mapCacheProposalAuditRow(row));
   }
 }

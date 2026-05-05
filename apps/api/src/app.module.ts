@@ -29,6 +29,7 @@ let KeyAnalyticsModule: any = null;
 let AnomalyModule: any = null;
 let WebhookProModule: any = null;
 let InferenceLatencyProModule: any = null;
+let CacheProposalsModule: any = null;
 let AgentModule: any = null;
 let DataRetentionModule: any = null;
 
@@ -77,6 +78,14 @@ try {
   const inferenceLatencyProModule = require('../../../proprietary/inference-latency-pro/inference-latency-pro.module');
   InferenceLatencyProModule = inferenceLatencyProModule.InferenceLatencyProModule;
   console.log('[InferenceLatencyPro] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
+  const cacheProposalsModule = require('../../../proprietary/cache-proposals/cache-proposals.module');
+  CacheProposalsModule = cacheProposalsModule.CacheProposalsModule;
+  console.log('[CacheProposals] Proprietary module loaded');
 } catch {
   // Proprietary module not available
 }
@@ -144,6 +153,7 @@ const proprietaryImports = [
   AnomalyModule,
   WebhookProModule,
   InferenceLatencyProModule,
+  CacheProposalsModule,
   AiModule,
   AgentModule,
   DataRetentionModule,

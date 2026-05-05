@@ -39,6 +39,7 @@ import {
 } from './discovery';
 
 const INVALIDATE_BATCH_SIZE = 1000;
+const THRESHOLD_OVERRIDES_TTL_MS = 5_000;
 
 const PACKAGE_VERSION = (require('../package.json') as { version: string }).version;
 
@@ -54,6 +55,7 @@ export class SemanticCache {
   private readonly entryPrefix: string;
   private readonly statsKey: string;
   private readonly similarityWindowKey: string;
+  private readonly configKey: string;
   private readonly defaultThreshold: number;
   private readonly defaultTtl: number | undefined;
   private readonly categoryThresholds: Record<string, number>;
@@ -71,6 +73,10 @@ export class SemanticCache {
   private _hasBinaryRefs = false;
   private _initPromise: Promise<void> | null = null;
   private _initGeneration = 0;
+
+  private thresholdOverrides: { global?: number; byCategory: Record<string, number> } | null = null;
+  private thresholdOverridesCachedAt = 0;
+  private thresholdOverridesRefresh: Promise<void> | null = null;
 
   private readonly analyticsOpts: SemanticCacheOptions['analytics'];
   private readonly usesDefaultCostTable: boolean;
@@ -96,6 +102,7 @@ export class SemanticCache {
     this.entryPrefix = `${this.name}:entry:`;
     this.statsKey = `${this.name}:__stats`;
     this.similarityWindowKey = `${this.name}:__similarity_window`;
+    this.configKey = `${this.name}:__config`;
     this.embedKeyPrefix = `${this.name}:embed:`;
     this.defaultThreshold = options.defaultThreshold ?? 0.1;
     this.defaultTtl = options.defaultTtl;
@@ -219,11 +226,8 @@ export class SemanticCache {
 
     return this.traced('check', async (span) => {
       const category = options?.category ?? '';
-      const threshold =
-        options?.threshold ??
-        (category && this.categoryThresholds[category] !== undefined
-          ? this.categoryThresholds[category]
-          : this.defaultThreshold);
+      const overrides = await this.getThresholdOverrides();
+      const threshold = this.resolveThreshold(category, options?.threshold, overrides);
 
       // Resolve text and binary refs from prompt
       const { text: promptText, binaryRefs } = await this.resolvePrompt(prompt);
@@ -594,11 +598,8 @@ export class SemanticCache {
       const embeddings = await Promise.all(resolved.map(({ text }) => this.embed(text)));
 
       const category = options?.category ?? '';
-      const threshold =
-        options?.threshold ??
-        (category && this.categoryThresholds[category] !== undefined
-          ? this.categoryThresholds[category]
-          : this.defaultThreshold);
+      const overrides = await this.getThresholdOverrides();
+      const threshold = this.resolveThreshold(category, options?.threshold, overrides);
       const k = options?.k ?? 1;
       const userFilter = options?.filter;
 
@@ -1290,6 +1291,86 @@ export class SemanticCache {
       msg.includes('no such index') ||
       msg.includes('not found')
     );
+  }
+
+  // -- Runtime threshold overrides --
+  //
+  // Reads { prefix }:__config to honor approved cache-intelligence threshold_adjust
+  // proposals at runtime. See docs/plans/specs/spec-semantic-cache-runtime-threshold-reads.md.
+
+  private resolveThreshold(
+    category: string,
+    optionsThreshold: number | undefined,
+    overrides: { global?: number; byCategory: Record<string, number> },
+  ): number {
+    if (optionsThreshold !== undefined) {
+      return optionsThreshold;
+    }
+    if (category && overrides.byCategory[category] !== undefined) {
+      return overrides.byCategory[category];
+    }
+    if (overrides.global !== undefined) {
+      return overrides.global;
+    }
+    if (category && this.categoryThresholds[category] !== undefined) {
+      return this.categoryThresholds[category];
+    }
+    return this.defaultThreshold;
+  }
+
+  private async getThresholdOverrides(): Promise<{
+    global?: number;
+    byCategory: Record<string, number>;
+  }> {
+    const fresh =
+      this.thresholdOverrides !== null &&
+      Date.now() - this.thresholdOverridesCachedAt < THRESHOLD_OVERRIDES_TTL_MS;
+    if (fresh) {
+      return this.thresholdOverrides!;
+    }
+    if (!this.thresholdOverridesRefresh) {
+      this.thresholdOverridesRefresh = this.refreshThresholdOverrides().finally(() => {
+        this.thresholdOverridesRefresh = null;
+      });
+    }
+    await this.thresholdOverridesRefresh;
+    return this.thresholdOverrides ?? { byCategory: {} };
+  }
+
+  private async refreshThresholdOverrides(): Promise<void> {
+    let hash: Record<string, string>;
+    try {
+      hash = await this.client.hgetall(this.configKey);
+    } catch (err: unknown) {
+      // Fail open: keep prior cache (if any) and let resolution fall back to
+      // constructor categoryThresholds. Logged so operators can spot a degraded
+      // Valkey config-hash read without breaking the user-facing check() path.
+      console.warn(
+        `[semantic-cache:${this.name}] failed to read ${this.configKey}: ${errMsg(err)}`,
+      );
+      return;
+    }
+
+    const next: { global?: number; byCategory: Record<string, number> } = { byCategory: {} };
+    for (const [field, value] of Object.entries(hash)) {
+      const parsed = parseFloat(value);
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 2) {
+        console.warn(
+          `[semantic-cache:${this.name}] config-hash override out of range: ${field}=${value}`,
+        );
+        continue;
+      }
+      if (field === 'threshold') {
+        next.global = parsed;
+      } else if (field.startsWith('threshold:')) {
+        const cat = field.slice('threshold:'.length);
+        if (cat) {
+          next.byCategory[cat] = parsed;
+        }
+      }
+    }
+    this.thresholdOverrides = next;
+    this.thresholdOverridesCachedAt = Date.now();
   }
 
   private parseDimensionFromInfo(info: unknown[]): number {

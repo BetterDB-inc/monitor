@@ -117,17 +117,20 @@ function metadataFor(name: string, overrides: Partial<MarkerMetadata> = {}): Mar
 }
 
 describe('buildSemanticMetadata', () => {
-  it('publishes capabilities without threshold_adjust until runtime config-hash reads ship', () => {
+  it('advertises threshold_adjust alongside the existing capabilities', () => {
     const meta = buildSemanticMetadata({
       name: 'foo',
-      version: '0.2.0',
+      version: '0.4.0',
       defaultThreshold: 0.1,
       categoryThresholds: {},
       uncertaintyBand: 0.05,
       includeCategories: true,
     });
-    expect(meta.capabilities).toEqual(['invalidate', 'similarity_distribution']);
-    expect(meta.capabilities).not.toContain('threshold_adjust');
+    expect(meta.capabilities).toEqual([
+      'invalidate',
+      'similarity_distribution',
+      'threshold_adjust',
+    ]);
   });
 
   it('derives index/stats/config keys from the cache name', () => {
