@@ -177,26 +177,38 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       <div className="px-3 py-2">
         <div className="flex items-center justify-between mb-1">
           <label className="text-xs text-muted-foreground">Connection</label>
-          {!isDemo && (
-            <div className="flex gap-1">
+          <div className="flex gap-1">
+            <button
+              onClick={() => !isDemo && setShowAddDialog(true)}
+              disabled={isDemo}
+              data-tooltip-id="license-tooltip"
+              data-tooltip-content={isDemo ? 'Not available in demo mode' : undefined}
+              className={`w-7 h-7 flex items-center justify-center rounded-md text-base font-medium transition-colors ${
+                isDemo
+                  ? 'opacity-30 cursor-not-allowed text-primary'
+                  : 'text-primary hover:bg-primary/10'
+              }`}
+              title={isDemo ? undefined : 'Add connection'}
+            >
+              +
+            </button>
+            {connections.length > 0 && (
               <button
-                onClick={() => setShowAddDialog(true)}
-                className="w-7 h-7 flex items-center justify-center rounded-md text-base font-medium text-primary hover:bg-primary/10 transition-colors"
-                title="Add connection"
+                onClick={() => !isDemo && setShowManageDialog(true)}
+                disabled={isDemo}
+                data-tooltip-id="license-tooltip"
+                data-tooltip-content={isDemo ? 'Not available in demo mode' : undefined}
+                className={`w-7 h-7 flex items-center justify-center rounded-md text-base transition-colors ${
+                  isDemo
+                    ? 'opacity-30 cursor-not-allowed text-muted-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                }`}
+                title={isDemo ? undefined : 'Manage connections'}
               >
-                +
+                ⚙
               </button>
-              {connections.length > 0 && (
-                <button
-                  onClick={() => setShowManageDialog(true)}
-                  className="w-7 h-7 flex items-center justify-center rounded-md text-base text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                  title="Manage connections"
-                >
-                  ⚙
-                </button>
-              )}
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {connections.length === 0 ? (

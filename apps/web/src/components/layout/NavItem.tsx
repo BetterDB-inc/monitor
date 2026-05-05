@@ -2,15 +2,30 @@ import { Link } from 'react-router-dom';
 import { useLicense } from '../../hooks/useLicense';
 import { Feature } from '@betterdb/shared';
 
+const DEMO_TOOLTIP = 'Not available in demo mode';
+
 interface NavItemProps {
   children: React.ReactNode;
   active: boolean;
   to: string;
   requiredFeature?: Feature;
+  demoLocked?: boolean;
 }
 
-export function NavItem({ children, active, to, requiredFeature }: NavItemProps) {
+export function NavItem({ children, active, to, requiredFeature, demoLocked }: NavItemProps) {
   const { hasFeature } = useLicense();
+
+  if (demoLocked) {
+    return (
+      <span
+        data-tooltip-id="license-tooltip"
+        data-tooltip-content={DEMO_TOOLTIP}
+        className="block w-full rounded-md px-3 py-2 text-sm opacity-40 cursor-not-allowed select-none"
+      >
+        {children}
+      </span>
+    );
+  }
 
   const isLocked = requiredFeature && !hasFeature(requiredFeature);
   const tooltipText = isLocked

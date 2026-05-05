@@ -102,11 +102,9 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
           <NavItem to="/audit" active={location.pathname === '/audit'}>
             Audit Trail
           </NavItem>
-          {!isDemo && (
-            <NavItem to="/webhooks" active={location.pathname === '/webhooks'}>
-              Webhooks
-            </NavItem>
-          )}
+          <NavItem to="/webhooks" active={location.pathname === '/webhooks'} demoLocked={isDemo}>
+            Webhooks
+          </NavItem>
           <NavItem to="/migration" active={location.pathname === '/migration'}>
             Migration
           </NavItem>
@@ -157,16 +155,14 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
           >
             Feedback
           </button>
-          {cloudUser && !isDemo && (
-            <NavItem to="/workspace/members" active={location.pathname === '/workspace/members'}>
+          {cloudUser && (
+            <NavItem to="/workspace/members" active={location.pathname === '/workspace/members'} demoLocked={isDemo}>
               Team
             </NavItem>
           )}
-          {!isDemo && (
-            <NavItem to="/settings" active={location.pathname === '/settings'}>
-              Settings
-            </NavItem>
-          )}
+          <NavItem to="/settings" active={location.pathname === '/settings'} demoLocked={isDemo}>
+            Settings
+          </NavItem>
         </div>
       </SidebarFooter>
     </Sidebar>
