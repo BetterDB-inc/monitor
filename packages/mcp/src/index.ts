@@ -4,6 +4,17 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { initTelemetry, trackToolCall, stopTelemetry } from './telemetry.js';
+import {
+  isJsonResponse,
+  isLicenseError,
+  licenseErrorResult,
+  buildQuery,
+  formatProposalText,
+  getArgValue as getArgValuePure,
+  resolveInstanceId as resolveInstanceIdPure,
+  parseErrorResponse,
+  type ToolResult,
+} from './utils.js';
 
 // --- CLI arg parsing ---
 
@@ -13,11 +24,7 @@ const PERSIST   = args.includes('--persist');
 const STOP      = args.includes('--stop');
 
 function getArgValue(flag: string, fallback: string): string {
-  const i = args.indexOf(flag);
-  if (i !== -1 && args[i + 1] && !args[i + 1].startsWith('--')) {
-    return args[i + 1];
-  }
-  return fallback;
+  return getArgValuePure(args, flag, fallback);
 }
 
 const MONITOR_PORT    = Number(getArgValue('--port', '3001'));
@@ -62,11 +69,6 @@ async function rawFetch(prefix: string, path: string): Promise<Response> {
     headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
   }
   return fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
-}
-
-function isJsonResponse(res: Response): boolean {
-  const ct = res.headers.get('content-type') || '';
-  return ct.includes('application/json');
 }
 
 async function detectPrefix(): Promise<string> {
@@ -116,15 +118,7 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    let message = `Request failed with status ${res.status}`;
-    try {
-      const parsed = JSON.parse(errText);
-      if (parsed.error) message = String(parsed.error);
-      else if (parsed.message) message = String(parsed.message);
-    } catch {
-      if (errText) message = errText;
-    }
-    throw new Error(message);
+    throw new Error(parseErrorResponse(errText, res.status));
   }
 
   const text = await res.text();
@@ -135,28 +129,9 @@ async function apiFetch(path: string): Promise<unknown> {
   return apiRequest('GET', path);
 }
 
-function isLicenseError(data: unknown): data is { __licenseError: true; requiredTier: string; currentTier: string; upgradeUrl: string } {
-  return data != null && typeof data === 'object' && (data as any).__licenseError === true;
-}
-
-function licenseErrorResult(data: { requiredTier: string; currentTier: string; upgradeUrl: string }): string {
-  return `This feature requires a ${data.requiredTier} license (current tier: ${data.currentTier}). Upgrade at ${data.upgradeUrl}`;
-}
-
-const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
-
 function resolveInstanceId(overrideId?: string): string {
-  const id = overrideId || activeInstanceId;
-  if (!id) {
-    throw new Error('No instance selected. Call list_instances then select_instance first.');
-  }
-  if (!INSTANCE_ID_RE.test(id)) {
-    throw new Error(`Invalid instance ID: ${id}`);
-  }
-  return id;
+  return resolveInstanceIdPure(activeInstanceId, overrideId);
 }
-
-type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
 async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): Promise<ToolResult> {
   const start = Date.now();
@@ -445,14 +420,6 @@ server.tool(
 );
 
 // --- Historical data tools ---
-
-function buildQuery(params: Record<string, string | number | boolean | undefined>): string {
-  const parts: string[] = [];
-  for (const [key, val] of Object.entries(params)) {
-    if (val !== undefined) parts.push(`${key}=${encodeURIComponent(String(val))}`);
-  }
-  return parts.length ? `?${parts.join('&')}` : '';
-}
 
 server.tool(
   'get_slowlog_patterns',
@@ -1189,21 +1156,6 @@ server.tool(
     }
   }),
 );
-
-function formatProposalText(data: { proposal_id: string; status: string; expires_at: number; warnings: string[] }): ToolResult {
-  const expiresAtIso = new Date(data.expires_at).toISOString();
-  const lines = [
-    `Proposal created: ${data.proposal_id}`,
-    `Status: ${data.status}`,
-    `Expires at: ${expiresAtIso}`,
-  ];
-  if (data.warnings && data.warnings.length > 0) {
-    lines.push(`Warnings: ${data.warnings.join('; ')}`);
-  }
-  return {
-    content: [{ type: 'text' as const, text: lines.join('\n') }],
-  };
-}
 
 server.tool(
   'stop_monitor',
