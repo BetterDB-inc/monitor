@@ -48,7 +48,7 @@ spec:
             - name: ROUTE53_ZONE_ID
               value: "Z071377925BCBHU7WUE59"
             - name: DEFAULT_IMAGE_TAG
-              value: "v0.16.0"
+              value: "v0.18.0"
             - name: COOKIE_DOMAIN
               valueFrom:
                 secretKeyRef:
