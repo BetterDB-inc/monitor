@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { NotFoundException } from '@nestjs/common';
-import { ConnectionRegistry } from '../connection-registry.service';
+import { ConnectionRegistry, ENV_DEFAULT_ID } from '../connection-registry.service';
 import { RuntimeCapabilityTracker } from '../runtime-capability-tracker.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
@@ -129,14 +129,14 @@ describe('ConnectionRegistry', () => {
 
       expect(mockStorage.saveConnection).toHaveBeenCalledWith(
         expect.objectContaining({
-          id: 'env-default',
+          id: ENV_DEFAULT_ID,
           name: 'Default',
           host: 'localhost',
           port: 6379,
           isDefault: true,
         }),
       );
-      expect(registry.getDefaultId()).toBe('env-default');
+      expect(registry.getDefaultId()).toBe(ENV_DEFAULT_ID);
     });
 
     it('should load saved connections on init', async () => {
@@ -188,7 +188,7 @@ describe('ConnectionRegistry', () => {
     });
 
     it('should return specific connection by id', () => {
-      const conn = registry.get('env-default');
+      const conn = registry.get(ENV_DEFAULT_ID);
       expect(conn).toBeDefined();
     });
 
@@ -228,9 +228,9 @@ describe('ConnectionRegistry', () => {
     });
 
     it('should return config for specific id', () => {
-      const config = registry.getConfig('env-default');
+      const config = registry.getConfig(ENV_DEFAULT_ID);
       expect(config).toBeDefined();
-      expect(config?.id).toBe('env-default');
+      expect(config?.id).toBe(ENV_DEFAULT_ID);
     });
 
     it('should return null for non-existent id', () => {
@@ -289,7 +289,7 @@ describe('ConnectionRegistry', () => {
     });
 
     it('should not allow removing env-default connection', async () => {
-      await expect(registry.removeConnection('env-default')).rejects.toThrow(
+      await expect(registry.removeConnection(ENV_DEFAULT_ID)).rejects.toThrow(
         'Cannot remove the default environment connection',
       );
     });
@@ -413,7 +413,7 @@ describe('ConnectionRegistry', () => {
 
       expect(list).toHaveLength(1);
       expect(list[0]).toMatchObject({
-        id: 'env-default',
+        id: ENV_DEFAULT_ID,
         name: 'Default',
         host: 'localhost',
         port: 6379,
@@ -438,10 +438,10 @@ describe('ConnectionRegistry', () => {
     });
 
     it('should reconnect an existing connection', async () => {
-      await registry.reconnect('env-default');
+      await registry.reconnect(ENV_DEFAULT_ID);
 
       // Should have created a new adapter and connected
-      const conn = registry.get('env-default');
+      const conn = registry.get(ENV_DEFAULT_ID);
       expect(conn.isConnected()).toBe(true);
     });
 
@@ -459,7 +459,7 @@ describe('ConnectionRegistry', () => {
 
     it('should find connection by host and port', () => {
       const id = registry.findIdByHostPort('localhost', 6379);
-      expect(id).toBe('env-default');
+      expect(id).toBe(ENV_DEFAULT_ID);
     });
 
     it('should return null when not found', () => {
@@ -470,7 +470,7 @@ describe('ConnectionRegistry', () => {
 
   describe('isEnvDefault', () => {
     it('should return true for env-default id', () => {
-      expect(registry.isEnvDefault('env-default')).toBe(true);
+      expect(registry.isEnvDefault(ENV_DEFAULT_ID)).toBe(true);
     });
 
     it('should return false for other ids', () => {

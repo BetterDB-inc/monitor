@@ -11,6 +11,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
 
+// Canonical value lives in connection-registry.service.ts (ENV_DEFAULT_ID).
+const ENV_DEFAULT_ID = 'env-default';
+
 // Configuration
 const DB_PATH = process.env.SQLITE_PATH || path.join(__dirname, '..', 'data', 'betterdb.sqlite');
 const SOURCE_HOST = '127.0.0.1';
@@ -708,7 +711,7 @@ function seedSlowLogEntries(): void {
       capturedAt: baseTs + randomInt(0, 5000), // captured shortly after
       sourceHost: SOURCE_HOST,
       sourcePort: SOURCE_PORT,
-      connectionId: 'env-default',
+      connectionId: ENV_DEFAULT_ID,
     });
   }
 
@@ -784,7 +787,7 @@ function seedLatencySnapshots(): void {
         eventName,
         latestEventTimestamp: eventTs,
         maxLatency: baseLatency, // microseconds
-        connectionId: 'env-default',
+        connectionId: ENV_DEFAULT_ID,
       });
     }
   }
@@ -856,7 +859,7 @@ function seedLatencyHistograms(): void {
       id: randomUUID(),
       timestamp: ts,
       data: JSON.stringify(data),
-      connectionId: 'env-default',
+      connectionId: ENV_DEFAULT_ID,
     });
   }
 
@@ -952,7 +955,7 @@ function seedMemorySnapshots(): void {
       cpuUser,
       ioThreadedReads: cumulativeIoReads,
       ioThreadedWrites: cumulativeIoWrites,
-      connectionId: 'env-default',
+      connectionId: ENV_DEFAULT_ID,
     });
   }
 

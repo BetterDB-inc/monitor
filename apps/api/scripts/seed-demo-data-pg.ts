@@ -9,12 +9,15 @@
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 
+// Canonical value lives in connection-registry.service.ts (ENV_DEFAULT_ID).
+const ENV_DEFAULT_ID = 'env-default';
+
 const STORAGE_URL =
   process.env.STORAGE_URL ||
   `postgresql://${process.env.STORAGE_POSTGRES_USER || 'betterdb'}:${process.env.STORAGE_POSTGRES_PASSWORD || 'devpassword'}@${process.env.STORAGE_POSTGRES_HOST || 'localhost'}:${process.env.STORAGE_POSTGRES_PORT || '5432'}/${process.env.STORAGE_POSTGRES_DATABASE || 'betterdb'}`;
 
 // Auto-detected at runtime from the most recently active connection
-let CONNECTION_ID = process.env.CONNECTION_ID || 'env-default';
+let CONNECTION_ID = process.env.CONNECTION_ID || ENV_DEFAULT_ID;
 let SOURCE_HOST = process.env.SOURCE_HOST || 'localhost';
 let SOURCE_PORT = parseInt(process.env.SOURCE_PORT || '6379', 10);
 
@@ -435,10 +438,10 @@ async function main(): Promise<void> {
     console.log('Connected to PostgreSQL');
 
     // Auto-detect the most recently active connection ID and source info
-    if (CONNECTION_ID === 'env-default') {
+    if (CONNECTION_ID === ENV_DEFAULT_ID) {
       const res = await pool.query(
         `SELECT connection_id, source_host, source_port FROM command_log_entries
-         WHERE connection_id <> 'env-default'
+         WHERE connection_id <> '${ENV_DEFAULT_ID}'
          ORDER BY captured_at DESC LIMIT 1`
       );
       if (res.rows.length > 0) {
