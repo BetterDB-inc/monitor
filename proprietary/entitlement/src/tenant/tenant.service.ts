@@ -5,7 +5,7 @@ import { TenantStatus } from '@prisma/client';
 const RESERVED_SUBDOMAINS = [
   'www', 'api', 'app', 'admin', 'system', 'test', 'staging', 'prod',
   'mail', 'smtp', 'ftp', 'ns1', 'ns2', 'status', 'docs', 'blog',
-  'support', 'help',
+  'support', 'help', 'demo',
 ];
 
 @Injectable()
