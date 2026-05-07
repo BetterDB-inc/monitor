@@ -1,6 +1,6 @@
 import { useState, ReactNode } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { useIsDemo } from '../../contexts/DemoContext';
+import { useDemoState } from '../../contexts/DemoContext';
 import { DemoBanner } from '../DemoBanner';
 import { useIdleTracker } from '../../hooks/useIdleTracker';
 import { useNavigationTracker } from '../../hooks/useNavigationTracker';
@@ -35,7 +35,8 @@ import { FeedbackModal } from './FeedbackModal';
 import { SidebarProvider } from '@/components/ui/sidebar.tsx';
 
 function DemoGuardedRoute({ children }: { children: ReactNode }) {
-  const isDemo = useIsDemo();
+  const { isDemo, loading } = useDemoState();
+  if (loading) return null;
   if (isDemo) return <Navigate to="/" replace />;
   return <>{children}</>;
 }

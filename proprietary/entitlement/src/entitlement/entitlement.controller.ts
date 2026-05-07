@@ -1,10 +1,12 @@
 import { Controller, Post, Body, BadRequestException } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { EntitlementService } from './entitlement.service';
 import type { EntitlementRequest, EntitlementResponse } from '@betterdb/shared';
 
 const LICENSE_KEY_MIN_LENGTH = 10;
 const LICENSE_KEY_MAX_LENGTH = 100;
 
+@SkipThrottle()
 @Controller('v1/entitlements')
 export class EntitlementController {
   constructor(private readonly entitlement: EntitlementService) {}

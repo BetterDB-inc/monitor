@@ -22,7 +22,7 @@ spec:
       serviceAccountName: entitlement
       containers:
         - name: entitlement
-          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v1.2.6
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v1.2.10
           imagePullPolicy: Always
           ports:
             - containerPort: 3002
@@ -49,6 +49,11 @@ spec:
               value: "Z071377925BCBHU7WUE59"
             - name: DEFAULT_IMAGE_TAG
               value: "v0.16.0"
+            - name: COOKIE_DOMAIN
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: COOKIE_DOMAIN
             - name: RESEND_API_KEY
               valueFrom:
                 secretKeyRef:

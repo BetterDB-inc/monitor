@@ -18,3 +18,7 @@ export function DemoProvider({ children }: { children: ReactNode }) {
 export function useIsDemo(): boolean {
   return useContext(DemoContext).isDemo;
 }
+
+export function useDemoState(): DemoState {
+  return useContext(DemoContext);
+}
