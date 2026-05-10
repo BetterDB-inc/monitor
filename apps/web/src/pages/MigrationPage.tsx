@@ -455,7 +455,13 @@ export function MigrationPage() {
               </div>
               <div className="flex justify-between">
                 <dt className="text-muted-foreground">Mode</dt>
-                <dd className="font-medium">{executionMode === 'command' ? 'Command-based' : 'DUMP/RESTORE (RedisShake)'}</dd>
+                <dd className="font-medium">
+                  {executionMode === 'command'
+                    ? 'Command-based'
+                    : executionMode === 'redis_shake_sync'
+                      ? 'Online sync (RedisShake PSYNC)'
+                      : 'DUMP/RESTORE (RedisShake)'}
+                </dd>
               </div>
             </dl>
 
