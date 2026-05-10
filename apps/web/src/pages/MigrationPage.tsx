@@ -229,7 +229,7 @@ export function MigrationPage() {
           <MigrationReport job={job} />
 
           {/* Mode selector + Start Migration button */}
-          <div className="pt-4 border-t space-y-3">
+          <div className="py-4 border-t space-y-3 mb-4">
             {canExecute && (
               <div className="flex items-center gap-3">
                 <label className="text-sm font-medium">Migration mode:</label>
@@ -478,8 +478,8 @@ export function MigrationPage() {
                 onClick={handleConfirmMigration}
                 disabled={migrationStarting}
                 className={`px-4 py-2 text-sm rounded-lg inline-flex items-center gap-2 disabled:opacity-70 ${blockingCount > 0
-                    ? 'border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100'
-                    : 'bg-primary text-primary-foreground hover:bg-primary/90'
+                  ? 'border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                  : 'bg-primary text-primary-foreground hover:bg-primary/90'
                   }`}
               >
                 {migrationStarting && (
