@@ -131,7 +131,7 @@ export function parseLogLine(line: string): ParsedLogLine {
   }
 
   const scannedMatch = line.match(/scanned[=: ]+(\d+)/i);
-  if (scannedMatch) {
+  if (scannedMatch && result.keysTransferred === null) {
     result.keysTransferred = parseInt(scannedMatch[1], 10);
   }
 

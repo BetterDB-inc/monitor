@@ -38,6 +38,13 @@ describe('parseLogLine — sync_reader stage detection', () => {
     expect(result.syncStage).toBe('aof_replicating');
   });
 
+  it('write_count takes priority over scanned on the same line', () => {
+    // A pathological line containing both patterns — write_count must win
+    const line = 'write_count=[500], scanned=999, total=1000, syncing aof';
+    const result = parseLogLine(line);
+    expect(result.keysTransferred).toBe(500);
+  });
+
   it('extracts write_count=0 without treating it as null', () => {
     const line = 'read_count=[0], read_ops=[0.00], write_count=[0], write_ops=[0.00], src-0, syncing aof, diff=[1048576]';
     const result = parseLogLine(line);
