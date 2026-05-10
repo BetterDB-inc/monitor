@@ -140,7 +140,7 @@ export class MigrationExecutionService {
           if (parsed.keysTransferred !== null) job.keysTransferred = parsed.keysTransferred;
           if (parsed.bytesTransferred !== null) job.bytesTransferred = parsed.bytesTransferred;
           if (parsed.progress !== null) job.progress = parsed.progress;
-          if (parsed.syncStage !== null) job.syncStage = parsed.syncStage;
+          if (parsed.syncStage !== null && job.mode === 'redis_shake_sync') job.syncStage = parsed.syncStage;
         }
       };
 
