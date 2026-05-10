@@ -7,6 +7,7 @@ jest.mock('../execution/redisshake-runner', () => ({
 
 jest.mock('../execution/toml-builder', () => ({
   buildScanReaderToml: jest.fn().mockReturnValue('[scan_reader]\naddress = "127.0.0.1:6379"\n'),
+  buildSyncReaderToml: jest.fn().mockReturnValue('[sync_reader]\naddress = "127.0.0.1:6379"\n'),
 }));
 
 jest.mock('child_process', () => ({
@@ -153,6 +154,43 @@ describe('MigrationExecutionService', () => {
 
       expect(runCommandMigration).toHaveBeenCalledWith(
         expect.objectContaining({ targetIsCluster: false }),
+      );
+    });
+
+    it('should route redis_shake_sync to buildSyncReaderToml and return pending status', async () => {
+      const { buildSyncReaderToml, buildScanReaderToml } = require('../execution/toml-builder');
+      (buildSyncReaderToml as jest.Mock).mockClear();
+      (buildScanReaderToml as jest.Mock).mockClear();
+
+      const result = await service.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+      });
+
+      expect(result.id).toBeDefined();
+      expect(result.status).toBe('pending');
+      expect(buildSyncReaderToml).toHaveBeenCalledTimes(1);
+      expect(buildScanReaderToml).not.toHaveBeenCalled();
+    });
+
+    it('should forward syncReaderOptions to buildSyncReaderToml', async () => {
+      const { buildSyncReaderToml } = require('../execution/toml-builder');
+      (buildSyncReaderToml as jest.Mock).mockClear();
+
+      await service.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake_sync',
+        syncReaderOptions: { preferReplica: true },
+      });
+
+      expect(buildSyncReaderToml).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        { preferReplica: true },
+        expect.any(Boolean),
       );
     });
   });

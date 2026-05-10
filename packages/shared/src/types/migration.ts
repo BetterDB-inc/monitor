@@ -109,12 +109,32 @@ export type ExecutionJobStatus =
   | 'failed'
   | 'cancelled';
 
-export type ExecutionMode = 'redis_shake' | 'command';
+export type ExecutionMode = 'redis_shake' | 'redis_shake_sync' | 'command';
+
+/**
+ * Options that apply only when mode === 'redis_shake_sync'.
+ * Ignored for other modes.
+ */
+export interface SyncReaderOptions {
+  /** Read from a replica instead of the primary. Default: false. */
+  preferReplica?: boolean;
+}
+
+/**
+ * Coarse-grained stage of a redis_shake_sync execution.
+ * - 'connecting': process started, no stage signal observed yet
+ * - 'rdb_syncing': RedisShake is doing the initial RDB transfer from source to target
+ * - 'aof_replicating': initial RDB done; replicating incremental writes via AOF
+ * - null: not applicable (non-sync modes)
+ */
+export type SyncStage = 'connecting' | 'rdb_syncing' | 'aof_replicating' | null;
 
 export interface MigrationExecutionRequest {
   sourceConnectionId: string;
   targetConnectionId: string;
   mode?: ExecutionMode; // default 'redis_shake'
+  /** Only honoured when mode === 'redis_shake_sync'. */
+  syncReaderOptions?: SyncReaderOptions;
 }
 
 export interface MigrationExecutionResult {
@@ -132,6 +152,8 @@ export interface MigrationExecutionResult {
   logs: string[];
   // Parsed progress 0–100, best-effort. null if unparseable.
   progress: number | null;
+  /** Only populated for redis_shake_sync mode; null otherwise. */
+  syncStage: SyncStage;
 }
 
 export interface StartExecutionResponse {

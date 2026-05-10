@@ -86,6 +86,7 @@ export function MigrationPage() {
   const canExecute = hasFeature(Feature.MIGRATION_EXECUTION);
   const blockingCount = job?.blockingCount ?? 0;
   const [executionMode, setExecutionMode] = useState<ExecutionMode>('command');
+  const [preferReplica, setPreferReplica] = useState<boolean>(false);
 
   // Issue 1 + 4: confirmation dialog state
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
@@ -116,6 +117,7 @@ export function MigrationPage() {
     setExecutionId(null);
     setValidationId(null);
     setExecutionResult(null);
+    setPreferReplica(false);
   };
 
   // Issue 1: open dialog instead of window.confirm
@@ -135,6 +137,9 @@ export function MigrationPage() {
           sourceConnectionId: job.sourceConnectionId,
           targetConnectionId: job.targetConnectionId,
           mode: executionMode,
+          ...(executionMode === 'redis_shake_sync' && {
+            syncReaderOptions: { preferReplica },
+          }),
         }),
       });
       setShowConfirmDialog(false);
@@ -235,7 +240,31 @@ export function MigrationPage() {
                 >
                   <option value="command">Command-based (cross-version compatible)</option>
                   <option value="redis_shake">DUMP/RESTORE (RedisShake)</option>
+                  <option value="redis_shake_sync">Online sync (RedisShake PSYNC, minimal downtime)</option>
                 </select>
+              </div>
+            )}
+
+            {executionMode === 'redis_shake_sync' && canExecute && (
+              <div className="space-y-3">
+                <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-3 text-sm">
+                  <p className="font-medium">Online sync runs continuously</p>
+                  <p className="mt-1">
+                    After the initial sync completes, the migration keeps replicating new writes from source to target.
+                    You'll need to manually stop it from the execution panel when you're ready to cut over.
+                    Plan a brief read-only window on the source during cutover.
+                  </p>
+                </div>
+
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={preferReplica}
+                    onChange={(e) => setPreferReplica(e.target.checked)}
+                    className="rounded"
+                  />
+                  <span>Read from replica (recommended for production: avoids extra PSYNC load on the primary)</span>
+                </label>
               </div>
             )}
 
@@ -311,11 +340,11 @@ export function MigrationPage() {
           <MigrationReport job={job} />
           <ExecutionPanel
             executionId={executionId}
-            onStopped={() => {/* already stopped */}}
+            onStopped={() => {/* already stopped */ }}
           />
 
           {/* Run Validation + actions */}
-          <div className="pt-4 border-t space-y-3">
+          <div className="py-4 border-t space-y-3 mb-4">
             {!canExecute && (
               <p className="text-sm text-muted-foreground">
                 Post-migration validation requires a Pro license. Upgrade at betterdb.com/pricing
@@ -357,7 +386,7 @@ export function MigrationPage() {
           {executionId && (
             <ExecutionPanel
               executionId={executionId}
-              onStopped={() => {/* already stopped */}}
+              onStopped={() => {/* already stopped */ }}
             />
           )}
           <div ref={validationRef}>
@@ -375,7 +404,7 @@ export function MigrationPage() {
           {executionId && (
             <ExecutionPanel
               executionId={executionId}
-              onStopped={() => {/* already stopped */}}
+              onStopped={() => {/* already stopped */ }}
             />
           )}
           <div ref={validationRef}>
@@ -448,11 +477,10 @@ export function MigrationPage() {
               <button
                 onClick={handleConfirmMigration}
                 disabled={migrationStarting}
-                className={`px-4 py-2 text-sm rounded-lg inline-flex items-center gap-2 disabled:opacity-70 ${
-                  blockingCount > 0
+                className={`px-4 py-2 text-sm rounded-lg inline-flex items-center gap-2 disabled:opacity-70 ${blockingCount > 0
                     ? 'border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100'
                     : 'bg-primary text-primary-foreground hover:bg-primary/90'
-                }`}
+                  }`}
               >
                 {migrationStarting && (
                   <span className="h-3 w-3 border-2 border-current border-t-transparent rounded-full animate-spin" />

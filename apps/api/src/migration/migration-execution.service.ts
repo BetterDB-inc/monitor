@@ -8,7 +8,7 @@ import type { MigrationExecutionRequest, MigrationExecutionResult, StartExecutio
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
-import { buildScanReaderToml } from './execution/toml-builder';
+import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
 import { parseLogLine } from './execution/log-parser';
 import { runCommandMigration } from './execution/command-migration-worker';
 
@@ -50,9 +50,9 @@ export class MigrationExecutionService {
     const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
     const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
 
-    // 4. For redis_shake mode, locate the binary upfront
+    // 4. For redis_shake modes, locate the binary upfront
     let binaryPath: string | undefined;
-    if (mode === 'redis_shake') {
+    if (mode === 'redis_shake' || mode === 'redis_shake_sync') {
       try {
         binaryPath = findRedisShakeBinary();
       } catch (err: unknown) {
@@ -74,6 +74,7 @@ export class MigrationExecutionService {
       totalKeys: 0,
       logs: [],
       progress: null,
+      syncStage: null,
       process: null,
       tomlPath: null,
       pidPath: null,
@@ -84,8 +85,16 @@ export class MigrationExecutionService {
     this.jobs.set(id, job);
 
     // 7. Fire and forget based on mode
-    if (mode === 'redis_shake') {
-      const tomlContent = buildScanReaderToml(sourceConfig, targetConfig, clusterEnabled);
+    if (mode === 'redis_shake' || mode === 'redis_shake_sync') {
+      const tomlContent = mode === 'redis_shake_sync'
+        ? buildSyncReaderToml(
+            sourceConfig,
+            targetConfig,
+            clusterEnabled,
+            req.syncReaderOptions ?? {},
+            targetIsCluster,
+          )
+        : buildScanReaderToml(sourceConfig, targetConfig, clusterEnabled, targetIsCluster);
       const tomlPath = join(os.tmpdir(), `${id}.toml`);
       writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
       job.tomlPath = tomlPath;
@@ -131,6 +140,7 @@ export class MigrationExecutionService {
           if (parsed.keysTransferred !== null) job.keysTransferred = parsed.keysTransferred;
           if (parsed.bytesTransferred !== null) job.bytesTransferred = parsed.bytesTransferred;
           if (parsed.progress !== null) job.progress = parsed.progress;
+          if (parsed.syncStage !== null) job.syncStage = parsed.syncStage;
         }
       };
 
@@ -264,6 +274,7 @@ export class MigrationExecutionService {
       totalKeys: job.totalKeys ?? undefined,
       logs: [...job.logs],
       progress: job.progress,
+      syncStage: job.syncStage,
     };
   }
 
