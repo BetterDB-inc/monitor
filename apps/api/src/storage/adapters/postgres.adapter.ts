@@ -43,6 +43,9 @@ import {
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  StoredScheduledCapture,
+  ScheduledCaptureQueryOptions,
+  ScheduledCapturePatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ActorSource,
@@ -1692,6 +1695,24 @@ export class PostgresAdapter implements StoragePort {
         ON capture_triggers(connection_id, status, expires_at);
       CREATE INDEX IF NOT EXISTS idx_capture_triggers_dedup
         ON capture_triggers(connection_id, metric_type, anomaly_type, status);
+
+      -- Pro+ Scheduled Captures Table (PR 19)
+      CREATE TABLE IF NOT EXISTS scheduled_captures (
+        id UUID PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        interval_seconds INTEGER NOT NULL CHECK (interval_seconds >= 10),
+        duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),
+        status VARCHAR(20) NOT NULL,
+        created_at BIGINT NOT NULL,
+        created_by TEXT,
+        last_fired_at BIGINT,
+        last_fired_session_id UUID,
+        last_skip_reason TEXT,
+        CHECK (status IN ('enabled','disabled'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_scheduled_captures_conn_status
+        ON scheduled_captures(connection_id, status);
     `);
   }
 
@@ -4211,6 +4232,127 @@ export class PostgresAdapter implements StoragePort {
       firedAt: toOptionalNumber(row.fired_at),
       firedSessionId: (row.fired_session_id as string | null) ?? undefined,
       skipReason: (row.skip_reason as string | null) ?? undefined,
+    };
+  }
+
+  async saveScheduledCapture(schedule: StoredScheduledCapture): Promise<string> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO scheduled_captures
+         (id, connection_id, interval_seconds, duration_ms, status, created_at,
+          created_by, last_fired_at, last_fired_session_id, last_skip_reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        schedule.id,
+        schedule.connectionId,
+        schedule.intervalSeconds,
+        schedule.durationMs,
+        schedule.status,
+        schedule.createdAt,
+        schedule.createdBy ?? null,
+        schedule.lastFiredAt ?? null,
+        schedule.lastFiredSessionId ?? null,
+        schedule.lastSkipReason ?? null,
+      ],
+    );
+    return schedule.id;
+  }
+
+  async updateScheduledCapture(id: string, patch: ScheduledCapturePatch): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    let p = 1;
+    if (patch.status !== undefined) {
+      sets.push(`status = $${p++}`);
+      params.push(patch.status);
+    }
+    if (patch.intervalSeconds !== undefined) {
+      sets.push(`interval_seconds = $${p++}`);
+      params.push(patch.intervalSeconds);
+    }
+    if (patch.durationMs !== undefined) {
+      sets.push(`duration_ms = $${p++}`);
+      params.push(patch.durationMs);
+    }
+    if (patch.lastFiredAt !== undefined) {
+      sets.push(`last_fired_at = $${p++}`);
+      params.push(patch.lastFiredAt);
+    }
+    if (patch.lastFiredSessionId !== undefined) {
+      sets.push(`last_fired_session_id = $${p++}`);
+      params.push(patch.lastFiredSessionId);
+    }
+    if (patch.lastSkipReason !== undefined) {
+      sets.push(`last_skip_reason = $${p++}`);
+      params.push(patch.lastSkipReason);
+    }
+    if (sets.length === 0) {
+      return false;
+    }
+    params.push(id);
+    const result = await this.pool.query(
+      `UPDATE scheduled_captures SET ${sets.join(', ')} WHERE id = $${p}`,
+      params,
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async deleteScheduledCapture(id: string): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query('DELETE FROM scheduled_captures WHERE id = $1', [id]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async getScheduledCapture(id: string): Promise<StoredScheduledCapture | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query('SELECT * FROM scheduled_captures WHERE id = $1', [id]);
+    return result.rows.length > 0 ? this.mapScheduledCaptureRow(result.rows[0]) : null;
+  }
+
+  async getScheduledCaptures(
+    options: ScheduledCaptureQueryOptions = {},
+  ): Promise<StoredScheduledCapture[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const where: string[] = [];
+    const params: unknown[] = [];
+    let p = 1;
+    if (options.connectionId) {
+      where.push(`connection_id = $${p++}`);
+      params.push(options.connectionId);
+    }
+    if (options.status) {
+      where.push(`status = $${p++}`);
+      params.push(options.status);
+    }
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    const result = await this.pool.query(
+      `SELECT * FROM scheduled_captures ${whereClause} ORDER BY created_at DESC LIMIT $${p} OFFSET $${p + 1}`,
+      [...params, limit, offset],
+    );
+    return result.rows.map((row) => this.mapScheduledCaptureRow(row));
+  }
+
+  private mapScheduledCaptureRow(row: Record<string, unknown>): StoredScheduledCapture {
+    const toNumber = (v: unknown): number =>
+      typeof v === 'string' ? parseInt(v, 10) : (v as number);
+    const toOptionalNumber = (v: unknown): number | undefined => {
+      if (v === null || v === undefined) return undefined;
+      return toNumber(v);
+    };
+    return {
+      id: row.id as string,
+      connectionId: row.connection_id as string,
+      intervalSeconds: toNumber(row.interval_seconds),
+      durationMs: toNumber(row.duration_ms),
+      status: row.status as StoredScheduledCapture['status'],
+      createdAt: toNumber(row.created_at),
+      createdBy: (row.created_by as string | null) ?? undefined,
+      lastFiredAt: toOptionalNumber(row.last_fired_at),
+      lastFiredSessionId: (row.last_fired_session_id as string | null) ?? undefined,
+      lastSkipReason: (row.last_skip_reason as string | null) ?? undefined,
     };
   }
 

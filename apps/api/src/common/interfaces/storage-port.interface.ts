@@ -57,6 +57,9 @@ export type {
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  StoredScheduledCapture,
+  ScheduledCaptureQueryOptions,
+  ScheduledCapturePatch,
 } from '@betterdb/shared';
 import type {
   AppSettings,
@@ -94,6 +97,9 @@ import type {
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  StoredScheduledCapture,
+  ScheduledCaptureQueryOptions,
+  ScheduledCapturePatch,
 } from '@betterdb/shared';
 
 // Anomaly Event Types
@@ -483,6 +489,13 @@ export interface StoragePort {
   updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean>;
   getCaptureTrigger(id: string): Promise<StoredCaptureTrigger | null>;
   getCaptureTriggers(options?: CaptureTriggerQueryOptions): Promise<StoredCaptureTrigger[]>;
+
+  // Monitor Scheduled Capture Methods (Pro+)
+  saveScheduledCapture(schedule: StoredScheduledCapture): Promise<string>;
+  updateScheduledCapture(id: string, patch: ScheduledCapturePatch): Promise<boolean>;
+  deleteScheduledCapture(id: string): Promise<boolean>;
+  getScheduledCapture(id: string): Promise<StoredScheduledCapture | null>;
+  getScheduledCaptures(options?: ScheduledCaptureQueryOptions): Promise<StoredScheduledCapture[]>;
 
   // Connection Management Methods (not connection-scoped, they manage connections themselves)
   saveConnection(config: DatabaseConnectionConfig): Promise<void>;

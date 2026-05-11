@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import type { ClusterDiscoveryService } from '../../cluster/cluster-discovery.service';
 import type { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { CaptureScheduler } from '../capture-scheduler';
 import { CaptureTriggerRegistry } from '../capture-trigger-registry';
 import { CrossReferenceEngine } from '../cross-reference.engine';
 import { HealthGateService } from '../health-gate.service';
@@ -25,6 +26,11 @@ describe('MonitorController', () => {
     listTriggers: jest.Mock;
     createTrigger: jest.Mock;
     cancelTrigger: jest.Mock;
+  };
+  let captureScheduler: {
+    listSchedules: jest.Mock;
+    createSchedule: jest.Mock;
+    deleteSchedule: jest.Mock;
   };
 
   beforeEach(() => {
@@ -71,6 +77,11 @@ describe('MonitorController', () => {
       createTrigger: jest.fn().mockResolvedValue({ id: 'trig-1', status: 'configured' }),
       cancelTrigger: jest.fn().mockResolvedValue(true),
     };
+    captureScheduler = {
+      listSchedules: jest.fn().mockResolvedValue([]),
+      createSchedule: jest.fn().mockResolvedValue({ id: 'sched-1', status: 'enabled' }),
+      deleteSchedule: jest.fn().mockResolvedValue(true),
+    };
     controller = new MonitorController(
       captureService as unknown as MonitorCaptureService,
       healthGateService as unknown as HealthGateService,
@@ -78,6 +89,7 @@ describe('MonitorController', () => {
       crossReferenceEngine as unknown as CrossReferenceEngine,
       clusterDiscovery as unknown as ClusterDiscoveryService,
       triggerRegistry as unknown as CaptureTriggerRegistry,
+      captureScheduler as unknown as CaptureScheduler,
       storage as unknown as StoragePort,
     );
   });
@@ -412,6 +424,65 @@ describe('MonitorController', () => {
     it('cancelTrigger throws NotFound when the trigger cannot be cancelled', async () => {
       triggerRegistry.cancelTrigger.mockResolvedValueOnce(false);
       await expect(controller.cancelTrigger('missing')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('schedules', () => {
+    it('listSchedules forwards query params to the scheduler', async () => {
+      await controller.listSchedules('conn-1', 'enabled', '50', '10');
+      expect(captureScheduler.listSchedules).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        status: 'enabled',
+        limit: 50,
+        offset: 10,
+      });
+    });
+
+    it('createSchedule forwards body fields and returns the new schedule', async () => {
+      const result = await controller.createSchedule({
+        connectionId: 'conn-1',
+        intervalSeconds: 30,
+        durationMs: 5000,
+        createdBy: 'alice',
+      });
+      expect(captureScheduler.createSchedule).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        intervalSeconds: 30,
+        durationMs: 5000,
+        createdBy: 'alice',
+      });
+      expect(result).toEqual({ id: 'sched-1', status: 'enabled' });
+    });
+
+    it('createSchedule throws BadRequest when connectionId is missing', async () => {
+      await expect(
+        controller.createSchedule({ intervalSeconds: 30, durationMs: 5000 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('createSchedule throws BadRequest when intervalSeconds is missing', async () => {
+      await expect(
+        controller.createSchedule({ connectionId: 'conn-1', durationMs: 5000 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('createSchedule throws BadRequest when durationMs is missing', async () => {
+      await expect(
+        controller.createSchedule({ connectionId: 'conn-1', intervalSeconds: 30 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('deleteSchedule returns { deleted: true } when the scheduler accepts', async () => {
+      const result = await controller.deleteSchedule('sched-1');
+      expect(captureScheduler.deleteSchedule).toHaveBeenCalledWith('sched-1');
+      expect(result).toEqual({ deleted: true });
+    });
+
+    it('deleteSchedule throws NotFound when the scheduler reports no row', async () => {
+      captureScheduler.deleteSchedule.mockResolvedValueOnce(false);
+      await expect(controller.deleteSchedule('missing')).rejects.toBeInstanceOf(
         NotFoundException,
       );
     });

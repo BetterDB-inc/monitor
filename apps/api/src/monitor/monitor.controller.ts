@@ -13,11 +13,12 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
-import { Feature, StoredCaptureTrigger } from '@betterdb/shared';
+import { Feature, StoredCaptureTrigger, StoredScheduledCapture } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { StoragePort, StoredCaptureSession } from '../common/interfaces/storage-port.interface';
+import { CaptureScheduler } from './capture-scheduler';
 import { CaptureTriggerRegistry } from './capture-trigger-registry';
 import { BaselineWindow, CrossReferenceEngine, CrossReferenceResult } from './cross-reference.engine';
 import { HealthGateResult } from './health-gate';
@@ -58,6 +59,13 @@ interface CreateTriggerRequestBody {
   createdBy?: string;
 }
 
+interface CreateScheduleRequestBody {
+  connectionId?: string;
+  intervalSeconds?: number;
+  durationMs?: number;
+  createdBy?: string;
+}
+
 export interface MonitorNodeDescriptor {
   id: string;
   address: string;
@@ -80,6 +88,7 @@ export class MonitorController {
     private readonly crossReferenceEngine: CrossReferenceEngine,
     private readonly clusterDiscovery: ClusterDiscoveryService,
     private readonly triggerRegistry: CaptureTriggerRegistry,
+    private readonly captureScheduler: CaptureScheduler,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
   ) {}
@@ -318,6 +327,57 @@ export class MonitorController {
       throw new NotFoundException(`Trigger ${id} not found or not cancellable`);
     }
     return { cancelled: true };
+  }
+
+  @Get('schedules')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MONITOR_SCHEDULED_CAPTURES)
+  listSchedules(
+    @Query('connectionId') connectionId?: string,
+    @Query('status') status?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ): Promise<StoredScheduledCapture[]> {
+    return this.captureScheduler.listSchedules({
+      connectionId,
+      status: status as StoredScheduledCapture['status'] | undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      offset: offset ? parseInt(offset, 10) : undefined,
+    });
+  }
+
+  @Post('schedules')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MONITOR_SCHEDULED_CAPTURES)
+  async createSchedule(
+    @Body() body: CreateScheduleRequestBody,
+  ): Promise<StoredScheduledCapture> {
+    if (!body?.connectionId) {
+      throw new BadRequestException('connectionId is required');
+    }
+    if (body.intervalSeconds === undefined) {
+      throw new BadRequestException('intervalSeconds is required');
+    }
+    if (body.durationMs === undefined) {
+      throw new BadRequestException('durationMs is required');
+    }
+    return this.captureScheduler.createSchedule({
+      connectionId: body.connectionId,
+      intervalSeconds: body.intervalSeconds,
+      durationMs: body.durationMs,
+      createdBy: body.createdBy,
+    });
+  }
+
+  @Delete('schedules/:id')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MONITOR_SCHEDULED_CAPTURES)
+  async deleteSchedule(@Param('id') id: string): Promise<{ deleted: boolean }> {
+    const ok = await this.captureScheduler.deleteSchedule(id);
+    if (!ok) {
+      throw new NotFoundException(`Schedule ${id} not found`);
+    }
+    return { deleted: true };
   }
 }
 

@@ -42,6 +42,9 @@ import {
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  StoredScheduledCapture,
+  ScheduledCaptureQueryOptions,
+  ScheduledCapturePatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1353,6 +1356,7 @@ export class MemoryAdapter implements StoragePort {
   private captureSessions: Map<string, StoredCaptureSession> = new Map();
   private captureChunks: StoredCaptureChunk[] = [];
   private captureTriggers: Map<string, StoredCaptureTrigger> = new Map();
+  private scheduledCaptures: Map<string, StoredScheduledCapture> = new Map();
 
 
   private cloneProposal(p: StoredCacheProposal): StoredCacheProposal {
@@ -1608,5 +1612,44 @@ export class MemoryAdapter implements StoragePort {
     const offset = options.offset ?? 0;
     const limit = options.limit ?? 100;
     return triggers.slice(offset, offset + limit).map((t) => ({ ...t }));
+  }
+
+  async saveScheduledCapture(schedule: StoredScheduledCapture): Promise<string> {
+    this.scheduledCaptures.set(schedule.id, { ...schedule });
+    return schedule.id;
+  }
+
+  async updateScheduledCapture(id: string, patch: ScheduledCapturePatch): Promise<boolean> {
+    const existing = this.scheduledCaptures.get(id);
+    if (!existing) {
+      return false;
+    }
+    this.scheduledCaptures.set(id, { ...existing, ...patch });
+    return true;
+  }
+
+  async deleteScheduledCapture(id: string): Promise<boolean> {
+    return this.scheduledCaptures.delete(id);
+  }
+
+  async getScheduledCapture(id: string): Promise<StoredScheduledCapture | null> {
+    const schedule = this.scheduledCaptures.get(id);
+    return schedule ? { ...schedule } : null;
+  }
+
+  async getScheduledCaptures(
+    options: ScheduledCaptureQueryOptions = {},
+  ): Promise<StoredScheduledCapture[]> {
+    let schedules = [...this.scheduledCaptures.values()];
+    if (options.connectionId) {
+      schedules = schedules.filter((s) => s.connectionId === options.connectionId);
+    }
+    if (options.status) {
+      schedules = schedules.filter((s) => s.status === options.status);
+    }
+    schedules.sort((a, b) => b.createdAt - a.createdAt);
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? 100;
+    return schedules.slice(offset, offset + limit).map((s) => ({ ...s }));
   }
 }
