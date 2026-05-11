@@ -51,6 +51,42 @@ export interface CaptureSessionQueryOptions {
   offset?: number;
 }
 
+export type CaptureTriggerStatus =
+  | 'configured'
+  | 'queued'
+  | 'fired'
+  | 'skipped'
+  | 'expired'
+  | 'cancelled';
+
+export interface StoredCaptureTrigger {
+  id: string;
+  connectionId: string;
+  metricType: string;
+  anomalyType: string;
+  expiresAt: number;
+  createdAt: number;
+  createdBy?: string;
+  status: CaptureTriggerStatus;
+  firedAt?: number;
+  firedSessionId?: string;
+  skipReason?: string;
+}
+
+export interface CaptureTriggerQueryOptions {
+  connectionId?: string;
+  status?: CaptureTriggerStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export interface CaptureTriggerPatch {
+  status?: CaptureTriggerStatus;
+  firedAt?: number;
+  firedSessionId?: string;
+  skipReason?: string;
+}
+
 export interface StoredCaptureChunk {
   sessionId: string;
   chunkIndex: number;

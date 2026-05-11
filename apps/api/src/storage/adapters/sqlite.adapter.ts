@@ -44,6 +44,9 @@ import {
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
   CaptureSessionPatch,
+  StoredCaptureTrigger,
+  CaptureTriggerQueryOptions,
+  CaptureTriggerPatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1423,6 +1426,26 @@ export class SqliteAdapter implements StoragePort {
       );
 
       CREATE INDEX IF NOT EXISTS idx_capture_chunks_session ON capture_chunks(session_id, chunk_index);
+
+      -- Pro+ Capture Triggers Table (PR 15)
+      CREATE TABLE IF NOT EXISTS capture_triggers (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        metric_type TEXT NOT NULL,
+        anomaly_type TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        created_by TEXT,
+        status TEXT NOT NULL CHECK (status IN ('configured','queued','fired','skipped','expired','cancelled')),
+        fired_at INTEGER,
+        fired_session_id TEXT,
+        skip_reason TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_capture_triggers_conn_status
+        ON capture_triggers(connection_id, status, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_capture_triggers_dedup
+        ON capture_triggers(connection_id, metric_type, anomaly_type, status);
     `);
 
     // Idempotent migration for existing deployments without ops/CPU columns
@@ -3830,6 +3853,108 @@ export class SqliteAdapter implements StoragePort {
       lastTs: row.last_ts as number,
       nodeId: (row.node_id as string | null) ?? undefined,
     }));
+  }
+
+  async saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `INSERT INTO capture_triggers
+          (id, connection_id, metric_type, anomaly_type, expires_at, created_at, created_by,
+           status, fired_at, fired_session_id, skip_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        trigger.id,
+        trigger.connectionId,
+        trigger.metricType,
+        trigger.anomalyType,
+        trigger.expiresAt,
+        trigger.createdAt,
+        trigger.createdBy ?? null,
+        trigger.status,
+        trigger.firedAt ?? null,
+        trigger.firedSessionId ?? null,
+        trigger.skipReason ?? null,
+      );
+    return trigger.id;
+  }
+
+  async updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (patch.status !== undefined) {
+      sets.push('status = ?');
+      params.push(patch.status);
+    }
+    if (patch.firedAt !== undefined) {
+      sets.push('fired_at = ?');
+      params.push(patch.firedAt);
+    }
+    if (patch.firedSessionId !== undefined) {
+      sets.push('fired_session_id = ?');
+      params.push(patch.firedSessionId);
+    }
+    if (patch.skipReason !== undefined) {
+      sets.push('skip_reason = ?');
+      params.push(patch.skipReason);
+    }
+    if (sets.length === 0) return false;
+    params.push(id);
+    const result = this.db
+      .prepare(`UPDATE capture_triggers SET ${sets.join(', ')} WHERE id = ?`)
+      .run(...params);
+    return result.changes > 0;
+  }
+
+  async getCaptureTrigger(id: string): Promise<StoredCaptureTrigger | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare('SELECT * FROM capture_triggers WHERE id = ?')
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapCaptureTriggerRow(row) : null;
+  }
+
+  async getCaptureTriggers(
+    options: CaptureTriggerQueryOptions = {},
+  ): Promise<StoredCaptureTrigger[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (options.connectionId) {
+      where.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
+    if (options.status) {
+      where.push('status = ?');
+      params.push(options.status);
+    }
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM capture_triggers ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as Record<string, unknown>[];
+    return rows.map((row) => this.mapCaptureTriggerRow(row));
+  }
+
+  private mapCaptureTriggerRow(row: Record<string, unknown>): StoredCaptureTrigger {
+    return {
+      id: row.id as string,
+      connectionId: row.connection_id as string,
+      metricType: row.metric_type as string,
+      anomalyType: row.anomaly_type as string,
+      expiresAt: row.expires_at as number,
+      createdAt: row.created_at as number,
+      createdBy: (row.created_by as string | null) ?? undefined,
+      status: row.status as StoredCaptureTrigger['status'],
+      firedAt: (row.fired_at as number | null) ?? undefined,
+      firedSessionId: (row.fired_session_id as string | null) ?? undefined,
+      skipReason: (row.skip_reason as string | null) ?? undefined,
+    };
   }
 }
 

@@ -14,6 +14,7 @@ const DENIED_MUTATION_PREFIXES = [
   '/cli',
   '/settings',
   '/monitor/sessions',
+  '/monitor/triggers',
 ];
 
 // Path prefixes that 404 on demo for any method (read leaks)

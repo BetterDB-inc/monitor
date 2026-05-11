@@ -39,6 +39,9 @@ import {
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
   CaptureSessionPatch,
+  StoredCaptureTrigger,
+  CaptureTriggerQueryOptions,
+  CaptureTriggerPatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1349,6 +1352,7 @@ export class MemoryAdapter implements StoragePort {
   private cacheProposalAudit: Map<string, StoredCacheProposalAudit> = new Map();
   private captureSessions: Map<string, StoredCaptureSession> = new Map();
   private captureChunks: StoredCaptureChunk[] = [];
+  private captureTriggers: Map<string, StoredCaptureTrigger> = new Map();
 
 
   private cloneProposal(p: StoredCacheProposal): StoredCacheProposal {
@@ -1569,5 +1573,40 @@ export class MemoryAdapter implements StoragePort {
     const offset = options.offset ?? 0;
     const limit = options.limit ?? 100;
     return sessions.slice(offset, offset + limit).map((s) => ({ ...s }));
+  }
+
+  async saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string> {
+    this.captureTriggers.set(trigger.id, { ...trigger });
+    return trigger.id;
+  }
+
+  async updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
+    const existing = this.captureTriggers.get(id);
+    if (!existing) {
+      return false;
+    }
+    this.captureTriggers.set(id, { ...existing, ...patch });
+    return true;
+  }
+
+  async getCaptureTrigger(id: string): Promise<StoredCaptureTrigger | null> {
+    const trigger = this.captureTriggers.get(id);
+    return trigger ? { ...trigger } : null;
+  }
+
+  async getCaptureTriggers(
+    options: CaptureTriggerQueryOptions = {},
+  ): Promise<StoredCaptureTrigger[]> {
+    let triggers = [...this.captureTriggers.values()];
+    if (options.connectionId) {
+      triggers = triggers.filter((t) => t.connectionId === options.connectionId);
+    }
+    if (options.status) {
+      triggers = triggers.filter((t) => t.status === options.status);
+    }
+    triggers.sort((a, b) => b.createdAt - a.createdAt);
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? 100;
+    return triggers.slice(offset, offset + limit).map((t) => ({ ...t }));
   }
 }

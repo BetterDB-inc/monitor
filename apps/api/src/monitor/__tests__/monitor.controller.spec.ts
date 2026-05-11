@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import type { ClusterDiscoveryService } from '../../cluster/cluster-discovery.service';
 import type { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { CaptureTriggerRegistry } from '../capture-trigger-registry';
 import { CrossReferenceEngine } from '../cross-reference.engine';
 import { HealthGateService } from '../health-gate.service';
 import { MonitorCaptureService } from '../monitor-capture.service';
@@ -20,6 +21,11 @@ describe('MonitorController', () => {
   let storage: { getCaptureChunks: jest.Mock };
   let crossReferenceEngine: { compute: jest.Mock };
   let clusterDiscovery: { discoverNodes: jest.Mock };
+  let triggerRegistry: {
+    listTriggers: jest.Mock;
+    createTrigger: jest.Mock;
+    cancelTrigger: jest.Mock;
+  };
 
   beforeEach(() => {
     captureService = {
@@ -60,12 +66,18 @@ describe('MonitorController', () => {
         aclDeltas: { auditEntriesInWindow: 0, counters: { aclAccessDeniedAuthDelta: null, rejectedConnectionsDelta: null } },
       }),
     };
+    triggerRegistry = {
+      listTriggers: jest.fn().mockResolvedValue([]),
+      createTrigger: jest.fn().mockResolvedValue({ id: 'trig-1', status: 'configured' }),
+      cancelTrigger: jest.fn().mockResolvedValue(true),
+    };
     controller = new MonitorController(
       captureService as unknown as MonitorCaptureService,
       healthGateService as unknown as HealthGateService,
       preflightService as unknown as PreflightService,
       crossReferenceEngine as unknown as CrossReferenceEngine,
       clusterDiscovery as unknown as ClusterDiscoveryService,
+      triggerRegistry as unknown as CaptureTriggerRegistry,
       storage as unknown as StoragePort,
     );
   });
@@ -342,6 +354,66 @@ describe('MonitorController', () => {
       const reply = makeReply();
       await controller.exportSession('sess-1', 'xml', undefined, undefined, undefined, undefined, undefined, reply as never);
       expect(reply.header).toHaveBeenCalledWith('content-type', 'application/json');
+    });
+  });
+
+  describe('triggers', () => {
+    it('listTriggers forwards query params to the registry', async () => {
+      await controller.listTriggers('conn-1', 'configured', '50', '10');
+      expect(triggerRegistry.listTriggers).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        status: 'configured',
+        limit: 50,
+        offset: 10,
+      });
+    });
+
+    it('createTrigger forwards body fields and returns the new trigger', async () => {
+      const result = await controller.createTrigger({
+        connectionId: 'conn-1',
+        metricType: 'connections',
+        anomalyType: 'spike',
+        createdBy: 'alice',
+      });
+      expect(triggerRegistry.createTrigger).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        metricType: 'connections',
+        anomalyType: 'spike',
+        expiresAt: undefined,
+        createdBy: 'alice',
+      });
+      expect(result).toEqual({ id: 'trig-1', status: 'configured' });
+    });
+
+    it('createTrigger throws BadRequest when connectionId is missing', async () => {
+      await expect(
+        controller.createTrigger({ metricType: 'connections', anomalyType: 'spike' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('createTrigger throws BadRequest when metricType is missing', async () => {
+      await expect(
+        controller.createTrigger({ connectionId: 'conn-1', anomalyType: 'spike' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('createTrigger throws BadRequest when anomalyType is missing', async () => {
+      await expect(
+        controller.createTrigger({ connectionId: 'conn-1', metricType: 'connections' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('cancelTrigger returns { cancelled: true } when the registry accepts', async () => {
+      const result = await controller.cancelTrigger('trig-1');
+      expect(triggerRegistry.cancelTrigger).toHaveBeenCalledWith('trig-1');
+      expect(result).toEqual({ cancelled: true });
+    });
+
+    it('cancelTrigger throws NotFound when the trigger cannot be cancelled', async () => {
+      triggerRegistry.cancelTrigger.mockResolvedValueOnce(false);
+      await expect(controller.cancelTrigger('missing')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
   });
 });

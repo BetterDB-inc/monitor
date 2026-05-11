@@ -40,6 +40,9 @@ import {
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
   CaptureSessionPatch,
+  StoredCaptureTrigger,
+  CaptureTriggerQueryOptions,
+  CaptureTriggerPatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ActorSource,
@@ -1668,6 +1671,27 @@ export class PostgresAdapter implements StoragePort {
       ALTER TABLE capture_chunks ADD COLUMN IF NOT EXISTS node_id TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_capture_chunks_session ON capture_chunks(session_id, chunk_index);
+
+      -- Pro+ Capture Triggers Table (PR 15)
+      CREATE TABLE IF NOT EXISTS capture_triggers (
+        id UUID PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        metric_type TEXT NOT NULL,
+        anomaly_type TEXT NOT NULL,
+        expires_at BIGINT NOT NULL,
+        created_at BIGINT NOT NULL,
+        created_by TEXT,
+        status VARCHAR(20) NOT NULL,
+        fired_at BIGINT,
+        fired_session_id UUID,
+        skip_reason TEXT,
+        CHECK (status IN ('configured','queued','fired','skipped','expired','cancelled'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_capture_triggers_conn_status
+        ON capture_triggers(connection_id, status, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_capture_triggers_dedup
+        ON capture_triggers(connection_id, metric_type, anomaly_type, status);
     `);
   }
 
@@ -4081,6 +4105,113 @@ export class PostgresAdapter implements StoragePort {
       ],
     );
     return result.rowCount ?? 0;
+  }
+
+  async saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string> {
+    if (!this.pool) throw new Error('Database not initialized');
+    await this.pool.query(
+      `INSERT INTO capture_triggers
+         (id, connection_id, metric_type, anomaly_type, expires_at, created_at, created_by,
+          status, fired_at, fired_session_id, skip_reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [
+        trigger.id,
+        trigger.connectionId,
+        trigger.metricType,
+        trigger.anomalyType,
+        trigger.expiresAt,
+        trigger.createdAt,
+        trigger.createdBy ?? null,
+        trigger.status,
+        trigger.firedAt ?? null,
+        trigger.firedSessionId ?? null,
+        trigger.skipReason ?? null,
+      ],
+    );
+    return trigger.id;
+  }
+
+  async updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    let p = 1;
+    if (patch.status !== undefined) {
+      sets.push(`status = $${p++}`);
+      params.push(patch.status);
+    }
+    if (patch.firedAt !== undefined) {
+      sets.push(`fired_at = $${p++}`);
+      params.push(patch.firedAt);
+    }
+    if (patch.firedSessionId !== undefined) {
+      sets.push(`fired_session_id = $${p++}`);
+      params.push(patch.firedSessionId);
+    }
+    if (patch.skipReason !== undefined) {
+      sets.push(`skip_reason = $${p++}`);
+      params.push(patch.skipReason);
+    }
+    if (sets.length === 0) return false;
+    params.push(id);
+    const result = await this.pool.query(
+      `UPDATE capture_triggers SET ${sets.join(', ')} WHERE id = $${p}`,
+      params,
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async getCaptureTrigger(id: string): Promise<StoredCaptureTrigger | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query('SELECT * FROM capture_triggers WHERE id = $1', [id]);
+    return result.rows.length > 0 ? this.mapCaptureTriggerRow(result.rows[0]) : null;
+  }
+
+  async getCaptureTriggers(
+    options: CaptureTriggerQueryOptions = {},
+  ): Promise<StoredCaptureTrigger[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const where: string[] = [];
+    const params: unknown[] = [];
+    let p = 1;
+    if (options.connectionId) {
+      where.push(`connection_id = $${p++}`);
+      params.push(options.connectionId);
+    }
+    if (options.status) {
+      where.push(`status = $${p++}`);
+      params.push(options.status);
+    }
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    const result = await this.pool.query(
+      `SELECT * FROM capture_triggers ${whereClause} ORDER BY created_at DESC LIMIT $${p} OFFSET $${p + 1}`,
+      [...params, limit, offset],
+    );
+    return result.rows.map((row) => this.mapCaptureTriggerRow(row));
+  }
+
+  private mapCaptureTriggerRow(row: Record<string, unknown>): StoredCaptureTrigger {
+    const toNumber = (v: unknown): number =>
+      typeof v === 'string' ? parseInt(v, 10) : (v as number);
+    const toOptionalNumber = (v: unknown): number | undefined => {
+      if (v === null || v === undefined) return undefined;
+      return toNumber(v);
+    };
+    return {
+      id: row.id as string,
+      connectionId: row.connection_id as string,
+      metricType: row.metric_type as string,
+      anomalyType: row.anomaly_type as string,
+      expiresAt: toNumber(row.expires_at),
+      createdAt: toNumber(row.created_at),
+      createdBy: (row.created_by as string | null) ?? undefined,
+      status: row.status as StoredCaptureTrigger['status'],
+      firedAt: toOptionalNumber(row.fired_at),
+      firedSessionId: (row.fired_session_id as string | null) ?? undefined,
+      skipReason: (row.skip_reason as string | null) ?? undefined,
+    };
   }
 
   async getCaptureChunks(sessionId: string): Promise<StoredCaptureChunk[]> {

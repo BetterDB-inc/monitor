@@ -13,8 +13,12 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
+import { Feature, StoredCaptureTrigger } from '@betterdb/shared';
+import { LicenseGuard } from '@proprietary/licenses';
+import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { StoragePort, StoredCaptureSession } from '../common/interfaces/storage-port.interface';
+import { CaptureTriggerRegistry } from './capture-trigger-registry';
 import { BaselineWindow, CrossReferenceEngine, CrossReferenceResult } from './cross-reference.engine';
 import { HealthGateResult } from './health-gate';
 import { HealthGateService } from './health-gate.service';
@@ -46,6 +50,14 @@ interface StartSessionRequestBody {
   fanOut?: boolean;
 }
 
+interface CreateTriggerRequestBody {
+  connectionId?: string;
+  metricType?: string;
+  anomalyType?: string;
+  expiresAt?: number;
+  createdBy?: string;
+}
+
 export interface MonitorNodeDescriptor {
   id: string;
   address: string;
@@ -67,6 +79,7 @@ export class MonitorController {
     private readonly preflightService: PreflightService,
     private readonly crossReferenceEngine: CrossReferenceEngine,
     private readonly clusterDiscovery: ClusterDiscoveryService,
+    private readonly triggerRegistry: CaptureTriggerRegistry,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
   ) {}
@@ -255,6 +268,56 @@ export class MonitorController {
       }
     }
     reply.send({ sessionId: id, count: rows.length, lines: rows });
+  }
+
+  @Get('triggers')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MONITOR_ANOMALY_TRIGGER)
+  listTriggers(
+    @Query('connectionId') connectionId?: string,
+    @Query('status') status?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ): Promise<StoredCaptureTrigger[]> {
+    return this.triggerRegistry.listTriggers({
+      connectionId,
+      status: status as StoredCaptureTrigger['status'] | undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      offset: offset ? parseInt(offset, 10) : undefined,
+    });
+  }
+
+  @Post('triggers')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MONITOR_ANOMALY_TRIGGER)
+  async createTrigger(@Body() body: CreateTriggerRequestBody): Promise<StoredCaptureTrigger> {
+    if (!body?.connectionId) {
+      throw new BadRequestException('connectionId is required');
+    }
+    if (!body.metricType) {
+      throw new BadRequestException('metricType is required');
+    }
+    if (!body.anomalyType) {
+      throw new BadRequestException('anomalyType is required');
+    }
+    return this.triggerRegistry.createTrigger({
+      connectionId: body.connectionId,
+      metricType: body.metricType,
+      anomalyType: body.anomalyType,
+      expiresAt: body.expiresAt,
+      createdBy: body.createdBy,
+    });
+  }
+
+  @Delete('triggers/:id')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MONITOR_ANOMALY_TRIGGER)
+  async cancelTrigger(@Param('id') id: string): Promise<{ cancelled: boolean }> {
+    const ok = await this.triggerRegistry.cancelTrigger(id);
+    if (!ok) {
+      throw new NotFoundException(`Trigger ${id} not found or not cancellable`);
+    }
+    return { cancelled: true };
   }
 }
 
