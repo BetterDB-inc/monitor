@@ -1,14 +1,22 @@
 import { BadRequestException } from '@nestjs/common';
+import { HealthGateService } from '../health-gate.service';
 import { MonitorCaptureService } from '../monitor-capture.service';
 import { MonitorController } from '../monitor.controller';
 
 describe('MonitorController', () => {
   let controller: MonitorController;
   let captureService: { listSessions: jest.Mock };
+  let healthGateService: { evaluate: jest.Mock };
 
   beforeEach(() => {
     captureService = { listSessions: jest.fn().mockResolvedValue([]) };
-    controller = new MonitorController(captureService as unknown as MonitorCaptureService);
+    healthGateService = {
+      evaluate: jest.fn().mockResolvedValue({ allow: true, signals: {}, thresholds: {} }),
+    };
+    controller = new MonitorController(
+      captureService as unknown as MonitorCaptureService,
+      healthGateService as unknown as HealthGateService,
+    );
   });
 
   describe('ping', () => {
@@ -48,6 +56,20 @@ describe('MonitorController', () => {
         limit: 100,
         offset: 0,
       });
+    });
+  });
+
+  describe('evaluateHealthGate', () => {
+    it('forwards connectionId to the service', async () => {
+      await controller.evaluateHealthGate('conn-1');
+      expect(healthGateService.evaluate).toHaveBeenCalledWith('conn-1');
+    });
+
+    it('throws BadRequest when connectionId is missing', async () => {
+      await expect(controller.evaluateHealthGate(undefined)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(healthGateService.evaluate).not.toHaveBeenCalled();
     });
   });
 });
