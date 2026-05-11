@@ -1,6 +1,8 @@
 import { ConflictException } from '@nestjs/common';
+import { WebhookEventType } from '@betterdb/shared';
 import { StoredAnomalyEvent } from '../../common/interfaces/storage-port.interface';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
+import type { WebhookDispatcherService } from '../../webhooks/webhook-dispatcher.service';
 import {
   CaptureTriggerRegistry,
   DEFAULT_TRIGGER_EXPIRY_MS,
@@ -48,21 +50,49 @@ function makeHealthGate(allow: boolean, skipReason?: string): FakeHealthGate {
   };
 }
 
+interface FakeDispatcher {
+  dispatchEvent: jest.Mock;
+  calls: Array<{ event: WebhookEventType; data: Record<string, unknown>; connectionId?: string }>;
+}
+
+function makeDispatcher(): FakeDispatcher {
+  const fake: FakeDispatcher = {
+    dispatchEvent: jest.fn(),
+    calls: [],
+  };
+  fake.dispatchEvent.mockImplementation(async (event, data, connectionId) => {
+    fake.calls.push({ event, data, connectionId });
+  });
+  return fake;
+}
+
 function makeRegistry(
   captureService: FakeCaptureService,
   healthGate: FakeHealthGate,
-): { registry: CaptureTriggerRegistry; storage: MemoryAdapter } {
+  dispatcher: FakeDispatcher = makeDispatcher(),
+): {
+  registry: CaptureTriggerRegistry;
+  storage: MemoryAdapter;
+  dispatcher: FakeDispatcher;
+} {
   const storage = new MemoryAdapter();
   const registry = new CaptureTriggerRegistry(
     storage,
     captureService as unknown as MonitorCaptureService,
     healthGate as unknown as HealthGateService,
+    dispatcher as unknown as WebhookDispatcherService,
   );
   registry.setOptions({ autoStart: false });
   // Tests want to see all stored anomaly events; the constructor seeds the
   // watermark to Date.now() to avoid replaying history on real restarts.
   registry.resetAnomalyWatermark();
-  return { registry, storage };
+  return { registry, storage, dispatcher };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 10; i++) {
+    await Promise.resolve();
+  }
 }
 
 function makeAnomaly(overrides: Partial<StoredAnomalyEvent> = {}): StoredAnomalyEvent {
@@ -352,6 +382,115 @@ describe('CaptureTriggerRegistry', () => {
       expect(captureService.startSession).not.toHaveBeenCalled();
       const updated = await storage.getCaptureTrigger(trigger.id);
       expect(updated?.status).toBe('expired');
+    });
+  });
+
+  describe('webhook dispatch', () => {
+    it('dispatches monitor.trigger.created after a successful createTrigger', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { registry, dispatcher } = makeRegistry(captureService, healthGate);
+
+      const trigger = await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+        createdBy: 'alice',
+      });
+      await flushMicrotasks();
+
+      expect(dispatcher.dispatchEvent).toHaveBeenCalledWith(
+        WebhookEventType.MONITOR_TRIGGER_CREATED,
+        expect.objectContaining({
+          triggerId: trigger.id,
+          metricType: METRIC,
+          anomalyType: ANOMALY,
+          createdBy: 'alice',
+        }),
+        CONNECTION_ID,
+      );
+    });
+
+    it('dispatches monitor.session.skipped with the gate skip reason', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(false, 'memory_above_threshold');
+      const { registry, storage, dispatcher } = makeRegistry(captureService, healthGate);
+
+      const trigger = await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly(), CONNECTION_ID);
+      await registry.tick();
+      await flushMicrotasks();
+
+      expect(dispatcher.dispatchEvent).toHaveBeenCalledWith(
+        WebhookEventType.MONITOR_SESSION_SKIPPED,
+        expect.objectContaining({
+          triggerId: trigger.id,
+          metricType: METRIC,
+          anomalyType: ANOMALY,
+          reason: 'memory_above_threshold',
+        }),
+        CONNECTION_ID,
+      );
+    });
+
+    it('does not dispatch monitor.session.skipped on successful fire', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { registry, storage, dispatcher } = makeRegistry(captureService, healthGate);
+
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly(), CONNECTION_ID);
+      await registry.tick();
+      await flushMicrotasks();
+
+      const skipped = dispatcher.calls.filter((c) => {
+        return c.event === WebhookEventType.MONITOR_SESSION_SKIPPED;
+      });
+      expect(skipped).toHaveLength(0);
+    });
+
+    it('does not dispatch monitor.session.skipped when the trigger is queued (not skipped)', async () => {
+      const captureService = makeCaptureService({ active: true });
+      const healthGate = makeHealthGate(true);
+      const { registry, storage, dispatcher } = makeRegistry(captureService, healthGate);
+
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly(), CONNECTION_ID);
+      await registry.tick();
+      await flushMicrotasks();
+
+      const skipped = dispatcher.calls.filter((c) => {
+        return c.event === WebhookEventType.MONITOR_SESSION_SKIPPED;
+      });
+      expect(skipped).toHaveLength(0);
+    });
+
+    it('swallows webhook dispatcher errors so the registry remains operational', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const dispatcher = makeDispatcher();
+      dispatcher.dispatchEvent.mockRejectedValueOnce(new Error('webhook unreachable'));
+      const { registry } = makeRegistry(captureService, healthGate, dispatcher);
+
+      await expect(
+        registry.createTrigger({
+          connectionId: CONNECTION_ID,
+          metricType: METRIC,
+          anomalyType: ANOMALY,
+        }),
+      ).resolves.toBeDefined();
     });
   });
 

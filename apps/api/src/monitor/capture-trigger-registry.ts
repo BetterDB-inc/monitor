@@ -11,8 +11,10 @@ import {
   CaptureTriggerPatch,
   CaptureTriggerQueryOptions,
   StoredCaptureTrigger,
+  WebhookEventType,
 } from '@betterdb/shared';
 import { StoragePort, StoredAnomalyEvent } from '../common/interfaces/storage-port.interface';
+import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
 
@@ -59,6 +61,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly captureService: MonitorCaptureService,
     private readonly healthGate: HealthGateService,
+    private readonly webhookDispatcher: WebhookDispatcherService,
   ) {
     // Seed the watermark to "now" so a process restart never replays
     // historical anomalies as if they just arrived. The trigger.createdAt
@@ -127,6 +130,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       status: 'configured',
     };
     await this.storage.saveCaptureTrigger(trigger);
+    void this.dispatchTriggerCreated(trigger);
     return trigger;
   }
 
@@ -243,10 +247,9 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   private async tryFire(trigger: StoredCaptureTrigger): Promise<void> {
     const gate = await this.healthGate.evaluate(trigger.connectionId);
     if (!gate.allow) {
-      await this.patch(trigger.id, {
-        status: 'skipped',
-        skipReason: gate.skipReason ?? 'health_gate_blocked',
-      });
+      const reason = gate.skipReason ?? 'health_gate_blocked';
+      await this.patch(trigger.id, { status: 'skipped', skipReason: reason });
+      void this.dispatchSessionSkipped(trigger, reason);
       return;
     }
     if (this.captureService.hasActiveSessionOn(trigger.connectionId)) {
@@ -298,5 +301,49 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
 
   private patch(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
     return this.storage.updateCaptureTrigger(id, patch);
+  }
+
+  private async dispatchTriggerCreated(trigger: StoredCaptureTrigger): Promise<void> {
+    try {
+      await this.webhookDispatcher.dispatchEvent(
+        WebhookEventType.MONITOR_TRIGGER_CREATED,
+        {
+          triggerId: trigger.id,
+          metricType: trigger.metricType,
+          anomalyType: trigger.anomalyType,
+          expiresAt: trigger.expiresAt,
+          createdAt: trigger.createdAt,
+          createdBy: trigger.createdBy,
+        },
+        trigger.connectionId,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to dispatch monitor.trigger.created: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  private async dispatchSessionSkipped(
+    trigger: StoredCaptureTrigger,
+    reason: string,
+  ): Promise<void> {
+    try {
+      await this.webhookDispatcher.dispatchEvent(
+        WebhookEventType.MONITOR_SESSION_SKIPPED,
+        {
+          triggerId: trigger.id,
+          metricType: trigger.metricType,
+          anomalyType: trigger.anomalyType,
+          reason,
+          timestamp: Date.now(),
+        },
+        trigger.connectionId,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to dispatch monitor.session.skipped: ${(err as Error).message}`,
+      );
+    }
   }
 }
