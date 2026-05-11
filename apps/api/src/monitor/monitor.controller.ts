@@ -1,9 +1,15 @@
-import { BadRequestException, Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { StoredCaptureSession } from '../common/interfaces/storage-port.interface';
 import { HealthGateResult } from './health-gate';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
 import { MonitorDevPreviewGuard } from './monitor-dev-preview.guard';
+import { PreflightResult, PreflightService } from './preflight.service';
+
+interface PreflightRequestBody {
+  connectionId?: string;
+  durationMs?: number;
+}
 
 @Controller('monitor')
 @UseGuards(MonitorDevPreviewGuard)
@@ -11,6 +17,7 @@ export class MonitorController {
   constructor(
     private readonly captureService: MonitorCaptureService,
     private readonly healthGateService: HealthGateService,
+    private readonly preflightService: PreflightService,
   ) {}
 
   @Get('_ping')
@@ -26,6 +33,17 @@ export class MonitorController {
       throw new BadRequestException('connectionId query parameter is required');
     }
     return this.healthGateService.evaluate(connectionId);
+  }
+
+  @Post('sessions/preflight')
+  async preflight(@Body() body: PreflightRequestBody): Promise<PreflightResult> {
+    if (!body?.connectionId) {
+      throw new BadRequestException('connectionId is required in the request body');
+    }
+    return this.preflightService.run({
+      connectionId: body.connectionId,
+      durationMs: body.durationMs,
+    });
   }
 
   @Get('sessions')
