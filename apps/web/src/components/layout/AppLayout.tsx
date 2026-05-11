@@ -29,6 +29,7 @@ import { InferenceLatency } from '../../pages/InferenceLatency';
 import { MetricForecasting } from '../../pages/MetricForecasting';
 import { CacheProposals } from '../../pages/CacheProposals';
 import { Monitor } from '../../pages/Monitor';
+import { MonitorSession } from '../../pages/MonitorSession';
 import { Members } from '../../pages/Members';
 
 const MONITOR_DEV_PREVIEW = import.meta.env.VITE_MONITOR_DEV_PREVIEW === 'true';
@@ -224,6 +225,16 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                   element={
                     <NoConnectionsGuard>
                       <Monitor />
+                    </NoConnectionsGuard>
+                  }
+                />
+              )}
+              {MONITOR_DEV_PREVIEW && (
+                <Route
+                  path="/monitor/sessions/:id"
+                  element={
+                    <NoConnectionsGuard>
+                      <MonitorSession />
                     </NoConnectionsGuard>
                   }
                 />
