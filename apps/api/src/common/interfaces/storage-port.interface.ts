@@ -45,6 +45,12 @@ export type {
   AppendProposalAuditInput,
   AppliedResult,
 } from '@betterdb/shared';
+export type {
+  CaptureSessionStatus,
+  CaptureSessionSource,
+  StoredCaptureSession,
+  CaptureSessionQueryOptions,
+} from '@betterdb/shared';
 import type {
   AppSettings,
   AuditQueryOptions,
@@ -74,6 +80,8 @@ import type {
   ListCacheProposalsOptions,
   UpdateProposalStatusInput,
   AppendProposalAuditInput,
+  StoredCaptureSession,
+  CaptureSessionQueryOptions,
 } from '@betterdb/shared';
 
 // Anomaly Event Types
@@ -449,6 +457,11 @@ export interface StoragePort {
   saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number>;
   getVectorIndexSnapshots(options: VectorIndexSnapshotQueryOptions): Promise<VectorIndexSnapshot[]>;
   pruneOldVectorIndexSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Monitor Capture Session Methods - connectionId required for writes, optional filter for reads
+  saveCaptureSession(session: StoredCaptureSession, connectionId: string): Promise<string>;
+  getCaptureSession(id: string): Promise<StoredCaptureSession | null>;
+  getCaptureSessions(options?: CaptureSessionQueryOptions): Promise<StoredCaptureSession[]>;
 
   // Connection Management Methods (not connection-scoped, they manage connections themselves)
   saveConnection(config: DatabaseConnectionConfig): Promise<void>;

@@ -21,3 +21,4 @@ export * from './types/command-safety';
 export * from './utils/cache-proposals';
 export * from './utils/discovery-protocol';
 export * from './types/inference-latency';
+export * from './types/monitor';

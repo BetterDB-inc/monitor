@@ -35,6 +35,8 @@ import {
   DatabaseConnectionConfig,
   StoredCommandStatsSample,
   CommandStatsHistoryQueryOptions,
+  StoredCaptureSession,
+  CaptureSessionQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1343,6 +1345,7 @@ export class MemoryAdapter implements StoragePort {
 
   private cacheProposals: Map<string, StoredCacheProposal> = new Map();
   private cacheProposalAudit: Map<string, StoredCacheProposalAudit> = new Map();
+  private captureSessions: Map<string, StoredCaptureSession> = new Map();
 
 
   private cloneProposal(p: StoredCacheProposal): StoredCacheProposal {
@@ -1497,5 +1500,46 @@ export class MemoryAdapter implements StoragePort {
       .filter((a) => a.proposal_id === proposalId)
       .sort((a, b) => a.event_at - b.event_at)
       .map((a) => this.cloneAudit(a));
+  }
+
+  async saveCaptureSession(
+    session: StoredCaptureSession,
+    connectionId: string,
+  ): Promise<string> {
+    this.captureSessions.set(session.id, { ...session, connectionId });
+    return session.id;
+  }
+
+  async getCaptureSession(id: string): Promise<StoredCaptureSession | null> {
+    const session = this.captureSessions.get(id);
+    return session ? { ...session } : null;
+  }
+
+  async getCaptureSessions(
+    options: CaptureSessionQueryOptions = {},
+  ): Promise<StoredCaptureSession[]> {
+    let sessions = [...this.captureSessions.values()];
+
+    if (options.connectionId) {
+      sessions = sessions.filter((s) => s.connectionId === options.connectionId);
+    }
+    if (options.status) {
+      sessions = sessions.filter((s) => s.status === options.status);
+    }
+    if (options.source) {
+      sessions = sessions.filter((s) => s.source === options.source);
+    }
+    if (options.startedAfter !== undefined) {
+      sessions = sessions.filter((s) => s.startedAt >= options.startedAfter!);
+    }
+    if (options.startedBefore !== undefined) {
+      sessions = sessions.filter((s) => s.startedAt <= options.startedBefore!);
+    }
+
+    sessions.sort((a, b) => b.startedAt - a.startedAt);
+
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? 100;
+    return sessions.slice(offset, offset + limit).map((s) => ({ ...s }));
   }
 }

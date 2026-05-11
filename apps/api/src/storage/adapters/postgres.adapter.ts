@@ -36,6 +36,8 @@ import {
   Webhook,
   WebhookDelivery,
   WebhookEventType,
+  StoredCaptureSession,
+  CaptureSessionQueryOptions,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ActorSource,
@@ -1616,6 +1618,46 @@ export class PostgresAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_cache_proposal_audit_proposal
         ON cache_proposal_audit(proposal_id, event_at DESC);
+
+      -- Monitor Capture Sessions Table
+      CREATE TABLE IF NOT EXISTS capture_sessions (
+        id UUID PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        status VARCHAR(20) NOT NULL,
+        source VARCHAR(20) NOT NULL,
+        trigger_id UUID,
+        schedule_id UUID,
+        requested_by TEXT,
+        started_at BIGINT NOT NULL,
+        ended_at BIGINT,
+        duration_ms BIGINT,
+        byte_count BIGINT NOT NULL DEFAULT 0,
+        line_count BIGINT NOT NULL DEFAULT 0,
+        byte_cap BIGINT NOT NULL,
+        line_cap BIGINT NOT NULL,
+        termination_reason TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        CHECK (status IN ('running','completed','truncated','failed','skipped')),
+        CHECK (source IN ('manual','trigger','schedule'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_connection_id ON capture_sessions(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_started_at ON capture_sessions(started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_status ON capture_sessions(status, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_source ON capture_sessions(source, started_at DESC);
+
+      -- Monitor Capture Chunks Table (one row per batched MONITOR-line chunk; populated by CaptureWriter in a later PR)
+      CREATE TABLE IF NOT EXISTS capture_chunks (
+        session_id UUID NOT NULL REFERENCES capture_sessions(id) ON DELETE CASCADE,
+        chunk_index INTEGER NOT NULL,
+        bytes BYTEA NOT NULL,
+        line_count INTEGER NOT NULL,
+        first_ts BIGINT NOT NULL,
+        last_ts BIGINT NOT NULL,
+        PRIMARY KEY(session_id, chunk_index)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_capture_chunks_session ON capture_chunks(session_id, chunk_index);
     `);
   }
 
@@ -3849,5 +3891,117 @@ export class PostgresAdapter implements StoragePort {
       [proposalId],
     );
     return result.rows.map((row: CacheProposalAuditRow) => this.mapCacheProposalAuditRow(row));
+  }
+
+  async saveCaptureSession(
+    session: StoredCaptureSession,
+    connectionId: string,
+  ): Promise<string> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    await this.pool.query(
+      `INSERT INTO capture_sessions (
+        id, connection_id, status, source, trigger_id, schedule_id, requested_by,
+        started_at, ended_at, duration_ms, byte_count, line_count, byte_cap, line_cap,
+        termination_reason
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [
+        session.id,
+        connectionId,
+        session.status,
+        session.source,
+        session.triggerId ?? null,
+        session.scheduleId ?? null,
+        session.requestedBy ?? null,
+        session.startedAt,
+        session.endedAt ?? null,
+        session.durationMs ?? null,
+        session.byteCount,
+        session.lineCount,
+        session.byteCap,
+        session.lineCap,
+        session.terminationReason ?? null,
+      ],
+    );
+
+    return session.id;
+  }
+
+  async getCaptureSession(id: string): Promise<StoredCaptureSession | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      'SELECT * FROM capture_sessions WHERE id = $1',
+      [id],
+    );
+
+    return result.rows.length > 0 ? this.mapCaptureSessionRow(result.rows[0]) : null;
+  }
+
+  async getCaptureSessions(
+    options: CaptureSessionQueryOptions = {},
+  ): Promise<StoredCaptureSession[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const where: string[] = [];
+    const params: unknown[] = [];
+    let p = 1;
+
+    if (options.connectionId) {
+      where.push(`connection_id = $${p++}`);
+      params.push(options.connectionId);
+    }
+    if (options.status) {
+      where.push(`status = $${p++}`);
+      params.push(options.status);
+    }
+    if (options.source) {
+      where.push(`source = $${p++}`);
+      params.push(options.source);
+    }
+    if (options.startedAfter !== undefined) {
+      where.push(`started_at >= $${p++}`);
+      params.push(options.startedAfter);
+    }
+    if (options.startedBefore !== undefined) {
+      where.push(`started_at <= $${p++}`);
+      params.push(options.startedBefore);
+    }
+
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+
+    const result = await this.pool.query(
+      `SELECT * FROM capture_sessions ${whereClause} ORDER BY started_at DESC LIMIT $${p} OFFSET $${p + 1}`,
+      [...params, limit, offset],
+    );
+
+    return result.rows.map((row) => this.mapCaptureSessionRow(row));
+  }
+
+  private mapCaptureSessionRow(row: Record<string, unknown>): StoredCaptureSession {
+    const toNumber = (v: unknown): number => (typeof v === 'string' ? parseInt(v, 10) : (v as number));
+    const toOptionalNumber = (v: unknown): number | undefined => {
+      if (v === null || v === undefined) return undefined;
+      return toNumber(v);
+    };
+    return {
+      id: row.id as string,
+      connectionId: row.connection_id as string,
+      status: row.status as StoredCaptureSession['status'],
+      source: row.source as StoredCaptureSession['source'],
+      triggerId: (row.trigger_id as string | null) ?? undefined,
+      scheduleId: (row.schedule_id as string | null) ?? undefined,
+      requestedBy: (row.requested_by as string | null) ?? undefined,
+      startedAt: toNumber(row.started_at),
+      endedAt: toOptionalNumber(row.ended_at),
+      durationMs: toOptionalNumber(row.duration_ms),
+      byteCount: toNumber(row.byte_count),
+      lineCount: toNumber(row.line_count),
+      byteCap: toNumber(row.byte_cap),
+      lineCap: toNumber(row.line_cap),
+      terminationReason: (row.termination_reason as string | null) ?? undefined,
+    };
   }
 }
