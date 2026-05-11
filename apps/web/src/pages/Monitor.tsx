@@ -1,18 +1,26 @@
+import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { monitorApi } from '../api/monitor';
+import { Button } from '../components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { SessionsTable } from './monitor/sessions-table';
+import { StartSessionModal } from './monitor/start-session-modal';
 
 export function Monitor() {
   const { currentConnection } = useConnection();
   const connectionId = currentConnection?.id;
+  const queryClient = useQueryClient();
+  const [startOpen, setStartOpen] = useState(false);
+
+  const queryKey = ['monitor', 'sessions', connectionId ?? 'none'];
 
   const { data, loading } = usePolling({
     fetcher: () => monitorApi.listSessions({ connectionId, limit: 100 }),
     interval: 5000,
     enabled: !!connectionId,
-    queryKey: ['monitor', 'sessions', connectionId ?? 'none'],
+    queryKey,
     refetchKey: connectionId,
   });
 
@@ -28,6 +36,9 @@ export function Monitor() {
             review past sessions for the currently selected connection.
           </p>
         </div>
+        <Button onClick={() => setStartOpen(true)} disabled={!connectionId}>
+          Start session
+        </Button>
       </header>
 
       <Card>
@@ -38,6 +49,17 @@ export function Monitor() {
           <SessionsTable sessions={sessions} isLoading={loading} />
         </CardContent>
       </Card>
+
+      {connectionId && (
+        <StartSessionModal
+          connectionId={connectionId}
+          open={startOpen}
+          onOpenChange={setStartOpen}
+          onStarted={() => {
+            void queryClient.invalidateQueries({ queryKey });
+          }}
+        />
+      )}
     </div>
   );
 }
