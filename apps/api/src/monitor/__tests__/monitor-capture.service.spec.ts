@@ -2,6 +2,7 @@ import { ConflictException } from '@nestjs/common';
 import { WebhookEventType } from '@betterdb/shared';
 import { EventEmitter } from 'events';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
+import type { ClusterDiscoveryService } from '../../cluster/cluster-discovery.service';
 import type { ConnectionRegistry } from '../../connections/connection-registry.service';
 import type { WebhookDispatcherService } from '../../webhooks/webhook-dispatcher.service';
 import { MonitorSource } from '../capture-writer';
@@ -43,18 +44,24 @@ function makeService(): {
   storage: MemoryAdapter;
   source: FakeSource;
   dispatcher: FakeDispatcher;
+  cluster: { discoverNodes: jest.Mock; getNodeConnection: jest.Mock };
 } {
   const storage = new MemoryAdapter();
   const registry = { get: jest.fn() } as unknown as ConnectionRegistry;
   const dispatcher = makeDispatcher();
+  const cluster = {
+    discoverNodes: jest.fn().mockResolvedValue([]),
+    getNodeConnection: jest.fn(),
+  };
   const service = new MonitorCaptureService(
     storage,
     registry,
     dispatcher as unknown as WebhookDispatcherService,
+    cluster as unknown as ClusterDiscoveryService,
   );
   const source = new FakeSource();
   service.setMonitorSourceFactory(async () => source);
-  return { service, storage, source, dispatcher };
+  return { service, storage, source, dispatcher, cluster };
 }
 
 describe('MonitorCaptureService', () => {
@@ -106,6 +113,45 @@ describe('MonitorCaptureService', () => {
       await service.stopSession(second.id);
     });
 
+    it('records target_node when a cluster node id is supplied', async () => {
+      const { service, storage, cluster } = makeService();
+      cluster.discoverNodes.mockResolvedValueOnce([
+        { id: 'node-a', address: 'cluster-1:6379', role: 'master', slots: [], healthy: true },
+        { id: 'node-b', address: 'cluster-2:6379', role: 'master', slots: [], healthy: true },
+      ]);
+      const session = await service.startSession({
+        connectionId: CONNECTION_ID,
+        targetNodeId: 'node-b',
+      });
+      const persisted = await storage.getCaptureSession(session.id);
+      expect(persisted?.targetNode).toBe('cluster-2:6379');
+      await service.stopSession(session.id);
+    });
+
+    it('passes targetNodeId through to the monitor source factory', async () => {
+      const { service, source } = makeService();
+      const factory = jest.fn().mockResolvedValue(source);
+      service.setMonitorSourceFactory(factory);
+      const session = await service.startSession({
+        connectionId: CONNECTION_ID,
+        targetNodeId: 'node-a',
+      });
+      expect(factory).toHaveBeenCalledWith(CONNECTION_ID, 'node-a');
+      await service.stopSession(session.id);
+    });
+
+    it('falls back to the supplied id when cluster discovery cannot resolve it', async () => {
+      const { service, storage, cluster } = makeService();
+      cluster.discoverNodes.mockRejectedValueOnce(new Error('not a cluster'));
+      const session = await service.startSession({
+        connectionId: CONNECTION_ID,
+        targetNodeId: 'lost-node',
+      });
+      const persisted = await storage.getCaptureSession(session.id);
+      expect(persisted?.targetNode).toBe('lost-node');
+      await service.stopSession(session.id);
+    });
+
     it('respects byteCap / lineCap overrides from the input', async () => {
       const { service, storage } = makeService();
       const session = await service.startSession({
@@ -123,10 +169,15 @@ describe('MonitorCaptureService', () => {
       const storage = new MemoryAdapter();
       const registry = { get: jest.fn() } as unknown as ConnectionRegistry;
       const dispatcher = makeDispatcher();
+      const cluster = {
+        discoverNodes: jest.fn().mockResolvedValue([]),
+        getNodeConnection: jest.fn(),
+      };
       const service = new MonitorCaptureService(
         storage,
         registry,
         dispatcher as unknown as WebhookDispatcherService,
+        cluster as unknown as ClusterDiscoveryService,
       );
       service.setMonitorSourceFactory(async () => {
         throw new Error('NOPERM monitor not allowed');
@@ -269,10 +320,15 @@ describe('MonitorCaptureService', () => {
       const storage = new MemoryAdapter();
       const registry = { get: jest.fn() } as unknown as ConnectionRegistry;
       const dispatcher = makeDispatcher();
+      const cluster = {
+        discoverNodes: jest.fn().mockResolvedValue([]),
+        getNodeConnection: jest.fn(),
+      };
       const service = new MonitorCaptureService(
         storage,
         registry,
         dispatcher as unknown as WebhookDispatcherService,
+        cluster as unknown as ClusterDiscoveryService,
       );
       service.setMonitorSourceFactory(async () => {
         throw new Error('boom');

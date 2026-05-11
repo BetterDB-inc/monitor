@@ -7,6 +7,7 @@ import {
   StoragePort,
   StoredCaptureSession,
 } from '../common/interfaces/storage-port.interface';
+import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { CaptureWriter, CaptureWriterResult, MonitorSource } from './capture-writer';
@@ -37,6 +38,8 @@ export interface StartSessionInput {
   triggerId?: string;
   scheduleId?: string;
   requestedBy?: string;
+  /** Cluster node id to MONITOR. When set, opens a dedicated connection to that node. Null for non-cluster targets. */
+  targetNodeId?: string;
 }
 
 interface ActiveSession {
@@ -48,8 +51,13 @@ interface ActiveSession {
 /**
  * Test seam — overrides how a MonitorSource is created from a connection. The
  * default goes through {@link createIovalkeyMonitorSource}; specs inject a fake.
+ * `targetNodeId` is the cluster-discovery node id when the caller wants a
+ * specific cluster member instead of the default connection.
  */
-export type MonitorSourceFactory = (connectionId: string) => Promise<MonitorSource>;
+export type MonitorSourceFactory = (
+  connectionId: string,
+  targetNodeId?: string,
+) => Promise<MonitorSource>;
 
 @Injectable()
 export class MonitorCaptureService {
@@ -62,8 +70,16 @@ export class MonitorCaptureService {
     private readonly storage: StoragePort,
     private readonly connectionRegistry: ConnectionRegistry,
     private readonly webhookDispatcher: WebhookDispatcherService,
+    private readonly clusterDiscovery: ClusterDiscoveryService,
   ) {
-    this.monitorSourceFactory = (connectionId) => {
+    this.monitorSourceFactory = async (connectionId, targetNodeId) => {
+      if (targetNodeId) {
+        const nodeClient = await this.clusterDiscovery.getNodeConnection(
+          targetNodeId,
+          connectionId,
+        );
+        return createIovalkeyMonitorSource(nodeClient);
+      }
       const port = this.connectionRegistry.get(connectionId);
       return createIovalkeyMonitorSource(port.getClient());
     };
@@ -100,6 +116,8 @@ export class MonitorCaptureService {
     const byteCap = input.byteCap ?? DEFAULT_BYTE_CAP;
     const lineCap = input.lineCap ?? DEFAULT_LINE_CAP;
 
+    const targetNode = await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
+
     const session: StoredCaptureSession = {
       id: randomUUID(),
       connectionId,
@@ -113,13 +131,14 @@ export class MonitorCaptureService {
       lineCount: 0,
       byteCap,
       lineCap,
+      targetNode,
     };
 
     await this.storage.saveCaptureSession(session, connectionId);
 
     let monitorSource: MonitorSource;
     try {
-      monitorSource = await this.monitorSourceFactory(connectionId);
+      monitorSource = await this.monitorSourceFactory(connectionId, input.targetNodeId);
     } catch (err) {
       this.logger.error(
         `Failed to open MONITOR on ${connectionId}: ${(err as Error).message}`,
@@ -247,5 +266,26 @@ export class MonitorCaptureService {
       if (a.session.id === sessionId) return a;
     }
     return undefined;
+  }
+
+  /**
+   * Translate a cluster-discovery node id into the human-readable host:port
+   * that goes into `capture_sessions.target_node`. Returns undefined for
+   * non-cluster sessions and falls back gracefully if discovery fails so a
+   * misconfigured cluster client doesn't kill the start path.
+   */
+  private async resolveTargetNodeAddress(
+    connectionId: string,
+    targetNodeId: string | undefined,
+  ): Promise<string | undefined> {
+    if (!targetNodeId) return undefined;
+    try {
+      const nodes = await this.clusterDiscovery.discoverNodes(connectionId);
+      const node = nodes.find((n) => n.id === targetNodeId);
+      return node?.address ?? targetNodeId;
+    } catch (err) {
+      this.logger.warn(`Cluster discovery failed for ${connectionId}: ${(err as Error).message}`);
+      return targetNodeId;
+    }
   }
 }

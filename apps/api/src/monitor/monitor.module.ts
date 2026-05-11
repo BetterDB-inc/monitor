@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ClusterModule } from '../cluster/cluster.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { StorageModule } from '../storage/storage.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
@@ -12,7 +13,7 @@ import { PreflightService } from './preflight.service';
 import { TailGateway } from './tail.gateway';
 
 @Module({
-  imports: [ConnectionsModule, StorageModule, WebhooksModule],
+  imports: [ClusterModule, ConnectionsModule, StorageModule, WebhooksModule],
   controllers: [MonitorController],
   providers: [
     AclChecker,

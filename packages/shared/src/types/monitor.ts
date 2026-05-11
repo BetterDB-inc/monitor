@@ -23,6 +23,8 @@ export interface StoredCaptureSession {
   byteCap: number;
   lineCap: number;
   terminationReason?: string;
+  /** When set, the session targeted a single cluster node (host:port). Null for single-instance or future fan-out (where per-node attribution lives in capture_chunks). */
+  targetNode?: string;
 }
 
 export interface CaptureSessionQueryOptions {

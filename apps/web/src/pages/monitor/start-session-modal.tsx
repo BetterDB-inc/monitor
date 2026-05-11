@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -9,11 +9,47 @@ import {
 } from '../../components/ui/dialog';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
-import { monitorApi, PreflightResult, StoredCaptureSession } from '../../api/monitor';
+import { useQuery } from '@tanstack/react-query';
+import { MonitorNodeDescriptor, monitorApi, PreflightResult, StoredCaptureSession } from '../../api/monitor';
 import { PreflightPanel } from './preflight-panel';
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const DEFAULT_DURATION_SECONDS = 30;
+
+function ClusterNodeField({
+  nodes,
+  selectedId,
+  onChange,
+}: {
+  nodes: MonitorNodeDescriptor[];
+  selectedId: string;
+  onChange: (id: string) => void;
+}) {
+  return (
+    <div>
+      <label className="text-xs font-medium text-muted-foreground" htmlFor="targetNode">
+        Cluster node
+      </label>
+      <select
+        id="targetNode"
+        value={selectedId}
+        onChange={(e) => onChange(e.target.value)}
+        className="block h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+      >
+        {nodes.map((n) => (
+          <option key={n.id} value={n.id}>
+            {n.address} · {n.role}
+            {n.healthy ? '' : ' (unhealthy)'}
+          </option>
+        ))}
+      </select>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        MONITOR is per-node. The session captures commands processed by this node only. Fan-out
+        across all primaries lands in a follow-up.
+      </p>
+    </div>
+  );
+}
 
 interface Props {
   connectionId: string;
@@ -28,9 +64,30 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
   const [duration, setDuration] = useState<number>(DEFAULT_DURATION_SECONDS);
   const [unit, setUnit] = useState<Unit>('s');
   const [requestedBy, setRequestedBy] = useState('');
+  const [targetNodeId, setTargetNodeId] = useState<string>('');
   const [confirming, setConfirming] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const nodesQuery = useQuery({
+    queryKey: ['monitor', 'connection-nodes', connectionId],
+    queryFn: () => monitorApi.listConnectionNodes(connectionId),
+    enabled: open,
+    refetchOnWindowFocus: false,
+  });
+  const clusterNodes = useMemo(
+    () => (nodesQuery.data?.isCluster ? nodesQuery.data.nodes : []),
+    [nodesQuery.data],
+  );
+  const isCluster = clusterNodes.length > 0;
+
+  useEffect(() => {
+    if (!open) return;
+    if (isCluster && !targetNodeId) {
+      const firstMaster = clusterNodes.find((n) => n.role === 'master') ?? clusterNodes[0];
+      if (firstMaster) setTargetNodeId(firstMaster.id);
+    }
+  }, [open, isCluster, clusterNodes, targetNodeId]);
 
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
@@ -50,6 +107,7 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
       setDuration(DEFAULT_DURATION_SECONDS);
       setUnit('s');
       setRequestedBy('');
+      setTargetNodeId('');
       setPreflight(null);
       setPreflightError(null);
       setConfirming(false);
@@ -91,6 +149,7 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
         connectionId,
         durationMs,
         requestedBy: requestedBy.trim() || undefined,
+        targetNodeId: isCluster ? targetNodeId || undefined : undefined,
       });
       onStarted(session);
       onOpenChange(false);
@@ -150,6 +209,14 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
               />
             </div>
           </div>
+
+          {isCluster && (
+            <ClusterNodeField
+              nodes={clusterNodes}
+              selectedId={targetNodeId}
+              onChange={setTargetNodeId}
+            />
+          )}
 
           <div>
             <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">

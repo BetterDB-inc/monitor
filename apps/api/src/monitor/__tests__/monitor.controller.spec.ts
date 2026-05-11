@@ -1,4 +1,5 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import type { ClusterDiscoveryService } from '../../cluster/cluster-discovery.service';
 import type { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { CrossReferenceEngine } from '../cross-reference.engine';
 import { HealthGateService } from '../health-gate.service';
@@ -18,6 +19,7 @@ describe('MonitorController', () => {
   let preflightService: { run: jest.Mock };
   let storage: { getCaptureChunks: jest.Mock };
   let crossReferenceEngine: { compute: jest.Mock };
+  let clusterDiscovery: { discoverNodes: jest.Mock };
 
   beforeEach(() => {
     captureService = {
@@ -46,6 +48,7 @@ describe('MonitorController', () => {
       }),
     };
     storage = { getCaptureChunks: jest.fn().mockResolvedValue([]) };
+    clusterDiscovery = { discoverNodes: jest.fn().mockResolvedValue([]) };
     crossReferenceEngine = {
       compute: jest.fn().mockResolvedValue({
         sessionId: 'sess-1',
@@ -62,6 +65,7 @@ describe('MonitorController', () => {
       healthGateService as unknown as HealthGateService,
       preflightService as unknown as PreflightService,
       crossReferenceEngine as unknown as CrossReferenceEngine,
+      clusterDiscovery as unknown as ClusterDiscoveryService,
       storage as unknown as StoragePort,
     );
   });
@@ -150,12 +154,47 @@ describe('MonitorController', () => {
         byteCap: 1234,
         lineCap: 567,
         requestedBy: 'tester',
+        targetNodeId: undefined,
       });
+    });
+
+    it('forwards targetNodeId when supplied', async () => {
+      await controller.startSession({ connectionId: 'conn-1', targetNodeId: 'node-7' });
+      expect(captureService.startSession).toHaveBeenCalledWith(
+        expect.objectContaining({ targetNodeId: 'node-7' }),
+      );
     });
 
     it('throws BadRequest when connectionId is missing', async () => {
       await expect(controller.startSession({})).rejects.toBeInstanceOf(BadRequestException);
       expect(captureService.startSession).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listConnectionNodes', () => {
+    it('returns {isCluster:false, nodes:[]} when discovery finds no nodes', async () => {
+      clusterDiscovery.discoverNodes.mockResolvedValueOnce([]);
+      const result = await controller.listConnectionNodes('conn-1');
+      expect(result).toEqual({ isCluster: false, nodes: [] });
+    });
+
+    it('returns descriptor list with isCluster:true when nodes exist', async () => {
+      clusterDiscovery.discoverNodes.mockResolvedValueOnce([
+        { id: 'a', address: 'h1:6379', role: 'master', slots: [[0, 5460]], healthy: true },
+        { id: 'b', address: 'h2:6379', role: 'replica', masterId: 'a', slots: [], healthy: true },
+      ]);
+      const result = await controller.listConnectionNodes('conn-1');
+      expect(result.isCluster).toBe(true);
+      expect(result.nodes).toEqual([
+        { id: 'a', address: 'h1:6379', role: 'master', healthy: true },
+        { id: 'b', address: 'h2:6379', role: 'replica', healthy: true },
+      ]);
+    });
+
+    it('treats a non-cluster connection (discovery throws) as {isCluster:false}', async () => {
+      clusterDiscovery.discoverNodes.mockRejectedValueOnce(new Error('CLUSTER not supported'));
+      const result = await controller.listConnectionNodes('conn-1');
+      expect(result).toEqual({ isCluster: false, nodes: [] });
     });
   });
 

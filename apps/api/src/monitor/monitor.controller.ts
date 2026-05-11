@@ -13,6 +13,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
+import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { StoragePort, StoredCaptureSession } from '../common/interfaces/storage-port.interface';
 import { BaselineWindow, CrossReferenceEngine, CrossReferenceResult } from './cross-reference.engine';
 import { HealthGateResult } from './health-gate';
@@ -41,6 +42,19 @@ interface StartSessionRequestBody {
   byteCap?: number;
   lineCap?: number;
   requestedBy?: string;
+  targetNodeId?: string;
+}
+
+export interface MonitorNodeDescriptor {
+  id: string;
+  address: string;
+  role: 'master' | 'replica';
+  healthy: boolean;
+}
+
+export interface MonitorNodesResponse {
+  isCluster: boolean;
+  nodes: MonitorNodeDescriptor[];
 }
 
 @Controller('monitor')
@@ -51,6 +65,7 @@ export class MonitorController {
     private readonly healthGateService: HealthGateService,
     private readonly preflightService: PreflightService,
     private readonly crossReferenceEngine: CrossReferenceEngine,
+    private readonly clusterDiscovery: ClusterDiscoveryService,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
   ) {}
@@ -108,7 +123,31 @@ export class MonitorController {
       byteCap: body.byteCap,
       lineCap: body.lineCap,
       requestedBy: body.requestedBy,
+      targetNodeId: body.targetNodeId,
     });
+  }
+
+  @Get('connections/:id/nodes')
+  async listConnectionNodes(@Param('id') id: string): Promise<MonitorNodesResponse> {
+    try {
+      const nodes = await this.clusterDiscovery.discoverNodes(id);
+      if (nodes.length === 0) {
+        return { isCluster: false, nodes: [] };
+      }
+      return {
+        isCluster: true,
+        nodes: nodes.map((n) => ({
+          id: n.id,
+          address: n.address,
+          role: n.role,
+          healthy: n.healthy,
+        })),
+      };
+    } catch {
+      // Single-instance connections throw when asked for cluster nodes. That's
+      // the signal we use to report "not a cluster" rather than a 500.
+      return { isCluster: false, nodes: [] };
+    }
   }
 
   @Get('sessions/:id')

@@ -1638,10 +1638,13 @@ export class PostgresAdapter implements StoragePort {
         byte_cap BIGINT NOT NULL,
         line_cap BIGINT NOT NULL,
         termination_reason TEXT,
+        target_node TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         CHECK (status IN ('running','completed','truncated','failed','skipped')),
         CHECK (source IN ('manual','trigger','schedule'))
       );
+
+      ALTER TABLE capture_sessions ADD COLUMN IF NOT EXISTS target_node TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_connection_id ON capture_sessions(connection_id);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_started_at ON capture_sessions(started_at DESC);
@@ -3905,8 +3908,8 @@ export class PostgresAdapter implements StoragePort {
       `INSERT INTO capture_sessions (
         id, connection_id, status, source, trigger_id, schedule_id, requested_by,
         started_at, ended_at, duration_ms, byte_count, line_count, byte_cap, line_cap,
-        termination_reason
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+        termination_reason, target_node
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [
         session.id,
         connectionId,
@@ -3923,6 +3926,7 @@ export class PostgresAdapter implements StoragePort {
         session.byteCap,
         session.lineCap,
         session.terminationReason ?? null,
+        session.targetNode ?? null,
       ],
     );
 
@@ -4004,6 +4008,7 @@ export class PostgresAdapter implements StoragePort {
       byteCap: toNumber(row.byte_cap),
       lineCap: toNumber(row.line_cap),
       terminationReason: (row.termination_reason as string | null) ?? undefined,
+      targetNode: (row.target_node as string | null) ?? undefined,
     };
   }
 

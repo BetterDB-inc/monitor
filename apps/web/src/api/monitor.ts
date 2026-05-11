@@ -65,6 +65,19 @@ export interface StartSessionParams {
   byteCap?: number;
   lineCap?: number;
   requestedBy?: string;
+  targetNodeId?: string;
+}
+
+export interface MonitorNodeDescriptor {
+  id: string;
+  address: string;
+  role: 'master' | 'replica';
+  healthy: boolean;
+}
+
+export interface MonitorNodesResponse {
+  isCluster: boolean;
+  nodes: MonitorNodeDescriptor[];
 }
 
 export type BaselineWindow = '6h' | '24h' | '7d' | 'same-hour-last-week';
@@ -166,6 +179,12 @@ export const monitorApi = {
       method: 'POST',
       body: JSON.stringify(params),
     });
+  },
+
+  listConnectionNodes: (connectionId: string): Promise<MonitorNodesResponse> => {
+    return fetchApi<MonitorNodesResponse>(
+      `/monitor/connections/${encodeURIComponent(connectionId)}/nodes`,
+    );
   },
 
   crossReference: (sessionId: string, baseline: BaselineWindow): Promise<CrossReferenceResult> => {

@@ -73,6 +73,21 @@ import {
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
 
+/**
+ * Idempotent migration: add the `target_node` column to existing capture_sessions
+ * tables (PR 14 — cluster per-node selection). Extracted to a helper so we can
+ * keep the call-site in createSchema readable.
+ */
+function addCaptureSessionsTargetNodeColumn(db: Database.Database): void {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(capture_sessions)`).all() as { name: string }[];
+    if (cols.some((c) => c.name === 'target_node')) return;
+    db.prepare(`ALTER TABLE capture_sessions ADD COLUMN target_node TEXT`).run();
+  } catch {
+    // Table may not exist yet — createSchema's CREATE TABLE includes the column from day one.
+  }
+}
+
 export interface SqliteAdapterConfig {
   filepath: string;
 }
@@ -1374,6 +1389,7 @@ export class SqliteAdapter implements StoragePort {
         byte_cap INTEGER NOT NULL,
         line_cap INTEGER NOT NULL,
         termination_reason TEXT,
+        target_node TEXT,
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
 
@@ -1428,6 +1444,7 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('command_stats_samples', 'usec_per_call', 'REAL', '0');
     addColumnIfMissing('command_stats_samples', 'rejected_calls', 'INTEGER', '0');
     addColumnIfMissing('command_stats_samples', 'failed_calls', 'INTEGER', '0');
+    addCaptureSessionsTargetNodeColumn(this.db!);
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
@@ -3618,8 +3635,8 @@ export class SqliteAdapter implements StoragePort {
       INSERT INTO capture_sessions (
         id, connection_id, status, source, trigger_id, schedule_id, requested_by,
         started_at, ended_at, duration_ms, byte_count, line_count, byte_cap, line_cap,
-        termination_reason
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        termination_reason, target_node
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       )
       .run(
@@ -3638,6 +3655,7 @@ export class SqliteAdapter implements StoragePort {
         session.byteCap,
         session.lineCap,
         session.terminationReason ?? null,
+        session.targetNode ?? null,
       );
 
     return session.id;
@@ -3712,6 +3730,7 @@ export class SqliteAdapter implements StoragePort {
       byteCap: row.byte_cap as number,
       lineCap: row.line_cap as number,
       terminationReason: (row.termination_reason as string | null) ?? undefined,
+      targetNode: (row.target_node as string | null) ?? undefined,
     };
   }
 
