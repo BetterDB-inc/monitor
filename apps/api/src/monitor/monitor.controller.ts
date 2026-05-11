@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
 import { StoragePort, StoredCaptureSession } from '../common/interfaces/storage-port.interface';
+import { BaselineWindow, CrossReferenceEngine, CrossReferenceResult } from './cross-reference.engine';
 import { HealthGateResult } from './health-gate';
 import { HealthGateService } from './health-gate.service';
 import {
@@ -26,6 +27,8 @@ import {
 import { MonitorCaptureService } from './monitor-capture.service';
 import { MonitorDevPreviewGuard } from './monitor-dev-preview.guard';
 import { PreflightResult, PreflightService } from './preflight.service';
+
+const VALID_BASELINES = new Set<BaselineWindow>(['6h', '24h', '7d', 'same-hour-last-week']);
 
 interface PreflightRequestBody {
   connectionId?: string;
@@ -47,6 +50,7 @@ export class MonitorController {
     private readonly captureService: MonitorCaptureService,
     private readonly healthGateService: HealthGateService,
     private readonly preflightService: PreflightService,
+    private readonly crossReferenceEngine: CrossReferenceEngine,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
   ) {}
@@ -123,6 +127,24 @@ export class MonitorController {
       throw new NotFoundException(`Session ${id} not found`);
     }
     return session;
+  }
+
+  @Get('sessions/:id/cross-reference')
+  async crossReference(
+    @Param('id') id: string,
+    @Query('baseline') baseline?: string,
+  ): Promise<CrossReferenceResult> {
+    const window = (baseline ?? '24h') as BaselineWindow;
+    if (!VALID_BASELINES.has(window)) {
+      throw new BadRequestException(
+        `baseline must be one of 6h, 24h, 7d, same-hour-last-week (got "${baseline}")`,
+      );
+    }
+    const session = await this.captureService.getSession(id);
+    if (!session) {
+      throw new NotFoundException(`Session ${id} not found`);
+    }
+    return this.crossReferenceEngine.compute({ sessionId: id, baseline: window });
   }
 
   @Get('sessions/:id/export')

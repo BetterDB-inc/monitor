@@ -1,5 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import type { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { CrossReferenceEngine } from '../cross-reference.engine';
 import { HealthGateService } from '../health-gate.service';
 import { MonitorCaptureService } from '../monitor-capture.service';
 import { MonitorController } from '../monitor.controller';
@@ -16,6 +17,7 @@ describe('MonitorController', () => {
   let healthGateService: { evaluate: jest.Mock };
   let preflightService: { run: jest.Mock };
   let storage: { getCaptureChunks: jest.Mock };
+  let crossReferenceEngine: { compute: jest.Mock };
 
   beforeEach(() => {
     captureService = {
@@ -44,10 +46,22 @@ describe('MonitorController', () => {
       }),
     };
     storage = { getCaptureChunks: jest.fn().mockResolvedValue([]) };
+    crossReferenceEngine = {
+      compute: jest.fn().mockResolvedValue({
+        sessionId: 'sess-1',
+        baseline: { window: '24h', startTs: 0, endTs: 0 },
+        session: { startTs: 0, endTs: 0, capturedLineCount: 0 },
+        newShapes: [],
+        hotKeyDelta: { newInTopK: [], rankChanges: [] },
+        slowlogRegressions: [],
+        aclDeltas: { auditEntriesInWindow: 0, counters: { aclAccessDeniedAuthDelta: null, rejectedConnectionsDelta: null } },
+      }),
+    };
     controller = new MonitorController(
       captureService as unknown as MonitorCaptureService,
       healthGateService as unknown as HealthGateService,
       preflightService as unknown as PreflightService,
+      crossReferenceEngine as unknown as CrossReferenceEngine,
       storage as unknown as StoragePort,
     );
   });
@@ -168,6 +182,39 @@ describe('MonitorController', () => {
     it('throws NotFound when the session does not exist', async () => {
       captureService.stopSession.mockResolvedValueOnce(null);
       await expect(controller.stopSession('missing')).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('crossReference', () => {
+    it('forwards the sessionId and the default 24h baseline to the engine', async () => {
+      await controller.crossReference('sess-1');
+      expect(crossReferenceEngine.compute).toHaveBeenCalledWith({
+        sessionId: 'sess-1',
+        baseline: '24h',
+      });
+    });
+
+    it('honors explicit baseline windows', async () => {
+      for (const window of ['6h', '24h', '7d', 'same-hour-last-week']) {
+        await controller.crossReference('sess-1', window);
+        expect(crossReferenceEngine.compute).toHaveBeenLastCalledWith({
+          sessionId: 'sess-1',
+          baseline: window,
+        });
+      }
+    });
+
+    it('throws BadRequest for an unknown baseline value', async () => {
+      await expect(controller.crossReference('sess-1', '15m')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(crossReferenceEngine.compute).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound when the session does not exist', async () => {
+      captureService.getSession.mockResolvedValueOnce(null);
+      await expect(controller.crossReference('missing')).rejects.toBeInstanceOf(NotFoundException);
+      expect(crossReferenceEngine.compute).not.toHaveBeenCalled();
     });
   });
 
