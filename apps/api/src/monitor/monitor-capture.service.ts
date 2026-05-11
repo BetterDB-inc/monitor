@@ -1,5 +1,6 @@
 import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import { WebhookEventType } from '@betterdb/shared';
 import {
   CaptureSessionQueryOptions,
   CaptureSessionSource,
@@ -7,15 +8,25 @@ import {
   StoredCaptureSession,
 } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
-import { CaptureWriter, MonitorSource } from './capture-writer';
+import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
+import { CaptureWriter, CaptureWriterResult, MonitorSource } from './capture-writer';
 import { createIovalkeyMonitorSource } from './iovalkey-monitor-source';
 
 /** Default capture duration if the caller does not specify one. Matches the start-session modal default. */
 export const DEFAULT_DURATION_MS = 30_000;
 
-/** Community-tier defaults. PR 24 will resolve these from license tier. */
-export const DEFAULT_BYTE_CAP = 50 * 1024 * 1024; // 50 MB
-export const DEFAULT_LINE_CAP = 5_000_000;
+/** Community-tier defaults; overridable per session and via env. PR 24 will resolve from license tier. */
+const COMMUNITY_BYTE_CAP = 50 * 1024 * 1024; // 50 MB
+const COMMUNITY_LINE_CAP = 5_000_000;
+
+export const DEFAULT_BYTE_CAP = parsePositiveInt(process.env.MONITOR_DEFAULT_BYTE_CAP, COMMUNITY_BYTE_CAP);
+export const DEFAULT_LINE_CAP = parsePositiveInt(process.env.MONITOR_DEFAULT_LINE_CAP, COMMUNITY_LINE_CAP);
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return isNaN(n) || n <= 0 ? fallback : n;
+}
 
 export interface StartSessionInput {
   connectionId: string;
@@ -50,6 +61,7 @@ export class MonitorCaptureService {
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
     private readonly connectionRegistry: ConnectionRegistry,
+    private readonly webhookDispatcher: WebhookDispatcherService,
   ) {
     this.monitorSourceFactory = (connectionId) => {
       const port = this.connectionRegistry.get(connectionId);
@@ -129,8 +141,9 @@ export class MonitorCaptureService {
       durationMs,
     });
 
-    const donePromise = writer.start();
-    donePromise
+    const finalize = writer
+      .start()
+      .then((result) => this.dispatchSessionEnded(session, result))
       .catch((err: Error) => {
         this.logger.error(`Writer for session ${session.id} threw: ${err.message}`);
       })
@@ -138,9 +151,69 @@ export class MonitorCaptureService {
         this.active.delete(connectionId);
       });
 
-    this.active.set(connectionId, { session, writer, donePromise });
+    this.active.set(connectionId, { session, writer, donePromise: finalize });
+
+    void this.dispatchSessionStarted(session);
 
     return session;
+  }
+
+  private async dispatchSessionStarted(session: StoredCaptureSession): Promise<void> {
+    try {
+      await this.webhookDispatcher.dispatchEvent(
+        WebhookEventType.MONITOR_SESSION_STARTED,
+        {
+          sessionId: session.id,
+          source: session.source,
+          triggerId: session.triggerId,
+          scheduleId: session.scheduleId,
+          requestedBy: session.requestedBy,
+          startedAt: session.startedAt,
+          byteCap: session.byteCap,
+          lineCap: session.lineCap,
+        },
+        session.connectionId,
+      );
+    } catch (err) {
+      this.logger.error(`Failed to dispatch monitor.session.started: ${(err as Error).message}`);
+    }
+  }
+
+  private async dispatchSessionEnded(
+    session: StoredCaptureSession,
+    result: CaptureWriterResult,
+  ): Promise<void> {
+    // 'failed' captures are observability noise more than user-actionable signal
+    // and don't have a community webhook; PR 16 will introduce monitor.session.skipped
+    // for the related Pro+ case.
+    if (result.status === 'failed') return;
+
+    const eventType =
+      result.status === 'truncated'
+        ? WebhookEventType.MONITOR_SESSION_TRUNCATED
+        : WebhookEventType.MONITOR_SESSION_COMPLETED;
+
+    try {
+      await this.webhookDispatcher.dispatchEvent(
+        eventType,
+        {
+          sessionId: session.id,
+          source: session.source,
+          triggerId: session.triggerId,
+          scheduleId: session.scheduleId,
+          requestedBy: session.requestedBy,
+          startedAt: session.startedAt,
+          endedAt: result.endedAt,
+          durationMs: result.endedAt - session.startedAt,
+          byteCount: result.byteCount,
+          lineCount: result.lineCount,
+          terminationReason: result.terminationReason,
+        },
+        session.connectionId,
+      );
+    } catch (err) {
+      this.logger.error(`Failed to dispatch ${eventType}: ${(err as Error).message}`);
+    }
   }
 
   /**
