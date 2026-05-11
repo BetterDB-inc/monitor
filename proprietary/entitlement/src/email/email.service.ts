@@ -32,7 +32,7 @@ If you're running a managed or private deployment (ElastiCache, MemoryDB, GCP Me
 
 Just reply to this email if you need anything - even if it's a Valkey or Redis question that has nothing to do with BetterDB.
 
-P.S. Last weekend we released chat.betterdb.com - a public OSS chat trained on Valkey, Redis, Dragonfly and our own docs, so you can use it to cross check the docs more easily and evaluate the differences. It also showcases our LLM caching libraries in action.
+P.S. We recently released chat.betterdb.com - a public OSS chat trained on Valkey, Redis, Dragonfly and our own docs, so you can use it to cross check the docs more easily and evaluate the differences. It also showcases our LLM caching libraries in action.
 
 Kristiyan
 Founder and CTO, BetterDB`;
