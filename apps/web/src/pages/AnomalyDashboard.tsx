@@ -1,10 +1,17 @@
 import { useState, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { Feature } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
+import { useLicense } from '../hooks/useLicense';
 import { metricsApi } from '../api/metrics';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
+import { Button } from '../components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import {
+  CaptureOnNextModal,
+  type CaptureOnNextContext,
+} from './anomalies/capture-on-next-modal';
 import {
   AlertTriangle,
   AlertCircle,
@@ -67,6 +74,13 @@ interface AnomalySummary {
   resolvedEvents: number;
 }
 
+interface MetricBaselineBuffer {
+  metricType: string;
+  mean: number;
+  stdDev: number;
+  isReady: boolean;
+}
+
 const SEVERITY_CONFIG = {
   critical: { color: 'text-destructive', bg: 'bg-destructive/10', border: 'border-destructive', icon: AlertCircle },
   warning: { color: 'text-yellow-500', bg: 'bg-yellow-500/10', border: 'border-yellow-500', icon: AlertTriangle },
@@ -116,10 +130,36 @@ function formatValue(value: number, metric: string): string {
   return value.toLocaleString();
 }
 
+const MONITOR_DEV_PREVIEW = import.meta.env.VITE_MONITOR_DEV_PREVIEW === 'true';
+
 export function AnomalyDashboard() {
   const { currentConnection } = useConnection();
+  const { hasFeature } = useLicense();
+  const captureActionEnabled =
+    MONITOR_DEV_PREVIEW &&
+    hasFeature(Feature.MONITOR_ANOMALY_TRIGGER) &&
+    !!currentConnection?.id;
   const [searchParams] = useSearchParams();
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [captureContext, setCaptureContext] = useState<CaptureOnNextContext | undefined>();
+  const [captureModalOpen, setCaptureModalOpen] = useState(false);
+
+  function openCaptureModal(
+    anomaly: { metricType: string; anomalyType: string },
+    source: CaptureOnNextContext['source'],
+  ) {
+    if (!currentConnection?.id) {
+      return;
+    }
+    setCaptureContext({
+      connectionId: currentConnection.id,
+      metricType: anomaly.metricType,
+      metricLabel: METRIC_LABELS[anomaly.metricType] ?? anomaly.metricType,
+      anomalyType: anomaly.anomalyType,
+      source,
+    });
+    setCaptureModalOpen(true);
+  }
 
   // Time filter — initialise from URL ?start=&end= (epoch ms)
   const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
@@ -154,7 +194,7 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
-  const { data: buffers } = usePolling<any[]>({
+  const { data: buffers } = usePolling<MetricBaselineBuffer[]>({
     fetcher: () => metricsApi.getAnomalyBuffers(),
     interval: 10000,
     refetchKey: currentConnection?.id,
@@ -170,11 +210,11 @@ export function AnomalyDashboard() {
   };
 
   // Timeline data for chart
-  const effectiveRangeMs = startTime != null
-    ? (endTime ?? Date.now()) - startTime
-    : 24 * 3_600_000; // fallback: 24 h when no range selected
-
   const timelineData = useMemo(() => {
+    const effectiveRangeMs = startTime != null
+      // eslint-disable-next-line react-hooks/purity
+      ? (endTime ?? Date.now()) - startTime
+      : 24 * 3_600_000;
     if (!events?.length || effectiveRangeMs <= 0) return [];
 
     const bucketSize = effectiveRangeMs / 60; // 60 buckets
@@ -189,7 +229,7 @@ export function AnomalyDashboard() {
     return Object.entries(buckets)
       .sort(([a], [b]) => parseInt(a) - parseInt(b))
       .map(([ts, counts]) => ({ time: formatTime(parseInt(ts)), ...counts }));
-  }, [events, effectiveRangeMs]);
+  }, [events, startTime, endTime]);
 
   // Metrics breakdown for bar chart
   const metricsData = useMemo(() => {
@@ -398,6 +438,18 @@ export function AnomalyDashboard() {
                                 <span className="text-xs">
                                   baseline: {formatValue(anomaly.baseline, anomaly.metricType)}
                                 </span>
+                                {captureActionEnabled && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openCaptureModal(anomaly, 'group');
+                                    }}
+                                  >
+                                    Capture next
+                                  </Button>
+                                )}
                               </div>
                             </div>
                           ))}
@@ -455,11 +507,22 @@ export function AnomalyDashboard() {
                         <p className="text-xs text-muted-foreground">{formatTime(event.timestamp)}</p>
                       </div>
                     </div>
-                    <div className="text-right">
-                      <p className="text-sm font-mono">{formatValue(event.value, event.metricType)}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {event.zScore > 0 ? '+' : ''}{event.zScore.toFixed(1)}σ from baseline
-                      </p>
+                    <div className="flex items-center gap-3">
+                      <div className="text-right">
+                        <p className="text-sm font-mono">{formatValue(event.value, event.metricType)}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {event.zScore > 0 ? '+' : ''}{event.zScore.toFixed(1)}σ from baseline
+                        </p>
+                      </div>
+                      {captureActionEnabled && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => openCaptureModal(event, 'event')}
+                        >
+                          Capture next
+                        </Button>
+                      )}
                     </div>
                   </div>
                 );
@@ -475,6 +538,12 @@ export function AnomalyDashboard() {
         </CardContent>
       </Card>
 
+      <CaptureOnNextModal
+        open={captureModalOpen}
+        context={captureContext}
+        onOpenChange={setCaptureModalOpen}
+      />
+
       {/* Buffer Stats (Debug) */}
       {buffers && buffers.length > 0 && (
         <Card>
@@ -483,7 +552,7 @@ export function AnomalyDashboard() {
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 text-sm">
-              {buffers.map((buffer: any) => (
+              {buffers.map((buffer) => (
                 <div key={buffer.metricType} className="p-2 bg-muted/30 rounded">
                   <p className="font-medium truncate">{METRIC_LABELS[buffer.metricType] || buffer.metricType}</p>
                   <p className="text-muted-foreground">
