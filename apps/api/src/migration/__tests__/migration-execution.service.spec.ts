@@ -191,6 +191,7 @@ describe('MigrationExecutionService', () => {
         expect.anything(),
         { preferReplica: true },
         expect.any(Boolean),
+        {},
       );
     });
   });
