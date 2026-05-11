@@ -69,6 +69,8 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'monitor.session.started': 'MONITOR Session Started',
   'monitor.session.completed': 'MONITOR Session Completed',
   'monitor.session.truncated': 'MONITOR Session Truncated',
+  'monitor.session.skipped': 'MONITOR Session Skipped',
+  'monitor.trigger.created': 'MONITOR Trigger Created',
 };
 
 // Tier display names

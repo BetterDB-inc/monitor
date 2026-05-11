@@ -1,7 +1,11 @@
-import type { StoredCaptureSession } from '@betterdb/shared';
+import type {
+  CaptureTriggerStatus,
+  StoredCaptureSession,
+  StoredCaptureTrigger,
+} from '@betterdb/shared';
 import { fetchApi } from './client';
 
-export type { StoredCaptureSession };
+export type { StoredCaptureSession, StoredCaptureTrigger, CaptureTriggerStatus };
 
 export interface ListSessionsParams {
   connectionId?: string;
@@ -193,4 +197,53 @@ export const monitorApi = {
       `/monitor/sessions/${encodeURIComponent(sessionId)}/cross-reference?baseline=${baseline}`,
     );
   },
+
+  listTriggers: (params: ListTriggersParams = {}): Promise<StoredCaptureTrigger[]> => {
+    const search = new URLSearchParams();
+    if (params.connectionId) {
+      search.set('connectionId', params.connectionId);
+    }
+    if (params.status) {
+      search.set('status', params.status);
+    }
+    if (params.limit !== undefined) {
+      search.set('limit', String(params.limit));
+    }
+    if (params.offset !== undefined) {
+      search.set('offset', String(params.offset));
+    }
+    const query = search.toString();
+    return fetchApi<StoredCaptureTrigger[]>(
+      query ? `/monitor/triggers?${query}` : '/monitor/triggers',
+    );
+  },
+
+  createTrigger: (params: CreateTriggerParams): Promise<StoredCaptureTrigger> => {
+    return fetchApi<StoredCaptureTrigger>('/monitor/triggers', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  },
+
+  cancelTrigger: (id: string): Promise<{ cancelled: boolean }> => {
+    return fetchApi<{ cancelled: boolean }>(
+      `/monitor/triggers/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    );
+  },
 };
+
+export interface ListTriggersParams {
+  connectionId?: string;
+  status?: CaptureTriggerStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export interface CreateTriggerParams {
+  connectionId: string;
+  metricType: string;
+  anomalyType: string;
+  expiresAt?: number;
+  createdBy?: string;
+}
