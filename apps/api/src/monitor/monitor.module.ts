@@ -8,6 +8,7 @@ import { MonitorCaptureService } from './monitor-capture.service';
 import { MonitorController } from './monitor.controller';
 import { MonitorDevPreviewGuard } from './monitor-dev-preview.guard';
 import { PreflightService } from './preflight.service';
+import { TailGateway } from './tail.gateway';
 
 @Module({
   imports: [ConnectionsModule, StorageModule, WebhooksModule],
@@ -18,6 +19,8 @@ import { PreflightService } from './preflight.service';
     MonitorCaptureService,
     MonitorDevPreviewGuard,
     PreflightService,
+    TailGateway,
   ],
+  exports: [TailGateway],
 })
 export class MonitorModule {}

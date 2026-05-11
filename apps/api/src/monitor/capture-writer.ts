@@ -90,6 +90,11 @@ export class CaptureWriter {
   /** Most recent N lines for tail readers, oldest-first. */
   private ringBuffer: string[] = [];
 
+  /** Per-viewer line subscribers; each subscription is independent. */
+  private lineSubscribers: Set<(line: string) => void> = new Set();
+  /** Subscribers notified once when the writer terminates. */
+  private endSubscribers: Set<() => void> = new Set();
+
   private status: CaptureWriterStatus = 'completed';
   private terminationReason = 'source_ended';
   private stopped = false;
@@ -148,6 +153,35 @@ export class CaptureWriter {
     return { byteCount: this.byteCount, lineCount: this.lineCount };
   }
 
+  /**
+   * Subscribe to new lines (one event per ingested line). Each subscriber
+   * runs synchronously inside the line-handler; throwing does NOT propagate
+   * — viewer faults must never affect the writer or other viewers.
+   *
+   * Returns an unsubscribe function. Safe to call after the writer terminates
+   * (returns a no-op).
+   */
+  subscribe(onLine: (line: string) => void): () => void {
+    if (this.stopped) {
+      return () => undefined;
+    }
+    this.lineSubscribers.add(onLine);
+    return () => this.lineSubscribers.delete(onLine);
+  }
+
+  /**
+   * Notify when the writer terminates (any status). Fires once. If the writer
+   * has already terminated, fires synchronously on the next microtask.
+   */
+  onEnd(cb: () => void): () => void {
+    if (this.stopped) {
+      Promise.resolve().then(() => cb());
+      return () => undefined;
+    }
+    this.endSubscribers.add(cb);
+    return () => this.endSubscribers.delete(cb);
+  }
+
   private handleLine(line: string): void {
     if (this.stopped) return;
 
@@ -164,6 +198,7 @@ export class CaptureWriter {
     }
 
     this.pushRingBuffer(line);
+    this.notifyLineSubscribers(line);
 
     if (this.byteCount >= this.byteCap) {
       this.terminate('truncated', 'byte_cap');
@@ -175,6 +210,16 @@ export class CaptureWriter {
     }
     if (this.buffer.length >= this.flushLineThreshold) {
       this.flush();
+    }
+  }
+
+  private notifyLineSubscribers(line: string): void {
+    for (const cb of this.lineSubscribers) {
+      try {
+        cb(line);
+      } catch (err) {
+        this.logger.warn(`Line subscriber threw (ignored): ${(err as Error).message}`);
+      }
     }
   }
 
@@ -267,6 +312,16 @@ export class CaptureWriter {
     } catch (err) {
       this.logger.error(`Failed to finalize session row: ${(err as Error).message}`);
     }
+
+    for (const cb of this.endSubscribers) {
+      try {
+        cb();
+      } catch (err) {
+        this.logger.warn(`End subscriber threw (ignored): ${(err as Error).message}`);
+      }
+    }
+    this.endSubscribers.clear();
+    this.lineSubscribers.clear();
 
     this.resolveDone?.({
       status,

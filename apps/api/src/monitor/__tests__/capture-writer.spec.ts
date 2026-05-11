@@ -342,6 +342,108 @@ describe('CaptureWriter', () => {
     });
   });
 
+  describe('subscribe / onEnd', () => {
+    it('delivers each ingested line to every subscriber, in order', async () => {
+      const source = new FakeSource();
+      const storage = makeStorage();
+      const writer = new CaptureWriter({
+        sessionId: SESSION_ID,
+        source,
+        storage,
+        byteCap: 1_000_000,
+        lineCap: 1_000_000,
+        durationMs: 60_000,
+      });
+
+      const a: string[] = [];
+      const b: string[] = [];
+      const done = writer.start();
+      writer.subscribe((l) => a.push(l));
+      writer.subscribe((l) => b.push(l));
+
+      source.push('one');
+      source.push('two');
+      source.push('three');
+      source.end();
+      await done;
+
+      expect(a).toEqual(['one', 'two', 'three']);
+      expect(b).toEqual(['one', 'two', 'three']);
+    });
+
+    it('unsubscribe stops further deliveries to that subscriber', async () => {
+      const source = new FakeSource();
+      const storage = makeStorage();
+      const writer = new CaptureWriter({
+        sessionId: SESSION_ID,
+        source,
+        storage,
+        byteCap: 1_000_000,
+        lineCap: 1_000_000,
+        durationMs: 60_000,
+      });
+
+      const a: string[] = [];
+      const done = writer.start();
+      const unsub = writer.subscribe((l) => a.push(l));
+      source.push('one');
+      unsub();
+      source.push('two');
+      source.end();
+      await done;
+      expect(a).toEqual(['one']);
+    });
+
+    it('a throwing subscriber does not affect the writer or other subscribers', async () => {
+      const source = new FakeSource();
+      const storage = makeStorage();
+      const writer = new CaptureWriter({
+        sessionId: SESSION_ID,
+        source,
+        storage,
+        byteCap: 1_000_000,
+        lineCap: 1_000_000,
+        durationMs: 60_000,
+      });
+
+      const good: string[] = [];
+      const done = writer.start();
+      writer.subscribe(() => {
+        throw new Error('viewer crashed');
+      });
+      writer.subscribe((l) => good.push(l));
+
+      source.push('one');
+      source.push('two');
+      source.end();
+      const result = await done;
+      expect(result.lineCount).toBe(2);
+      expect(good).toEqual(['one', 'two']);
+    });
+
+    it('onEnd fires once on termination', async () => {
+      const source = new FakeSource();
+      const storage = makeStorage();
+      const writer = new CaptureWriter({
+        sessionId: SESSION_ID,
+        source,
+        storage,
+        byteCap: 1_000_000,
+        lineCap: 1_000_000,
+        durationMs: 60_000,
+      });
+
+      const ends: number[] = [];
+      const done = writer.start();
+      writer.onEnd(() => ends.push(1));
+      writer.onEnd(() => ends.push(2));
+
+      source.end();
+      await done;
+      expect(ends).toEqual([1, 2]);
+    });
+  });
+
   describe('failure modes', () => {
     it('reports status="failed" on source error', async () => {
       const source = new FakeSource();
