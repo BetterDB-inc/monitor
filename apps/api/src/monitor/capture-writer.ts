@@ -66,7 +66,7 @@ const DEFAULT_RING_BUFFER_SIZE = 10000;
  *    block the writer.
  */
 export class CaptureWriter {
-  private readonly logger = new Logger(`${CaptureWriter.name}[${'sessionId'}]`);
+  private readonly logger: Logger;
 
   private readonly sessionId: string;
   private readonly source: MonitorSource;
@@ -102,6 +102,7 @@ export class CaptureWriter {
 
   constructor(opts: CaptureWriterOptions) {
     this.sessionId = opts.sessionId;
+    this.logger = new Logger(`${CaptureWriter.name}[${opts.sessionId}]`);
     this.source = opts.source;
     this.storage = opts.storage;
     this.byteCap = opts.byteCap;
