@@ -66,6 +66,9 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'config.changed': 'Config Changed',
   'metric_forecast.limit': 'Metric Forecast Limit',
   'inference.sla.breach': 'Inference SLA Breach',
+  'monitor.session.started': 'MONITOR Session Started',
+  'monitor.session.completed': 'MONITOR Session Completed',
+  'monitor.session.truncated': 'MONITOR Session Truncated',
 };
 
 // Tier display names
