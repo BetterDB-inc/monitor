@@ -2,13 +2,16 @@ import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
 import { monitorApi } from '../api/monitor';
+import { useMonitorTail } from '../hooks/useMonitorTail';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { FiltersAndExport } from './monitor/filters-and-export';
 import { SessionStatusBadge } from './monitor/session-status-badge';
 import { TailView } from './monitor/tail-view';
 
 export function MonitorSession() {
   const { id } = useParams<{ id: string }>();
   const sessionId = id ?? null;
+  const tail = useMonitorTail(sessionId);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['monitor', 'session', sessionId],
@@ -79,7 +82,16 @@ export function MonitorSession() {
           <CardTitle>Live tail</CardTitle>
         </CardHeader>
         <CardContent>
-          <TailView sessionId={sessionId} />
+          <TailView tail={tail} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Filters &amp; export</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <FiltersAndExport sessionId={sessionId} bufferLines={tail.lines} />
         </CardContent>
       </Card>
     </div>

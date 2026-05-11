@@ -67,6 +67,31 @@ export interface StartSessionParams {
   requestedBy?: string;
 }
 
+export interface ExportFilters {
+  command?: string;
+  client?: string;
+  key?: string;
+  afterTs?: number;
+  beforeTs?: number;
+}
+
+const API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:3001';
+
+export function buildExportUrl(
+  sessionId: string,
+  format: 'json' | 'csv',
+  filters: ExportFilters = {},
+): string {
+  const params = new URLSearchParams();
+  params.set('format', format);
+  if (filters.command) params.set('command', filters.command);
+  if (filters.client) params.set('client', filters.client);
+  if (filters.key) params.set('key', filters.key);
+  if (filters.afterTs !== undefined) params.set('afterTs', String(filters.afterTs));
+  if (filters.beforeTs !== undefined) params.set('beforeTs', String(filters.beforeTs));
+  return `${API_BASE}/monitor/sessions/${encodeURIComponent(sessionId)}/export?${params.toString()}`;
+}
+
 export const monitorApi = {
   listSessions: (params: ListSessionsParams = {}): Promise<StoredCaptureSession[]> => {
     const search = new URLSearchParams();

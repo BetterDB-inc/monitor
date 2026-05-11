@@ -1,4 +1,5 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import type { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { HealthGateService } from '../health-gate.service';
 import { MonitorCaptureService } from '../monitor-capture.service';
 import { MonitorController } from '../monitor.controller';
@@ -14,6 +15,7 @@ describe('MonitorController', () => {
   };
   let healthGateService: { evaluate: jest.Mock };
   let preflightService: { run: jest.Mock };
+  let storage: { getCaptureChunks: jest.Mock };
 
   beforeEach(() => {
     captureService = {
@@ -41,10 +43,12 @@ describe('MonitorController', () => {
         },
       }),
     };
+    storage = { getCaptureChunks: jest.fn().mockResolvedValue([]) };
     controller = new MonitorController(
       captureService as unknown as MonitorCaptureService,
       healthGateService as unknown as HealthGateService,
       preflightService as unknown as PreflightService,
+      storage as unknown as StoragePort,
     );
   });
 
@@ -164,6 +168,94 @@ describe('MonitorController', () => {
     it('throws NotFound when the session does not exist', async () => {
       captureService.stopSession.mockResolvedValueOnce(null);
       await expect(controller.stopSession('missing')).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('exportSession', () => {
+    function makeReply() {
+      const reply = {
+        status: jest.fn(),
+        header: jest.fn(),
+        send: jest.fn(),
+      };
+      reply.status.mockReturnValue(reply);
+      reply.header.mockReturnValue(reply);
+      return reply;
+    }
+
+    function chunkOf(lines: string[]) {
+      return {
+        sessionId: 'sess-1',
+        chunkIndex: 0,
+        bytes: Buffer.from(lines.join('\n'), 'utf-8'),
+        lineCount: lines.length,
+        firstTs: 0,
+        lastTs: 0,
+      };
+    }
+
+    it('throws NotFound when the session does not exist', async () => {
+      captureService.getSession.mockResolvedValueOnce(null);
+      await expect(
+        controller.exportSession('missing', 'json', undefined, undefined, undefined, undefined, undefined, makeReply() as never),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('returns JSON with all parsed lines when no filters are set', async () => {
+      storage.getCaptureChunks.mockResolvedValueOnce([
+        chunkOf([
+          '1700000000.0 [0 1.2.3.4:5] "GET" "foo"',
+          '1700000000.5 [0 1.2.3.4:5] "SET" "bar" "v"',
+        ]),
+      ]);
+      const reply = makeReply();
+      await controller.exportSession('sess-1', 'json', undefined, undefined, undefined, undefined, undefined, reply as never);
+
+      expect(reply.header).toHaveBeenCalledWith('content-type', 'application/json');
+      expect(reply.header).toHaveBeenCalledWith(
+        'content-disposition',
+        expect.stringContaining('monitor-session-sess-1.json'),
+      );
+      const body = reply.send.mock.calls[0][0];
+      expect(body.count).toBe(2);
+      expect(body.lines.map((l: { cmd: string }) => l.cmd)).toEqual(['GET', 'SET']);
+    });
+
+    it('respects the command filter', async () => {
+      storage.getCaptureChunks.mockResolvedValueOnce([
+        chunkOf([
+          '1700000000.0 [0 1.2.3.4:5] "GET" "foo"',
+          '1700000000.5 [0 1.2.3.4:5] "SET" "bar" "v"',
+        ]),
+      ]);
+      const reply = makeReply();
+      await controller.exportSession('sess-1', 'json', 'SET', undefined, undefined, undefined, undefined, reply as never);
+      const body = reply.send.mock.calls[0][0];
+      expect(body.count).toBe(1);
+      expect(body.lines[0].cmd).toBe('SET');
+    });
+
+    it('emits CSV with header row when format=csv', async () => {
+      storage.getCaptureChunks.mockResolvedValueOnce([
+        chunkOf(['1700000000.0 [0 1.2.3.4:5] "GET" "foo"']),
+      ]);
+      const reply = makeReply();
+      await controller.exportSession('sess-1', 'csv', undefined, undefined, undefined, undefined, undefined, reply as never);
+      expect(reply.header).toHaveBeenCalledWith('content-type', 'text/csv; charset=utf-8');
+      expect(reply.header).toHaveBeenCalledWith(
+        'content-disposition',
+        expect.stringContaining('monitor-session-sess-1.csv'),
+      );
+      const body = reply.send.mock.calls[0][0];
+      expect(body.split('\n')[0]).toBe('ts,ts_raw,db,addr,cmd,args,key');
+      expect(body).toContain('GET,foo,foo');
+    });
+
+    it('defaults format to json when an unknown value is supplied', async () => {
+      storage.getCaptureChunks.mockResolvedValueOnce([]);
+      const reply = makeReply();
+      await controller.exportSession('sess-1', 'xml', undefined, undefined, undefined, undefined, undefined, reply as never);
+      expect(reply.header).toHaveBeenCalledWith('content-type', 'application/json');
     });
   });
 });

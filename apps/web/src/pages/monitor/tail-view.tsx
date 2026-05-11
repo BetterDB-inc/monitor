@@ -1,9 +1,9 @@
 import { useEffect, useRef } from 'react';
 import { Button } from '../../components/ui/button';
-import { useMonitorTail, TailStatus } from '../../hooks/useMonitorTail';
+import { MonitorTailHandle, TailStatus } from '../../hooks/useMonitorTail';
 
 interface Props {
-  sessionId: string;
+  tail: MonitorTailHandle;
 }
 
 const STATUS_LABEL: Record<TailStatus, string> = {
@@ -26,8 +26,7 @@ const STATUS_TONE: Record<TailStatus, string> = {
   error: 'bg-red-500/15 text-red-700 dark:text-red-300',
 };
 
-export function TailView({ sessionId }: Props) {
-  const tail = useMonitorTail(sessionId);
+export function TailView({ tail }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followBottomRef = useRef(true);
 
