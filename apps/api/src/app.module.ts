@@ -24,6 +24,7 @@ import { InferenceLatencyModule } from './inference-latency/inference-latency.mo
 import { CliModule } from './cli/cli.module';
 import { PosthogProxyModule } from './posthog-proxy/posthog-proxy.module';
 import { SystemModule } from './system/system.module';
+import { MonitorModule } from './monitor/monitor.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -149,6 +150,7 @@ const baseImports = [
   CliModule,
   PosthogProxyModule,
   SystemModule,
+  MonitorModule,
 ];
 
 const proprietaryImports = [

@@ -28,7 +28,10 @@ import { VectorAi } from '../../pages/VectorAi';
 import { InferenceLatency } from '../../pages/InferenceLatency';
 import { MetricForecasting } from '../../pages/MetricForecasting';
 import { CacheProposals } from '../../pages/CacheProposals';
+import { Monitor } from '../../pages/Monitor';
 import { Members } from '../../pages/Members';
+
+const MONITOR_DEV_PREVIEW = import.meta.env.VITE_MONITOR_DEV_PREVIEW === 'true';
 import { CloudUser } from '../../api/workspace';
 import { AppSidebar } from './AppSidebar.tsx';
 import { FeedbackModal } from './FeedbackModal';
@@ -215,6 +218,16 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                   </NoConnectionsGuard>
                 }
               />
+              {MONITOR_DEV_PREVIEW && (
+                <Route
+                  path="/monitor"
+                  element={
+                    <NoConnectionsGuard>
+                      <Monitor />
+                    </NoConnectionsGuard>
+                  }
+                />
+              )}
               {cloudUser && (
                 <Route
                   path="/workspace/members"
