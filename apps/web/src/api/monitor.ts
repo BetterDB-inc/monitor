@@ -67,6 +67,52 @@ export interface StartSessionParams {
   requestedBy?: string;
 }
 
+export type BaselineWindow = '6h' | '24h' | '7d' | 'same-hour-last-week';
+
+export interface CrossReferenceNewShape {
+  shape: string;
+  cmd: string;
+  arity: number | null;
+  scriptSha: string | null;
+  countInCapture: number;
+}
+
+export interface CrossReferenceHotKey {
+  key: string;
+  countInCapture: number;
+  countInBaseline: number;
+  rankInCapture: number;
+  rankInBaseline: number | null;
+}
+
+export interface CrossReferenceSlowlogRegression {
+  cmd: string;
+  shape: string;
+  slowlogCountInSession: number;
+  observedRatePerSec: number;
+  baselineRatePerSec: number;
+  baselineP95RatePerSec: number;
+}
+
+export interface CrossReferenceResult {
+  sessionId: string;
+  baseline: { window: BaselineWindow; startTs: number; endTs: number };
+  session: { startTs: number; endTs: number; capturedLineCount: number };
+  newShapes: CrossReferenceNewShape[];
+  hotKeyDelta: {
+    newInTopK: CrossReferenceHotKey[];
+    rankChanges: CrossReferenceHotKey[];
+  };
+  slowlogRegressions: CrossReferenceSlowlogRegression[];
+  aclDeltas: {
+    auditEntriesInWindow: number;
+    counters: {
+      aclAccessDeniedAuthDelta: number | null;
+      rejectedConnectionsDelta: number | null;
+    };
+  };
+}
+
 export interface ExportFilters {
   command?: string;
   client?: string;
@@ -120,5 +166,11 @@ export const monitorApi = {
       method: 'POST',
       body: JSON.stringify(params),
     });
+  },
+
+  crossReference: (sessionId: string, baseline: BaselineWindow): Promise<CrossReferenceResult> => {
+    return fetchApi<CrossReferenceResult>(
+      `/monitor/sessions/${encodeURIComponent(sessionId)}/cross-reference?baseline=${baseline}`,
+    );
   },
 };

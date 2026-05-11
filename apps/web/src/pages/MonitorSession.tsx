@@ -4,6 +4,7 @@ import { ArrowLeft } from 'lucide-react';
 import { monitorApi } from '../api/monitor';
 import { useMonitorTail } from '../hooks/useMonitorTail';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { CrossReferencePanel } from './monitor/cross-reference-panel';
 import { FiltersAndExport } from './monitor/filters-and-export';
 import { SessionStatusBadge } from './monitor/session-status-badge';
 import { TailView } from './monitor/tail-view';
@@ -83,6 +84,15 @@ export function MonitorSession() {
         </CardHeader>
         <CardContent>
           <TailView tail={tail} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Cross-reference</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <CrossReferencePanel sessionId={sessionId} />
         </CardContent>
       </Card>
 
