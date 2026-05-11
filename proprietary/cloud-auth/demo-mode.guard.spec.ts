@@ -48,4 +48,19 @@ describe('DemoModeGuard', () => {
     const ctx = makeContext(DEMO_HOST, 'POST', '/api/connections');
     expect(guard.canActivate(ctx)).toBe(true);
   });
+
+  it('throws NotFoundException on demo host POST /monitor/sessions', () => {
+    const ctx = makeContext(DEMO_HOST, 'POST', '/api/monitor/sessions');
+    expect(() => guard.canActivate(ctx)).toThrow(NotFoundException);
+  });
+
+  it('throws NotFoundException on demo host DELETE /monitor/sessions/:id', () => {
+    const ctx = makeContext(DEMO_HOST, 'DELETE', '/api/monitor/sessions/abc-123');
+    expect(() => guard.canActivate(ctx)).toThrow(NotFoundException);
+  });
+
+  it('passes on demo host GET /monitor/sessions (read is allowed for demo browsing)', () => {
+    const ctx = makeContext(DEMO_HOST, 'GET', '/api/monitor/sessions');
+    expect(guard.canActivate(ctx)).toBe(true);
+  });
 });

@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { HealthGateService } from '../health-gate.service';
 import { MonitorCaptureService } from '../monitor-capture.service';
 import { MonitorController } from '../monitor.controller';
@@ -6,12 +6,22 @@ import { PreflightService } from '../preflight.service';
 
 describe('MonitorController', () => {
   let controller: MonitorController;
-  let captureService: { listSessions: jest.Mock };
+  let captureService: {
+    listSessions: jest.Mock;
+    startSession: jest.Mock;
+    stopSession: jest.Mock;
+    getSession: jest.Mock;
+  };
   let healthGateService: { evaluate: jest.Mock };
   let preflightService: { run: jest.Mock };
 
   beforeEach(() => {
-    captureService = { listSessions: jest.fn().mockResolvedValue([]) };
+    captureService = {
+      listSessions: jest.fn().mockResolvedValue([]),
+      startSession: jest.fn().mockResolvedValue({ id: 'sess-1', status: 'running' }),
+      stopSession: jest.fn().mockResolvedValue({ id: 'sess-1', status: 'completed' }),
+      getSession: jest.fn().mockResolvedValue({ id: 'sess-1', status: 'running' }),
+    };
     healthGateService = {
       evaluate: jest.fn().mockResolvedValue({ allow: true, signals: {}, thresholds: {} }),
     };
@@ -104,6 +114,56 @@ describe('MonitorController', () => {
     it('throws BadRequest when connectionId is missing', async () => {
       await expect(controller.preflight({})).rejects.toBeInstanceOf(BadRequestException);
       expect(preflightService.run).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('startSession', () => {
+    it('forwards connectionId and optional caps / duration to the service', async () => {
+      await controller.startSession({
+        connectionId: 'conn-1',
+        durationMs: 5000,
+        byteCap: 1234,
+        lineCap: 567,
+        requestedBy: 'tester',
+      });
+      expect(captureService.startSession).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        durationMs: 5000,
+        byteCap: 1234,
+        lineCap: 567,
+        requestedBy: 'tester',
+      });
+    });
+
+    it('throws BadRequest when connectionId is missing', async () => {
+      await expect(controller.startSession({})).rejects.toBeInstanceOf(BadRequestException);
+      expect(captureService.startSession).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getSession', () => {
+    it('returns the session record', async () => {
+      const result = await controller.getSession('sess-1');
+      expect(result).toMatchObject({ id: 'sess-1' });
+      expect(captureService.getSession).toHaveBeenCalledWith('sess-1');
+    });
+
+    it('throws NotFound when the session does not exist', async () => {
+      captureService.getSession.mockResolvedValueOnce(null);
+      await expect(controller.getSession('missing')).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('stopSession', () => {
+    it('returns the updated session record', async () => {
+      const result = await controller.stopSession('sess-1');
+      expect(result).toMatchObject({ id: 'sess-1', status: 'completed' });
+      expect(captureService.stopSession).toHaveBeenCalledWith('sess-1');
+    });
+
+    it('throws NotFound when the session does not exist', async () => {
+      captureService.stopSession.mockResolvedValueOnce(null);
+      await expect(controller.stopSession('missing')).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

@@ -1,0 +1,170 @@
+import { ConflictException } from '@nestjs/common';
+import { EventEmitter } from 'events';
+import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
+import type { ConnectionRegistry } from '../../connections/connection-registry.service';
+import { MonitorSource } from '../capture-writer';
+import { MonitorCaptureService } from '../monitor-capture.service';
+
+class FakeSource extends EventEmitter implements MonitorSource {
+  stopped = false;
+  stop(): void {
+    this.stopped = true;
+  }
+  push(line: string): void {
+    this.emit('line', line);
+  }
+  end(): void {
+    this.emit('end');
+  }
+}
+
+const CONNECTION_ID = 'conn-1';
+
+function makeService(): {
+  service: MonitorCaptureService;
+  storage: MemoryAdapter;
+  source: FakeSource;
+} {
+  const storage = new MemoryAdapter();
+  const registry = { get: jest.fn() } as unknown as ConnectionRegistry;
+  const service = new MonitorCaptureService(storage, registry);
+  const source = new FakeSource();
+  service.setMonitorSourceFactory(async () => source);
+  return { service, storage, source };
+}
+
+describe('MonitorCaptureService', () => {
+  describe('startSession', () => {
+    it('inserts the session row with status="running" and registers an active session', async () => {
+      const { service, storage } = makeService();
+      const session = await service.startSession({ connectionId: CONNECTION_ID });
+
+      expect(session.status).toBe('running');
+      expect(session.connectionId).toBe(CONNECTION_ID);
+      expect(session.source).toBe('manual');
+      expect(session.byteCap).toBeGreaterThan(0);
+      expect(session.lineCap).toBeGreaterThan(0);
+      expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(true);
+
+      const persisted = await storage.getCaptureSession(session.id);
+      expect(persisted).toMatchObject({
+        id: session.id,
+        connectionId: CONNECTION_ID,
+        status: 'running',
+        source: 'manual',
+      });
+
+      // Drain
+      await service.stopSession(session.id);
+    });
+
+    it('throws ConflictException when a session is already active on the same connection', async () => {
+      const { service } = makeService();
+      await service.startSession({ connectionId: CONNECTION_ID });
+
+      await expect(
+        service.startSession({ connectionId: CONNECTION_ID }),
+      ).rejects.toBeInstanceOf(ConflictException);
+
+      await service.stopSession((await service.listSessions())[0].id);
+    });
+
+    it('allows a new session on the same connection after the previous one ends', async () => {
+      const { service } = makeService();
+      const first = await service.startSession({ connectionId: CONNECTION_ID });
+      await service.stopSession(first.id);
+
+      // After stop, the active map is cleared
+      expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+
+      const second = await service.startSession({ connectionId: CONNECTION_ID });
+      expect(second.id).not.toBe(first.id);
+      await service.stopSession(second.id);
+    });
+
+    it('respects byteCap / lineCap overrides from the input', async () => {
+      const { service, storage } = makeService();
+      const session = await service.startSession({
+        connectionId: CONNECTION_ID,
+        byteCap: 12_345,
+        lineCap: 678,
+      });
+      const persisted = await storage.getCaptureSession(session.id);
+      expect(persisted?.byteCap).toBe(12_345);
+      expect(persisted?.lineCap).toBe(678);
+      await service.stopSession(session.id);
+    });
+
+    it('marks the session as failed when the monitor source factory throws', async () => {
+      const storage = new MemoryAdapter();
+      const registry = { get: jest.fn() } as unknown as ConnectionRegistry;
+      const service = new MonitorCaptureService(storage, registry);
+      service.setMonitorSourceFactory(async () => {
+        throw new Error('NOPERM monitor not allowed');
+      });
+
+      await expect(
+        service.startSession({ connectionId: CONNECTION_ID }),
+      ).rejects.toThrow('NOPERM monitor not allowed');
+
+      // Session row should exist with status='failed' and the reason
+      const sessions = await storage.getCaptureSessions();
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]).toMatchObject({
+        status: 'failed',
+        terminationReason: expect.stringContaining('monitor_open_failed'),
+      });
+      // Active map cleared on the failure path
+      expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+    });
+  });
+
+  describe('stopSession', () => {
+    it('finalizes the session with status="completed" and reason="manual_stop"', async () => {
+      const { service, source } = makeService();
+      const session = await service.startSession({ connectionId: CONNECTION_ID });
+      source.push('one');
+      source.push('two');
+
+      const stopped = await service.stopSession(session.id);
+      expect(stopped).toMatchObject({
+        id: session.id,
+        status: 'completed',
+        terminationReason: 'manual_stop',
+        lineCount: 2,
+      });
+      expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+    });
+
+    it('returns the persisted record (or null) for unknown ids without throwing', async () => {
+      const { service } = makeService();
+      const result = await service.stopSession('00000000-0000-0000-0000-000000000000');
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('getSession', () => {
+    it('returns the persisted record', async () => {
+      const { service } = makeService();
+      const session = await service.startSession({ connectionId: CONNECTION_ID });
+      const fetched = await service.getSession(session.id);
+      expect(fetched?.id).toBe(session.id);
+      await service.stopSession(session.id);
+    });
+
+    it('returns null when the session does not exist', async () => {
+      const { service } = makeService();
+      expect(await service.getSession('11111111-1111-1111-1111-111111111111')).toBeNull();
+    });
+  });
+
+  describe('getActiveWriter', () => {
+    it('returns the live writer while a session is running and undefined after stop', async () => {
+      const { service } = makeService();
+      const session = await service.startSession({ connectionId: CONNECTION_ID });
+      expect(service.getActiveWriter(CONNECTION_ID)).toBeDefined();
+      await service.stopSession(session.id);
+      expect(service.getActiveWriter(CONNECTION_ID)).toBeUndefined();
+    });
+  });
+});

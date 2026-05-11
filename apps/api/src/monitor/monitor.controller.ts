@@ -1,4 +1,15 @@
-import { BadRequestException, Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  NotFoundException,
+  Param,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { StoredCaptureSession } from '../common/interfaces/storage-port.interface';
 import { HealthGateResult } from './health-gate';
 import { HealthGateService } from './health-gate.service';
@@ -9,6 +20,14 @@ import { PreflightResult, PreflightService } from './preflight.service';
 interface PreflightRequestBody {
   connectionId?: string;
   durationMs?: number;
+}
+
+interface StartSessionRequestBody {
+  connectionId?: string;
+  durationMs?: number;
+  byteCap?: number;
+  lineCap?: number;
+  requestedBy?: string;
 }
 
 @Controller('monitor')
@@ -60,6 +79,38 @@ export class MonitorController {
       limit: parsePositiveInt(limit, 100, 1000),
       offset: parsePositiveInt(offset, 0, Number.MAX_SAFE_INTEGER),
     });
+  }
+
+  @Post('sessions')
+  async startSession(@Body() body: StartSessionRequestBody): Promise<StoredCaptureSession> {
+    if (!body?.connectionId) {
+      throw new BadRequestException('connectionId is required in the request body');
+    }
+    return this.captureService.startSession({
+      connectionId: body.connectionId,
+      durationMs: body.durationMs,
+      byteCap: body.byteCap,
+      lineCap: body.lineCap,
+      requestedBy: body.requestedBy,
+    });
+  }
+
+  @Get('sessions/:id')
+  async getSession(@Param('id') id: string): Promise<StoredCaptureSession> {
+    const session = await this.captureService.getSession(id);
+    if (!session) {
+      throw new NotFoundException(`Session ${id} not found`);
+    }
+    return session;
+  }
+
+  @Delete('sessions/:id')
+  async stopSession(@Param('id') id: string): Promise<StoredCaptureSession> {
+    const session = await this.captureService.stopSession(id);
+    if (!session) {
+      throw new NotFoundException(`Session ${id} not found`);
+    }
+    return session;
   }
 }
 
