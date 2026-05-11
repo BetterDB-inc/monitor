@@ -1639,12 +1639,14 @@ export class PostgresAdapter implements StoragePort {
         line_cap BIGINT NOT NULL,
         termination_reason TEXT,
         target_node TEXT,
+        node_segments JSONB,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         CHECK (status IN ('running','completed','truncated','failed','skipped')),
         CHECK (source IN ('manual','trigger','schedule'))
       );
 
       ALTER TABLE capture_sessions ADD COLUMN IF NOT EXISTS target_node TEXT;
+      ALTER TABLE capture_sessions ADD COLUMN IF NOT EXISTS node_segments JSONB;
 
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_connection_id ON capture_sessions(connection_id);
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_started_at ON capture_sessions(started_at DESC);
@@ -1659,8 +1661,11 @@ export class PostgresAdapter implements StoragePort {
         line_count INTEGER NOT NULL,
         first_ts BIGINT NOT NULL,
         last_ts BIGINT NOT NULL,
+        node_id TEXT,
         PRIMARY KEY(session_id, chunk_index)
       );
+
+      ALTER TABLE capture_chunks ADD COLUMN IF NOT EXISTS node_id TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_capture_chunks_session ON capture_chunks(session_id, chunk_index);
     `);
@@ -3908,8 +3913,8 @@ export class PostgresAdapter implements StoragePort {
       `INSERT INTO capture_sessions (
         id, connection_id, status, source, trigger_id, schedule_id, requested_by,
         started_at, ended_at, duration_ms, byte_count, line_count, byte_cap, line_cap,
-        termination_reason, target_node
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+        termination_reason, target_node, node_segments
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
       [
         session.id,
         connectionId,
@@ -3927,6 +3932,7 @@ export class PostgresAdapter implements StoragePort {
         session.lineCap,
         session.terminationReason ?? null,
         session.targetNode ?? null,
+        session.nodeSegments ? JSON.stringify(session.nodeSegments) : null,
       ],
     );
 
@@ -4009,6 +4015,7 @@ export class PostgresAdapter implements StoragePort {
       lineCap: toNumber(row.line_cap),
       terminationReason: (row.termination_reason as string | null) ?? undefined,
       targetNode: (row.target_node as string | null) ?? undefined,
+      nodeSegments: normaliseNodeSegments(row.node_segments),
     };
   }
 
@@ -4042,6 +4049,10 @@ export class PostgresAdapter implements StoragePort {
       sets.push(`termination_reason = $${p++}`);
       params.push(patch.terminationReason);
     }
+    if (patch.nodeSegments !== undefined) {
+      sets.push(`node_segments = $${p++}`);
+      params.push(JSON.stringify(patch.nodeSegments));
+    }
 
     if (sets.length === 0) return false;
 
@@ -4057,9 +4068,17 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     const result = await this.pool.query(
-      `INSERT INTO capture_chunks (session_id, chunk_index, bytes, line_count, first_ts, last_ts)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [chunk.sessionId, chunk.chunkIndex, chunk.bytes, chunk.lineCount, chunk.firstTs, chunk.lastTs],
+      `INSERT INTO capture_chunks (session_id, chunk_index, bytes, line_count, first_ts, last_ts, node_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        chunk.sessionId,
+        chunk.chunkIndex,
+        chunk.bytes,
+        chunk.lineCount,
+        chunk.firstTs,
+        chunk.lastTs,
+        chunk.nodeId ?? null,
+      ],
     );
     return result.rowCount ?? 0;
   }
@@ -4068,7 +4087,7 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
 
     const result = await this.pool.query(
-      'SELECT session_id, chunk_index, bytes, line_count, first_ts, last_ts FROM capture_chunks WHERE session_id = $1 ORDER BY chunk_index ASC',
+      'SELECT session_id, chunk_index, bytes, line_count, first_ts, last_ts, node_id FROM capture_chunks WHERE session_id = $1 ORDER BY chunk_index ASC',
       [sessionId],
     );
 
@@ -4081,6 +4100,20 @@ export class PostgresAdapter implements StoragePort {
       lineCount: toNumber(row.line_count),
       firstTs: toNumber(row.first_ts),
       lastTs: toNumber(row.last_ts),
+      nodeId: (row.node_id as string | null) ?? undefined,
     }));
+  }
+}
+
+function normaliseNodeSegments(raw: unknown): StoredCaptureSession['nodeSegments'] | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  // pg returns JSONB as already-parsed JS values
+  if (Array.isArray(raw)) return raw as StoredCaptureSession['nodeSegments'];
+  if (typeof raw !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
   }
 }

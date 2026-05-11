@@ -76,6 +76,26 @@ export function MonitorSession() {
             <dd className="font-mono">{data.terminationReason ?? '—'}</dd>
           </div>
         </dl>
+        {data.nodeSegments && data.nodeSegments.length > 0 && (
+          <div className="rounded-md border border-border p-3 text-xs">
+            <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Fan-out segments ({data.nodeSegments.length} nodes)
+            </div>
+            <ul className="space-y-1">
+              {data.nodeSegments.map((s) => (
+                <li key={s.nodeId} className="flex items-center justify-between gap-2 font-mono">
+                  <span>
+                    {s.address}{' '}
+                    <SessionStatusBadge status={s.status} />
+                  </span>
+                  <span className="text-muted-foreground">
+                    {s.lineCount.toLocaleString()} lines · {s.terminationReason ?? '—'}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </header>
 
       <Card>

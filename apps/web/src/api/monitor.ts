@@ -66,6 +66,7 @@ export interface StartSessionParams {
   lineCap?: number;
   requestedBy?: string;
   targetNodeId?: string;
+  fanOut?: boolean;
 }
 
 export interface MonitorNodeDescriptor {

@@ -43,6 +43,7 @@ interface StartSessionRequestBody {
   lineCap?: number;
   requestedBy?: string;
   targetNodeId?: string;
+  fanOut?: boolean;
 }
 
 export interface MonitorNodeDescriptor {
@@ -124,6 +125,7 @@ export class MonitorController {
       lineCap: body.lineCap,
       requestedBy: body.requestedBy,
       targetNodeId: body.targetNodeId,
+      fanOut: body.fanOut,
     });
   }
 

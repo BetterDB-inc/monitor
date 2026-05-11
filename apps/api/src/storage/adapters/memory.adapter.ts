@@ -1527,6 +1527,7 @@ export class MemoryAdapter implements StoragePort {
     if (patch.byteCount !== undefined) session.byteCount = patch.byteCount;
     if (patch.lineCount !== undefined) session.lineCount = patch.lineCount;
     if (patch.terminationReason !== undefined) session.terminationReason = patch.terminationReason;
+    if (patch.nodeSegments !== undefined) session.nodeSegments = patch.nodeSegments;
     return true;
   }
 

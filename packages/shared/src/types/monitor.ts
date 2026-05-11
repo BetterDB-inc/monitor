@@ -25,6 +25,20 @@ export interface StoredCaptureSession {
   terminationReason?: string;
   /** When set, the session targeted a single cluster node (host:port). Null for single-instance or future fan-out (where per-node attribution lives in capture_chunks). */
   targetNode?: string;
+  /** Per-node status segments for fan-out captures. Empty/undefined for single-node sessions. */
+  nodeSegments?: CaptureNodeSegment[];
+}
+
+export interface CaptureNodeSegment {
+  /** Cluster-discovery node id. */
+  nodeId: string;
+  /** Node address (host:port) at capture time. */
+  address: string;
+  status: CaptureSessionStatus;
+  byteCount: number;
+  lineCount: number;
+  endedAt?: number;
+  terminationReason?: string;
 }
 
 export interface CaptureSessionQueryOptions {
@@ -44,6 +58,8 @@ export interface StoredCaptureChunk {
   lineCount: number;
   firstTs: number;
   lastTs: number;
+  /** Cluster node attribution for fan-out chunks; null for single-node sessions. */
+  nodeId?: string;
 }
 
 /** Mutable subset of {@link StoredCaptureSession} that can be patched after insert. */
@@ -54,4 +70,5 @@ export interface CaptureSessionPatch {
   byteCount?: number;
   lineCount?: number;
   terminationReason?: string;
+  nodeSegments?: CaptureNodeSegment[];
 }

@@ -1,6 +1,6 @@
 import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { WebhookEventType } from '@betterdb/shared';
+import { CaptureNodeSegment, WebhookEventType } from '@betterdb/shared';
 import {
   CaptureSessionQueryOptions,
   CaptureSessionSource,
@@ -40,12 +40,34 @@ export interface StartSessionInput {
   requestedBy?: string;
   /** Cluster node id to MONITOR. When set, opens a dedicated connection to that node. Null for non-cluster targets. */
   targetNodeId?: string;
+  /**
+   * Fan-out: open one MONITOR connection per cluster primary and write into a
+   * single logical session. Ignored when the connection is not a cluster.
+   * Mutually exclusive with targetNodeId (fan-out covers all primaries).
+   */
+  fanOut?: boolean;
 }
+
+/**
+ * Per-writer chunk_index namespace size. Each writer in a fan-out session gets
+ * its own [N * NAMESPACE, (N+1) * NAMESPACE) range so that the (sessionId,
+ * chunkIndex) PK on capture_chunks does not collide across writers. 10M chunks
+ * per writer is far beyond any realistic session.
+ */
+const CHUNK_INDEX_NAMESPACE = 10_000_000;
 
 interface ActiveSession {
   session: StoredCaptureSession;
-  writer: CaptureWriter;
+  /** For single-node sessions this is one writer. For fan-out, one per node. */
+  writers: ActiveWriter[];
+  /** Resolves after every writer terminates AND the aggregate finalize has run. */
   donePromise: Promise<unknown>;
+}
+
+interface ActiveWriter {
+  writer: CaptureWriter;
+  nodeId?: string;
+  address?: string;
 }
 
 /**
@@ -116,7 +138,22 @@ export class MonitorCaptureService {
     const byteCap = input.byteCap ?? DEFAULT_BYTE_CAP;
     const lineCap = input.lineCap ?? DEFAULT_LINE_CAP;
 
-    const targetNode = await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
+    const fanOutNodes = input.fanOut ? await this.resolveFanOutNodes(connectionId) : [];
+    const isFanOut = fanOutNodes.length > 0;
+
+    const targetNode = isFanOut
+      ? undefined
+      : await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
+
+    const initialSegments: CaptureNodeSegment[] = isFanOut
+      ? fanOutNodes.map((n) => ({
+          nodeId: n.id,
+          address: n.address,
+          status: 'running',
+          byteCount: 0,
+          lineCount: 0,
+        }))
+      : [];
 
     const session: StoredCaptureSession = {
       id: randomUUID(),
@@ -132,16 +169,31 @@ export class MonitorCaptureService {
       byteCap,
       lineCap,
       targetNode,
+      nodeSegments: isFanOut ? initialSegments : undefined,
     };
 
     await this.storage.saveCaptureSession(session, connectionId);
 
+    if (isFanOut) {
+      return this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap);
+    }
+
+    return this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
+  }
+
+  private async startSingleSession(
+    session: StoredCaptureSession,
+    targetNodeId: string | undefined,
+    durationMs: number,
+    byteCap: number,
+    lineCap: number,
+  ): Promise<StoredCaptureSession> {
     let monitorSource: MonitorSource;
     try {
-      monitorSource = await this.monitorSourceFactory(connectionId, input.targetNodeId);
+      monitorSource = await this.monitorSourceFactory(session.connectionId, targetNodeId);
     } catch (err) {
       this.logger.error(
-        `Failed to open MONITOR on ${connectionId}: ${(err as Error).message}`,
+        `Failed to open MONITOR on ${session.connectionId}: ${(err as Error).message}`,
       );
       await this.storage.updateCaptureSession(session.id, {
         status: 'failed',
@@ -167,15 +219,161 @@ export class MonitorCaptureService {
         this.logger.error(`Writer for session ${session.id} threw: ${err.message}`);
       })
       .finally(() => {
-        this.active.delete(connectionId);
+        this.active.delete(session.connectionId);
       });
 
-    this.active.set(connectionId, { session, writer, donePromise: finalize });
+    this.active.set(session.connectionId, {
+      session,
+      writers: [{ writer }],
+      donePromise: finalize,
+    });
 
     void this.dispatchSessionStarted(session);
 
     return session;
   }
+
+  /**
+   * Open one writer per cluster primary; aggregate per-node status into
+   * session.nodeSegments. Per-node writer failure does NOT cascade: other
+   * writers keep running. The session terminates only after every writer has
+   * resolved.
+   */
+  private async startFanOutSession(
+    session: StoredCaptureSession,
+    nodes: Array<{ id: string; address: string }>,
+    durationMs: number,
+    byteCap: number,
+    lineCap: number,
+  ): Promise<StoredCaptureSession> {
+    const writers: ActiveWriter[] = [];
+    const segments = new Map<string, CaptureNodeSegment>();
+    for (const seg of session.nodeSegments ?? []) {
+      segments.set(seg.nodeId, { ...seg });
+    }
+
+    const segmentPromises: Array<Promise<void>> = [];
+
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      let source: MonitorSource;
+      try {
+        source = await this.monitorSourceFactory(session.connectionId, node.id);
+      } catch (err) {
+        // Failing to open MONITOR on ONE node does not kill the session — mark
+        // that segment failed up front and keep going with the others.
+        const seg = segments.get(node.id);
+        if (seg) {
+          seg.status = 'failed';
+          seg.endedAt = Date.now();
+          seg.terminationReason = `monitor_open_failed: ${(err as Error).message}`;
+        }
+        this.logger.warn(
+          `Fan-out: failed to open MONITOR on ${node.address}: ${(err as Error).message}`,
+        );
+        continue;
+      }
+
+      const writer = new CaptureWriter({
+        sessionId: session.id,
+        source,
+        storage: this.storage,
+        byteCap,
+        lineCap,
+        durationMs,
+        nodeId: node.id,
+        startChunkIndex: i * CHUNK_INDEX_NAMESPACE,
+        skipSessionFinalize: true,
+      });
+
+      writers.push({ writer, nodeId: node.id, address: node.address });
+
+      segmentPromises.push(
+        writer
+          .start()
+          .then((result) => {
+            const seg = segments.get(node.id);
+            if (!seg) return;
+            seg.status = result.status === 'failed' ? 'failed' : result.status;
+            seg.endedAt = result.endedAt;
+            seg.byteCount = result.byteCount;
+            seg.lineCount = result.lineCount;
+            seg.terminationReason = result.terminationReason;
+          })
+          .catch((err: Error) => {
+            this.logger.error(
+              `Fan-out writer for ${node.address} threw: ${err.message}`,
+            );
+            const seg = segments.get(node.id);
+            if (!seg) return;
+            seg.status = 'failed';
+            seg.endedAt = Date.now();
+            seg.terminationReason = `writer_threw: ${err.message}`;
+          }),
+      );
+    }
+
+    const finalize = Promise.all(segmentPromises)
+      .then(() => this.finalizeFanOutSession(session, segments))
+      .finally(() => {
+        this.active.delete(session.connectionId);
+      });
+
+    this.active.set(session.connectionId, {
+      session,
+      writers,
+      donePromise: finalize,
+    });
+
+    void this.dispatchSessionStarted(session);
+
+    return session;
+  }
+
+  private async finalizeFanOutSession(
+    session: StoredCaptureSession,
+    segments: Map<string, CaptureNodeSegment>,
+  ): Promise<void> {
+    const segmentList = Array.from(segments.values());
+    const totalBytes = segmentList.reduce((s, x) => s + x.byteCount, 0);
+    const totalLines = segmentList.reduce((s, x) => s + x.lineCount, 0);
+    const endedAt = Math.max(
+      ...segmentList.map((s) => s.endedAt ?? Date.now()),
+      session.startedAt,
+    );
+
+    const status = aggregateSegmentStatus(segmentList);
+    const reason = aggregateTerminationReason(segmentList, status);
+
+    try {
+      await this.storage.updateCaptureSession(session.id, {
+        status,
+        endedAt,
+        byteCount: totalBytes,
+        lineCount: totalLines,
+        terminationReason: reason,
+        nodeSegments: segmentList,
+      });
+    } catch (err) {
+      this.logger.error(`Fan-out finalize failed: ${(err as Error).message}`);
+    }
+
+    // status here is one of completed | truncated | failed (segments cannot be
+    // 'running' at finalize time); narrow for the dispatch contract.
+    const dispatchStatus = status as 'completed' | 'truncated' | 'failed';
+    await this.dispatchSessionEnded(session, {
+      status: dispatchStatus,
+      terminationReason: reason,
+      byteCount: totalBytes,
+      lineCount: totalLines,
+      endedAt,
+    });
+  }
+
+  /**
+   * Aggregate per-node status into a session-level status. The most severe wins:
+   * any failed segment → failed; any truncated → truncated; otherwise → completed.
+   */
 
   private async dispatchSessionStarted(session: StoredCaptureSession): Promise<void> {
     try {
@@ -236,25 +434,28 @@ export class MonitorCaptureService {
   }
 
   /**
-   * Stop a running session by ID. If found in the active map, awaits the
-   * writer's finalization. Returns the latest persisted record (or null).
+   * Stop a running session by ID. If found in the active map, stops every
+   * writer (fan-out captures have N) and awaits the aggregate finalize.
    */
   async stopSession(id: string): Promise<StoredCaptureSession | null> {
     const active = this.findActiveById(id);
     if (active) {
-      active.writer.stop('manual_stop');
+      for (const w of active.writers) {
+        w.writer.stop('manual_stop');
+      }
       await active.donePromise;
     }
     return this.storage.getCaptureSession(id);
   }
 
   /**
-   * For tail readers (PR 7) — returns the live writer if a session is active.
-   * Returns undefined for completed sessions; tail readers should fall back to
-   * reading persisted chunks.
+   * For tail readers (PR 7) — returns a live writer if a session is active.
+   * For fan-out sessions returns the first node's writer; the tail panel today
+   * shows lines from a single source. Cross-node line interleaving belongs in
+   * a follow-up.
    */
   getActiveWriter(connectionId: string): CaptureWriter | undefined {
-    return this.active.get(connectionId)?.writer;
+    return this.active.get(connectionId)?.writers[0]?.writer;
   }
 
   hasActiveSessionOn(connectionId: string): boolean {
@@ -288,4 +489,52 @@ export class MonitorCaptureService {
       return targetNodeId;
     }
   }
+
+  /**
+   * Resolve the list of cluster primaries for fan-out. Returns empty when the
+   * connection is not a cluster — the caller falls back to a single-node start.
+   */
+  private async resolveFanOutNodes(
+    connectionId: string,
+  ): Promise<Array<{ id: string; address: string }>> {
+    try {
+      const nodes = await this.clusterDiscovery.discoverNodes(connectionId);
+      return nodes
+        .filter((n) => n.role === 'master' && n.healthy)
+        .map((n) => ({ id: n.id, address: n.address }));
+    } catch (err) {
+      this.logger.warn(
+        `Fan-out cluster discovery failed for ${connectionId}: ${(err as Error).message}`,
+      );
+      return [];
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pure aggregation helpers (exported for unit testing)
+// ---------------------------------------------------------------------------
+
+export function aggregateSegmentStatus(segments: CaptureNodeSegment[]): StoredCaptureSession['status'] {
+  if (segments.length === 0) return 'completed';
+  if (segments.some((s) => s.status === 'failed')) return 'failed';
+  if (segments.some((s) => s.status === 'truncated')) return 'truncated';
+  return 'completed';
+}
+
+export function aggregateTerminationReason(
+  segments: CaptureNodeSegment[],
+  status: StoredCaptureSession['status'],
+): string {
+  if (status === 'failed') {
+    const failed = segments.find((s) => s.status === 'failed');
+    return failed?.terminationReason ?? 'fan_out_node_failed';
+  }
+  if (status === 'truncated') {
+    const reasons = new Set(
+      segments.filter((s) => s.status === 'truncated').map((s) => s.terminationReason ?? 'truncated'),
+    );
+    return `fan_out_truncated: ${[...reasons].join(', ')}`;
+  }
+  return 'fan_out_complete';
 }

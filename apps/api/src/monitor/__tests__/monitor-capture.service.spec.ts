@@ -238,6 +238,145 @@ describe('MonitorCaptureService', () => {
     });
   });
 
+  describe('fan-out', () => {
+    function configureCluster(cluster: { discoverNodes: jest.Mock }, nodes: Array<{ id: string; address: string; role?: 'master' | 'replica'; healthy?: boolean }>) {
+      cluster.discoverNodes.mockResolvedValue(
+        nodes.map((n) => ({
+          id: n.id,
+          address: n.address,
+          role: n.role ?? 'master',
+          slots: [],
+          healthy: n.healthy ?? true,
+        })),
+      );
+    }
+
+    it('opens one writer per primary, attributes each chunk to a node, and aggregates segments on terminate', async () => {
+      const { service, storage, cluster } = makeService();
+      configureCluster(cluster, [
+        { id: 'A', address: 'h1:6379' },
+        { id: 'B', address: 'h2:6379' },
+        { id: 'C', address: 'h3:6379' },
+      ]);
+
+      const sources: Record<string, FakeSource> = {};
+      service.setMonitorSourceFactory(async (_connId, nodeId) => {
+        const src = new FakeSource();
+        if (nodeId) sources[nodeId] = src;
+        return src;
+      });
+
+      const session = await service.startSession({ connectionId: CONNECTION_ID, fanOut: true });
+      expect(Object.keys(sources)).toEqual(['A', 'B', 'C']);
+
+      sources.A.push('1700000000.0 [0 1.2.3.4:5] "GET" "k1"');
+      sources.A.push('1700000000.1 [0 1.2.3.4:5] "GET" "k2"');
+      sources.B.push('1700000000.2 [0 5.6.7.8:9] "SET" "k3" "v"');
+      sources.C.push('1700000000.3 [0 9.9.9.9:9] "DEL" "k4"');
+      sources.C.push('1700000000.4 [0 9.9.9.9:9] "DEL" "k5"');
+      sources.C.push('1700000000.5 [0 9.9.9.9:9] "DEL" "k6"');
+
+      sources.A.end();
+      sources.B.end();
+      sources.C.end();
+
+      // Wait for fan-out finalize to drain
+      await service.stopSession(session.id);
+
+      const persisted = await storage.getCaptureSession(session.id);
+      expect(persisted?.status).toBe('completed');
+      expect(persisted?.lineCount).toBe(6);
+      expect(persisted?.byteCount).toBeGreaterThan(0);
+      expect(persisted?.terminationReason).toBe('fan_out_complete');
+      const segs = persisted?.nodeSegments ?? [];
+      expect(segs).toHaveLength(3);
+      const byId = Object.fromEntries(segs.map((s) => [s.nodeId, s]));
+      expect(byId.A.lineCount).toBe(2);
+      expect(byId.B.lineCount).toBe(1);
+      expect(byId.C.lineCount).toBe(3);
+      for (const s of segs) {
+        expect(s.status).toBe('completed');
+        expect(s.endedAt).toBeDefined();
+      }
+
+      // Per-node chunk attribution
+      const chunks = await storage.getCaptureChunks(session.id);
+      const byNode: Record<string, number> = {};
+      for (const c of chunks) {
+        byNode[c.nodeId ?? '<none>'] = (byNode[c.nodeId ?? '<none>'] ?? 0) + c.lineCount;
+      }
+      expect(byNode.A).toBe(2);
+      expect(byNode.B).toBe(1);
+      expect(byNode.C).toBe(3);
+    });
+
+    it('marks one node failed while the others complete (partial failure)', async () => {
+      const { service, storage, cluster } = makeService();
+      configureCluster(cluster, [
+        { id: 'A', address: 'h1:6379' },
+        { id: 'B', address: 'h2:6379' },
+      ]);
+      const sources: Record<string, FakeSource> = {};
+      service.setMonitorSourceFactory(async (_connId, nodeId) => {
+        const src = new FakeSource();
+        if (nodeId) sources[nodeId] = src;
+        return src;
+      });
+
+      const session = await service.startSession({ connectionId: CONNECTION_ID, fanOut: true });
+      sources.A.push('1700000000.0 [0 1:1] "PING"');
+      sources.B.emit('error', new Error('node B disconnected'));
+      sources.A.end();
+      await service.stopSession(session.id);
+
+      const persisted = await storage.getCaptureSession(session.id);
+      expect(persisted?.status).toBe('failed');
+      const segs = persisted?.nodeSegments ?? [];
+      const byId = Object.fromEntries(segs.map((s) => [s.nodeId, s]));
+      expect(byId.A.status).toBe('completed');
+      expect(byId.B.status).toBe('failed');
+      expect(byId.B.terminationReason).toContain('source_error');
+    });
+
+    it('marks a node failed if its source factory rejects, others continue', async () => {
+      const { service, storage, cluster } = makeService();
+      configureCluster(cluster, [
+        { id: 'A', address: 'h1:6379' },
+        { id: 'B', address: 'h2:6379' },
+      ]);
+      const sources: Record<string, FakeSource> = {};
+      service.setMonitorSourceFactory(async (_connId, nodeId) => {
+        if (nodeId === 'B') throw new Error('connect ECONNREFUSED');
+        const src = new FakeSource();
+        if (nodeId) sources[nodeId] = src;
+        return src;
+      });
+
+      const session = await service.startSession({ connectionId: CONNECTION_ID, fanOut: true });
+      sources.A.push('1700000000.0 [0 1:1] "PING"');
+      sources.A.end();
+      await service.stopSession(session.id);
+
+      const persisted = await storage.getCaptureSession(session.id);
+      const segs = persisted?.nodeSegments ?? [];
+      const byId = Object.fromEntries(segs.map((s) => [s.nodeId, s]));
+      expect(byId.A.status).toBe('completed');
+      expect(byId.B.status).toBe('failed');
+      expect(byId.B.terminationReason).toContain('monitor_open_failed');
+      expect(persisted?.status).toBe('failed');
+    });
+
+    it('falls back to a single-node start when the connection is not a cluster', async () => {
+      const { service, storage } = makeService();
+      // discoverNodes returns [] for non-cluster
+      const session = await service.startSession({ connectionId: CONNECTION_ID, fanOut: true });
+      expect(session.nodeSegments).toBeUndefined();
+      const persisted = await storage.getCaptureSession(session.id);
+      expect(persisted?.nodeSegments).toBeUndefined();
+      await service.stopSession(session.id);
+    });
+  });
+
   describe('getActiveWriter', () => {
     it('returns the live writer while a session is running and undefined after stop', async () => {
       const { service } = makeService();

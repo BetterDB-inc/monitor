@@ -65,6 +65,7 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
   const [unit, setUnit] = useState<Unit>('s');
   const [requestedBy, setRequestedBy] = useState('');
   const [targetNodeId, setTargetNodeId] = useState<string>('');
+  const [fanOut, setFanOut] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +109,7 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
       setUnit('s');
       setRequestedBy('');
       setTargetNodeId('');
+      setFanOut(false);
       setPreflight(null);
       setPreflightError(null);
       setConfirming(false);
@@ -149,7 +151,8 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
         connectionId,
         durationMs,
         requestedBy: requestedBy.trim() || undefined,
-        targetNodeId: isCluster ? targetNodeId || undefined : undefined,
+        targetNodeId: isCluster && !fanOut ? targetNodeId || undefined : undefined,
+        fanOut: isCluster && fanOut ? true : undefined,
       });
       onStarted(session);
       onOpenChange(false);
@@ -211,11 +214,29 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
           </div>
 
           {isCluster && (
-            <ClusterNodeField
-              nodes={clusterNodes}
-              selectedId={targetNodeId}
-              onChange={setTargetNodeId}
-            />
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={fanOut}
+                  onChange={(e) => setFanOut(e.target.checked)}
+                />
+                <span>Fan-out across all primaries ({clusterNodes.filter((n) => n.role === 'master').length} nodes)</span>
+              </label>
+              {!fanOut && (
+                <ClusterNodeField
+                  nodes={clusterNodes}
+                  selectedId={targetNodeId}
+                  onChange={setTargetNodeId}
+                />
+              )}
+              {fanOut && (
+                <p className="text-[11px] text-muted-foreground">
+                  One MONITOR connection per primary. Per-node status is recorded; one node failing
+                  mid-capture does not stop the others.
+                </p>
+              )}
+            </div>
           )}
 
           <div>

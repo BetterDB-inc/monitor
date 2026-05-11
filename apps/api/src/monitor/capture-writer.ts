@@ -31,6 +31,26 @@ export interface CaptureWriterOptions {
   ringBufferSize?: number;
   /** Injectable for tests; defaults to Date.now. */
   now?: () => number;
+  /**
+   * Cluster node attribution for fan-out captures. When set, every chunk
+   * written by this writer carries `nodeId`. Required to be unique within a
+   * session when multiple writers share the same sessionId.
+   */
+  nodeId?: string;
+  /**
+   * Starting chunk_index for this writer's chunk sequence. Used by the service
+   * to namespace per-node chunk indexes within a shared session id so the
+   * (sessionId, chunkIndex) PK does not collide across fan-out writers.
+   * Defaults to 0 (single-writer sessions).
+   */
+  startChunkIndex?: number;
+  /**
+   * When true, the writer skips its final `updateCaptureSession` call on
+   * terminate. The caller (the fan-out orchestrator in MonitorCaptureService)
+   * collects per-writer results and aggregates them into one session-row update
+   * once every writer has terminated.
+   */
+  skipSessionFinalize?: boolean;
 }
 
 export type CaptureWriterStatus = 'completed' | 'truncated' | 'failed';
@@ -78,6 +98,8 @@ export class CaptureWriter {
   private readonly flushLineThreshold: number;
   private readonly ringBufferSize: number;
   private readonly now: () => number;
+  private readonly nodeId?: string;
+  private readonly skipSessionFinalize: boolean;
 
   private buffer: string[] = [];
   private bufferBytes = 0;
@@ -85,7 +107,7 @@ export class CaptureWriter {
 
   private byteCount = 0;
   private lineCount = 0;
-  private chunkIndex = 0;
+  private chunkIndex: number;
 
   /** Most recent N lines for tail readers, oldest-first. */
   private ringBuffer: string[] = [];
@@ -117,6 +139,9 @@ export class CaptureWriter {
     this.flushLineThreshold = opts.flushLineThreshold ?? DEFAULT_FLUSH_LINE_THRESHOLD;
     this.ringBufferSize = opts.ringBufferSize ?? DEFAULT_RING_BUFFER_SIZE;
     this.now = opts.now ?? Date.now;
+    this.nodeId = opts.nodeId;
+    this.chunkIndex = opts.startChunkIndex ?? 0;
+    this.skipSessionFinalize = opts.skipSessionFinalize ?? false;
 
     this.donePromise = new Promise((resolve) => {
       this.resolveDone = resolve;
@@ -264,6 +289,7 @@ export class CaptureWriter {
           lineCount: chunkLineCount,
           firstTs,
           lastTs,
+          nodeId: this.nodeId,
         })
         .then(() => undefined)
         .catch((err: Error) => {
@@ -300,17 +326,19 @@ export class CaptureWriter {
 
     const endedAt = this.now();
 
-    try {
-      await this.storage.updateCaptureSession(this.sessionId, {
-        status,
-        endedAt,
-        durationMs: undefined,
-        byteCount: this.byteCount,
-        lineCount: this.lineCount,
-        terminationReason: reason,
-      });
-    } catch (err) {
-      this.logger.error(`Failed to finalize session row: ${(err as Error).message}`);
+    if (!this.skipSessionFinalize) {
+      try {
+        await this.storage.updateCaptureSession(this.sessionId, {
+          status,
+          endedAt,
+          durationMs: undefined,
+          byteCount: this.byteCount,
+          lineCount: this.lineCount,
+          terminationReason: reason,
+        });
+      } catch (err) {
+        this.logger.error(`Failed to finalize session row: ${(err as Error).message}`);
+      }
     }
 
     for (const cb of this.endSubscribers) {

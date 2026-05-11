@@ -74,17 +74,28 @@ import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
 
 /**
- * Idempotent migration: add the `target_node` column to existing capture_sessions
- * tables (PR 14 — cluster per-node selection). Extracted to a helper so we can
- * keep the call-site in createSchema readable.
+ * Idempotent migrations for capture_sessions columns landed across PR 14a + 14b.
+ * Extracted so the call-site in createSchema stays readable.
  */
 function addCaptureSessionsTargetNodeColumn(db: Database.Database): void {
   try {
     const cols = db.prepare(`PRAGMA table_info(capture_sessions)`).all() as { name: string }[];
-    if (cols.some((c) => c.name === 'target_node')) return;
-    db.prepare(`ALTER TABLE capture_sessions ADD COLUMN target_node TEXT`).run();
+    if (!cols.some((c) => c.name === 'target_node')) {
+      db.prepare(`ALTER TABLE capture_sessions ADD COLUMN target_node TEXT`).run();
+    }
+    if (!cols.some((c) => c.name === 'node_segments')) {
+      db.prepare(`ALTER TABLE capture_sessions ADD COLUMN node_segments TEXT`).run();
+    }
   } catch {
-    // Table may not exist yet — createSchema's CREATE TABLE includes the column from day one.
+    // Table may not exist yet — createSchema's CREATE TABLE includes the columns from day one.
+  }
+  try {
+    const cols = db.prepare(`PRAGMA table_info(capture_chunks)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'node_id')) {
+      db.prepare(`ALTER TABLE capture_chunks ADD COLUMN node_id TEXT`).run();
+    }
+  } catch {
+    // Same — fresh schemas have the column from day one.
   }
 }
 
@@ -1390,6 +1401,7 @@ export class SqliteAdapter implements StoragePort {
         line_cap INTEGER NOT NULL,
         termination_reason TEXT,
         target_node TEXT,
+        node_segments TEXT,
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
 
@@ -1406,6 +1418,7 @@ export class SqliteAdapter implements StoragePort {
         line_count INTEGER NOT NULL,
         first_ts INTEGER NOT NULL,
         last_ts INTEGER NOT NULL,
+        node_id TEXT,
         PRIMARY KEY(session_id, chunk_index)
       );
 
@@ -3635,8 +3648,8 @@ export class SqliteAdapter implements StoragePort {
       INSERT INTO capture_sessions (
         id, connection_id, status, source, trigger_id, schedule_id, requested_by,
         started_at, ended_at, duration_ms, byte_count, line_count, byte_cap, line_cap,
-        termination_reason, target_node
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        termination_reason, target_node, node_segments
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       )
       .run(
@@ -3656,6 +3669,7 @@ export class SqliteAdapter implements StoragePort {
         session.lineCap,
         session.terminationReason ?? null,
         session.targetNode ?? null,
+        session.nodeSegments ? JSON.stringify(session.nodeSegments) : null,
       );
 
     return session.id;
@@ -3731,6 +3745,7 @@ export class SqliteAdapter implements StoragePort {
       lineCap: row.line_cap as number,
       terminationReason: (row.termination_reason as string | null) ?? undefined,
       targetNode: (row.target_node as string | null) ?? undefined,
+      nodeSegments: parseNodeSegmentsJson(row.node_segments),
     };
   }
 
@@ -3763,6 +3778,10 @@ export class SqliteAdapter implements StoragePort {
       sets.push('termination_reason = ?');
       params.push(patch.terminationReason);
     }
+    if (patch.nodeSegments !== undefined) {
+      sets.push('node_segments = ?');
+      params.push(JSON.stringify(patch.nodeSegments));
+    }
 
     if (sets.length === 0) return false;
 
@@ -3778,8 +3797,8 @@ export class SqliteAdapter implements StoragePort {
 
     const result = this.db
       .prepare(
-        `INSERT INTO capture_chunks (session_id, chunk_index, bytes, line_count, first_ts, last_ts)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO capture_chunks (session_id, chunk_index, bytes, line_count, first_ts, last_ts, node_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         chunk.sessionId,
@@ -3788,6 +3807,7 @@ export class SqliteAdapter implements StoragePort {
         chunk.lineCount,
         chunk.firstTs,
         chunk.lastTs,
+        chunk.nodeId ?? null,
       );
     return result.changes;
   }
@@ -3797,7 +3817,7 @@ export class SqliteAdapter implements StoragePort {
 
     const rows = this.db
       .prepare(
-        'SELECT session_id, chunk_index, bytes, line_count, first_ts, last_ts FROM capture_chunks WHERE session_id = ? ORDER BY chunk_index ASC',
+        'SELECT session_id, chunk_index, bytes, line_count, first_ts, last_ts, node_id FROM capture_chunks WHERE session_id = ? ORDER BY chunk_index ASC',
       )
       .all(sessionId) as Record<string, unknown>[];
 
@@ -3808,6 +3828,18 @@ export class SqliteAdapter implements StoragePort {
       lineCount: row.line_count as number,
       firstTs: row.first_ts as number,
       lastTs: row.last_ts as number,
+      nodeId: (row.node_id as string | null) ?? undefined,
     }));
+  }
+}
+
+function parseNodeSegmentsJson(raw: unknown): StoredCaptureSession['nodeSegments'] | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
   }
 }
