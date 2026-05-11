@@ -37,6 +37,8 @@ import {
   CommandStatsHistoryQueryOptions,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
+  StoredCaptureChunk,
+  CaptureSessionPatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1346,6 +1348,7 @@ export class MemoryAdapter implements StoragePort {
   private cacheProposals: Map<string, StoredCacheProposal> = new Map();
   private cacheProposalAudit: Map<string, StoredCacheProposalAudit> = new Map();
   private captureSessions: Map<string, StoredCaptureSession> = new Map();
+  private captureChunks: StoredCaptureChunk[] = [];
 
 
   private cloneProposal(p: StoredCacheProposal): StoredCacheProposal {
@@ -1513,6 +1516,30 @@ export class MemoryAdapter implements StoragePort {
   async getCaptureSession(id: string): Promise<StoredCaptureSession | null> {
     const session = this.captureSessions.get(id);
     return session ? { ...session } : null;
+  }
+
+  async updateCaptureSession(id: string, patch: CaptureSessionPatch): Promise<boolean> {
+    const session = this.captureSessions.get(id);
+    if (!session) return false;
+    if (patch.status !== undefined) session.status = patch.status;
+    if (patch.endedAt !== undefined) session.endedAt = patch.endedAt;
+    if (patch.durationMs !== undefined) session.durationMs = patch.durationMs;
+    if (patch.byteCount !== undefined) session.byteCount = patch.byteCount;
+    if (patch.lineCount !== undefined) session.lineCount = patch.lineCount;
+    if (patch.terminationReason !== undefined) session.terminationReason = patch.terminationReason;
+    return true;
+  }
+
+  async saveCaptureChunk(chunk: StoredCaptureChunk): Promise<number> {
+    this.captureChunks.push({ ...chunk, bytes: Buffer.from(chunk.bytes) });
+    return 1;
+  }
+
+  async getCaptureChunks(sessionId: string): Promise<StoredCaptureChunk[]> {
+    return this.captureChunks
+      .filter((c) => c.sessionId === sessionId)
+      .sort((a, b) => a.chunkIndex - b.chunkIndex)
+      .map((c) => ({ ...c, bytes: Buffer.from(c.bytes) }));
   }
 
   async getCaptureSessions(

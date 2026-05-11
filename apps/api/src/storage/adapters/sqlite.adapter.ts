@@ -42,6 +42,8 @@ import {
   CommandStatsHistoryQueryOptions,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
+  StoredCaptureChunk,
+  CaptureSessionPatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -3711,5 +3713,82 @@ export class SqliteAdapter implements StoragePort {
       lineCap: row.line_cap as number,
       terminationReason: (row.termination_reason as string | null) ?? undefined,
     };
+  }
+
+  async updateCaptureSession(id: string, patch: CaptureSessionPatch): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (patch.status !== undefined) {
+      sets.push('status = ?');
+      params.push(patch.status);
+    }
+    if (patch.endedAt !== undefined) {
+      sets.push('ended_at = ?');
+      params.push(patch.endedAt);
+    }
+    if (patch.durationMs !== undefined) {
+      sets.push('duration_ms = ?');
+      params.push(patch.durationMs);
+    }
+    if (patch.byteCount !== undefined) {
+      sets.push('byte_count = ?');
+      params.push(patch.byteCount);
+    }
+    if (patch.lineCount !== undefined) {
+      sets.push('line_count = ?');
+      params.push(patch.lineCount);
+    }
+    if (patch.terminationReason !== undefined) {
+      sets.push('termination_reason = ?');
+      params.push(patch.terminationReason);
+    }
+
+    if (sets.length === 0) return false;
+
+    params.push(id);
+    const result = this.db
+      .prepare(`UPDATE capture_sessions SET ${sets.join(', ')} WHERE id = ?`)
+      .run(...params);
+    return result.changes > 0;
+  }
+
+  async saveCaptureChunk(chunk: StoredCaptureChunk): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const result = this.db
+      .prepare(
+        `INSERT INTO capture_chunks (session_id, chunk_index, bytes, line_count, first_ts, last_ts)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        chunk.sessionId,
+        chunk.chunkIndex,
+        chunk.bytes,
+        chunk.lineCount,
+        chunk.firstTs,
+        chunk.lastTs,
+      );
+    return result.changes;
+  }
+
+  async getCaptureChunks(sessionId: string): Promise<StoredCaptureChunk[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const rows = this.db
+      .prepare(
+        'SELECT session_id, chunk_index, bytes, line_count, first_ts, last_ts FROM capture_chunks WHERE session_id = ? ORDER BY chunk_index ASC',
+      )
+      .all(sessionId) as Record<string, unknown>[];
+
+    return rows.map((row) => ({
+      sessionId: row.session_id as string,
+      chunkIndex: row.chunk_index as number,
+      bytes: Buffer.isBuffer(row.bytes) ? (row.bytes as Buffer) : Buffer.from(row.bytes as ArrayBuffer),
+      lineCount: row.line_count as number,
+      firstTs: row.first_ts as number,
+      lastTs: row.last_ts as number,
+    }));
   }
 }
