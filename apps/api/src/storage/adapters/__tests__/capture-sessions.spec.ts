@@ -107,4 +107,68 @@ describe.each([
     expect(page2).toHaveLength(2);
     expect(page1[0].startedAt).toBeGreaterThan(page2[0].startedAt);
   });
+
+  it('updateCaptureSession applies a partial patch', async () => {
+    const session = makeSession({ status: 'running', endedAt: undefined, byteCount: 0, lineCount: 0 });
+    await storage.saveCaptureSession(session, CONNECTION_ID);
+
+    const updated = await storage.updateCaptureSession(session.id, {
+      status: 'completed',
+      endedAt: 1_700_000_010_000,
+      durationMs: 10_000,
+      byteCount: 4096,
+      lineCount: 100,
+      terminationReason: 'manual_stop',
+    });
+    expect(updated).toBe(true);
+
+    const fetched = await storage.getCaptureSession(session.id);
+    expect(fetched).toMatchObject({
+      status: 'completed',
+      endedAt: 1_700_000_010_000,
+      durationMs: 10_000,
+      byteCount: 4096,
+      lineCount: 100,
+      terminationReason: 'manual_stop',
+    });
+  });
+
+  it('updateCaptureSession returns false for an unknown id', async () => {
+    expect(await storage.updateCaptureSession(randomUUID(), { status: 'completed' })).toBe(false);
+  });
+
+  it('saveCaptureChunk + getCaptureChunks round-trip preserves bytes and order', async () => {
+    const session = makeSession();
+    await storage.saveCaptureSession(session, CONNECTION_ID);
+
+    await storage.saveCaptureChunk({
+      sessionId: session.id,
+      chunkIndex: 0,
+      bytes: Buffer.from('chunk-0-content', 'utf-8'),
+      lineCount: 3,
+      firstTs: 1000,
+      lastTs: 1500,
+    });
+    await storage.saveCaptureChunk({
+      sessionId: session.id,
+      chunkIndex: 1,
+      bytes: Buffer.from('chunk-1-content', 'utf-8'),
+      lineCount: 2,
+      firstTs: 2000,
+      lastTs: 2500,
+    });
+
+    const chunks = await storage.getCaptureChunks(session.id);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0].chunkIndex).toBe(0);
+    expect(chunks[1].chunkIndex).toBe(1);
+    expect(chunks[0].bytes.toString('utf-8')).toBe('chunk-0-content');
+    expect(chunks[1].bytes.toString('utf-8')).toBe('chunk-1-content');
+    expect(chunks[0].lineCount).toBe(3);
+    expect(chunks[1].lineCount).toBe(2);
+  });
+
+  it('getCaptureChunks returns empty for unknown session', async () => {
+    expect(await storage.getCaptureChunks(randomUUID())).toEqual([]);
+  });
 });

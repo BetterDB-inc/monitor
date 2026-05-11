@@ -38,6 +38,8 @@ import {
   WebhookEventType,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
+  StoredCaptureChunk,
+  CaptureSessionPatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ActorSource,
@@ -4003,5 +4005,77 @@ export class PostgresAdapter implements StoragePort {
       lineCap: toNumber(row.line_cap),
       terminationReason: (row.termination_reason as string | null) ?? undefined,
     };
+  }
+
+  async updateCaptureSession(id: string, patch: CaptureSessionPatch): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    let p = 1;
+    if (patch.status !== undefined) {
+      sets.push(`status = $${p++}`);
+      params.push(patch.status);
+    }
+    if (patch.endedAt !== undefined) {
+      sets.push(`ended_at = $${p++}`);
+      params.push(patch.endedAt);
+    }
+    if (patch.durationMs !== undefined) {
+      sets.push(`duration_ms = $${p++}`);
+      params.push(patch.durationMs);
+    }
+    if (patch.byteCount !== undefined) {
+      sets.push(`byte_count = $${p++}`);
+      params.push(patch.byteCount);
+    }
+    if (patch.lineCount !== undefined) {
+      sets.push(`line_count = $${p++}`);
+      params.push(patch.lineCount);
+    }
+    if (patch.terminationReason !== undefined) {
+      sets.push(`termination_reason = $${p++}`);
+      params.push(patch.terminationReason);
+    }
+
+    if (sets.length === 0) return false;
+
+    params.push(id);
+    const result = await this.pool.query(
+      `UPDATE capture_sessions SET ${sets.join(', ')} WHERE id = $${p}`,
+      params,
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async saveCaptureChunk(chunk: StoredCaptureChunk): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `INSERT INTO capture_chunks (session_id, chunk_index, bytes, line_count, first_ts, last_ts)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [chunk.sessionId, chunk.chunkIndex, chunk.bytes, chunk.lineCount, chunk.firstTs, chunk.lastTs],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async getCaptureChunks(sessionId: string): Promise<StoredCaptureChunk[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      'SELECT session_id, chunk_index, bytes, line_count, first_ts, last_ts FROM capture_chunks WHERE session_id = $1 ORDER BY chunk_index ASC',
+      [sessionId],
+    );
+
+    const toNumber = (v: unknown): number => (typeof v === 'string' ? parseInt(v, 10) : (v as number));
+
+    return result.rows.map((row) => ({
+      sessionId: row.session_id as string,
+      chunkIndex: toNumber(row.chunk_index),
+      bytes: Buffer.isBuffer(row.bytes) ? (row.bytes as Buffer) : Buffer.from(row.bytes),
+      lineCount: toNumber(row.line_count),
+      firstTs: toNumber(row.first_ts),
+      lastTs: toNumber(row.last_ts),
+    }));
   }
 }

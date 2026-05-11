@@ -34,3 +34,22 @@ export interface CaptureSessionQueryOptions {
   limit?: number;
   offset?: number;
 }
+
+export interface StoredCaptureChunk {
+  sessionId: string;
+  chunkIndex: number;
+  bytes: Buffer;
+  lineCount: number;
+  firstTs: number;
+  lastTs: number;
+}
+
+/** Mutable subset of {@link StoredCaptureSession} that can be patched after insert. */
+export interface CaptureSessionPatch {
+  status?: CaptureSessionStatus;
+  endedAt?: number;
+  durationMs?: number;
+  byteCount?: number;
+  lineCount?: number;
+  terminationReason?: string;
+}
