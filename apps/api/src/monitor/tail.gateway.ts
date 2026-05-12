@@ -52,16 +52,9 @@ export class TailGateway implements OnModuleDestroy {
    * Called by main.ts on HTTP upgrade matching /monitor/ws.
    *
    * The HTTP-level DemoModeGuard does NOT run on WebSocket upgrades, so we
-   * enforce the demo-host restriction here. We also gate on the dev preview
-   * env var to mirror the HTTP guard behaviour for the rest of the surface.
+   * enforce the demo-host restriction here.
    */
   handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
-    if (process.env.MONITOR_DEV_PREVIEW !== 'true') {
-      this.logger.debug('Tail upgrade rejected: dev preview disabled');
-      socket.destroy();
-      return;
-    }
-
     const host = request.headers.host || '';
     if (process.env.DEMO_HOSTNAME && host === process.env.DEMO_HOSTNAME) {
       this.logger.debug(`Tail upgrade rejected: demo host ${host}`);

@@ -89,9 +89,6 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     if (!this.autoStart) {
       return;
     }
-    if (process.env.MONITOR_DEV_PREVIEW !== 'true') {
-      return;
-    }
     this.pollHandle = setInterval(() => {
       this.tick().catch((err: Error) => {
         this.logger.error(`CaptureTriggerRegistry tick failed: ${err.message}`);

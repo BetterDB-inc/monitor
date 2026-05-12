@@ -130,15 +130,11 @@ function formatValue(value: number, metric: string): string {
   return value.toLocaleString();
 }
 
-const MONITOR_DEV_PREVIEW = import.meta.env.VITE_MONITOR_DEV_PREVIEW === 'true';
-
 export function AnomalyDashboard() {
   const { currentConnection } = useConnection();
   const { hasFeature } = useLicense();
   const captureActionEnabled =
-    MONITOR_DEV_PREVIEW &&
-    hasFeature(Feature.MONITOR_ANOMALY_TRIGGER) &&
-    !!currentConnection?.id;
+    hasFeature(Feature.MONITOR_ANOMALY_TRIGGER) && !!currentConnection?.id;
   const [searchParams] = useSearchParams();
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [captureContext, setCaptureContext] = useState<CaptureOnNextContext | undefined>();

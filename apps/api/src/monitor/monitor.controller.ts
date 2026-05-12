@@ -31,7 +31,6 @@ import {
   parseMonitorLine,
 } from './monitor-line.parser';
 import { MonitorCaptureService } from './monitor-capture.service';
-import { MonitorDevPreviewGuard } from './monitor-dev-preview.guard';
 import { PreflightResult, PreflightService } from './preflight.service';
 
 const VALID_BASELINES = new Set<BaselineWindow>(['6h', '24h', '7d', 'same-hour-last-week']);
@@ -80,7 +79,6 @@ export interface MonitorNodesResponse {
 }
 
 @Controller('monitor')
-@UseGuards(MonitorDevPreviewGuard)
 export class MonitorController {
   constructor(
     private readonly captureService: MonitorCaptureService,
