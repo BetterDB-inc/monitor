@@ -20,7 +20,7 @@ describe('MonitorController', () => {
   let healthGateService: { evaluate: jest.Mock };
   let preflightService: { run: jest.Mock };
   let storage: { getCaptureChunks: jest.Mock };
-  let crossReferenceEngine: { compute: jest.Mock };
+  let crossReferenceEngine: { compute: jest.Mock; computeCaptureDiff: jest.Mock };
   let clusterDiscovery: { discoverNodes: jest.Mock };
   let triggerRegistry: {
     listTriggers: jest.Mock;
@@ -65,6 +65,15 @@ describe('MonitorController', () => {
       compute: jest.fn().mockResolvedValue({
         sessionId: 'sess-1',
         baseline: { window: '24h', startTs: 0, endTs: 0 },
+        session: { startTs: 0, endTs: 0, capturedLineCount: 0 },
+        newShapes: [],
+        hotKeyDelta: { newInTopK: [], rankChanges: [] },
+        slowlogRegressions: [],
+        aclDeltas: { auditEntriesInWindow: 0, counters: { aclAccessDeniedAuthDelta: null, rejectedConnectionsDelta: null } },
+      }),
+      computeCaptureDiff: jest.fn().mockResolvedValue({
+        sessionId: 'sess-1',
+        baseline: { window: 'capture', startTs: 0, endTs: 0, sessionId: 'sess-2' },
         session: { startTs: 0, endTs: 0, capturedLineCount: 0 },
         newShapes: [],
         hotKeyDelta: { newInTopK: [], rankChanges: [] },
@@ -366,6 +375,44 @@ describe('MonitorController', () => {
       const reply = makeReply();
       await controller.exportSession('sess-1', 'xml', undefined, undefined, undefined, undefined, undefined, reply as never);
       expect(reply.header).toHaveBeenCalledWith('content-type', 'application/json');
+    });
+  });
+
+  describe('sessionDiff', () => {
+    it('forwards to computeCaptureDiff when both sessions exist', async () => {
+      captureService.getSession.mockResolvedValueOnce({ id: 'sess-1' });
+      captureService.getSession.mockResolvedValueOnce({ id: 'sess-2' });
+      await controller.sessionDiff('sess-1', 'sess-2');
+      expect(crossReferenceEngine.computeCaptureDiff).toHaveBeenCalledWith('sess-1', 'sess-2');
+    });
+
+    it('throws BadRequest when vs is missing', async () => {
+      await expect(controller.sessionDiff('sess-1')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(crossReferenceEngine.computeCaptureDiff).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequest when comparing a capture against itself', async () => {
+      await expect(controller.sessionDiff('sess-1', 'sess-1')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(crossReferenceEngine.computeCaptureDiff).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound when the primary session is missing', async () => {
+      captureService.getSession.mockResolvedValueOnce(null);
+      await expect(controller.sessionDiff('missing', 'sess-2')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('throws NotFound when the baseline session is missing', async () => {
+      captureService.getSession.mockResolvedValueOnce({ id: 'sess-1' });
+      captureService.getSession.mockResolvedValueOnce(null);
+      await expect(controller.sessionDiff('sess-1', 'missing')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
   });
 

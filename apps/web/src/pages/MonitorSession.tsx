@@ -1,9 +1,12 @@
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
+import { Feature } from '@betterdb/shared';
 import { monitorApi } from '../api/monitor';
 import { useMonitorTail } from '../hooks/useMonitorTail';
+import { useLicense } from '../hooks/useLicense';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { CompareCapturesPanel } from './monitor/compare-captures-panel';
 import { CrossReferencePanel } from './monitor/cross-reference-panel';
 import { FiltersAndExport } from './monitor/filters-and-export';
 import { SessionStatusBadge } from './monitor/session-status-badge';
@@ -13,6 +16,8 @@ export function MonitorSession() {
   const { id } = useParams<{ id: string }>();
   const sessionId = id ?? null;
   const tail = useMonitorTail(sessionId);
+  const { hasFeature } = useLicense();
+  const compareEnabled = hasFeature(Feature.MONITOR_CAPTURE_DIFF);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['monitor', 'session', sessionId],
@@ -115,6 +120,17 @@ export function MonitorSession() {
           <CrossReferencePanel sessionId={sessionId} />
         </CardContent>
       </Card>
+
+      {compareEnabled && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Compare with another capture</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <CompareCapturesPanel sessionId={sessionId} connectionId={data.connectionId} />
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

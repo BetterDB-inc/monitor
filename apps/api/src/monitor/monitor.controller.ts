@@ -211,6 +211,32 @@ export class MonitorController {
     return this.crossReferenceEngine.compute({ sessionId: id, baseline: window });
   }
 
+  @Get('sessions/:id/diff')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.MONITOR_CAPTURE_DIFF)
+  async sessionDiff(
+    @Param('id') id: string,
+    @Query('vs') vs?: string,
+  ): Promise<CrossReferenceResult> {
+    if (!vs) {
+      throw new BadRequestException('vs query parameter is required');
+    }
+    if (vs === id) {
+      throw new BadRequestException('Cannot diff a capture against itself');
+    }
+    const [session, baselineSession] = await Promise.all([
+      this.captureService.getSession(id),
+      this.captureService.getSession(vs),
+    ]);
+    if (!session) {
+      throw new NotFoundException(`Session ${id} not found`);
+    }
+    if (!baselineSession) {
+      throw new NotFoundException(`Baseline session ${vs} not found`);
+    }
+    return this.crossReferenceEngine.computeCaptureDiff(id, vs);
+  }
+
   @Get('sessions/:id/export')
   async exportSession(
     @Param('id') id: string,

@@ -430,6 +430,134 @@ describe('CrossReferenceEngine.compute', () => {
     expect(result.newShapes).toEqual([]);
   });
 
+  it('throws when the baseline session does not exist (capture-vs-capture)', async () => {
+    const storage = {
+      getCaptureSession: jest.fn().mockImplementation(async (id: string) => {
+        return id === SESSION_ID
+          ? {
+              id: SESSION_ID,
+              connectionId: CONNECTION_ID,
+              status: 'completed',
+              source: 'manual',
+              startedAt: SESSION_START_MS,
+              endedAt: SESSION_END_MS,
+              byteCount: 0,
+              lineCount: 1,
+              byteCap: 100_000,
+              lineCap: 100_000,
+            }
+          : null;
+      }),
+      getCaptureChunks: jest.fn().mockResolvedValue([]),
+      getSlowLogEntries: jest.fn().mockResolvedValue([]),
+      getCommandLogEntries: jest.fn().mockResolvedValue([]),
+      getClientSnapshots: jest.fn().mockResolvedValue([]),
+      getAclEntries: jest.fn().mockResolvedValue([]),
+    } as unknown as StoragePort;
+    const engine = new CrossReferenceEngine(storage);
+    await expect(engine.computeCaptureDiff(SESSION_ID, 'missing')).rejects.toThrow(
+      'Baseline session missing not found',
+    );
+  });
+
+  it('refuses to diff a capture against itself', async () => {
+    const engine = new CrossReferenceEngine(makeStorage());
+    await expect(engine.computeCaptureDiff(SESSION_ID, SESSION_ID)).rejects.toThrow(
+      /diff a capture against itself/,
+    );
+  });
+
+  describe('capture-vs-capture diff', () => {
+    const SESSION_B_ID = 'sess-other';
+    const SESSION_B_START_MS = SESSION_START_MS - 60_000;
+    const SESSION_B_END_MS = SESSION_B_START_MS + 30_000;
+
+    function buildStorage(
+      sessionALines: string[],
+      sessionBLines: string[],
+    ): StoragePort {
+      const sessionA: StoredCaptureSession = {
+        id: SESSION_ID,
+        connectionId: CONNECTION_ID,
+        status: 'completed',
+        source: 'manual',
+        startedAt: SESSION_START_MS,
+        endedAt: SESSION_END_MS,
+        byteCount: 0,
+        lineCount: sessionALines.length,
+        byteCap: 100_000,
+        lineCap: 100_000,
+      };
+      const sessionB: StoredCaptureSession = {
+        ...sessionA,
+        id: SESSION_B_ID,
+        startedAt: SESSION_B_START_MS,
+        endedAt: SESSION_B_END_MS,
+        lineCount: sessionBLines.length,
+      };
+      const chunksFor = (id: string) =>
+        id === SESSION_ID
+          ? [chunkOf(sessionALines)]
+          : [{
+              sessionId: SESSION_B_ID,
+              chunkIndex: 0,
+              bytes: Buffer.from(sessionBLines.join('\n'), 'utf-8'),
+              lineCount: sessionBLines.length,
+              firstTs: SESSION_B_START_MS,
+              lastTs: SESSION_B_END_MS,
+            }];
+      return {
+        getCaptureSession: jest.fn().mockImplementation(async (id: string) => {
+          if (id === SESSION_ID) return sessionA;
+          if (id === SESSION_B_ID) return sessionB;
+          return null;
+        }),
+        getCaptureChunks: jest.fn().mockImplementation(async (id: string) => chunksFor(id)),
+        getSlowLogEntries: jest.fn().mockResolvedValue([]),
+        getCommandLogEntries: jest.fn().mockResolvedValue([]),
+        getClientSnapshots: jest.fn().mockResolvedValue([]),
+        getAclEntries: jest.fn().mockResolvedValue([]),
+      } as unknown as StoragePort;
+    }
+
+    it('surfaces shapes in A that are absent from B as newShapes', async () => {
+      const a = [
+        '1700000000.0 [0 1.2.3.4:5] "GET" "foo"',
+        '1700000000.5 [0 1.2.3.4:5] "LPUSH" "x" "v"',
+      ];
+      const b = [
+        '1700000000.0 [0 1.2.3.4:5] "GET" "foo"',
+      ];
+      const engine = new CrossReferenceEngine(buildStorage(a, b));
+      const result = await engine.computeCaptureDiff(SESSION_ID, SESSION_B_ID);
+      expect(result.newShapes.map((s) => s.shape)).toEqual(['LPUSH:2']);
+      expect(result.baseline.window).toBe('capture');
+      expect(result.baseline.sessionId).toBe(SESSION_B_ID);
+      expect(result.baseline.startTs).toBe(SESSION_B_START_MS);
+      expect(result.baseline.endTs).toBe(SESSION_B_END_MS);
+      expect(result.slowlogRegressions).toEqual([]);
+      expect(result.aclDeltas.auditEntriesInWindow).toBe(0);
+    });
+
+    it('computes hot-key delta against the baseline capture key counts', async () => {
+      const a = [
+        '1700000000.0 [0 1.2.3.4:5] "GET" "k1"',
+        '1700000000.1 [0 1.2.3.4:5] "GET" "k1"',
+        '1700000000.2 [0 1.2.3.4:5] "GET" "k2"',
+      ];
+      const b = [
+        '1700000000.0 [0 1.2.3.4:5] "GET" "k1"',
+      ];
+      const engine = new CrossReferenceEngine(buildStorage(a, b));
+      const result = await engine.computeCaptureDiff(SESSION_ID, SESSION_B_ID);
+      const keysInResult = [
+        ...result.hotKeyDelta.newInTopK.map((k) => k.key),
+        ...result.hotKeyDelta.rankChanges.map((k) => k.key),
+      ];
+      expect(keysInResult).toContain('k2');
+    });
+  });
+
   it('surfaces audit-trail entry count in aclDeltas when audit module persists rows in the window', async () => {
     const aclEntries: StoredAclEntry[] = [
       {
