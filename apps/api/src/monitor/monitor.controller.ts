@@ -143,9 +143,9 @@ export class MonitorController {
 
     const fmt = format === 'csv' ? 'csv' : 'json';
     const filters: MonitorLineFilters = {
-      command,
-      client,
-      key,
+      command: trimmedOrUndefined(command),
+      client: trimmedOrUndefined(client),
+      key: cappedKeyFilter(key),
       afterTs: afterTsRaw ? parseInt(afterTsRaw, 10) : undefined,
       beforeTs: beforeTsRaw ? parseInt(beforeTsRaw, 10) : undefined,
     };
@@ -204,4 +204,33 @@ function parsePositiveInt(raw: string | undefined, fallback: number, max: number
     return fallback;
   }
   return Math.min(parsed, max);
+}
+
+/** Trim whitespace and treat empty strings as "no filter". */
+function trimmedOrUndefined(raw: string | undefined): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Key-glob filters become regular expressions in the parser. Cap the input
+ * length so a long pattern packed with `*` wildcards cannot drive
+ * catastrophic backtracking against equally long captured keys.
+ */
+const MAX_KEY_FILTER_LENGTH = 128;
+
+function cappedKeyFilter(raw: string | undefined): string | undefined {
+  const trimmed = trimmedOrUndefined(raw);
+  if (!trimmed) {
+    return undefined;
+  }
+  if (trimmed.length > MAX_KEY_FILTER_LENGTH) {
+    throw new BadRequestException(
+      `key filter must be ${MAX_KEY_FILTER_LENGTH} characters or fewer`,
+    );
+  }
+  return trimmed;
 }
