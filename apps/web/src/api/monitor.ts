@@ -79,6 +79,10 @@ export const monitorApi = {
     );
   },
 
+  getSession: (id: string): Promise<StoredCaptureSession> => {
+    return fetchApi<StoredCaptureSession>(`/monitor/sessions/${encodeURIComponent(id)}`);
+  },
+
   preflight: (connectionId: string, durationMs?: number): Promise<PreflightResult> => {
     return fetchApi<PreflightResult>('/monitor/sessions/preflight', {
       method: 'POST',

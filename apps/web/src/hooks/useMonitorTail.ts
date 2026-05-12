@@ -147,6 +147,13 @@ export function useMonitorTail(
     };
 
     return () => {
+      // Detach handlers BEFORE close(). close() is async — without this, the
+      // old socket's onclose can fire after a new socket has been created and
+      // flip the new connection's status back to 'closed'.
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
       ws.close();
       wsRef.current = null;
     };

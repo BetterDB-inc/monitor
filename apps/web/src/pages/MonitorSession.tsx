@@ -12,7 +12,7 @@ export function MonitorSession() {
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['monitor', 'session', sessionId],
-    queryFn: () => monitorApi.listSessions({ limit: 100 }).then((rows) => rows.find((r) => r.id === sessionId) ?? null),
+    queryFn: () => monitorApi.getSession(sessionId!),
     enabled: !!sessionId,
     refetchInterval: (q) => {
       const s = q.state.data;
