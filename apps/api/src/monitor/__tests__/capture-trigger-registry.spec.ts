@@ -59,6 +59,9 @@ function makeRegistry(
     healthGate as unknown as HealthGateService,
   );
   registry.setOptions({ autoStart: false });
+  // Tests want to see all stored anomaly events; the constructor seeds the
+  // watermark to Date.now() to avoid replaying history on real restarts.
+  registry.resetAnomalyWatermark();
   return { registry, storage };
 }
 

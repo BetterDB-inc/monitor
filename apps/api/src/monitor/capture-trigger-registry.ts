@@ -12,7 +12,7 @@ import {
   CaptureTriggerQueryOptions,
   StoredCaptureTrigger,
 } from '@betterdb/shared';
-import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { StoragePort, StoredAnomalyEvent } from '../common/interfaces/storage-port.interface';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
 
@@ -60,6 +60,16 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     private readonly captureService: MonitorCaptureService,
     private readonly healthGate: HealthGateService,
   ) {
+    // Seed the watermark to "now" so a process restart never replays
+    // historical anomalies as if they just arrived. The trigger.createdAt
+    // guard in processNewAnomalies() blocks events older than each trigger
+    // anyway, but starting from 0 still means an unbounded scan on first
+    // tick. Tests can reset via the test seam below.
+    this.lastAnomalyAt = Date.now();
+  }
+
+  /** Test seam — reset the anomaly watermark so specs see all stored events. */
+  resetAnomalyWatermark(): void {
     this.lastAnomalyAt = 0;
   }
 
@@ -184,12 +194,34 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
 
   private async processNewAnomalies(): Promise<void> {
     const startTime = this.lastAnomalyAt === 0 ? 0 : this.lastAnomalyAt + 1;
-    const events = await this.storage.getAnomalyEvents({ startTime, limit: 200 });
-    if (events.length === 0) {
+    const pageSize = 200;
+    // Drain pagination by walking offset until storage returns fewer rows
+    // than requested. Cap total work per tick so a runaway backlog can't
+    // starve other tick steps.
+    const maxPerTick = 5000;
+    const collected: StoredAnomalyEvent[] = [];
+    for (let offset = 0; offset < maxPerTick; offset += pageSize) {
+      const page = await this.storage.getAnomalyEvents({
+        startTime,
+        limit: pageSize,
+        offset,
+      });
+      if (page.length === 0) {
+        break;
+      }
+      collected.push(...page);
+      if (page.length < pageSize) {
+        break;
+      }
+    }
+    if (collected.length === 0) {
       return;
     }
+    // Storage returns DESC by timestamp; iterate oldest-first so a partial
+    // drain still leaves a coherent watermark.
+    const sorted = collected.sort((a, b) => a.timestamp - b.timestamp);
     let maxTs = this.lastAnomalyAt;
-    for (const evt of events) {
+    for (const evt of sorted) {
       if (evt.timestamp > maxTs) {
         maxTs = evt.timestamp;
       }
@@ -201,13 +233,9 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
         evt.metricType,
         evt.anomalyType,
       );
-      if (!match || match.status !== 'configured') {
-        continue;
+      if (match && match.status === 'configured' && evt.timestamp >= match.createdAt) {
+        await this.tryFire(match);
       }
-      if (evt.timestamp < match.createdAt) {
-        continue;
-      }
-      await this.tryFire(match);
     }
     this.lastAnomalyAt = maxTs;
   }
