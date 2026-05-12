@@ -55,6 +55,28 @@ const HOST_SUFFIXES: Array<{ suffix: string; provider: Provider }> = [
   { suffix: '.upstash.io', provider: 'upstash' },
 ];
 
+const PROVIDER_OVERRIDE_ALIASES: Record<string, Provider> = {
+  elasticache: 'aws-elasticache',
+  'aws-elasticache': 'aws-elasticache',
+  memorystore: 'gcp-memorystore',
+  'gcp-memorystore': 'gcp-memorystore',
+  'redis-cloud': 'redis-cloud',
+  rediscloud: 'redis-cloud',
+  upstash: 'upstash',
+  'self-hosted': 'self-hosted',
+  selfhosted: 'self-hosted',
+  unknown: 'unknown',
+};
+
+function readProviderOverride(): Provider | null {
+  const raw = process.env.MONITOR_PROVIDER_OVERRIDE;
+  if (!raw) {
+    return null;
+  }
+  const normalised = raw.trim().toLowerCase();
+  return PROVIDER_OVERRIDE_ALIASES[normalised] ?? null;
+}
+
 /**
  * @param server INFO `server` section (string keys to string values), or undefined when INFO is not yet available.
  * @param host Connection hostname; checked for managed-provider DNS suffixes first.
@@ -63,6 +85,11 @@ export function detectProvider(
   server: Record<string, string | undefined> = {},
   host?: string,
 ): ProviderInfo {
+  const override = readProviderOverride();
+  if (override) {
+    return { provider: override, restrictions: RESTRICTIONS[override] };
+  }
+
   const fromHost = matchByHost(host);
   if (fromHost) {
     return { provider: fromHost, restrictions: RESTRICTIONS[fromHost] };

@@ -64,4 +64,47 @@ describe('detectProvider', () => {
       expect(result.restrictions).toEqual([]);
     });
   });
+
+  describe('MONITOR_PROVIDER_OVERRIDE env', () => {
+    let original: string | undefined;
+    beforeEach(() => {
+      original = process.env.MONITOR_PROVIDER_OVERRIDE;
+    });
+    afterEach(() => {
+      if (original === undefined) {
+        delete process.env.MONITOR_PROVIDER_OVERRIDE;
+      } else {
+        process.env.MONITOR_PROVIDER_OVERRIDE = original;
+      }
+    });
+
+    it('forces aws-elasticache when set to "elasticache"', () => {
+      process.env.MONITOR_PROVIDER_OVERRIDE = 'elasticache';
+      const result = detectProvider({}, 'localhost');
+      expect(result.provider).toBe('aws-elasticache');
+      expect(result.restrictions.length).toBeGreaterThan(0);
+    });
+
+    it('accepts the canonical id "aws-elasticache" too', () => {
+      process.env.MONITOR_PROVIDER_OVERRIDE = 'aws-elasticache';
+      expect(detectProvider({}, 'localhost').provider).toBe('aws-elasticache');
+    });
+
+    it('overrides a real host signal — useful for QA without touching DNS', () => {
+      process.env.MONITOR_PROVIDER_OVERRIDE = 'memorystore';
+      const result = detectProvider({}, 'fly-rabbit.upstash.io');
+      expect(result.provider).toBe('gcp-memorystore');
+    });
+
+    it('ignores an unknown override value (falls through to detection)', () => {
+      process.env.MONITOR_PROVIDER_OVERRIDE = 'made-up-provider';
+      const result = detectProvider({}, 'fly-rabbit.upstash.io');
+      expect(result.provider).toBe('upstash');
+    });
+
+    it('is case-insensitive', () => {
+      process.env.MONITOR_PROVIDER_OVERRIDE = 'ELASTICACHE';
+      expect(detectProvider({}).provider).toBe('aws-elasticache');
+    });
+  });
 });
