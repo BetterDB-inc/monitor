@@ -41,15 +41,18 @@ const RESTRICTIONS: Record<Provider, string[]> = {
   unknown: [],
 };
 
+// Ordered longest-suffix first so more specific entries (e.g. the `serverless`
+// ElastiCache suffix) match before their shorter parents. matchByHost iterates
+// the list and short-circuits on the first endsWith hit.
 const HOST_SUFFIXES: Array<{ suffix: string; provider: Provider }> = [
-  { suffix: '.cache.amazonaws.com', provider: 'aws-elasticache' },
-  { suffix: '.serverless.cache.amazonaws.com', provider: 'aws-elasticache' },
-  { suffix: '.gcp.cloud.rlrcp.com', provider: 'redis-cloud' },
-  { suffix: '.redislabs.com', provider: 'redis-cloud' },
-  { suffix: '.redis-cloud.com', provider: 'redis-cloud' },
-  { suffix: '.redis.cache.windows.net', provider: 'unknown' }, // Azure Cache for Redis — surface as unknown for now; restrictions unverified
-  { suffix: '.upstash.io', provider: 'upstash' },
   { suffix: '.internal.memorystore.googleapis.com', provider: 'gcp-memorystore' },
+  { suffix: '.serverless.cache.amazonaws.com', provider: 'aws-elasticache' },
+  { suffix: '.redis.cache.windows.net', provider: 'unknown' }, // Azure Cache for Redis — surface as unknown for now; restrictions unverified
+  { suffix: '.gcp.cloud.rlrcp.com', provider: 'redis-cloud' },
+  { suffix: '.cache.amazonaws.com', provider: 'aws-elasticache' },
+  { suffix: '.redis-cloud.com', provider: 'redis-cloud' },
+  { suffix: '.redislabs.com', provider: 'redis-cloud' },
+  { suffix: '.upstash.io', provider: 'upstash' },
 ];
 
 /**
