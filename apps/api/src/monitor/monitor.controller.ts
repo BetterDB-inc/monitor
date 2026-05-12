@@ -341,8 +341,8 @@ export class MonitorController {
     return this.captureScheduler.listSchedules({
       connectionId,
       status: status as StoredScheduledCapture['status'] | undefined,
-      limit: limit ? parseInt(limit, 10) : undefined,
-      offset: offset ? parseInt(offset, 10) : undefined,
+      limit: parsePositiveInt(limit, 100, 1000),
+      offset: parsePositiveInt(offset, 0, Number.MAX_SAFE_INTEGER),
     });
   }
 
