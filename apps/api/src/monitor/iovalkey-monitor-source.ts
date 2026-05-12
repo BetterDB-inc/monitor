@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import type Valkey from 'iovalkey';
 import { MonitorSource } from './capture-writer';
+import { isRedactionEnabled, redactWriteCommandArgs } from './value-redactor';
 
 /**
  * Wrap iovalkey's `MONITOR` mode in our {@link MonitorSource} contract.
@@ -15,9 +16,11 @@ export async function createIovalkeyMonitorSource(client: Valkey): Promise<Monit
   const emitter = new EventEmitter();
   let stopped = false;
 
+  const redactionEnabled = isRedactionEnabled();
   monitor.on('monitor', (time: string, args: string[], source: string, database: number) => {
     if (stopped) return;
-    emitter.emit('line', formatMonitorLine(time, args, source, database));
+    const finalArgs = redactionEnabled ? redactWriteCommandArgs(args) : args;
+    emitter.emit('line', formatMonitorLine(time, finalArgs, source, database));
   });
 
   monitor.on('error', (err: Error) => {
