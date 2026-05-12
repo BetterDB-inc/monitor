@@ -57,6 +57,10 @@ export class DataRetentionService {
       { name: 'latency_snapshots', fn: () => this.storage.pruneOldLatencySnapshots(cutoff) },
       { name: 'latency_histograms', fn: () => this.storage.pruneOldLatencyHistograms(cutoff) },
       { name: 'memory_snapshots', fn: () => this.storage.pruneOldMemorySnapshots(cutoff) },
+      { name: 'capture_chunks', fn: () => this.storage.pruneOldCaptureChunks(cutoff) },
+      { name: 'capture_sessions', fn: () => this.storage.pruneOldCaptureSessions(cutoff) },
+      { name: 'capture_triggers', fn: () => this.storage.pruneOldCaptureTriggers(cutoff) },
+      { name: 'scheduled_captures', fn: () => this.storage.pruneOldScheduledCaptures(cutoff) },
     ];
 
     for (const op of pruneOps) {

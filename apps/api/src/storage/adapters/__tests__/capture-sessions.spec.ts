@@ -171,4 +171,132 @@ describe.each([
   it('getCaptureChunks returns empty for unknown session', async () => {
     expect(await storage.getCaptureChunks(randomUUID())).toEqual([]);
   });
+
+  describe('data-retention prune hooks', () => {
+    const NOW = 2_000_000_000_000;
+    const EIGHT_DAYS_AGO = NOW - 8 * 24 * 60 * 60 * 1000;
+    const TWO_DAYS_AGO = NOW - 2 * 24 * 60 * 60 * 1000;
+    const SEVEN_DAY_CUTOFF = NOW - 7 * 24 * 60 * 60 * 1000;
+
+    it('pruneOldCaptureSessions deletes ended sessions older than the cutoff', async () => {
+      const old = makeSession({
+        id: randomUUID(),
+        startedAt: EIGHT_DAYS_AGO,
+        endedAt: EIGHT_DAYS_AGO + 1000,
+      });
+      const recent = makeSession({
+        id: randomUUID(),
+        startedAt: TWO_DAYS_AGO,
+        endedAt: TWO_DAYS_AGO + 1000,
+      });
+      await storage.saveCaptureSession(old, CONNECTION_ID);
+      await storage.saveCaptureSession(recent, CONNECTION_ID);
+
+      const pruned = await storage.pruneOldCaptureSessions(SEVEN_DAY_CUTOFF);
+      expect(pruned).toBe(1);
+      expect(await storage.getCaptureSession(old.id)).toBeNull();
+      expect(await storage.getCaptureSession(recent.id)).not.toBeNull();
+    });
+
+    it('pruneOldCaptureSessions does not touch running sessions even when older than the cutoff', async () => {
+      const running = makeSession({
+        id: randomUUID(),
+        status: 'running',
+        startedAt: EIGHT_DAYS_AGO,
+        endedAt: undefined,
+        durationMs: undefined,
+      });
+      await storage.saveCaptureSession(running, CONNECTION_ID);
+      const pruned = await storage.pruneOldCaptureSessions(SEVEN_DAY_CUTOFF);
+      expect(pruned).toBe(0);
+      expect(await storage.getCaptureSession(running.id)).not.toBeNull();
+    });
+
+    it('pruneOldCaptureChunks deletes chunks whose lastTs is below the cutoff', async () => {
+      const session = makeSession({
+        id: randomUUID(),
+        startedAt: EIGHT_DAYS_AGO,
+        endedAt: TWO_DAYS_AGO + 1000,
+      });
+      await storage.saveCaptureSession(session, CONNECTION_ID);
+      const sessionId = session.id;
+      await storage.saveCaptureChunk({
+        sessionId,
+        chunkIndex: 0,
+        bytes: Buffer.from('old', 'utf-8'),
+        lineCount: 1,
+        firstTs: EIGHT_DAYS_AGO,
+        lastTs: EIGHT_DAYS_AGO + 1000,
+      });
+      await storage.saveCaptureChunk({
+        sessionId,
+        chunkIndex: 1,
+        bytes: Buffer.from('recent', 'utf-8'),
+        lineCount: 1,
+        firstTs: TWO_DAYS_AGO,
+        lastTs: TWO_DAYS_AGO + 1000,
+      });
+      const pruned = await storage.pruneOldCaptureChunks(SEVEN_DAY_CUTOFF);
+      expect(pruned).toBe(1);
+      const remaining = await storage.getCaptureChunks(sessionId);
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].chunkIndex).toBe(1);
+    });
+
+    it('pruneOldCaptureTriggers deletes terminal triggers older than cutoff and preserves active ones', async () => {
+      const fired = {
+        id: randomUUID(),
+        connectionId: CONNECTION_ID,
+        metricType: 'connections',
+        anomalyType: 'spike',
+        expiresAt: EIGHT_DAYS_AGO + 60_000,
+        createdAt: EIGHT_DAYS_AGO,
+        status: 'fired' as const,
+        firedAt: EIGHT_DAYS_AGO + 30_000,
+        firedSessionId: randomUUID(),
+      };
+      const stillConfigured = {
+        id: randomUUID(),
+        connectionId: CONNECTION_ID,
+        metricType: 'memory_used',
+        anomalyType: 'spike',
+        expiresAt: NOW + 24 * 60 * 60 * 1000,
+        createdAt: EIGHT_DAYS_AGO,
+        status: 'configured' as const,
+      };
+      await storage.saveCaptureTrigger(fired);
+      await storage.saveCaptureTrigger(stillConfigured);
+
+      const pruned = await storage.pruneOldCaptureTriggers(SEVEN_DAY_CUTOFF);
+      expect(pruned).toBe(1);
+      expect(await storage.getCaptureTrigger(fired.id)).toBeNull();
+      expect(await storage.getCaptureTrigger(stillConfigured.id)).not.toBeNull();
+    });
+
+    it('pruneOldScheduledCaptures deletes disabled rows older than cutoff and preserves enabled ones', async () => {
+      const disabled = {
+        id: randomUUID(),
+        connectionId: CONNECTION_ID,
+        intervalSeconds: 60,
+        durationMs: 5000,
+        status: 'disabled' as const,
+        createdAt: EIGHT_DAYS_AGO,
+      };
+      const enabled = {
+        id: randomUUID(),
+        connectionId: CONNECTION_ID,
+        intervalSeconds: 60,
+        durationMs: 5000,
+        status: 'enabled' as const,
+        createdAt: EIGHT_DAYS_AGO,
+      };
+      await storage.saveScheduledCapture(disabled);
+      await storage.saveScheduledCapture(enabled);
+
+      const pruned = await storage.pruneOldScheduledCaptures(SEVEN_DAY_CUTOFF);
+      expect(pruned).toBe(1);
+      expect(await storage.getScheduledCapture(disabled.id)).toBeNull();
+      expect(await storage.getScheduledCapture(enabled.id)).not.toBeNull();
+    });
+  });
 });

@@ -497,6 +497,12 @@ export interface StoragePort {
   getScheduledCapture(id: string): Promise<StoredScheduledCapture | null>;
   getScheduledCaptures(options?: ScheduledCaptureQueryOptions): Promise<StoredScheduledCapture[]>;
 
+  // Monitor data-retention prune hooks (PR 22)
+  pruneOldCaptureSessions(cutoffTimestamp: number): Promise<number>;
+  pruneOldCaptureChunks(cutoffTimestamp: number): Promise<number>;
+  pruneOldCaptureTriggers(cutoffTimestamp: number): Promise<number>;
+  pruneOldScheduledCaptures(cutoffTimestamp: number): Promise<number>;
+
   // Connection Management Methods (not connection-scoped, they manage connections themselves)
   saveConnection(config: DatabaseConnectionConfig): Promise<void>;
   getConnections(): Promise<DatabaseConnectionConfig[]>;
