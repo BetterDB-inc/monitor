@@ -92,7 +92,10 @@ export type ScheduledCaptureStatus = 'enabled' | 'disabled';
 export interface StoredScheduledCapture {
   id: string;
   connectionId: string;
-  intervalSeconds: number;
+  /** Fixed interval in seconds. Mutually exclusive with cronExpression. */
+  intervalSeconds?: number;
+  /** Standard 5- or 6-field cron expression. Mutually exclusive with intervalSeconds. */
+  cronExpression?: string;
   durationMs: number;
   status: ScheduledCaptureStatus;
   createdAt: number;
@@ -112,6 +115,7 @@ export interface ScheduledCaptureQueryOptions {
 export interface ScheduledCapturePatch {
   status?: ScheduledCaptureStatus;
   intervalSeconds?: number;
+  cronExpression?: string;
   durationMs?: number;
   lastFiredAt?: number;
   lastFiredSessionId?: string;

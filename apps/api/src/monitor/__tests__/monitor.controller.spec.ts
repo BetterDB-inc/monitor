@@ -450,6 +450,7 @@ describe('MonitorController', () => {
       expect(captureScheduler.createSchedule).toHaveBeenCalledWith({
         connectionId: 'conn-1',
         intervalSeconds: 30,
+        cronExpression: undefined,
         durationMs: 5000,
         createdBy: 'alice',
       });
@@ -462,10 +463,25 @@ describe('MonitorController', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('createSchedule throws BadRequest when intervalSeconds is missing', async () => {
+    it('createSchedule throws BadRequest when both intervalSeconds and cronExpression are missing', async () => {
       await expect(
         controller.createSchedule({ connectionId: 'conn-1', durationMs: 5000 }),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('createSchedule forwards cronExpression when provided', async () => {
+      await controller.createSchedule({
+        connectionId: 'conn-1',
+        cronExpression: '*/2 * * * *',
+        durationMs: 5000,
+      });
+      expect(captureScheduler.createSchedule).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        intervalSeconds: undefined,
+        cronExpression: '*/2 * * * *',
+        durationMs: 5000,
+        createdBy: undefined,
+      });
     });
 
     it('createSchedule throws BadRequest when durationMs is missing', async () => {

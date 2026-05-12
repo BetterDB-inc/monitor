@@ -1,11 +1,19 @@
 import type {
   CaptureTriggerStatus,
+  ScheduledCaptureStatus,
   StoredCaptureSession,
   StoredCaptureTrigger,
+  StoredScheduledCapture,
 } from '@betterdb/shared';
 import { fetchApi } from './client';
 
-export type { StoredCaptureSession, StoredCaptureTrigger, CaptureTriggerStatus };
+export type {
+  StoredCaptureSession,
+  StoredCaptureTrigger,
+  StoredScheduledCapture,
+  CaptureTriggerStatus,
+  ScheduledCaptureStatus,
+};
 
 export interface ListSessionsParams {
   connectionId?: string;
@@ -231,6 +239,40 @@ export const monitorApi = {
       { method: 'DELETE' },
     );
   },
+
+  listSchedules: (params: ListSchedulesParams = {}): Promise<StoredScheduledCapture[]> => {
+    const search = new URLSearchParams();
+    if (params.connectionId) {
+      search.set('connectionId', params.connectionId);
+    }
+    if (params.status) {
+      search.set('status', params.status);
+    }
+    if (params.limit !== undefined) {
+      search.set('limit', String(params.limit));
+    }
+    if (params.offset !== undefined) {
+      search.set('offset', String(params.offset));
+    }
+    const query = search.toString();
+    return fetchApi<StoredScheduledCapture[]>(
+      query ? `/monitor/schedules?${query}` : '/monitor/schedules',
+    );
+  },
+
+  createSchedule: (params: CreateScheduleParams): Promise<StoredScheduledCapture> => {
+    return fetchApi<StoredScheduledCapture>('/monitor/schedules', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  },
+
+  deleteSchedule: (id: string): Promise<{ deleted: boolean }> => {
+    return fetchApi<{ deleted: boolean }>(
+      `/monitor/schedules/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    );
+  },
 };
 
 export interface ListTriggersParams {
@@ -245,5 +287,20 @@ export interface CreateTriggerParams {
   metricType: string;
   anomalyType: string;
   expiresAt?: number;
+  createdBy?: string;
+}
+
+export interface ListSchedulesParams {
+  connectionId?: string;
+  status?: ScheduledCaptureStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export interface CreateScheduleParams {
+  connectionId: string;
+  intervalSeconds?: number;
+  cronExpression?: string;
+  durationMs: number;
   createdBy?: string;
 }

@@ -62,6 +62,7 @@ interface CreateTriggerRequestBody {
 interface CreateScheduleRequestBody {
   connectionId?: string;
   intervalSeconds?: number;
+  cronExpression?: string;
   durationMs?: number;
   createdBy?: string;
 }
@@ -355,8 +356,10 @@ export class MonitorController {
     if (!body?.connectionId) {
       throw new BadRequestException('connectionId is required');
     }
-    if (body.intervalSeconds === undefined) {
-      throw new BadRequestException('intervalSeconds is required');
+    if (body.intervalSeconds === undefined && !body.cronExpression) {
+      throw new BadRequestException(
+        'Either intervalSeconds or cronExpression is required',
+      );
     }
     if (body.durationMs === undefined) {
       throw new BadRequestException('durationMs is required');
@@ -364,6 +367,7 @@ export class MonitorController {
     return this.captureScheduler.createSchedule({
       connectionId: body.connectionId,
       intervalSeconds: body.intervalSeconds,
+      cronExpression: body.cronExpression,
       durationMs: body.durationMs,
       createdBy: body.createdBy,
     });

@@ -1450,23 +1450,38 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_capture_triggers_dedup
         ON capture_triggers(connection_id, metric_type, anomaly_type, status);
 
-      -- Pro+ Scheduled Captures Table (PR 19)
+      -- Pro+ Scheduled Captures Table (PR 19, cron column added in PR 20)
       CREATE TABLE IF NOT EXISTS scheduled_captures (
         id TEXT PRIMARY KEY,
         connection_id TEXT NOT NULL,
-        interval_seconds INTEGER NOT NULL CHECK (interval_seconds >= 10),
+        interval_seconds INTEGER,
+        cron_expression TEXT,
         duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),
         status TEXT NOT NULL CHECK (status IN ('enabled','disabled')),
         created_at INTEGER NOT NULL,
         created_by TEXT,
         last_fired_at INTEGER,
         last_fired_session_id TEXT,
-        last_skip_reason TEXT
+        last_skip_reason TEXT,
+        CHECK (
+          (interval_seconds IS NOT NULL AND cron_expression IS NULL)
+          OR (interval_seconds IS NULL AND cron_expression IS NOT NULL)
+        ),
+        CHECK (interval_seconds IS NULL OR interval_seconds >= 10)
       );
 
       CREATE INDEX IF NOT EXISTS idx_scheduled_captures_conn_status
         ON scheduled_captures(connection_id, status);
     `);
+
+    // Idempotent migration for deployments that ran the PR 19 schema before
+    // cron support landed.
+    const scheduledCols = this.db
+      .prepare('PRAGMA table_info(scheduled_captures)')
+      .all() as { name: string }[];
+    if (!scheduledCols.some((c) => c.name === 'cron_expression')) {
+      this.db.exec('ALTER TABLE scheduled_captures ADD COLUMN cron_expression TEXT');
+    }
 
     // Idempotent migration for existing deployments without ops/CPU columns
     const addColumnIfMissing = (
@@ -3982,14 +3997,15 @@ export class SqliteAdapter implements StoragePort {
     this.db
       .prepare(
         `INSERT INTO scheduled_captures
-          (id, connection_id, interval_seconds, duration_ms, status, created_at,
-           created_by, last_fired_at, last_fired_session_id, last_skip_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, connection_id, interval_seconds, cron_expression, duration_ms, status,
+           created_at, created_by, last_fired_at, last_fired_session_id, last_skip_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         schedule.id,
         schedule.connectionId,
-        schedule.intervalSeconds,
+        schedule.intervalSeconds ?? null,
+        schedule.cronExpression ?? null,
         schedule.durationMs,
         schedule.status,
         schedule.createdAt,
@@ -4012,6 +4028,10 @@ export class SqliteAdapter implements StoragePort {
     if (patch.intervalSeconds !== undefined) {
       sets.push('interval_seconds = ?');
       params.push(patch.intervalSeconds);
+    }
+    if (patch.cronExpression !== undefined) {
+      sets.push('cron_expression = ?');
+      params.push(patch.cronExpression);
     }
     if (patch.durationMs !== undefined) {
       sets.push('duration_ms = ?');
@@ -4084,7 +4104,8 @@ export class SqliteAdapter implements StoragePort {
     return {
       id: row.id as string,
       connectionId: row.connection_id as string,
-      intervalSeconds: row.interval_seconds as number,
+      intervalSeconds: (row.interval_seconds as number | null) ?? undefined,
+      cronExpression: (row.cron_expression as string | null) ?? undefined,
       durationMs: row.duration_ms as number,
       status: row.status as StoredScheduledCapture['status'],
       createdAt: row.created_at as number,

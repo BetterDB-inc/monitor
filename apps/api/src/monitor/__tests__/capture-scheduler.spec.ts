@@ -86,9 +86,11 @@ describe('CaptureScheduler', () => {
 
       const persisted = await storage.getScheduledCapture(schedule.id);
       expect(persisted).not.toBeNull();
-      expect(registry.doesExist('interval', `monitor-schedule-${schedule.id}`)).toBe(true);
+      expect(
+        registry.doesExist('interval', `monitor-schedule-interval-${schedule.id}`),
+      ).toBe(true);
 
-      registry.deleteInterval(`monitor-schedule-${schedule.id}`);
+      registry.deleteInterval(`monitor-schedule-interval-${schedule.id}`);
     });
 
     it('rejects intervals below 10 seconds', async () => {
@@ -129,6 +131,66 @@ describe('CaptureScheduler', () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
+
+    it('rejects when neither intervalSeconds nor cronExpression is provided', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { scheduler } = makeScheduler(captureService, healthGate);
+      await expect(
+        scheduler.createSchedule({
+          connectionId: CONNECTION_ID,
+          durationMs: 1000,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects when both intervalSeconds and cronExpression are provided', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { scheduler } = makeScheduler(captureService, healthGate);
+      await expect(
+        scheduler.createSchedule({
+          connectionId: CONNECTION_ID,
+          intervalSeconds: 30,
+          cronExpression: '*/2 * * * *',
+          durationMs: 1000,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('persists a cron schedule and registers a Nest cron job', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { scheduler, storage, registry } = makeScheduler(captureService, healthGate);
+
+      const schedule = await scheduler.createSchedule({
+        connectionId: CONNECTION_ID,
+        cronExpression: '*/2 * * * *',
+        durationMs: 5000,
+      });
+      expect(schedule.cronExpression).toBe('*/2 * * * *');
+      expect(schedule.intervalSeconds).toBeUndefined();
+
+      const persisted = await storage.getScheduledCapture(schedule.id);
+      expect(persisted?.cronExpression).toBe('*/2 * * * *');
+      expect(registry.doesExist('cron', `monitor-schedule-cron-${schedule.id}`)).toBe(true);
+
+      await scheduler.deleteSchedule(schedule.id);
+      expect(registry.doesExist('cron', `monitor-schedule-cron-${schedule.id}`)).toBe(false);
+    });
+
+    it('rejects an invalid cron expression', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { scheduler } = makeScheduler(captureService, healthGate);
+      await expect(
+        scheduler.createSchedule({
+          connectionId: CONNECTION_ID,
+          cronExpression: 'not a cron',
+          durationMs: 1000,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
   });
 
   describe('deleteSchedule', () => {
@@ -145,7 +207,9 @@ describe('CaptureScheduler', () => {
       const ok = await scheduler.deleteSchedule(schedule.id);
       expect(ok).toBe(true);
       expect(await storage.getScheduledCapture(schedule.id)).toBeNull();
-      expect(registry.doesExist('interval', `monitor-schedule-${schedule.id}`)).toBe(false);
+      expect(
+        registry.doesExist('interval', `monitor-schedule-interval-${schedule.id}`),
+      ).toBe(false);
     });
 
     it('throws NotFound for unknown id', async () => {

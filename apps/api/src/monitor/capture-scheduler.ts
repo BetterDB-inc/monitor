@@ -8,6 +8,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
+import { CronJob } from 'cron';
 import { randomUUID } from 'crypto';
 import {
   ScheduledCaptureQueryOptions,
@@ -17,7 +18,8 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
 
-const INTERVAL_PREFIX = 'monitor-schedule-';
+const INTERVAL_PREFIX = 'monitor-schedule-interval-';
+const CRON_PREFIX = 'monitor-schedule-cron-';
 
 export const MIN_INTERVAL_SECONDS = 10;
 export const MAX_INTERVAL_SECONDS = 24 * 60 * 60;
@@ -26,7 +28,9 @@ export const MAX_DURATION_MS = 15 * 60 * 1000;
 
 export interface CreateScheduleInput {
   connectionId: string;
-  intervalSeconds: number;
+  /** One of intervalSeconds OR cronExpression must be supplied. */
+  intervalSeconds?: number;
+  cronExpression?: string;
   durationMs: number;
   createdBy?: string;
 }
@@ -83,19 +87,23 @@ export class CaptureScheduler implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
-    for (const name of this.activeTimerNames()) {
+    for (const name of this.activeIntervalNames()) {
       this.schedulerRegistry.deleteInterval(name);
+    }
+    for (const name of this.activeCronNames()) {
+      this.schedulerRegistry.deleteCronJob(name);
     }
   }
 
   async createSchedule(input: CreateScheduleInput): Promise<StoredScheduledCapture> {
-    validateInterval(input.intervalSeconds);
+    validateScheduleSpec(input);
     validateDuration(input.durationMs);
 
     const schedule: StoredScheduledCapture = {
       id: randomUUID(),
       connectionId: input.connectionId,
       intervalSeconds: input.intervalSeconds,
+      cronExpression: input.cronExpression,
       durationMs: input.durationMs,
       status: 'enabled',
       createdAt: Date.now(),
@@ -141,7 +149,16 @@ export class CaptureScheduler implements OnModuleInit, OnModuleDestroy {
   }
 
   private registerTimer(schedule: StoredScheduledCapture): void {
-    const name = timerName(schedule.id);
+    if (schedule.cronExpression) {
+      this.registerCronJob(schedule);
+      return;
+    }
+    if (schedule.intervalSeconds === undefined) {
+      throw new Error(
+        `Schedule ${schedule.id} has neither intervalSeconds nor cronExpression`,
+      );
+    }
+    const name = intervalName(schedule.id);
     if (this.schedulerRegistry.doesExist('interval', name)) {
       this.schedulerRegistry.deleteInterval(name);
     }
@@ -153,17 +170,41 @@ export class CaptureScheduler implements OnModuleInit, OnModuleDestroy {
     this.schedulerRegistry.addInterval(name, handle);
   }
 
+  private registerCronJob(schedule: StoredScheduledCapture): void {
+    const name = cronName(schedule.id);
+    if (this.schedulerRegistry.doesExist('cron', name)) {
+      this.schedulerRegistry.deleteCronJob(name);
+    }
+    const job = new CronJob(schedule.cronExpression!, () => {
+      this.tick(schedule).catch((err: Error) => {
+        this.logger.error(`Scheduled cron capture tick failed (${schedule.id}): ${err.message}`);
+      });
+    });
+    this.schedulerRegistry.addCronJob(name, job);
+    job.start();
+  }
+
   private unregisterTimer(id: string): void {
-    const name = timerName(id);
-    if (this.schedulerRegistry.doesExist('interval', name)) {
-      this.schedulerRegistry.deleteInterval(name);
+    const intervalKey = intervalName(id);
+    if (this.schedulerRegistry.doesExist('interval', intervalKey)) {
+      this.schedulerRegistry.deleteInterval(intervalKey);
+    }
+    const cronKey = cronName(id);
+    if (this.schedulerRegistry.doesExist('cron', cronKey)) {
+      this.schedulerRegistry.deleteCronJob(cronKey);
     }
   }
 
-  private activeTimerNames(): string[] {
+  private activeIntervalNames(): string[] {
     return this.schedulerRegistry
       .getIntervals()
       .filter((n) => n.startsWith(INTERVAL_PREFIX));
+  }
+
+  private activeCronNames(): string[] {
+    return Array.from(this.schedulerRegistry.getCronJobs().keys()).filter((n) =>
+      n.startsWith(CRON_PREFIX),
+    );
   }
 
   private async tick(schedule: StoredScheduledCapture): Promise<void> {
@@ -210,8 +251,27 @@ export class CaptureScheduler implements OnModuleInit, OnModuleDestroy {
   }
 }
 
-function timerName(id: string): string {
+function intervalName(id: string): string {
   return `${INTERVAL_PREFIX}${id}`;
+}
+
+function cronName(id: string): string {
+  return `${CRON_PREFIX}${id}`;
+}
+
+function validateScheduleSpec(input: CreateScheduleInput): void {
+  const hasInterval = input.intervalSeconds !== undefined;
+  const hasCron = input.cronExpression !== undefined;
+  if (hasInterval === hasCron) {
+    throw new BadRequestException(
+      'Exactly one of intervalSeconds or cronExpression must be provided',
+    );
+  }
+  if (hasInterval) {
+    validateInterval(input.intervalSeconds!);
+  } else {
+    validateCron(input.cronExpression!);
+  }
 }
 
 function validateInterval(seconds: number): void {
@@ -224,6 +284,16 @@ function validateInterval(seconds: number): void {
     throw new BadRequestException(
       `intervalSeconds must be at most ${MAX_INTERVAL_SECONDS}`,
     );
+  }
+}
+
+function validateCron(expression: string): void {
+  try {
+    // CronJob constructor with start=false / no auto-run still validates the
+    // expression and throws on syntax errors. We discard the instance.
+    new CronJob(expression, () => undefined, null, false);
+  } catch (err) {
+    throw new BadRequestException(`Invalid cron expression: ${(err as Error).message}`);
   }
 }
 

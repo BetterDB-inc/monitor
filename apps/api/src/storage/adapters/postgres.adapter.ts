@@ -1696,11 +1696,12 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_capture_triggers_dedup
         ON capture_triggers(connection_id, metric_type, anomaly_type, status);
 
-      -- Pro+ Scheduled Captures Table (PR 19)
+      -- Pro+ Scheduled Captures Table (PR 19, cron column added in PR 20)
       CREATE TABLE IF NOT EXISTS scheduled_captures (
         id UUID PRIMARY KEY,
         connection_id TEXT NOT NULL,
-        interval_seconds INTEGER NOT NULL CHECK (interval_seconds >= 10),
+        interval_seconds INTEGER,
+        cron_expression TEXT,
         duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),
         status VARCHAR(20) NOT NULL,
         created_at BIGINT NOT NULL,
@@ -1708,11 +1709,20 @@ export class PostgresAdapter implements StoragePort {
         last_fired_at BIGINT,
         last_fired_session_id UUID,
         last_skip_reason TEXT,
-        CHECK (status IN ('enabled','disabled'))
+        CHECK (status IN ('enabled','disabled')),
+        CHECK (
+          (interval_seconds IS NOT NULL AND cron_expression IS NULL)
+          OR (interval_seconds IS NULL AND cron_expression IS NOT NULL)
+        ),
+        CHECK (interval_seconds IS NULL OR interval_seconds >= 10)
       );
 
       CREATE INDEX IF NOT EXISTS idx_scheduled_captures_conn_status
         ON scheduled_captures(connection_id, status);
+
+      -- Idempotent migration for deployments that ran the PR 19 schema
+      ALTER TABLE scheduled_captures
+        ADD COLUMN IF NOT EXISTS cron_expression TEXT;
     `);
   }
 
@@ -4239,13 +4249,14 @@ export class PostgresAdapter implements StoragePort {
     if (!this.pool) throw new Error('Database not initialized');
     await this.pool.query(
       `INSERT INTO scheduled_captures
-         (id, connection_id, interval_seconds, duration_ms, status, created_at,
-          created_by, last_fired_at, last_fired_session_id, last_skip_reason)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+         (id, connection_id, interval_seconds, cron_expression, duration_ms, status,
+          created_at, created_by, last_fired_at, last_fired_session_id, last_skip_reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         schedule.id,
         schedule.connectionId,
-        schedule.intervalSeconds,
+        schedule.intervalSeconds ?? null,
+        schedule.cronExpression ?? null,
         schedule.durationMs,
         schedule.status,
         schedule.createdAt,
@@ -4270,6 +4281,10 @@ export class PostgresAdapter implements StoragePort {
     if (patch.intervalSeconds !== undefined) {
       sets.push(`interval_seconds = $${p++}`);
       params.push(patch.intervalSeconds);
+    }
+    if (patch.cronExpression !== undefined) {
+      sets.push(`cron_expression = $${p++}`);
+      params.push(patch.cronExpression);
     }
     if (patch.durationMs !== undefined) {
       sets.push(`duration_ms = $${p++}`);
@@ -4345,7 +4360,8 @@ export class PostgresAdapter implements StoragePort {
     return {
       id: row.id as string,
       connectionId: row.connection_id as string,
-      intervalSeconds: toNumber(row.interval_seconds),
+      intervalSeconds: toOptionalNumber(row.interval_seconds),
+      cronExpression: (row.cron_expression as string | null) ?? undefined,
       durationMs: toNumber(row.duration_ms),
       status: row.status as StoredScheduledCapture['status'],
       createdAt: toNumber(row.created_at),
