@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-05-13
+
+### Added
+
+- **LLM-as-judge for borderline hits** — `CacheCheckOptions.judge` accepts a `judgeFn` that adjudicates hits whose cosine distance lands in the uncertainty band (`threshold - uncertaintyBand < score <= threshold`). The judge promotes accepted hits to `confidence: 'high'` and demotes rejected hits to a miss with `nearestMiss` populated. Configurable `timeoutMs` (default 2000) and `onError` (default `'accept'`, fail-open). Direct response to user feedback that single-threshold matching produced too many uncertain borderline returns on chat.betterdb.com.
+- New Prometheus metrics `{prefix}_judge_decisions_total{decision}` and `{prefix}_judge_duration_seconds{decision}` with decision labels `accept | reject | error_accept | error_reject | timeout_accept | timeout_reject`.
+- New OTel span attributes `cache.judge.invoked`, `cache.judge.decision`, `cache.judge.latency_ms`.
+- `JudgeOptions` type exported from the package root.
+
+### Changed
+
+- `nearestMiss.deltaToThreshold` may be `<= 0` when a miss originates from a judge rejection (the score did clear the threshold but the judge said no). Existing miss paths still produce `> 0`. Documented on the type.
+- `checkBatch()` throws `SemanticCacheUsageError` when `judge` is supplied, matching the existing handling of `rerank` and `staleAfterModelChange`.
+
+### Breaking changes
+
+None.
+
 ## [0.4.0] - 2026-05-04
 
 ### Added

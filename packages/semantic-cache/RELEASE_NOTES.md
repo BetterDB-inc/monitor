@@ -1,111 +1,99 @@
-# Release Notes - @betterdb/semantic-cache v0.2.0
+# Release Notes — @betterdb/semantic-cache v0.5.0
 
 ## What's New
 
-v0.2.0 brings full adapter parity with `@betterdb/agent-cache`, adds cost tracking with a bundled model price table, multi-modal prompt support, threshold effectiveness recommendations, and several new quality-of-life features.
+v0.5.0 adds LLM-as-judge adjudication for borderline cache hits. This is a direct response to user feedback from chat.betterdb.com: single-threshold matching produced too many `confidence: 'uncertain'` returns that callers had to handle themselves. With the judge, you can plug in an LLM call (or any async function) to make the accept/reject call on ambiguous hits automatically.
 
 ## Installation
 
 ```bash
-npm install @betterdb/semantic-cache@0.2.0 iovalkey
+npm install @betterdb/semantic-cache@0.5.0 iovalkey
 ```
 
 ## Highlights
 
-### Bundled cost table + cost savings tracking
+### LLM-as-judge for borderline hits
 
-Store token counts at cache-time and automatically compute cost saved on every hit:
-
-```typescript
-await cache.store('What is the capital of France?', 'Paris', {
-  model: 'gpt-4o',
-  inputTokens: 25,
-  outputTokens: 5,
-});
-
-const result = await cache.check('Capital city of France?');
-console.log(result.costSaved); // e.g. 0.000105
-```
-
-The bundled `DEFAULT_COST_TABLE` contains pricing for 1,971 models sourced from LiteLLM. Update with `pnpm update:pricing`.
-
-### Five new provider adapters
-
-Each extracts the semantic cache key from provider-specific request params:
+Supply a `judgeFn` on any `check()` call. It fires only when the cosine distance lands in the uncertainty band:
 
 ```typescript
-import { prepareSemanticParams } from '@betterdb/semantic-cache/openai';
-import { prepareSemanticParams } from '@betterdb/semantic-cache/openai-responses';
-import { prepareSemanticParams } from '@betterdb/semantic-cache/anthropic';
-import { prepareSemanticParams } from '@betterdb/semantic-cache/llamaindex';
-import { BetterDBSemanticStore } from '@betterdb/semantic-cache/langgraph';
-```
+import { SemanticCache } from '@betterdb/semantic-cache';
+import Valkey from 'iovalkey';
+import OpenAI from 'openai';
 
-### Embedding helpers
-
-Five pre-built `EmbedFn` factories for common providers:
-
-```typescript
-import { createOpenAIEmbed } from '@betterdb/semantic-cache/embed/openai';
-import { createVoyageEmbed } from '@betterdb/semantic-cache/embed/voyage';
-// + createBedrockEmbed, createCohereEmbed, createOllamaEmbed
-```
-
-### Multi-modal prompts
-
-Cache prompts containing both text and binary content (images, documents, audio):
-
-```typescript
-const prompt: ContentBlock[] = [
-  { type: 'text', text: 'Describe this image.' },
-  { type: 'binary', kind: 'image', mediaType: 'image/png', ref: hashBase64(b64) },
-];
-await cache.store(prompt, 'A red square.');
-const result = await cache.check(prompt); // only hits if text AND image ref match
-```
-
-### Threshold effectiveness recommendations
-
-Analyze the rolling score window and get actionable threshold tuning advice:
-
-```typescript
-const analysis = await cache.thresholdEffectiveness({ minSamples: 100 });
-// { recommendation: 'tighten_threshold', recommendedThreshold: 0.085, reasoning: '...' }
-```
-
-### Embedding cache
-
-Avoid re-embedding the same text on repeated `check()` calls. Enabled by default with 24-hour TTL:
-
-```typescript
+const openai = new OpenAI();
 const cache = new SemanticCache({
-  // ...
-  embeddingCache: { enabled: true, ttl: 86400 },
+  client: new Valkey(),
+  embedFn: async (text) => (await openai.embeddings.create({
+    model: 'text-embedding-3-small',
+    input: text,
+  })).data[0].embedding,
+  defaultThreshold: 0.15,
+  uncertaintyBand: 0.07,
 });
+await cache.initialize();
+
+const result = await cache.check(userPrompt, {
+  judge: {
+    judgeFn: async ({ prompt, response, similarity }) => {
+      const verdict = await openai.chat.completions.create({
+        model: 'gpt-5-mini',
+        messages: [
+          { role: 'system', content: 'You decide whether a cached response correctly answers a user prompt. Reply with only YES or NO.' },
+          { role: 'user', content: `Prompt: ${prompt}\n\nCached response: ${response}\n\nDoes the response correctly answer the prompt?` },
+        ],
+      });
+      return verdict.choices[0].message.content?.trim().toUpperCase().startsWith('YES') ?? false;
+    },
+    onError: 'accept',   // fail-open: return cached result if judge throws
+    timeoutMs: 1500,     // give the LLM 1.5 seconds
+  },
+});
+
+if (result.hit && result.confidence === 'high') {
+  // Judge accepted — use the cached response
+  return result.response;
+}
+if (!result.hit && result.nearestMiss) {
+  // Judge rejected — nearestMiss.deltaToThreshold <= 0 identifies this path
+  console.log('Judge-rejected borderline hit, falling back to LLM');
+}
 ```
 
-### Other additions
+### What happens in each case
 
-- `checkBatch(prompts[])` - pipelined multi-prompt lookups
-- `storeMultipart(prompt, blocks[])` - store structured response content blocks
-- `invalidateByModel(model)` / `invalidateByCategory(category)` - convenience invalidation
-- `staleAfterModelChange` option - auto-evict entries from old models
-- `rerank` hook - top-k candidate selection with custom ranking function
-- `temperature`, `topP`, `seed` stored as NUMERIC fields for opt-in filtering
-- Cluster-aware `flush()` using `clusterScan()` across all master nodes
+| Score range | Judge called? | Accept path | Reject path |
+|---|---|---|---|
+| `<= threshold - band` | No | `confidence: 'high'` | — |
+| `(threshold - band, threshold]` | Yes | `confidence: 'high'` | `hit: false`, `nearestMiss.deltaToThreshold <= 0` |
+| `> threshold` | No | — | `confidence: 'miss'` |
+
+### Error and timeout handling
+
+`onError: 'accept'` (default) returns the cached entry with `confidence: 'uncertain'` when `judgeFn` throws or times out — fail-open. `onError: 'reject'` treats errors as rejections — fail-closed.
+
+Prometheus counters track each outcome: `accept`, `reject`, `error_accept`, `error_reject`, `timeout_accept`, `timeout_reject`.
+
+### New Prometheus metrics
+
+```
+semantic_cache_judge_decisions_total{cache_name, category, decision}
+semantic_cache_judge_duration_seconds{cache_name, category, decision}
+```
+
+### OTel span attributes added on every judge invocation
+
+```
+cache.judge.invoked = true
+cache.judge.decision = "accept" | "reject" | ...
+cache.judge.latency_ms = <float>
+```
 
 ## Breaking changes
 
-None. v0.2.0 is backward compatible with v0.1.0. Existing text-only string prompts produce byte-identical cache behavior.
-
-**Schema migration required for multi-modal features:** The v0.2.0 index schema adds `binary_refs`, `temperature`, `top_p`, and `seed` fields. Existing v0.1.0 indexes operate in text-only mode until `flush()` and `initialize()` are called to rebuild.
-
-## Examples
-
-Runnable examples for every adapter and feature are in `packages/semantic-cache/examples/`. Each runs against a local Valkey instance at `localhost:6399`.
+None.
 
 ## Links
 
-- [Changelog](./CHANGELOG.md)
-- [Examples](./examples/README.md)
-- [Documentation](../../docs/packages/semantic-cache.md)
+- [CHANGELOG](./CHANGELOG.md)
+- [Examples](./examples/judge/)

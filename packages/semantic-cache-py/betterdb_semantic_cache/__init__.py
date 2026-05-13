@@ -1,3 +1,6 @@
+# TODO(v0.5): port LLM-as-judge from @betterdb/semantic-cache 0.5.0.
+# See packages/semantic-cache/CHANGELOG.md and src/types.ts JudgeOptions.
+
 from __future__ import annotations
 
 from .errors import EmbeddingError, SemanticCacheUsageError, ValkeyCommandError
