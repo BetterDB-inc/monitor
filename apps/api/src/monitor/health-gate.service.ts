@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import {
@@ -6,37 +7,38 @@ import {
   HealthGateSignals,
   HealthGateThresholds,
   evaluateHealthGate,
-  thresholdsFromEnv,
 } from './health-gate';
-
-/** Window in which a recent OOM-correlated anomaly event still counts as "active distress". */
-const RECENT_OOM_WINDOW_MS = parseWindowEnv('MONITOR_RECENT_OOM_WINDOW_MS', 5 * 60 * 1000);
-
-/** Window in which a recent replication-role change still counts as "failover in progress". */
-const RECENT_FAILOVER_WINDOW_MS = parseWindowEnv(
-  'MONITOR_RECENT_FAILOVER_WINDOW_MS',
-  2 * 60 * 1000,
-);
 
 @Injectable()
 export class HealthGateService {
   private readonly logger = new Logger(HealthGateService.name);
+  private readonly oomWindowMs: number;
+  private readonly failoverWindowMs: number;
+  private readonly thresholds: HealthGateThresholds;
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
-  ) {}
+    configService: ConfigService,
+  ) {
+    this.oomWindowMs = Number(
+      configService.get('MONITOR_RECENT_OOM_WINDOW_MS', 5 * 60 * 1000),
+    );
+    this.failoverWindowMs = Number(
+      configService.get('MONITOR_RECENT_FAILOVER_WINDOW_MS', 2 * 60 * 1000),
+    );
+    const memoryPct = Number(configService.get('MONITOR_MEMORY_PCT_THRESHOLD', 85));
+    const lagBytes = Number(
+      configService.get('MONITOR_REPLICATION_LAG_BYTES', 10 * 1024 * 1024),
+    );
+    this.thresholds = {
+      memoryPctThreshold: memoryPct / 100,
+      replicationLagThresholdBytes: lagBytes,
+    };
+  }
 
-  /**
-   * Evaluate the health gate for one connection. Pulls a fresh INFO snapshot,
-   * looks up recent OOM-correlated and failover anomalies in storage, and runs
-   * the pure {@link evaluateHealthGate} decision function.
-   */
-  async evaluate(
-    connectionId: string,
-    thresholds: HealthGateThresholds = thresholdsFromEnv(),
-  ): Promise<HealthGateResult> {
+  async evaluate(connectionId: string): Promise<HealthGateResult> {
     const client = this.connectionRegistry.get(connectionId);
     const info = await client.getInfoParsed();
 
@@ -45,8 +47,8 @@ export class HealthGateService {
     const now = Date.now();
 
     const [oomEvents, roleChangeEvents] = await Promise.all([
-      this.countRecentEvents(connectionId, 'memory_used', now - RECENT_OOM_WINDOW_MS),
-      this.countRecentEvents(connectionId, 'replication_role', now - RECENT_FAILOVER_WINDOW_MS),
+      this.countRecentEvents(connectionId, 'memory_used', now - this.oomWindowMs),
+      this.countRecentEvents(connectionId, 'replication_role', now - this.failoverWindowMs),
     ]);
 
     const signals: HealthGateSignals = {
@@ -56,7 +58,7 @@ export class HealthGateService {
       failoverInProgress: infoFailoverInProgress || roleChangeEvents > 0,
     };
 
-    const result = evaluateHealthGate(signals, thresholds);
+    const result = evaluateHealthGate(signals, this.thresholds);
     if (!result.allow) {
       this.logger.debug(
         `health gate skipping ${connectionId}: ${result.skipReason} signals=${JSON.stringify(signals)}`,
@@ -82,16 +84,25 @@ export class HealthGateService {
 
 function readMemoryPct(info: unknown): number {
   const memory = (info as { memory?: Record<string, string> }).memory;
-  if (!memory) return 0;
+  if (memory === undefined) {
+    return 0;
+  }
   const used = toNumber(memory.used_memory);
   const max = toNumber(memory.maxmemory);
-  if (max <= 0) return 0;
+  if (max <= 0) {
+    return 0;
+  }
   return used / max;
 }
 
-function readReplication(info: unknown): { replicationLagBytes: number; infoFailoverInProgress: boolean } {
+function readReplication(info: unknown): {
+  replicationLagBytes: number;
+  infoFailoverInProgress: boolean;
+} {
   const replication = (info as { replication?: Record<string, string> }).replication;
-  if (!replication) return { replicationLagBytes: 0, infoFailoverInProgress: false };
+  if (replication === undefined) {
+    return { replicationLagBytes: 0, infoFailoverInProgress: false };
+  }
 
   const isReplica = replication.role === 'slave' || replication.role === 'replica';
   let lag = 0;
@@ -102,20 +113,19 @@ function readReplication(info: unknown): { replicationLagBytes: number; infoFail
   }
 
   const failoverState = replication.master_failover_state;
-  const infoFailoverInProgress = !!failoverState && failoverState !== 'no-failover';
+  const infoFailoverInProgress =
+    failoverState !== undefined && failoverState !== '' && failoverState !== 'no-failover';
 
   return { replicationLagBytes: lag, infoFailoverInProgress };
 }
 
 function toNumber(raw: string | undefined): number {
-  if (!raw) return 0;
+  if (raw === undefined) {
+    return 0;
+  }
   const n = parseInt(raw, 10);
-  return isNaN(n) ? 0 : n;
-}
-
-function parseWindowEnv(name: string, fallbackMs: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallbackMs;
-  const n = parseInt(raw, 10);
-  return isNaN(n) || n < 0 ? fallbackMs : n;
+  if (isNaN(n)) {
+    return 0;
+  }
+  return n;
 }

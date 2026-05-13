@@ -1,3 +1,4 @@
+import type { ConfigService } from '@nestjs/config';
 import type { ConnectionRegistry } from '../../connections/connection-registry.service';
 import type { StoragePort, StoredAnomalyEvent } from '../../common/interfaces/storage-port.interface';
 import { HealthGateService } from '../health-gate.service';
@@ -40,8 +41,16 @@ function makeService({
       return Promise.resolve(anomalyEvents.filter((e) => e.metricType === metricType));
     }),
   } as unknown as StoragePort;
+  const configService = {
+    get: jest.fn((_key: string, defaultValue: number) => defaultValue),
+  } as unknown as ConfigService;
 
-  return { service: new HealthGateService(registry, storage), client, registry, storage };
+  return {
+    service: new HealthGateService(registry, storage, configService),
+    client,
+    registry,
+    storage,
+  };
 }
 
 describe('HealthGateService', () => {
