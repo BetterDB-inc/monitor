@@ -101,6 +101,12 @@ describe('resolveInstanceId', () => {
     expect(() => resolveInstanceId(null, 'bad id!')).toThrow('Invalid instance ID: bad id!');
   });
 
+  it('throws a clear error when override is an empty string', () => {
+    expect(() => resolveInstanceId('active-1', '')).toThrow(
+      'Instance ID override must not be an empty string.',
+    );
+  });
+
   it('accepts alphanumeric, hyphens, and underscores', () => {
     expect(resolveInstanceId(null, 'inst_abc-123')).toBe('inst_abc-123');
   });
@@ -130,9 +136,16 @@ describe('buildQuery', () => {
     expect(buildQuery({ limit: 10, command: undefined })).toBe('?limit=10');
   });
 
-  it('percent-encodes special characters', () => {
-    expect(buildQuery({ command: 'FT.SEARCH' })).toBe('?command=FT.SEARCH');
+  it('percent-encodes spaces in values', () => {
     expect(buildQuery({ q: 'a b' })).toBe('?q=a%20b');
+  });
+
+  it('does not encode unreserved characters like dots', () => {
+    expect(buildQuery({ command: 'FT.SEARCH' })).toBe('?command=FT.SEARCH');
+  });
+
+  it('percent-encodes special characters in keys', () => {
+    expect(buildQuery({ 'has space': 'val' })).toBe('?has%20space=val');
   });
 });
 

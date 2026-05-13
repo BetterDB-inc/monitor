@@ -27,6 +27,9 @@ export function licenseErrorResult(data: Pick<LicenseErrorPayload, 'requiredTier
 }
 
 export function resolveInstanceId(activeInstanceId: string | null, overrideId?: string): string {
+  if (overrideId !== undefined && overrideId !== null && overrideId === '') {
+    throw new Error('Instance ID override must not be an empty string.');
+  }
   const id = overrideId || activeInstanceId;
   if (!id) {
     throw new Error('No instance selected. Call list_instances then select_instance first.');
@@ -40,7 +43,7 @@ export function resolveInstanceId(activeInstanceId: string | null, overrideId?: 
 export function buildQuery(params: Record<string, string | number | boolean | undefined>): string {
   const parts: string[] = [];
   for (const [key, val] of Object.entries(params)) {
-    if (val !== undefined) parts.push(`${key}=${encodeURIComponent(String(val))}`);
+    if (val !== undefined) parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(val))}`);
   }
   return parts.length ? `?${parts.join('&')}` : '';
 }
