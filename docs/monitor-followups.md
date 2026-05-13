@@ -415,6 +415,91 @@ Mark items `- [x]` as they land.
   throw it from `fetchApi`. Benefits every monitor page that needs to
   distinguish failure modes.
 
+## From PR #172 review — start-session modal + pre-flight + 5-min confirmation
+
+- [ ] **5-min confirmation guard can be bypassed by editing duration between
+  the two clicks** (`apps/web/src/pages/monitor/start-session-modal.tsx:73-94`).
+  Today the flow is: first click on a 6-minute session sets
+  `confirming=true`; user can then edit duration up to e.g. 999 minutes;
+  second click ("Yes, start session") fires *without re-confirmation* because
+  the button label and gate only check at submit, never on duration change.
+  Fix: invalidate `confirming` whenever `durationMs` changes after entering
+  confirm mode (not just when it drops below 5m). The existing
+  auto-clear-when-dropping-below-5m effect at `:43-45` already proves the
+  hook; extend it to clear on any value change while `confirming === true`.
+
+- [ ] **Pre-flight failure must block start** (`start-session-modal.tsx:189-194`).
+  Submit is gated only on `submitting || preflightLoading`, not on
+  `!!preflightError`. If pre-flight fetch fails (network / license / 5xx)
+  the user can blindly start a session that the backend will then reject —
+  defeating the entire purpose of the pre-flight surface. Gate Submit on
+  `preflightError === null` (or require an explicit "Start without
+  pre-flight" affordance with its own confirmation).
+
+- [ ] **Make `PreflightPanel` defensive against degraded backend responses**
+  (`apps/web/src/pages/monitor/preflight-panel.tsx`). Multiple latent
+  crashes the moment any of the #166 follow-ups land:
+  - `:23` — `PROVIDER_LABELS[preflight.provider.provider]` with no
+    fallback renders `undefined` for any new provider value. Same class
+    of bug as `SessionStatusBadge` in #171.
+  - `:42` — `preflight.acl.hasMonitor` is treated as `boolean`. When the
+    `AclCheckResult` discriminated-union follow-up lands (PR #166),
+    `hasMonitor === 'unknown'` truthy-renders as "+monitor granted" —
+    actively misleading the operator.
+  - `:78-86` — throughput section calls `.toFixed` / `.toLocaleString`
+    on raw numbers. When the `{ available: false; reason }` follow-up
+    lands, `null.toFixed(0)` throws and crashes the modal (no visible
+    error boundary). Add per-section null guards and a fallback label
+    for unknown enum values.
+
+- [ ] **Add state-machine tests for the 5-min guard and state-reset-on-close**
+  (`start-session-modal.tsx`). Author shipped a state-carryover bug once
+  already (their own "Bug caught and fixed during live testing" admission
+  in the PR body). There is zero regression protection. The `apps/web`
+  Vitest + RTL infra is fully present and `cache-proposals/PendingCard.test.tsx`
+  is the direct precedent for modal interaction tests. Minimum test matrix:
+  - 30s submit → API called immediately
+  - 6m first submit → no API call, `confirming=true`, button label changes
+  - 6m second submit → API called
+  - 6m → drop to 30s → `confirming` clears
+  - API rejects → `confirming` resets in `finally`, modal stays open
+  - Close at 6m → reopen → input shows 30s default (the carryover bug)
+  - Rapid duration edits → only latest preflight result renders (race)
+
+- [ ] **Use `AbortController` for pre-flight fetches + debounce duration
+  input** (`start-session-modal.tsx:60-78`). Today the cancelled-flag
+  prevents stale `setState` but the underlying `fetch` runs to completion
+  on every keystroke. With unit=`s` and rapid typing ("3"→"30"→"300"), three
+  pre-flight POSTs hit the backend. Wire an `AbortController` per effect,
+  pass `signal` through `fetchApi` (the global client already supports it
+  per `apps/web/src/api/client.ts:148`), and debounce duration changes by
+  250–300 ms. Closes the modal-close-mid-fetch leak too.
+
+- [ ] **Bound `requestedBy` length and validate duration input client-side**
+  (`start-session-modal.tsx:127-135, 152`). Today:
+  - `requestedBy` is unbounded free text sent verbatim. Add
+    `maxLength={64}` on the input. Cross-reference #168 follow-up: this
+    field should ultimately come from the authenticated principal, not
+    body input; the UI gives the silent gap a visible surface.
+  - Duration accepts `1.5` (durationMs=1500), `1e9`, `999999999`. Add
+    `step={1}`, `Math.floor`, and a sane upper bound (e.g.
+    session-cap-aware max). Backend currently rejects with a generic 400
+    which collapses into the opaque error string (see typed-`HttpError`
+    item in the #171 section).
+
+- [ ] **Centralize the 5-minute threshold** (`start-session-modal.tsx:13`
+  `FIVE_MINUTES_MS`). Today it's a local magic constant. The same
+  threshold likely exists server-side as part of session-cap policy; move
+  to `packages/shared/src/monitor/defaults.ts` (the same module already
+  proposed for `DEFAULT_DURATION_MS`) so frontend / backend can't drift.
+
+- [ ] **Surface success feedback after Start session**
+  (`apps/web/src/pages/Monitor.tsx:53-60`). Today after `onStarted` fires
+  and modal closes, the only signal is the new row appearing — which
+  depends on `queryClient.invalidateQueries` succeeding (the call is
+  `void`-discarded, so failure is silent). Add a toast confirming the
+  session started, and `.catch(logError)` the invalidation.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
