@@ -337,6 +337,84 @@ Mark items `- [x]` as they land.
   Add a regression test that forces the race (terminate after
   `getActiveWriter` returns, before `subscribe` is wired).
 
+## From PR #171 review — Sessions list with 5s polling (first frontend slice)
+
+- [ ] **Surface fetch errors in the Monitor UI** (`apps/web/src/pages/Monitor.tsx:11-18`).
+  The page destructures only `{ data, loading }` from `usePolling`; the
+  `error` return is never read. On 4xx/5xx the table shows "No capture
+  sessions for this connection yet." — indistinguishable from a real empty
+  state. 403 (license), 404 (no connection), 500 (DB down), and network
+  failure all collapse into the same UI with no toast, no log, no Sentry
+  event. Destructure `error`, render an inline banner ("Failed to load
+  capture sessions: <message>. Retrying in 5s."), and call `logError` with
+  an errorId.
+
+- [ ] **`SessionStatusBadge` fallback for unknown statuses**
+  (`apps/web/src/pages/monitor/session-status-badge.tsx:11-18`).
+  `STYLES[status]` is type-safe at build time but a backend deploy that
+  introduces a new status (e.g. `'paused'`, `'aborted'`) ahead of a frontend
+  release produces `className="... undefined"` with no fallback label.
+  Add `const style = STYLES[status] ?? 'bg-muted text-muted-foreground'`
+  and a fallback label so the row stays readable. The same pattern applies
+  to any other typed-record lookup keyed on a server-controlled enum.
+
+- [ ] **Reuse the existing `formatBytes` utility and make formatters
+  defensive** (`apps/web/src/pages/monitor/sessions-table.tsx:84-97`).
+  - `formatBytes` is duplicated from `apps/web/src/lib/utils.ts:8` — delete
+    the local copy, import the canonical one.
+  - `formatDuration` belongs alongside `formatDurationUs` in `lib/utils.ts`
+    (or a sibling). Move it there.
+  - Both functions need guards: `formatBytes(NaN)` falls through every
+    threshold and renders `"NaN GB"`; `formatDuration` returns `0ms` for a
+    completed session in the transient state where both `durationMs` and
+    `endedAt` are missing post-finalize; `s.lineCount.toLocaleString()` at
+    `:70` throws `TypeError` if `lineCount` is ever undefined and crashes
+    the entire table. Guard with `Number.isFinite` checks and render `—`
+    for missing values.
+  - Add Vitest specs alongside `lib/formatters.test.ts` — pure functions
+    with magnitude-tier branching; the precedent and infra already exist.
+    (Author's "no test infrastructure" claim is incorrect — `apps/web` has
+    30+ test files including `lib/formatters.test.ts`,
+    `api/commandstats.test.ts`, and `components/pages/cache-proposals/*.test.tsx`.)
+
+- [ ] **Move monitor page components to `apps/web/src/components/pages/monitor/`**.
+  CLAUDE.md says "Pages components are in `components/pages` folder."
+  Project precedent at `components/pages/inference-latency/`,
+  `components/pages/cache-proposals/`, `components/pages/metric-forecasting/`.
+  PR #171 put `sessions-table.tsx` / `session-status-badge.tsx` in
+  `apps/web/src/pages/monitor/` (continuing a wrong prior precedent at
+  `pages/monitor/preflight-panel.tsx` from earlier monitor PRs). Move all
+  monitor page-internal components to `components/pages/monitor/` and
+  update imports.
+
+- [ ] **Status-badge colors via theme variables, not hard-coded Tailwind
+  classes** (`session-status-badge.tsx:4-9`). Today the badges use
+  `bg-emerald-500/15 text-emerald-700 dark:text-emerald-300` etc. — exactly
+  the "inline color breaks dark-mode adaptation" pattern CLAUDE.md guards
+  against for charts. Map to semantic theme variables:
+  `running → --chart-info`, `truncated → --chart-warning`,
+  `failed → --chart-critical`, `completed → --primary` or `--chart-1`,
+  `skipped → --muted`.
+
+- [ ] **Clarify that counters are flushed-not-live in the Sessions table**.
+  The 5s polling pulls `byteCount`/`lineCount` from the session row, but
+  the writer persists these only on chunk flush. A running session can
+  show identical numbers for many polls then jump — operators reasonably
+  read the polling cadence as "live" and file bug reports about "stuck"
+  captures. Either rename the column header to "Lines (flushed)" /
+  "Bytes (flushed)", or add a tooltip / footer indicator showing flush
+  cadence + "updated Xs ago" on running rows.
+
+- [ ] **Typed `HttpError` from the API client**
+  (`apps/web/src/api/client.ts:161`). The shared client throws an untyped
+  `Error` with the status code only embedded in the message string.
+  `PaymentRequiredError` (402) is the only typed exception. Frontend
+  callers cannot branch on 403 (license required) vs 404 (no such
+  connection) vs 500 (server error) to render targeted UI. Introduce
+  `class HttpError extends Error { status: number; body?: unknown }` and
+  throw it from `fetchApi`. Benefits every monitor page that needs to
+  distinguish failure modes.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
