@@ -9,7 +9,8 @@ import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 
-export const ENV_DEFAULT_ID = 'env-default';
+export { ENV_DEFAULT_ID } from './connection.constants';
+import { ENV_DEFAULT_ID } from './connection.constants';
 
 @Injectable()
 export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {

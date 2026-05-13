@@ -8,9 +8,7 @@
 
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
-
-// Canonical value lives in connection-registry.service.ts (ENV_DEFAULT_ID).
-const ENV_DEFAULT_ID = 'env-default';
+import { ENV_DEFAULT_ID } from '../src/connections/connection.constants';
 
 const STORAGE_URL =
   process.env.STORAGE_URL ||
@@ -441,8 +439,9 @@ async function main(): Promise<void> {
     if (CONNECTION_ID === ENV_DEFAULT_ID) {
       const res = await pool.query(
         `SELECT connection_id, source_host, source_port FROM command_log_entries
-         WHERE connection_id <> '${ENV_DEFAULT_ID}'
-         ORDER BY captured_at DESC LIMIT 1`
+         WHERE connection_id <> $1
+         ORDER BY captured_at DESC LIMIT 1`,
+        [ENV_DEFAULT_ID],
       );
       if (res.rows.length > 0) {
         CONNECTION_ID = res.rows[0].connection_id;

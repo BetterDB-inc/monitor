@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsString, IsNumber, IsBoolean, IsOptional, Min, Max, MinLength, MaxLength } from 'class-validator';
-import { ENV_DEFAULT_ID } from '../../connections/connection-registry.service';
+import { ENV_DEFAULT_ID } from '../../connections/connection.constants';
 import type {
   ConnectionStatus,
   ConnectionCapabilities,

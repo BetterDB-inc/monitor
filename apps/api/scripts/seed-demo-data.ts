@@ -10,9 +10,7 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
-
-// Canonical value lives in connection-registry.service.ts (ENV_DEFAULT_ID).
-const ENV_DEFAULT_ID = 'env-default';
+import { ENV_DEFAULT_ID } from '../src/connections/connection.constants';
 
 // Configuration
 const DB_PATH = process.env.SQLITE_PATH || path.join(__dirname, '..', 'data', 'betterdb.sqlite');
