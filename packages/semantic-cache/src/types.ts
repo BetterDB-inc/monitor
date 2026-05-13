@@ -137,6 +137,58 @@ export interface RerankOptions {
   ) => Promise<number>;
 }
 
+/**
+ * LLM-as-judge adjudication for borderline cache hits.
+ *
+ * When set on CacheCheckOptions, a hit whose cosine distance lands in the
+ * uncertainty band (threshold - uncertaintyBand < score <= threshold) is
+ * passed to judgeFn before being returned. The judge accepts (promotes the
+ * hit to confidence: 'high') or rejects (treats it as a miss with
+ * nearestMiss populated).
+ *
+ * The judge is NOT invoked for:
+ *   - high-confidence hits (score <= threshold - uncertaintyBand)
+ *   - misses (score > threshold)
+ *   - the no-candidates case (FT.SEARCH returned zero rows)
+ *
+ * When rerank is also set, the judge runs on the reranked pick, not the
+ * original top-1.
+ */
+export interface JudgeOptions {
+  /**
+   * Function that decides whether a borderline cache hit is acceptable.
+   * Return true to accept (caller receives confidence: 'high').
+   * Return false to reject (caller receives a miss with nearestMiss).
+   *
+   * The function receives the original prompt text (or the resolved text
+   * portion of a multipart prompt), the cached response, the cosine distance,
+   * the effective threshold, and the category if one was supplied to check().
+   */
+  judgeFn: (input: {
+    prompt: string;
+    response: string;
+    similarity: number;
+    threshold: number;
+    category: string | undefined;
+  }) => Promise<boolean>;
+
+  /**
+   * Behavior when judgeFn throws or exceeds timeoutMs.
+   *   'accept' - return the cached response with confidence: 'uncertain'
+   *              (current pre-judge behavior, fail-open).
+   *   'reject' - treat as a miss (fail-closed).
+   * Default: 'accept'.
+   */
+  onError?: 'accept' | 'reject';
+
+  /**
+   * Per-call timeout in milliseconds. Default: 2000.
+   * The judge function is raced against this timeout; timeout is treated
+   * the same as a thrown error and routed through onError.
+   */
+  timeoutMs?: number;
+}
+
 export interface CacheCheckOptions {
   /** Per-request threshold override (cosine distance 0-2). Highest priority. */
   threshold?: number;
@@ -175,6 +227,11 @@ export interface CacheCheckOptions {
    * in rerankFn yourself.
    */
   rerank?: RerankOptions;
+  /**
+   * Optional LLM-as-judge adjudication for borderline hits.
+   * See JudgeOptions. Ignored on checkBatch() - call check() per prompt instead.
+   */
+  judge?: JudgeOptions;
 }
 
 export interface CacheStoreOptions {
@@ -234,10 +291,19 @@ export interface CacheCheckResult {
   /**
    * On a miss where a candidate existed but didn't clear the threshold,
    * describes how close it was. Useful for threshold tuning.
+   *
+   * Note: when the miss originates from a judge rejection, `deltaToThreshold`
+   * will be <= 0 because the score did clear the threshold — the judge said no.
+   * Existing non-judge misses always produce deltaToThreshold > 0.
+   * Use `deltaToThreshold <= 0` to detect judge-originated misses.
    */
   nearestMiss?: {
     similarity: number;
     deltaToThreshold: number;
+    /** The effective threshold that was applied. Present on judge-rejection misses. */
+    threshold?: number;
+    /** The Valkey key of the entry that was rejected. Present on judge-rejection misses. */
+    matchedKey?: string;
   };
   /**
    * Estimated cost saved (in dollars) by returning this cached result instead of calling the LLM.

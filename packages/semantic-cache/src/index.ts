@@ -13,6 +13,7 @@ export type {
   EmbedFn,
   ModelCost,
   RerankOptions,
+  JudgeOptions,
   ConfigRefreshOptions,
 } from './types';
 export {
