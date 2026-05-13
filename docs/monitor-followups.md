@@ -619,6 +619,77 @@ Mark items `- [x]` as they land.
   Defense-in-depth: `id.replace(/[^A-Za-z0-9_-]/g, '_')` before
   interpolation. Add `filename*=UTF-8''…` for non-ASCII safety.
 
+## From PR #175 review — CrossReferenceEngine + REST endpoint
+
+- [ ] **`Promise.allSettled` + per-dimension `dimensionUnavailable` flags**
+  (`apps/api/src/monitor/cross-reference.engine.ts:669-691, 756-775`).
+  Today a single storage rejection (slowlog adapter down, audit table
+  missing) aborts the whole computation with a raw 500. Combined with
+  the empty-baseline rule, a misconfigured adapter creates a
+  false-positive flood. Switch to `allSettled`, log each rejection with
+  a stable errorId, and surface
+  `dimensionUnavailable: 'slowlog' | 'audit' | …` on the result so the
+  UI gates regression rendering on `'ok'`.
+
+- [ ] **DST-correct `same-hour-last-week`**
+  (`cross-reference.engine.ts:277-281`). Today `sessionStartMs - WEEK_MS`
+  shifts wall-clock 168h, not 7 calendar days. Spring forward / fall
+  back silently drifts the window an hour for non-UTC deployments.
+  Either calendar-shift via local date components (or a date library)
+  or rename the window to reflect the 168h semantics and document it.
+
+- [ ] **Bucket-based p95 with minimum-sample gating**
+  (`cross-reference.engine.ts:412, 446-454`). `baselineRates` is one
+  rate per distinct verb (typically 1–3 verbs) rather than per time
+  bucket. With 1 verb, p95 = that verb's rate → no regression ever
+  fires; with empty baseline, p95 = 0 → every nonzero session rate
+  regresses. Bucket the baseline window into N intervals (e.g. 60s),
+  compute p95 of per-verb-per-bucket rates, and refuse to flag
+  regressions when `bucketCount < MIN_BASELINE_SAMPLES` (log
+  `MONITOR_CROSSREF_INSUFFICIENT_BASELINE` and surface
+  `dimensionUnavailable: 'slowlog-insufficient-samples'`).
+
+- [ ] **Reject cross-reference on non-completed sessions** (controller +
+  `cross-reference.engine.ts:109`). `session.endedAt ?? Date.now()`
+  lets a `running` session compute against a sliding endpoint — two
+  calls return different `newShapes` / regression sets. Either 409 in
+  the controller when `session.status !== 'completed'`, or accept
+  `?allowPartial=true` and stamp `session.partial: true` on the
+  response.
+
+- [ ] **`NewShape` discriminated union + hash EVAL script bodies**
+  (`cross-reference.engine.ts:21-27, 286-290, 296`). Two issues:
+  `{ arity: number|null; scriptSha: string|null }` allows all four
+  states; replace with
+  `{ kind: 'plain'; arity } | { kind: 'scripted'; cmd; scriptSha }`.
+  EVAL without preload uses args[0] as the *script source*, not a SHA —
+  encoding multi-line script text as the shape key explodes cardinality
+  and leaks script contents into responses / log aggregators. Hash
+  before use: `sha1(scriptBody).slice(0, 16)`. Also `.toLowerCase()`
+  SHAs for `EVAL`/`EVALSHA` (Redis treats them case-insensitive); keep
+  function names case-sensitive.
+
+- [ ] **Look up `newInTopK` against the full key map, not the top-50
+  slice** (`cross-reference.engine.ts:14, 357-362`). A key at baseline
+  rank 60 → capture rank 5 currently appears in `newInTopK` (misleading
+  — it WAS in baseline). A key going 49 → 51 silently vanishes from
+  `rankChanges`. Look up in the full `baselineKeyCounts`; surface
+  `rankInBaseline: '>50'` (or numeric rank + `wasBelowTopK: true`).
+  Also add a deterministic tiebreaker to the top-K sort
+  (`(a,b) => b[1]-a[1] || a[0].localeCompare(b[0])`) — V8 stable-sort
+  + differing insertion order across capture/baseline produces phantom
+  `rankChange` rows today.
+
+- [ ] **Promote `aclDeltas.counters` from placeholder to discriminated
+  state** (`cross-reference.engine.ts:602-614, 169-174`). Today both
+  counter fields are hard-coded `null` and the spec at
+  `cross-reference.engine.spec.ts:455` locks in the placeholder — so
+  no test breaks when the real implementation lands. Either drop the
+  field until populated, or surface
+  `counters: { status: 'not-yet-implemented' }`. Also:
+  `MonitorCaptureService.startSession` / `terminate` need to take
+  INFO snapshots for the counter deltas to be implementable.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
