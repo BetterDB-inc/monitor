@@ -256,6 +256,87 @@ Mark items `- [x]` as they land.
   `monitor.session.skipped` event lands in PR 16 but is Pro+; community-tier
   users running monitor stay blind.
 
+## From PR #170 review — TailGateway WebSocket + pause/resume
+
+- [ ] **Register `ws.on('error', ...)` and handle `ws.send` failures**
+  (`apps/api/src/monitor/tail.gateway.ts`). The gateway listens only for
+  `'close'`; every `ws.send(...)` is fire-and-forget with no callback. A
+  failed send emits `'error'` on the `ws` EventEmitter; with no listener the
+  error is silently dropped, and in the live-stream path the subscriber
+  callback keeps firing into a broken socket for every subsequent line —
+  unbounded waste, no operator signal. Add `ws.on('error', (err) => {
+  logger.warn(...); cleanup(); ws.terminate(); })` at the top of
+  `handleConnection`, and unify the close/error cleanup so subscribers can't
+  leak when only `'error'` fires (some `ws` versions do this).
+
+- [ ] **Apply backpressure on un-paused viewers via `ws.bufferedAmount`**
+  (`tail.gateway.ts:128-141`). The 50 000-line cap only protects
+  **explicitly paused** viewers. An un-paused slow consumer makes Node's
+  `ws` lib buffer in JS until the OS socket buffer fills, then keeps
+  buffering — the API process heap grows without bound. When
+  `ws.bufferedAmount > THRESHOLD`, either pause-buffer with the same cap or
+  `ws.close(1013, 'slow consumer')` and emit an operator-visible warning.
+
+- [ ] **Signal pause-buffer overflow to the viewer**
+  (`tail.gateway.ts:294-300`). At 50 000 lines, `pausedBuffer.shift()` drops
+  the oldest line with no log, no metric, no client-visible signal. On
+  resume the viewer sees an unexplained gap. Track
+  `droppedWhilePausedCount`, log at WARN when it first crosses zero, and on
+  resume send `{type:'status', status:'buffer_overflow', droppedLines: N}`
+  before draining. Same pattern as the writer-side `droppedAfterTermination`
+  counter from the #167 follow-up.
+
+- [ ] **Add tenant / owner verification at the WS handshake**
+  (`tail.gateway.ts:191-227`). Currently `sessionId` is the only capability
+  — anyone with (or guessing) a sessionId gets the live tail, including for
+  another tenant's database. `MonitorCaptureService.getSession` is called
+  but the returned session's `requestedBy` / `connectionId` owner is never
+  compared to the requestor. Pull the user from the auth-proxy headers and
+  reject when `session.requestedBy !== request.user` (or whatever the
+  tenant-scope equivalent is). Add a regression test for cross-tenant
+  access.
+
+- [ ] **Verify and fix `Host`-header semantics in `handleUpgrade`**
+  (`tail.gateway.ts:60-64`). Two distinct problems:
+  - **Forgeable**: a direct TCP client sets `Host: anything` — no proxy
+    strips it. Same finding as #168 HTTP guard. Trust an auth-proxy header
+    (e.g. `X-Forwarded-Host` from a known trusted ingress) rather than
+    `Host`.
+  - **Likely inverted semantics**: current code *rejects* when
+    `host === DEMO_HOSTNAME`, but `DemoModeGuard` for HTTP typically
+    *restricts to* the demo host. If `DEMO_HOSTNAME` is ever set on a prod
+    deployment for any reason, prod traffic on that host is blocked while
+    everything else passes. Cross-check `DemoModeGuard` semantics and
+    align.
+
+- [ ] **Type-safe wire contract for the tail WS**: tighten `OutboundMessage`
+  status to `'session_ended' | 'historical_complete'` (currently
+  `status: string`, defeats the discriminated union); validate inbound
+  `ControlMessage` with a Zod schema (currently `JSON.parse(...)` cast to
+  the type with zero runtime validation — a hostile client sending
+  `{type: '__proto__'}` silently no-ops); and **move both message types to
+  `packages/shared`** so `apps/web` consumes the same definitions and
+  cannot drift. Files: `tail.gateway.ts:13-26, 114-116`.
+
+- [ ] **Propagate `CaptureWriterResult` through `onEnd`**
+  (`apps/api/src/monitor/capture-writer.ts:201`). The callback signature
+  is `() => void` even though `CaptureWriterResult` exists. The gateway
+  currently sends a flat `'session_ended'` status regardless of whether
+  the writer truncated, failed, or completed cleanly. Promote to
+  `(result: CaptureWriterResult) => void` and let the gateway send
+  `{type:'error', error:...}` for failed sessions and a richer
+  `{type:'status', status, terminationReason}` for the rest.
+
+- [ ] **Fix the active-vs-historical subscribe-order race**
+  (`tail.gateway.ts:122-141`). Between `getActiveWriter()` (line 73) and
+  `writer.subscribe(...)` (line 122), the writer can terminate.
+  `subscribe()` then becomes a no-op; `onEnd` fires on a microtask **after**
+  the backlog is sent, so the viewer receives backlog + `session_ended`
+  instead of falling through to historical replay. Reorder: register
+  `onEnd` first, then drain the ring-buffer backlog, then `subscribe`.
+  Add a regression test that forces the race (terminate after
+  `getActiveWriter` returns, before `subscribe` is wired).
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
