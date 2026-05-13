@@ -563,6 +563,62 @@ Mark items `- [x]` as they land.
   `packages/shared`** (`useMonitorTail.ts:26-38`). Currently re-declared
   on both sides; pairs with the #170 follow-up.
 
+## From PR #174 review — post-capture filters + JSON/CSV export
+
+- [ ] **CSV formula-injection mitigation** (`apps/api/src/monitor/monitor-line.parser.ts:108-122`).
+  A captured Valkey arg like `=cmd|'/c calc'!A1` opens in Excel/Sheets and
+  executes — operators downloading forensic CSVs are the target. RFC 4180
+  doesn't help. In `csvField`, prefix `=`, `+`, `-`, `@`, `\t`, `\r` with
+  `'` and add `\r` to the special-char quote check.
+
+- [ ] **Surface dropped-line count from the export endpoint**
+  (`apps/api/src/monitor/monitor.controller.ts:166-180`). Unparseable lines
+  are silently `continue`d. `{count: 4823, lines: [...]}` claims success
+  when 17 lines were dropped — bad for a forensic export. Track
+  `droppedCount`, attach to JSON response, set
+  `X-Monitor-Export-Parse-Errors` header, `logError` past a ratio threshold.
+
+- [ ] **Validate `afterTs` / `beforeTs` (and reject unknown `format`)**
+  (`monitor.controller.ts:147-150`). Today `parseInt('abc', 10)` → `NaN`
+  silently becomes allow-all; `?afterTs=0` is falsy → silently dropped;
+  `?format=xls` silently returns JSON. The test at
+  `monitor.controller.spec.ts:282-288` codifies the format fallback —
+  it's a tripwire against fixing this. Reuse the existing
+  `parsePositiveInt` (which already throws `BadRequestException` correctly)
+  for timestamps; throw on unknown format; update the spec.
+
+- [ ] **Stream the export instead of accumulating in memory**
+  (`monitor.controller.ts:160-198`). Today the controller builds the full
+  response as a string/array before `reply.send`. A 50 MB cap peaks at
+  ~150-200 MB heap; 500 MB sessions OOM. Switch CSV to `reply.raw.write()`
+  chunk-by-chunk and JSON to NDJSON (or a streamed array). Wrap in
+  try/catch so a mid-iteration storage rejection translates to a proper
+  5xx instead of a half-written 200 body.
+
+- [ ] **Extract `monitor-line.parser.ts` to `packages/shared` (or add a
+  frontend/backend parity test)**. The frontend duplicates the parser
+  inline at `apps/web/src/pages/monitor/filters-and-export.tsx:106-150`.
+  When the backend evolves (IPv6, new escape rule, glob behavior), the
+  in-page "Buffer match: N" silently diverges from the export count. Pure
+  parser has no Nest deps — it belongs in `@betterdb/shared`. Minimum
+  fallback: a parity test running identical line corpora through both
+  implementations.
+
+- [ ] **Honest copy on the buffer preview + optional server-side count
+  endpoint** (`filters-and-export.tsx:60-66`). The 5000-line live buffer
+  is a tiny window of a session that may have millions of lines.
+  "Buffer match: 50" → user clicks Export → 50 000-line file; or buffer
+  has zero matches because filter targets earlier-evicted traffic →
+  operator abandons the export. Either re-word ("recent buffer only —
+  may differ from server-side count") or add `?countOnly=true` returning
+  the authoritative server-side count cheaply and show both numbers.
+
+- [ ] **Sanitize id in `Content-Disposition`** (`monitor.controller.ts:154-156`).
+  `id` is interpolated directly into the header. UUIDs are safe today;
+  a future broader id scheme makes CRLF/quote injection possible.
+  Defense-in-depth: `id.replace(/[^A-Za-z0-9_-]/g, '_')` before
+  interpolation. Add `filename*=UTF-8''…` for non-ASCII safety.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
