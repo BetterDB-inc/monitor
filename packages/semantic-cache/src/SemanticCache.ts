@@ -387,17 +387,97 @@ export class SemanticCache {
         }
       }
 
-      // All checks passed — record as a genuine hit
-      await this.recordSimilarityWindow(winnerScore, 'hit', category);
-      const confidence: CacheConfidence =
+      // All checks passed — compute confidence (recordSimilarityWindow moves to after judge)
+      let confidence: CacheConfidence =
         winnerScore >= threshold - this.uncertaintyBand ? 'uncertain' : 'high';
 
+      const matchedKey = winner.key;
+
+      // --- LLM-as-judge for borderline hits ---
+      if (options?.judge && confidence === 'uncertain') {
+        const judgeStart = performance.now();
+        const timeoutMs = options.judge.timeoutMs ?? 2000;
+        const onError = options.judge.onError ?? 'accept';
+
+        type JudgeDecision =
+          | 'accept' | 'reject'
+          | 'error_accept' | 'error_reject'
+          | 'timeout_accept' | 'timeout_reject';
+        let decision: JudgeDecision;
+
+        try {
+          const accepted = await raceWithTimeout(
+            options.judge.judgeFn({
+              prompt: promptText,
+              response: winner.fields['response'] ?? '',
+              similarity: winnerScore,
+              threshold,
+              category: category || undefined,
+            }),
+            timeoutMs,
+          );
+          decision = accepted ? 'accept' : 'reject';
+        } catch (err) {
+          const isTimeout = err instanceof JudgeTimeoutError;
+          if (onError === 'accept') {
+            decision = isTimeout ? 'timeout_accept' : 'error_accept';
+          } else {
+            decision = isTimeout ? 'timeout_reject' : 'error_reject';
+          }
+        }
+
+        const judgeSec = (performance.now() - judgeStart) / 1000;
+        this.telemetry.metrics.judgeDecisions
+          .labels({ cache_name: this.name, category: categoryLabel, decision })
+          .inc();
+        this.telemetry.metrics.judgeDuration
+          .labels({ cache_name: this.name, category: categoryLabel, decision })
+          .observe(judgeSec);
+
+        span.setAttributes({
+          'cache.judge.invoked': true,
+          'cache.judge.decision': decision,
+          'cache.judge.latency_ms': judgeSec * 1000,
+        });
+
+        if (decision === 'accept') {
+          confidence = 'high';
+          // Fall through to hit-return path
+        } else if (decision === 'error_accept' || decision === 'timeout_accept') {
+          // Preserve 'uncertain'; fall through to hit-return path
+        } else {
+          // reject / error_reject / timeout_reject → treat as miss
+          await this.recordSimilarityWindow(winnerScore, 'miss', category);
+          await this.recordStat('misses');
+          this.telemetry.metrics.requestsTotal
+            .labels({ cache_name: this.name, result: 'miss', category: categoryLabel })
+            .inc();
+          span.setAttributes({
+            'cache.hit': false,
+            'cache.name': this.name,
+            'cache.category': categoryLabel,
+          });
+          return {
+            hit: false,
+            confidence: 'miss' as const,
+            nearestMiss: {
+              similarity: winnerScore,
+              threshold,
+              deltaToThreshold: winnerScore - threshold,
+              matchedKey,
+            },
+          };
+        }
+      }
+      // --- End judge ---
+
+      // Record as genuine hit (moved here from before the judge block)
+      await this.recordSimilarityWindow(winnerScore, 'hit', category);
       await this.recordStat('hits');
       const metricResult = confidence === 'uncertain' ? 'uncertain_hit' : 'hit';
       this.telemetry.metrics.requestsTotal
         .labels({ cache_name: this.name, result: metricResult, category: categoryLabel }).inc();
 
-      const matchedKey = winner.key;
       if (this.defaultTtl !== undefined && matchedKey) {
         await this.client.expire(matchedKey, this.defaultTtl);
       }
@@ -611,6 +691,11 @@ export class SemanticCache {
     if (options?.staleAfterModelChange) {
       throw new SemanticCacheUsageError(
         "checkBatch() does not support 'staleAfterModelChange'. Use check() for stale-model eviction.",
+      );
+    }
+    if (options?.judge) {
+      throw new SemanticCacheUsageError(
+        "checkBatch() does not support the 'judge' option. Use check() for LLM-as-judge adjudication.",
       );
     }
 
@@ -1462,4 +1547,21 @@ export interface ThresholdEffectivenessResult {
   recommendation: 'tighten_threshold' | 'loosen_threshold' | 'optimal' | 'insufficient_data';
   recommendedThreshold?: number;
   reasoning: string;
+}
+
+// --- Judge helpers ---
+
+class JudgeTimeoutError extends Error {
+  constructor() {
+    super('judgeFn timed out');
+    this.name = 'JudgeTimeoutError';
+  }
+}
+
+function raceWithTimeout<T>(p: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new JudgeTimeoutError()), timeoutMs);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
