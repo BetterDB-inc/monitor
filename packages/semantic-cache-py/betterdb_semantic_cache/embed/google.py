@@ -80,11 +80,16 @@ def create_google_embed(
 
         resp = await client.post(
             f"{base_url}/models/{model}:embedContent",
-            params={"key": key},
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "x-goog-api-key": key},
             json=body,
         )
         resp.raise_for_status()
         return resp.json().get("embedding", {}).get("values") or []
 
+    async def close() -> None:
+        if _client:
+            await _client[0].aclose()
+            _client.clear()
+
+    embed.close = close  # type: ignore[attr-defined]
     return embed

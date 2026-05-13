@@ -70,21 +70,21 @@ export function createGoogleEmbed(opts?: GoogleEmbedOptions): EmbedFn {
       taskType,
     };
 
-    if (opts?.title) {
+    if (opts?.title !== undefined) {
       requestBody.title = opts.title;
     }
     if (opts?.outputDimensionality !== undefined) {
       requestBody.outputDimensionality = opts.outputDimensionality;
     }
 
-    const res = await fetch(
-      `${baseUrl}/models/${model}:embedContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
+    const res = await fetch(`${baseUrl}/models/${model}:embedContent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
       },
-    );
+      body: JSON.stringify(requestBody),
+    });
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
