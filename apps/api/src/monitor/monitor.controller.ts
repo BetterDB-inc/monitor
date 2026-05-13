@@ -92,11 +92,6 @@ export class MonitorController {
     private readonly storage: StoragePort,
   ) {}
 
-  @Get('_ping')
-  ping(): { ok: true } {
-    return { ok: true };
-  }
-
   @Get('_diag/health-gate')
   async evaluateHealthGate(
     @Query('connectionId') connectionId?: string,
