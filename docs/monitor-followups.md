@@ -500,6 +500,69 @@ Mark items `- [x]` as they land.
   `void`-discarded, so failure is silent). Add a toast confirming the
   session started, and `.catch(logError)` the invalidation.
 
+## From PR #173 review — live tail view + pause/resume + bounded buffer
+
+- [ ] **Cancel pending `requestAnimationFrame` on unmount**
+  (`apps/web/src/hooks/useMonitorTail.ts:132-141, 199-209`). Cleanup never
+  calls `cancelAnimationFrame`; queued callbacks fire after unmount and
+  setState on a dead component. Store the handle in a ref, cancel in the
+  effect cleanup.
+
+- [ ] **Validate inbound WS frames; log on unknown `type` / parse failure**
+  (`useMonitorTail.ts:178-181`). Today `try { JSON.parse } catch { return }`
+  silently drops malformed frames; unknown `msg.type` has no `else` branch
+  → silent dispatch failure. Backend rename / version mismatch / binary
+  frame goes invisible. Use a Zod schema (or narrow guards) and `logError`
+  on rejection.
+
+- [ ] **Surface `ws.onclose` code/reason and add reconnect** (`useMonitorTail.ts:164-174`).
+  All non-1000 closures map to `closed` with the generic
+  `"WebSocket connection error"` text. Handshake-rejected
+  (1006/4xxx), server crash mid-stream, and graceful end all look the same
+  to the user, with no retry path. Branch on `close.code`, render
+  actionable text ("Live tail unavailable — preview disabled / session not
+  found / server unreachable"), and add backoff reconnect for transient
+  closes.
+
+- [ ] **`historical_complete` / `session_ended` must close the WS**
+  (`useMonitorTail.ts:140-142`). Code only updates state; doc/PR
+  description claims the socket closes. Additional frames after a terminal
+  status are still processed. Call `ws.close()` (with handlers detached)
+  on either status frame.
+
+- [ ] **Remove dead `MONITOR_DEV_PREVIEW` route gate post-launch**
+  (`apps/web/src/components/layout/AppLayout.tsx:32-41`). The `/monitor/sessions/:id`
+  route is still wrapped in `{MONITOR_DEV_PREVIEW && ...}` even though
+  commit `9cee378` removed the env flag everywhere else. On master with
+  the flag unset, clicking a session row routes to a path with no
+  matching `<Route>` — silent black hole. Drop the conditional.
+
+- [ ] **Derive WS URL from `window.location` / Vite proxy, not hardcoded
+  `localhost:3001`** (`useMonitorTail.ts:96-99`). Today's dev URL breaks
+  Codespaces, LAN-accessed dev, remote dev hosts, IPv6-only. Use Vite's
+  dev proxy and hit `/api/monitor/ws` in both prod and dev, or derive host
+  from `window.location.hostname`.
+
+- [ ] **`useMonitorTail` hook tests** — the most complex client-side
+  stateful logic in the stack has zero coverage; Vitest + RTL `renderHook`
+  + `MockWebSocket` infra is already in use (see
+  `apps/web/src/hooks/useLicense.test.ts`). Minimum matrix: open →
+  `streaming`; line frames flush once per rAF; 5001 lines →
+  `bufferTrimmed=true` + last 5000 retained + `totalReceived=5001`;
+  `pause`/`resume` send correct control frames and gate on
+  `readyState === OPEN`; sessionId swap tears down old socket; unmount
+  cancels rAF; StrictMode double-mount leaves one live WS.
+
+- [ ] **Stable key on line list, not index** (`tail-view.tsx:469`). When
+  the buffer trims oldest, every row's index shifts → full re-render,
+  text selection breaks mid-stream. Use a monotonic id minted at push
+  (e.g. `totalReceived - lines.length + i`, or a circular buffer with
+  stable ids).
+
+- [ ] **Move WS wire types (`OutboundMessage`, control message) to
+  `packages/shared`** (`useMonitorTail.ts:26-38`). Currently re-declared
+  on both sides; pairs with the #170 follow-up.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
