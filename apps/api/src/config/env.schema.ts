@@ -85,6 +85,12 @@ export const envSchema = z
     WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).optional(),
     WEBHOOK_MAX_RESPONSE_BODY_BYTES: z.coerce.number().int().min(0).optional(),
 
+    // Monitor health gate
+    MONITOR_RECENT_OOM_WINDOW_MS: z.coerce.number().int().min(0).default(5 * 60 * 1000),
+    MONITOR_RECENT_FAILOVER_WINDOW_MS: z.coerce.number().int().min(0).default(2 * 60 * 1000),
+    MONITOR_MEMORY_PCT_THRESHOLD: z.coerce.number().int().min(0).max(100).default(85),
+    MONITOR_REPLICATION_LAG_BYTES: z.coerce.number().int().min(0).default(10 * 1024 * 1024),
+
     // Security
     ENCRYPTION_KEY: z.string().min(16).optional(),
   })

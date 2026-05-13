@@ -3,7 +3,6 @@ import {
   HealthGateSignals,
   HealthGateThresholds,
   evaluateHealthGate,
-  thresholdsFromEnv,
 } from '../health-gate';
 
 const HEALTHY_SIGNALS: HealthGateSignals = {
@@ -129,36 +128,3 @@ describe('evaluateHealthGate', () => {
   });
 });
 
-describe('thresholdsFromEnv', () => {
-  it('returns defaults when no env vars are set', () => {
-    expect(thresholdsFromEnv({})).toEqual(DEFAULT_HEALTH_GATE_THRESHOLDS);
-  });
-
-  it('parses MONITOR_MEMORY_PCT_THRESHOLD as integer percent', () => {
-    expect(thresholdsFromEnv({ MONITOR_MEMORY_PCT_THRESHOLD: '50' }).memoryPctThreshold).toBeCloseTo(0.5);
-    expect(thresholdsFromEnv({ MONITOR_MEMORY_PCT_THRESHOLD: '10' }).memoryPctThreshold).toBeCloseTo(0.1);
-    expect(thresholdsFromEnv({ MONITOR_MEMORY_PCT_THRESHOLD: '0' }).memoryPctThreshold).toBe(0);
-  });
-
-  it('falls back to default for invalid percent values', () => {
-    for (const v of ['', 'abc', '-1', '101', '85.5']) {
-      expect(thresholdsFromEnv({ MONITOR_MEMORY_PCT_THRESHOLD: v }).memoryPctThreshold).toBe(
-        DEFAULT_HEALTH_GATE_THRESHOLDS.memoryPctThreshold,
-      );
-    }
-  });
-
-  it('parses MONITOR_REPLICATION_LAG_BYTES as positive integer', () => {
-    expect(
-      thresholdsFromEnv({ MONITOR_REPLICATION_LAG_BYTES: '5000' }).replicationLagThresholdBytes,
-    ).toBe(5000);
-  });
-
-  it('falls back to default for invalid lag values', () => {
-    for (const v of ['', 'nope', '-100']) {
-      expect(thresholdsFromEnv({ MONITOR_REPLICATION_LAG_BYTES: v }).replicationLagThresholdBytes).toBe(
-        DEFAULT_HEALTH_GATE_THRESHOLDS.replicationLagThresholdBytes,
-      );
-    }
-  });
-});
