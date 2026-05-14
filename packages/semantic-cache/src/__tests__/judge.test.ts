@@ -354,6 +354,49 @@ describe('judge composes with rerank', () => {
     expect(capturedInputs[0].response).toBe('Response one');
     expect(capturedInputs[0].similarity).toBeCloseTo(0.09, 5);
   });
+
+  it('rerank winner rejected by judge returns miss with deltaToThreshold <= 0', async () => {
+    const registry = new Registry();
+    const client = makeMockClient(BORDERLINE_SCORE);
+
+    client.call.mockImplementation(async (...args: unknown[]) => {
+      const cmd = args[0] as string;
+      if (cmd === 'FT.INFO') {
+        return [
+          'attributes',
+          [['identifier', 'embedding', 'type', 'VECTOR', 'index', ['dimensions', '2']]],
+        ];
+      }
+      if (cmd === 'FT.SEARCH') {
+        return [
+          '3',
+          'key0', ['response', 'Response zero', 'model', '', 'category', '', '__score', '0.08'],
+          'key1', ['response', 'Response one', 'model', '', 'category', '', '__score', '0.09'],
+          'key2', ['response', 'Response two', 'model', '', 'category', '', '__score', '0.07'],
+        ];
+      }
+      return null;
+    });
+
+    const cache = await makeCache(client, registry, 'test_judge_rerank_reject');
+
+    // Rerank picks index 1 (Response one, score 0.09), judge rejects it
+    const rerankFn = vi.fn(async () => 1);
+    const judgeFn = vi.fn(async () => false);
+
+    const result = await cache.check('hello', {
+      rerank: { k: 3, rerankFn },
+      judge: { judgeFn },
+    });
+
+    expect(result.hit).toBe(false);
+    expect(result.nearestMiss).toBeDefined();
+    expect(result.nearestMiss!.deltaToThreshold).toBeLessThanOrEqual(0);
+    // Verify judge saw the reranked pick (index 1), not top-1
+    expect(judgeFn).toHaveBeenCalledWith(
+      expect.objectContaining({ response: 'Response one', similarity: expect.closeTo(0.09, 5) }),
+    );
+  });
 });
 
 // --- Test 11: judgeFn receives correct inputs ---
