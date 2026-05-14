@@ -821,6 +821,112 @@ Mark items `- [x]` as they land.
   helper (`sqlite.adapter.ts:459-467`) with a code-specific guard that
   still logs unrelated errors.
 
+## From PR #178 review — cluster fan-out + partial-failure (14b of 14)
+
+- [ ] **Recover orphaned fan-out sessions on startup**
+  (`apps/api/src/monitor/monitor-capture.service.ts:435-457`). Fan-out
+  writers use `skipSessionFinalize: true`; only `finalizeFanOutSession`
+  writes the terminal row, with all aggregation state in process
+  memory. An API crash between `saveCaptureSession` and the finalize
+  call leaves the session row `running` forever. Add a startup
+  reconciler that flips orphan `running` sessions older than 2× their
+  `durationMs` to `failed` with `terminationReason='orchestrator_crash'`
+  (or have writers persist per-node terminal segments so any survivor
+  can finalize). Pairs with the #167 finalize-zombie follow-up.
+
+- [ ] **Don't dispatch `sessionEnded` when `finalizeFanOutSession`'s
+  storage write fails** (`monitor-capture.service.ts:489-500`). Today
+  `try { update } catch { logger.error }` then still emits the webhook —
+  consumers see a "completed" event while the DB row is stuck on
+  `running`. Retry with bounded backoff; on persistent failure log via
+  `logError` with a stable errorId, skip the dispatch, and enqueue for
+  the recovery sweep above.
+
+- [ ] **Distinguish "discovery failed" from "not a cluster" in
+  `resolveFanOutNodes`** (`monitor-capture.service.ts:567-581`). Today
+  `try { discover } catch { return [] }` silently degrades to single-node
+  when the user explicitly checked the "Fan-out" box. Return a typed
+  result (e.g. `{ kind: 'not-cluster' } | { kind: 'discovery-failed';
+  error } | { kind: 'nodes'; nodes }`) and surface a 503 / typed error
+  back to the modal so the user can retry. Also: return 503 when
+  `fanOut` was requested but zero primaries are healthy, and surface
+  `excludedNodes` when a subset is unhealthy (today: silently dropped
+  from the fan-out).
+
+- [ ] **Enforce the 10M chunk-index namespace in `CaptureWriter`**
+  (`apps/api/src/monitor/capture-writer.ts:139`,
+  `monitor-capture.service.ts:57,285`). Today the per-writer range
+  `[i*10M, (i+1)*10M)` is documented but never asserted. A writer that
+  overruns silently corrupts per-node attribution (next writer's
+  namespace). Either `terminate('truncated', 'chunk_namespace_exhausted')`
+  when `chunkIndex >= startChunkIndex + CHUNK_INDEX_NAMESPACE`, or
+  replace the namespace trick with an explicit `node_id` column on the
+  PK (the column already exists from this PR). Export
+  `CHUNK_INDEX_NAMESPACE` from a shared module so writer + service
+  can't drift.
+
+- [ ] **Discriminated single-node-vs-fan-out for `StoredCaptureSession`**
+  (`packages/shared/src/types/monitor.ts:10`). Today `{ targetNode?,
+  nodeSegments? }` permits both set and neither set with the fan-out
+  flag. Convert to:
+  ```ts
+  type StoredCaptureSession = Base & (
+    | { kind: 'single'; targetNode?: string; nodeSegments?: never }
+    | { kind: 'fanOut'; nodeSegments: CaptureNodeSegment[]; targetNode?: never }
+  );
+  ```
+  Eliminates the `nodeSegments?.length ?? 0 > 0` checks in UI / service
+  / migration code and is the natural home for the recovery sweep
+  predicate.
+
+- [ ] **`aggregateSegmentStatus([])` should return `'failed'`, not
+  `'completed'`** (`monitor-capture.service.ts:589`). For a fan-out
+  session, empty segments means zero writers opened — a bug, not a
+  success. Either narrow input to `NonEmptyArray<>` or return
+  `{ status: 'failed', reason: 'no_nodes_resolved' }`. Today the path
+  is gated by `isFanOut = fanOutNodes.length > 0` but the function's
+  invariant is still wrong on its face.
+
+- [ ] **Validate `nodeSegments` JSON on adapter read with Zod**
+  (`apps/api/src/storage/adapters/sqlite.adapter.ts:893-902`,
+  `postgres.adapter.ts:752-763`). Today both adapters do
+  `try { JSON.parse } catch { return undefined }` with zero logging and
+  only `Array.isArray` validation. A bad row (older schema, partial
+  write, manual SQL) flows through as `CaptureNodeSegment[]` and crashes
+  `.lineCount.toLocaleString()` in the UI session-list. Add a shared
+  Zod schema in `packages/shared`, parse on read, log invalid rows via
+  `logError`.
+
+- [ ] **Surface all fan-out writers (or label the visible one) from
+  `getActiveWriter`** (`monitor-capture.service.ts:451-454`). Today
+  returns `writers[0]` only — the tail UI silently shows one node's
+  lines. Either return `getActiveWriters()` and let the tail page
+  interleave (or paginate by node), or set an
+  `X-Monitor-Tail-Node: <nodeId>` header so the UI can render
+  "Showing node A of A, B, C." Author flagged.
+
+- [ ] **Deadline + timeout on `stopSession` for fan-out**
+  (`monitor-capture.service.ts:438-447`). `await active.donePromise`
+  resolves only when every writer's `Promise.all` settles — one writer
+  with a hung network connection blocks `stopSession` forever and the
+  HTTP request times out. Race against a 30s deadline; on timeout, mark
+  unresolved segments `failed` with reason `stop_timeout` and proceed to
+  finalize.
+
+- [ ] **`CaptureNodeSegment.status` should narrow to `CaptureWriterStatus`**
+  (`packages/shared/src/types/monitor.ts`). Today reuses
+  `CaptureSessionStatus` (5 variants) but only 3 are meaningful for a
+  terminated segment (`'completed' | 'truncated' | 'failed'`).
+  `'skipped'` and `'running'` are nonsensical post-hoc and silently
+  permit illegal aggregator inputs. Reuse `CaptureWriterStatus` —
+  exhaustiveness is provable.
+
+- [ ] **Postgres adapter coverage for `node_segments` + `node_id`**
+  (`apps/api/src/storage/adapters/__tests__/capture-sessions.spec.ts`).
+  Same gap as #177's `target_node` — `describe.each` covers only
+  Sqlite + Memory. Now there's a JSONB column to test (parser, partial
+  patch via `updateCaptureSession`, round-trip). Extend the matrix.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
