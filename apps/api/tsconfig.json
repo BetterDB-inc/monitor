@@ -46,6 +46,8 @@
     "node_modules",
     "dist",
     "../../proprietary/entitlement/**/*",
-    "../../proprietary/infra/**/*"
+    "../../proprietary/infra/**/*",
+    "../../proprietary/**/__tests__/**/*",
+    "../../proprietary/**/*.spec.ts"
   ]
 }
