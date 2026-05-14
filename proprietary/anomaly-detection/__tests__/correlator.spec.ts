@@ -45,6 +45,18 @@ describe('Correlator', () => {
       expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
     });
 
+    it('matches on CLUSTER_STATE metric', () => {
+      const anomaly = makeAnomaly({
+        metricType: MetricType.CLUSTER_STATE,
+        anomalyType: AnomalyType.DROP,
+        severity: AnomalySeverity.CRITICAL,
+      });
+
+      const groups = correlator.correlate([anomaly]);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+    });
+
     it('provides correct diagnosis and recommendations', () => {
       const anomaly = makeAnomaly({
         metricType: MetricType.REPLICATION_ROLE,
@@ -71,6 +83,60 @@ describe('Correlator', () => {
 
       const groups = correlator.correlate([anomaly]);
       expect(groups[0].severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('groups NODE_FAILOVER + SLOWLOG_LAST_ID in same window into single CorrelatedGroup', () => {
+      const baseTime = 1000000;
+      const groups = correlator.correlate([
+        makeAnomaly({
+          timestamp: baseTime,
+          metricType: MetricType.REPLICATION_ROLE,
+          anomalyType: AnomalyType.DROP,
+          severity: AnomalySeverity.CRITICAL,
+        }),
+        makeAnomaly({
+          timestamp: baseTime + 2000,
+          metricType: MetricType.SLOWLOG_LAST_ID,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+        }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+      expect(groups[0].anomalies).toHaveLength(2);
+      expect(groups[0].severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('includes slowlog context in diagnosis when SLOWLOG_LAST_ID co-occurs', () => {
+      const baseTime = 1000000;
+      const groups = correlator.correlate([
+        makeAnomaly({
+          timestamp: baseTime,
+          metricType: MetricType.REPLICATION_ROLE,
+          anomalyType: AnomalyType.DROP,
+          severity: AnomalySeverity.CRITICAL,
+        }),
+        makeAnomaly({
+          timestamp: baseTime + 1000,
+          metricType: MetricType.SLOWLOG_LAST_ID,
+          anomalyType: AnomalyType.SPIKE,
+        }),
+      ]);
+
+      expect(groups[0].diagnosis).toContain('correlated slowlog spike');
+    });
+
+    it('diagnosis is failover-only when no slowlog spike co-occurs', () => {
+      const anomaly = makeAnomaly({
+        metricType: MetricType.REPLICATION_ROLE,
+        anomalyType: AnomalyType.DROP,
+        severity: AnomalySeverity.CRITICAL,
+      });
+
+      const groups = correlator.correlate([anomaly]);
+      expect(groups[0].diagnosis).toContain('Node failover detected');
+      expect(groups[0].diagnosis).not.toContain('slowlog');
     });
   });
 
