@@ -103,12 +103,6 @@ describe('MonitorController', () => {
     );
   });
 
-  describe('ping', () => {
-    it('returns { ok: true }', () => {
-      expect(controller.ping()).toEqual({ ok: true });
-    });
-  });
-
   describe('listSessions', () => {
     it('returns an empty array when the connection has no sessions', async () => {
       await expect(controller.listSessions('conn-1')).resolves.toEqual([]);

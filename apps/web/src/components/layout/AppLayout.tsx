@@ -32,7 +32,6 @@ import { Monitor } from '../../pages/Monitor';
 import { MonitorSession } from '../../pages/MonitorSession';
 import { Members } from '../../pages/Members';
 
-const MONITOR_DEV_PREVIEW = import.meta.env.VITE_MONITOR_DEV_PREVIEW === 'true';
 import { CloudUser } from '../../api/workspace';
 import { AppSidebar } from './AppSidebar.tsx';
 import { FeedbackModal } from './FeedbackModal';
@@ -219,26 +218,22 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                   </NoConnectionsGuard>
                 }
               />
-              {MONITOR_DEV_PREVIEW && (
-                <Route
-                  path="/monitor"
-                  element={
-                    <NoConnectionsGuard>
-                      <Monitor />
-                    </NoConnectionsGuard>
-                  }
-                />
-              )}
-              {MONITOR_DEV_PREVIEW && (
-                <Route
-                  path="/monitor/sessions/:id"
-                  element={
-                    <NoConnectionsGuard>
-                      <MonitorSession />
-                    </NoConnectionsGuard>
-                  }
-                />
-              )}
+              <Route
+                path="/monitor"
+                element={
+                  <NoConnectionsGuard>
+                    <Monitor />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/monitor/sessions/:id"
+                element={
+                  <NoConnectionsGuard>
+                    <MonitorSession />
+                  </NoConnectionsGuard>
+                }
+              />
               {cloudUser && (
                 <Route
                   path="/workspace/members"

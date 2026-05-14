@@ -11,7 +11,6 @@ import { CrossReferenceEngine } from './cross-reference.engine';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
 import { MonitorController } from './monitor.controller';
-import { MonitorDevPreviewGuard } from './monitor-dev-preview.guard';
 import { PreflightService } from './preflight.service';
 import { TailGateway } from './tail.gateway';
 
@@ -31,7 +30,6 @@ import { TailGateway } from './tail.gateway';
     CrossReferenceEngine,
     HealthGateService,
     MonitorCaptureService,
-    MonitorDevPreviewGuard,
     PreflightService,
     TailGateway,
   ],
