@@ -4350,6 +4350,44 @@ export class PostgresAdapter implements StoragePort {
     return result.rows.map((row) => this.mapScheduledCaptureRow(row));
   }
 
+  async pruneOldCaptureSessions(cutoffTimestamp: number): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      "DELETE FROM capture_sessions WHERE ended_at IS NOT NULL AND ended_at < $1 AND status != 'running'",
+      [cutoffTimestamp],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async pruneOldCaptureChunks(cutoffTimestamp: number): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'DELETE FROM capture_chunks WHERE last_ts < $1',
+      [cutoffTimestamp],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async pruneOldCaptureTriggers(cutoffTimestamp: number): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `DELETE FROM capture_triggers
+       WHERE created_at < $1
+         AND status IN ('fired','skipped','expired','cancelled')`,
+      [cutoffTimestamp],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async pruneOldScheduledCaptures(cutoffTimestamp: number): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      "DELETE FROM scheduled_captures WHERE created_at < $1 AND status = 'disabled'",
+      [cutoffTimestamp],
+    );
+    return result.rowCount ?? 0;
+  }
+
   private mapScheduledCaptureRow(row: Record<string, unknown>): StoredScheduledCapture {
     const toNumber = (v: unknown): number =>
       typeof v === 'string' ? parseInt(v, 10) : (v as number);

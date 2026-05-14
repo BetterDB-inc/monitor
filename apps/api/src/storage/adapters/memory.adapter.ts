@@ -1652,4 +1652,48 @@ export class MemoryAdapter implements StoragePort {
     const limit = options.limit ?? 100;
     return schedules.slice(offset, offset + limit).map((s) => ({ ...s }));
   }
+
+  async pruneOldCaptureSessions(cutoffTimestamp: number): Promise<number> {
+    let pruned = 0;
+    for (const [id, session] of this.captureSessions) {
+      if (
+        session.endedAt !== undefined &&
+        session.endedAt < cutoffTimestamp &&
+        session.status !== 'running'
+      ) {
+        this.captureSessions.delete(id);
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
+  async pruneOldCaptureChunks(cutoffTimestamp: number): Promise<number> {
+    const initial = this.captureChunks.length;
+    this.captureChunks = this.captureChunks.filter((c) => c.lastTs >= cutoffTimestamp);
+    return initial - this.captureChunks.length;
+  }
+
+  async pruneOldCaptureTriggers(cutoffTimestamp: number): Promise<number> {
+    const terminal = new Set(['fired', 'skipped', 'expired', 'cancelled']);
+    let pruned = 0;
+    for (const [id, trigger] of this.captureTriggers) {
+      if (trigger.createdAt < cutoffTimestamp && terminal.has(trigger.status)) {
+        this.captureTriggers.delete(id);
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
+  async pruneOldScheduledCaptures(cutoffTimestamp: number): Promise<number> {
+    let pruned = 0;
+    for (const [id, schedule] of this.scheduledCaptures) {
+      if (schedule.createdAt < cutoffTimestamp && schedule.status === 'disabled') {
+        this.scheduledCaptures.delete(id);
+        pruned++;
+      }
+    }
+    return pruned;
+  }
 }

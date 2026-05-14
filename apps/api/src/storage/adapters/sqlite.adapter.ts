@@ -4100,6 +4100,46 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mapScheduledCaptureRow(row));
   }
 
+  async pruneOldCaptureSessions(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare(
+        "DELETE FROM capture_sessions WHERE ended_at IS NOT NULL AND ended_at < ? AND status != 'running'",
+      )
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  async pruneOldCaptureChunks(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare('DELETE FROM capture_chunks WHERE last_ts < ?')
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  async pruneOldCaptureTriggers(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare(
+        `DELETE FROM capture_triggers
+         WHERE created_at < ?
+           AND status IN ('fired','skipped','expired','cancelled')`,
+      )
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  async pruneOldScheduledCaptures(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare(
+        "DELETE FROM scheduled_captures WHERE created_at < ? AND status = 'disabled'",
+      )
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
   private mapScheduledCaptureRow(row: Record<string, unknown>): StoredScheduledCapture {
     return {
       id: row.id as string,
