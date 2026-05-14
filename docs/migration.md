@@ -29,12 +29,19 @@ What it checks:
 
 ### 2. Execution (Pro tier)
 
-Transfers keys from source to target. Two modes are available:
+Transfers keys from source to target. Three modes are available:
 
 | Mode | Mechanism | Best for |
 |------|-----------|----------|
-| **redis_shake** (default) | External Go binary ([redis-shake](https://github.com/tair-opensource/RedisShake)) | Large datasets, production workloads |
-| **command** | In-process Node.js via iovalkey | Simpler deployments, smaller datasets, easier debugging |
+| **redis_shake** (default) | RedisShake `scan_reader` — DUMP/RESTORE via [redis-shake](https://github.com/tair-opensource/RedisShake) | Large datasets, same-engine migrations (Redis→Redis or Valkey→Valkey) |
+| **redis_shake_sync** | RedisShake `sync_reader` — PSYNC-based continuous replication | Minimal-downtime migrations; keeps replicating until you cut over |
+| **command** | In-process Node.js via iovalkey | Cross-engine migrations (Redis→Valkey), smaller datasets, easier debugging |
+
+#### Choosing a mode
+
+- **Same engine, same major version** (e.g. Redis 7→Redis 7, Valkey 7→Valkey 7): any mode works. `redis_shake` is fastest for large datasets.
+- **Cross-engine** (Redis→Valkey or vice versa): use `redis_shake_sync` or `command`. The `redis_shake` (DUMP/RESTORE) mode will fail because Redis and Valkey use different RDB format versions and the `RESTORE` command rejects the foreign payload.
+- **Near-zero downtime** required: use `redis_shake_sync`. It completes an initial snapshot and then keeps replicating incremental writes until you manually stop it.
 
 #### Command mode
 
@@ -58,12 +65,58 @@ then atomically renamed to the final key. This avoids partial writes if the
 process crashes mid-transfer. If `EVAL` is blocked by ACL on the target, the
 rename and TTL are applied as separate commands with a small race window.
 
-#### RedisShake mode
+#### RedisShake mode (DUMP/RESTORE)
 
-Spawns the redis-shake binary as a child process. BetterDB generates the TOML
-configuration, manages the process lifecycle, and streams progress from its
-stdout. RedisShake auto-discovers cluster topology on both sides, so no special
-handling is needed for cluster targets.
+Spawns the redis-shake binary as a child process using its `scan_reader`. BetterDB
+generates the TOML configuration, manages the process lifecycle, and streams
+progress from its stdout. RedisShake scans every key on the source with `DUMP`,
+sends the raw RDB payload to the target via `RESTORE`, and exits when the scan is
+complete.
+
+**RDB compatibility requirement**: `DUMP`/`RESTORE` payloads embed an RDB format
+version byte. Redis and Valkey have diverged their RDB versions since the fork
+(Redis 7.4 uses RDB v12; Valkey 7.x/8.x uses RDB v11). A `RESTORE` on the
+receiving end will reject a payload with an unrecognised version. Use `command`
+or `redis_shake_sync` mode for cross-engine migrations.
+
+#### RedisShake sync mode (PSYNC)
+
+Uses RedisShake's `sync_reader`, which opens a PSYNC replication stream from the
+source — the same protocol a replica uses. This means:
+
+1. **Initial RDB sync** — RedisShake requests a full sync, receives the source's
+   RDB snapshot, and writes all keys to the target.
+2. **Incremental AOF replication** — After the RDB transfer completes, the source
+   keeps streaming every new write to RedisShake, which forwards it to the target
+   in near real-time.
+
+The migration **runs continuously** and never exits on its own. The UI shows a
+stage chip that transitions from **Initial sync (RDB)** to
+**Replicating · ready for cutover** once the snapshot phase finishes.
+
+**Cutover procedure**:
+1. Wait for the stage chip to show *Replicating · ready for cutover*.
+2. Pause or quiesce writes on the source (brief read-only window).
+3. Wait a few seconds for the replication lag to drain to zero (`diff=[0]` in
+   the log).
+4. Click **Stop Migration** in the execution panel.
+5. Point your application at the target.
+
+**Options**:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `preferReplica` | `false` | Read from a replica instead of the primary. Recommended for production clusters — avoids placing extra PSYNC load on the primary. |
+
+`sync_rdb` and `sync_aof` are hardcoded to `true`. Snapshot-only or AOF-only
+modes may be exposed in a future release.
+
+**Known limitation — log parsing**: sync_reader emits different log keys than
+scan_reader (`write_count`, `diff`, `syncing aof`). Progress during the initial
+RDB phase is not available; the progress bar remains hidden until the AOF
+replication stage begins.
+
+#### Binary location (all RedisShake modes)
 
 The binary is found in this order:
 1. `$REDIS_SHAKE_PATH` environment variable
@@ -209,15 +262,40 @@ inaccurate for cluster targets. This is a known limitation.
 
 ### Concurrent writes on the source
 
-The migration reads a point-in-time snapshot per key but does not freeze the
-source. If keys are modified on the source during migration:
+**Command and redis_shake (DUMP/RESTORE) modes** read a point-in-time snapshot
+per key but do not freeze the source. If keys are modified on the source during
+migration:
 
 - **Lists** may have different lengths. A post-migration length check warns if
   the list grew or shrank.
 - **Keys created after SCAN started** are missed entirely.
 - **Keys deleted after SCAN** are skipped with no error (the read returns nil).
 
-For a consistent migration, quiesce writes to the source before starting.
+For a consistent migration with these modes, quiesce writes to the source before
+starting.
+
+**redis_shake_sync mode** is specifically designed for live sources. It replicates
+writes continuously via PSYNC, so keys created or modified after the initial RDB
+sync are captured. The intended workflow is to keep the source running normally,
+wait for the stage to show *Replicating · ready for cutover*, then apply a brief
+read-only window only at the moment of cutover.
+
+### RDB format compatibility
+
+`DUMP`/`RESTORE` transfers (used by `redis_shake` scan mode) embed an RDB version
+byte in the payload. The target's `RESTORE` command rejects payloads with a
+version it does not understand.
+
+| Source engine | Target engine | redis_shake | redis_shake_sync | command |
+|---------------|---------------|:-----------:|:----------------:|:-------:|
+| Redis 7.x | Redis 7.x | ✅ | ✅ | ✅ |
+| Valkey 7.x | Valkey 7.x | ✅ | ✅ | ✅ |
+| Redis 7.4+ | Valkey any | ❌ RDB v12 vs v11 | ✅ | ✅ |
+| Valkey any | Redis 7.4+ | ❌ RDB v11 vs v12 | ✅ | ✅ |
+
+`redis_shake_sync` is not affected because RedisShake parses the RDB stream
+internally and writes to the target using application-level commands, bypassing
+the `RESTORE` compatibility constraint entirely.
 
 ## Batching and concurrency
 
