@@ -49,6 +49,8 @@ spec:
               value: "Z071377925BCBHU7WUE59"
             - name: DEFAULT_IMAGE_TAG
               value: "v0.21.0"
+            - name: COOKIE_DOMAIN
+              value: ".app.betterdb.com"
             - name: RESEND_API_KEY
               valueFrom:
                 secretKeyRef:
