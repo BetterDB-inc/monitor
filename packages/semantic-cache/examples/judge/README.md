@@ -2,13 +2,13 @@
 
 Demonstrates the `judge` option for adjudicating borderline cache hits.
 
-Uses a mocked judgeFn — **no API key or LLM required**. Replace `mockJudge` in `index.ts` with a real LLM call (see `RELEASE_NOTES.md` for the OpenAI example).
+Uses a mocked judgeFn — **no API key or LLM required**. Replace `mockJudge` in `index.ts` with a real LLM call (see the `## LLM-as-judge` section in the package README for an OpenAI example).
 
 ## Prerequisites
 
 - Valkey 8.0+ with valkey-search running at `localhost:6399`
   ```bash
-  docker run -p 6399:6379 valkey/valkey-search:latest
+  docker run -p 6399:6379 valkey/valkey-bundle:latest
   ```
 
 ## Run
