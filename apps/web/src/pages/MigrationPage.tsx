@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import type { MigrationAnalysisResult, MigrationExecutionResult, ExecutionMode } from '@betterdb/shared';
+import type { MigrationAnalysisResult, MigrationExecutionResult, ExecutionMode, RedisShakeOptions } from '@betterdb/shared';
 import { Feature } from '@betterdb/shared';
 import { fetchApi } from '../api/client';
 import { useLicense } from '../hooks/useLicense';
@@ -86,6 +86,9 @@ export function MigrationPage() {
   const canExecute = hasFeature(Feature.MIGRATION_EXECUTION);
   const blockingCount = job?.blockingCount ?? 0;
   const [executionMode, setExecutionMode] = useState<ExecutionMode>('command');
+  const [preferReplica, setPreferReplica] = useState<boolean>(false);
+  const [tryDiskless, setTryDiskless] = useState<boolean>(false);
+  const [emptyDbBeforeSync, setEmptyDbBeforeSync] = useState<boolean>(false);
 
   // Issue 1 + 4: confirmation dialog state
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
@@ -116,6 +119,9 @@ export function MigrationPage() {
     setExecutionId(null);
     setValidationId(null);
     setExecutionResult(null);
+    setPreferReplica(false);
+    setTryDiskless(false);
+    setEmptyDbBeforeSync(false);
   };
 
   // Issue 1: open dialog instead of window.confirm
@@ -129,12 +135,21 @@ export function MigrationPage() {
     if (!job?.sourceConnectionId || !job?.targetConnectionId) return;
     setMigrationStarting(true);
     try {
+      const rsOptions: RedisShakeOptions = {};
+      if (tryDiskless) rsOptions.tryDiskless = true;
+      if (emptyDbBeforeSync) rsOptions.emptyDbBeforeSync = true;
+      const hasRsOptions = Object.keys(rsOptions).length > 0;
+
       const result = await fetchApi<{ id: string }>('/migration/execution', {
         method: 'POST',
         body: JSON.stringify({
           sourceConnectionId: job.sourceConnectionId,
           targetConnectionId: job.targetConnectionId,
           mode: executionMode,
+          ...(executionMode === 'redis_shake_sync' && {
+            syncReaderOptions: { preferReplica },
+          }),
+          ...(hasRsOptions && { redisShakeOptions: rsOptions }),
         }),
       });
       setShowConfirmDialog(false);
@@ -224,7 +239,7 @@ export function MigrationPage() {
           <MigrationReport job={job} />
 
           {/* Mode selector + Start Migration button */}
-          <div className="pt-4 border-t space-y-3">
+          <div className="py-4 border-t space-y-3 mb-4">
             {canExecute && (
               <div className="flex items-center gap-3">
                 <label className="text-sm font-medium">Migration mode:</label>
@@ -235,7 +250,55 @@ export function MigrationPage() {
                 >
                   <option value="command">Command-based (cross-version compatible)</option>
                   <option value="redis_shake">DUMP/RESTORE (RedisShake)</option>
+                  <option value="redis_shake_sync">Online sync (RedisShake PSYNC, minimal downtime)</option>
                 </select>
+              </div>
+            )}
+
+            {executionMode === 'redis_shake_sync' && canExecute && (
+              <div className="space-y-3">
+                <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-3 text-sm">
+                  <p className="font-medium">Online sync runs continuously</p>
+                  <p className="mt-1">
+                    After the initial sync completes, the migration keeps replicating new writes from source to target.
+                    You'll need to manually stop it from the execution panel when you're ready to cut over.
+                    Plan a brief read-only window on the source during cutover.
+                  </p>
+                </div>
+
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={preferReplica}
+                    onChange={(e) => setPreferReplica(e.target.checked)}
+                    className="rounded"
+                  />
+                  <span>Read from replica (recommended for production: avoids extra PSYNC load on the primary)</span>
+                </label>
+              </div>
+            )}
+
+            {(executionMode === 'redis_shake' || executionMode === 'redis_shake_sync') && canExecute && (
+              <div className="space-y-2 pt-1">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">RedisShake options</p>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={tryDiskless}
+                    onChange={(e) => setTryDiskless(e.target.checked)}
+                    className="rounded"
+                  />
+                  <span>Diskless RDB transfer <span className="text-muted-foreground">(source streams RDB over TCP, no disk write — recommended for large datasets)</span></span>
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={emptyDbBeforeSync}
+                    onChange={(e) => setEmptyDbBeforeSync(e.target.checked)}
+                    className="rounded"
+                  />
+                  <span>Flush target before migration <span className="text-muted-foreground">(prevents BUSYKEY errors if the target already has data)</span></span>
+                </label>
               </div>
             )}
 
@@ -311,11 +374,11 @@ export function MigrationPage() {
           <MigrationReport job={job} />
           <ExecutionPanel
             executionId={executionId}
-            onStopped={() => {/* already stopped */}}
+            onStopped={() => {/* already stopped */ }}
           />
 
           {/* Run Validation + actions */}
-          <div className="pt-4 border-t space-y-3">
+          <div className="py-4 border-t space-y-3 mb-4">
             {!canExecute && (
               <p className="text-sm text-muted-foreground">
                 Post-migration validation requires a Pro license. Upgrade at betterdb.com/pricing
@@ -357,7 +420,7 @@ export function MigrationPage() {
           {executionId && (
             <ExecutionPanel
               executionId={executionId}
-              onStopped={() => {/* already stopped */}}
+              onStopped={() => {/* already stopped */ }}
             />
           )}
           <div ref={validationRef}>
@@ -375,7 +438,7 @@ export function MigrationPage() {
           {executionId && (
             <ExecutionPanel
               executionId={executionId}
-              onStopped={() => {/* already stopped */}}
+              onStopped={() => {/* already stopped */ }}
             />
           )}
           <div ref={validationRef}>
@@ -426,7 +489,13 @@ export function MigrationPage() {
               </div>
               <div className="flex justify-between">
                 <dt className="text-muted-foreground">Mode</dt>
-                <dd className="font-medium">{executionMode === 'command' ? 'Command-based' : 'DUMP/RESTORE (RedisShake)'}</dd>
+                <dd className="font-medium">
+                  {executionMode === 'command'
+                    ? 'Command-based'
+                    : executionMode === 'redis_shake_sync'
+                      ? 'Online sync (RedisShake PSYNC)'
+                      : 'DUMP/RESTORE (RedisShake)'}
+                </dd>
               </div>
             </dl>
 
@@ -448,11 +517,10 @@ export function MigrationPage() {
               <button
                 onClick={handleConfirmMigration}
                 disabled={migrationStarting}
-                className={`px-4 py-2 text-sm rounded-lg inline-flex items-center gap-2 disabled:opacity-70 ${
-                  blockingCount > 0
-                    ? 'border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100'
-                    : 'bg-primary text-primary-foreground hover:bg-primary/90'
-                }`}
+                className={`px-4 py-2 text-sm rounded-lg inline-flex items-center gap-2 disabled:opacity-70 ${blockingCount > 0
+                  ? 'border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                  : 'bg-primary text-primary-foreground hover:bg-primary/90'
+                  }`}
               >
                 {migrationStarting && (
                   <span className="h-3 w-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
