@@ -8,6 +8,5 @@ import { MonitorDevPreviewGuard } from './monitor-dev-preview.guard';
   imports: [StorageModule],
   controllers: [MonitorController],
   providers: [MonitorCaptureService, MonitorDevPreviewGuard],
-  controllers: [MonitorController],
 })
 export class MonitorModule {}
