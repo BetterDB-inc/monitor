@@ -27,7 +27,7 @@ export function licenseErrorResult(data: Pick<LicenseErrorPayload, 'requiredTier
 }
 
 export function resolveInstanceId(activeInstanceId: string | null, overrideId?: string): string {
-  if (overrideId !== undefined && overrideId !== null && overrideId === '') {
+  if (overrideId === '') {
     throw new Error('Instance ID override must not be an empty string.');
   }
   const id = overrideId || activeInstanceId;
