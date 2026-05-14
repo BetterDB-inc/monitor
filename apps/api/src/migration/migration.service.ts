@@ -196,6 +196,26 @@ export class MigrationService {
       job.result.clusterMasterCount = clusterMasterCount;
       job.result.sampledPerNode = scanSampleSize;
 
+      // For cluster mode the adapter connects to a single node, so the totalKeys and
+      // totalMemoryBytes collected in step 2 reflect only one shard. Now that scanClients
+      // covers every master, query each in parallel and overwrite with the real totals.
+      if (isCluster && scanClients.length > 0) {
+        const nodeStats = await Promise.all(scanClients.map(async (nodeClient) => {
+          const [nodeKeys, nodeMemStr] = await Promise.all([
+            nodeClient.dbsize() as Promise<number>,
+            nodeClient.info('memory') as Promise<string>,
+          ]);
+          const memMatch = String(nodeMemStr).match(/\bused_memory:(\d+)/);
+          return {
+            keys: Number(nodeKeys) || 0,
+            memory: memMatch ? parseInt(memMatch[1], 10) : 0,
+          };
+        }));
+        totalKeys = nodeStats.reduce((s, n) => s + n.keys, 0);
+        job.result.totalKeys = totalKeys;
+        job.result.totalMemoryBytes = nodeStats.reduce((s, n) => s + n.memory, 0);
+      }
+
       if (job.cancelled) return;
       job.progress = 15;
 
