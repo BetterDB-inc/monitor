@@ -13,6 +13,8 @@ export enum WebhookEventType {
   CONFIG_CHANGED = 'config.changed',
   REPLICATION_LAG = 'replication.lag',
   CLUSTER_FAILOVER = 'cluster.failover',
+  FAILOVER_STARTED = 'failover.started',
+  FAILOVER_COMPLETED = 'failover.completed',
   AUDIT_POLICY_VIOLATION = 'audit.policy.violation',
   COMPLIANCE_ALERT = 'compliance.alert',
   METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
@@ -49,6 +51,8 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.LATENCY_SPIKE,
   WebhookEventType.CONNECTION_SPIKE,
   WebhookEventType.METRIC_FORECAST_LIMIT,
+  WebhookEventType.FAILOVER_STARTED,
+  WebhookEventType.FAILOVER_COMPLETED,
   WebhookEventType.INFERENCE_SLA_BREACH,
   WebhookEventType.MONITOR_TRIGGER_CREATED,
 ];
@@ -93,6 +97,8 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.LATENCY_SPIKE]: Tier.pro,
   [WebhookEventType.CONNECTION_SPIKE]: Tier.pro,
   [WebhookEventType.METRIC_FORECAST_LIMIT]: Tier.pro,
+  [WebhookEventType.FAILOVER_STARTED]: Tier.pro,
+  [WebhookEventType.FAILOVER_COMPLETED]: Tier.pro,
   [WebhookEventType.INFERENCE_SLA_BREACH]: Tier.pro,
   [WebhookEventType.MONITOR_TRIGGER_CREATED]: Tier.pro,
 
@@ -296,6 +302,22 @@ export interface IWebhookEventsProService {
     slotsAssigned: number;
     slotsFailed: number;
     knownNodes: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+    connectionId?: string;
+  }): Promise<void>;
+
+  dispatchFailoverStarted(data: {
+    previousRole: string;
+    newRole: string;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+    connectionId?: string;
+  }): Promise<void>;
+
+  dispatchFailoverCompleted(data: {
+    previousRole: string;
+    newRole: string;
     timestamp: number;
     instance: WebhookInstanceInfo;
     connectionId?: string;

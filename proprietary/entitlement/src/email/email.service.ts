@@ -16,6 +16,60 @@ export class EmailService {
     }
   }
 
+  async sendWelcomeEmail(to: string, workspaceUrl: string): Promise<void> {
+    const subject = 'Welcome to BetterDB';
+    const text = `Hey,
+
+I'm Kristiyan, founder and CTO of BetterDB and an expert on Valkey and Redis - I spent the last few years running Redis Insight at Redis Inc., so if you ever have questions about your setup, I'm happy to help directly.
+
+Your workspace is live at ${workspaceUrl}. BetterDB works with both Valkey and Redis. It persists your slowlog, COMMANDLOG, latency history, client analytics, and ACL audit trail so you can debug incidents hours after they happen, not just in real time.
+
+To get started, connect your first instance from the dashboard.
+
+If you're running a managed or private deployment (ElastiCache, MemoryDB, GCP Memorystore, or an instance not directly reachable from the internet), you'll also need the BetterDB agent:
+- Docker: https://hub.docker.com/r/betterdb/agent
+- npm: https://www.npmjs.com/package/@betterdb/agent
+
+Just reply to this email if you need anything - even if it's a Valkey or Redis question that has nothing to do with BetterDB.
+
+P.S. We recently released chat.betterdb.com - a public OSS chat trained on Valkey, Redis, Dragonfly and our own docs, so you can use it to cross check the docs more easily and evaluate the differences. It also showcases our LLM caching libraries in action.
+
+Kristiyan
+Founder and CTO, BetterDB`;
+
+    if (!this.apiKey) {
+      this.logger.log(`[DEV] Would send welcome email to ${to} (workspace: ${workspaceUrl})`);
+      return;
+    }
+
+    try {
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: this.fromEmail,
+          to,
+          subject,
+          text,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        this.logger.error(`Failed to send welcome email to ${to}: ${response.status} ${error}`);
+        throw new Error(`Email delivery failed: ${response.status}`);
+      }
+
+      this.logger.log(`Welcome email sent to ${to}`);
+    } catch (error) {
+      this.logger.error(`Failed to send welcome email to ${to}:`, error);
+      throw error;
+    }
+  }
+
   async sendRegistrationEmail(to: string, licenseKey: string): Promise<void> {
     const subject = 'Your BetterDB license key';
     const text = `Hi,
