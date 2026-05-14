@@ -105,19 +105,7 @@ export class WebhookProcessorService implements OnModuleInit, OnModuleDestroy {
       }, delayMs);
     };
 
-    // Run immediately, then schedule adaptively
-    this.processRetries()
-      .then((hadRetries) => {
-        if (!this.isShuttingDown) {
-          schedule(hadRetries ? this.FAST_RETRY_CHECK_INTERVAL_MS : this.BASE_RETRY_CHECK_INTERVAL_MS);
-        }
-      })
-      .catch((error) => {
-        this.logger.error('Error in initial retry processor run:', error);
-        if (!this.isShuttingDown) {
-          schedule(this.BASE_RETRY_CHECK_INTERVAL_MS);
-        }
-      });
+    schedule(0);
   }
 
   /**
