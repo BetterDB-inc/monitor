@@ -57,6 +57,8 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'slowlog.threshold': 'Slowlog Threshold',
   'replication.lag': 'Replication Lag',
   'cluster.failover': 'Cluster Failover',
+  'failover.started': 'Failover Started',
+  'failover.completed': 'Failover Completed',
   'latency.spike': 'Latency Spike',
   'connection.spike': 'Connection Spike',
   'audit.policy.violation': 'Audit Policy Violation',
@@ -69,6 +71,8 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'monitor.session.started': 'MONITOR Session Started',
   'monitor.session.completed': 'MONITOR Session Completed',
   'monitor.session.truncated': 'MONITOR Session Truncated',
+  'monitor.session.skipped': 'MONITOR Session Skipped',
+  'monitor.trigger.created': 'MONITOR Trigger Created',
 };
 
 // Tier display names

@@ -12,6 +12,7 @@ export enum MetricType {
   FRAGMENTATION_RATIO = 'fragmentation_ratio',
   CPU_UTILIZATION = 'cpu_utilization',
   REPLICATION_ROLE = 'replication_role',
+  CLUSTER_STATE = 'cluster_state',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',
 }
