@@ -87,6 +87,37 @@ export interface CaptureTriggerPatch {
   skipReason?: string;
 }
 
+export type ScheduledCaptureStatus = 'enabled' | 'disabled';
+
+export interface StoredScheduledCapture {
+  id: string;
+  connectionId: string;
+  intervalSeconds: number;
+  durationMs: number;
+  status: ScheduledCaptureStatus;
+  createdAt: number;
+  createdBy?: string;
+  lastFiredAt?: number;
+  lastFiredSessionId?: string;
+  lastSkipReason?: string;
+}
+
+export interface ScheduledCaptureQueryOptions {
+  connectionId?: string;
+  status?: ScheduledCaptureStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ScheduledCapturePatch {
+  status?: ScheduledCaptureStatus;
+  intervalSeconds?: number;
+  durationMs?: number;
+  lastFiredAt?: number;
+  lastFiredSessionId?: string;
+  lastSkipReason?: string;
+}
+
 export interface StoredCaptureChunk {
   sessionId: string;
   chunkIndex: number;

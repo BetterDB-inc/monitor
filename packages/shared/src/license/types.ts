@@ -38,6 +38,7 @@ export enum Feature {
   INFERENCE_SLA = 'inferenceSla',
   CACHE_INTELLIGENCE = 'cacheIntelligence',
   MONITOR_ANOMALY_TRIGGER = 'monitorAnomalyTrigger',
+  MONITOR_SCHEDULED_CAPTURES = 'monitorScheduledCaptures',
   // Enterprise-only features
   SSO_SAML = 'ssoSaml',
   COMPLIANCE_EXPORT = 'complianceExport',
@@ -64,6 +65,7 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
     Feature.INFERENCE_SLA,
     Feature.CACHE_INTELLIGENCE,
     Feature.MONITOR_ANOMALY_TRIGGER,
+    Feature.MONITOR_SCHEDULED_CAPTURES,
   ],
   [Tier.enterprise]: Object.values(Feature),
 };
