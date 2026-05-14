@@ -1258,6 +1258,93 @@ Mark items `- [x]` as they land.
   (event vs group rows). Infra fully present (`PendingCard.test.tsx`
   precedent).
 
+## From PR #184 review — scheduled captures + CaptureScheduler + REST
+
+- [ ] **Remove `MONITOR_DEV_PREVIEW` gate from `CaptureScheduler.onModuleInit`**
+  (`apps/api/src/monitor/capture-scheduler.ts:515`). Same #179 finding,
+  same shape: production restart → schedules persist in storage but
+  never re-register; no fires, no log. Pro+ feature ships dark.
+  License gate is the correct security boundary; drop the env check.
+
+- [ ] **Atomic claim / single-leader for ticks on multi-replica**
+  (`capture-scheduler.ts:583-594`). Every replica registers per-row
+  `setInterval`. A 3-pod deployment fires each schedule 3× per
+  interval; the second/third races against an in-process
+  `hasActiveSessionOn` check that doesn't cross processes. Add a
+  DB-level atomic claim (`UPDATE scheduled_captures SET last_fired_at
+  = ? WHERE id = ? AND (last_fired_at IS NULL OR last_fired_at <
+  ? - interval_seconds*1000)`) before `startSession`, or gate the
+  scheduler to a single leader (advisory lock / role flag). Pairs with
+  the #179 follow-up.
+
+- [ ] **`lastSkipReason: undefined` doesn't actually clear the column**
+  (`capture-scheduler.ts:638-642`,
+  `apps/api/src/storage/adapters/postgres.adapter.ts:969-972`,
+  `sqlite.adapter.ts:1136-1139`). Success path writes
+  `lastSkipReason: undefined`; adapters guard with
+  `patch.lastSkipReason !== undefined` and drop the field. A healthy
+  schedule that just recovered from `memory_above_threshold` displays
+  the stale reason indefinitely. Use a `null` sentinel that adapters
+  translate to a real `NULL`, or always write the column.
+
+- [ ] **Per-row try/catch in `onModuleInit` restore**
+  (`capture-scheduler.ts:518-522`). One row's `addInterval` throw
+  aborts the loop; rows after N never restore; Nest crash-loops the
+  pod; no `lastSkipReason: 'restore_failed: <msg>'` is persisted. Wrap
+  each iteration in try/catch, log per-row with an errorId, mark the
+  bad row, continue.
+
+- [ ] **Decide on `cronExpression`** — implement or remove from the
+  shared types (`packages/shared/src/types/monitor.ts:98, 118`). The
+  field is in `StoredScheduledCapture` and `ScheduledCapturePatch` but
+  the scheduler completely ignores it (`capture-scheduler.ts:583-594`
+  only uses `intervalSeconds * 1000`). A future PATCH that toggles to
+  cron form would persist a row the scheduler can't fire
+  (`setInterval(undefined)`). Either drop the field for now or land a
+  discriminated `ScheduleSpec = { kind: 'interval' } | { kind: 'cron' }`.
+
+- [ ] **Add `CaptureScheduler.updateSchedule(id, patch)` and make
+  `StoragePort.updateScheduledCapture` `@internal`**
+  (`capture-scheduler.ts`, `apps/api/src/common/interfaces/storage-port.interface.ts:494-499`).
+  Today `ScheduledCapturePatch` allows mutating `intervalSeconds` but
+  no scheduler method re-registers the timer. The first PATCH endpoint
+  to land silently desyncs the timer map from storage. Route mutations
+  through the scheduler; rename / mark the raw storage method so other
+  modules can't bypass.
+
+- [ ] **`fireOnce` exposed as a public method** (`capture-scheduler.ts:575`).
+  Documented as a test seam but reachable from any in-process
+  collaborator — and a future controller could expose it, bypassing
+  the license gate (which lives on the controller, not the
+  scheduler). Mark `@internal`, prefix `_`, or move behind a test-only
+  subclass / DI override.
+
+- [ ] **Sanitize / redact errors persisted to `lastSkipReason`**
+  (`capture-scheduler.ts:644-648`). `(err as Error).message` may
+  include connection strings, IPs, internal hostnames, and is exposed
+  by `GET /monitor/schedules` to anyone with the feature flag. There's
+  also no `logError` / Sentry errorId. Store an opaque code
+  (`start_failed`) plus a separate redacted detail; route full
+  detail through `logError` with a stable errorId.
+
+- [ ] **Cross-field validation: `intervalSeconds * 1000 > durationMs +
+  headroom`** (`capture-scheduler.ts:657-676`). `{ intervalSeconds:
+  10, durationMs: 900_000 }` passes individual bounds (≥10s, ≤15min)
+  but produces a schedule that perpetually skips itself via
+  `hasActiveSessionOn`. Reject the combo at create time. Same place
+  should reject non-integer `intervalSeconds` / `durationMs` — today
+  floats are silently truncated by Sqlite and rejected by Postgres,
+  yielding inconsistent backend behavior.
+
+- [ ] **Discriminated `lastOutcome` union for schedule + trigger rows**
+  (`packages/shared/src/types/monitor.ts`). `lastFiredAt` /
+  `lastFiredSessionId` / `lastSkipReason` (schedules) and
+  `firedAt` / `firedSessionId` / `skipReason` (triggers) each encode
+  three mutually-exclusive states as three independent optionals. Add
+  a shared discriminated `LastOutcome = { kind: 'fired'; at;
+  sessionId } | { kind: 'skipped'; at; reason } | { kind: 'never' }`
+  and unify naming between the two record types.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
