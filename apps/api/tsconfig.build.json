@@ -5,6 +5,8 @@
     "dist",
     "../../proprietary/entitlement/**/*",
     "../../proprietary/infra/**/*",
+    "../../proprietary/**/__tests__/**/*",
+    "../../proprietary/**/*.spec.ts",
     "src/**/*.spec.ts",
     "src/**/__tests__/**/*",
     "test/**/*"
