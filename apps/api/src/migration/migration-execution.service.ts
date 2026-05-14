@@ -4,11 +4,12 @@ import { spawn } from 'child_process';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import * as os from 'os';
+import Valkey from 'iovalkey';
 import type { MigrationExecutionRequest, MigrationExecutionResult, StartExecutionResponse, ExecutionMode } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
-import { buildScanReaderToml } from './execution/toml-builder';
+import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
 import { parseLogLine } from './execution/log-parser';
 import { runCommandMigration } from './execution/command-migration-worker';
 
@@ -50,9 +51,40 @@ export class MigrationExecutionService {
     const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
     const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
 
-    // 4. For redis_shake mode, locate the binary upfront
+    // 3.5. If emptyDbBeforeSync requested, flush every target master now.
+    // RedisShake's own empty_db_before_sync only flushes the seed node in cluster
+    // mode, leaving other masters intact. We handle it here instead.
+    if ((mode === 'redis_shake' || mode === 'redis_shake_sync') && req.redisShakeOptions?.emptyDbBeforeSync) {
+      if (targetIsCluster) {
+        const nodes = await targetAdapter.getClusterNodes();
+        const masters = nodes.filter(n => n.flags.includes('master'));
+        await Promise.all(masters.map(async (master) => {
+          const addrPart = master.address?.split('@')[0] ?? '';
+          const lastColon = addrPart.lastIndexOf(':');
+          let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
+          const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
+          if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+          if (!host || isNaN(port)) return;
+          const client = new Valkey({
+            host, port,
+            username: targetConfig?.username || undefined,
+            password: targetConfig?.password || undefined,
+            tls: targetConfig?.tls ? {} : undefined,
+            lazyConnect: true,
+          });
+          await client.connect();
+          await client.flushall();
+          await client.quit();
+        }));
+      } else {
+        await targetAdapter.getClient().flushall();
+      }
+      this.logger.log(`Execution pre-flush: flushed target before migration`);
+    }
+
+    // 4. For redis_shake modes, locate the binary upfront
     let binaryPath: string | undefined;
-    if (mode === 'redis_shake') {
+    if (mode === 'redis_shake' || mode === 'redis_shake_sync') {
       try {
         binaryPath = findRedisShakeBinary();
       } catch (err: unknown) {
@@ -74,6 +106,7 @@ export class MigrationExecutionService {
       totalKeys: 0,
       logs: [],
       progress: null,
+      syncStage: null,
       process: null,
       tomlPath: null,
       pidPath: null,
@@ -84,8 +117,18 @@ export class MigrationExecutionService {
     this.jobs.set(id, job);
 
     // 7. Fire and forget based on mode
-    if (mode === 'redis_shake') {
-      const tomlContent = buildScanReaderToml(sourceConfig, targetConfig, clusterEnabled);
+    if (mode === 'redis_shake' || mode === 'redis_shake_sync') {
+      const rsOptions = req.redisShakeOptions ?? {};
+      const tomlContent = mode === 'redis_shake_sync'
+        ? buildSyncReaderToml(
+            sourceConfig,
+            targetConfig,
+            clusterEnabled,
+            req.syncReaderOptions ?? {},
+            targetIsCluster,
+            rsOptions,
+          )
+        : buildScanReaderToml(sourceConfig, targetConfig, clusterEnabled, targetIsCluster, rsOptions);
       const tomlPath = join(os.tmpdir(), `${id}.toml`);
       writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
       job.tomlPath = tomlPath;
@@ -131,6 +174,7 @@ export class MigrationExecutionService {
           if (parsed.keysTransferred !== null) job.keysTransferred = parsed.keysTransferred;
           if (parsed.bytesTransferred !== null) job.bytesTransferred = parsed.bytesTransferred;
           if (parsed.progress !== null) job.progress = parsed.progress;
+          if (parsed.syncStage !== null && job.mode === 'redis_shake_sync') job.syncStage = parsed.syncStage;
         }
       };
 
@@ -264,6 +308,7 @@ export class MigrationExecutionService {
       totalKeys: job.totalKeys ?? undefined,
       logs: [...job.logs],
       progress: job.progress,
+      syncStage: job.syncStage,
     };
   }
 

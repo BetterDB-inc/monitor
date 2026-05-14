@@ -71,9 +71,38 @@ export class MigrationController {
     if (body.sourceConnectionId === body.targetConnectionId) {
       throw new BadRequestException('Source and target must be different connections');
     }
-    if (body.mode && body.mode !== 'redis_shake' && body.mode !== 'command') {
-      throw new BadRequestException('mode must be "redis_shake" or "command"');
+    if (
+      body.mode &&
+      body.mode !== 'redis_shake' &&
+      body.mode !== 'redis_shake_sync' &&
+      body.mode !== 'command'
+    ) {
+      throw new BadRequestException('mode must be "redis_shake", "redis_shake_sync", or "command"');
     }
+
+    if (body.syncReaderOptions !== undefined) {
+      if (typeof body.syncReaderOptions !== 'object' || body.syncReaderOptions === null) {
+        throw new BadRequestException('syncReaderOptions must be an object');
+      }
+      if (
+        body.syncReaderOptions.preferReplica !== undefined &&
+        typeof body.syncReaderOptions.preferReplica !== 'boolean'
+      ) {
+        throw new BadRequestException('syncReaderOptions.preferReplica must be a boolean');
+      }
+    }
+
+    if (body.redisShakeOptions !== undefined) {
+      if (typeof body.redisShakeOptions !== 'object' || body.redisShakeOptions === null) {
+        throw new BadRequestException('redisShakeOptions must be an object');
+      }
+      for (const field of ['tryDiskless', 'emptyDbBeforeSync'] as const) {
+        if (body.redisShakeOptions[field] !== undefined && typeof body.redisShakeOptions[field] !== 'boolean') {
+          throw new BadRequestException(`redisShakeOptions.${field} must be a boolean`);
+        }
+      }
+    }
+
     return this.executionService.startExecution(body);
   }
 

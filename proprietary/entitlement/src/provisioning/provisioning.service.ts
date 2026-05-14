@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { EmailService } from '../email/email.service';
 import { TenantStatus } from '@prisma/client';
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
@@ -41,6 +42,7 @@ export class ProvisioningService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly email: EmailService,
   ) {
     // Initialize K8s client
     this.kc = this.getK8sClient();
@@ -179,6 +181,13 @@ export class ProvisioningService {
       // Step 12: Update status to ready
       await this.updateTenantStatus(tenantId, 'ready');
       this.logger.log(`[${tenant.subdomain}] Provisioning complete! Tenant is ready at https://${hostname}`);
+
+      // Step 13: Send welcome email (non-blocking — don't fail provisioning if email fails)
+      if (!tenant.isDemo) {
+        this.email.sendWelcomeEmail(tenant.email, `https://${hostname}`).catch((err) => {
+          this.logger.error(`[${tenant.subdomain}] Failed to send welcome email: ${err?.message}`);
+        });
+      }
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';

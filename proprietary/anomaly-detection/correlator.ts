@@ -42,12 +42,32 @@ export class Correlator {
       {
         pattern: AnomalyPattern.NODE_FAILOVER,
         requiredMetrics: [MetricType.REPLICATION_ROLE],
-        diagnosis: 'Node failover detected — this instance transitioned from master to replica',
+        optionalMetrics: [MetricType.SLOWLOG_LAST_ID, MetricType.CLUSTER_STATE, MetricType.OPS_PER_SEC],
+        check: (anomalies) => {
+          return anomalies.some(a =>
+            a.metricType === MetricType.REPLICATION_ROLE
+          );
+        },
+        get diagnosis() {
+          return 'Node failover detected — this instance transitioned role';
+        },
         recommendations: [
           'Verify the new primary is healthy and accepting writes',
           'Check replication lag on the new primary',
           'Review application connection strings for failover handling',
           'Inspect cluster logs for the cause of the failover',
+          'Confirm no split-brain scenario exists',
+        ],
+      },
+      {
+        pattern: AnomalyPattern.NODE_FAILOVER,
+        requiredMetrics: [MetricType.CLUSTER_STATE],
+        diagnosis: 'Cluster state transition detected — slot coverage changed',
+        recommendations: [
+          'Check cluster slot coverage and reassign if needed',
+          'Verify all master nodes are healthy and reachable',
+          'Review cluster-level slow queries across nodes',
+          'Inspect CLUSTER INFO for partially-failed slots',
           'Confirm no split-brain scenario exists',
         ],
       },
@@ -373,10 +393,34 @@ export class Correlator {
       timestamp: Math.min(...anomalies.map(a => a.timestamp)),
       anomalies,
       pattern: rule.pattern,
-      diagnosis: rule.diagnosis,
+      diagnosis: this.enrichDiagnosis(rule, anomalies),
       recommendations: rule.recommendations,
       severity: maxSeverity,
     };
+  }
+
+  /**
+   * Enrich diagnosis text with context from co-occurring anomalies.
+   * For NODE_FAILOVER, dynamically mention slowlog correlation if present.
+   */
+  private enrichDiagnosis(rule: PatternRule, anomalies: AnomalyEvent[]): string {
+    if (rule.pattern === AnomalyPattern.NODE_FAILOVER) {
+      const hasSlowlogSpike = anomalies.some(a => a.metricType === MetricType.SLOWLOG_LAST_ID);
+      const hasClusterState = anomalies.some(a => a.metricType === MetricType.CLUSTER_STATE);
+      const hasRoleChange = anomalies.some(a => a.metricType === MetricType.REPLICATION_ROLE);
+
+      let diagnosis = rule.diagnosis;
+
+      if (hasRoleChange && hasSlowlogSpike) {
+        diagnosis = 'Node failover detected with correlated slowlog spike — the slow queries are likely caused by the failover transition';
+      } else if (hasClusterState && hasSlowlogSpike) {
+        diagnosis = 'Cluster state transition detected with correlated slowlog spike — slot re-coverage may have caused latency';
+      }
+
+      return diagnosis;
+    }
+
+    return rule.diagnosis;
   }
 
   getPatternDescription(pattern: AnomalyPattern): string {
