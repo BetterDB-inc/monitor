@@ -1538,6 +1538,88 @@ Mark items `- [x]` as they land.
   (`EVAL:<sha>` from A absent in B appears in `newShapes` with SHA
   intact); slowlog/ACL "evaluated" flag (per the follow-up above).
 
+## From PR #187 review — data-retention pruning hooks
+
+- [ ] **`logError` + errorId in the per-op retention catch + surface
+  failures in the summary** (`proprietary/data-retention/data-retention.service.ts:67-72, 75`).
+  Today `this.logger.error` writes to stdout only, the `-1` sentinel
+  for a failed prune is then dropped by `.filter(v > 0)` in the total,
+  and the summary log reads "Retention complete: N rows pruned" as if
+  nothing went wrong. A nightly cron that mass-deletes data is exactly
+  where you want Sentry breadcrumbs. Define
+  `RETENTION_PRUNE_FAILED`, replace `logger.error` with `logError(...)`,
+  include `{ op, cutoff, tier, err }`, and emit a structured
+  `{ failures: string[] }` field in the summary.
+
+- [ ] **Zombie-detection on every retention run**
+  (`data-retention.service.ts`). Today retention silently preserves
+  every session stuck in `running`, every trigger stuck in
+  `queued`/`configured`, every `enabled` schedule perma-failing — for
+  the lifetime of the deployment. Add a sibling SELECT-count query per
+  table counting `(active-status rows older than cutoff)` and
+  `logError(RETENTION_ZOMBIE_DETECTED, ...)` when > 0. Pairs with
+  #167's zombie-session reconciler follow-up.
+
+- [ ] **`pruneOldCaptureChunks` must respect parent session status**
+  (`apps/api/src/storage/adapters/sqlite.adapter.ts:4115-4118`,
+  `postgres.adapter.ts:4364-4367`, `memory.adapter.ts:179-183`).
+  Today chunks are deleted purely by `last_ts < cutoff` with no
+  session-status awareness. A 14-day session that's still `running`
+  on a 7-day cutoff loses its first 7 days of chunks mid-stream;
+  `getCaptureChunks(sessionId)` then returns silently truncated data.
+  Fix: `AND session_id NOT IN (SELECT id FROM capture_sessions
+  WHERE status = 'running')`, or prune chunks only after their owning
+  session is in a terminal state.
+
+- [ ] **Enable `PRAGMA foreign_keys = ON` on the SQLite adapter**
+  (`apps/api/src/storage/adapters/sqlite.adapter.ts`). The
+  `capture_chunks.session_id REFERENCES capture_sessions(id) ON DELETE
+  CASCADE` is decorative without the pragma — sessions deleted without
+  cascading the chunks, leaving orphans until their own `last_ts`
+  cutoff. Pairs with the #164 follow-up that flagged this for the
+  capture-chunks FK originally. Set the pragma once at connection
+  setup; matches Postgres semantics.
+
+- [ ] **Leader-election / advisory lock around `runRetention()`**
+  (`data-retention.service.ts:24`, `@Cron('0 3 * * *')`). Every API
+  replica fires the cron simultaneously → `15 × N` overlapping DELETE
+  transactions at 03:00 UTC every night. Postgres lock contention;
+  SQLite serialises and timeouts which then hit the catch (finding
+  above) and disappear. Wrap in `pg_try_advisory_lock(RETENTION_LOCK_ID)`,
+  or insert into a `retention_runs(date UNIQUE)` row before running.
+
+- [ ] **Postgres adapter coverage for the 4 new prune methods**
+  (`apps/api/src/storage/adapters/__tests__/capture-sessions.spec.ts`).
+  `describe.each` covers only Sqlite + Memory. Same recurring gap from
+  #167/#177/#178/#184/#185/#186 — at this point a single follow-up
+  that brings Postgres into the matrix across all monitor storage
+  methods is overdue.
+
+- [ ] **Preserve `status='failed'` sessions longer than the default
+  cutoff** (`sqlite.adapter.ts:4107`, `postgres.adapter.ts:4356`).
+  Today retention prunes `failed` / `truncated` / `completed` /
+  `cancelled` identically. An operator investigating an 8-day-old
+  `failed` capture on community-tier (7d) install has no recourse —
+  it vanishes overnight. Add a `RETENTION_FAILED_SESSION_MULTIPLIER`
+  (default 2× tier cutoff) and `logEvent` whenever a `failed` session
+  is actually pruned, so operators can grep history.
+
+- [ ] **`pruneOldScheduledCaptures` should use
+  `GREATEST(created_at, last_fired_at)`**
+  (`postgres.adapter.ts:248`, `sqlite.adapter.ts:299`). Today the
+  query uses only `created_at`, so a long-lived schedule disabled
+  yesterday but created two years ago is pruned immediately on
+  Community tier. Coalesce against `last_fired_at` (which exists on
+  the row) so retention reflects when the schedule was last useful,
+  not when it was created.
+
+- [ ] **Typed `StorageNotInitializedError` with errorId** for the 8
+  new throw sites in the prune methods (sqlite + postgres). Today
+  `throw new Error('Database not initialized')` is an opaque string;
+  the retention catch eats it and reports `-1` for every op. A typed
+  error lets the catch distinguish "fix the deploy" from "fix the
+  SQL," and the errorId surfaces in Sentry.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
