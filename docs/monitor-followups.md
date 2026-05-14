@@ -927,6 +927,101 @@ Mark items `- [x]` as they land.
   Sqlite + Memory. Now there's a JSONB column to test (parser, partial
   patch via `updateCaptureSession`, round-trip). Extend the matrix.
 
+## From PR #179 review — Pro+ capture triggers + REST + license gate
+
+- [ ] **Remove `MONITOR_DEV_PREVIEW` gate from `CaptureTriggerRegistry.onModuleInit`**
+  (`apps/api/src/monitor/capture-trigger-registry.ts:639-651`). Commit
+  `9cee378` removed the gate elsewhere but this file was missed. Today
+  the Pro+ feature accepts trigger creation in production but **never
+  polls** — operators see `201 {status:'configured'}`, no fire, then
+  `expired` 24h later, with no log.
+
+- [ ] **Atomic, status-guarded state transitions in storage**
+  (`updateCaptureTrigger` across sqlite / postgres / memory).
+  - Replace blind status patches with
+    `UPDATE … WHERE id = ? AND status IN (<expected>)` (or a
+    `compareAndSetStatus(id, expected, next)` storage primitive). Rejects
+    `cancelled → fired` and similar at the DB.
+  - Add a partial unique index on
+    `(connection_id, metric_type, anomaly_type) WHERE status IN ('configured','queued')`
+    so concurrent `createTrigger` calls can't race past
+    `findActiveTrigger`.
+  - These two changes also close the **multi-replica double-fire**: two
+    pods both pass `findActiveTrigger`, both call `startSession`. An
+    atomic claim (`UPDATE … SET status='fired' WHERE id = ? AND status='configured'`)
+    serialises the claim.
+
+- [ ] **Per-step + per-trigger try/catch in `tick()`**
+  (`capture-trigger-registry.ts:712-724, 798`). Today `sweepExpired`,
+  `processQueued`, `processNewAnomalies` run sequentially with no
+  per-phase catch; one rejected storage call or `HealthGateService.evaluate`
+  throw aborts the entire tick. Wrap each phase and each per-trigger
+  iteration; on health-gate failure mark the trigger `skipped` with
+  `skipReason: 'health_gate_error: <msg>'` (distinguishes from
+  signal-gated skip).
+
+- [ ] **Typed `CaptureBusyException` instead of string-match**
+  (`capture-trigger-registry.ts:823-834`). `message.includes('already
+  active')` decides between busy → `queued` and generic error →
+  `skipped`. Locale change / refactor of the error text silently flips
+  every contention into a one-shot failure. Throw a typed exception
+  from `MonitorCaptureService.startSession` and `instanceof`-check.
+
+- [ ] **Discriminated `StoredCaptureTrigger` by status**
+  (`packages/shared/src/types/monitor.ts:62`). Today's flat shape lets
+  a `cancelled` trigger appear to have a `firedSessionId`, and lets
+  `{status:'fired'}` be constructed without one. Convert to:
+  ```ts
+  type StoredCaptureTrigger =
+    | { status: 'configured' | 'queued'; …base }
+    | { status: 'fired';    firedAt: number; firedSessionId: string }
+    | { status: 'skipped';  skipReason: string }
+    | { status: 'expired' | 'cancelled' };
+  ```
+  Pairs naturally with the storage-layer transition guards above.
+
+- [ ] **`firedSessionId` should reflect terminal session status**
+  (`capture-trigger-registry.ts:818-822`). Trigger flips to `fired` the
+  instant `startSession` resolves. If the session later fails
+  (capture-writer error, MONITOR-open fail, node disconnect), the
+  trigger row stays `fired` pointing at a `failed` session. Either add
+  a terminal `fired_failed` state populated when `MonitorCaptureService`
+  finalises a failed session that has a `triggerId`, or join against
+  `capture_sessions.status` in the `/monitor/triggers` response shape.
+
+- [ ] **License-gate + DemoMode coverage at controller level**.
+  - Controller spec instantiates `MonitorController` directly,
+    bypassing the Nest pipeline → `@UseGuards(LicenseGuard)` +
+    `@RequiresFeature(MONITOR_ANOMALY_TRIGGER)` on the three trigger
+    endpoints are never exercised. Use `Test.createTestingModule` and
+    assert 402/403 on community-tier license.
+  - `proprietary/cloud-auth/demo-mode.guard.spec.ts` has zero references
+    to `/monitor/triggers`. Add POST/DELETE → 403 + GET → 200 on demo
+    host. Also anchor the prefix match (`p === path || path.startsWith(p
+    + '/')`) — same #168/#177 follow-up.
+
+- [ ] **Pre-load active triggers once per tick**
+  (`capture-trigger-registry.ts:785-789`). `findActiveTrigger` runs 2
+  storage queries **per anomaly event** inside the per-event loop. With
+  `maxPerTick = 5000` that's up to 10 000 SELECTs per tick. Fetch
+  configured+queued triggers once at top of `processNewAnomalies`, then
+  match in-memory.
+
+- [ ] **Validate `metricType` and `anomalyType` against canonical
+  anomaly enums** at the create-DTO boundary
+  (`apps/api/src/monitor/monitor.controller.ts` create handler). Today a
+  typo (`'connetions'` for `'connections'`) silently never matches; the
+  trigger sits `configured` → `expired` after 24h. Reject unknown values
+  with `BadRequestException` listing the valid set.
+
+- [ ] **`MONITOR_TRIGGER_POLL_MS` as Zod-validated env var**
+  (`capture-trigger-registry.ts:576`). Today `DEFAULT_POLL_INTERVAL_MS =
+  5_000` is hard-coded; only the test seam can override. Same #165/#169
+  pattern — add `z.coerce.number().int().min(100).default(5000)` to
+  `env.schema.ts`, inject `ConfigService`. Also: when `setInterval`
+  fires and `ticking` is true (i.e. previous tick still running), log a
+  warning so silent throttling is visible.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
