@@ -1089,6 +1089,88 @@ Mark items `- [x]` as they land.
   that proposed deriving the arrays from the tier map. Either derive,
   or pin parity in a spec.
 
+## From PR #182 review — Triggers tab UI
+
+- [ ] **Add error handling to `handleCancelTrigger`** (`apps/web/src/pages/Monitor.tsx:35-43, 80-86`).
+  Today `try { … } finally { … }` with no catch swallows 404 (already
+  cancelled/expired), 402 (license downgrade), 500, network failure.
+  User sees "Cancelling…" flip back to "Delete," same silent no-op on
+  retry. Add a `catch`, route `PaymentRequiredError` through
+  `useUpgradePrompt`, toast the rest, and `logError` with a stable
+  errorId.
+
+- [ ] **Tear down the triggers query and redirect the tab on license
+  downgrade** (`Monitor.tsx:39-45`). When `hasFeature` flips
+  Pro → Community mid-session, the polling query already in flight keeps
+  hitting `/monitor/triggers` and routing 402s into `showUpgradePrompt`
+  every 5 s — spamming the upgrade modal. The user can also be stranded
+  on a blank `triggers` tab (`defaultValue="sessions"` doesn't auto
+  switch). On `!triggersEnabled`, call
+  `queryClient.removeQueries({ queryKey: triggersKey })` and force the
+  tab back to `sessions` via an effect.
+
+- [ ] **Surface `triggersQuery.error` as a banner**. The page
+  destructures `data`/`loading` only and the empty state ("No capture
+  triggers configured") swallows persistent 500s. Same #171 finding —
+  worth fixing across both pages at once.
+
+- [ ] **Defensive formatters for triggers-table**
+  (`apps/web/src/pages/monitor/triggers-table.tsx:35-66, 141-154`).
+  - `formatRelative` renders literal `"NaN d"` for missing /
+    garbage `expiresAt`: `NaN <= 0` is `false` so the `'expired'`
+    short-circuit misses, then every threshold branch is `false` →
+    `${NaN.toFixed(1)}d`. Add `if (!Number.isFinite(ms)) return '—';`
+    at the top.
+  - `formatTimestamp(undefined)` renders `"Invalid Date"`. Guard to
+    return `"—"` on non-finite / null input.
+  - Extract both to `apps/web/src/lib/format-time.ts` alongside the
+    similar functions duplicated from #171's sessions-table.
+
+- [ ] **`EVENT_LABELS[type] ?? type` fallback in WebhookForm**
+  (`apps/web/src/components/webhooks/WebhookForm.tsx:71-72`). Today
+  `Record<WebhookEventType, string>` is exhaustive at compile time, but
+  the #181 follow-up will rename `monitor.session.skipped` →
+  `monitor.trigger.skipped`. After the rename, the lookup falls to
+  `undefined` and the dropdown shows a blank label silently. Defaulting
+  to the raw event name keeps the form usable through the rename.
+
+- [ ] **Status-badge unknown-status visibility**
+  (`triggers-table.tsx:107-121`). Today an unmapped status falls through
+  to `'outline'` with the raw enum string — graceful, but the operator
+  has no signal the UI is out-of-date with backend. Make it an
+  exhaustive switch with a `never` check (compile-time), and `logError`
+  once per session on unknown status so version skew surfaces in
+  Sentry.
+
+- [ ] **Optimistic remove + global cancel-in-flight disable**
+  (`triggers-table.tsx:69`). `disabled={cancellingId === t.id}` disables
+  only the single row. Same-row double-click can race the state commit;
+  more importantly the row stays visible until the next 5 s poll, so a
+  user "double-deletes" by clicking again before the list refreshes
+  (404 silent — see error-handling item above). Optimistically remove
+  the row from the cache on cancel, or disable cancel across the entire
+  list while any cancel is in flight.
+
+- [ ] **URL state for the Sessions/Triggers tab** (`Monitor.tsx:88`).
+  Today `defaultValue="sessions"` is fixed — no `useSearchParams`, no
+  deep-link to `?tab=triggers`. That defeats the point of the new
+  `monitor.trigger.created` webhook (operators clicking the alert link
+  always land on Sessions). Sync the active tab with the URL.
+
+- [ ] **`firedSessionId` should link to the captured session**
+  (`triggers-table.tsx:73-75`). Today the column shows `slice(0, 8)`
+  with no affordance. Wrap with `<Link to={\`/monitor/sessions/${t.firedSessionId}\`}>`.
+
+- [ ] **Tests for the license gate, status-variant matrix, formatter
+  guards, and cancel mutation flow**. None added in this PR. Infra is
+  fully present (`apps/web/vitest.config.ts` + `useLicense.test.ts` /
+  `formatters.test.ts` / `commandstats.test.ts` /
+  `PendingCard.test.tsx` precedents). Minimum: license gate visible
+  vs hidden + polling-disabled-when-ungated; each of the 6 status
+  variants; cancel → invalidates; cancel rejection → no invalidation
+  + button re-enables; `formatRelative` boundary table (0, 59999, 60000,
+  1h, 1d, `NaN`, negative).
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
