@@ -1715,6 +1715,83 @@ Mark items `- [x]` as they land.
   to `[]` and `logError('PREFLIGHT_PROVIDER_RESTRICTIONS_MISSING',
   { provider })` so the gap surfaces in Sentry.
 
+## From PR #189 review — optional value-redaction toggle
+
+- [ ] **`redaction_mode` on `capture_sessions` + UI badge + per-writer
+  warn log on unscrubbed verbs**
+  (`apps/api/src/monitor/value-redactor.ts:35-65, 84`,
+  `apps/api/src/monitor/iovalkey-monitor-source.ts:19`). Today
+  `MONITOR_REDACT_VALUES=true` is captured once at writer construction
+  but never recorded on the session. ~21 verbs are scrubbed; everything
+  else (XADD, ZADD, BITFIELD, BITOP, EVAL, MIGRATE, RESTORE, etc.)
+  falls through silently. Operators reading the PR title reasonably
+  believe "values are redacted" — they aren't. Add a
+  `redaction_mode: 'off' | 'partial' | 'unknown'` column, default
+  historical rows to `unknown`, surface in the session DTO and UI
+  badge, and `logger.warn` once per writer at session start listing
+  the unscrubbed verbs.
+
+- [ ] **Add strategies for secrets-in-args verbs**
+  (`value-redactor.ts:42-65`). `AUTH <password>`, `HELLO ... AUTH user
+  pass`, `CONFIG SET requirepass/masterauth <pw>`, `MIGRATE ... AUTH
+  <pw>`, `ACL SETUSER user > <password>`, `EVAL <script>` (script body
+  is index 1), `SCRIPT LOAD <body>`, `FUNCTION LOAD <code>`,
+  `RESTORE key ttl <rdb-blob>` are all leaked verbatim under the
+  current toggle. These are the highest-risk targets a redaction
+  feature should cover. Add explicit per-verb strategies and update
+  `.env.example` to list which verbs are covered vs unhandled (and
+  surface this list at the API too — see `redaction_mode` above).
+
+- [ ] **`MONITOR_REDACT_VALUES` to Zod schema + warn on
+  non-recognized value** (`value-redactor.ts:97`,
+  `apps/api/src/config/env.schema.ts`). Recurring #165/#169/#184/#188
+  pattern, but this one is security-adjacent. Today strict `'true'`
+  match silently disables redaction for `=1`, `=TRUE`, `=yes`, `=on`,
+  `="true"` (Helm-quoted). A security toggle silently failing OFF is
+  the textbook silent-failure anti-pattern. The spec at
+  `value-redactor.spec.ts:217-224` codifies the silent fallthrough as
+  desired — that test should pin a `logger.warn` instead. Add to Zod
+  with `z.enum(['true', 'false']).optional()` (or coerce) and `warn`
+  on any non-empty value that's not in the set.
+
+- [ ] **Buffer-typed args contract**
+  (`value-redactor.ts:88`, `iovalkey-monitor-source.ts:20-24`). Today
+  `String(args[0] ?? '').toUpperCase()` works for the verb lookup but
+  per-arg `args[i]` may be a `Buffer` if iovalkey is configured with
+  a binary-safe decoder. Strategies slice/copy but `formatMonitorLine`
+  later does `String(a)` — produces `[object Object]` or lossy decode
+  on non-UTF-8 bytes. Either narrow the input contract (assert all
+  args are strings; `logError` + skip line on non-string) or document
+  the iovalkey decode mode this PR depends on.
+
+- [ ] **Wiring test for `iovalkey-monitor-source.ts` with redaction
+  enabled** (`apps/api/src/monitor/__tests__/`). Today 20 unit tests
+  cover the pure redactor; nothing asserts the source actually
+  invokes `redactWriteCommandArgs` when `MONITOR_REDACT_VALUES=true`.
+  A regression like swapping the ternary, dropping the call, or
+  short-circuiting on `stopped` early would pass every current test.
+  Stub `Valkey.monitor()` returning an `EventEmitter`, emit fake
+  events in both env states, and assert the emitted `'line'` payload
+  shape end-to-end.
+
+- [ ] **Non-colliding placeholder** (`value-redactor.ts:12`). The
+  literal `<redacted>` is indistinguishable from a genuine value of
+  the same string. Low practical impact but `find captures with
+  redactions` queries get false positives. Use
+  `<betterdb:redacted>` (or a zero-width marker), or stop relying on
+  the literal and record the redacted-arg position per chunk so
+  forensic queries can be exact.
+
+- [ ] **Cover excluded verbs explicitly in tests + named in
+  `.env.example`** (`.env.example:14-16`,
+  `value-redactor.spec.ts`). Today excluded grammars (XADD / ZADD /
+  BITFIELD / BITOP) are mentioned abstractly in `.env.example` and
+  not asserted as pass-through in the spec. List the unhandled verbs
+  inline in the env-example trade-off note, and add explicit
+  `toEqual(unchanged)` assertions for representative excluded verbs
+  so a future contributor who adds a partial strategy doesn't forget
+  to flip the `redaction_mode` marker.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
