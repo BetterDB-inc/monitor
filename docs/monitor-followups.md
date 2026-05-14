@@ -1345,6 +1345,108 @@ Mark items `- [x]` as they land.
   sessionId } | { kind: 'skipped'; at; reason } | { kind: 'never' }`
   and unify naming between the two record types.
 
+## From PR #185 review — Scheduled tab UI + cron expression support
+
+- [ ] **Fix the cron migration for PR-19 deployments**
+  (`apps/api/src/storage/adapters/sqlite.adapter.ts:1450-1483`,
+  `postgres.adapter.ts:1696-1729`). `CREATE TABLE IF NOT EXISTS`
+  doesn't re-evaluate column definitions or table-level CHECKs on
+  existing tables. Today's `ADD COLUMN cron_expression` migration
+  leaves the prior `interval_seconds INTEGER NOT NULL CHECK (...)`
+  intact — so cron-only inserts on an upgraded deployment fail with
+  `NOT NULL violation`, and the new XOR CHECK never applies. **P0 for
+  any deployment that already ran PR 19.** Either rebuild the table
+  (`CREATE TABLE _new` + `INSERT SELECT` + rename + reinstall the new
+  CHECKs) or, on Postgres, run `ALTER COLUMN interval_seconds DROP
+  NOT NULL` plus a fresh CHECK. Add adapter tests that exercise the
+  legacy schema → `initialize()` path.
+
+- [ ] **Make cron timezone explicit** (`capture-scheduler.ts:236, 314`).
+  `new CronJob(expr, fn)` defaults to the Node process timezone — prod
+  (UTC) vs dev (operator-local) interpret `"0 9 * * *"` differently.
+  Add an IANA `timezone: string` field to the `cron` arm of the
+  schedule (default `'UTC'`), pass `{ timeZone }` to `CronJob`,
+  surface the timezone in the modal and the cadence label, and persist
+  to the row. Document DST behaviour for `0 2 * * *` (spring-forward
+  zero-fire, fall-back double-fire).
+
+- [ ] **Discriminated `ScheduleSpec` union in shared types**
+  (`packages/shared/src/types/monitor.ts:92-106`). Replace independent
+  optionals (`intervalSeconds?` / `cronExpression?`) with
+  `{ kind: 'interval'; intervalSeconds: number } | { kind: 'cron';
+  cronExpression: string; timezone?: string }`. Eliminates the
+  `cronExpression!` non-null bang at `capture-scheduler.ts:175`, the
+  dead-branch throw at `:153-157`, lets `registerTimer` dispatch
+  exhaustively, and turns the SQL CHECK into pure defense-in-depth.
+  Pairs with the #184 `cronExpression` follow-up.
+
+- [ ] **Enforce a minimum cadence on cron** (`capture-scheduler.ts:288-318`).
+  `validateCron` accepts `* * * * *` (every minute) and 6-field forms
+  like `* * * * * *` (every second). Pathological cadences silently
+  fall into a `session_already_active`-skip loop (#184 finding) →
+  user sees a schedule that "appears to do nothing useful." Compute
+  the next 2-3 fire times from the parsed expression, derive the min
+  delta, and reject when `< MIN_INTERVAL_SECONDS`. Surface the
+  derived cadence to the user.
+
+- [ ] **Replace live `new CronJob(...)` with a pure parser for
+  validation** (`capture-scheduler.ts:310-318`). Today `validateCron`
+  constructs a real `CronJob` with `start=false` purely to check
+  syntax. The `cron@4.x` constructor still parses, computes next-fire
+  times, and may attach event listeners — and a future positional
+  signature drift (the `cron` API changed shape across v2→v3→v4)
+  could silently start the validation "job." Use `cron`'s exported
+  parser (e.g. `cron-parser`'s `CronExpressionParser.parse`) for pure
+  validation; reserve `CronJob` for live registration.
+
+- [ ] **`ScheduledCapturePatch`: forbid kind-flips with stale partner
+  field; add `CaptureScheduler.updateSchedule` that re-registers**
+  (`packages/shared/src/types/monitor.ts:115-123`,
+  `capture-scheduler.ts`). Today the patch type accepts both
+  `intervalSeconds` and `cronExpression` independently. A PATCH that
+  flips the kind without nulling the partner triggers the SQL CHECK
+  → 500. Worse, the live `CronJob`/`Interval` is never rebuilt on
+  update. Model the patch as
+  `{ status?, durationMs?, schedule?: ScheduleSpec }` so kind moves
+  atomically; add a scheduler method that re-registers the timer.
+
+- [ ] **Sweep legacy `monitor-schedule-` timer prefix on init**
+  (`capture-scheduler.ts:21-22, 251-257`). PR renames the prefix to
+  `monitor-schedule-interval-` / `monitor-schedule-cron-`. On rolling
+  deploys, any timer registered under the old prefix is orphaned —
+  `onModuleDestroy` only deletes new-prefix names. Scan
+  `registry.getIntervals()` for the legacy prefix in `onModuleInit`
+  and delete.
+
+- [ ] **Storage round-trip + migration tests for `cron_expression`**
+  (`apps/api/src/storage/adapters/__tests__/capture-sessions.spec.ts`).
+  `describe.each` covers Sqlite + Memory (Postgres still missing per
+  #167 carry-over). Today no test persists a cron-only schedule;
+  regressions in the new placeholder shift, JSONB readback, or
+  `toOptionalNumber` ship silently. Add: cron save→get round-trip;
+  interval→cron swap via `updateScheduledCapture`; DB-level rejection
+  of XOR-violating rows; legacy-schema → `initialize()` migration
+  test that asserts `PRAGMA table_info` now contains
+  `cron_expression`.
+
+- [ ] **Cron validation matrix**: today's spec covers one valid /
+  one invalid string. Expand to: 5-field, 6-field with seconds,
+  aliases (`@daily`, `@hourly`) — pin whether accepted; 4-field
+  (invalid); empty string; whitespace-only; very long pathological
+  string; pathological-but-valid `* * * * *` (assert accepted and
+  flag the foot-gun); DST-relevant `0 2 * * *`.
+
+- [ ] **Per-error UX in `CreateScheduleModal` + reset on submit**
+  (`apps/web/src/pages/monitor/create-schedule-modal.tsx:783, 830-833`).
+  Today raw `err.message` is shown for every failure (400 cron
+  invalid, 402 license downgrade, 409 dup, 500). State-reset only
+  fires on `open` toggle — a parent re-render that flips `open`
+  synchronously keeps stale `createdId`. Branch by error status
+  (route `PaymentRequiredError` to upgrade CTA), reset state on
+  submit too (or `key={open ? 'open' : 'closed'}` to force remount),
+  and `logError` with a stable errorId. Same recurring item from
+  #172/#183.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
