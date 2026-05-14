@@ -1022,6 +1022,73 @@ Mark items `- [x]` as they land.
   fires and `ticking` is true (i.e. previous tick still running), log a
   warning so silent throttling is visible.
 
+## From PR #181 review — trigger.created + session.skipped webhooks
+
+- [ ] **Switch webhook-dispatch error logging to `logError` + errorId**
+  (`apps/api/src/monitor/capture-trigger-registry.ts:331-333, 353-355`).
+  Today `this.logger.error(\`… ${(err as Error).message}\`)` writes to
+  stdout only — Sentry never sees dispatch failures. Also `.message`
+  swallows non-Error rejections (`undefined` in the log) and drops the
+  stack. Define `MONITOR_TRIGGER_WEBHOOK_DISPATCH_FAILED` /
+  `MONITOR_SESSION_SKIPPED_WEBHOOK_DISPATCH_FAILED` errorIds and pass
+  `{ triggerId, connectionId, eventType, cause: err }`.
+
+- [ ] **Rename `monitor.session.skipped` → `monitor.trigger.skipped`**
+  (`packages/shared/src/webhooks/types.ts`). The event fires from
+  `tryFire` when the gate denies — **no session was ever started**. The
+  current name implies a session entity existed; SIEM dashboards keyed
+  on `session.*` vs `trigger.*` namespaces will miscategorise. Cheap to
+  fix pre-launch, breaking change later. Pairs with the missing
+  lifecycle-events item below.
+
+- [ ] **Promote `monitor.trigger.skipped` to Pro tier** (`types.ts:88`).
+  Today community-tier; only Pro triggers produce it, so a community
+  subscriber receives zero events and assumes the webhook is broken.
+  Tier should match the producing feature.
+
+- [ ] **Add the missing trigger lifecycle events**: `monitor.trigger.fired`
+  (mandatory — pairs with `trigger.skipped`), plus `monitor.trigger.cancelled`
+  and `monitor.trigger.expired`. Without these, subscribers who keyed
+  off `monitor.trigger.created` to provision resources never learn the
+  trigger terminated. `trigger.expired` also addresses the #179 finding
+  about silent expiry-without-firing.
+
+- [ ] **Dispatch the `start_failed` skip path or document the gap**
+  (`capture-trigger-registry.ts:276-279`). Today the `start_failed: <msg>`
+  branch flips the trigger to `skipped` but never calls
+  `dispatchSessionSkipped`. Subscribers see successful starts silently
+  fail. Either dispatch (with `reason: 'start_failed'`) or document the
+  contract with a negative test.
+
+- [ ] **Derive `createdBy` from the authenticated principal, not the
+  request body** (`monitor.controller.ts:337` → `capture-trigger-registry.ts:313`).
+  Same #168 finding (`requestedBy`) carried over: today any caller can
+  put any string into the webhook audit trail. Strip from DTO, read
+  from `@User()` decorator.
+
+- [ ] **Fix the create-then-cancel race in `dispatchTriggerCreated`**
+  (`capture-trigger-registry.ts:131`). `void` makes dispatch a microtask
+  scheduled after `saveCaptureTrigger`. A `cancelTrigger` (or expiry
+  sweep) between save and dispatch results in `trigger.created` being
+  sent for an already-cancelled trigger. Re-read trigger status inside
+  the dispatch helper and skip if not `configured`.
+
+- [ ] **Validate `skipped.reason` against an allowlist; distinguish
+  `health_gate_blocked` from `health_gate_unavailable`**
+  (`capture-trigger-registry.ts:247, 344`). Today
+  `gate.skipReason ?? 'health_gate_blocked'` accepts any string and
+  swallows the case where the gate threw (per #165 follow-up). Validate
+  against `HealthGateSkipReason | 'unknown' | 'health_gate_unavailable'`
+  before dispatch; on unknown values, log via `logError` and send
+  `reason: 'unknown'`.
+
+- [ ] **`packages/shared/src/webhooks/types.spec.ts` parity test for
+  `FREE_EVENTS`/`PRO_EVENTS`/`WEBHOOK_EVENT_TIERS`**. The three
+  structures are parallel and silently drift (the Record is exhaustive
+  at compile time but the arrays aren't). Pairs with the #169 follow-up
+  that proposed deriving the arrays from the tier map. Either derive,
+  or pin parity in a spec.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
