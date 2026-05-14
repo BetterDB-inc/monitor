@@ -141,6 +141,7 @@ describe('judge: reject on borderline hit', () => {
 
     expect(result.hit).toBe(false);
     expect(result.confidence).toBe('miss');
+    expect(result.similarity).toBeCloseTo(0.08, 5); // top-level similarity present on judge-rejection
     expect(result.nearestMiss).toBeDefined();
     expect(result.nearestMiss!.similarity).toBeCloseTo(0.08, 5);
     expect(result.nearestMiss!.deltaToThreshold).toBeLessThanOrEqual(0);

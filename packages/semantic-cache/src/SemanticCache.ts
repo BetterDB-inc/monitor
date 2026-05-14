@@ -460,6 +460,7 @@ export class SemanticCache {
           return {
             hit: false,
             confidence: 'miss' as const,
+            similarity: winnerScore,
             nearestMiss: {
               similarity: winnerScore,
               threshold,
