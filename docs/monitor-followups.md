@@ -690,6 +690,62 @@ Mark items `- [x]` as they land.
   `MonitorCaptureService.startSession` / `terminate` need to take
   INFO snapshots for the counter deltas to be implementable.
 
+## From PR #176 review — cross-reference panel + baseline selector
+
+- [ ] **Don't cache cross-reference results for `running` sessions**
+  (`apps/web/src/pages/monitor/cross-reference-panel.tsx:128-132`).
+  QueryKey is `['monitor', 'cross-reference', sessionId, baseline]` — no
+  status. A user opens a still-running session, the panel computes against
+  in-progress capture and caches forever; the status flips
+  `running → completed` via parent polling but the cross-reference never
+  refetches. Either disable the query while `status === 'running'`, or
+  include `status` in the queryKey, or invalidate from the parent on
+  status transition.
+
+- [ ] **Distinguish per-section "empty" from "unavailable"**
+  (`cross-reference-panel.tsx:230-232, 251-253, 307-311`). Today empty
+  arrays from the backend (broken slowlog poller, empty audit table,
+  zero baseline rows) render as `"No hot-key shifts"` /
+  `"every captured command was seen in baseline"` — green checkmarks on
+  a broken backend. Pairs with the #175 `dimensionUnavailable` follow-up:
+  once that lands, branch the empty-state copy. Until then, surface
+  coverage caveats from `result.session.capturedLineCount === 0` and
+  `baseline.rowCount === 0` distinctly.
+
+- [ ] **Truncate EVAL script bodies in `NewShapesList`**
+  (`cross-reference-panel.tsx:235-247`). Per #175, `EVAL` without preload
+  encodes raw Lua source as the shape string. The component renders it
+  in a `<span>` with no `truncate` / `break-all` / `max-width` — blows
+  out the column. Wrap with `truncate` + `title={s.shape}` tooltip;
+  special-case `cmd === 'EVAL' && scriptSha === null` to render
+  `EVAL (inline script)` instead of the body.
+
+- [ ] **Move `CrossReferenceResult` types to `packages/shared`**
+  (`apps/web/src/api/monitor.ts:36-53`). The mirror has **already drifted**
+  vs the backend: frontend declares `baseline.window: BaselineWindow`
+  while backend `cross-reference.engine.ts:71` is
+  `BaselineWindow | CaptureBaselineMarker` and adds an optional
+  `sessionId`. Future renames silently render `undefined` and any
+  `.toFixed` / `.toLocaleString` calls throw at runtime. Either re-export
+  from `@betterdb/shared` (and import on both ends) or add a Zod parse
+  at the `fetchApi` boundary.
+
+- [ ] **Filter or dim `(redacted)` rows in the hot-key list**
+  (`cross-reference-panel.tsx:262-269`). Author flagged. `(redacted)` is
+  a MONITOR marker, not a key — rendering "(redacted) ×3 (rank #2)" as
+  a top hot-key is misleading. Either filter from the list and group
+  into a `"+N redacted entries"` footnote, or render the row with
+  `text-muted-foreground` + an explanatory tooltip.
+
+- [ ] **Disambiguate `aclDeltas.counters` `null` from `0` visually**
+  (`cross-reference-panel.tsx:333-337`). Both render in the same
+  `font-mono` style and color. The disambiguation footer at `:339-343`
+  only appears when BOTH counters are null — a mixed state (one `null`,
+  one `5`) shows `—` next to a real number with no explanation, and an
+  operator reads `—` as "no breaches." Mute/italicize the `—` glyph and
+  attach a per-row tooltip explaining "pending session-boundary
+  snapshot," regardless of the sibling.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
