@@ -46,6 +46,10 @@ def create_google_embed(
         title: Optional document title. Only used with task_type='RETRIEVAL_DOCUMENT'.
         output_dimensionality: Optional output dimensionality (truncation).
                                Supported by text-embedding-004+.
+
+    When finished, release the connection pool::
+
+        await embed.close()
     """
     _client: list[Any] = []
 
