@@ -15,7 +15,7 @@ function DbBadge({ dbType, dbVersion, connectionName }: {
 }) {
   const label = dbType === 'valkey' ? 'Valkey' : dbType === 'redis' ? 'Redis' : 'Unknown';
   const colorClass = dbType === 'valkey'
-    ? 'bg-teal-100 text-teal-700'
+    ? 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300'
     : dbType === 'redis'
       ? 'bg-muted text-foreground'
       : 'bg-muted text-foreground';
@@ -68,7 +68,7 @@ export function SummarySection({ job }: Props) {
       </div>
 
       {job.isCluster && (
-        <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-3 mb-4">
+        <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-800 dark:bg-amber-950/30 dark:border-amber-800 dark:text-amber-400 rounded-lg p-3 mb-4">
           <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           <p className="text-sm">
             Cluster mode detected — analysis covers {job.clusterMasterCount} master nodes.

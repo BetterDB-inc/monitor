@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { fetchApi } from '../../api/client';
-import type { MigrationExecutionResult } from '@betterdb/shared';
+import type { MigrationExecutionResult, SyncStage } from '@betterdb/shared';
 import { ExecutionLogViewer } from './ExecutionLogViewer';
 
 interface Props {
@@ -14,6 +14,19 @@ function formatElapsed(startedAt: number, completedAt?: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function syncStageLabel(stage: SyncStage): { label: string; className: string } | null {
+  switch (stage) {
+    case 'connecting':
+      return { label: 'Connecting', className: 'bg-muted text-muted-foreground' };
+    case 'rdb_syncing':
+      return { label: 'Initial sync (RDB)', className: 'bg-blue-50 text-blue-700 border border-blue-200' };
+    case 'aof_replicating':
+      return { label: 'Replicating · ready for cutover', className: 'bg-green-50 text-green-700 border border-green-200' };
+    default:
+      return null;
+  }
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -91,8 +104,21 @@ export function ExecutionPanel({ executionId, onStopped }: Props) {
         <div className="flex items-center gap-4">
           <StatusBadge status={execution.status} />
           <span className="px-2 py-0.5 rounded text-xs bg-muted text-muted-foreground">
-            {execution.mode === 'command' ? 'Command' : 'RedisShake'}
+            {execution.mode === 'command'
+              ? 'Command'
+              : execution.mode === 'redis_shake_sync'
+                ? 'RedisShake (Sync)'
+                : 'RedisShake'}
           </span>
+          {execution.mode === 'redis_shake_sync' && (() => {
+            const stage = syncStageLabel(execution.syncStage);
+            if (!stage) return null;
+            return (
+              <span className={`px-2 py-0.5 rounded text-xs ${stage.className}`}>
+                {stage.label}
+              </span>
+            );
+          })()}
           <span className="text-sm text-muted-foreground">
             {(execution.keysTransferred ?? 0).toLocaleString()}
             {execution.totalKeys ? ` / ${execution.totalKeys.toLocaleString()}` : ''} keys transferred
@@ -129,6 +155,19 @@ export function ExecutionPanel({ executionId, onStopped }: Props) {
               style={{ width: `${Math.min(100, execution.progress)}%` }}
             />
           </div>
+        </div>
+      )}
+
+      {execution.status === 'running' &&
+       execution.mode === 'redis_shake_sync' &&
+       execution.syncStage === 'aof_replicating' && (
+        <div className="bg-green-50 border border-green-200 text-green-800 rounded-lg p-4 text-sm space-y-2">
+          <p className="font-medium">Initial sync complete. Replicating new writes.</p>
+          <p>
+            The migration will keep replicating from source to target until you stop it.
+            When you're ready to cut over: pause writes on the source, wait briefly for the
+            replication to drain, then click Stop Migration and point your application at the target.
+          </p>
         </div>
       )}
 
