@@ -746,6 +746,81 @@ Mark items `- [x]` as they land.
   attach a per-row tooltip explaining "pending session-boundary
   snapshot," regardless of the sibling.
 
+## From PR #177 review — cluster per-node selector (14a of 14)
+
+- [ ] **Distinguish "single-instance" from "discovery failed" in
+  `/connections/:id/nodes`** (`apps/api/src/monitor/monitor.controller.ts:371-375`).
+  Bare `catch {}` maps every cluster-discovery failure (ACL-denied,
+  network timeout, parser bug) to the same `{isCluster:false}` payload as
+  a genuine single Valkey. `ClusterDiscoveryService.discoverNodes` already
+  logs and re-throws — the controller erases the signal. Add a positive
+  `isClusterConnection(id)` predicate on the service, return
+  `{isCluster:'unknown', reason}` on real failures, log via
+  `logError` with a stable errorId so a misconfigured cluster doesn't
+  silently regress to MONITOR-on-arbitrary-node.
+
+- [ ] **Don't persist `targetNodeId` as `target_node` when address
+  resolution fails** (`apps/api/src/monitor/monitor-capture.service.ts:286-305`).
+  The catch returns the raw cluster-discovery id (40-char hex) which is
+  then written to `capture_sessions.target_node` — a column documented as
+  "host:port string". No marker that the value is degraded. Either
+  fail-fast (throw a typed error, roll back the session row) or skip
+  persisting `targetNode` until resolution succeeds.
+
+- [ ] **Backfill / disambiguate historical `target_node = NULL` rows**.
+  Pre-PR cluster captures ran MONITOR on whatever node iovalkey routed
+  to. After migration all of those rows have `target_node IS NULL` —
+  indistinguishable in the UI from "single-instance capture." Operators
+  reviewing last month's captures can't tell which were valid. Add a
+  `target_node_status` enum (`pre-cluster-aware | single-instance |
+  targeted | fanout`), backfill pre-migration rows on cluster
+  connections to `pre-cluster-aware`, and surface the state in the UI.
+
+- [ ] **Add round-trip + Postgres coverage for `target_node`**
+  (`apps/api/src/storage/adapters/__tests__/capture-sessions.spec.ts`).
+  Today the round-trip test never sets `targetNode`; the
+  `toEqual(session)` assertion passes only because both sides are
+  `undefined`. Postgres adapter is still missing from `describe.each`
+  (carried over from #167), so the new column, ALTER migration, `$16`
+  bind, and `mapRow` decoding are entirely unexercised. Extend the spec
+  + bring postgres into the matrix.
+
+- [ ] **Validate `targetNodeId` on POST and surface "node removed"
+  specifically** (`monitor.controller.ts:108-124`,
+  `monitor-capture.service.ts:292-305`). Any string is accepted; stale
+  modal (node removed between open and submit) records
+  `target_node = 'lost-node'` and the generic "Failed to open MONITOR"
+  error fires later. Reject unknown ids with a typed
+  `BadRequestException`; map `NodeNotFoundError` to a `409` with
+  `{code: 'target-node-not-found', nodeId, availableNodes}` so the
+  modal can refresh the dropdown.
+
+- [ ] **Default-master selection in the modal must prefer healthy nodes**
+  (`apps/web/src/pages/monitor/start-session-modal.tsx:636`). Today's
+  `find(n => n.role === 'master') ?? clusterNodes[0]` pre-selects the
+  first master regardless of `healthy`. During failover the unhealthy
+  master is auto-selected and the user clicks Start before noticing the
+  `(unhealthy)` label. Use
+  `find(n => n.role === 'master' && n.healthy) ?? find(n => n.healthy) ?? [0]`,
+  and render a banner if zero masters are healthy.
+
+- [ ] **Surface `nodesQuery` errors in the start-session modal**
+  (`start-session-modal.tsx:621-626`). `useQuery`'s `error`/`isError`
+  return is never read. A 500 from `/connections/:id/nodes` silently
+  falls through with `isCluster=false`. Render a destructive banner on
+  `isError` ("Couldn't load cluster topology — capture may target an
+  arbitrary node") and gate the dropdown's absence on the server's
+  authoritative `isCluster` field rather than `clusterNodes.length > 0`.
+
+- [ ] **Safer schema migrations on multi-replica Postgres**
+  (`apps/api/src/storage/adapters/postgres.adapter.ts:1638-1647`).
+  Concurrent `ADD COLUMN IF NOT EXISTS` from two booting replicas can
+  race; the loser crash-loops on `42701`. Wrap the ALTER block in a
+  try/catch that swallows `42701` specifically (or take a Postgres
+  advisory lock), and replace the bare-catch in the sqlite migration
+  helper (`sqlite.adapter.ts:459-467`) with a code-specific guard that
+  still logs unrelated errors.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
