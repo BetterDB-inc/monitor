@@ -1,7 +1,9 @@
 import { ConflictException } from '@nestjs/common';
+import { WebhookEventType } from '@betterdb/shared';
 import { EventEmitter } from 'events';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
 import type { ConnectionRegistry } from '../../connections/connection-registry.service';
+import type { WebhookDispatcherService } from '../../webhooks/webhook-dispatcher.service';
 import { MonitorSource } from '../capture-writer';
 import { MonitorCaptureService } from '../monitor-capture.service';
 
@@ -20,17 +22,39 @@ class FakeSource extends EventEmitter implements MonitorSource {
 
 const CONNECTION_ID = 'conn-1';
 
+interface FakeDispatcher {
+  dispatchEvent: jest.Mock;
+  calls: Array<{ event: WebhookEventType; data: Record<string, unknown>; connectionId?: string }>;
+}
+
+function makeDispatcher(): FakeDispatcher {
+  const fake: FakeDispatcher = {
+    dispatchEvent: jest.fn(),
+    calls: [],
+  };
+  fake.dispatchEvent.mockImplementation(async (event, data, connectionId) => {
+    fake.calls.push({ event, data, connectionId });
+  });
+  return fake;
+}
+
 function makeService(): {
   service: MonitorCaptureService;
   storage: MemoryAdapter;
   source: FakeSource;
+  dispatcher: FakeDispatcher;
 } {
   const storage = new MemoryAdapter();
   const registry = { get: jest.fn() } as unknown as ConnectionRegistry;
-  const service = new MonitorCaptureService(storage, registry);
+  const dispatcher = makeDispatcher();
+  const service = new MonitorCaptureService(
+    storage,
+    registry,
+    dispatcher as unknown as WebhookDispatcherService,
+  );
   const source = new FakeSource();
   service.setMonitorSourceFactory(async () => source);
-  return { service, storage, source };
+  return { service, storage, source, dispatcher };
 }
 
 describe('MonitorCaptureService', () => {
@@ -98,7 +122,12 @@ describe('MonitorCaptureService', () => {
     it('marks the session as failed when the monitor source factory throws', async () => {
       const storage = new MemoryAdapter();
       const registry = { get: jest.fn() } as unknown as ConnectionRegistry;
-      const service = new MonitorCaptureService(storage, registry);
+      const dispatcher = makeDispatcher();
+      const service = new MonitorCaptureService(
+        storage,
+        registry,
+        dispatcher as unknown as WebhookDispatcherService,
+      );
       service.setMonitorSourceFactory(async () => {
         throw new Error('NOPERM monitor not allowed');
       });
@@ -165,6 +194,94 @@ describe('MonitorCaptureService', () => {
       expect(service.getActiveWriter(CONNECTION_ID)).toBeDefined();
       await service.stopSession(session.id);
       expect(service.getActiveWriter(CONNECTION_ID)).toBeUndefined();
+    });
+  });
+
+  describe('webhook dispatch', () => {
+    it('dispatches monitor.session.started after persisting the row, scoped to connectionId', async () => {
+      const { service, dispatcher } = makeService();
+      const session = await service.startSession({ connectionId: CONNECTION_ID });
+
+      // Allow the void-fired dispatch to flush
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const startedCall = dispatcher.calls.find(
+        (c) => c.event === WebhookEventType.MONITOR_SESSION_STARTED,
+      );
+      expect(startedCall).toBeDefined();
+      expect(startedCall?.connectionId).toBe(CONNECTION_ID);
+      expect(startedCall?.data).toMatchObject({
+        sessionId: session.id,
+        source: 'manual',
+        startedAt: session.startedAt,
+        byteCap: session.byteCap,
+        lineCap: session.lineCap,
+      });
+
+      await service.stopSession(session.id);
+    });
+
+    it('dispatches monitor.session.completed when the writer ends naturally', async () => {
+      const { service, source, dispatcher } = makeService();
+      const session = await service.startSession({ connectionId: CONNECTION_ID });
+      source.push('one');
+      source.push('two');
+      await service.stopSession(session.id);
+
+      const completedCall = dispatcher.calls.find(
+        (c) => c.event === WebhookEventType.MONITOR_SESSION_COMPLETED,
+      );
+      expect(completedCall).toBeDefined();
+      expect(completedCall?.data).toMatchObject({
+        sessionId: session.id,
+        terminationReason: 'manual_stop',
+        lineCount: 2,
+        durationMs: expect.any(Number),
+      });
+      expect(
+        dispatcher.calls.find((c) => c.event === WebhookEventType.MONITOR_SESSION_TRUNCATED),
+      ).toBeUndefined();
+    });
+
+    it('dispatches monitor.session.truncated when a cap is hit', async () => {
+      const { service, source, dispatcher } = makeService();
+      const session = await service.startSession({
+        connectionId: CONNECTION_ID,
+        byteCap: 50,
+      });
+      // Two long lines exceed the 50-byte cap
+      source.push('a'.repeat(40));
+      source.push('b'.repeat(40));
+      // Wait for the writer's done-promise to flush (stopSession awaits it for active sessions)
+      await service.stopSession(session.id);
+
+      const truncatedCall = dispatcher.calls.find(
+        (c) => c.event === WebhookEventType.MONITOR_SESSION_TRUNCATED,
+      );
+      expect(truncatedCall).toBeDefined();
+      expect(truncatedCall?.data.terminationReason).toBe('byte_cap');
+      expect(
+        dispatcher.calls.find((c) => c.event === WebhookEventType.MONITOR_SESSION_COMPLETED),
+      ).toBeUndefined();
+    });
+
+    it('does not dispatch when start fails (failed status has no community webhook)', async () => {
+      const storage = new MemoryAdapter();
+      const registry = { get: jest.fn() } as unknown as ConnectionRegistry;
+      const dispatcher = makeDispatcher();
+      const service = new MonitorCaptureService(
+        storage,
+        registry,
+        dispatcher as unknown as WebhookDispatcherService,
+      );
+      service.setMonitorSourceFactory(async () => {
+        throw new Error('boom');
+      });
+
+      await expect(service.startSession({ connectionId: CONNECTION_ID })).rejects.toThrow('boom');
+
+      // No started, no completed, no truncated.
+      expect(dispatcher.calls).toEqual([]);
     });
   });
 });

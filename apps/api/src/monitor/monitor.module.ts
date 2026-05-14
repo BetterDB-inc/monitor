@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConnectionsModule } from '../connections/connections.module';
 import { StorageModule } from '../storage/storage.module';
+import { WebhooksModule } from '../webhooks/webhooks.module';
 import { AclChecker } from './acl-checker';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
@@ -9,7 +10,7 @@ import { MonitorDevPreviewGuard } from './monitor-dev-preview.guard';
 import { PreflightService } from './preflight.service';
 
 @Module({
-  imports: [ConnectionsModule, StorageModule],
+  imports: [ConnectionsModule, StorageModule, WebhooksModule],
   controllers: [MonitorController],
   providers: [
     AclChecker,

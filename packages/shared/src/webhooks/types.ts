@@ -19,6 +19,9 @@ export enum WebhookEventType {
   COMPLIANCE_ALERT = 'compliance.alert',
   METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
   INFERENCE_SLA_BREACH = 'inference.sla.breach',
+  MONITOR_SESSION_STARTED = 'monitor.session.started',
+  MONITOR_SESSION_COMPLETED = 'monitor.session.completed',
+  MONITOR_SESSION_TRUNCATED = 'monitor.session.truncated',
 }
 
 // Injection tokens for proprietary webhook services
@@ -31,6 +34,9 @@ export const FREE_EVENTS: WebhookEventType[] = [
   WebhookEventType.MEMORY_CRITICAL,
   WebhookEventType.CONNECTION_CRITICAL,
   WebhookEventType.CLIENT_BLOCKED,
+  WebhookEventType.MONITOR_SESSION_STARTED,
+  WebhookEventType.MONITOR_SESSION_COMPLETED,
+  WebhookEventType.MONITOR_SESSION_TRUNCATED,
 ];
 
 export const PRO_EVENTS: WebhookEventType[] = [
@@ -74,6 +80,9 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.MEMORY_CRITICAL]: Tier.community,
   [WebhookEventType.CONNECTION_CRITICAL]: Tier.community,
   [WebhookEventType.CLIENT_BLOCKED]: Tier.community,
+  [WebhookEventType.MONITOR_SESSION_STARTED]: Tier.community,
+  [WebhookEventType.MONITOR_SESSION_COMPLETED]: Tier.community,
+  [WebhookEventType.MONITOR_SESSION_TRUNCATED]: Tier.community,
 
   // Pro tier events
   [WebhookEventType.ANOMALY_DETECTED]: Tier.pro,
