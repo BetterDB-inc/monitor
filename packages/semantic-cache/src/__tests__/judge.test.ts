@@ -195,21 +195,6 @@ describe('judge: NOT invoked when FT.SEARCH returns zero rows', () => {
   });
 });
 
-// --- Test 5: same as test 4 but named for spec alignment ---
-
-describe('judge: NOT invoked on miss', () => {
-  it('does not call judgeFn when there are no candidates', async () => {
-    const registry = new Registry();
-    const client = makeMockClient(BORDERLINE_SCORE, 'Cached response', true);
-    const cache = await makeCache(client, registry, 'test_judge_miss');
-    const judgeFn = vi.fn(async () => true);
-
-    const result = await cache.check('anything', { judge: { judgeFn } });
-
-    expect(result.hit).toBe(false);
-    expect(judgeFn).not.toHaveBeenCalled();
-  });
-});
 
 // --- Test 6: error with onError='accept' ---
 

@@ -1560,7 +1560,7 @@ class JudgeTimeoutError extends Error {
 }
 
 function raceWithTimeout<T>(p: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
+  let timer!: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new JudgeTimeoutError()), timeoutMs);
   });

@@ -142,7 +142,7 @@ const result = await cache.check(userPrompt, {
 | `staleAfterModelChange` | `boolean` | `false` | Evict and miss when stored model differs from `currentModel` |
 | `currentModel` | `string` | — | Model to compare against stored entries |
 | `rerank` | `RerankOptions` | — | Rerank hook; see `RerankOptions` |
-| `judge` | `JudgeOptions` | — | LLM-as-judge for borderline hits; see `JudgeOptions`. Ignored by `checkBatch()` |
+| `judge` | `JudgeOptions` | — | LLM-as-judge for borderline hits; see `JudgeOptions`. Not supported by `checkBatch()`; throws `SemanticCacheUsageError` |
 
 ## Configuration Reference
 

@@ -185,6 +185,12 @@ export interface JudgeOptions {
    * Per-call timeout in milliseconds. Default: 2000.
    * The judge function is raced against this timeout; timeout is treated
    * the same as a thrown error and routed through onError.
+   *
+   * Note: the underlying promise is not cancelled on timeout — JavaScript has
+   * no built-in cancellation primitive. A real LLM HTTP request will continue
+   * running in the background after the timeout fires, consuming API quota.
+   * To stop the underlying request, use an AbortController inside judgeFn and
+   * abort it when the signal you manage fires.
    */
   timeoutMs?: number;
 }
