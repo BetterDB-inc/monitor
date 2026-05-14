@@ -1,7 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { NotFoundException } from '@nestjs/common';
-import { ConnectionRegistry, ENV_DEFAULT_ID } from '../connection-registry.service';
+import { ConnectionRegistry } from '../connection-registry.service';
+import { ENV_DEFAULT_ID } from '../connection.constants';
 import { RuntimeCapabilityTracker } from '../runtime-capability-tracker.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
