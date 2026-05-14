@@ -702,7 +702,7 @@ describe('AnomalyService', () => {
   describe('cluster state webhook dispatch', () => {
     it('dispatches cluster.failover webhook on ok→fail transition', async () => {
       // First poll: establish cluster state as 'ok'
-      dbClient.getInfoParsed.mockResolvedValue({
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
         server: { role: 'master' },
         clients: { connected_clients: '10', blocked_clients: '0' },
         memory: {
@@ -730,7 +730,7 @@ describe('AnomalyService', () => {
       await poll();
 
       // Second poll: cluster state transitions to 'fail'
-      dbClient.getClusterInfo.mockResolvedValue({
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue({
         cluster_state: 'fail',
         cluster_slots_assigned: '16384',
         cluster_slots_fail: '2048',
