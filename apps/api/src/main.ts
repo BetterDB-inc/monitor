@@ -11,6 +11,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { validateEnv } from './config/env.schema';
 import { categorizeError } from './common/utils/error-categorizer';
 import { CliGateway } from './cli/cli.gateway';
+import { TailGateway } from './monitor/tail.gateway';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
@@ -182,9 +183,10 @@ async function bootstrap(): Promise<void> {
   const document = SwaggerModule.createDocument(app as unknown as INestApplication, config);
   SwaggerModule.setup('docs', app as unknown as INestApplication, document);
 
-  // Register unified WebSocket upgrade handler for CLI and agent connections
+  // Register unified WebSocket upgrade handler for CLI, agent, and monitor tail connections
   {
     const cliGateway = app.get(CliGateway);
+    const tailGateway = app.get(TailGateway);
     const httpServer = app.getHttpServer();
 
     const agentGateway = process.env.CLOUD_MODE
@@ -207,6 +209,8 @@ async function bootstrap(): Promise<void> {
       const url = new URL(request.url || '', `http://${request.headers.host}`);
       if (url.pathname === '/cli/ws' || url.pathname === '/api/cli/ws') {
         cliGateway.handleUpgrade(request, socket, head);
+      } else if (url.pathname === '/monitor/ws' || url.pathname === '/api/monitor/ws') {
+        tailGateway.handleUpgrade(request, socket, head);
       } else if (
         agentGateway &&
         (url.pathname === '/agent/ws' || url.pathname === '/api/agent/ws')
