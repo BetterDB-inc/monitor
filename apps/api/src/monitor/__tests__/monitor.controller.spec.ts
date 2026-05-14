@@ -2,20 +2,39 @@ import { BadRequestException } from '@nestjs/common';
 import { HealthGateService } from '../health-gate.service';
 import { MonitorCaptureService } from '../monitor-capture.service';
 import { MonitorController } from '../monitor.controller';
+import { PreflightService } from '../preflight.service';
 
 describe('MonitorController', () => {
   let controller: MonitorController;
   let captureService: { listSessions: jest.Mock };
   let healthGateService: { evaluate: jest.Mock };
+  let preflightService: { run: jest.Mock };
 
   beforeEach(() => {
     captureService = { listSessions: jest.fn().mockResolvedValue([]) };
     healthGateService = {
       evaluate: jest.fn().mockResolvedValue({ allow: true, signals: {}, thresholds: {} }),
     };
+    preflightService = {
+      run: jest.fn().mockResolvedValue({
+        connectionId: 'conn-1',
+        provider: { provider: 'self-hosted', restrictions: [] },
+        acl: { username: 'default', hasMonitor: true },
+        health: { allow: true, signals: {}, thresholds: {} },
+        throughput: {
+          opsPerSec: 0,
+          inputKbps: 0,
+          outputKbps: 0,
+          durationMs: 30000,
+          estimatedLines: 0,
+          estimatedBytes: 0,
+        },
+      }),
+    };
     controller = new MonitorController(
       captureService as unknown as MonitorCaptureService,
       healthGateService as unknown as HealthGateService,
+      preflightService as unknown as PreflightService,
     );
   });
 
@@ -70,6 +89,21 @@ describe('MonitorController', () => {
         BadRequestException,
       );
       expect(healthGateService.evaluate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('preflight', () => {
+    it('forwards connectionId and durationMs to the service', async () => {
+      await controller.preflight({ connectionId: 'conn-1', durationMs: 60_000 });
+      expect(preflightService.run).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        durationMs: 60_000,
+      });
+    });
+
+    it('throws BadRequest when connectionId is missing', async () => {
+      await expect(controller.preflight({})).rejects.toBeInstanceOf(BadRequestException);
+      expect(preflightService.run).not.toHaveBeenCalled();
     });
   });
 });
