@@ -1620,6 +1620,101 @@ Mark items `- [x]` as they land.
   error lets the catch distinguish "fix the deploy" from "fix the
   SQL," and the errorId surfaces in Sentry.
 
+## From PR #188 review — provider warnings + ACL snippet polish
+
+- [ ] **Gate `MONITOR_PROVIDER_OVERRIDE` to non-prod and log on
+  activation** (`apps/api/src/monitor/provider-detector.ts:74-92`).
+  Today the "test-only knob" is just `process.env.MONITOR_PROVIDER_OVERRIDE`
+  with no `NODE_ENV` guard. An ops engineer who promotes a shared
+  `.env` to prod silently overrides provider detection for every
+  operator. Gate to `NODE_ENV !== 'production'` (or explicit opt-in
+  via a second env var), call
+  `logEvent('preflight.provider_override_active', { provider })` at
+  boot, and surface `overrideActive: true` on `ProviderInfo` so the
+  panel can render a separate banner ("Override active — detection
+  bypassed").
+
+- [ ] **Add `MONITOR_PROVIDER_OVERRIDE` to the Zod schema + log invalid
+  values** (`apps/api/src/config/env.schema.ts`,
+  `provider-detector.ts:80`). Same recurring #165/#169/#184 pattern:
+  raw `process.env` access; typos silently fall through. Today the
+  spec at `provider-detector.spec.ts:41-45` actually pins the
+  silent-fallthrough as desired — that test should either assert a
+  thrown / `logError` instead, or move enforcement into Zod (`z.enum(
+  [...known values, ...known aliases]).optional()`).
+
+- [ ] **Surface clipboard `writeText` failures with a manual fallback**
+  (`apps/web/src/pages/monitor/preflight-panel.tsx:309-317`). Today
+  the bare `catch {}` absorbs `TypeError` (`navigator.clipboard`
+  undefined on `http://`), `NotAllowedError`, `SecurityError`, sandbox
+  rejects — all without a single user-visible signal. Operator clicks
+  "Copy snippet" → nothing → pastes stale clipboard contents into
+  `redis-cli`. Add an inline `'failed'` state, branch on
+  `NotAllowedError`/`SecurityError`/other, surface a manual select-all
+  hint, and `logForDebugging` with an errorId.
+
+- [ ] **Defensive `hasMonitor === true / false / undefined` branching
+  in `AclBanner`** (`preflight-panel.tsx:107-146`). Today's strict
+  boolean treats "ACL probe failed" identically to "+monitor missing"
+  — an operator whose redis is firewalled or auth-rejected gets a
+  confident "ACL is missing the +monitor permission" banner and an
+  irrelevant `ACL SETUSER` snippet they'll happily execute. Pairs
+  with the #166 follow-up that proposes the discriminated
+  `'unknown'` state — until that lands, branch defensively now.
+
+- [ ] **Split `preflight-panel.tsx` into one-component-per-file**
+  (`apps/web/src/pages/monitor/preflight-panel.tsx`). The file now
+  defines `PreflightPanel`, `ProviderBanner`, `AclBanner`,
+  `CopyableSnippet`, `Section`, `Badge`. CLAUDE.md is explicit:
+  "NEVER write more than one component per file." Move under
+  `pages/monitor/preflight-panel/` subfolder (and, while there,
+  follow the broader `components/pages/...` convention already
+  tracked in the recurring-themes section).
+
+- [ ] **Cleanup `setTimeout` on unmount in `CopyableSnippet`**
+  (`preflight-panel.tsx:147, 313`). The 1.5 s flip back has no
+  cleanup. If the user navigates away within that window (very
+  likely after they paste), the timer holds the closure; in
+  StrictMode dev the timer survives unmount and fires later
+  `setCopied(false)` on a dead component. Track the timer id in a
+  ref and clear in a `useEffect` cleanup.
+
+- [ ] **Distinct `unknown` vs `self-hosted` rendering in
+  `ProviderBanner`** (`preflight-panel.tsx:216-223`). Today identical
+  quiet line. The whole point of the #166 follow-up was to let
+  operators see "we know it's self-hosted" separately from "we
+  couldn't tell." Separate branches; the `unknown` branch should
+  hint "could not detect provider — check hostname or set
+  `MONITOR_PROVIDER_OVERRIDE` (non-prod only)."
+
+- [ ] **Centralize + telemetry on provider docs URLs**
+  (`preflight-panel.tsx:15-22, 114-122`). AWS / GCP / Redis Cloud /
+  Upstash docs URLs rot regularly; today they are inline literals
+  with no fallback and no `logEvent` to detect dead links via
+  funnel drop-off. Centralize in
+  `apps/web/src/constants/provider-docs.ts` with a "last verified"
+  comment, add `logEvent('preflight.provider_docs_clicked', {
+  provider, url })` on click, and consider a server-side
+  `/r/docs/elasticache-restricted` redirect so the team can patch
+  URLs without a frontend deploy.
+
+- [ ] **Frontend tests for `ProviderBanner` / `AclBanner` /
+  `CopyableSnippet`** (`apps/web/src/pages/monitor/preflight-panel.tsx`).
+  Minimum: each managed provider renders the right docs link;
+  self-hosted/unknown render the quiet line; `hasMonitor: false`
+  shows the amber snippet, `true` shows the minimal line; Copy
+  button success → "Copied" state → 1.5 s revert (with
+  `vi.useFakeTimers()`); Copy rejection keeps `copied: false` and
+  does not throw. Vitest + RTL infra fully present.
+
+- [ ] **`RESTRICTIONS[override] ?? []` + log on miss**
+  (`provider-detector.ts:91`). If a future `Provider` literal is
+  added (e.g. `'azure-cache'`) without updating the `RESTRICTIONS`
+  map, the indexer returns `undefined` and downstream
+  `restrictions.length` / `.map(...)` crashes the panel. Coalesce
+  to `[]` and `logError('PREFLIGHT_PROVIDER_RESTRICTIONS_MISSING',
+  { provider })` so the gap surfaces in Sentry.
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
