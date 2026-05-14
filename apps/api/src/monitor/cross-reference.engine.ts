@@ -9,6 +9,10 @@ import { ParsedMonitorLine, parseMonitorLine } from './monitor-line.parser';
 /** Baseline window selector. `same-hour-last-week` shifts the window to the same hour-of-day 7 days ago. */
 export type BaselineWindow = '6h' | '24h' | '7d' | 'same-hour-last-week';
 
+/** Sentinel surfaced by capture-vs-capture diff results in {@link CrossReferenceResult.baseline.window}. */
+export const CAPTURE_BASELINE_WINDOW = 'capture' as const;
+export type CaptureBaselineMarker = typeof CAPTURE_BASELINE_WINDOW;
+
 const SCRIPTED_VERBS = new Set(['EVAL', 'EVALSHA', 'FCALL', 'FCALL_RO']);
 
 const HOT_KEY_TOP_K = 50;
@@ -65,9 +69,11 @@ export interface AclDeltas {
 export interface CrossReferenceResult {
   sessionId: string;
   baseline: {
-    window: BaselineWindow;
+    window: BaselineWindow | CaptureBaselineMarker;
     startTs: number;
     endTs: number;
+    /** Set when the baseline source is another capture; identifies that capture. */
+    sessionId?: string;
   };
   session: {
     startTs: number;
@@ -168,6 +174,67 @@ export class CrossReferenceEngine {
       slowlogRegressions,
       aclDeltas: {
         auditEntriesInWindow: auditEntries.length,
+        counters: {
+          aclAccessDeniedAuthDelta: null,
+          rejectedConnectionsDelta: null,
+        },
+      },
+    };
+  }
+
+  /**
+   * Capture-vs-capture diff. Treats {@code baselineSessionId} as the baseline
+   * source for shapes and hot keys; returns the same result shape as
+   * {@link compute} but with empty slowlog/ACL deltas (those axes are scoped to
+   * connection history, not a single capture).
+   */
+  async computeCaptureDiff(
+    sessionId: string,
+    baselineSessionId: string,
+  ): Promise<CrossReferenceResult> {
+    if (sessionId === baselineSessionId) {
+      throw new Error('Cannot diff a capture against itself');
+    }
+    const [session, baselineSession] = await Promise.all([
+      this.storage.getCaptureSession(sessionId),
+      this.storage.getCaptureSession(baselineSessionId),
+    ]);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+    if (!baselineSession) {
+      throw new Error(`Baseline session ${baselineSessionId} not found`);
+    }
+
+    const [capturedLines, baselineLines] = await Promise.all([
+      this.parseCapturedLines(sessionId),
+      this.parseCapturedLines(baselineSessionId),
+    ]);
+
+    const baselineShapes = collectShapesFromLines(baselineLines);
+    const baselineKeyCounts = collectKeyCountsFromLines(baselineLines);
+
+    const newShapes = computeNewShapes(capturedLines, baselineShapes);
+    const hotKeyDelta = computeHotKeyDelta(capturedLines, baselineKeyCounts);
+
+    return {
+      sessionId,
+      baseline: {
+        window: CAPTURE_BASELINE_WINDOW,
+        startTs: baselineSession.startedAt,
+        endTs: baselineSession.endedAt ?? baselineSession.startedAt,
+        sessionId: baselineSessionId,
+      },
+      session: {
+        startTs: session.startedAt,
+        endTs: session.endedAt ?? session.startedAt,
+        capturedLineCount: capturedLines.length,
+      },
+      newShapes,
+      hotKeyDelta,
+      slowlogRegressions: [],
+      aclDeltas: {
+        auditEntriesInWindow: 0,
         counters: {
           aclAccessDeniedAuthDelta: null,
           rejectedConnectionsDelta: null,
@@ -309,6 +376,27 @@ export function shapeOfStringArray(command: string[]): string {
 
 function firstArgOf(command: string[]): string | null {
   return command.length > 1 ? command[1] : null;
+}
+
+/** Set of {@link shapeOf} values for every parsed MONITOR line. */
+export function collectShapesFromLines(lines: ParsedMonitorLine[]): Set<string> {
+  const shapes = new Set<string>();
+  for (const line of lines) {
+    shapes.add(shapeOf(line).shape);
+  }
+  return shapes;
+}
+
+/** Per-key counts from parsed MONITOR lines (skips lines without an extractable key). */
+export function collectKeyCountsFromLines(lines: ParsedMonitorLine[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const line of lines) {
+    if (!line.key) {
+      continue;
+    }
+    counts.set(line.key, (counts.get(line.key) ?? 0) + 1);
+  }
+  return counts;
 }
 
 export function computeNewShapes(

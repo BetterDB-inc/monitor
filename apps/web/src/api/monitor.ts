@@ -94,6 +94,7 @@ export interface MonitorNodesResponse {
 }
 
 export type BaselineWindow = '6h' | '24h' | '7d' | 'same-hour-last-week';
+export type CrossReferenceBaseline = BaselineWindow | 'capture';
 
 export interface CrossReferenceNewShape {
   shape: string;
@@ -122,7 +123,13 @@ export interface CrossReferenceSlowlogRegression {
 
 export interface CrossReferenceResult {
   sessionId: string;
-  baseline: { window: BaselineWindow; startTs: number; endTs: number };
+  baseline: {
+    window: CrossReferenceBaseline;
+    startTs: number;
+    endTs: number;
+    /** Set on capture-vs-capture diffs; identifies the baseline capture. */
+    sessionId?: string;
+  };
   session: { startTs: number; endTs: number; capturedLineCount: number };
   newShapes: CrossReferenceNewShape[];
   hotKeyDelta: {
@@ -203,6 +210,12 @@ export const monitorApi = {
   crossReference: (sessionId: string, baseline: BaselineWindow): Promise<CrossReferenceResult> => {
     return fetchApi<CrossReferenceResult>(
       `/monitor/sessions/${encodeURIComponent(sessionId)}/cross-reference?baseline=${baseline}`,
+    );
+  },
+
+  compareSessions: (sessionId: string, otherSessionId: string): Promise<CrossReferenceResult> => {
+    return fetchApi<CrossReferenceResult>(
+      `/monitor/sessions/${encodeURIComponent(sessionId)}/diff?vs=${encodeURIComponent(otherSessionId)}`,
     );
   },
 

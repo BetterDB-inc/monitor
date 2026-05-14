@@ -68,7 +68,7 @@ export function CrossReferencePanel({ sessionId }: Props) {
   );
 }
 
-function CrossReferenceSections({ result }: { result: CrossReferenceResult }) {
+export function CrossReferenceSections({ result }: { result: CrossReferenceResult }) {
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
       <Section
