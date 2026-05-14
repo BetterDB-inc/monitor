@@ -1447,6 +1447,97 @@ Mark items `- [x]` as they land.
   and `logError` with a stable errorId. Same recurring item from
   #172/#183.
 
+## From PR #186 review — capture-vs-capture diff + compare UI
+
+- [ ] **Reject cross-connection diffs**
+  (`apps/api/src/monitor/cross-reference.engine.ts:252-305`,
+  `apps/api/src/monitor/monitor.controller.ts:346-369`). Neither engine
+  nor controller compares `session.connectionId` against
+  `baselineSession.connectionId`. Frontend filters by connection; CLI
+  / automation / direct API hits bypass. Worst silent-failure mode —
+  no error, plausible-looking output, meaningless conclusions
+  ("staging has 412 new shapes vs prod" — because they're different
+  deployments). Add `BadRequestException` after the existence checks.
+
+- [ ] **Enforce baseline-completed server-side**
+  (`monitor.controller.ts:346-369`). Frontend gates via
+  `COMPLETED_STATUSES = {completed, truncated}`
+  (`compare-captures-panel.tsx:477-480`) but the backend accepts any
+  status. A `running` baseline's chunk set grows monotonically — same
+  diff request mutates over time. Same shape as the #175 follow-up
+  about non-completed sessions; this PR is the right place to fix
+  both primary and baseline.
+
+- [ ] **Surface "empty baseline" instead of silently flagging
+  everything as new** (`cross-reference.engine.ts:275-279`). If
+  `baselineLines.length === 0`, `baselineShapes` and
+  `baselineKeyCounts` are empty so every captured shape becomes
+  `newShapes` and every hot key becomes "new in top-K." The result
+  body has no signal. Either reject with `BadRequestException` or
+  add `baseline.parsedLineCount` + `baseline.empty: true` to the
+  result and render a warning in the UI. Pairs with the #175
+  follow-up.
+
+- [ ] **Mark slowlog/ACL as `evaluated: false` for capture-vs-capture
+  diffs** (`cross-reference.engine.ts:296-304`, `cross-reference-panel.tsx:88-100`).
+  `computeCaptureDiff` always returns `slowlogRegressions: []` and
+  zeroed `aclDeltas`. The reused `CrossReferenceSections` UI renders
+  "0 verbs above baseline p95" and "0 audit entries during the
+  session window" — operators read "we checked, nothing fired" but
+  the axes weren't evaluated. Add `evaluated: false` (or
+  `notApplicable: true`) on those two sub-objects of the result, and
+  in the UI render "Not applicable for capture-vs-capture diff"
+  instead.
+
+- [ ] **Per-error UX in `compareSessions` + upgrade CTA on 402**
+  (`apps/web/src/api/monitor.ts:213-218`,
+  `compare-captures-panel.tsx:545-549`). Today `(error as Error).message`
+  shows "Compare failed: Payment Required" / "Compare failed: Bad
+  Request" — generic and unhelpful. Same recurring pattern from
+  #172/#182/#183/#184/#185. Route `PaymentRequiredError` to the
+  upgrade-prompt component; surface server-JSON message for 4xx.
+  Also: a license downgrade between mount and click currently produces
+  a generic 402 banner with no path forward.
+
+- [ ] **Discriminated `baseline.window: 'capture'` union**
+  (`packages/shared/src/types/monitor.ts`). Today `sessionId?` is
+  always set when `window === 'capture'` and never otherwise but the
+  type has it as an independent optional. Convert to
+  `{ window: 'capture'; sessionId: string } | { window: BaselineWindow }`.
+  Eliminates the optional-chain in
+  `compare-captures-panel.tsx:555` (`data.baseline.sessionId?.slice(0, 8)`)
+  and pairs with #175's follow-up on the `CrossReferenceResult`
+  discriminated union.
+
+- [ ] **Extract `CrossReferenceSections` to its own file**
+  (`apps/web/src/pages/monitor/cross-reference-panel.tsx`). CLAUDE.md
+  says one component per file; the file now exports two (panel +
+  sections) because the sections component is reused by
+  `CompareCapturesPanel`. Move to
+  `apps/web/src/pages/monitor/cross-reference-panel/cross-reference-sections.tsx`.
+
+- [ ] **Render `candidatesError` in `CompareCapturesPanel`**
+  (`compare-captures-panel.tsx:486-489`). `candidatesLoading` is
+  wired but `candidatesError` is silently discarded. A 401 / network
+  blip on `listSessions` leaves the dropdown empty with "No other
+  completed captures on this connection" — operator concludes
+  (wrongly) no captures exist. Destructure `error: candidatesError`
+  and render alongside the diff error.
+
+- [ ] **Test `CompareCapturesPanel`**: dropdown population (filtered
+  to current connection, excludes self, only completed/truncated),
+  Compare button gating (`compareTargetId !== ''` AND not fetching),
+  error-state rendering (diff + candidates), empty-candidates copy,
+  baseline session-id ellipsis + start timestamp.
+
+- [ ] **Add `same-connection` and `empty-baseline` tests in
+  `cross-reference.engine.spec.ts`**. Today the engine spec covers
+  partial-overlap only. Pin: A on `conn-A` + B on `conn-B` → expected
+  behaviour; A non-empty + B empty → expected behaviour; scripted-
+  command shape preservation through the capture-baseline path
+  (`EVAL:<sha>` from A absent in B appears in `newShapes` with SHA
+  intact); slowlog/ACL "evaluated" flag (per the follow-up above).
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
