@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router-dom';
 import type { StoredCaptureSession } from '@betterdb/shared';
 import {
   Table,
@@ -15,6 +16,8 @@ interface SessionsTableProps {
 }
 
 export function SessionsTable({ sessions, isLoading }: SessionsTableProps) {
+  const navigate = useNavigate();
+
   if (isLoading && sessions.length === 0) {
     return (
       <p className="py-8 text-center text-sm text-muted-foreground">Loading sessions…</p>
@@ -45,7 +48,11 @@ export function SessionsTable({ sessions, isLoading }: SessionsTableProps) {
       </TableHeader>
       <TableBody>
         {sessions.map((s) => (
-          <TableRow key={s.id}>
+          <TableRow
+            key={s.id}
+            className="cursor-pointer hover:bg-muted/50"
+            onClick={() => navigate(`/monitor/sessions/${s.id}`)}
+          >
             <TableCell className="whitespace-nowrap font-mono text-xs">
               {formatTimestamp(s.startedAt)}
             </TableCell>
