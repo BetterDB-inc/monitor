@@ -44,13 +44,13 @@ export function VerdictSection({ job }: Props) {
     BannerIcon = XCircle;
     bannerMessage = `${blockingCount} blocking issue(s) — resolve before migrating.`;
   } else if (warningCount > 0) {
-    bannerBg = 'bg-amber-50 border-amber-200';
-    bannerText = 'text-amber-800';
+    bannerBg = 'bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800';
+    bannerText = 'text-amber-800 dark:text-amber-400';
     BannerIcon = AlertTriangle;
     bannerMessage = `No blocking issues. ${warningCount} warning(s) to review.`;
   } else {
-    bannerBg = 'bg-green-50 border-green-200';
-    bannerText = 'text-green-800';
+    bannerBg = 'bg-green-50 border-green-200 dark:bg-green-950/30 dark:border-green-800';
+    bannerText = 'text-green-800 dark:text-green-400';
     BannerIcon = CheckCircle;
     bannerMessage = 'No compatibility issues found. Migration appears safe.';
   }
@@ -61,9 +61,9 @@ export function VerdictSection({ job }: Props) {
 
   return (
     <section className="space-y-4">
-      <div className={`border rounded-lg p-6 ${bannerBg}`}>
-        <h2 className="text-lg font-semibold mb-3">Compatibility</h2>
-        <div className={`flex items-start gap-3 ${bannerText}`}>
+      <div className="bg-card border rounded-lg p-6 space-y-3">
+        <h2 className="text-lg font-semibold">Compatibility</h2>
+        <div className={`border rounded-lg px-4 py-3 flex items-start gap-3 ${bannerBg} ${bannerText}`}>
           <BannerIcon className="w-5 h-5 mt-0.5 flex-shrink-0" />
           <p className="font-medium">{bannerMessage}</p>
         </div>
