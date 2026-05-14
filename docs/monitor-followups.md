@@ -1171,6 +1171,93 @@ Mark items `- [x]` as they land.
   + button re-enables; `formatRelative` boundary table (0, 59999, 60000,
   1h, 1d, `NaN`, negative).
 
+## From PR #183 review — Capture-on-next row action + prefilled modal
+
+- [ ] **Drop `VITE_MONITOR_DEV_PREVIEW` from `captureActionEnabled`**
+  (`apps/web/src/pages/AnomalyDashboard.tsx:130, 134-137`). PR adds a
+  fresh `MONITOR_DEV_PREVIEW` literal and ANDs it into the row-action
+  gate. The launch commit `9cee378` removes the env var everywhere
+  else, so post-launch the gate evaluates `false` for everyone — feature
+  ships dark for all licenses. Gate solely on
+  `hasFeature(Feature.MONITOR_ANOMALY_TRIGGER) && !!currentConnection?.id`.
+
+- [ ] **Fix wrong-connection trigger creation on connection switch**
+  (`AnomalyDashboard.tsx:55-70`, `capture-on-next-modal.tsx:48-58`).
+  `openCaptureModal` snapshots `currentConnection.id` into modal
+  context at click time. If the user changes connection via the global
+  selector while the modal is open, Confirm submits with the OLD
+  `connectionId` in the body but the NEW one in the
+  `X-Connection-Id` header. Either auto-close the modal on connection
+  change (`useEffect` watching `currentConnection?.id` calls
+  `onOpenChange(false)`), or re-read inside `handleConfirm` and abort
+  with a clear message.
+
+- [ ] **Branch error UX in the modal**
+  (`capture-on-next-modal.tsx:56-58`). Today raw `err.message` is shown
+  for every failure: 402 (license downgrade — `PaymentRequiredError`
+  bypasses the `hasFeature` gate once the modal is mounted), 409 dedup
+  (#179 — the common repeat-click case), 400 (per the upcoming canonical
+  enum validation), 500. Add typed branches:
+  `PaymentRequiredError` → upgrade CTA; 409 → "trigger already armed
+  for this metric + anomaly — view in Triggers" with a link to
+  `/monitor?tab=triggers`; 500 → retry hint. Also call
+  `logError('monitor.anomaly.capture_on_next_failed', err, { connectionId, metricType, anomalyType, source })`
+  before setting the user-facing message — today the catch logs
+  nothing, leaving zero Sentry signal for "Capture next failed."
+
+- [ ] **Surface success via a toast with a "View triggers" action**
+  (`capture-on-next-modal.tsx:53-57`). Today the only success signal is
+  the green banner inside the modal; once the user clicks Close the
+  `/anomalies` page is visually unchanged and the "Capture next" row
+  button still shows — they reasonably doubt the action and either
+  navigate to `/monitor` to verify or double-click (→ 409 silent, see
+  the error-branching item). The whole point of the row-action UX was
+  to make that round-trip unnecessary.
+
+- [ ] **Move `CaptureOnNextModal` to `components/pages/anomaly-dashboard/`**
+  (`apps/web/src/pages/anomalies/capture-on-next-modal.tsx`). Same
+  CLAUDE.md convention violation as #171/#172/#176 and the monitor
+  pages — track under the existing follow-up but the new
+  `pages/anomalies/` directory is yet another spot to consolidate.
+
+- [ ] **Prefix-based invalidation for the triggers query**
+  (`capture-on-next-modal.tsx:56`). Today
+  `queryClient.invalidateQueries({ queryKey: ['monitor', 'triggers', context.connectionId] })`
+  matches the canonical key in `apps/web/src/pages/Monitor.tsx:31` —
+  but the moment the Monitor.tsx key grows a filter (`{status}`,
+  pagination, etc.) invalidation silently misses and the Triggers tab
+  shows stale data. Use prefix invalidation
+  (`{ queryKey: ['monitor', 'triggers'], exact: false }`), and
+  centralise the key shape in a shared `monitorKeys` factory imported
+  by both files.
+
+- [ ] **Disambiguate "Capture next" on group rows**
+  (`AnomalyDashboard.tsx:443-449`). The button inside an expanded
+  correlated group calls `openCaptureModal(anomaly, 'group')` with a
+  single per-event anomaly. Operators reasonably expect "capture the
+  whole group" but the modal arms only one metric. Either move the
+  action to the group header (capture-on-any-member) or rename to
+  "Capture next on this metric" so the scope is obvious.
+
+- [ ] **Address residual eslint hygiene in `AnomalyDashboard.tsx`**
+  (`:195, 228, 229, 233, 200`). The PR cleaned several issues but
+  retained `// Time filter…`, `// fallback: 24 h`, `// 60 buckets`, a
+  `parseInt(a)` without radix, and a fresh
+  `// eslint-disable-next-line react-hooks/purity` around `Date.now()`.
+  CLAUDE.md says fix existing eslint errors when editing a file rather
+  than `disable`-commenting. Solve the purity warning by lifting
+  `now` out of the memo (e.g. stable from polling); drop the
+  freeform comments per the no-comments rule.
+
+- [ ] **Test the modal**: payload integrity (single
+  `monitorApi.createTrigger` call with exact
+  `{connectionId, metricType, anomalyType}` from row context),
+  invalidation key, dual-gate visibility (`hasFeature` + license
+  downgrade + missing connection), state-reset on close (including
+  reopen with different context), 409 error path, prefill correctness
+  (event vs group rows). Infra fully present (`PendingCard.test.tsx`
+  precedent).
+
 ## Recurring themes (apply across multiple PRs)
 
 These are patterns that recurred in every review. They're not standalone tasks
