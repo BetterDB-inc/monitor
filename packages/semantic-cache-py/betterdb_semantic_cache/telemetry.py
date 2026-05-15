@@ -75,6 +75,8 @@ class SemanticCacheMetrics:
     stale_model_evictions: Counter
     config_refresh_failed: Counter
     discovery_write_failed: Counter
+    judge_decisions_total: Counter
+    judge_duration_seconds: Histogram
 
 
 @dataclass
@@ -148,6 +150,19 @@ def create_telemetry(
             f"{prefix}_discovery_write_failed_total",
             "Count of failed discovery marker writes (HSET registry, SET heartbeat).",
             ["cache_name"],
+        ),
+        judge_decisions_total=_get_or_create_counter(
+            reg,
+            f"{prefix}_judge_decisions_total",
+            "LLM-as-judge decisions by outcome.",
+            ["cache_name", "decision"],
+        ),
+        judge_duration_seconds=_get_or_create_histogram(
+            reg,
+            f"{prefix}_judge_duration_seconds",
+            "Duration of LLM-as-judge calls in seconds.",
+            ["cache_name", "decision"],
+            _OPERATION_BUCKETS,
         ),
     )
 

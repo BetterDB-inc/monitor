@@ -94,6 +94,10 @@ class CacheCheckOptions:
     stale_after_model_change: bool = False
     current_model: str | None = None
     rerank: RerankOptions | None = None
+    judge: "JudgeOptions | None" = None
+    """Optional LLM-as-judge adjudication for borderline hits.
+    Ignored on check_batch() — call check() per prompt instead.
+    """
 
 
 @dataclass
@@ -113,9 +117,46 @@ CacheConfidence = str  # 'high' | 'uncertain' | 'miss'
 
 
 @dataclass
+class JudgeOptions:
+    """LLM-as-judge adjudication for borderline cache hits.
+
+    When set on CacheCheckOptions, a hit whose cosine distance lands in the
+    uncertainty band (threshold - uncertainty_band < score <= threshold) is
+    passed to judge_fn before being returned. The judge accepts (promotes the
+    hit to confidence='high') or rejects (treats it as a miss with
+    nearest_miss populated).
+
+    The judge is NOT invoked for high-confidence hits or outright misses.
+    When rerank is also set, the judge runs on the reranked pick.
+    """
+
+    judge_fn: Callable[[dict], Awaitable[bool]]
+    """Async function that decides whether a borderline hit is acceptable.
+    Receives a dict with keys: prompt, response, similarity, threshold, category.
+    Return True to accept (confidence='high'), False to reject (miss).
+    """
+
+    on_error: str = "accept"
+    """Behavior when judge_fn raises or exceeds timeout_ms.
+    'accept' — return the cached response with confidence='uncertain' (fail-open).
+    'reject' — treat as a miss (fail-closed).
+    Default: 'accept'.
+    """
+
+    timeout_ms: int = 2000
+    """Per-call timeout in milliseconds. Default: 2000.
+    Timeout is treated the same as a thrown error and routed through on_error.
+    """
+
+
+@dataclass
 class NearestMiss:
     similarity: float
     delta_to_threshold: float
+    threshold: float | None = None
+    """The effective threshold that was applied. Present on judge-rejection misses."""
+    matched_key: str | None = None
+    """The Valkey key of the entry that was rejected. Present on judge-rejection misses."""
 
 
 @dataclass

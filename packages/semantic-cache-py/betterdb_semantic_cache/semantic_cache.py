@@ -29,6 +29,7 @@ from .types import (
     EmbedFn,
     IndexInfo,
     InvalidateResult,
+    JudgeOptions,
     ModelCost,
     NearestMiss,
     SemanticCacheOptions,
@@ -339,7 +340,48 @@ class SemanticCache:
 
             # All checks passed — record as a genuine hit
             await self._record_similarity_window(winner_score, "hit", category)
-            confidence = "uncertain" if winner_score >= threshold - self._uncertainty_band else "high"
+            is_uncertain = winner_score >= threshold - self._uncertainty_band
+            confidence = "uncertain" if is_uncertain else "high"
+
+            # Judge: only invoked for borderline (uncertain) hits
+            if opts.judge is not None and is_uncertain:
+                winner_response = winner["fields"].get("response", "")
+                decision, judge_sec = await self._run_judge(
+                    opts.judge, prompt_text, winner_response, winner_score, threshold,
+                    category or None,
+                )
+                self._telemetry.metrics.judge_decisions_total.labels(
+                    cache_name=self._name, decision=decision
+                ).inc()
+                self._telemetry.metrics.judge_duration_seconds.labels(
+                    cache_name=self._name, decision=decision
+                ).observe(judge_sec)
+                _set_span_attrs(span, {
+                    "cache.judge.invoked": True,
+                    "cache.judge.decision": decision,
+                    "cache.judge.latency_ms": judge_sec * 1000,
+                })
+                if decision in ("reject", "error_reject", "timeout_reject"):
+                    # Undo the hit we just recorded
+                    await self._record_similarity_window(winner_score, "miss", category)
+                    await self._record_stat("misses")
+                    self._telemetry.metrics.requests_total.labels(
+                        cache_name=self._name, result="miss", category=category_label
+                    ).inc()
+                    return CacheCheckResult(
+                        hit=False,
+                        confidence="miss",
+                        similarity=winner_score,
+                        nearest_miss=NearestMiss(
+                            similarity=winner_score,
+                            delta_to_threshold=winner_score - threshold,
+                            threshold=threshold,
+                            matched_key=winner["key"],
+                        ),
+                    )
+                # Accepted by judge — promote to high confidence
+                confidence = "high"
+
             await self._record_stat("hits")
             metric_result = "uncertain_hit" if confidence == "uncertain" else "hit"
             self._telemetry.metrics.requests_total.labels(
@@ -548,6 +590,11 @@ class SemanticCache:
             raise SemanticCacheUsageError(
                 "check_batch() does not support the 'rerank' option. "
                 "Use check() for reranking individual prompts."
+            )
+        if opts.judge is not None:
+            raise SemanticCacheUsageError(
+                "check_batch() does not support the 'judge' option. "
+                "Use check() for LLM-as-judge adjudication."
             )
         if opts.stale_after_model_change:
             raise SemanticCacheUsageError(
@@ -1429,6 +1476,43 @@ class SemanticCache:
                 f"Embedding dimension mismatch: index expects {self._dimension}, "
                 f"embed_fn returned {len(embedding)}. Call flush() then initialize() to rebuild."
             )
+
+    async def _run_judge(
+        self,
+        opts: JudgeOptions,
+        prompt_text: str,
+        response: str,
+        score: float,
+        threshold: float,
+        category: str | None,
+    ) -> tuple[str, float]:
+        """Invoke the LLM judge for a borderline hit.
+
+        Returns (decision, duration_sec) where decision is one of:
+        'accept', 'reject', 'error_accept', 'error_reject', 'timeout_accept', 'timeout_reject'.
+        """
+        on_error = opts.on_error or "accept"
+        timeout_s = (opts.timeout_ms if opts.timeout_ms is not None else 2000) / 1000
+        start = time.perf_counter()
+        try:
+            result = await asyncio.wait_for(
+                opts.judge_fn({
+                    "prompt": prompt_text,
+                    "response": response,
+                    "similarity": score,
+                    "threshold": threshold,
+                    "category": category,
+                }),
+                timeout=timeout_s,
+            )
+            duration_sec = time.perf_counter() - start
+            return ("accept" if result else "reject"), duration_sec
+        except asyncio.TimeoutError:
+            duration_sec = time.perf_counter() - start
+            return f"timeout_{on_error}", duration_sec
+        except Exception:
+            duration_sec = time.perf_counter() - start
+            return f"error_{on_error}", duration_sec
 
     def _is_index_not_found_error(self, err: Exception) -> bool:
         msg = str(err).lower()
