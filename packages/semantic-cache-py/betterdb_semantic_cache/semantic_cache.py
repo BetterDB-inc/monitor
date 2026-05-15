@@ -352,10 +352,10 @@ class SemanticCache:
                     category or None,
                 )
                 self._telemetry.metrics.judge_decisions_total.labels(
-                    cache_name=self._name, decision=decision
+                    cache_name=self._name, category=category_label, decision=decision
                 ).inc()
                 self._telemetry.metrics.judge_duration_seconds.labels(
-                    cache_name=self._name, decision=decision
+                    cache_name=self._name, category=category_label, decision=decision
                 ).observe(judge_sec)
                 _set_span_attrs(span, {
                     "cache.judge.invoked": True,

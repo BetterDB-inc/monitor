@@ -101,7 +101,7 @@ async def test_judge_accept_promotes_to_high_confidence():
     assert abs(result.similarity - 0.08) < 1e-5
     judge_fn.assert_awaited_once()
     cache._telemetry.metrics.judge_decisions_total.labels.assert_called_with(
-        cache_name="test_judge", decision="accept"
+        cache_name="test_judge", category="none", decision="accept"
     )
 
 
@@ -123,7 +123,7 @@ async def test_judge_reject_returns_miss_with_nearest_miss():
     assert result.nearest_miss.threshold == THRESHOLD
     assert result.nearest_miss.matched_key is not None
     cache._telemetry.metrics.judge_decisions_total.labels.assert_called_with(
-        cache_name="test_judge", decision="reject"
+        cache_name="test_judge", category="none", decision="reject"
     )
 
 
@@ -166,7 +166,7 @@ async def test_judge_error_on_error_accept_returns_uncertain_hit():
     assert result.hit is True
     assert result.confidence == "uncertain"  # judge didn't verify — stays uncertain
     cache._telemetry.metrics.judge_decisions_total.labels.assert_called_with(
-        cache_name="test_judge", decision="error_accept"
+        cache_name="test_judge", category="none", decision="error_accept"
     )
 
 
@@ -182,7 +182,7 @@ async def test_judge_error_on_error_reject_returns_miss():
     assert result.hit is False
     assert result.confidence == "miss"
     cache._telemetry.metrics.judge_decisions_total.labels.assert_called_with(
-        cache_name="test_judge", decision="error_reject"
+        cache_name="test_judge", category="none", decision="error_reject"
     )
 
 
@@ -198,7 +198,7 @@ async def test_judge_timeout_on_error_accept_returns_hit():
     assert result.hit is True
     assert result.confidence == "uncertain"  # judge didn't verify — stays uncertain
     cache._telemetry.metrics.judge_decisions_total.labels.assert_called_with(
-        cache_name="test_judge", decision="timeout_accept"
+        cache_name="test_judge", category="none", decision="timeout_accept"
     )
 
 
@@ -214,7 +214,7 @@ async def test_judge_timeout_on_error_reject_returns_miss():
     assert result.hit is False
     assert result.confidence == "miss"
     cache._telemetry.metrics.judge_decisions_total.labels.assert_called_with(
-        cache_name="test_judge", decision="timeout_reject"
+        cache_name="test_judge", category="none", decision="timeout_reject"
     )
 
 

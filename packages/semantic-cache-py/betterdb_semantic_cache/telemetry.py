@@ -155,13 +155,13 @@ def create_telemetry(
             reg,
             f"{prefix}_judge_decisions_total",
             "LLM-as-judge decisions by outcome.",
-            ["cache_name", "decision"],
+            ["cache_name", "category", "decision"],
         ),
         judge_duration_seconds=_get_or_create_histogram(
             reg,
             f"{prefix}_judge_duration_seconds",
             "Duration of LLM-as-judge calls in seconds.",
-            ["cache_name", "decision"],
+            ["cache_name", "category", "decision"],
             _OPERATION_BUCKETS,
         ),
     )
