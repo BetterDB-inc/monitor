@@ -56,10 +56,14 @@ export class McpController {
   }
 
   @Get('instance/:id/info')
-  async getInfo(@Param('id', ValidateInstanceIdPipe) id: string) {
+  async getInfo(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Query('section') section?: string,
+  ) {
     try {
       const client = this.registry.get(id);
-      const info = await client.getInfoParsed();
+      const sections = section ? [section] : undefined;
+      const info = await client.getInfoParsed(sections);
       return info;
     } catch (error) {
       this.logger.error(`Failed to get info for ${id}`, error instanceof Error ? error.stack : error);
