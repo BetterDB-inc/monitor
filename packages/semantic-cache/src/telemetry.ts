@@ -24,6 +24,8 @@ interface CacheMetrics {
   staleModelEvictions: Counter;
   discoveryWriteFailed: Counter;
   configRefreshFailed: Counter;
+  judgeDecisions: Counter;
+  judgeDuration: Histogram;
 }
 
 export interface Telemetry {
@@ -112,6 +114,19 @@ export function createTelemetry(opts: TelemetryFactoryOptions): Telemetry {
     labelNames: ['cache_name'],
   });
 
+  const judgeDecisions = getOrCreateCounter(registry, {
+    name: `${opts.prefix}_judge_decisions_total`,
+    help: 'LLM-as-judge decisions for borderline cache hits',
+    labelNames: ['cache_name', 'category', 'decision'],
+  });
+
+  const judgeDuration = getOrCreateHistogram(registry, {
+    name: `${opts.prefix}_judge_duration_seconds`,
+    help: 'Wall-clock duration of judgeFn invocations',
+    labelNames: ['cache_name', 'category', 'decision'],
+    buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+  });
+
   return {
     tracer,
     metrics: {
@@ -124,6 +139,8 @@ export function createTelemetry(opts: TelemetryFactoryOptions): Telemetry {
       staleModelEvictions,
       discoveryWriteFailed,
       configRefreshFailed,
+      judgeDecisions,
+      judgeDuration,
     },
   };
 }

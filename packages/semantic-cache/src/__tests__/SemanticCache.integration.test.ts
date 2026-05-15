@@ -302,4 +302,60 @@ describe('SemanticCache integration', () => {
       await optOutCache.flush();
     }
   });
+
+  describe('judge: integration path', () => {
+    it('accept promotes borderline hit to confidence: high; reject returns miss with nearestMiss', async () => {
+      if (skip) return;
+
+      // Controlled embedFn: produces vectors at known cosine distances.
+      // 'stored prompt' → [1, 0, 0, 0, 0, 0, 0, 0]
+      // 'paraphrased query' → [0.9, sqrt(1-0.81), 0, ...] → cosine distance = 0.10
+      // With threshold=0.15, band=0.10: uncertain range is (0.05, 0.15].
+      // Distance 0.10 lands in the band reliably.
+      const sqrtComp = Math.sqrt(1 - 0.81); // ≈ 0.4359
+      const controlledEmbedMap: Record<string, number[]> = {
+        'stored prompt': [1, 0, 0, 0, 0, 0, 0, 0],
+        'paraphrased query': [0.9, sqrtComp, 0, 0, 0, 0, 0, 0],
+      };
+      const controlledEmbed: EmbedFn = async (text: string) =>
+        controlledEmbedMap[text] ?? fakeEmbed(text);
+
+      const judgeCacheName = `betterdb_judge_test_${Date.now()}`;
+      const judgeRegistry = new Registry();
+      const judgeCache = new SemanticCache({
+        name: judgeCacheName,
+        client,
+        embedFn: controlledEmbed,
+        defaultThreshold: 0.15,
+        uncertaintyBand: 0.10,
+        telemetry: { registry: judgeRegistry },
+        embeddingCache: { enabled: false },
+      });
+
+      try {
+        await judgeCache.initialize();
+        await judgeCache.store('stored prompt', 'The cached answer');
+        await new Promise((r) => setTimeout(r, 500));
+
+        // Judge accepts → confidence: 'high'
+        const acceptResult = await judgeCache.check('paraphrased query', {
+          judge: { judgeFn: async () => true, onError: 'accept' },
+        });
+        expect(acceptResult.hit).toBe(true);
+        expect(acceptResult.confidence).toBe('high');
+        expect(acceptResult.response).toBe('The cached answer');
+
+        // Judge rejects → miss with nearestMiss.deltaToThreshold <= 0
+        const rejectResult = await judgeCache.check('paraphrased query', {
+          judge: { judgeFn: async () => false, onError: 'accept' },
+        });
+        expect(rejectResult.hit).toBe(false);
+        expect(rejectResult.confidence).toBe('miss');
+        expect(rejectResult.nearestMiss).toBeDefined();
+        expect(rejectResult.nearestMiss!.deltaToThreshold).toBeLessThanOrEqual(0);
+      } finally {
+        await judgeCache.flush();
+      }
+    });
+  });
 });

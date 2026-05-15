@@ -96,6 +96,54 @@ A lookup is a **hit** when `score <= threshold`. The default threshold is `0.1`.
 | Conversational / RAG | `0.15` | Paraphrases hit as `high` confidence |
 | Broad search / recall | `0.20` | High hit rate, review uncertain hits |
 
+## LLM-as-judge
+
+When a hit lands in the uncertainty band (`threshold - uncertaintyBand < score <= threshold`), you can supply a `judgeFn` to adjudicate automatically instead of handling `confidence: 'uncertain'` yourself.
+
+```typescript
+const result = await cache.check(userPrompt, {
+  judge: {
+    judgeFn: async ({ prompt, response, similarity, threshold, category }) => {
+      // Return true to accept (confidence → 'high')
+      // Return false to reject (treated as miss with nearestMiss)
+      const verdict = await openai.chat.completions.create({
+        model: 'gpt-5-mini',
+        messages: [
+          { role: 'system', content: 'Reply YES or NO only.' },
+          { role: 'user', content: `Does this cached response correctly answer the prompt?\nPrompt: ${prompt}\nResponse: ${response}` },
+        ],
+      });
+      return verdict.choices[0].message.content?.startsWith('YES') ?? false;
+    },
+    onError: 'accept',  // fail-open on judge errors (default)
+    timeoutMs: 2000,    // per-call timeout (default)
+  },
+});
+```
+
+**When the judge is invoked:** only for `confidence === 'uncertain'` hits. High-confidence hits, misses, and the zero-candidates case bypass the judge entirely.
+
+**Accept path:** `result.hit === true`, `result.confidence === 'high'`.
+
+**Reject path:** `result.hit === false`, `result.nearestMiss` populated with `deltaToThreshold <= 0` (use this to distinguish judge rejections from regular misses where `deltaToThreshold > 0`).
+
+**Composing with rerank:** when both `rerank` and `judge` are set, the judge receives the reranked pick's response and similarity score.
+
+**`checkBatch()` does not support `judge`.** Call `check()` individually for prompts that need adjudication.
+
+### CacheCheckOptions reference
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `threshold` | `number` | `defaultThreshold` | Per-request cosine distance threshold override |
+| `category` | `string` | — | Category tag for per-category thresholds and metric labels |
+| `filter` | `string` | — | FT.SEARCH pre-filter expression (trusted input only) |
+| `k` | `number` | `1` | KNN neighbours to fetch (ignored when `rerank` is set) |
+| `staleAfterModelChange` | `boolean` | `false` | Evict and miss when stored model differs from `currentModel` |
+| `currentModel` | `string` | — | Model to compare against stored entries |
+| `rerank` | `RerankOptions` | — | Rerank hook; see `RerankOptions` |
+| `judge` | `JudgeOptions` | — | LLM-as-judge for borderline hits; see `JudgeOptions`. Not supported by `checkBatch()`; throws `SemanticCacheUsageError` |
+
 ## Configuration Reference
 
 | Option | Type | Default | Description |
