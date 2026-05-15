@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0] - 2026-05-15
+
+### Added
+
+- **LLM-as-judge for borderline hits** — `CacheCheckOptions.judge` accepts a `JudgeOptions` with a `judge_fn` that adjudicates hits whose cosine distance lands in the uncertainty band (`threshold - uncertainty_band < score <= threshold`). Accepted hits are promoted to `confidence='high'`; rejected hits are demoted to a miss with `nearest_miss` populated. Configurable `timeout_ms` (default 2000) and `on_error` (default `'accept'`, fail-open).
+- New Prometheus metrics `{prefix}_judge_decisions_total` (labels: `decision`) and `{prefix}_judge_duration_seconds` (labels: `decision`) with decision values `accept | reject | error_accept | error_reject | timeout_accept | timeout_reject`.
+- `JudgeOptions` type exported from the package root.
+- `examples/judge/main.py` — runnable example demonstrating accept, reject, and no-invocation paths.
+
+### Changed
+
+- `NearestMiss.delta_to_threshold` may now be `<= 0` when a miss originates from a judge rejection (score cleared the threshold but the judge rejected it). Existing miss paths still produce `> 0`. Documented on the type.
+- `check_batch()` raises `SemanticCacheUsageError` when `judge` is supplied, matching the existing handling of `rerank` and `stale_after_model_change`.
+
+### Breaking changes
+
+None.
+
 ## [0.3.0] - 2026-05-05
 
 ### Added

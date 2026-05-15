@@ -46,6 +46,8 @@ def make_telemetry() -> Telemetry:
         stale_model_evictions=_counter(),
         config_refresh_failed=_counter(),
         discovery_write_failed=_counter(),
+        judge_decisions_total=_counter(),
+        judge_duration_seconds=_histogram(),
     )
     return Telemetry(tracer=tracer, metrics=metrics)
 
