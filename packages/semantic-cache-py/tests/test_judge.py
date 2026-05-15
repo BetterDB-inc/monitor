@@ -164,7 +164,7 @@ async def test_judge_error_on_error_accept_returns_uncertain_hit():
         judge=JudgeOptions(judge_fn=failing_fn, on_error="accept")
     ))
     assert result.hit is True
-    assert result.confidence == "high"  # promoted by accept path
+    assert result.confidence == "uncertain"  # judge didn't verify — stays uncertain
     cache._telemetry.metrics.judge_decisions_total.labels.assert_called_with(
         cache_name="test_judge", decision="error_accept"
     )
@@ -196,6 +196,7 @@ async def test_judge_timeout_on_error_accept_returns_hit():
         judge=JudgeOptions(judge_fn=slow_fn, on_error="accept", timeout_ms=10)
     ))
     assert result.hit is True
+    assert result.confidence == "uncertain"  # judge didn't verify — stays uncertain
     cache._telemetry.metrics.judge_decisions_total.labels.assert_called_with(
         cache_name="test_judge", decision="timeout_accept"
     )

@@ -338,12 +338,13 @@ class SemanticCache:
                     _set_span_attrs(span, {"cache.hit": False, "cache.stale_evicted": True})
                     return CacheCheckResult(hit=False, confidence="miss")
 
-            # All checks passed — record as a genuine hit
-            await self._record_similarity_window(winner_score, "hit", category)
+            # All checks passed
             is_uncertain = winner_score >= threshold - self._uncertainty_band
             confidence = "uncertain" if is_uncertain else "high"
 
-            # Judge: only invoked for borderline (uncertain) hits
+            # Judge: only invoked for borderline (uncertain) hits.
+            # Similarity window is recorded AFTER the judge so each query
+            # produces exactly one entry with the correct outcome.
             if opts.judge is not None and is_uncertain:
                 winner_response = winner["fields"].get("response", "")
                 decision, judge_sec = await self._run_judge(
@@ -362,7 +363,6 @@ class SemanticCache:
                     "cache.judge.latency_ms": judge_sec * 1000,
                 })
                 if decision in ("reject", "error_reject", "timeout_reject"):
-                    # Undo the hit we just recorded
                     await self._record_similarity_window(winner_score, "miss", category)
                     await self._record_stat("misses")
                     self._telemetry.metrics.requests_total.labels(
@@ -379,8 +379,12 @@ class SemanticCache:
                             matched_key=winner["key"],
                         ),
                     )
-                # Accepted by judge — promote to high confidence
-                confidence = "high"
+                # Genuine accept only — error/timeout accept keeps 'uncertain'
+                # per JudgeOptions.on_error docstring (judge didn't actually verify).
+                if decision == "accept":
+                    confidence = "high"
+
+            await self._record_similarity_window(winner_score, "hit", category)
 
             await self._record_stat("hits")
             metric_result = "uncertain_hit" if confidence == "uncertain" else "hit"
