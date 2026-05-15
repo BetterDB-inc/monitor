@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { Feature } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
@@ -17,6 +18,7 @@ import { TriggersTable } from './monitor/triggers-table';
 export function Monitor() {
   const { currentConnection } = useConnection();
   const connectionId = currentConnection?.id;
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { hasFeature } = useLicense();
   const triggersEnabled = hasFeature(Feature.MONITOR_ANOMALY_TRIGGER);
@@ -154,8 +156,9 @@ export function Monitor() {
           connectionId={connectionId}
           open={startOpen}
           onOpenChange={setStartOpen}
-          onStarted={() => {
+          onStarted={(session) => {
             void queryClient.invalidateQueries({ queryKey: sessionsKey });
+            navigate(`/monitor/sessions/${session.id}`);
           }}
         />
       )}
