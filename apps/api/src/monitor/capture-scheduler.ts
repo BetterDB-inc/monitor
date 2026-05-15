@@ -76,9 +76,6 @@ export class CaptureScheduler implements OnModuleInit, OnModuleDestroy {
     if (!this.autoStart) {
       return;
     }
-    if (process.env.MONITOR_DEV_PREVIEW !== 'true') {
-      return;
-    }
     const enabled = await this.storage.getScheduledCaptures({ status: 'enabled' });
     for (const schedule of enabled) {
       this.registerTimer(schedule);

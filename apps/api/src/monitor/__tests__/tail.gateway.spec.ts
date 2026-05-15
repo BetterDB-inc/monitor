@@ -41,20 +41,7 @@ afterEach(() => {
 });
 
 describe('TailGateway.handleUpgrade', () => {
-  it('destroys the socket when MONITOR_DEV_PREVIEW is not set', () => {
-    delete process.env.MONITOR_DEV_PREVIEW;
-    const { gateway } = makeGateway();
-    const socket = new FakeSocket();
-    gateway.handleUpgrade(
-      makeRequest(`/monitor/ws?sessionId=${SESSION_ID}`),
-      socket as unknown as Socket,
-      Buffer.alloc(0),
-    );
-    expect(socket.destroyed).toBe(true);
-  });
-
   it('destroys the socket when the demo host header matches DEMO_HOSTNAME', () => {
-    process.env.MONITOR_DEV_PREVIEW = 'true';
     process.env.DEMO_HOSTNAME = 'demo.local';
     const { gateway } = makeGateway();
     const socket = new FakeSocket();
@@ -67,7 +54,6 @@ describe('TailGateway.handleUpgrade', () => {
   });
 
   it('passes through when host is non-demo even with DEMO_HOSTNAME set', () => {
-    process.env.MONITOR_DEV_PREVIEW = 'true';
     process.env.DEMO_HOSTNAME = 'demo.local';
     const { gateway } = makeGateway();
     // We can't easily exercise the real wss.handleUpgrade in a unit test, but
@@ -86,7 +72,6 @@ describe('TailGateway.handleUpgrade', () => {
   });
 
   it('destroys the socket when sessionId query param is missing', () => {
-    process.env.MONITOR_DEV_PREVIEW = 'true';
     const { gateway } = makeGateway();
     const socket = new FakeSocket();
     gateway.handleUpgrade(

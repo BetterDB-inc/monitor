@@ -120,7 +120,6 @@ export class CaptureWriter {
   private status: CaptureWriterStatus = 'completed';
   private terminationReason = 'source_ended';
   private stopped = false;
-  private startedAt = 0;
   private flushTimer: NodeJS.Timeout | null = null;
   private durationTimer: NodeJS.Timeout | null = null;
   private writeQueue: Promise<void> = Promise.resolve();
@@ -154,8 +153,6 @@ export class CaptureWriter {
    * status/counters when the writer terminates.
    */
   start(): Promise<CaptureWriterResult> {
-    this.startedAt = this.now();
-
     this.source.on('line', (line) => this.handleLine(line));
     this.source.on('error', (err) => this.terminate('failed', `source_error: ${err.message}`));
     this.source.on('end', () => this.terminate(this.status, this.terminationReason));
@@ -334,7 +331,7 @@ export class CaptureWriter {
         await this.storage.updateCaptureSession(this.sessionId, {
           status,
           endedAt,
-          durationMs: endedAt - this.startedAt,
+          durationMs: undefined,
           byteCount: this.byteCount,
           lineCount: this.lineCount,
           terminationReason: reason,
