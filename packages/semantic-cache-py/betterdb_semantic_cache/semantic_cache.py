@@ -368,6 +368,11 @@ class SemanticCache:
                     self._telemetry.metrics.requests_total.labels(
                         cache_name=self._name, result="miss", category=category_label
                     ).inc()
+                    _set_span_attrs(span, {
+                        "cache.hit": False,
+                        "cache.name": self._name,
+                        "cache.category": category_label,
+                    })
                     return CacheCheckResult(
                         hit=False,
                         confidence="miss",

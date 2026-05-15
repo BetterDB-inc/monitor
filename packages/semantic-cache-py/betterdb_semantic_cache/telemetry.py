@@ -162,7 +162,7 @@ def create_telemetry(
             f"{prefix}_judge_duration_seconds",
             "Duration of LLM-as-judge calls in seconds.",
             ["cache_name", "category", "decision"],
-            _OPERATION_BUCKETS,
+            [0.05, 0.1, 0.25, 0.5, 1, 2, 5],
         ),
     )
 
