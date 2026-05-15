@@ -1,11 +1,21 @@
+import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { ArrowLeft, OctagonX } from 'lucide-react';
 import { Feature } from '@betterdb/shared';
 import { monitorApi } from '../api/monitor';
 import { useMonitorTail } from '../hooks/useMonitorTail';
 import { useLicense } from '../hooks/useLicense';
+import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../components/ui/dialog';
 import { CompareCapturesPanel } from './monitor/compare-captures-panel';
 import { CrossReferencePanel } from './monitor/cross-reference-panel';
 import { FiltersAndExport } from './monitor/filters-and-export';
@@ -18,6 +28,26 @@ export function MonitorSession() {
   const tail = useMonitorTail(sessionId);
   const { hasFeature } = useLicense();
   const compareEnabled = hasFeature(Feature.MONITOR_CAPTURE_DIFF);
+  const queryClient = useQueryClient();
+
+  const [stopDialogOpen, setStopDialogOpen] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
+
+  const handleStop = async () => {
+    if (!sessionId) return;
+    setStopping(true);
+    setStopError(null);
+    try {
+      await monitorApi.stopSession(sessionId);
+      await queryClient.invalidateQueries({ queryKey: ['monitor', 'session', sessionId] });
+      setStopDialogOpen(false);
+    } catch (err) {
+      setStopError((err as Error).message);
+    } finally {
+      setStopping(false);
+    }
+  };
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['monitor', 'session', sessionId],
@@ -59,9 +89,21 @@ export function MonitorSession() {
       </div>
 
       <header className="space-y-2">
-        <div className="flex items-baseline justify-between gap-3">
+        <div className="flex items-center justify-between gap-3">
           <h1 className="font-mono text-lg font-semibold tracking-tight">{data.id}</h1>
-          <SessionStatusBadge status={data.status} />
+          <div className="flex items-center gap-2">
+            <SessionStatusBadge status={data.status} />
+            {data.status === 'running' && (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setStopDialogOpen(true)}
+              >
+                <OctagonX className="h-3.5 w-3.5" />
+                Stop
+              </Button>
+            )}
+          </div>
         </div>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-muted-foreground sm:grid-cols-4">
           <div>
@@ -140,6 +182,28 @@ export function MonitorSession() {
           <FiltersAndExport sessionId={sessionId} bufferLines={tail.lines} />
         </CardContent>
       </Card>
+
+      <Dialog open={stopDialogOpen} onOpenChange={setStopDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Stop capture session?</DialogTitle>
+            <DialogDescription>
+              This will immediately terminate the MONITOR connection to the server. The capture
+              cannot be resumed — all commands received so far are preserved and remain
+              available for analysis and export.
+            </DialogDescription>
+          </DialogHeader>
+          {stopError && <p className="text-sm text-destructive">{stopError}</p>}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setStopDialogOpen(false)} disabled={stopping}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleStop} disabled={stopping}>
+              {stopping ? 'Stopping…' : 'Stop session'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

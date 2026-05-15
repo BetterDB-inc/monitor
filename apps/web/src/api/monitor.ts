@@ -201,6 +201,12 @@ export const monitorApi = {
     });
   },
 
+  stopSession: (id: string): Promise<StoredCaptureSession> => {
+    return fetchApi<StoredCaptureSession>(`/monitor/sessions/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  },
+
   listConnectionNodes: (connectionId: string): Promise<MonitorNodesResponse> => {
     return fetchApi<MonitorNodesResponse>(
       `/monitor/connections/${encodeURIComponent(connectionId)}/nodes`,
