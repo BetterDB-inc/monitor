@@ -9,6 +9,13 @@ import {
 } from '../../components/ui/dialog';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../../components/ui/select';
 import { useQuery } from '@tanstack/react-query';
 import { MonitorNodeDescriptor, monitorApi, PreflightResult, StoredCaptureSession } from '../../api/monitor';
 import { PreflightPanel } from './preflight-panel';
@@ -27,22 +34,22 @@ function ClusterNodeField({
 }) {
   return (
     <div>
-      <label className="text-xs font-medium text-muted-foreground" htmlFor="targetNode">
+      <label className="text-xs font-medium text-muted-foreground">
         Cluster node
       </label>
-      <select
-        id="targetNode"
-        value={selectedId}
-        onChange={(e) => onChange(e.target.value)}
-        className="block h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-      >
-        {nodes.map((n) => (
-          <option key={n.id} value={n.id}>
-            {n.address} · {n.role}
-            {n.healthy ? '' : ' (unhealthy)'}
-          </option>
-        ))}
-      </select>
+      <Select value={selectedId} onValueChange={onChange}>
+        <SelectTrigger className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {nodes.map((n) => (
+            <SelectItem key={n.id} value={n.id}>
+              {n.address} · {n.role}
+              {n.healthy ? '' : ' (unhealthy)'}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
       <p className="mt-1 text-[11px] text-muted-foreground">
         MONITOR is per-node. The session captures commands processed by this node only. Fan-out
         across all primaries lands in a follow-up.
@@ -166,7 +173,7 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Start MONITOR capture session</DialogTitle>
           <DialogDescription>
@@ -190,15 +197,15 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
                   onChange={(e) => setDuration(Math.max(1, Number(e.target.value) || 1))}
                 />
               </div>
-              <select
-                aria-label="Duration unit"
-                value={unit}
-                onChange={(e) => setUnit(e.target.value as Unit)}
-                className="h-9 rounded-md border border-input bg-transparent px-3 text-sm"
-              >
-                <option value="s">seconds</option>
-                <option value="m">minutes</option>
-              </select>
+              <Select value={unit} onValueChange={(v) => setUnit(v as Unit)}>
+                <SelectTrigger aria-label="Duration unit">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="s">seconds</SelectItem>
+                  <SelectItem value="m">minutes</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <div>
               <label className="text-xs font-medium text-muted-foreground" htmlFor="requestedBy">
