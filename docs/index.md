@@ -28,6 +28,12 @@ Open [http://localhost:3001](http://localhost:3001) to access the dashboard.
 - [Anomaly Detection](anomaly-detection) — Understanding detection patterns and tuning sensitivity
 - [Valkey Features](valkey-features) — Valkey-specific capabilities like COMMANDLOG and SLOT-STATS
 
+## Provider Guides
+
+Step-by-step connection guides for managed Redis/Valkey providers:
+
+- [Upstash](providers/upstash) — Serverless Redis/Valkey, direct connection with TLS
+
 ## API Reference
 
 BetterDB includes interactive API documentation powered by Swagger/OpenAPI.
