@@ -1,6 +1,7 @@
-import { Injectable, Inject, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Inject, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppSettings, SettingsUpdateRequest, SettingsResponse } from '@betterdb/shared';
+import { DetectorConfigMap, MetricType, resolveDetectorConfig } from '../anomaly/anomaly.types';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 
 @Injectable()
@@ -74,6 +75,7 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
         10,
       ),
       inferenceSlaConfig: {},
+      anomalyDetectorConfig: {},
       createdAt: now,
       updatedAt: now,
     };
@@ -124,6 +126,46 @@ export class SettingsService implements OnModuleInit, OnModuleDestroy {
       source: 'database',
       requiresRestart: false,
     };
+  }
+
+  async getDetectorConfig(): Promise<DetectorConfigMap> {
+    const stored = this.getCachedSettings().anomalyDetectorConfig;
+    return stored ?? {};
+  }
+
+  async updateDetectorConfig(overrides: DetectorConfigMap): Promise<DetectorConfigMap> {
+    const existing = await this.getDetectorConfig();
+    const merged: DetectorConfigMap = { ...existing };
+
+    for (const key of Object.keys(overrides) as MetricType[]) {
+      merged[key] = {
+        ...existing[key],
+        ...overrides[key],
+      };
+    }
+
+    for (const key of Object.keys(merged) as MetricType[]) {
+      const resolved = resolveDetectorConfig(key as MetricType, merged);
+
+      if (resolved.warningZScore >= resolved.criticalZScore) {
+        throw new BadRequestException(
+          `${key}: warningZScore (${resolved.warningZScore}) must be less than ` +
+            `criticalZScore (${resolved.criticalZScore}) after merging with stored config`,
+        );
+      }
+
+      const hasWarningAbs = resolved.warningAbsolute !== Number.POSITIVE_INFINITY;
+      const hasCriticalAbs = resolved.criticalAbsolute !== Number.POSITIVE_INFINITY;
+      if (hasWarningAbs && hasCriticalAbs && resolved.warningAbsolute >= resolved.criticalAbsolute) {
+        throw new BadRequestException(
+          `${key}: warningAbsolute (${resolved.warningAbsolute}) must be less than ` +
+            `criticalAbsolute (${resolved.criticalAbsolute}) after merging with stored config`,
+        );
+      }
+    }
+
+    const updated = await this.updateSettings({ anomalyDetectorConfig: merged });
+    return updated.settings.anomalyDetectorConfig as DetectorConfigMap;
   }
 
   async resetToDefaults(): Promise<SettingsResponse> {

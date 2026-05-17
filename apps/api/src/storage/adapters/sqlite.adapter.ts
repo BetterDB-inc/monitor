@@ -223,6 +223,7 @@ export class SqliteAdapter implements StoragePort {
         type: 'INTEGER NOT NULL DEFAULT 7200000',
       },
       { name: 'inference_sla_config', type: "TEXT NOT NULL DEFAULT '{}'" },
+      { name: 'anomaly_detector_config', type: "TEXT NOT NULL DEFAULT '{}'" },
     ];
     for (const col of appSettingsMigrations) {
       if (!settingsColumns.has(col.name)) {
@@ -2253,9 +2254,9 @@ export class SqliteAdapter implements StoragePort {
         id, audit_poll_interval_ms, client_analytics_poll_interval_ms,
         anomaly_poll_interval_ms, anomaly_cache_ttl_ms, anomaly_prometheus_interval_ms,
         throughput_forecasting_enabled, throughput_forecasting_default_rolling_window_ms, throughput_forecasting_default_alert_threshold_ms,
-        inference_sla_config,
+        inference_sla_config, anomaly_detector_config,
         updated_at, created_at
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         audit_poll_interval_ms = excluded.audit_poll_interval_ms,
         client_analytics_poll_interval_ms = excluded.client_analytics_poll_interval_ms,
@@ -2266,6 +2267,7 @@ export class SqliteAdapter implements StoragePort {
         throughput_forecasting_default_rolling_window_ms = excluded.throughput_forecasting_default_rolling_window_ms,
         throughput_forecasting_default_alert_threshold_ms = excluded.throughput_forecasting_default_alert_threshold_ms,
         inference_sla_config = excluded.inference_sla_config,
+        anomaly_detector_config = excluded.anomaly_detector_config,
         updated_at = excluded.updated_at
     `);
 
@@ -2279,6 +2281,7 @@ export class SqliteAdapter implements StoragePort {
       settings.metricForecastingDefaultRollingWindowMs,
       settings.metricForecastingDefaultAlertThresholdMs,
       JSON.stringify(settings.inferenceSlaConfig ?? {}),
+      JSON.stringify(settings.anomalyDetectorConfig ?? {}),
       now,
       settings.createdAt || now,
     );
@@ -3494,6 +3497,57 @@ export class SqliteAdapter implements StoragePort {
 
   async createCacheProposal(input: CreateCacheProposalInput): Promise<StoredCacheProposal> {
     if (!this.db) throw new Error('Database not initialized');
+
+    // Guard: enforce pending-uniqueness (partial indexes are unreliable on some SQLite versions)
+    if (input.proposal_type === 'tool_ttl_adjust') {
+      const toolName =
+        (input.proposal_payload as { tool_name?: string })?.tool_name ?? null;
+      const normalizedTool = toolName ?? '__betterdb_null__';
+      const existing = this.db
+        .prepare(
+          `SELECT id FROM cache_proposals
+           WHERE connection_id = ?
+             AND cache_name = ?
+             AND proposal_type = ?
+             AND status = 'pending'
+             AND COALESCE(json_extract(proposal_payload, '$.tool_name'), '__betterdb_null__') = ?
+           LIMIT 1`,
+        )
+        .get(input.connection_id, input.cache_name, input.proposal_type, normalizedTool);
+      if (existing) {
+        throw new Error(
+          `UNIQUE constraint failed: pending proposal already exists for ` +
+            `(${input.connection_id}, ${input.cache_name}, ${input.proposal_type})`,
+        );
+      }
+    } else if (input.proposal_type === 'threshold_adjust') {
+      const category =
+        (input.proposal_payload as { category?: string | null })?.category ?? null;
+      const normalizedCategory = category ?? '__betterdb_null__';
+      const existing = this.db
+        .prepare(
+          `SELECT id FROM cache_proposals
+           WHERE connection_id = ?
+             AND cache_name = ?
+             AND proposal_type = ?
+             AND status = 'pending'
+             AND COALESCE(json_extract(proposal_payload, '$.category'), '__betterdb_null__') = ?
+           LIMIT 1`,
+        )
+        .get(
+          input.connection_id,
+          input.cache_name,
+          input.proposal_type,
+          normalizedCategory,
+        );
+      if (existing) {
+        throw new Error(
+          `UNIQUE constraint failed: pending proposal already exists for ` +
+            `(${input.connection_id}, ${input.cache_name}, ${input.proposal_type})`,
+        );
+      }
+    }
+
     const proposedAt = input.proposed_at ?? Date.now();
     const expiresAt = input.expires_at ?? proposedAt + PROPOSAL_DEFAULT_EXPIRY_MS;
     this.db
