@@ -1,3 +1,4 @@
+import type { AnomalyDetectorConfigMap } from './anomaly-detector-settings.types';
 import { AnomalyWarmupStatus } from './health';
 
 export const ANOMALY_SERVICE = 'ANOMALY_SERVICE';
@@ -8,4 +9,5 @@ export const ANOMALY_SERVICE = 'ANOMALY_SERVICE';
  */
 export interface IAnomalyService {
   getWarmupStatus(): AnomalyWarmupStatus;
+  reloadDetectorConfig(overrides: AnomalyDetectorConfigMap): void;
 }

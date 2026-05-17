@@ -115,6 +115,14 @@ import {
   largeReplyPressureSignature,
 } from './large-reply-pressure-detector';
 import {
+  DEFAULT_SPIKE_CONFIG,
+  DetectorConfigMap,
+  DETECTOR_DEFAULTS,
+  MetricType as ApiMetricType,
+  resolveDetectorConfig,
+  toSpikeDetectorConfig,
+} from '@app/anomaly/anomaly.types';
+import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
   AnomalyEvent,
@@ -322,6 +330,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private readonly persistenceStallSec: number;
   private readonly persistenceWarnSec: number;
   private readonly persistenceCritSec: number;
+  private detectorOverrides: DetectorConfigMap = {};
   private readonly correlationIntervalMs = 5000;
   private correlationInterval: NodeJS.Timeout | null = null;
   private prometheusSummaryInterval: NodeJS.Timeout | null = null;
@@ -369,7 +378,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     return this.settingsService.getCachedSettings().anomalyPrometheusIntervalMs;
   }
 
-  onModuleInit() {
+  async onModuleInit() {
+    this.detectorOverrides = await this.settingsService.getDetectorConfig();
     this.logger.log('Starting anomaly detection service...');
 
     // Start multi-connection polling
@@ -442,51 +452,32 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     ]);
   }
 
-  private initializeBuffersAndDetectorsForConnection(connectionId: string): void {
-    // Define custom configs for specific metrics
-    const configs: Partial<Record<MetricType, SpikeDetectorConfig>> = {
-      [MetricType.ACL_DENIED]: {
-        warningZScore: 1.5,
-        criticalZScore: 2.5,
-        warningThreshold: 10,
-        criticalThreshold: 50,
-        consecutiveRequired: 2,
-        cooldownMs: 30000,
-      },
-      [MetricType.MEMORY_USED]: {
-        warningZScore: 2.5,
-        criticalZScore: 3.5,
-        consecutiveRequired: 3,
-        cooldownMs: 60000,
-      },
-      [MetricType.EVICTED_KEYS]: {
-        warningZScore: 2.0,
-        criticalZScore: 3.0,
-        consecutiveRequired: 2,
-        cooldownMs: 30000,
-      },
-      [MetricType.FRAGMENTATION_RATIO]: {
-        warningZScore: 2.0,
-        criticalZScore: 3.0,
-        warningThreshold: 1.5,
-        criticalThreshold: 2.0,
-        consecutiveRequired: 5,
-        cooldownMs: 120000,
-      },
-      // Keep CPU z-score-only (no absolute warning/criticalThreshold): the
-      // control-plane saturation detector already emits its own synthetic
-      // CRITICAL CPU event at a fixed 90% threshold (see
-      // createControlPlaneSaturationEvent) — a second absolute-threshold
-      // source on this metric would double-alert the same condition.
-      [MetricType.CPU_UTILIZATION]: {
-        warningZScore: 2.0,
-        criticalZScore: 3.0,
-        consecutiveRequired: 3,
-        cooldownMs: 60000,
-        detectDrops: true,
-      },
-    };
+  reloadDetectorConfig(overrides: DetectorConfigMap): void {
+    this.detectorOverrides = overrides;
+    this.applyDetectorConfigToAllConnections();
+  }
 
+  private applyDetectorConfigToAllConnections(): void {
+    for (const detectors of this.detectors.values()) {
+      for (const [metricType, detector] of detectors.entries()) {
+        detector.updateConfig(this.resolveSpikeConfig(metricType));
+      }
+    }
+  }
+
+  private resolveSpikeConfig(metric: MetricType): Required<SpikeDetectorConfig> {
+    if (metric in DETECTOR_DEFAULTS) {
+      return toSpikeDetectorConfig(
+        resolveDetectorConfig(metric as unknown as ApiMetricType, this.detectorOverrides),
+      );
+    }
+    if (metric === MetricType.CPU_UTILIZATION) {
+      return { ...DEFAULT_SPIKE_CONFIG, detectDrops: true };
+    }
+    return DEFAULT_SPIKE_CONFIG;
+  }
+
+  private initializeBuffersAndDetectorsForConnection(connectionId: string): void {
     // Initialize buffers and detectors for all metrics
     const connectionBuffers = new Map<MetricType, MetricBuffer>();
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
@@ -496,8 +487,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // (single source of truth shared with the test — see types.ts).
       if (METRICS_HANDLED_OUTSIDE_EXTRACTOR.has(metricType)) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
-      const config = configs[metricType] || {};
-      connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
+      connectionDetectors.set(
+        metricType,
+        new SpikeDetector(metricType, this.resolveSpikeConfig(metricType)),
+      );
     }
 
     this.buffers.set(connectionId, connectionBuffers);
@@ -687,12 +680,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           buffers.set(MetricType.SLOWLOG_LAST_ID, new MetricBuffer(MetricType.SLOWLOG_LAST_ID));
           detectors.set(
             MetricType.SLOWLOG_LAST_ID,
-            new SpikeDetector(MetricType.SLOWLOG_LAST_ID, {
-              warningZScore: 1.5,
-              criticalZScore: 2.5,
-              consecutiveRequired: 1,
-              cooldownMs: 30000,
-            }),
+            new SpikeDetector(
+              MetricType.SLOWLOG_LAST_ID,
+              this.resolveSpikeConfig(MetricType.SLOWLOG_LAST_ID),
+            ),
           );
         }
 
