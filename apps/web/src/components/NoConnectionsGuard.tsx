@@ -15,6 +15,7 @@ function ProviderGuidesInfo() {
   }
 
   function handleMouseLeave() {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
     closeTimer.current = setTimeout(() => setOpen(false), 500);
   }
 
