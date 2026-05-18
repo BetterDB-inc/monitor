@@ -9,12 +9,14 @@ function ProviderGuidesInfo() {
   const ref = useRef<HTMLDivElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  function handleMouseEnter() {
+  function handlePointerEnter(e: React.PointerEvent) {
+    if (e.pointerType !== 'mouse') return;
     if (closeTimer.current) clearTimeout(closeTimer.current);
     setOpen(true);
   }
 
-  function handleMouseLeave() {
+  function handlePointerLeave(e: React.PointerEvent) {
+    if (e.pointerType !== 'mouse') return;
     if (closeTimer.current) clearTimeout(closeTimer.current);
     closeTimer.current = setTimeout(() => setOpen(false), 500);
   }
@@ -34,8 +36,8 @@ function ProviderGuidesInfo() {
     <div
       className="relative"
       ref={ref}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
     >
       <button
         type="button"
@@ -53,8 +55,8 @@ function ProviderGuidesInfo() {
       {open && (
         <div
           className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 w-64 rounded-lg border border-border bg-popover text-popover-foreground shadow-md p-3 text-[12px] leading-relaxed z-50"
-          onMouseEnter={handleMouseEnter}
-          onMouseLeave={handleMouseLeave}
+          onPointerEnter={handlePointerEnter}
+          onPointerLeave={handlePointerLeave}
         >
           <p className="text-muted-foreground">
             More guides coming soon. If you have issues with a specific provider,{' '}
