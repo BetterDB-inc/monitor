@@ -15,7 +15,7 @@ function makeService({
     signals: { memoryPct: 0.1, oomEventsRecent: 0, replicationLagBytes: 0, failoverInProgress: false },
     thresholds: { memoryPctThreshold: 0.85, replicationLagThresholdBytes: 10485760 },
   },
-  monitorSupport = { status: 'yes', checkedAt: 1700000000000 } satisfies MonitorSupportResult,
+  monitorSupport,
 }: {
   info: unknown;
   host?: string;
@@ -31,7 +31,8 @@ function makeService({
   const aclChecker = { check: jest.fn().mockResolvedValue(acl) } as unknown as AclChecker;
   const healthGate = { evaluate: jest.fn().mockResolvedValue(health) } as unknown as HealthGateService;
   const monitorSupportProbe = {
-    probe: jest.fn().mockResolvedValue(monitorSupport),
+    probe: jest.fn(),
+    getCached: jest.fn().mockReturnValue(monitorSupport),
   } as unknown as MonitorSupportProbe;
   return {
     service: new PreflightService(registry, aclChecker, healthGate, monitorSupportProbe),
@@ -43,6 +44,33 @@ function makeService({
 }
 
 describe('PreflightService', () => {
+  it('returns monitorSupport=null when no probe has run yet (preflight never triggers probing)', async () => {
+    const { service, monitorSupportProbe } = makeService({
+      info: { stats: { instantaneous_ops_per_sec: '0' } },
+      // monitorSupport intentionally undefined -> getCached returns undefined
+    });
+    const result = await service.run({ connectionId: CONNECTION_ID });
+    expect(result.monitorSupport).toBeNull();
+    expect(monitorSupportProbe.getCached).toHaveBeenCalledWith(CONNECTION_ID);
+    expect(monitorSupportProbe.probe).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the cached probe result when one exists', async () => {
+    const monitorSupport: MonitorSupportResult = {
+      status: 'no',
+      source: 'live-monitor',
+      checkedAt: 1700000000999,
+      detail: 'NOPERM MONITOR is not allowed',
+    };
+    const { service, monitorSupportProbe } = makeService({
+      info: { stats: { instantaneous_ops_per_sec: '0' } },
+      monitorSupport,
+    });
+    const result = await service.run({ connectionId: CONNECTION_ID });
+    expect(result.monitorSupport).toEqual(monitorSupport);
+    expect(monitorSupportProbe.probe).not.toHaveBeenCalled();
+  });
+
   it('composes provider, acl, health, and throughput from one INFO call + downstream services', async () => {
     const { service, aclChecker, healthGate } = makeService({
       info: {
@@ -71,22 +99,6 @@ describe('PreflightService', () => {
     });
     expect(aclChecker.check).toHaveBeenCalledWith(CONNECTION_ID);
     expect(healthGate.evaluate).toHaveBeenCalledWith(CONNECTION_ID);
-    expect(result.monitorSupport).toEqual({ status: 'yes', checkedAt: 1700000000000 });
-  });
-
-  it('forwards the monitorSupport result from the probe', async () => {
-    const monitorSupport: MonitorSupportResult = {
-      status: 'no',
-      checkedAt: 1700000000999,
-      detail: 'COMMAND INFO MONITOR returned nil',
-    };
-    const { service, monitorSupportProbe } = makeService({
-      info: { stats: { instantaneous_ops_per_sec: '0' } },
-      monitorSupport,
-    });
-    const result = await service.run({ connectionId: CONNECTION_ID });
-    expect(result.monitorSupport).toEqual(monitorSupport);
-    expect(monitorSupportProbe.probe).toHaveBeenCalledWith(CONNECTION_ID);
   });
 
   it('detects provider from the connection host suffix', async () => {

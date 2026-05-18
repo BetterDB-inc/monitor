@@ -109,6 +109,11 @@ function ProviderBanner({ preflight }: Props) {
 function MonitorSupportBanner({ preflight }: Props) {
   const provider = preflight.provider.provider;
   const docsUrl = PROVIDER_DOC_LINKS[provider];
+
+  if (!preflight.monitorSupport) {
+    return null;
+  }
+
   const { status } = preflight.monitorSupport;
 
   if (status === 'yes') {

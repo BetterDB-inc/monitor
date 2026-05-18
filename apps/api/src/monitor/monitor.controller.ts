@@ -31,6 +31,7 @@ import {
   parseMonitorLine,
 } from './monitor-line.parser';
 import { MonitorCaptureService } from './monitor-capture.service';
+import { MonitorSupportProbe, MonitorSupportResult } from './monitor-support-probe';
 import { PreflightResult, PreflightService } from './preflight.service';
 
 const VALID_BASELINES = new Set<BaselineWindow>(['6h', '24h', '7d', 'same-hour-last-week']);
@@ -88,6 +89,7 @@ export class MonitorController {
     private readonly clusterDiscovery: ClusterDiscoveryService,
     private readonly triggerRegistry: CaptureTriggerRegistry,
     private readonly captureScheduler: CaptureScheduler,
+    private readonly monitorSupportProbe: MonitorSupportProbe,
     @Inject('STORAGE_CLIENT')
     private readonly storage: StoragePort,
   ) {}
@@ -100,6 +102,20 @@ export class MonitorController {
       throw new BadRequestException('connectionId query parameter is required');
     }
     return this.healthGateService.evaluate(connectionId);
+  }
+
+  /**
+   * Lazy MONITOR-support probe. Called by the web app when the user opens the
+   * Monitor page so the support banner is ready by the time they consider
+   * starting a session. The probe is idempotent — the first call does the real
+   * work (running `COMMAND INFO MONITOR` and, if inconclusive, a brief live
+   * `MONITOR`); subsequent calls return the cached verdict instantly.
+   */
+  @Get('connections/:connectionId/monitor-support')
+  async getMonitorSupport(
+    @Param('connectionId') connectionId: string,
+  ): Promise<MonitorSupportResult> {
+    return this.monitorSupportProbe.probe(connectionId);
   }
 
   @Post('sessions/preflight')
@@ -329,6 +345,9 @@ export class MonitorController {
     if (!body.anomalyType) {
       throw new BadRequestException('anomalyType is required');
     }
+    void this.monitorSupportProbe.probe(body.connectionId).catch(() => {
+      // Fire-and-forget: probe is informational and never gates trigger creation.
+    });
     return this.triggerRegistry.createTrigger({
       connectionId: body.connectionId,
       metricType: body.metricType,

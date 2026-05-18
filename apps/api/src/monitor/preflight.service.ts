@@ -33,7 +33,13 @@ export interface PreflightResult {
   acl: AclCheckResult;
   health: HealthGateResult;
   throughput: PreflightThroughput;
-  monitorSupport: MonitorSupportResult;
+  /**
+   * Cached MONITOR-support verdict, if any. Preflight never triggers the
+   * probe itself — it just reads whatever is in the cache. The probe is
+   * fired from explicit entry points (opening the Monitor page, creating an
+   * anomaly trigger). See {@link MonitorSupportProbe}.
+   */
+  monitorSupport: MonitorSupportResult | null;
 }
 
 @Injectable()
@@ -64,10 +70,9 @@ export class PreflightService {
     const estimatedLines = Math.round(opsPerSec * (durationMs / 1000));
     const estimatedBytes = estimatedLines * AVG_MONITOR_LINE_BYTES;
 
-    const [acl, health, monitorSupport] = await Promise.all([
+    const [acl, health] = await Promise.all([
       this.aclChecker.check(connectionId),
       this.healthGateService.evaluate(connectionId),
-      this.monitorSupportProbe.probe(connectionId),
     ]);
 
     return {
@@ -75,7 +80,7 @@ export class PreflightService {
       provider: detectProvider(server, config?.host),
       acl,
       health,
-      monitorSupport,
+      monitorSupport: this.monitorSupportProbe.getCached(connectionId) ?? null,
       throughput: {
         opsPerSec,
         inputKbps,
