@@ -1,21 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
-import { readFileSync } from 'fs';
 import { LicenseService } from '../license.service';
 import { TelemetryPort } from '@app/common/interfaces/telemetry-port.interface';
-
-// Mock fs so that readFileSync for the persisted license.key file returns an
-// empty string in tests. Without this, a real license.key file on the CI runner
-// (written by a previous run or workflow step) leaks into the test process and
-// causes keyless-path tests to unexpectedly find a key.
-const actualReadFileSync = readFileSync;
-jest.mock('fs', () => ({
-  ...jest.requireActual('fs'),
-  readFileSync: jest.fn(jest.requireActual('fs').readFileSync),
-  mkdirSync: jest.requireActual('fs').mkdirSync,
-  writeFileSync: jest.requireActual('fs').writeFileSync,
-}));
-const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 
 const createMockTelemetryClient = (): jest.Mocked<TelemetryPort> => ({
   capture: jest.fn(),
@@ -50,16 +36,6 @@ describe('LicenseService', () => {
   beforeEach(async () => {
     jest.resetModules();
     process.env = { ...originalEnv };
-    // Remove any real license key from the environment before each test so that
-    // tests which require keyless behaviour are not affected by a CI/CD secret
-    // leaking in via the host environment. Tests that need a key set it explicitly.
-    delete process.env.BETTERDB_LICENSE_KEY;
-    // Prevent loadPersistedKey() from reading a real license.key file that may
-    // exist on the CI runner from a previous run or workflow setup.
-    mockReadFileSync.mockImplementation((path: unknown, ...args: unknown[]) => {
-      if (typeof path === 'string' && path.endsWith('license.key')) return '';
-      return actualReadFileSync(path as any, ...(args as any[]));
-    });
     mockTelemetryClient = createMockTelemetryClient();
 
     const module: TestingModule = await Test.createTestingModule({
@@ -85,7 +61,6 @@ describe('LicenseService', () => {
   afterEach(() => {
     process.env = originalEnv;
     mockFetch.mockRestore();
-    mockReadFileSync.mockRestore();
   });
 
   describe('keyless validation', () => {
