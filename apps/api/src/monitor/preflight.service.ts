@@ -3,6 +3,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { AclCheckResult, AclChecker } from './acl-checker';
 import { HealthGateResult } from './health-gate';
 import { HealthGateService } from './health-gate.service';
+import { MonitorSupportProbe, MonitorSupportResult } from './monitor-support-probe';
 import { ProviderInfo, detectProvider } from './provider-detector';
 
 /** Average bytes per MONITOR-formatted line. Conservative estimate; overestimates short keys, underestimates very long values. */
@@ -32,6 +33,7 @@ export interface PreflightResult {
   acl: AclCheckResult;
   health: HealthGateResult;
   throughput: PreflightThroughput;
+  monitorSupport: MonitorSupportResult;
 }
 
 @Injectable()
@@ -42,6 +44,7 @@ export class PreflightService {
     private readonly connectionRegistry: ConnectionRegistry,
     private readonly aclChecker: AclChecker,
     private readonly healthGateService: HealthGateService,
+    private readonly monitorSupportProbe: MonitorSupportProbe,
   ) {}
 
   async run(input: PreflightInput): Promise<PreflightResult> {
@@ -61,9 +64,10 @@ export class PreflightService {
     const estimatedLines = Math.round(opsPerSec * (durationMs / 1000));
     const estimatedBytes = estimatedLines * AVG_MONITOR_LINE_BYTES;
 
-    const [acl, health] = await Promise.all([
+    const [acl, health, monitorSupport] = await Promise.all([
       this.aclChecker.check(connectionId),
       this.healthGateService.evaluate(connectionId),
+      this.monitorSupportProbe.probe(connectionId),
     ]);
 
     return {
@@ -71,6 +75,7 @@ export class PreflightService {
       provider: detectProvider(server, config?.host),
       acl,
       health,
+      monitorSupport,
       throughput: {
         opsPerSec,
         inputKbps,

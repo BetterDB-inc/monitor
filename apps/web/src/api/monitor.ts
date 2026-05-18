@@ -63,12 +63,21 @@ export interface PreflightThroughput {
   estimatedBytes: number;
 }
 
+export type MonitorSupportStatus = 'yes' | 'no' | 'unknown';
+
+export interface PreflightMonitorSupport {
+  status: MonitorSupportStatus;
+  checkedAt: number;
+  detail?: string;
+}
+
 export interface PreflightResult {
   connectionId: string;
   provider: PreflightProvider;
   acl: PreflightAcl;
   health: PreflightHealth;
   throughput: PreflightThroughput;
+  monitorSupport: PreflightMonitorSupport;
 }
 
 export interface StartSessionParams {

@@ -10,6 +10,7 @@ import { CaptureTriggerRegistry } from './capture-trigger-registry';
 import { CrossReferenceEngine } from './cross-reference.engine';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
+import { MonitorSupportProbe } from './monitor-support-probe';
 import { MonitorController } from './monitor.controller';
 import { PreflightService } from './preflight.service';
 import { TailGateway } from './tail.gateway';
@@ -30,6 +31,7 @@ import { TailGateway } from './tail.gateway';
     CrossReferenceEngine,
     HealthGateService,
     MonitorCaptureService,
+    MonitorSupportProbe,
     PreflightService,
     TailGateway,
   ],

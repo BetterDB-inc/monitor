@@ -6,8 +6,11 @@
  * Where neither yields a hit, we report 'self-hosted' rather than 'unknown' so
  * the pre-flight UI doesn't flag every dev instance with a scary warning.
  *
- * Restrictions are documentation strings shown in the pre-flight modal; they do
- * NOT block the capture. Capture-time enforcement happens server-side via ACL.
+ * Restrictions are advisory copy shown in the pre-flight modal; they do NOT
+ * block the capture and they no longer claim a provider blocks MONITOR. The
+ * authoritative answer comes from {@link MonitorSupportProbe}, which actually
+ * probes the connection. The strings here are intentionally vague because
+ * provider behaviour changes over time and per plan/tier.
  */
 
 export type Provider =
@@ -23,20 +26,16 @@ export interface ProviderInfo {
   restrictions: string[];
 }
 
+const GENERIC_MANAGED_NOTICE =
+  'Not all cloud providers allow the MONITOR command on their managed instances, ' +
+  'and policies change over time. If captures return no data, consult the provider ' +
+  'documentation or contact us at info@betterdb.com.';
+
 const RESTRICTIONS: Record<Provider, string[]> = {
-  'aws-elasticache': [
-    'ElastiCache may rate-limit or terminate MONITOR sessions after a per-account quota.',
-    'IAM auth is unaffected; the +monitor ACL must still be granted to the cache user.',
-  ],
-  'gcp-memorystore': [
-    'Memorystore Standard tier disables MONITOR. Use a Customer-Managed Redis instance for diagnostic captures.',
-  ],
-  'redis-cloud': [
-    'Redis Cloud Essentials and Fixed plans disable MONITOR. Pro / Enterprise plans allow it on a best-effort basis.',
-  ],
-  upstash: [
-    'Upstash REST tier does not support MONITOR. Direct-Redis tier supports it but charges per-command, including MONITOR-streamed commands.',
-  ],
+  'aws-elasticache': [GENERIC_MANAGED_NOTICE],
+  'gcp-memorystore': [GENERIC_MANAGED_NOTICE],
+  'redis-cloud': [GENERIC_MANAGED_NOTICE],
+  upstash: [GENERIC_MANAGED_NOTICE],
   'self-hosted': [],
   unknown: [],
 };
