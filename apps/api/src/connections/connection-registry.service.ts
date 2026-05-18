@@ -469,6 +469,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       port: request.port,
       username: request.username || 'default',
       password: request.password || '',
+      tls: request.tls,
     });
 
     try {
