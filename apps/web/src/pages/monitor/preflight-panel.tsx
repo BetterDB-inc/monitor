@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertTriangle, Check, Copy, ExternalLink } from 'lucide-react';
+import { AlertTriangle, Check, CheckCircle2, Copy, ExternalLink } from 'lucide-react';
 import type { PreflightResult } from '../../api/monitor';
 import { Button } from '../../components/ui/button';
 
@@ -15,12 +15,14 @@ const PROVIDER_LABELS: Record<PreflightResult['provider']['provider'], string> =
 const PROVIDER_DOC_LINKS: Partial<Record<PreflightResult['provider']['provider'], string>> = {
   'aws-elasticache':
     'https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/RestrictedCommands.html',
-  'gcp-memorystore':
-    'https://cloud.google.com/memorystore/docs/redis/product-constraints#blocked_redis_commands',
-  'redis-cloud':
-    'https://redis.io/docs/latest/operate/rc/databases/configuration/limited-commands/',
-  upstash: 'https://upstash.com/docs/redis/overall/databasetypes',
+  'gcp-memorystore': 'https://cloud.google.com/memorystore/docs/redis/product-constraints',
+  'redis-cloud': 'https://redis.io/docs/latest/operate/rc/databases/configuration/',
+  upstash: 'https://upstash.com/docs/redis/overall/rediscompatibility',
 };
+
+const MONITOR_SUPPORT_GENERIC_NOTICE =
+  'Not all cloud providers allow the MONITOR command on their managed instances, and policies change over time. ' +
+  "If the monitor doesn't log anything, consult the provider's documentation or contact us at info@betterdb.com.";
 
 const SKIP_REASON_LABELS: Record<string, string> = {
   memory_above_threshold: 'Memory above threshold',
@@ -37,6 +39,7 @@ export function PreflightPanel({ preflight }: Props) {
   return (
     <div className="space-y-4">
       <ProviderBanner preflight={preflight} />
+      <MonitorSupportBanner preflight={preflight} />
       <AclBanner preflight={preflight} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -96,41 +99,73 @@ export function PreflightPanel({ preflight }: Props) {
 
 function ProviderBanner({ preflight }: Props) {
   const provider = preflight.provider.provider;
-  const restrictions = preflight.provider.restrictions;
+  return (
+    <div className="rounded-md border border-border p-3 text-xs text-muted-foreground">
+      Detected provider: <span className="font-medium">{PROVIDER_LABELS[provider]}</span>
+    </div>
+  );
+}
+
+function MonitorSupportBanner({ preflight }: Props) {
+  const provider = preflight.provider.provider;
   const docsUrl = PROVIDER_DOC_LINKS[provider];
 
-  if (provider === 'self-hosted' || provider === 'unknown') {
+  if (!preflight.monitorSupport) {
+    return null;
+  }
+
+  const { status } = preflight.monitorSupport;
+
+  if (status === 'yes') {
     return (
-      <div className="rounded-md border border-border p-3 text-xs text-muted-foreground">
-        Provider: <span className="font-medium">{PROVIDER_LABELS[provider]}</span>. No
-        managed-provider restrictions detected.
+      <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3">
+        <div className="flex items-start gap-2">
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+          <div className="text-xs text-emerald-900 dark:text-emerald-100">
+            MONITOR is available on this connection.
+          </div>
+        </div>
       </div>
     );
   }
 
+  const tone = status === 'no' ? 'red' : 'amber';
+  const heading =
+    status === 'no'
+      ? 'MONITOR appears unavailable on this connection'
+      : 'MONITOR availability could not be confirmed';
+
+  const wrapClass =
+    tone === 'red'
+      ? 'rounded-md border border-red-500/40 bg-red-500/10 p-3'
+      : 'rounded-md border border-amber-500/40 bg-amber-500/10 p-3';
+  const iconClass =
+    tone === 'red'
+      ? 'mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400'
+      : 'mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400';
+  const headingClass =
+    tone === 'red'
+      ? 'text-sm font-semibold text-red-900 dark:text-red-100'
+      : 'text-sm font-semibold text-amber-900 dark:text-amber-100';
+  const bodyClass =
+    tone === 'red'
+      ? 'text-xs text-red-900/90 dark:text-red-100/90'
+      : 'text-xs text-amber-900/90 dark:text-amber-100/90';
+  const linkClass =
+    tone === 'red'
+      ? 'inline-flex items-center gap-1 text-xs text-red-700 underline hover:text-red-900 dark:text-red-300 dark:hover:text-red-100'
+      : 'inline-flex items-center gap-1 text-xs text-amber-700 underline hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100';
+
   return (
-    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+    <div className={wrapClass}>
       <div className="flex items-start gap-2">
-        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+        <AlertTriangle className={iconClass} />
         <div className="flex-1 space-y-2">
-          <div className="text-sm font-semibold text-amber-900 dark:text-amber-100">
-            Managed provider detected: {PROVIDER_LABELS[provider]}
-          </div>
-          {restrictions.length > 0 && (
-            <ul className="space-y-1 text-xs text-amber-900/90 dark:text-amber-100/90">
-              {restrictions.map((r) => (
-                <li key={r}>• {r}</li>
-              ))}
-            </ul>
-          )}
+          <div className={headingClass}>{heading}</div>
+          <p className={bodyClass}>{MONITOR_SUPPORT_GENERIC_NOTICE}</p>
           {docsUrl && (
-            <a
-              href={docsUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-xs text-amber-700 underline hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100"
-            >
-              Provider docs <ExternalLink className="h-3 w-3" />
+            <a href={docsUrl} target="_blank" rel="noopener noreferrer" className={linkClass}>
+              {PROVIDER_LABELS[provider]} docs <ExternalLink className="h-3 w-3" />
             </a>
           )}
         </div>

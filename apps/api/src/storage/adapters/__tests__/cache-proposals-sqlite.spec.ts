@@ -15,6 +15,31 @@ describe('Cache proposal storage (SQLite)', () => {
     await storage.initialize();
   });
 
+  // Temporary diagnostic for cross-PR CI failure on this spec. Local repro
+  // works; CI consistently fails 3 of the duplicate-rejection cases. Dumping
+  // SQLite version + index list once per spec run so the next CI log tells us
+  // whether the partial unique indexes were actually created or silently
+  // skipped on the Linux better-sqlite3 prebuild.
+  let diagDumped = false;
+  beforeEach(() => {
+    if (diagDumped) return;
+    diagDumped = true;
+    const db = (storage as unknown as { db: { prepare: (sql: string) => { all: () => unknown; pluck: () => { get: () => unknown } } } }).db;
+    const sqliteVersion = db.prepare('SELECT sqlite_version()').pluck().get();
+    const indexes = db.prepare("PRAGMA index_list('cache_proposals')").all();
+    const v2ThresholdSql = db
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='uniq_cache_proposals_pending_threshold_v2'",
+      )
+      .all();
+    // eslint-disable-next-line no-console
+    console.log('[cache-proposals diag] sqlite_version=', sqliteVersion);
+    // eslint-disable-next-line no-console
+    console.log('[cache-proposals diag] indexes=', JSON.stringify(indexes));
+    // eslint-disable-next-line no-console
+    console.log('[cache-proposals diag] v2 threshold sql=', JSON.stringify(v2ThresholdSql));
+  });
+
   afterEach(async () => {
     await storage.close();
     if (fs.existsSync(dbPath)) {

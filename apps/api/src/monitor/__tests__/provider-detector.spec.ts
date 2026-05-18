@@ -13,9 +13,11 @@ describe('detectProvider', () => {
     ])('matches %s → %s', (host, provider) => {
       const result = detectProvider({}, host);
       expect(result.provider).toBe(provider);
-      // Managed providers always come with at least one restriction string.
+      // Managed providers carry the generic advisory notice (the authoritative
+      // "is MONITOR supported?" answer comes from MonitorSupportProbe).
       if (provider !== 'unknown') {
         expect(result.restrictions.length).toBeGreaterThan(0);
+        expect(result.restrictions[0]).toMatch(/info@betterdb\.com/);
       }
     });
 

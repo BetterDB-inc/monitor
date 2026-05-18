@@ -91,6 +91,11 @@ describe('MonitorController', () => {
       createSchedule: jest.fn().mockResolvedValue({ id: 'sched-1', status: 'enabled' }),
       deleteSchedule: jest.fn().mockResolvedValue(true),
     };
+    const monitorSupportProbe = {
+      probe: jest.fn().mockResolvedValue({ status: 'yes', source: 'command-info', checkedAt: 0 }),
+      getCached: jest.fn(),
+      invalidate: jest.fn(),
+    };
     controller = new MonitorController(
       captureService as unknown as MonitorCaptureService,
       healthGateService as unknown as HealthGateService,
@@ -99,6 +104,7 @@ describe('MonitorController', () => {
       clusterDiscovery as unknown as ClusterDiscoveryService,
       triggerRegistry as unknown as CaptureTriggerRegistry,
       captureScheduler as unknown as CaptureScheduler,
+      monitorSupportProbe as unknown as import('../monitor-support-probe').MonitorSupportProbe,
       storage as unknown as StoragePort,
     );
   });

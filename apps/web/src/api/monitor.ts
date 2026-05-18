@@ -63,12 +63,27 @@ export interface PreflightThroughput {
   estimatedBytes: number;
 }
 
+export type MonitorSupportStatus = 'yes' | 'no' | 'unknown';
+
+export interface PreflightMonitorSupport {
+  status: MonitorSupportStatus;
+  source: 'command-info' | 'live-monitor' | 'none';
+  checkedAt: number;
+  detail?: string;
+}
+
 export interface PreflightResult {
   connectionId: string;
   provider: PreflightProvider;
   acl: PreflightAcl;
   health: PreflightHealth;
   throughput: PreflightThroughput;
+  /**
+   * Cached MONITOR-support verdict, or null when the probe has never run on
+   * this connection. The probe only fires when a capture session is actually
+   * started — opening the preflight modal never triggers it.
+   */
+  monitorSupport: PreflightMonitorSupport | null;
 }
 
 export interface StartSessionParams {
@@ -185,6 +200,12 @@ export const monitorApi = {
 
   getSession: (id: string): Promise<StoredCaptureSession> => {
     return fetchApi<StoredCaptureSession>(`/monitor/sessions/${encodeURIComponent(id)}`);
+  },
+
+  probeMonitorSupport: (connectionId: string): Promise<PreflightMonitorSupport> => {
+    return fetchApi<PreflightMonitorSupport>(
+      `/monitor/connections/${encodeURIComponent(connectionId)}/monitor-support`,
+    );
   },
 
   preflight: (connectionId: string, durationMs?: number): Promise<PreflightResult> => {

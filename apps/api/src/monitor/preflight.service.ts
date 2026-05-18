@@ -3,6 +3,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { AclCheckResult, AclChecker } from './acl-checker';
 import { HealthGateResult } from './health-gate';
 import { HealthGateService } from './health-gate.service';
+import { MonitorSupportProbe, MonitorSupportResult } from './monitor-support-probe';
 import { ProviderInfo, detectProvider } from './provider-detector';
 
 /** Average bytes per MONITOR-formatted line. Conservative estimate; overestimates short keys, underestimates very long values. */
@@ -32,6 +33,13 @@ export interface PreflightResult {
   acl: AclCheckResult;
   health: HealthGateResult;
   throughput: PreflightThroughput;
+  /**
+   * Cached MONITOR-support verdict, if any. Preflight never triggers the
+   * probe itself — it just reads whatever is in the cache. The probe is
+   * fired from explicit entry points (opening the Monitor page, creating an
+   * anomaly trigger). See {@link MonitorSupportProbe}.
+   */
+  monitorSupport: MonitorSupportResult | null;
 }
 
 @Injectable()
@@ -42,6 +50,7 @@ export class PreflightService {
     private readonly connectionRegistry: ConnectionRegistry,
     private readonly aclChecker: AclChecker,
     private readonly healthGateService: HealthGateService,
+    private readonly monitorSupportProbe: MonitorSupportProbe,
   ) {}
 
   async run(input: PreflightInput): Promise<PreflightResult> {
@@ -71,6 +80,7 @@ export class PreflightService {
       provider: detectProvider(server, config?.host),
       acl,
       health,
+      monitorSupport: this.monitorSupportProbe.getCached(connectionId) ?? null,
       throughput: {
         opsPerSec,
         inputKbps,

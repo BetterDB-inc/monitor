@@ -1,6 +1,7 @@
 import type { ConnectionRegistry } from '../../connections/connection-registry.service';
 import type { AclChecker } from '../acl-checker';
 import type { HealthGateService } from '../health-gate.service';
+import type { MonitorSupportProbe, MonitorSupportResult } from '../monitor-support-probe';
 import { PreflightService } from '../preflight.service';
 
 const CONNECTION_ID = 'conn-1';
@@ -14,11 +15,13 @@ function makeService({
     signals: { memoryPct: 0.1, oomEventsRecent: 0, replicationLagBytes: 0, failoverInProgress: false },
     thresholds: { memoryPctThreshold: 0.85, replicationLagThresholdBytes: 10485760 },
   },
+  monitorSupport,
 }: {
   info: unknown;
   host?: string;
   acl?: unknown;
   health?: unknown;
+  monitorSupport?: MonitorSupportResult;
 } = { info: {} }) {
   const client = { getInfoParsed: jest.fn().mockResolvedValue(info) };
   const registry = {
@@ -27,15 +30,47 @@ function makeService({
   } as unknown as ConnectionRegistry;
   const aclChecker = { check: jest.fn().mockResolvedValue(acl) } as unknown as AclChecker;
   const healthGate = { evaluate: jest.fn().mockResolvedValue(health) } as unknown as HealthGateService;
+  const monitorSupportProbe = {
+    probe: jest.fn(),
+    getCached: jest.fn().mockReturnValue(monitorSupport),
+  } as unknown as MonitorSupportProbe;
   return {
-    service: new PreflightService(registry, aclChecker, healthGate),
+    service: new PreflightService(registry, aclChecker, healthGate, monitorSupportProbe),
     aclChecker,
     healthGate,
+    monitorSupportProbe,
     registry,
   };
 }
 
 describe('PreflightService', () => {
+  it('returns monitorSupport=null when no probe has run yet (preflight never triggers probing)', async () => {
+    const { service, monitorSupportProbe } = makeService({
+      info: { stats: { instantaneous_ops_per_sec: '0' } },
+      // monitorSupport intentionally undefined -> getCached returns undefined
+    });
+    const result = await service.run({ connectionId: CONNECTION_ID });
+    expect(result.monitorSupport).toBeNull();
+    expect(monitorSupportProbe.getCached).toHaveBeenCalledWith(CONNECTION_ID);
+    expect(monitorSupportProbe.probe).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the cached probe result when one exists', async () => {
+    const monitorSupport: MonitorSupportResult = {
+      status: 'no',
+      source: 'live-monitor',
+      checkedAt: 1700000000999,
+      detail: 'NOPERM MONITOR is not allowed',
+    };
+    const { service, monitorSupportProbe } = makeService({
+      info: { stats: { instantaneous_ops_per_sec: '0' } },
+      monitorSupport,
+    });
+    const result = await service.run({ connectionId: CONNECTION_ID });
+    expect(result.monitorSupport).toEqual(monitorSupport);
+    expect(monitorSupportProbe.probe).not.toHaveBeenCalled();
+  });
+
   it('composes provider, acl, health, and throughput from one INFO call + downstream services', async () => {
     const { service, aclChecker, healthGate } = makeService({
       info: {

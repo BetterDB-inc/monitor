@@ -10,6 +10,7 @@ import { Button } from '../components/ui/button';
 import { Card, CardContent } from '../components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { CreateScheduleModal } from './monitor/create-schedule-modal';
+import { MonitorSupportIndicator } from './monitor/monitor-support-indicator';
 import { SchedulesTable } from './monitor/schedules-table';
 import { SessionsTable } from './monitor/sessions-table';
 import { StartSessionModal } from './monitor/start-session-modal';
@@ -91,9 +92,12 @@ export function Monitor() {
             review past sessions for the currently selected connection.
           </p>
         </div>
-        <Button onClick={() => setStartOpen(true)} disabled={!connectionId}>
-          Start session
-        </Button>
+        <div className="flex items-center gap-3">
+          <MonitorSupportIndicator connectionId={connectionId} />
+          <Button onClick={() => setStartOpen(true)} disabled={!connectionId}>
+            Start session
+          </Button>
+        </div>
       </header>
 
       <Tabs defaultValue="sessions" className="space-y-4">
