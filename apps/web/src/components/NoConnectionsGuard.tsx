@@ -1,8 +1,84 @@
 import { useConnection } from '../hooks/useConnection';
-import { ReactNode, ReactElement } from 'react';
+import { ReactNode, ReactElement, useState, useRef, useEffect } from 'react';
 import { useIsDemo } from '../contexts/DemoContext';
 import { useTelemetry } from '../hooks/useTelemetry';
 
+
+function ProviderGuidesInfo() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function handleMouseEnter() {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    setOpen(true);
+  }
+
+  function handleMouseLeave() {
+    closeTimer.current = setTimeout(() => setOpen(false), 500);
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [open]);
+
+  return (
+    <div
+      className="relative"
+      ref={ref}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center text-muted-foreground/50 hover:text-muted-foreground transition-colors cursor-pointer"
+        aria-label="More information about provider guides"
+      >
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+          <circle cx="7" cy="7" r="6.25" stroke="currentColor" strokeWidth="1.5" />
+          <path d="M7 6.5v4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          <circle cx="7" cy="4" r="0.75" fill="currentColor" />
+        </svg>
+      </button>
+
+      {open && (
+        <div
+          className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 w-64 rounded-lg border border-border bg-popover text-popover-foreground shadow-md p-3 text-[12px] leading-relaxed z-50"
+          onMouseEnter={handleMouseEnter}
+          onMouseLeave={handleMouseLeave}
+        >
+          <p className="text-muted-foreground">
+            More guides coming soon. If you have issues with a specific provider,{' '}
+            <a
+              href="mailto:info@betterdb.com"
+              className="font-medium text-foreground underline underline-offset-2 hover:text-primary transition-colors"
+            >
+              email us
+            </a>
+            {' '}or{' '}
+            <a
+              href="https://github.com/BetterDB-inc/monitor/issues/new"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-foreground underline underline-offset-2 hover:text-primary transition-colors"
+            >
+              open a GitHub issue
+            </a>
+            {' '}and we'll help.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function openAddConnectionDialog() {
   window.dispatchEvent(new CustomEvent('betterdb:open-add-connection'));
@@ -71,11 +147,32 @@ export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): React
           <div className="flex items-center gap-4">
             <button
               onClick={openAddConnectionDialog}
-              className="inline-flex items-center gap-2 h-9 px-5 rounded-md bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="inline-flex items-center gap-2 h-9 px-5 rounded-md bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 cursor-pointer"
             >
               <span className="text-[1.1rem] leading-none">+</span>
               Add Connection
             </button>
+
+            <span className="inline-flex items-center gap-1.5">
+              <a
+                href="https://docs.betterdb.com/providers/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:underline underline-offset-4 transition-colors"
+              >
+                Provider setup guides
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+                  <path
+                    d="M2 6.5h9M7.5 3l3.5 3.5L7.5 10"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </a>
+              <ProviderGuidesInfo />
+            </span>
 
             {isCloudDomain && (
               <>
