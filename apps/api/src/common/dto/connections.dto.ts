@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsString, IsNumber, IsBoolean, IsOptional, Min, Max, MinLength, MaxLength } from 'class-validator';
+import { ENV_DEFAULT_ID } from '../../connections/connection.constants';
 import type {
   ConnectionStatus,
   ConnectionCapabilities,
@@ -31,7 +32,7 @@ export class ConnectionCapabilitiesDto implements ConnectionCapabilities {
  * DTO for connection status
  */
 export class ConnectionStatusDto implements ConnectionStatus {
-  @ApiProperty({ description: 'Unique connection identifier', example: 'env-default' })
+  @ApiProperty({ description: 'Unique connection identifier', example: ENV_DEFAULT_ID })
   id: string;
 
   @ApiProperty({ description: 'Human-readable connection name', example: 'Production Redis' })
@@ -138,7 +139,7 @@ export class ConnectionListResponseDto implements ConnectionListResponse {
   @ApiProperty({ description: 'List of all connections', type: [ConnectionStatusDto] })
   connections: ConnectionStatus[];
 
-  @ApiProperty({ description: 'Current default connection ID', nullable: true, example: 'env-default' })
+  @ApiProperty({ description: 'Current default connection ID', nullable: true, example: ENV_DEFAULT_ID })
   currentId: string | null;
 }
 
@@ -146,7 +147,7 @@ export class ConnectionListResponseDto implements ConnectionListResponse {
  * DTO for current connection response
  */
 export class CurrentConnectionResponseDto implements CurrentConnectionResponse {
-  @ApiProperty({ description: 'Current default connection ID', nullable: true, example: 'env-default' })
+  @ApiProperty({ description: 'Current default connection ID', nullable: true, example: ENV_DEFAULT_ID })
   id: string | null;
 }
 
@@ -170,7 +171,7 @@ export class SuccessResponseDto {
  * DTO for individual connection health in all-connections response
  */
 export class ConnectionHealthDto {
-  @ApiProperty({ description: 'Connection ID', example: 'env-default' })
+  @ApiProperty({ description: 'Connection ID', example: ENV_DEFAULT_ID })
   connectionId: string;
 
   @ApiProperty({ description: 'Connection name', example: 'Production Redis' })
