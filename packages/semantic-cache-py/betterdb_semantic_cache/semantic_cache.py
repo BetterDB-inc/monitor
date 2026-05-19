@@ -61,6 +61,7 @@ class SemanticCache:
         self._embed_key_prefix = f"{options.name}:embed:"
         self._default_threshold = options.default_threshold
         self._default_ttl = options.default_ttl
+        self._initial_default_ttl = options.default_ttl
         self._category_thresholds: dict[str, float] = dict(options.category_thresholds)
         self._uncertainty_band = options.uncertainty_band
 
@@ -1093,6 +1094,23 @@ class SemanticCache:
 
         self._default_threshold = next_default
         self._category_thresholds = next_category
+
+        # TTL — positive integer seconds. Falls back to constructor value when absent.
+        raw_ttl = None
+        if raw:
+            raw_ttl = raw.get(b"ttl") or raw.get("ttl")
+        if raw_ttl is None or raw_ttl == b"" or raw_ttl == "":
+            self._default_ttl = self._initial_default_ttl
+        else:
+            ttl_str = raw_ttl.decode() if isinstance(raw_ttl, bytes) else str(raw_ttl)
+            try:
+                parsed = float(ttl_str)
+                if math.isfinite(parsed) and parsed == int(parsed) and int(parsed) > 0:
+                    self._default_ttl = int(parsed)
+                # else: silently ignore — keep current value
+            except (ValueError, TypeError):
+                pass  # silently ignore invalid values
+
         return True
 
     def _start_config_refresh(self) -> None:

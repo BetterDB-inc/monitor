@@ -48,7 +48,7 @@ def build_semantic_metadata(input: BuildSemanticMetadataInput) -> MarkerMetadata
         'prefix': input.name,
         'version': input.version,
         'protocol_version': PROTOCOL_VERSION,
-        'capabilities': ['invalidate', 'similarity_distribution', 'threshold_adjust'],
+        'capabilities': ['invalidate', 'similarity_distribution', 'threshold_adjust', 'ttl_adjust'],
         'index_name': f'{input.name}:idx',
         'stats_key': f'{input.name}:__stats',
         'config_key': f'{input.name}:__config',

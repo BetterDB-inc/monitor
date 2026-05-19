@@ -2,8 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import math
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -27,6 +26,7 @@ def _make_cache(
     *,
     config: dict | None = None,
     default_threshold: float = 0.10,
+    default_ttl: int | None = None,
     category_thresholds: dict | None = None,
     enabled: bool = True,
     interval_ms: int = 5_000,
@@ -48,6 +48,7 @@ def _make_cache(
         embed_fn=_embed,
         name="test_sc",
         default_threshold=default_threshold,
+        default_ttl=default_ttl,
         category_thresholds=category_thresholds or {},
         embedding_cache=EmbeddingCacheOptions(enabled=False),
         config_refresh=ConfigRefreshOptions(enabled=enabled, interval_ms=interval_ms),
@@ -313,6 +314,137 @@ async def test_config_refresh_propagates_threshold_change_on_second_tick():
     await cache.refresh_config()
 
     assert cache._default_threshold == pytest.approx(0.05)
+
+    if cache._config_refresh_task:
+        cache._config_refresh_task.cancel()
+        await asyncio.gather(cache._config_refresh_task, return_exceptions=True)
+
+
+# ── TTL via __config['ttl'] ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ttl_reads_field_and_updates_default_ttl():
+    cache, client = _make_cache(config={"ttl": "120"}, default_ttl=300, enabled=False)
+    await cache.initialize()
+    await cache.refresh_config()
+    await cache.store("prompt", "response")
+    client.expire.assert_called_with(ANY, 120)
+
+
+@pytest.mark.asyncio
+async def test_ttl_falls_back_to_constructor_value_when_absent():
+    cache, client = _make_cache(config={}, default_ttl=300, enabled=False)
+    await cache.initialize()
+    await cache.refresh_config()
+    await cache.store("prompt", "response")
+    client.expire.assert_called_with(ANY, 300)
+
+
+@pytest.mark.asyncio
+async def test_ttl_restores_constructor_value_when_field_removed():
+    config_store = {"ttl": "120"}
+
+    async def hgetall_side_effect(key: str):
+        if key.endswith(":__config"):
+            return {k.encode(): v.encode() for k, v in config_store.items()}
+        return {}
+
+    client = make_client()
+    client.hgetall = AsyncMock(side_effect=hgetall_side_effect)
+
+    cache = SemanticCache(
+        SemanticCacheOptions(
+            client=client,
+            embed_fn=_embed,
+            name="ttl_restore_py",
+            default_ttl=300,
+            embedding_cache=EmbeddingCacheOptions(enabled=False),
+            config_refresh=ConfigRefreshOptions(enabled=False),
+        )
+    )
+    await cache.initialize()
+    await cache.refresh_config()
+    await cache.store("a", "b")
+    client.expire.assert_called_with(ANY, 120)
+
+    config_store.clear()
+    await cache.refresh_config()
+    client.expire.reset_mock()
+    await cache.store("c", "d")
+    client.expire.assert_called_with(ANY, 300)
+
+
+@pytest.mark.asyncio
+async def test_ttl_ignores_zero():
+    cache, client = _make_cache(config={"ttl": "0"}, default_ttl=300, enabled=False)
+    await cache.initialize()
+    await cache.refresh_config()
+    await cache.store("prompt", "response")
+    client.expire.assert_called_with(ANY, 300)
+
+
+@pytest.mark.asyncio
+async def test_ttl_ignores_negative():
+    cache, client = _make_cache(config={"ttl": "-1"}, default_ttl=300, enabled=False)
+    await cache.initialize()
+    await cache.refresh_config()
+    await cache.store("prompt", "response")
+    client.expire.assert_called_with(ANY, 300)
+
+
+@pytest.mark.asyncio
+async def test_ttl_ignores_non_integer():
+    cache, client = _make_cache(config={"ttl": "1.5"}, default_ttl=300, enabled=False)
+    await cache.initialize()
+    await cache.refresh_config()
+    await cache.store("prompt", "response")
+    client.expire.assert_called_with(ANY, 300)
+
+
+@pytest.mark.asyncio
+async def test_ttl_ignores_non_numeric_string():
+    cache, client = _make_cache(config={"ttl": "invalid"}, default_ttl=300, enabled=False)
+    await cache.initialize()
+    await cache.refresh_config()
+    await cache.store("prompt", "response")
+    client.expire.assert_called_with(ANY, 300)
+
+
+@pytest.mark.asyncio
+async def test_ttl_timer_propagation_store_uses_updated_ttl():
+    config_store = {"ttl": "60"}
+
+    async def hgetall_side_effect(key: str):
+        if key.endswith(":__config"):
+            return {k.encode(): v.encode() for k, v in config_store.items()}
+        return {}
+
+    client = make_client()
+    client.hgetall = AsyncMock(side_effect=hgetall_side_effect)
+
+    cache = SemanticCache(
+        SemanticCacheOptions(
+            client=client,
+            embed_fn=_embed,
+            name="ttl_prop_py",
+            default_ttl=300,
+            embedding_cache=EmbeddingCacheOptions(enabled=False),
+            config_refresh=ConfigRefreshOptions(enabled=True, interval_ms=30_000),
+        )
+    )
+    await cache.initialize()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert cache._default_ttl == 60
+
+    config_store["ttl"] = "90"
+    await cache.refresh_config()
+    client.expire.reset_mock()
+    await cache.store("p", "r")
+    client.expire.assert_called_once()
+    assert client.expire.call_args[0][1] == 90
 
     if cache._config_refresh_task:
         cache._config_refresh_task.cancel()

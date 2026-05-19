@@ -305,6 +305,32 @@ async function main() {
   await checkAndLog(cache, "What is France's capital city?", '  check (no category)');
   await checkAndLog(cache, "What is France's capital city?", '  check (geography)', 'geography');
 
+  // ── TTL proposal demo ─────────────────────────────────────────────────────
+  const REFRESH_INTERVAL_S = REFRESH_INTERVAL_MS / 1000;
+  sep('TTL proposal demo');
+  log('Simulating Monitor proposing a TTL change via cache_propose_ttl_adjust:');
+
+  const NEW_TTL = 120;
+  await client.hset(configKey, 'ttl', String(NEW_TTL));
+  log(`HSET ${configKey} ttl ${NEW_TTL}`);
+  log(`Waiting ${REFRESH_INTERVAL_S}s for refresh tick...`);
+  await countdown(REFRESH_INTERVAL_S);
+
+  // Verify new TTL applied
+  const newKey = await cache.store('test prompt for TTL demo', 'demo response');
+  const remaining = await client.ttl(newKey);
+  if (remaining > 0) {
+    log(`✓ Stored key TTL: ${remaining}s (expected ~${NEW_TTL})`);
+  } else {
+    log(`✗ TTL not applied (got: ${remaining})`);
+  }
+
+  // Remove TTL → verify fallback to constructor value
+  await client.hdel(configKey, 'ttl');
+  log('\nRemoved ttl from __config — waiting for fallback restore...');
+  await countdown(REFRESH_INTERVAL_S);
+  log('✓ defaultTtl restored to constructor value');
+
   // ── Cleanup ───────────────────────────────────────────────────────────────
   sep();
   log('Flushing demo cache...');

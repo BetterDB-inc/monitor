@@ -57,7 +57,8 @@ export class SemanticCache {
   private readonly similarityWindowKey: string;
   private readonly configKey: string;
   private defaultThreshold: number;
-  private readonly defaultTtl: number | undefined;
+  private defaultTtl: number | undefined;
+  private readonly _initialDefaultTtl: number | undefined;
   private categoryThresholds: Record<string, number>;
   private readonly uncertaintyBand: number;
   private readonly telemetry: Telemetry;
@@ -106,6 +107,7 @@ export class SemanticCache {
     this.embedKeyPrefix = `${this.name}:embed:`;
     this.defaultThreshold = options.defaultThreshold ?? 0.1;
     this.defaultTtl = options.defaultTtl;
+    this._initialDefaultTtl = options.defaultTtl;
     this.categoryThresholds = options.categoryThresholds ?? {};
     this.uncertaintyBand = options.uncertaintyBand ?? 0.05;
 
@@ -1126,6 +1128,19 @@ export class SemanticCache {
 
     this.defaultThreshold = nextDefault;
     this.categoryThresholds = nextCategory;
+
+    // TTL — positive integer seconds. Falls back to constructor value when absent.
+    const rawTtl = raw?.ttl;
+    if (rawTtl === undefined || rawTtl === null || rawTtl === '') {
+      this.defaultTtl = this._initialDefaultTtl;
+    } else {
+      const parsed = Number(rawTtl);
+      if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) {
+        this.defaultTtl = parsed;
+      }
+      // Out-of-range or non-integer: silently ignore, keep current value. No throw.
+    }
+
     return true;
   }
 
