@@ -17,7 +17,7 @@
   "dependencies": {
     "@betterdb/shared": "workspace:*",
     "iovalkey": "^0.3.3",
-    "ws": "^8.20.0"
+    "ws": "^8.20.1"
   },
   "devDependencies": {
     "@types/node": "^22.19.15",
