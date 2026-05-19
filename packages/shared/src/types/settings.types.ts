@@ -1,3 +1,4 @@
+import type { AnomalyDetectorConfigMap } from './anomaly-detector-settings.types';
 import type { InferenceSlaConfig } from './inference-latency';
 
 export interface AppSettings {
@@ -16,6 +17,8 @@ export interface AppSettings {
   metricForecastingDefaultAlertThresholdMs: number;
 
   inferenceSlaConfig: InferenceSlaConfig;
+
+  anomalyDetectorConfig: AnomalyDetectorConfigMap;
 
   updatedAt: number;
   createdAt: number;
