@@ -229,7 +229,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.defaultId = config.id;
       const envCaps = adapter.getCapabilities();
       this.usageTelemetry?.trackDbConnect({
-        connectionType: 'direct',
+        connectionType: config.host === 'agent' ? 'agent' : 'direct',
         isFirstConnection: true,
         host: config.host,
         port: config.port,
