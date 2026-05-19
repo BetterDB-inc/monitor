@@ -96,10 +96,44 @@ export class UsageTelemetryService implements OnModuleInit {
 
   async trackDbConnect(opts: {
     connectionType: string;
-    success: boolean;
     isFirstConnection: boolean;
+    host: string;
+    port: number;
+    tls: boolean;
+    dbType: string;
+    dbVersion: string;
   }): Promise<void> {
     this.sendEvent('db_connect', opts);
+  }
+
+  async trackDbConnectFailed(opts: {
+    connectionType: string;
+    isFirstConnection: boolean;
+    host: string;
+    port: number;
+    tls: boolean;
+    error: string;
+  }): Promise<void> {
+    this.sendEvent('db_connect_failed', opts);
+  }
+
+  async trackTestConnection(opts: {
+    success: boolean;
+    host: string;
+    port: number;
+    tls: boolean;
+    dbType?: string;
+    dbVersion?: string;
+    error?: string;
+  }): Promise<void> {
+    this.sendEvent('test_connection', opts);
+  }
+
+  async trackDbRemove(opts: {
+    connectionType: string;
+    remainingConnections: number;
+  }): Promise<void> {
+    this.sendEvent('db_remove', opts);
   }
 
   async trackDbSwitch(totalConnections: number, dbType: string, dbVersion: string): Promise<void> {

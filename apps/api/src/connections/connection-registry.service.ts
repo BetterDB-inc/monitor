@@ -227,10 +227,15 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.configs.set(config.id, { ...config, credentialStatus: 'valid' });
       this.connections.set(config.id, adapter);
       this.defaultId = config.id;
+      const envCaps = adapter.getCapabilities();
       this.usageTelemetry?.trackDbConnect({
-        connectionType: 'standalone',
-        success: true,
+        connectionType: 'direct',
         isFirstConnection: true,
+        host: config.host,
+        port: config.port,
+        tls: config.tls ?? false,
+        dbType: envCaps.dbType ?? 'unknown',
+        dbVersion: envCaps.version ?? 'unknown',
       });
       this.logger.log('Created and connected to default connection from env vars');
     } catch (error) {
@@ -363,14 +368,26 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
     // Create and connect adapter BEFORE persisting to storage
     // This ensures we don't end up with config in storage but no working connection
+    const connectionType = config.host === 'agent' ? 'agent' : 'direct';
     const adapter = this.createAdapter(config);
     try {
       await adapter.connect();
     } catch (error) {
       // Connection failed - don't persist anything
-      this.logger.error(`Failed to connect to ${config.name}: ${error instanceof Error ? error.message : error}`);
-      throw new Error(`Connection failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Failed to connect to ${config.name}: ${errorMsg}`);
+      this.usageTelemetry?.trackDbConnectFailed({
+        connectionType,
+        isFirstConnection: this.configs.size === 0,
+        host: config.host,
+        port: config.port,
+        tls: config.tls ?? false,
+        error: errorMsg,
+      });
+      throw new Error(`Connection failed: ${errorMsg}`);
     }
+
+    const caps = adapter.getCapabilities();
 
     // Connection succeeded - now persist state
     // If storage fails, disconnect the adapter to prevent leaks
@@ -387,9 +404,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       }
 
       this.usageTelemetry?.trackDbConnect({
-        connectionType: 'standalone',
-        success: true,
+        connectionType,
         isFirstConnection: this.configs.size === 1,
+        host: config.host,
+        port: config.port,
+        tls: config.tls ?? false,
+        dbType: caps.dbType ?? 'unknown',
+        dbVersion: caps.version ?? 'unknown',
       });
 
       this.logger.log(`Added connection: ${config.name} (${config.host}:${config.port})`);
@@ -407,6 +428,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw new Error('Cannot remove the default environment connection');
     }
 
+    const removedConfig = this.configs.get(id);
     const connection = this.connections.get(id);
     if (connection && connection.isConnected()) {
       await connection.disconnect();
@@ -416,6 +438,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     this.configs.delete(id);
     this.runtimeCapabilityTracker.removeConnection(id);
     await this.storage.deleteConnection(id);
+
+    if (removedConfig) {
+      this.usageTelemetry?.trackDbRemove({
+        connectionType: removedConfig.host === 'agent' ? 'agent' : 'direct',
+        remainingConnections: this.configs.size,
+      });
+    }
 
     if (this.defaultId === id) {
       const remaining = Array.from(this.configs.keys());
@@ -477,6 +506,15 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       const capabilities = adapter.getCapabilities();
       await adapter.disconnect();
 
+      this.usageTelemetry?.trackTestConnection({
+        success: true,
+        host: request.host,
+        port: request.port,
+        tls: request.tls ?? false,
+        dbType: capabilities.dbType ?? 'unknown',
+        dbVersion: capabilities.version ?? 'unknown',
+      });
+
       return {
         success: true,
         capabilities: {
@@ -487,9 +525,19 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         },
       };
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Connection failed';
+
+      this.usageTelemetry?.trackTestConnection({
+        success: false,
+        host: request.host,
+        port: request.port,
+        tls: request.tls ?? false,
+        error: errorMsg,
+      });
+
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Connection failed',
+        error: errorMsg,
       };
     }
   }
