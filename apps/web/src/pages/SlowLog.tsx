@@ -13,6 +13,7 @@ import { CommandLogTable } from '../components/metrics/CommandLogTable';
 import { SlowLogPatternAnalysisView } from '../components/metrics/SlowLogPatternAnalysis';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { UnavailableOverlay } from '../components/UnavailableOverlay';
+import { CapabilityUnavailableBanner } from '../components/CapabilityUnavailableBanner';
 import type { CommandLogType } from '../types/metrics';
 
 function getTabFromParams(params: URLSearchParams): CommandLogType {
@@ -38,7 +39,15 @@ function filterByClient<T extends { clientName: string; clientAddress: string }>
 
 export function SlowLog() {
   const { currentConnection } = useConnection();
-  const { hasCommandLog, hasSlowLog, capabilities } = useCapabilities();
+  const { hasCommandLog, hasSlowLog, capabilities, reasons, retryCapability } = useCapabilities();
+  const slowLogReason = reasons.canSlowLog;
+  const commandLogReason = reasons.canCommandLog;
+  const handleRetrySlowLog = retryCapability
+    ? () => retryCapability('canSlowLog')
+    : undefined;
+  const handleRetryCommandLog = retryCapability
+    ? () => retryCapability('canCommandLog')
+    : undefined;
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = getTabFromParams(searchParams);
   const clientFilter = searchParams.get('client');
@@ -203,6 +212,12 @@ export function SlowLog() {
   };
 
   const slowLogUnavailable = !hasSlowLog && !hasCommandLog;
+  // When commandlog IS available but slowlog is NOT (or vice versa) we still
+  // render the page — show a banner so the operator knows the missing half
+  // and can attempt to re-enable it.
+  const showSlowLogBanner = !slowLogUnavailable && !hasSlowLog && Boolean(slowLogReason);
+  const showCommandLogBanner = !slowLogUnavailable && !hasCommandLog && Boolean(commandLogReason);
+
   const content = (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -234,6 +249,25 @@ export function SlowLog() {
           </span>
         )}
       </div>
+
+      {showSlowLogBanner && slowLogReason && (
+        <CapabilityUnavailableBanner
+          featureName="Slow Log"
+          command="SLOWLOG"
+          reason={slowLogReason.reason}
+          disabledAt={slowLogReason.disabledAt}
+          onRetry={handleRetrySlowLog}
+        />
+      )}
+      {showCommandLogBanner && commandLogReason && (
+        <CapabilityUnavailableBanner
+          featureName="Command Log"
+          command="COMMANDLOG"
+          reason={commandLogReason.reason}
+          disabledAt={commandLogReason.disabledAt}
+          onRetry={handleRetryCommandLog}
+        />
+      )}
 
       {hasCommandLog ? (
         <Card>
@@ -328,8 +362,16 @@ export function SlowLog() {
   );
 
   if (slowLogUnavailable) {
+    // Prefer the slowlog reason — that's the canonical command for both
+    // Valkey and Redis; commandlog is Valkey-only.
+    const blockedInfo = slowLogReason ?? commandLogReason;
     return (
-      <UnavailableOverlay featureName="Slow Log" command="SLOWLOG/COMMANDLOG">
+      <UnavailableOverlay
+        featureName="Slow Log"
+        command="SLOWLOG/COMMANDLOG"
+        reason={blockedInfo?.reason}
+        onRetry={handleRetrySlowLog}
+      >
         {content}
       </UnavailableOverlay>
     );

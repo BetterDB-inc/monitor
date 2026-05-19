@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { BrowserRouter } from 'react-router-dom';
 import { Tooltip } from 'react-tooltip';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { metricsApi } from './api/metrics';
+import { fetchApi } from './api/client';
 import { CapabilitiesContext, CapabilitiesState } from './hooks/useCapabilities';
+import type { RuntimeCapabilities } from './types/metrics';
 import { LicenseContext, useLicenseStatus } from './hooks/useLicense';
 import { UpgradePromptContext, useUpgradePromptState } from './hooks/useUpgradePrompt';
 import { ConnectionContext, useConnectionState } from './hooks/useConnection';
@@ -28,27 +30,57 @@ function App() {
  * ensuring all data fetching happens when the backend is fully initialized.
  */
 function AppContent() {
-  const [capabilitiesState, setCapabilitiesState] = useState<CapabilitiesState>({ static: null, runtime: null });
+  const [capabilitiesData, setCapabilitiesData] = useState<Omit<CapabilitiesState, 'retryCapability'>>({
+    static: null,
+    runtime: null,
+    reasons: {},
+  });
   const [cloudUser, setCloudUser] = useState<CloudUser | null>(null);
   const { license } = useLicenseStatus();
   const upgradePromptState = useUpgradePromptState();
   const connectionState = useConnectionState();
   const versionCheckState = useVersionCheckState();
+  const currentConnectionId = connectionState.currentConnection?.id;
 
-  useEffect(() => {
-    metricsApi.getHealth()
-      .then(health => {
-        setCapabilitiesState({
+  const refreshCapabilities = useCallback(() => {
+    metricsApi
+      .getHealth()
+      .then((health) => {
+        setCapabilitiesData({
           static: health.capabilities ?? null,
           runtime: health.runtimeCapabilities ?? null,
+          reasons: health.runtimeCapabilityReasons ?? {},
         });
       })
       .catch(console.error);
+  }, []);
+
+  const retryCapability = useCallback(
+    async (capability: keyof RuntimeCapabilities) => {
+      if (!currentConnectionId) {
+        return;
+      }
+      await fetchApi(
+        `/connections/${encodeURIComponent(currentConnectionId)}/capabilities/${encodeURIComponent(capability)}/retry`,
+        { method: 'POST' },
+      );
+      refreshCapabilities();
+    },
+    [currentConnectionId, refreshCapabilities],
+  );
+
+  const capabilitiesState = useMemo<CapabilitiesState>(
+    () => ({ ...capabilitiesData, retryCapability }),
+    [capabilitiesData, retryCapability],
+  );
+
+  useEffect(() => {
+    refreshCapabilities();
 
     workspaceApi.getMe()
       .then(setCloudUser)
       .catch(() => { /* Not in cloud mode */ });
-  }, [connectionState.currentConnection?.id]);
+  }, [currentConnectionId, refreshCapabilities]);
 
   return (
     <BrowserRouter>

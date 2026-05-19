@@ -1,6 +1,8 @@
 import { Controller, Get, Post, Delete, Param, Body, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
+import { RuntimeCapabilities } from '@betterdb/shared';
 import { ConnectionRegistry } from './connection-registry.service';
+import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
 import {
   CreateConnectionDto,
   ConnectionListResponseDto,
@@ -10,10 +12,28 @@ import {
   SuccessResponseDto,
 } from '../common/dto/connections.dto';
 
+const RUNTIME_CAPABILITY_KEYS: ReadonlyArray<keyof RuntimeCapabilities> = [
+  'canSlowLog',
+  'canClientList',
+  'canAclLog',
+  'canClusterInfo',
+  'canClusterSlotStats',
+  'canCommandLog',
+  'canLatency',
+  'canMemory',
+];
+
+function isRuntimeCapabilityKey(value: string): value is keyof RuntimeCapabilities {
+  return RUNTIME_CAPABILITY_KEYS.includes(value as keyof RuntimeCapabilities);
+}
+
 @ApiTags('connections')
 @Controller('connections')
 export class ConnectionsController {
-  constructor(private readonly registry: ConnectionRegistry) {}
+  constructor(
+    private readonly registry: ConnectionRegistry,
+    private readonly capabilityTracker: RuntimeCapabilityTracker,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -108,6 +128,35 @@ export class ConnectionsController {
         HttpStatus.BAD_REQUEST,
       );
     }
+  }
+
+  @Post(':id/capabilities/:capability/retry')
+  @ApiOperation({
+    summary: 'Re-enable a runtime capability and retry on next poll',
+    description:
+      'When a command (e.g. SLOWLOG) is reported as unsupported by the server, the corresponding runtime capability is disabled to avoid hammering the server. This endpoint re-enables that capability so it will be retried on the next poll cycle — useful if the operator believes the upstream provider has since enabled the command.',
+  })
+  @ApiParam({ name: 'id', description: 'Connection ID' })
+  @ApiParam({
+    name: 'capability',
+    description: 'Runtime capability key (e.g. canSlowLog, canCommandLog, canLatency)',
+  })
+  @ApiResponse({ status: 200, description: 'Capability reset', type: SuccessResponseDto })
+  @ApiResponse({ status: 400, description: 'Unknown capability key' })
+  @ApiResponse({ status: 404, description: 'Connection not found' })
+  retryCapability(
+    @Param('id') id: string,
+    @Param('capability') capability: string,
+  ): SuccessResponseDto {
+    if (!isRuntimeCapabilityKey(capability)) {
+      throw new HttpException(`Unknown capability: ${capability}`, HttpStatus.BAD_REQUEST);
+    }
+    const config = this.registry.getConfig(id);
+    if (!config) {
+      throw new HttpException(`Connection ${id} not found`, HttpStatus.NOT_FOUND);
+    }
+    this.capabilityTracker.resetCapability(id, capability);
+    return { success: true };
   }
 
   @Delete(':id')

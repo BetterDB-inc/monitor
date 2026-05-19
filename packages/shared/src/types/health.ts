@@ -22,6 +22,18 @@ export interface RuntimeCapabilities {
   canMemory: boolean;
 }
 
+/** Reason a runtime capability is disabled and when it was disabled (ms epoch). */
+export interface RuntimeCapabilityDisabledInfo {
+  reason: string;
+  disabledAt: number;
+}
+
+/** Map of capability key → disabled-reason. Capabilities that are still
+ *  available are omitted, so the absence of a key means "fine". */
+export type RuntimeCapabilityReasons = Partial<
+  Record<keyof RuntimeCapabilities, RuntimeCapabilityDisabledInfo>
+>;
+
 export interface HealthResponse {
   status: 'connected' | 'disconnected' | 'error' | 'waiting';
   database: {
@@ -32,6 +44,7 @@ export interface HealthResponse {
   };
   capabilities: DatabaseCapabilities | null;
   runtimeCapabilities?: RuntimeCapabilities | null;
+  runtimeCapabilityReasons?: RuntimeCapabilityReasons;
   error?: string;
   message?: string;
 }

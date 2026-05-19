@@ -22,6 +22,15 @@ export interface RuntimeCapabilities {
   canMemory: boolean;
 }
 
+export interface RuntimeCapabilityDisabledInfo {
+  reason: string;
+  disabledAt: number;
+}
+
+export type RuntimeCapabilityReasons = Partial<
+  Record<keyof RuntimeCapabilities, RuntimeCapabilityDisabledInfo>
+>;
+
 export interface HealthResponse {
   status: 'connected' | 'disconnected' | 'error' | 'waiting';
   database: {
@@ -32,6 +41,7 @@ export interface HealthResponse {
   };
   capabilities: DatabaseCapabilities | null;
   runtimeCapabilities?: RuntimeCapabilities | null;
+  runtimeCapabilityReasons?: RuntimeCapabilityReasons;
   error?: string;
   message?: string;
 }

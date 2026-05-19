@@ -179,6 +179,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
         },
         capabilities,
         runtimeCapabilities: this.runtimeCapabilityTracker.getCapabilities(targetId),
+        runtimeCapabilityReasons: this.runtimeCapabilityTracker.getDisabledReasons(targetId),
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
