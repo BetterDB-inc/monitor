@@ -387,11 +387,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       throw new Error(`Connection failed: ${errorMsg}`);
     }
 
-    const caps = adapter.getCapabilities();
-
     // Connection succeeded - now persist state
     // If storage fails, disconnect the adapter to prevent leaks
     try {
+      const caps = adapter.getCapabilities();
       // Store encrypted config in DB, decrypted config in memory
       await this.storage.saveConnection(this.encryptConfig(config));
       // Mark credentials as valid since connection succeeded
