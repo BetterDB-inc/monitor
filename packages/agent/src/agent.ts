@@ -33,6 +33,7 @@ export class Agent {
   private isReconnecting = false;
   private reconnectAttempt = 0;
   private reconnectLoopPromise: Promise<void> | null = null;
+  private resolveReconnectDelay: (() => void) | null = null;
   private cliExecutor: CommandExecutor | null = null;
   private cliConnectingPromise: Promise<CommandExecutor> | null = null;
   private wsClient: WsClient;
@@ -114,7 +115,11 @@ export class Agent {
     this.reconnectAttempt += 1;
     const delayMs = Math.min(this.reconnectAttempt * 1000, 30000);
     console.log(`[Agent] Rebuilding Valkey client with fresh IAM token (attempt ${this.reconnectAttempt}, delay ${delayMs}ms)`);
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await new Promise<void>((resolve) => {
+      this.resolveReconnectDelay = resolve;
+      setTimeout(() => { this.resolveReconnectDelay = null; resolve(); }, delayMs);
+    });
+    this.resolveReconnectDelay = null;
 
     if (this.shuttingDown) {
       this.isReconnecting = false;
@@ -127,6 +132,10 @@ export class Agent {
         try { this.client.disconnect(); } catch { /* ignore */ }
       }
       // Proactively tear down CLI client so both connections rotate together.
+      // Null cliConnectingPromise unconditionally: if a CLI creation is in-flight
+      // with the old token, its result is discarded so the next getCliExecutor
+      // call starts a fresh connection rather than awaiting the stale promise.
+      this.cliConnectingPromise = null;
       if (this.cliClient) {
         this.cliClient.removeAllListeners();
         try { this.cliClient.disconnect(); } catch { /* ignore */ }
@@ -190,8 +199,9 @@ export class Agent {
       console.log(`[Agent] Connecting to cloud: ${this.config.cloudUrl}`);
       this.wsClient.connect();
     } catch (err) {
-      // Prevent the error handler's reconnect path from looping
-      // indefinitely if start() fails (e.g. bad credentials on first connect).
+      // Agent is single-use: a failed start() is not recoverable on the same
+      // instance. Setting shuttingDown prevents the error handler from spawning
+      // a reconnect loop. Callers should discard this instance and create a new one.
       this.shuttingDown = true;
       throw err;
     }
@@ -201,6 +211,12 @@ export class Agent {
     this.shuttingDown = true;
     console.log('[Agent] Shutting down...');
     this.wsClient.close();
+    // If the reconnect loop is sleeping in its backoff delay, wake it immediately
+    // so it can observe shuttingDown and exit rather than blocking stop() for up to 30s.
+    if (this.resolveReconnectDelay) {
+      this.resolveReconnectDelay();
+      this.resolveReconnectDelay = null;
+    }
     if (this.reconnectLoopPromise) {
       await this.reconnectLoopPromise;
     }

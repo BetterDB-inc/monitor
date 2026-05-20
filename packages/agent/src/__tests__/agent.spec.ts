@@ -148,9 +148,10 @@ describe('Agent.reconnectWithFreshToken', () => {
     await jest.advanceTimersByTimeAsync(1000); // drain attempt-1 delay
     await p;                                   // attempt 1 finishes (fails), retry scheduled
 
-    // Advance past the retry's delay (attempt 2 = 2000ms) and drain.
+    // Advance past the retry's delay (attempt 2 = 2000ms) then await the
+    // reconnectLoopPromise so all async work in the second attempt has settled.
     await jest.advanceTimersByTimeAsync(2000);
-    await Promise.resolve();
+    await a.reconnectLoopPromise;
 
     // Two Valkey clients were created: one per attempt.
     expect(MockValkey).toHaveBeenCalledTimes(2);
