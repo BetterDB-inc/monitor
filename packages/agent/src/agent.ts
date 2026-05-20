@@ -2,6 +2,8 @@ import Valkey from 'iovalkey';
 import { WsClient } from './ws-client';
 import { CommandExecutor } from './command-executor';
 import type { AgentCommandMessage, AgentHelloMessage } from './protocol';
+import type { AuthProvider } from './auth';
+import { PasswordProvider, ElastiCacheIamProvider } from './auth';
 
 export interface AgentConfig {
   token: string;
@@ -23,9 +25,12 @@ export interface AgentConfig {
 }
 
 export class Agent {
-  private readonly client: Valkey;
-  private readonly executor: CommandExecutor;
+  private client: Valkey;
+  private executor: CommandExecutor;
   private cliClient: Valkey | null = null;
+  private readonly authProvider: AuthProvider;
+  private shuttingDown = false;
+  private reconnectAttempt = 0;
   private cliExecutor: CommandExecutor | null = null;
   private wsClient: WsClient;
   private valkeyConnected = false;
@@ -34,42 +39,97 @@ export class Agent {
   private isCluster = false;
   private capabilities: string[] = [];
 
-  private createValkeyClient(connectionName: string): Valkey {
+  private async createValkeyClient(connectionName: string): Promise<Valkey> {
+    const password = await this.authProvider.getToken();
+    // For IAM modes we disable iovalkey's internal reconnect because each
+    // reconnect must use a fresh token. The Agent rebuilds the client on close.
+    const retryStrategy = this.authProvider.requiresFreshTokenPerConnection
+      ? () => null
+      : (times: number) => Math.min(times * 1000, 30000);
+
     return new Valkey({
       host: this.config.valkeyHost,
       port: this.config.valkeyPort,
       username: this.config.valkeyUsername,
-      password: this.config.valkeyPassword,
+      password,
       tls: this.config.valkeyTls ? {} : undefined,
       db: this.config.valkeyDb,
       lazyConnect: true,
       connectionName,
-      retryStrategy: (times: number) => Math.min(times * 1000, 30000),
+      retryStrategy,
     });
   }
 
-  constructor(private readonly config: AgentConfig) {
-    this.client = this.createValkeyClient('BetterDB-Agent');
-
-    this.executor = new CommandExecutor(this.client, { unsafeMode: config.unsafeMode });
-
-    if (config.unsafeMode) {
-      console.warn('[Agent] WARNING: Unsafe mode enabled. All commands are permitted.');
+  private buildAuthProvider(): AuthProvider {
+    if (this.config.authMode === 'elasticache-iam') {
+      return new ElastiCacheIamProvider({
+        region: this.config.awsRegion!,
+        resourceName: this.config.awsResourceName!,
+        userId: this.config.awsUserId!,
+        serverless: this.config.awsServerless,
+      });
     }
+    return new PasswordProvider(this.config.valkeyPassword);
+  }
 
-    this.client.on('connect', () => {
+  private attachClientHandlers(client: Valkey): void {
+    client.on('connect', () => {
       this.valkeyConnected = true;
       console.log('[Agent] Connected to Valkey/Redis');
     });
 
-    this.client.on('error', (err) => {
+    client.on('error', (err) => {
       console.error(`[Agent] Valkey error: ${err.message}`);
       this.valkeyConnected = false;
     });
 
-    this.client.on('close', () => {
+    client.on('close', () => {
       this.valkeyConnected = false;
+      if (this.shuttingDown) return;
+      if (this.authProvider.requiresFreshTokenPerConnection) {
+        this.reconnectWithFreshToken().catch((err) => {
+          console.error(`[Agent] IAM reconnect failed: ${err.message}`);
+        });
+      }
     });
+  }
+
+  private async reconnectWithFreshToken(): Promise<void> {
+    if (this.shuttingDown) return;
+
+    this.reconnectAttempt += 1;
+    const delayMs = Math.min(this.reconnectAttempt * 1000, 30000);
+    console.log(`[Agent] Rebuilding Valkey client with fresh IAM token (attempt ${this.reconnectAttempt}, delay ${delayMs}ms)`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+    if (this.shuttingDown) return;
+
+    try {
+      this.client.removeAllListeners();
+      try { this.client.disconnect(); } catch { /* ignore */ }
+      this.client = await this.createValkeyClient('BetterDB-Agent');
+      this.attachClientHandlers(this.client);
+      await this.client.connect();
+      this.reconnectAttempt = 0;
+    } catch (err: any) {
+      console.error(`[Agent] Failed to reconnect with fresh token: ${err.message}`);
+      if (!this.shuttingDown) {
+        this.reconnectWithFreshToken().catch(() => {});
+      }
+    }
+  }
+
+  constructor(private readonly config: AgentConfig) {
+    this.authProvider = this.buildAuthProvider();
+
+    // Client is created asynchronously in start() because IAM token generation
+    // is async. Use null assertion here; the field is set before any handlers fire.
+    this.client = null as unknown as Valkey;
+    this.executor = null as unknown as CommandExecutor;
+
+    if (config.unsafeMode) {
+      console.warn('[Agent] WARNING: Unsafe mode enabled. All commands are permitted.');
+    }
 
     this.wsClient = new WsClient({
       url: config.cloudUrl,
@@ -83,6 +143,9 @@ export class Agent {
 
   async start(): Promise<void> {
     console.log(`[Agent] Connecting to ${this.config.valkeyHost}:${this.config.valkeyPort}...`);
+    this.client = await this.createValkeyClient('BetterDB-Agent');
+    this.attachClientHandlers(this.client);
+    this.executor = new CommandExecutor(this.client, { unsafeMode: this.config.unsafeMode });
     await this.client.connect();
     this.valkeyConnected = true;
 
@@ -94,6 +157,7 @@ export class Agent {
   }
 
   async stop(): Promise<void> {
+    this.shuttingDown = true;
     console.log('[Agent] Shutting down...');
     this.wsClient.close();
     if (this.cliClient) {
@@ -201,7 +265,7 @@ export class Agent {
       return this.cliExecutor;
     }
 
-    this.cliClient = this.createValkeyClient('BetterDB-Agent-CLI');
+    this.cliClient = await this.createValkeyClient('BetterDB-Agent-CLI');
 
     await this.cliClient.connect();
     this.cliExecutor = new CommandExecutor(this.cliClient, { unsafeMode: this.config.unsafeMode });
