@@ -149,6 +149,9 @@ export class Agent {
       // same tick as the 'connect' event dispatches to the live client.
       this.executor = new CommandExecutor(this.client, { unsafeMode: this.config.unsafeMode });
       await this.client.connect();
+      // Mirror start(): explicitly set the flag so commands aren't rejected
+      // if the 'connect' event fires in a deferred tick.
+      this.valkeyConnected = true;
       // Guard against stop() racing with the connect above.
       if (this.shuttingDown) {
         await this.client.quit().catch(() => {});
