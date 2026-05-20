@@ -1,9 +1,5 @@
-/**
- * AuthMode controls how the agent obtains the AUTH password for its Valkey/Redis
- * client. "password" returns the static password from config. IAM modes generate
- * short-lived SigV4-signed tokens and require fresh generation per reconnect.
- */
-export type AuthMode = 'password' | 'elasticache-iam';
+import type { AuthMode } from '@betterdb/shared';
+export type { AuthMode };
 
 export interface AuthProvider {
   readonly mode: AuthMode;

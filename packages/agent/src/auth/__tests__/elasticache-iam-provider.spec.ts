@@ -69,18 +69,23 @@ describe('ElastiCacheIamProvider', () => {
   });
 
   it('generates a different signature on subsequent calls (token freshness)', async () => {
-    const provider = new ElastiCacheIamProvider({
-      region: 'us-east-1',
-      resourceName: 'my-cluster',
-      userId: 'iam-user-01',
-      credentials: FAKE_CREDS,
-    });
+    jest.useFakeTimers();
+    try {
+      const provider = new ElastiCacheIamProvider({
+        region: 'us-east-1',
+        resourceName: 'my-cluster',
+        userId: 'iam-user-01',
+        credentials: FAKE_CREDS,
+      });
 
-    const t1 = await provider.getToken();
-    // Wait a second so the X-Amz-Date changes
-    await new Promise((r) => setTimeout(r, 1100));
-    const t2 = await provider.getToken();
+      const t1 = await provider.getToken();
+      // Advance fake clock by 61 seconds so X-Amz-Date changes
+      jest.setSystemTime(Date.now() + 61000);
+      const t2 = await provider.getToken();
 
-    expect(t1).not.toBe(t2);
+      expect(t1).not.toBe(t2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

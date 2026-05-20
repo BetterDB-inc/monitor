@@ -30,6 +30,7 @@ export class Agent {
   private cliClient: Valkey | null = null;
   private readonly authProvider: AuthProvider;
   private shuttingDown = false;
+  private isReconnecting = false;
   private reconnectAttempt = 0;
   private cliExecutor: CommandExecutor | null = null;
   private wsClient: WsClient;
@@ -96,13 +97,18 @@ export class Agent {
 
   private async reconnectWithFreshToken(): Promise<void> {
     if (this.shuttingDown) return;
+    if (this.isReconnecting) return;
+    this.isReconnecting = true;
 
     this.reconnectAttempt += 1;
     const delayMs = Math.min(this.reconnectAttempt * 1000, 30000);
     console.log(`[Agent] Rebuilding Valkey client with fresh IAM token (attempt ${this.reconnectAttempt}, delay ${delayMs}ms)`);
     await new Promise((resolve) => setTimeout(resolve, delayMs));
 
-    if (this.shuttingDown) return;
+    if (this.shuttingDown) {
+      this.isReconnecting = false;
+      return;
+    }
 
     try {
       this.client.removeAllListeners();
@@ -110,9 +116,12 @@ export class Agent {
       this.client = await this.createValkeyClient('BetterDB-Agent');
       this.attachClientHandlers(this.client);
       await this.client.connect();
+      this.executor = new CommandExecutor(this.client, { unsafeMode: this.config.unsafeMode });
       this.reconnectAttempt = 0;
+      this.isReconnecting = false;
     } catch (err: any) {
       console.error(`[Agent] Failed to reconnect with fresh token: ${err.message}`);
+      this.isReconnecting = false;
       if (!this.shuttingDown) {
         this.reconnectWithFreshToken().catch(() => {});
       }
@@ -269,6 +278,10 @@ export class Agent {
     this.cliClient = await this.createValkeyClient('BetterDB-Agent-CLI');
 
     await this.cliClient.connect();
+    this.cliClient.on('close', () => {
+      this.cliClient = null;
+      this.cliExecutor = null;
+    });
     this.cliExecutor = new CommandExecutor(this.cliClient, { unsafeMode: this.config.unsafeMode });
     console.log('[Agent] CLI client connected');
     return this.cliExecutor;
