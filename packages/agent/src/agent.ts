@@ -237,6 +237,7 @@ export class Agent {
         tls: this.config.valkeyTls,
         cluster: this.isCluster,
       },
+      authMode: this.authProvider.mode,
     };
     this.wsClient.send(JSON.stringify(hello));
   }
