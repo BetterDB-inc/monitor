@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, NotRequired, Required, TypedDict
+from typing import Any, Literal, NotRequired, Required, TypedDict, Union
 
 
 # ─── Content blocks ───────────────────────────────────────────────────────────
@@ -238,9 +238,15 @@ class AgentCacheStats:
     per_tool: dict[str, ToolStats]
 
 
+ToolRecommendation = Literal["increase_ttl", "optimal", "decrease_ttl_or_disable"]
+
+
 @dataclass
 class ToolEffectivenessEntry:
     tool: str
     hit_rate: float
     cost_saved: float
-    recommendation: Literal["increase_ttl", "optimal", "decrease_ttl_or_disable"]
+    recommendation: ToolRecommendation
+
+
+CacheResult = Union[LlmCacheResult, ToolCacheResult]
