@@ -25,8 +25,8 @@ export interface AgentConfig {
 }
 
 export class Agent {
-  private client: Valkey;
-  private executor: CommandExecutor;
+  private client: Valkey | null = null;
+  private executor: CommandExecutor | null = null;
   private cliClient: Valkey | null = null;
   private readonly authProvider: AuthProvider;
   private shuttingDown = false;
@@ -111,12 +111,29 @@ export class Agent {
     }
 
     try {
-      this.client.removeAllListeners();
-      try { this.client.disconnect(); } catch { /* ignore */ }
+      if (this.client) {
+        this.client.removeAllListeners();
+        try { this.client.disconnect(); } catch { /* ignore */ }
+      }
+      // Proactively tear down CLI client so both connections rotate together.
+      if (this.cliClient) {
+        this.cliClient.removeAllListeners();
+        try { this.cliClient.disconnect(); } catch { /* ignore */ }
+        this.cliClient = null;
+        this.cliExecutor = null;
+      }
       this.client = await this.createValkeyClient('BetterDB-Agent');
       this.attachClientHandlers(this.client);
-      await this.client.connect();
+      // Assign executor before connect() so any WS command that arrives in the
+      // same tick as the 'connect' event dispatches to the live client.
       this.executor = new CommandExecutor(this.client, { unsafeMode: this.config.unsafeMode });
+      await this.client.connect();
+      // Guard against stop() racing with the connect above.
+      if (this.shuttingDown) {
+        await this.client.quit().catch(() => {});
+        this.isReconnecting = false;
+        return;
+      }
       this.reconnectAttempt = 0;
       this.isReconnecting = false;
     } catch (err: any) {
@@ -130,11 +147,6 @@ export class Agent {
 
   constructor(private readonly config: AgentConfig) {
     this.authProvider = this.buildAuthProvider();
-
-    // Client is created asynchronously in start() because IAM token generation
-    // is async. Use null assertion here; the field is set before any handlers fire.
-    this.client = null as unknown as Valkey;
-    this.executor = null as unknown as CommandExecutor;
 
     if (config.unsafeMode) {
       console.warn('[Agent] WARNING: Unsafe mode enabled. All commands are permitted.');
@@ -173,13 +185,13 @@ export class Agent {
       await this.cliClient.quit().catch(() => {});
     }
     if (this.valkeyConnected) {
-      await this.client.quit().catch(() => {});
+      await this.client?.quit().catch(() => {});
     }
     console.log('[Agent] Stopped');
   }
 
   private async detectCapabilities(): Promise<void> {
-    const infoStr = (await this.client.info('server')) as string;
+    const infoStr = (await this.client!.info('server')) as string;
     const isValkey = infoStr.includes('valkey_version:');
     this.valkeyType = isValkey ? 'valkey' : 'redis';
 
@@ -190,7 +202,7 @@ export class Agent {
 
     // Check cluster
     try {
-      const clusterInfo = (await this.client.call('CLUSTER', 'INFO')) as string;
+      const clusterInfo = (await this.client!.call('CLUSTER', 'INFO')) as string;
       this.isCluster = clusterInfo.includes('cluster_enabled:1');
     } catch {
       this.isCluster = false;
@@ -227,7 +239,7 @@ export class Agent {
 
     // Detect FT (Search) module
     try {
-      await this.client.call('FT._LIST');
+      await this.client!.call('FT._LIST');
       this.capabilities.push('FT');
     } catch {
       // Search module not loaded
@@ -310,6 +322,9 @@ export class Agent {
       }
 
       const executor = msg.cli ? await this.getCliExecutor() : this.executor;
+      if (!executor) {
+        throw new Error('Executor not ready');
+      }
       const result = await executor.execute(msg.cmd, msg.args, binaryArgs);
 
       // If result is a Buffer, encode as base64 and flag as binary
