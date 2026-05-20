@@ -136,20 +136,24 @@ describe('Agent.reconnectWithFreshToken', () => {
     expect(a.isReconnecting).toBe(false);
   });
 
-  it('schedules a retry after connect() failure', async () => {
+  it('retries after connect() failure: a second Valkey client is created', async () => {
     const a = new Agent(IAM_CONFIG) as any;
 
-    mockConnect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    // First connect fails, second succeeds.
+    mockConnect
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockResolvedValueOnce(undefined);
 
     const p = a.reconnectWithFreshToken();
-    await jest.advanceTimersByTimeAsync(1000);
-    await p;
+    await jest.advanceTimersByTimeAsync(1000); // drain attempt-1 delay
+    await p;                                   // attempt 1 finishes (fails), retry scheduled
 
-    // The catch block sets isReconnecting=false then immediately calls
-    // reconnectWithFreshToken() again, which synchronously sets isReconnecting=true
-    // and increments reconnectAttempt before its first await.
-    expect(a.isReconnecting).toBe(true);
-    expect(a.reconnectAttempt).toBe(2); // incremented by the retry call
+    // Advance past the retry's delay (attempt 2 = 2000ms) and drain.
+    await jest.advanceTimersByTimeAsync(2000);
+    await Promise.resolve();
+
+    // Two Valkey clients were created: one per attempt.
+    expect(MockValkey).toHaveBeenCalledTimes(2);
   });
 });
 

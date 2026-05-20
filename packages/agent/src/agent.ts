@@ -32,7 +32,9 @@ export class Agent {
   private shuttingDown = false;
   private isReconnecting = false;
   private reconnectAttempt = 0;
+  private reconnectLoopPromise: Promise<void> | null = null;
   private cliExecutor: CommandExecutor | null = null;
+  private cliConnectingPromise: Promise<CommandExecutor> | null = null;
   private wsClient: WsClient;
   private valkeyConnected = false;
   private valkeyType: 'valkey' | 'redis' = 'valkey';
@@ -86,8 +88,8 @@ export class Agent {
       // would leave the agent permanently disconnected because iovalkey's internal
       // retry is disabled. Trigger a fresh-token reconnect here; the isReconnecting
       // guard prevents a duplicate loop if close also fires.
-      if (!this.shuttingDown && this.authProvider.requiresFreshTokenPerConnection) {
-        this.reconnectWithFreshToken().catch((reconnectErr) => {
+      if (!this.shuttingDown && this.authProvider.requiresFreshTokenPerConnection && !this.isReconnecting) {
+        this.reconnectLoopPromise = this.reconnectWithFreshToken().catch((reconnectErr) => {
           console.error(`[Agent] IAM reconnect failed: ${reconnectErr.message}`);
         });
       }
@@ -96,8 +98,8 @@ export class Agent {
     client.on('close', () => {
       this.valkeyConnected = false;
       if (this.shuttingDown) return;
-      if (this.authProvider.requiresFreshTokenPerConnection) {
-        this.reconnectWithFreshToken().catch((err) => {
+      if (this.authProvider.requiresFreshTokenPerConnection && !this.isReconnecting) {
+        this.reconnectLoopPromise = this.reconnectWithFreshToken().catch((err) => {
           console.error(`[Agent] IAM reconnect failed: ${err.message}`);
         });
       }
@@ -149,7 +151,9 @@ export class Agent {
       console.error(`[Agent] Failed to reconnect with fresh token: ${err.message}`);
       this.isReconnecting = false;
       if (!this.shuttingDown) {
-        this.reconnectWithFreshToken().catch(() => {});
+        // Intentional: perpetual retry loop. Per-iteration errors are logged above;
+        // the outer .catch(() => {}) suppresses unhandled-rejection noise.
+        this.reconnectLoopPromise = this.reconnectWithFreshToken().catch(() => {});
       }
     }
   }
@@ -173,23 +177,33 @@ export class Agent {
 
   async start(): Promise<void> {
     console.log(`[Agent] Connecting to ${this.config.valkeyHost}:${this.config.valkeyPort}...`);
-    this.client = await this.createValkeyClient('BetterDB-Agent');
-    this.attachClientHandlers(this.client);
-    this.executor = new CommandExecutor(this.client, { unsafeMode: this.config.unsafeMode });
-    await this.client.connect();
-    this.valkeyConnected = true;
+    try {
+      this.client = await this.createValkeyClient('BetterDB-Agent');
+      this.attachClientHandlers(this.client);
+      this.executor = new CommandExecutor(this.client, { unsafeMode: this.config.unsafeMode });
+      await this.client.connect();
+      this.valkeyConnected = true;
 
-    await this.detectCapabilities();
-    console.log(`[Agent] Detected ${this.valkeyType} ${this.valkeyVersion}`);
+      await this.detectCapabilities();
+      console.log(`[Agent] Detected ${this.valkeyType} ${this.valkeyVersion}`);
 
-    console.log(`[Agent] Connecting to cloud: ${this.config.cloudUrl}`);
-    this.wsClient.connect();
+      console.log(`[Agent] Connecting to cloud: ${this.config.cloudUrl}`);
+      this.wsClient.connect();
+    } catch (err) {
+      // Prevent the error handler's reconnect path from looping
+      // indefinitely if start() fails (e.g. bad credentials on first connect).
+      this.shuttingDown = true;
+      throw err;
+    }
   }
 
   async stop(): Promise<void> {
     this.shuttingDown = true;
     console.log('[Agent] Shutting down...');
     this.wsClient.close();
+    if (this.reconnectLoopPromise) {
+      await this.reconnectLoopPromise;
+    }
     if (this.cliClient) {
       await this.cliClient.quit().catch(() => {});
     }
@@ -295,17 +309,25 @@ export class Agent {
     if (this.cliExecutor && this.cliClient) {
       return this.cliExecutor;
     }
-
-    this.cliClient = await this.createValkeyClient('BetterDB-Agent-CLI');
-
-    this.cliClient.on('close', () => {
-      this.cliClient = null;
-      this.cliExecutor = null;
+    // Deduplicate concurrent calls: return the in-progress creation promise
+    // so two overlapping WS commands don't each allocate a separate CLI client.
+    if (this.cliConnectingPromise) {
+      return this.cliConnectingPromise;
+    }
+    this.cliConnectingPromise = (async () => {
+      this.cliClient = await this.createValkeyClient('BetterDB-Agent-CLI');
+      this.cliClient.on('close', () => {
+        this.cliClient = null;
+        this.cliExecutor = null;
+      });
+      await this.cliClient.connect();
+      this.cliExecutor = new CommandExecutor(this.cliClient, { unsafeMode: this.config.unsafeMode });
+      console.log('[Agent] CLI client connected');
+      return this.cliExecutor;
+    })().finally(() => {
+      this.cliConnectingPromise = null;
     });
-    await this.cliClient.connect();
-    this.cliExecutor = new CommandExecutor(this.cliClient, { unsafeMode: this.config.unsafeMode });
-    console.log('[Agent] CLI client connected');
-    return this.cliExecutor;
+    return this.cliConnectingPromise;
   }
 
   private async handleCommand(msg: AgentCommandMessage): Promise<void> {
