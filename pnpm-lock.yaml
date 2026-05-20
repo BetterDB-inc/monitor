@@ -1079,9 +1079,6 @@ packages:
   '@borewit/text-codec@0.1.1':
     resolution: {integrity: sha512-5L/uBxmjaCIX5h8Z+uu+kA9BQLkc/Wl06UGR5ajNRxu+/XjonB5i8JpgFMrPj3LXTCPA0pv8yxUvbUi+QthGGA==}
 
-  '@browserbasehq/sdk@2.10.0':
-    resolution: {integrity: sha512-pOL4yW8P8AI2+N5y6zEP6XXKqIXtYyKunr1JXppqQDOyKLxxvZEDqQCHJXWUzqgx3R1tGWpn7m9AjXN7MeYInA==}
-
   '@browserbasehq/sdk@2.11.0':
     resolution: {integrity: sha512-hJ1Pq+uRagLZfyS5oHKmMAYZSTmhTGgQ3JExoVKdrsQ1qRZu2S7fLLb+78EbHyhNPSXJiQTTCSPnajsGMzzp8g==}
 
@@ -8913,18 +8910,6 @@ packages:
     resolution: {integrity: sha512-+QU2zd6OTD8XWIJCbffaiQeH9U73qIqafo1x6V1snCWYGJf6cVE0cDR4D8xRzcEnfI21IFrUPzPGtcPf8AC+Rw==}
     engines: {node: ^14.17.0 || ^16.13.0 || >=18.0.0}
 
-  ws@8.20.0:
-    resolution: {integrity: sha512-sAt8BhgNbzCtgGbt2OxmpuryO63ZoDk/sqaB/znQm94T4fCEsy/yV+7CdC1kJhOU9lboAEU7R3kquuycDoibVA==}
-    engines: {node: '>=10.0.0'}
-    peerDependencies:
-      bufferutil: ^4.0.1
-      utf-8-validate: '>=5.0.2'
-    peerDependenciesMeta:
-      bufferutil:
-        optional: true
-      utf-8-validate:
-        optional: true
-
   ws@8.20.1:
     resolution: {integrity: sha512-It4dO0K5v//JtTXuPkfEOaI3uUN87iYPnqo/ZzqCoG3g8uhA66QUMs/SrM0YK7/NAu+r4LMh/9dq2A7k+rHs+w==}
     engines: {node: '>=10.0.0'}
@@ -9810,18 +9795,6 @@ snapshots:
 
   '@borewit/text-codec@0.1.1': {}
 
-  '@browserbasehq/sdk@2.10.0':
-    dependencies:
-      '@types/node': 18.19.130
-      '@types/node-fetch': 2.6.13
-      abort-controller: 3.0.0
-      agentkeepalive: 4.6.0
-      form-data-encoder: 1.7.2
-      formdata-node: 4.4.1
-      node-fetch: 2.7.0
-    transitivePeerDependencies:
-      - encoding
-
   '@browserbasehq/sdk@2.11.0':
     dependencies:
       '@types/node': 18.19.130
@@ -9833,17 +9806,16 @@ snapshots:
       node-fetch: 2.7.0
     transitivePeerDependencies:
       - encoding
-    optional: true
 
   '@browserbasehq/stagehand@1.14.0(@playwright/test@1.57.0)(deepmerge@4.3.1)(dotenv@17.3.1)(openai@6.34.0(ws@8.20.1)(zod@4.3.6))(zod@4.3.6)':
     dependencies:
       '@anthropic-ai/sdk': 0.27.3
-      '@browserbasehq/sdk': 2.10.0
+      '@browserbasehq/sdk': 2.11.0
       '@playwright/test': 1.57.0
       deepmerge: 4.3.1
       dotenv: 17.3.1
       openai: 6.34.0(ws@8.20.1)(zod@4.3.6)
-      ws: 8.20.0
+      ws: 8.20.1
       zod: 4.3.6
       zod-to-json-schema: 3.25.2(zod@4.3.6)
     transitivePeerDependencies:
@@ -15177,7 +15149,7 @@ snapshots:
       isstream: 0.1.2
       jsonwebtoken: 9.0.3
       mime-types: 2.1.35
-      retry-axios: 2.6.0(axios@1.14.0(debug@4.4.3))
+      retry-axios: 2.6.0(axios@1.14.0)
       tough-cookie: 4.1.4
     transitivePeerDependencies:
       - supports-color
@@ -17347,7 +17319,7 @@ snapshots:
 
   ret@0.5.0: {}
 
-  retry-axios@2.6.0(axios@1.14.0(debug@4.4.3)):
+  retry-axios@2.6.0(axios@1.14.0):
     dependencies:
       axios: 1.14.0(debug@4.4.3)
 
@@ -18409,8 +18381,6 @@ snapshots:
     dependencies:
       imurmurhash: 0.1.4
       signal-exit: 4.1.0
-
-  ws@8.20.0: {}
 
   ws@8.20.1: {}
 
