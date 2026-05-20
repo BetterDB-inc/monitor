@@ -26,6 +26,34 @@ function parseArgs(): AgentConfig {
     process.exit(1);
   }
 
+  const rawAuthMode = (parsed['auth-mode'] || process.env.AGENT_AUTH_MODE || 'password').toLowerCase();
+  if (rawAuthMode !== 'password' && rawAuthMode !== 'elasticache-iam') {
+    console.error(`Error: invalid --auth-mode "${rawAuthMode}". Must be "password" or "elasticache-iam".`);
+    process.exit(1);
+  }
+  const authMode = rawAuthMode as 'password' | 'elasticache-iam';
+
+  const awsRegion = parsed['aws-region'] || process.env.AWS_REGION || '';
+  const awsResourceName = parsed['aws-resource-name'] || process.env.AWS_RESOURCE_NAME || '';
+  const awsUserId = parsed['aws-user-id'] || process.env.AWS_USER_ID || '';
+  const awsServerless = (parsed['aws-serverless'] || process.env.AWS_SERVERLESS || 'false') === 'true';
+  const valkeyTls = (parsed['valkey-tls'] || process.env.VALKEY_TLS || 'false') === 'true';
+
+  if (authMode === 'elasticache-iam') {
+    const missing: string[] = [];
+    if (!awsRegion) missing.push('--aws-region / AWS_REGION');
+    if (!awsResourceName) missing.push('--aws-resource-name / AWS_RESOURCE_NAME');
+    if (!awsUserId) missing.push('--aws-user-id / AWS_USER_ID');
+    if (missing.length > 0) {
+      console.error(`Error: --auth-mode=elasticache-iam requires: ${missing.join(', ')}`);
+      process.exit(1);
+    }
+    if (!valkeyTls) {
+      console.error('Error: --auth-mode=elasticache-iam requires --valkey-tls=true (ElastiCache IAM requires TLS).');
+      process.exit(1);
+    }
+  }
+
   return {
     token,
     cloudUrl,
@@ -33,9 +61,14 @@ function parseArgs(): AgentConfig {
     valkeyPort: parseInt(parsed['valkey-port'] || process.env.VALKEY_PORT || '6379', 10),
     valkeyUsername: parsed['valkey-username'] || process.env.VALKEY_USERNAME || 'default',
     valkeyPassword: parsed['valkey-password'] || process.env.VALKEY_PASSWORD || '',
-    valkeyTls: (parsed['valkey-tls'] || process.env.VALKEY_TLS || 'false') === 'true',
+    valkeyTls,
     valkeyDb: parseInt(parsed['valkey-db'] || process.env.VALKEY_DB || '0', 10),
     unsafeMode: (parsed['unsafe-cli'] || process.env.BETTERDB_UNSAFE_CLI || 'false') === 'true',
+    authMode,
+    awsRegion: awsRegion || undefined,
+    awsResourceName: awsResourceName || undefined,
+    awsUserId: awsUserId || undefined,
+    awsServerless,
   };
 }
 

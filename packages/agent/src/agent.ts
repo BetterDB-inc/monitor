@@ -13,6 +13,13 @@ export interface AgentConfig {
   valkeyTls: boolean;
   valkeyDb: number;
   unsafeMode: boolean;
+  // New IAM auth fields. authMode defaults to "password" so existing setups
+  // are unaffected.
+  authMode?: 'password' | 'elasticache-iam';
+  awsRegion?: string;
+  awsResourceName?: string;
+  awsUserId?: string;
+  awsServerless?: boolean;
 }
 
 export class Agent {
