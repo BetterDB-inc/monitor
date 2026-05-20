@@ -130,6 +130,7 @@ describe('buildSemanticMetadata', () => {
       'invalidate',
       'similarity_distribution',
       'threshold_adjust',
+      'entry_analytics',
     ]);
   });
 
