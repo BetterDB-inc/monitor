@@ -1,0 +1,177 @@
+// Mock variables must be prefixed "mock" so Jest hoists them alongside jest.mock().
+const mockConnect = jest.fn().mockResolvedValue(undefined);
+const mockDisconnect = jest.fn();
+const mockRemoveAllListeners = jest.fn();
+const mockQuit = jest.fn().mockResolvedValue(undefined);
+const mockOn = jest.fn();
+
+jest.mock('iovalkey', () => ({
+  __esModule: true,
+  default: jest.fn(() => ({
+    on: mockOn,
+    connect: mockConnect,
+    disconnect: mockDisconnect,
+    removeAllListeners: mockRemoveAllListeners,
+    quit: mockQuit,
+  })),
+}));
+
+jest.mock('../ws-client', () => ({
+  WsClient: jest.fn(() => ({ connect: jest.fn(), close: jest.fn(), send: jest.fn() })),
+}));
+
+jest.mock('../command-executor', () => ({
+  CommandExecutor: jest.fn(),
+}));
+
+jest.mock('../auth', () => ({
+  ElastiCacheIamProvider: jest.fn(() => ({
+    mode: 'elasticache-iam',
+    requiresFreshTokenPerConnection: true,
+    getToken: jest.fn().mockResolvedValue('fake-iam-token'),
+  })),
+  PasswordProvider: jest.fn(() => ({
+    mode: 'password',
+    requiresFreshTokenPerConnection: false,
+    getToken: jest.fn().mockResolvedValue(''),
+  })),
+}));
+
+import Valkey from 'iovalkey';
+import { Agent } from '../agent';
+import type { AgentConfig } from '../agent';
+
+const MockValkey = Valkey as unknown as jest.Mock;
+
+const IAM_CONFIG: AgentConfig = {
+  token: 'tok',
+  cloudUrl: 'wss://test',
+  valkeyHost: 'localhost',
+  valkeyPort: 6379,
+  valkeyUsername: 'default',
+  valkeyPassword: '',
+  valkeyTls: true,
+  valkeyDb: 0,
+  unsafeMode: false,
+  authMode: 'elasticache-iam',
+  awsRegion: 'us-east-1',
+  awsResourceName: 'my-cluster',
+  awsUserId: 'iam-user',
+};
+
+describe('Agent.reconnectWithFreshToken', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
+    mockQuit.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('isReconnecting guard prevents a concurrent second loop', async () => {
+    const a = new Agent(IAM_CONFIG) as any;
+
+    const p1 = a.reconnectWithFreshToken();
+    const p2 = a.reconnectWithFreshToken(); // bails immediately
+
+    await jest.advanceTimersByTimeAsync(1000);
+    await Promise.all([p1, p2]);
+
+    expect(MockValkey).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconnectAttempt increments before the delay and resets to 0 on success', async () => {
+    const a = new Agent(IAM_CONFIG) as any;
+
+    expect(a.reconnectAttempt).toBe(0);
+    const p = a.reconnectWithFreshToken();
+    expect(a.reconnectAttempt).toBe(1); // synchronous increment before first await
+
+    await jest.advanceTimersByTimeAsync(1000);
+    await p;
+
+    expect(a.reconnectAttempt).toBe(0);
+  });
+
+  it('backoff delay grows with each attempt (attempt 1 = 1s, attempt 2 = 2s)', async () => {
+    const a = new Agent(IAM_CONFIG) as any;
+
+    // Attempt 1: delay is 1000ms
+    const p1 = a.reconnectWithFreshToken();
+    await jest.advanceTimersByTimeAsync(999);
+    expect(MockValkey).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(1);
+    await p1;
+    expect(MockValkey).toHaveBeenCalledTimes(1);
+
+    // Manually prime for a second attempt (as if first had failed)
+    jest.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
+    a.reconnectAttempt = 1;
+
+    // Attempt 2: delay is 2000ms
+    const p2 = a.reconnectWithFreshToken();
+    await jest.advanceTimersByTimeAsync(1999);
+    expect(MockValkey).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(1);
+    await p2;
+    expect(MockValkey).toHaveBeenCalledTimes(1);
+  });
+
+  it('shuttingDown set during connect causes the new client to be quit', async () => {
+    const a = new Agent(IAM_CONFIG) as any;
+
+    mockConnect.mockImplementationOnce(async () => {
+      a.shuttingDown = true;
+    });
+
+    const p = a.reconnectWithFreshToken();
+    await jest.advanceTimersByTimeAsync(1000);
+    await p;
+
+    expect(mockQuit).toHaveBeenCalled();
+    expect(a.isReconnecting).toBe(false);
+  });
+
+  it('schedules a retry after connect() failure', async () => {
+    const a = new Agent(IAM_CONFIG) as any;
+
+    mockConnect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const p = a.reconnectWithFreshToken();
+    await jest.advanceTimersByTimeAsync(1000);
+    await p;
+
+    // The catch block sets isReconnecting=false then immediately calls
+    // reconnectWithFreshToken() again, which synchronously sets isReconnecting=true
+    // and increments reconnectAttempt before its first await.
+    expect(a.isReconnecting).toBe(true);
+    expect(a.reconnectAttempt).toBe(2); // incremented by the retry call
+  });
+});
+
+describe('Agent.createValkeyClient - retryStrategy', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('uses null retryStrategy for IAM mode (fresh client per connection)', async () => {
+    const a = new Agent(IAM_CONFIG) as any;
+    await a.createValkeyClient('test');
+
+    const { retryStrategy } = MockValkey.mock.calls[0][0];
+    expect(retryStrategy()).toBeNull();
+  });
+
+  it('uses exponential retryStrategy for password mode', async () => {
+    const pwConfig: AgentConfig = { ...IAM_CONFIG, authMode: 'password' };
+    const a = new Agent(pwConfig) as any;
+    await a.createValkeyClient('test');
+
+    const { retryStrategy } = MockValkey.mock.calls[0][0];
+    expect(retryStrategy(1)).toBe(1000);
+    expect(retryStrategy(2)).toBe(2000);
+    expect(retryStrategy(100)).toBe(30000); // capped
+  });
+});

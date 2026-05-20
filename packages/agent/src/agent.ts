@@ -82,6 +82,15 @@ export class Agent {
     client.on('error', (err) => {
       console.error(`[Agent] Valkey error: ${err.message}`);
       this.valkeyConnected = false;
+      // In IAM mode, an error without a subsequent close (e.g. auth rejection)
+      // would leave the agent permanently disconnected because iovalkey's internal
+      // retry is disabled. Trigger a fresh-token reconnect here; the isReconnecting
+      // guard prevents a duplicate loop if close also fires.
+      if (!this.shuttingDown && this.authProvider.requiresFreshTokenPerConnection) {
+        this.reconnectWithFreshToken().catch((reconnectErr) => {
+          console.error(`[Agent] IAM reconnect failed: ${reconnectErr.message}`);
+        });
+      }
     });
 
     client.on('close', () => {
@@ -289,11 +298,11 @@ export class Agent {
 
     this.cliClient = await this.createValkeyClient('BetterDB-Agent-CLI');
 
-    await this.cliClient.connect();
     this.cliClient.on('close', () => {
       this.cliClient = null;
       this.cliExecutor = null;
     });
+    await this.cliClient.connect();
     this.cliExecutor = new CommandExecutor(this.cliClient, { unsafeMode: this.config.unsafeMode });
     console.log('[Agent] CLI client connected');
     return this.cliExecutor;

@@ -18,8 +18,8 @@
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/credential-provider-node": "^3.668.0",
-    "@aws-sdk/protocol-http": "^3.374.0",
-    "@aws-sdk/signature-v4": "^3.374.0",
+    "@smithy/protocol-http": "^4.1.0",
+    "@smithy/signature-v4": "^4.2.0",
     "@aws-sdk/util-format-url": "^3.667.0",
     "@betterdb/shared": "workspace:*",
     "iovalkey": "^0.3.3",
