@@ -85,11 +85,12 @@ export class Agent {
     client.on('error', (err) => {
       console.error(`[Agent] Valkey error: ${err.message}`);
       this.valkeyConnected = false;
-      // In IAM mode, an error without a subsequent close (e.g. auth rejection)
-      // would leave the agent permanently disconnected because iovalkey's internal
-      // retry is disabled. Trigger a fresh-token reconnect here; the isReconnecting
-      // guard prevents a duplicate loop if close also fires.
-      if (!this.shuttingDown && this.authProvider.requiresFreshTokenPerConnection && !this.isReconnecting) {
+      // In IAM mode, trigger a fresh-token reconnect on auth rejections (WRONGPASS /
+      // NOAUTH) that don't emit a subsequent close. Transient network errors
+      // (ECONNRESET, ETIMEDOUT) are handled by the close handler below, since
+      // iovalkey emits close after error in those cases.
+      const isAuthError = /WRONGPASS|NOAUTH/i.test(err.message);
+      if (!this.shuttingDown && this.authProvider.requiresFreshTokenPerConnection && isAuthError && !this.isReconnecting) {
         this.reconnectLoopPromise = this.reconnectWithFreshToken().catch((reconnectErr) => {
           console.error(`[Agent] IAM reconnect failed: ${reconnectErr.message}`);
         });
@@ -217,7 +218,7 @@ export class Agent {
       this.resolveReconnectDelay();
       this.resolveReconnectDelay = null;
     }
-    if (this.reconnectLoopPromise) {
+    while (this.reconnectLoopPromise) {
       await this.reconnectLoopPromise;
     }
     if (this.cliClient) {
@@ -331,13 +332,21 @@ export class Agent {
       return this.cliConnectingPromise;
     }
     this.cliConnectingPromise = (async () => {
-      this.cliClient = await this.createValkeyClient('BetterDB-Agent-CLI');
-      this.cliClient.on('close', () => {
+      const client = await this.createValkeyClient('BetterDB-Agent-CLI');
+      this.cliClient = client;
+      client.on('close', () => {
         this.cliClient = null;
         this.cliExecutor = null;
       });
-      await this.cliClient.connect();
-      this.cliExecutor = new CommandExecutor(this.cliClient, { unsafeMode: this.config.unsafeMode });
+      await client.connect();
+      // If reconnectWithFreshToken ran while we were connecting, it will have
+      // nulled this.cliClient. Throw so the stale connection is discarded rather
+      // than installing a broken executor.
+      if (this.cliClient !== client) {
+        client.quit().catch(() => {});
+        throw new Error('CLI connection invalidated by IAM rotation');
+      }
+      this.cliExecutor = new CommandExecutor(client, { unsafeMode: this.config.unsafeMode });
       console.log('[Agent] CLI client connected');
       return this.cliExecutor;
     })().finally(() => {

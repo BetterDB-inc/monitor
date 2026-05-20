@@ -99,25 +99,22 @@ describe('Agent.reconnectWithFreshToken', () => {
   it('backoff delay grows with each attempt (attempt 1 = 1s, attempt 2 = 2s)', async () => {
     const a = new Agent(IAM_CONFIG) as any;
 
-    // Attempt 1: delay is 1000ms
+    // Fail attempt 1 so reconnectAttempt naturally reaches 2 for the retry.
+    mockConnect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
     const p1 = a.reconnectWithFreshToken();
     await jest.advanceTimersByTimeAsync(999);
-    expect(MockValkey).not.toHaveBeenCalled();
+    expect(MockValkey).not.toHaveBeenCalled(); // still waiting for 1000ms delay
     await jest.advanceTimersByTimeAsync(1);
-    await p1;
-    expect(MockValkey).toHaveBeenCalledTimes(1);
+    await p1; // attempt 1 fails; retry is scheduled on reconnectLoopPromise
 
-    // Manually prime for a second attempt (as if first had failed)
+    // Retry has reconnectAttempt=2, delay=2000ms.
     jest.clearAllMocks();
     mockConnect.mockResolvedValue(undefined);
-    a.reconnectAttempt = 1;
-
-    // Attempt 2: delay is 2000ms
-    const p2 = a.reconnectWithFreshToken();
     await jest.advanceTimersByTimeAsync(1999);
-    expect(MockValkey).not.toHaveBeenCalled();
+    expect(MockValkey).not.toHaveBeenCalled(); // still waiting for 2000ms delay
     await jest.advanceTimersByTimeAsync(1);
-    await p2;
+    await a.reconnectLoopPromise;
     expect(MockValkey).toHaveBeenCalledTimes(1);
   });
 
