@@ -58,7 +58,9 @@ export class MonitorSupportProbe {
     }
 
     const result = await this.runProbe(connectionId);
-    this.cache.set(connectionId, result);
+    if (result.status !== 'unknown') {
+      this.cache.set(connectionId, result);
+    }
     return result;
   }
 
@@ -116,8 +118,10 @@ export class MonitorSupportProbe {
       monitor = await valkey.monitor();
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      this.logger.debug(`Live MONITOR probe rejected on ${connectionId}: ${detail}`);
-      const status = valkey.status === 'ready' ? 'no' : 'unknown';
+      const status = classifyMonitorError(err);
+      this.logger.debug(
+        `Live MONITOR probe rejected on ${connectionId} (verdict=${status}): ${detail}`,
+      );
       return { status, source: 'live-monitor', checkedAt: Date.now(), detail };
     }
 
@@ -178,4 +182,32 @@ function interpretCommandInfo(raw: unknown): MonitorSupportResult {
     checkedAt,
     detail: 'COMMAND INFO returned unexpected shape',
   };
+}
+
+/**
+ * Patterns that prove the server received the MONITOR command and explicitly
+ * refused it (either unknown, ACL-blocked, or disabled). Any of these is a
+ * definitive 'no'.
+ *
+ * Anything else — socket errors (ECONNRESET, ETIMEDOUT, ENOTFOUND, EAI_AGAIN,
+ * EHOSTUNREACH, socket hang up, Connection is closed, Stream isn't writeable),
+ * TLS errors, AUTH errors (NOAUTH, WRONGPASS), and retry-budget exhaustion —
+ * is transient or configuration-related. The duplicate connection failed for a
+ * reason unrelated to MONITOR semantics, so we return 'unknown' and let the
+ * cache layer decline to remember the verdict.
+ *
+ * Why we can't trust the parent client's status here: `iovalkey.monitor()`
+ * opens a fresh socket via `duplicate()`, so a failure on that new socket
+ * tells us nothing about the parent — and the parent's `ready` status tells
+ * us nothing about why the duplicate failed.
+ */
+const MONITOR_REJECTED_BY_SERVER =
+  /unknown command\s+['"`]?monitor|NOPERM[^]*monitor|command\s+['"`]?monitor['"`]?\s+is not allowed|MONITOR is disabled|does not allow MONITOR/i;
+
+export function classifyMonitorError(err: unknown): MonitorSupportStatus {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (MONITOR_REJECTED_BY_SERVER.test(msg)) {
+    return 'no';
+  }
+  return 'unknown';
 }

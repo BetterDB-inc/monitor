@@ -1,0 +1,2 @@
+user default on >devpassword ~* &* +@all
+user noMon on >limited ~* &* +@all -monitor -command

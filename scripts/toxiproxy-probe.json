@@ -1,0 +1,8 @@
+[
+  {
+    "name": "valkey",
+    "listen": "0.0.0.0:6398",
+    "upstream": "valkey-toxic-upstream:6379",
+    "enabled": true
+  }
+]

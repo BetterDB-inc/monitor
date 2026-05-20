@@ -1,0 +1,75 @@
+services:
+  # Valkey with the default user (devpassword) PLUS a 'noMon' ACL user
+  # that lacks MONITOR and COMMAND. Connect with username=noMon /
+  # password=limited from the app to drive the probe through both
+  # layers and observe a definitive 'no' verdict.
+  valkey-no-monitor:
+    image: valkey/valkey:8-alpine
+    container_name: betterdb-probe-valkey-no-monitor
+    ports:
+      - "6395:6379"
+    command: valkey-server --aclfile /etc/valkey/users.acl
+    volumes:
+      - ./scripts/probe-test-users.acl:/etc/valkey/users.acl:ro
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-a", "devpassword", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # Same setup on Redis — covers ACL-parser drift between Redis and
+  # Valkey on the same MONITOR-rejection error shapes.
+  redis-no-monitor:
+    image: redis:8-alpine
+    container_name: betterdb-probe-redis-no-monitor
+    ports:
+      - "6397:6379"
+    command: redis-server --aclfile /etc/redis/users.acl
+    volumes:
+      - ./scripts/probe-test-users.acl:/etc/redis/users.acl:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devpassword", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # Healthy Valkey upstream, reachable only through toxiproxy. Used to
+  # verify the 'unknown' verdict for transient duplicate-socket failures
+  # and that 'unknown' is not cached. Not exposed to the host.
+  valkey-toxic-upstream:
+    image: valkey/valkey:8-alpine
+    container_name: betterdb-probe-valkey-tox-upstream
+    # COMMAND renamed away so layer 1 (COMMAND INFO MONITOR) is
+    # inconclusive and the probe always escalates to the live MONITOR
+    # layer — that's the layer the bug lives in.
+    command:
+      - valkey-server
+      - --requirepass
+      - devpassword
+      - --rename-command
+      - COMMAND
+      - ""
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-a", "devpassword", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # Fault-injection proxy in front of valkey-toxic-upstream.
+  # Connect the app to localhost:6398. Inject toxics via the admin
+  # API at http://localhost:8474. See docs/dev/verify-monitor-probe.md
+  # for the curl recipes (reset_peer, latency, etc.).
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: betterdb-probe-toxiproxy
+    command: -host 0.0.0.0 -config /config/toxiproxy.json
+    ports:
+      - "6398:6398"
+      - "8474:8474"
+    volumes:
+      - ./scripts/toxiproxy-probe.json:/config/toxiproxy.json:ro
+    depends_on:
+      valkey-toxic-upstream:
+        condition: service_healthy

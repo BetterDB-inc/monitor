@@ -77,35 +77,70 @@ describe('MonitorSupportProbe', () => {
       expect(disconnect).toHaveBeenCalledTimes(1);
     });
 
-    it('returns status=no with source=live-monitor when MONITOR is rejected by a still-connected server', async () => {
+    it.each([
+      ['NOPERM this user has insufficient permissions to run the \'monitor\' command'],
+      ['NOPERM No permissions to run the \'monitor\' command'],
+      ["ERR unknown command 'monitor', with args beginning with:"],
+      ["ERR unknown command 'MONITOR'"],
+      ["ERR command 'monitor' is not allowed"],
+      ['ERR MONITOR is disabled'],
+      ['ERR This Redis Cloud subscription does not allow MONITOR'],
+    ])('classifies server-side MONITOR rejection (%s) as status=no', async (errMsg) => {
       const { probe } = makeProbe({
         callImpl: async () => {
           throw new Error('ERR wrong number of arguments');
         },
         monitorImpl: async () => {
-          throw new Error('NOPERM MONITOR is not allowed');
+          throw new Error(errMsg);
         },
-        clientStatus: 'ready',
       });
       const result = await probe.probe('conn-1');
       expect(result.status).toBe('no');
       expect(result.source).toBe('live-monitor');
-      expect(result.detail).toContain('NOPERM');
+      expect(result.detail).toBe(errMsg);
     });
 
-    it('returns status=unknown when MONITOR rejects and the parent client is no longer ready', async () => {
+    it.each([
+      ['read ECONNRESET'],
+      ['connect ETIMEDOUT 10.0.0.1:6379'],
+      ['connect ECONNREFUSED 127.0.0.1:6379'],
+      ['getaddrinfo ENOTFOUND redis.example.com'],
+      ['getaddrinfo EAI_AGAIN redis.example.com'],
+      ['socket hang up'],
+      ['Connection is closed.'],
+      ['Stream isn\'t writeable and enableOfflineQueue options is false'],
+      ['unable to verify the first certificate'],
+      ['Hostname/IP does not match certificate\'s altnames'],
+      ['NOAUTH Authentication required.'],
+      ['WRONGPASS invalid username-password pair'],
+      ['Reached the max retries per request limit'],
+    ])('classifies transient/config duplicate-socket failure (%s) as status=unknown', async (errMsg) => {
       const { probe } = makeProbe({
         callImpl: async () => {
-          throw new Error('ERR cmd');
+          throw new Error('ERR wrong number of arguments');
         },
         monitorImpl: async () => {
-          throw new Error('ECONNRESET');
+          throw new Error(errMsg);
         },
-        clientStatus: 'end',
       });
       const result = await probe.probe('conn-1');
       expect(result.status).toBe('unknown');
       expect(result.source).toBe('live-monitor');
+      expect(result.detail).toBe(errMsg);
+    });
+
+    it('classifies transient failure as unknown even when the parent client reports status=ready', async () => {
+      const { probe } = makeProbe({
+        callImpl: async () => {
+          throw new Error('ERR');
+        },
+        monitorImpl: async () => {
+          throw new Error('read ECONNRESET');
+        },
+        clientStatus: 'ready',
+      });
+      const result = await probe.probe('conn-1');
+      expect(result.status).toBe('unknown');
     });
 
     it('escalates on empty COMMAND INFO array', async () => {
@@ -205,6 +240,26 @@ describe('MonitorSupportProbe', () => {
       await probe.probe('conn-1');
       await probe.probe('conn-2');
       expect(call).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not cache a layer-2 unknown verdict so the next call retries', async () => {
+      const { probe, call, monitorMock } = makeProbe({
+        callImpl: async () => {
+          throw new Error('ERR');
+        },
+        monitorImpl: async () => {
+          throw new Error('read ECONNRESET');
+        },
+      });
+
+      const first = await probe.probe('conn-1');
+      expect(first.status).toBe('unknown');
+      expect(probe.getCached('conn-1')).toBeUndefined();
+
+      const second = await probe.probe('conn-1');
+      expect(second.status).toBe('unknown');
+      expect(call).toHaveBeenCalledTimes(2);
+      expect(monitorMock).toHaveBeenCalledTimes(2);
     });
   });
 
