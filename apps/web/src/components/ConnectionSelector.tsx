@@ -331,7 +331,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                       type="text"
                       value={formData.host}
                       onChange={(e) => handleInputChange('host', e.target.value)}
-                      placeholder="localhost"
+                      placeholder={isCloudMode ? 'your-redis-host.example.com' : 'localhost'}
                       className={`w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary ${
                         isCloudMode && isLocalhostHost(formData.host) ? 'border-amber-500 focus:ring-amber-500' : ''
                       }`}
