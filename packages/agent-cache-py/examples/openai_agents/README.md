@@ -1,8 +1,6 @@
 # OpenAI Agents SDK example
 
-This example shows how to wrap an OpenAI Agents SDK `ModelProvider` with
-`CachedModelProvider` so LLM responses are served from `betterdb-agent-cache`
-on repeat requests.
+This example shows how to wrap an OpenAI Agents SDK `ModelProvider` with `CachedModelProvider` so LLM responses are served from `betterdb-agent-cache` on repeat requests.
 
 It demonstrates:
 - text prompts via `Runner.run()`
@@ -24,5 +22,4 @@ python main.py
 
 ## Expected output
 
-The first call in each scenario is a miss and the second is a hit. At the end,
-cache stats show non-zero LLM hits and a positive cost-saved value.
+The first call in each scenario is a miss and the second is a hit. At the end,cache stats show non-zero LLM hits and a positive cost-saved value.
