@@ -222,7 +222,14 @@ export class Agent {
       this.resolveReconnectDelay = null;
     }
     while (this.reconnectLoopPromise) {
-      await this.reconnectLoopPromise;
+      const current = this.reconnectLoopPromise;
+      await current;
+      // A resolved Promise is still truthy. If a new iteration was scheduled,
+      // reconnectLoopPromise was overwritten with a fresh reference — loop again.
+      // If not (shuttingDown stopped the loop), clear the stale reference to exit.
+      if (this.reconnectLoopPromise === current) {
+        this.reconnectLoopPromise = null;
+      }
     }
     if (this.cliClient) {
       await this.cliClient.quit().catch(() => {});
