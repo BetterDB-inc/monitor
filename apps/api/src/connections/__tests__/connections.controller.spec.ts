@@ -150,6 +150,36 @@ describe('ConnectionsController.retryCapability', () => {
       expect(result.reason).toBe('plain-string-error');
     });
   });
+
+  describe('probe timeout', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('aborts a hung probe and returns "unknown" so the endpoint never pins forever', async () => {
+      const { controller, tracker } = setup({
+        // never resolves — simulates a hung adapter.call
+        callImpl: () => new Promise(() => undefined),
+      });
+      tracker.recordFailure(
+        'conn-1',
+        'canSlowLog',
+        new Error("ERR Command is not available: 'SLOWLOG'"),
+      );
+
+      const pending = controller.retryCapability('conn-1', 'canSlowLog');
+      await jest.advanceTimersByTimeAsync(5000);
+      const result = await pending;
+
+      expect(result.available).toBe('unknown');
+      expect(result.reason).toMatch(/timed out/i);
+      // Prior disabled state must be preserved across a timeout.
+      expect(tracker.isAvailable('conn-1', 'canSlowLog')).toBe(false);
+    });
+  });
 });
 
 describe('ConnectionsController.retryCapability — HttpException shapes', () => {

@@ -30,6 +30,33 @@ function isRuntimeCapabilityKey(value: string): value is keyof RuntimeCapabiliti
   return RUNTIME_CAPABILITY_KEYS.includes(value as keyof RuntimeCapabilities);
 }
 
+/**
+ * Hard ceiling on a capability-probe call. iovalkey configures its own
+ * `commandTimeout`, but adapters that lack one (or that get stuck before a
+ * command is even queued — TLS hand-shaking on a dead server, etc.) would
+ * otherwise pin the retry endpoint forever. On timeout the probe yields
+ * `available: 'unknown'` and the prior capability state is preserved.
+ */
+const CAPABILITY_PROBE_TIMEOUT_MS = 5000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Probe timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 @ApiTags('connections')
 @Controller('connections')
 export class ConnectionsController {
@@ -161,7 +188,7 @@ export class ConnectionsController {
     const adapter = this.registry.get(id);
     const [command, ...args] = CAPABILITY_TEST_COMMAND[capability];
     try {
-      await adapter.call(command, args);
+      await withTimeout(adapter.call(command, args), CAPABILITY_PROBE_TIMEOUT_MS);
       this.capabilityTracker.resetCapability(id, capability);
       return { available: true };
     } catch (error) {
