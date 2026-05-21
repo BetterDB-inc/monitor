@@ -1,6 +1,23 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { RuntimeCapabilities } from '@betterdb/shared';
 
+/**
+ * Cheapest read-only command per capability used to probe whether the
+ * server actually allows it. Surfaced for ConnectionsController so retry
+ * can run the probe synchronously instead of relying on the next poll
+ * cycle.
+ */
+export const CAPABILITY_TEST_COMMAND: Record<keyof RuntimeCapabilities, [string, ...string[]]> = {
+  canSlowLog: ['SLOWLOG', 'LEN'],
+  canCommandLog: ['COMMANDLOG', 'LEN', 'slow'],
+  canLatency: ['LATENCY', 'LATEST'],
+  canClientList: ['CLIENT', 'LIST'],
+  canAclLog: ['ACL', 'LOG', '1'],
+  canClusterInfo: ['CLUSTER', 'INFO'],
+  canClusterSlotStats: ['CLUSTER', 'SLOT-STATS'],
+  canMemory: ['MEMORY', 'STATS'],
+};
+
 const BLOCKED_COMMAND_PATTERNS = [
   /unknown command/i,
   /unknown subcommand/i,

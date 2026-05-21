@@ -12,8 +12,7 @@ import { SlowLogTable } from '../components/metrics/SlowLogTable';
 import { CommandLogTable } from '../components/metrics/CommandLogTable';
 import { SlowLogPatternAnalysisView } from '../components/metrics/SlowLogPatternAnalysis';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
-import { UnavailableOverlay } from '../components/UnavailableOverlay';
-import { CapabilityUnavailableBanner } from '../components/CapabilityUnavailableBanner';
+import { CapabilityStatusBanner } from '../components/CapabilityStatusBanner';
 import type { CommandLogType } from '../types/metrics';
 
 function getTabFromParams(params: URLSearchParams): CommandLogType {
@@ -250,21 +249,27 @@ export function SlowLog() {
         )}
       </div>
 
+      {slowLogUnavailable && (slowLogReason || commandLogReason) && (
+        <CapabilityStatusBanner
+          featureName="Slow Log"
+          command="SLOWLOG/COMMANDLOG"
+          reason={(slowLogReason ?? commandLogReason)?.reason ?? ''}
+          onRetry={handleRetrySlowLog}
+        />
+      )}
       {showSlowLogBanner && slowLogReason && (
-        <CapabilityUnavailableBanner
+        <CapabilityStatusBanner
           featureName="Slow Log"
           command="SLOWLOG"
           reason={slowLogReason.reason}
-          disabledAt={slowLogReason.disabledAt}
           onRetry={handleRetrySlowLog}
         />
       )}
       {showCommandLogBanner && commandLogReason && (
-        <CapabilityUnavailableBanner
+        <CapabilityStatusBanner
           featureName="Command Log"
           command="COMMANDLOG"
           reason={commandLogReason.reason}
-          disabledAt={commandLogReason.disabledAt}
           onRetry={handleRetryCommandLog}
         />
       )}
@@ -360,22 +365,6 @@ export function SlowLog() {
       )}
     </div>
   );
-
-  if (slowLogUnavailable) {
-    // Prefer the slowlog reason — that's the canonical command for both
-    // Valkey and Redis; commandlog is Valkey-only.
-    const blockedInfo = slowLogReason ?? commandLogReason;
-    return (
-      <UnavailableOverlay
-        featureName="Slow Log"
-        command="SLOWLOG/COMMANDLOG"
-        reason={blockedInfo?.reason}
-        onRetry={handleRetrySlowLog}
-      >
-        {content}
-      </UnavailableOverlay>
-    );
-  }
 
   return content;
 }

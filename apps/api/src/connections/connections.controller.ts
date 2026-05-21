@@ -2,7 +2,10 @@ import { Controller, Get, Post, Delete, Param, Body, HttpException, HttpStatus }
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { RuntimeCapabilities } from '@betterdb/shared';
 import { ConnectionRegistry } from './connection-registry.service';
-import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
+import {
+  CAPABILITY_TEST_COMMAND,
+  RuntimeCapabilityTracker,
+} from './runtime-capability-tracker.service';
 import {
   CreateConnectionDto,
   ConnectionListResponseDto,
@@ -132,22 +135,22 @@ export class ConnectionsController {
 
   @Post(':id/capabilities/:capability/retry')
   @ApiOperation({
-    summary: 'Re-enable a runtime capability and retry on next poll',
+    summary: 'Force a synchronous probe of a runtime capability',
     description:
-      'When a command (e.g. SLOWLOG) is reported as unsupported by the server, the corresponding runtime capability is disabled to avoid hammering the server. This endpoint re-enables that capability so it will be retried on the next poll cycle — useful if the operator believes the upstream provider has since enabled the command.',
+      'Runs the capability\'s test command against the live server and returns the verdict (`available: true` / `false` / `"unknown"`). On success the capability is re-enabled; on a definitive rejection it stays (or becomes) disabled with the fresh reason; on transient errors the previous state is preserved.',
   })
   @ApiParam({ name: 'id', description: 'Connection ID' })
   @ApiParam({
     name: 'capability',
     description: 'Runtime capability key (e.g. canSlowLog, canCommandLog, canLatency)',
   })
-  @ApiResponse({ status: 200, description: 'Capability reset', type: SuccessResponseDto })
+  @ApiResponse({ status: 200, description: 'Probe completed; see body for verdict' })
   @ApiResponse({ status: 400, description: 'Unknown capability key' })
   @ApiResponse({ status: 404, description: 'Connection not found' })
-  retryCapability(
+  async retryCapability(
     @Param('id') id: string,
     @Param('capability') capability: string,
-  ): SuccessResponseDto {
+  ): Promise<{ available: boolean | 'unknown'; reason?: string }> {
     if (!isRuntimeCapabilityKey(capability)) {
       throw new HttpException(`Unknown capability: ${capability}`, HttpStatus.BAD_REQUEST);
     }
@@ -155,8 +158,24 @@ export class ConnectionsController {
     if (!config) {
       throw new HttpException(`Connection ${id} not found`, HttpStatus.NOT_FOUND);
     }
-    this.capabilityTracker.resetCapability(id, capability);
-    return { success: true };
+    const adapter = this.registry.get(id);
+    const [command, ...args] = CAPABILITY_TEST_COMMAND[capability];
+    try {
+      await adapter.call(command, args);
+      this.capabilityTracker.resetCapability(id, capability);
+      return { available: true };
+    } catch (error) {
+      const wasBlocked = this.capabilityTracker.recordFailure(
+        id,
+        capability,
+        error instanceof Error ? error : String(error),
+      );
+      const reason = error instanceof Error ? error.message : String(error);
+      if (wasBlocked) {
+        return { available: false, reason };
+      }
+      return { available: 'unknown', reason };
+    }
   }
 
   @Delete(':id')
