@@ -11,10 +11,14 @@ export const CAPABILITY_TEST_COMMAND: Record<keyof RuntimeCapabilities, [string,
   canSlowLog: ['SLOWLOG', 'LEN'],
   canCommandLog: ['COMMANDLOG', 'LEN', 'slow'],
   canLatency: ['LATENCY', 'LATEST'],
-  canClientList: ['CLIENT', 'LIST'],
+  // CLIENT GETNAME is O(1) and exercises the same ACL gate as CLIENT LIST
+  // without scanning the connection table.
+  canClientList: ['CLIENT', 'GETNAME'],
   canAclLog: ['ACL', 'LOG', '1'],
   canClusterInfo: ['CLUSTER', 'INFO'],
-  canClusterSlotStats: ['CLUSTER', 'SLOT-STATS'],
+  // Match the shape used by the live poller (unified.adapter.ts) so a
+  // server that accepts the polled call also accepts the probe.
+  canClusterSlotStats: ['CLUSTER', 'SLOT-STATS', 'ORDERBY', 'key-count', 'LIMIT', '1'],
   canMemory: ['MEMORY', 'STATS'],
 };
 
@@ -26,6 +30,8 @@ const BLOCKED_COMMAND_PATTERNS = [
   // Upstash returns "ERR Command is not available: '<COMMAND>'" for unsupported commands
   /command is not available/i,
   /command .* not supported/i,
+  // Standalone Valkey/Redis on cluster-only commands (CLUSTER SLOT-STATS etc.)
+  /cluster support disabled/i,
 ];
 
 function isBlockedCommandError(error: Error | string): boolean {

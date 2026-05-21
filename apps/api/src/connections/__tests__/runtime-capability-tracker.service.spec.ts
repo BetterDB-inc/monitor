@@ -1,4 +1,7 @@
-import { RuntimeCapabilityTracker } from '../runtime-capability-tracker.service';
+import {
+  CAPABILITY_TEST_COMMAND,
+  RuntimeCapabilityTracker,
+} from '../runtime-capability-tracker.service';
 
 describe('RuntimeCapabilityTracker', () => {
   let tracker: RuntimeCapabilityTracker;
@@ -84,6 +87,48 @@ describe('RuntimeCapabilityTracker', () => {
 
       expect(handled).toBe(true);
       expect(tracker.isAvailable(connectionId, 'canSlowLog')).toBe(false);
+    });
+
+    it('treats "cluster support disabled" (standalone) as a definitive rejection', () => {
+      const handled = tracker.recordFailure(
+        connectionId,
+        'canClusterSlotStats',
+        new Error('ERR This instance has cluster support disabled'),
+      );
+
+      expect(handled).toBe(true);
+      expect(tracker.isAvailable(connectionId, 'canClusterSlotStats')).toBe(false);
+    });
+  });
+
+  describe('CAPABILITY_TEST_COMMAND', () => {
+    it('covers every key of RuntimeCapabilities', () => {
+      const expected = [
+        'canSlowLog',
+        'canCommandLog',
+        'canLatency',
+        'canClientList',
+        'canAclLog',
+        'canClusterInfo',
+        'canClusterSlotStats',
+        'canMemory',
+      ];
+      expect(Object.keys(CAPABILITY_TEST_COMMAND).sort()).toEqual(expected.sort());
+    });
+
+    it('CLUSTER SLOT-STATS probe passes ORDERBY+LIMIT so a capable server does not reject on missing args', () => {
+      expect(CAPABILITY_TEST_COMMAND.canClusterSlotStats).toEqual([
+        'CLUSTER',
+        'SLOT-STATS',
+        'ORDERBY',
+        'key-count',
+        'LIMIT',
+        '1',
+      ]);
+    });
+
+    it('canClientList uses CLIENT GETNAME (O(1)) rather than CLIENT LIST', () => {
+      expect(CAPABILITY_TEST_COMMAND.canClientList).toEqual(['CLIENT', 'GETNAME']);
     });
   });
 
