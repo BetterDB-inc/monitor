@@ -1,28 +1,25 @@
 import { useState } from 'react';
-import { AlertTriangle, XCircle, RefreshCw } from 'lucide-react';
+import { AlertTriangle, XCircle, RefreshCw, HelpCircle } from 'lucide-react';
 import { Button } from './ui/button';
+import type { CapabilityRetryVerdict } from '../types/metrics';
+
+const PERCEPTIBLE_RETRY_DELAY_MS = 3000;
 
 interface Props {
   featureName: string;
   command: string;
-  /** Verbatim server error to surface in the error banner. */
   reason: string;
-  /** Called on retry. Should re-probe the capability and resolve when done. */
-  onRetry?: () => Promise<void> | void;
+  /**
+   * Called on retry. Returns the probe verdict so the banner can render an
+   * `'unknown'` (transient) outcome in an amber tone instead of red.
+   * Optional — without it the Retry button is hidden.
+   */
+  onRetry?: () => Promise<CapabilityRetryVerdict | undefined> | CapabilityRetryVerdict | void;
 }
 
-/**
- * Stacked warn + error banners shown above page content when a capability is
- * unavailable. The retry button sits at top-right of the block. While a retry
- * is in flight, the error banner is replaced with a "Force-retrying X…"
- * message so the operator gets immediate feedback that the click landed.
- *
- * On successful retry the caller's effect (capability state changes to
- * available) will unmount this component; on failure the new reason is
- * delivered through props (`reason` updates) and the banner stays.
- */
 export function CapabilityStatusBanner({ featureName, command, reason, onRetry }: Props) {
   const [retrying, setRetrying] = useState(false);
+  const [lastVerdict, setLastVerdict] = useState<CapabilityRetryVerdict | null>(null);
 
   const handleRetry = async () => {
     if (!onRetry) {
@@ -30,14 +27,18 @@ export function CapabilityStatusBanner({ featureName, command, reason, onRetry }
     }
     setRetrying(true);
     try {
-      // Brief delay so the "Force-retrying…" state is actually perceptible
-      // before the (typically <100 ms) probe round-trip resolves it.
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      await onRetry();
+      await new Promise((resolve) => setTimeout(resolve, PERCEPTIBLE_RETRY_DELAY_MS));
+      const verdict = await onRetry();
+      setLastVerdict(verdict ?? null);
     } finally {
       setRetrying(false);
     }
   };
+
+  const lastWasTransient = lastVerdict?.available === 'unknown';
+  // The verdict's reason (transient error) is fresher than the prop-level
+  // disabled-because reason when the last retry was inconclusive.
+  const displayedReason = lastWasTransient && lastVerdict?.reason ? lastVerdict.reason : reason;
 
   return (
     <div className="space-y-2">
@@ -57,15 +58,40 @@ export function CapabilityStatusBanner({ featureName, command, reason, onRetry }
           </div>
         </div>
       </div>
-      <div
-        role="alert"
-        className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3"
-      >
-        <XCircle className="mt-0.5 size-4 shrink-0 text-red-600 dark:text-red-400" />
-        <div className="flex-1 min-w-0 break-words font-mono text-xs text-red-900 dark:text-red-100">
-          {retrying ? `Force-retrying ${command}…` : reason}
+      {retrying ? (
+        <div
+          role="status"
+          className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-900 dark:text-amber-100"
+        >
+          <RefreshCw className="mt-0.5 size-4 shrink-0 animate-spin text-amber-600 dark:text-amber-400" />
+          <div className="min-w-0">Force-retrying {command}…</div>
         </div>
-      </div>
+      ) : lastWasTransient ? (
+        <div
+          role="alert"
+          className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3"
+        >
+          <HelpCircle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <div className="flex-1 min-w-0 space-y-1 text-amber-900 dark:text-amber-100">
+            <div className="text-xs font-medium">
+              Couldn&apos;t verify — transient error. Try again.
+            </div>
+            <div className="break-words font-mono text-xs text-amber-900/80 dark:text-amber-100/80">
+              {displayedReason}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div
+          role="alert"
+          className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3"
+        >
+          <XCircle className="mt-0.5 size-4 shrink-0 text-red-600 dark:text-red-400" />
+          <div className="flex-1 min-w-0 break-words font-mono text-xs text-red-900 dark:text-red-100">
+            {displayedReason}
+          </div>
+        </div>
+      )}
       {onRetry && (
         <div className="flex justify-start">
           <Button

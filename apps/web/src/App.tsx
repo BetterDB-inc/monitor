@@ -5,7 +5,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { metricsApi } from './api/metrics';
 import { fetchApi } from './api/client';
 import { CapabilitiesContext, CapabilitiesState } from './hooks/useCapabilities';
-import type { RuntimeCapabilities } from './types/metrics';
+import type { CapabilityRetryVerdict, RuntimeCapabilities } from './types/metrics';
 import { LicenseContext, useLicenseStatus } from './hooks/useLicense';
 import { UpgradePromptContext, useUpgradePromptState } from './hooks/useUpgradePrompt';
 import { ConnectionContext, useConnectionState } from './hooks/useConnection';
@@ -56,15 +56,16 @@ function AppContent() {
   }, []);
 
   const retryCapability = useCallback(
-    async (capability: keyof RuntimeCapabilities) => {
+    async (capability: keyof RuntimeCapabilities): Promise<CapabilityRetryVerdict | undefined> => {
       if (!currentConnectionId) {
-        return;
+        return undefined;
       }
-      await fetchApi(
+      const verdict = await fetchApi<CapabilityRetryVerdict>(
         `/connections/${encodeURIComponent(currentConnectionId)}/capabilities/${encodeURIComponent(capability)}/retry`,
         { method: 'POST' },
       );
       refreshCapabilities();
+      return verdict;
     },
     [currentConnectionId, refreshCapabilities],
   );

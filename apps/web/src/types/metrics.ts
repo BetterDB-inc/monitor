@@ -31,6 +31,11 @@ export type RuntimeCapabilityReasons = Partial<
   Record<keyof RuntimeCapabilities, RuntimeCapabilityDisabledInfo>
 >;
 
+export interface CapabilityRetryVerdict {
+  available: boolean | 'unknown';
+  reason?: string;
+}
+
 export interface HealthResponse {
   status: 'connected' | 'disconnected' | 'error' | 'waiting';
   database: {

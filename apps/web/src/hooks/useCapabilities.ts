@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react';
 import type {
+  CapabilityRetryVerdict,
   DatabaseCapabilities,
   RuntimeCapabilities,
   RuntimeCapabilityReasons,
@@ -14,7 +15,9 @@ export interface CapabilitiesState {
    * retried on the next poll. Optional because it is provided by App.tsx;
    * tests and isolated component mounts may leave it undefined.
    */
-  retryCapability?: (capability: keyof RuntimeCapabilities) => Promise<void>;
+  retryCapability?: (
+    capability: keyof RuntimeCapabilities,
+  ) => Promise<CapabilityRetryVerdict | undefined>;
 }
 
 export const CapabilitiesContext = createContext<CapabilitiesState>({

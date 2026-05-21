@@ -1,6 +1,6 @@
 import { Controller, Get, Post, Delete, Param, Body, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
-import { RuntimeCapabilities } from '@betterdb/shared';
+import { CapabilityRetryVerdict, RuntimeCapabilities } from '@betterdb/shared';
 import { ConnectionRegistry } from './connection-registry.service';
 import {
   CAPABILITY_TEST_COMMAND,
@@ -150,7 +150,7 @@ export class ConnectionsController {
   async retryCapability(
     @Param('id') id: string,
     @Param('capability') capability: string,
-  ): Promise<{ available: boolean | 'unknown'; reason?: string }> {
+  ): Promise<CapabilityRetryVerdict> {
     if (!isRuntimeCapabilityKey(capability)) {
       throw new HttpException(`Unknown capability: ${capability}`, HttpStatus.BAD_REQUEST);
     }

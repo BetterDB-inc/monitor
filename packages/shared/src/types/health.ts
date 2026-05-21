@@ -34,6 +34,18 @@ export type RuntimeCapabilityReasons = Partial<
   Record<keyof RuntimeCapabilities, RuntimeCapabilityDisabledInfo>
 >;
 
+/**
+ * Verdict returned by POST /connections/:id/capabilities/:capability/retry.
+ * `available: 'unknown'` means the probe failed for a transient reason
+ * (network blip, timeout, connection reset) — the prior capability state
+ * is preserved and the operator should try again rather than treat it as
+ * a definitive answer.
+ */
+export interface CapabilityRetryVerdict {
+  available: boolean | 'unknown';
+  reason?: string;
+}
+
 export interface HealthResponse {
   status: 'connected' | 'disconnected' | 'error' | 'waiting';
   database: {
