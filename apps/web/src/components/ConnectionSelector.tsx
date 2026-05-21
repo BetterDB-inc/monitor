@@ -30,7 +30,12 @@ interface ConnectionFormData {
 
 function isLocalhostHost(host: string): boolean {
   const h = host.trim().toLowerCase();
-  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+  return (
+    h === 'localhost' ||
+    h === '::1' ||
+    h === '0.0.0.0' ||
+    /^127\./.test(h)
+  );
 }
 
 const defaultFormData: ConnectionFormData = {
@@ -72,6 +77,10 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   };
 
   const handleTestConnection = async () => {
+    if (isCloudMode && isLocalhostHost(formData.host)) {
+      setTestResult({ success: false, message: 'localhost is not reachable from the cloud. Please provide a publicly accessible host.' });
+      return;
+    }
     setTesting(true);
     setTestResult(null);
     try {
