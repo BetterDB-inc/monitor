@@ -28,6 +28,11 @@ interface ConnectionFormData {
   tls: boolean;
 }
 
+function isLocalhostHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+}
+
 const defaultFormData: ConnectionFormData = {
   name: '',
   host: 'localhost',
@@ -41,6 +46,7 @@ const defaultFormData: ConnectionFormData = {
 type AddTab = 'direct' | 'agent';
 
 export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
+  const emptyFormData = isCloudMode ? { ...defaultFormData, host: '' } : defaultFormData;
   const isDemo = useIsDemo();
   const { currentConnection, connections, loading, error, setConnection, refreshConnections } = useConnection();
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -51,7 +57,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     return () => window.removeEventListener('betterdb:open-add-connection', handler);
   }, []);
   const [showManageDialog, setShowManageDialog] = useState(false);
-  const [formData, setFormData] = useState<ConnectionFormData>(defaultFormData);
+  const [formData, setFormData] = useState<ConnectionFormData>(emptyFormData);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -100,6 +106,10 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       setTestResult({ success: false, message: 'Name and host are required' });
       return;
     }
+    if (isCloudMode && isLocalhostHost(formData.host)) {
+      setTestResult({ success: false, message: 'localhost is not reachable from the cloud. Please provide a publicly accessible host.' });
+      return;
+    }
 
     setSaving(true);
     try {
@@ -117,7 +127,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         }),
       });
       setShowAddDialog(false);
-      setFormData(defaultFormData);
+      setFormData(emptyFormData);
       setTestResult(null);
       await refreshConnections();
     } catch (err) {
@@ -258,7 +268,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       <Dialog open={showAddDialog} onOpenChange={(open) => {
         setShowAddDialog(open);
         if (!open) {
-          setFormData(defaultFormData);
+          setFormData(emptyFormData);
           setTestResult(null);
         }
       }}>
@@ -313,8 +323,32 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                       value={formData.host}
                       onChange={(e) => handleInputChange('host', e.target.value)}
                       placeholder="localhost"
-                      className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                      className={`w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary ${
+                        isCloudMode && isLocalhostHost(formData.host) ? 'border-amber-500 focus:ring-amber-500' : ''
+                      }`}
                     />
+                    {isCloudMode && isLocalhostHost(formData.host) && (
+                      <div className="mt-1.5 text-xs text-amber-600 dark:text-amber-500 leading-snug space-y-1">
+                        <p><strong>localhost won't work on the cloud.</strong> Please provide a publicly accessible address.</p>
+                        <a
+                          href="https://docs.betterdb.com/providers/"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block underline underline-offset-2 hover:text-amber-700 dark:hover:text-amber-400"
+                        >
+                          Provider setup guides →
+                        </a>
+                        <p>Want to monitor a local instance?</p>
+                        <a
+                          href="https://hub.docker.com/r/betterdb/monitor"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block underline underline-offset-2 hover:text-amber-700 dark:hover:text-amber-400"
+                        >
+                          Run BetterDB locally with Docker →
+                        </a>
+                      </div>
+                    )}
                   </div>
                   <div>
                     <label className="block text-sm font-medium mb-1">Port</label>
@@ -384,7 +418,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               <div className="flex items-center justify-between pt-3 border-t bg-muted/30 -mx-4 -mb-4 px-4 py-3 rounded-b-xl">
                 <button
                   onClick={handleTestConnection}
-                  disabled={testing || !formData.host}
+                  disabled={testing || !formData.host || (isCloudMode && isLocalhostHost(formData.host))}
                   className="px-4 py-2 text-sm border rounded-md hover:bg-muted disabled:opacity-50"
                 >
                   {testing ? 'Testing...' : 'Test Connection'}
@@ -393,7 +427,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   <button
                     onClick={() => {
                       setShowAddDialog(false);
-                      setFormData(defaultFormData);
+                      setFormData(emptyFormData);
                       setTestResult(null);
                     }}
                     className="px-4 py-2 text-sm border rounded-md hover:bg-muted"
@@ -402,7 +436,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   </button>
                   <button
                     onClick={handleSaveConnection}
-                    disabled={saving || !formData.name || !formData.host}
+                    disabled={saving || !formData.name || !formData.host || (isCloudMode && isLocalhostHost(formData.host))}
                     className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
                   >
                     {saving ? 'Saving...' : 'Save'}
@@ -414,7 +448,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             <AgentTab
               onClose={() => {
                 setShowAddDialog(false);
-                setFormData(defaultFormData);
+                setFormData(emptyFormData);
                 setTestResult(null);
                 setAddTab('direct');
               }}
