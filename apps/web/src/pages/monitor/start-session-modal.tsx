@@ -17,12 +17,7 @@ import {
   SelectValue,
 } from '../../components/ui/select';
 import { useQuery } from '@tanstack/react-query';
-import {
-  MonitorNodeDescriptor,
-  monitorApi,
-  PreflightResult,
-  StoredCaptureSession,
-} from '../../api/monitor';
+import { MonitorNodeDescriptor, monitorApi, PreflightResult, StoredCaptureSession } from '../../api/monitor';
 import { PreflightPanel } from './preflight-panel';
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
@@ -39,7 +34,9 @@ function ClusterNodeField({
 }) {
   return (
     <div>
-      <label className="text-xs font-medium text-muted-foreground">Cluster node</label>
+      <label className="text-xs font-medium text-muted-foreground">
+        Cluster node
+      </label>
       <Select value={selectedId} onValueChange={onChange}>
         <SelectTrigger className="w-full">
           <SelectValue />
@@ -231,10 +228,7 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
                   checked={fanOut}
                   onChange={(e) => setFanOut(e.target.checked)}
                 />
-                <span>
-                  Fan-out across all primaries (
-                  {clusterNodes.filter((n) => n.role === 'master').length} nodes)
-                </span>
+                <span>Fan-out across all primaries ({clusterNodes.filter((n) => n.role === 'master').length} nodes)</span>
               </label>
               {!fanOut && (
                 <ClusterNodeField
@@ -271,8 +265,7 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
                 Sessions over 5 minutes can produce significant load. Confirm to proceed.
               </p>
               <p className="mt-1 text-xs text-amber-700/90 dark:text-amber-200/80">
-                Duration: {duration}
-                {unit === 'm' ? ' min' : ' s'} ({durationMs.toLocaleString()} ms)
+                Duration: {duration}{unit === 'm' ? ' min' : ' s'} ({durationMs.toLocaleString()} ms)
               </p>
             </div>
           )}
@@ -285,7 +278,11 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
             Cancel
           </Button>
           <Button onClick={handleSubmit} disabled={submitting || preflightLoading}>
-            {submitting ? 'Starting…' : confirming ? 'Yes, start session' : 'Start session'}
+            {submitting
+              ? 'Starting…'
+              : confirming
+                ? 'Yes, start session'
+                : 'Start session'}
           </Button>
         </DialogFooter>
       </DialogContent>
