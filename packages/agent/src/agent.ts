@@ -198,14 +198,13 @@ export class Agent {
       this.executor = new CommandExecutor(this.client, { unsafeMode: this.config.unsafeMode });
       await this.client.connect();
       this.valkeyConnected = true;
-      // Mark as fully started before opening the WS connection. Error/close
-      // handlers gate their reconnect path on this.started, so any error that
-      // fires synchronously during connect() (before this line) is ignored and
-      // the catch block handles cleanup instead.
-      this.started = true;
 
       await this.detectCapabilities();
       console.log(`[Agent] Detected ${this.valkeyType} ${this.valkeyVersion}`);
+      // Mark fully started only after capability detection finishes. Error/close
+      // handlers gate their reconnect path on this.started, so any disconnect
+      // during detectCapabilities() is also ignored — the catch block handles it.
+      this.started = true;
 
       console.log(`[Agent] Connecting to cloud: ${this.config.cloudUrl}`);
       this.wsClient.connect();
