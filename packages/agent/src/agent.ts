@@ -226,6 +226,12 @@ export class Agent {
       this.resolveReconnectDelay();
       this.resolveReconnectDelay = null;
     }
+    // If reconnectWithFreshToken is blocked on client.connect(), abort it so
+    // stop() doesn't stall until TCP timeout. The resulting rejection is caught
+    // by reconnectWithFreshToken's catch block, which skips retry on shuttingDown.
+    if (this.isReconnecting && this.client) {
+      try { this.client.disconnect(); } catch { /* ignore */ }
+    }
     while (this.reconnectLoopPromise) {
       const current = this.reconnectLoopPromise;
       await current;
