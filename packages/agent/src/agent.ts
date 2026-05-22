@@ -35,6 +35,8 @@ export class Agent {
   private reconnectAttempt = 0;
   private reconnectLoopPromise: Promise<void> | null = null;
   private resolveReconnectDelay: (() => void) | null = null;
+  private readonly shutdownSignal: Promise<void>;
+  private resolveShutdown!: () => void;
   private cliExecutor: CommandExecutor | null = null;
   private cliConnectingPromise: Promise<CommandExecutor> | null = null;
   private wsClient: WsClient;
@@ -45,7 +47,14 @@ export class Agent {
   private capabilities: string[] = [];
 
   private async createValkeyClient(connectionName: string): Promise<Valkey> {
-    const password = await this.authProvider.getToken();
+    const result = await Promise.race([
+      this.authProvider.getToken().then(t => ({ token: t, shutdown: false as const })),
+      this.shutdownSignal.then(() => ({ token: '', shutdown: true as const })),
+    ]);
+    if (result.shutdown) {
+      throw new Error('agent shutting down');
+    }
+    const password = result.token;
     // For IAM modes we disable iovalkey's internal reconnect because each
     // reconnect must use a fresh token. The Agent rebuilds the client on close.
     const retryStrategy = this.authProvider.requiresFreshTokenPerConnection
@@ -175,6 +184,7 @@ export class Agent {
 
   constructor(private readonly config: AgentConfig) {
     this.authProvider = this.buildAuthProvider();
+    this.shutdownSignal = new Promise<void>(resolve => { this.resolveShutdown = resolve; });
 
     if (config.unsafeMode) {
       console.warn('[Agent] WARNING: Unsafe mode enabled. All commands are permitted.');
@@ -218,6 +228,7 @@ export class Agent {
 
   async stop(): Promise<void> {
     this.shuttingDown = true;
+    this.resolveShutdown();
     console.log('[Agent] Shutting down...');
     this.wsClient.close();
     // If the reconnect loop is sleeping in its backoff delay, wake it immediately
