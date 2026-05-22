@@ -353,9 +353,6 @@ importers:
       '@aws-sdk/util-format-url':
         specifier: ^3.667.0
         version: 3.972.14
-      '@betterdb/shared':
-        specifier: workspace:*
-        version: link:../shared
       '@smithy/protocol-http':
         specifier: ^4.1.0
         version: 4.1.8
@@ -369,6 +366,9 @@ importers:
         specifier: ^8.20.1
         version: 8.20.1
     devDependencies:
+      '@betterdb/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@types/jest':
         specifier: ^29.5.14
         version: 29.5.14
@@ -15077,7 +15077,7 @@ snapshots:
       isstream: 0.1.2
       jsonwebtoken: 9.0.3
       mime-types: 2.1.35
-      retry-axios: 2.6.0(axios@1.14.0)
+      retry-axios: 2.6.0(axios@1.14.0(debug@4.4.3))
       tough-cookie: 4.1.4
     transitivePeerDependencies:
       - supports-color
@@ -17247,7 +17247,7 @@ snapshots:
 
   ret@0.5.0: {}
 
-  retry-axios@2.6.0(axios@1.14.0):
+  retry-axios@2.6.0(axios@1.14.0(debug@4.4.3)):
     dependencies:
       axios: 1.14.0(debug@4.4.3)
 
