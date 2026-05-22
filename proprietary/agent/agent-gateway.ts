@@ -124,7 +124,8 @@ export class AgentGateway {
     const hello = agent.agentHello!;
     this.logger.log(
       `Agent ${agent.id} hello: ${hello.valkey.type} ${hello.valkey.version} ` +
-      `(cluster: ${hello.valkey.cluster}, capabilities: ${hello.capabilities.join(', ')})`,
+      `(cluster: ${hello.valkey.cluster}, auth: ${hello.authMode ?? 'password'}, ` +
+      `capabilities: ${hello.capabilities.join(', ')})`,
     );
 
     // Create the DatabaseAdapter
@@ -189,6 +190,7 @@ export class AgentGateway {
           connectedAt: agent.connectedAt,
           agentVersion: agent.agentHello.version,
           valkey: agent.agentHello.valkey,
+          authMode: agent.agentHello.authMode,
         });
       }
     }

@@ -99,11 +99,84 @@ clustercfg.my-cluster.abc123.use1.cache.amazonaws.com  # cluster mode
 my-cluster.serverless.use1.cache.amazonaws.com          # serverless
 ```
 
-## Step 5 - Run the BetterDB Agent
+## Authentication options
 
-Generate a token in BetterDB Cloud (**connection selector > Via Agent tab > Generate Token**), then run the agent on your EC2 instance:
+BetterDB supports two ways for the agent to authenticate against ElastiCache. Pick one before continuing.
 
-**Without auth (no password configured on the cluster):**
+| Mode | When to pick | Requires |
+|------|--------------|----------|
+| **Password** | Cluster uses an AUTH token, or you do not want to use IAM | An auth token configured on the cluster |
+| **IAM** (recommended for Valkey 7.2+ / Redis 7.0+) | You want short-lived rotating credentials, audit via CloudTrail, and no static secrets | TLS enabled on the cluster, an IAM-mode user, and an EC2 instance role with `elasticache:Connect` |
+
+If you pick IAM, complete [Step 5a: configure IAM authentication](#step-5a---configure-iam-authentication-iam-only) before running the agent. If you pick password, skip directly to [Step 6](#step-6---run-the-betterdb-agent).
+
+## Step 5a - Configure IAM authentication (IAM only)
+
+This step sets up the AWS-side resources required for IAM-based authentication. Skip if you are using password authentication.
+
+Three things have to be in place:
+
+1. **An ElastiCache IAM user.** The user-id must equal the user-name; this is an AWS requirement for IAM-mode users.
+
+   ```bash
+   aws elasticache create-user \
+     --user-id <your-iam-user-id> \
+     --user-name <your-iam-user-id> \
+     --engine valkey \
+     --access-string "on ~* +@all" \
+     --authentication-mode Type=iam
+   ```
+
+   For Redis-engine clusters, change `--engine valkey` to `--engine redis`.
+
+2. **A user group containing the IAM user.** For Valkey-engine clusters, the user group must also include a Valkey-engine user named `default`. The AWS-provided `default` user is Redis-engine and AWS rejects mixing engines in a user group.
+
+   ```bash
+   # Only needed for Valkey clusters - create a disabled placeholder
+   # named "default" so the user group has a default user
+   aws elasticache create-user \
+     --user-id valkey-default \
+     --user-name default \
+     --engine valkey \
+     --access-string "off" \
+     --authentication-mode Type=password --passwords "$(openssl rand -hex 24)Aa1!"
+
+   # Then create the user group
+   aws elasticache create-user-group \
+     --user-group-id <your-user-group-id> \
+     --engine valkey \
+     --user-ids valkey-default <your-iam-user-id>
+   ```
+
+   Attach the user group to the cluster (set it during cluster creation, or use `aws elasticache modify-replication-group --user-group-ids-to-add` for existing clusters).
+
+3. **An IAM policy on the EC2 instance role granting `elasticache:Connect`.**
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": "elasticache:Connect",
+       "Resource": [
+         "arn:aws:elasticache:<region>:<account-id>:replicationgroup:<your-cache-name>",
+         "arn:aws:elasticache:<region>:<account-id>:user:<your-iam-user-id>"
+       ]
+     }]
+   }
+   ```
+
+   Attach this policy to the IAM role used by your EC2 instance profile. The agent reads credentials from the instance metadata service.
+
+> The cluster must have encryption in transit (TLS) enabled. IAM authentication will not work on a cluster without TLS, and the agent enforces this at startup.
+
+## Step 6 - Run the BetterDB Agent
+
+Generate a token in BetterDB Cloud (**connection selector > Via Agent tab > Generate Token**), then run the agent on your EC2 instance.
+
+### Password authentication
+
+**Without auth (no auth token configured on the cluster):**
 ```bash
 docker run -d --name betterdb-agent \
   --restart=always \
@@ -127,9 +200,31 @@ docker run -d --name betterdb-agent \
   betterdb/agent
 ```
 
+### IAM authentication
+
+```bash
+docker run -d --name betterdb-agent \
+  --restart=always \
+  -e BETTERDB_TOKEN="<your-token>" \
+  -e BETTERDB_CLOUD_URL="wss://<your-workspace>.app.betterdb.com/agent/ws" \
+  -e VALKEY_HOST="<your-elasticache-endpoint>" \
+  -e VALKEY_PORT="6379" \
+  -e VALKEY_USERNAME="<your-iam-user-id>" \
+  -e VALKEY_TLS="true" \
+  -e AGENT_AUTH_MODE="elasticache-iam" \
+  -e AWS_REGION="us-east-1" \
+  -e AWS_RESOURCE_NAME="<your-cache-name>" \
+  -e AWS_USER_ID="<your-iam-user-id>" \
+  betterdb/agent
+```
+
+For ElastiCache Serverless, also set `-e AWS_SERVERLESS="true"`.
+
+When running on EC2 with an instance profile attached, no AWS credential env vars are needed - the agent reads credentials from the instance metadata service. If running outside EC2, supply `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` env vars on the container.
+
 > ElastiCache Serverless always requires TLS. For self-designed clusters, TLS is enabled if you checked **Encryption in transit** when creating the cluster.
 
-## Step 6 - Verify the Connection
+## Step 7 - Verify the Connection
 
 Check the agent logs:
 ```bash
@@ -184,4 +279,8 @@ In BetterDB Cloud, the connection appears in the **Via Agent** tab with a **Conn
 | `WRONGPASS` / `NOAUTH` | Auth token mismatch | Set `VALKEY_PASSWORD` to the **Auth token** configured on the cluster (not an IAM credential) |
 | `SSL routines` / TLS error | TLS mismatch | Add `-e VALKEY_TLS=true` if the cluster has encryption in transit enabled; remove it if not |
 | Agent connects but dashboard shows no data | Wrong endpoint type | For cluster mode enabled, use the **Configuration endpoint**, not a node or primary endpoint |
+| `WRONGPASS` in IAM mode immediately after policy attach | IAM policy propagation lag (~30-60s) | Wait one minute; the agent retries automatically on reconnect |
+| `WRONGPASS` persists in IAM mode | User-id != user-name, or user not in the cluster's user group | Verify with `aws elasticache describe-users` and `aws elasticache describe-user-groups` |
+| `NOAUTH` in IAM mode | TLS disabled on the cluster | IAM auth requires `transit-encryption-enabled` on the replication group; recreate or modify the cluster with TLS |
+| `Could not load credentials` at agent startup in IAM mode | No AWS credentials reachable from the agent process | Attach an EC2 instance profile, or pass `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` env vars to the container |
 | `ERR unknown command 'CONFIG'` | AWS blocks CONFIG | Expected - BetterDB handles this automatically |

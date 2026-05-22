@@ -655,6 +655,14 @@ function AgentTab({
                     {agent.valkey.tls ? ' TLS' : ''}
                   </div>
                 </div>
+                {agent.authMode === 'elasticache-iam' && (
+                  <span
+                    className="text-xs px-1.5 py-0.5 bg-indigo-500/10 text-indigo-600 rounded"
+                    title="Agent uses AWS IAM authentication; credentials rotate automatically"
+                  >
+                    IAM
+                  </span>
+                )}
                 <span className="text-xs px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded">
                   Agent
                 </span>

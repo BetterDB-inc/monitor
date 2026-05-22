@@ -12,16 +12,25 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "test": "jest"
   },
   "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/credential-provider-node": "^3.668.0",
+    "@smithy/protocol-http": "^4.1.0",
+    "@smithy/signature-v4": "^4.2.0",
+    "@aws-sdk/util-format-url": "^3.667.0",
     "@betterdb/shared": "workspace:*",
     "iovalkey": "^0.3.3",
     "ws": "^8.20.1"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.14",
     "@types/node": "^22.19.15",
     "@types/ws": "^8.18.1",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   },

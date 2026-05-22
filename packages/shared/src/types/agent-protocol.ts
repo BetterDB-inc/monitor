@@ -1,3 +1,11 @@
+/**
+ * How the agent authenticates to the underlying Valkey/Redis instance.
+ * "password" covers all static-credential modes (AUTH token, ACL password).
+ * "elasticache-iam" indicates the agent is minting short-lived SigV4-signed
+ * tokens against AWS credentials and rotating them on every reconnect.
+ */
+export type AuthMode = 'password' | 'elasticache-iam';
+
 // Cloud → Agent
 export interface AgentCommandMessage {
   id: string;
@@ -33,6 +41,11 @@ export interface AgentHelloMessage {
     tls: boolean;
     cluster: boolean;
   };
+  /**
+   * Optional. Older agent versions do not send this field; the cloud should
+   * treat absence as "password" for display purposes.
+   */
+  authMode?: AuthMode;
 }
 
 // Bidirectional heartbeat
@@ -81,4 +94,6 @@ export interface AgentConnectionInfo {
     tls: boolean;
     cluster: boolean;
   };
+  /** Optional; absent when the agent did not report it (older versions). */
+  authMode?: AuthMode;
 }
