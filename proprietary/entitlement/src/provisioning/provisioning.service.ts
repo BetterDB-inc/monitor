@@ -750,8 +750,6 @@ export class ProvisioningService {
               'alb.ingress.kubernetes.io/listen-ports': '[{"HTTPS":443}]',
               'alb.ingress.kubernetes.io/ssl-redirect': '443',
               'alb.ingress.kubernetes.io/group.name': this.albGroupName,
-              'alb.ingress.kubernetes.io/healthcheck-path': '/health',
-              'alb.ingress.kubernetes.io/healthcheck-interval-seconds': '10',
             },
           },
           spec: {
@@ -778,19 +776,17 @@ export class ProvisioningService {
       });
     } catch (error: any) {
       if (this.isAlreadyExistsError(error)) {
-        // Patch the group.name annotation so retries move the ingress to the current ALB group.
-        // k8s client v1.x sends application/json-patch+json by default, so use JSON Patch array format.
-        // '/' in annotation keys must be escaped as '~1' per RFC 6902.
+        // Patch the group.name annotation so retries move the ingress to the current ALB group
         await this.networkingApi.patchNamespacedIngress({
           name: 'betterdb',
           namespace,
-          body: [
-            {
-              op: 'add',
-              path: '/metadata/annotations/alb.ingress.kubernetes.io~1group.name',
-              value: this.albGroupName,
+          body: {
+            metadata: {
+              annotations: {
+                'alb.ingress.kubernetes.io/group.name': this.albGroupName,
+              },
             },
-          ] as any,
+          },
         });
       } else {
         throw error;
