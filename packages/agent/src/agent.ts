@@ -30,6 +30,7 @@ export class Agent {
   private cliClient: Valkey | null = null;
   private readonly authProvider: AuthProvider;
   private shuttingDown = false;
+  private started = false;
   private isReconnecting = false;
   private reconnectAttempt = 0;
   private reconnectLoopPromise: Promise<void> | null = null;
@@ -90,7 +91,7 @@ export class Agent {
       // (ECONNRESET, ETIMEDOUT) are handled by the close handler below, since
       // iovalkey emits close after error in those cases.
       const isAuthError = /WRONGPASS|NOAUTH/i.test(err.message);
-      if (!this.shuttingDown && this.authProvider.requiresFreshTokenPerConnection && isAuthError && !this.isReconnecting) {
+      if (this.started && !this.shuttingDown && this.authProvider.requiresFreshTokenPerConnection && isAuthError && !this.isReconnecting) {
         this.reconnectLoopPromise = this.reconnectWithFreshToken().catch((reconnectErr) => {
           console.error(`[Agent] IAM reconnect failed: ${reconnectErr.message}`);
         });
@@ -100,7 +101,7 @@ export class Agent {
     client.on('close', () => {
       this.valkeyConnected = false;
       if (this.shuttingDown) return;
-      if (this.authProvider.requiresFreshTokenPerConnection && !this.isReconnecting) {
+      if (this.started && this.authProvider.requiresFreshTokenPerConnection && !this.isReconnecting) {
         this.reconnectLoopPromise = this.reconnectWithFreshToken().catch((err) => {
           console.error(`[Agent] IAM reconnect failed: ${err.message}`);
         });
@@ -160,6 +161,7 @@ export class Agent {
       }
       this.reconnectAttempt = 0;
       this.isReconnecting = false;
+      this.reconnectLoopPromise = null;
     } catch (err: any) {
       console.error(`[Agent] Failed to reconnect with fresh token: ${err.message}`);
       this.isReconnecting = false;
@@ -196,6 +198,11 @@ export class Agent {
       this.executor = new CommandExecutor(this.client, { unsafeMode: this.config.unsafeMode });
       await this.client.connect();
       this.valkeyConnected = true;
+      // Mark as fully started before opening the WS connection. Error/close
+      // handlers gate their reconnect path on this.started, so any error that
+      // fires synchronously during connect() (before this line) is ignored and
+      // the catch block handles cleanup instead.
+      this.started = true;
 
       await this.detectCapabilities();
       console.log(`[Agent] Detected ${this.valkeyType} ${this.valkeyVersion}`);
@@ -204,8 +211,7 @@ export class Agent {
       this.wsClient.connect();
     } catch (err) {
       // Agent is single-use: a failed start() is not recoverable on the same
-      // instance. Setting shuttingDown prevents the error handler from spawning
-      // a reconnect loop. Callers should discard this instance and create a new one.
+      // instance. Callers should discard this instance and create a new one.
       this.shuttingDown = true;
       throw err;
     }
