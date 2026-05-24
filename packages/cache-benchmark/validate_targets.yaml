@@ -1,0 +1,17 @@
+# Validation targets for go/no-go gate (Step 10).
+#
+# Fill in static_threshold_baseline_f1 from vCache (arXiv 2502.03771) Table 2:
+#   - Row: "Static Threshold Baseline"
+#   - Column: all-MiniLM-L6-v2, threshold=0.15
+#
+# Each adapter must land within `tolerance` (relative) of the expected F1.
+# Example: if expected F1 = 0.72 and tolerance = 0.10,
+#   pass range is [0.72 * 0.90, 0.72 * 1.10] = [0.648, 0.792]
+
+vcache_lmarena:
+  threshold: 0.15
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  expected:
+    # USER ACTION REQUIRED: replace 0.0 with the F1 from vCache Table 2
+    static_threshold_baseline_f1: 0.0
+    tolerance: 0.10  # 10% relative tolerance
