@@ -1,16 +1,16 @@
 """
 vCache SemBenchmarkLmArena dataset loader.
 
-Dataset: vcache-project/SemBenchmarkLmArena on HuggingFace.
+Dataset: vCache/SemBenchmarkLmArena on HuggingFace.
 Two prompts are a true semantic match if and only if they share the same
-equivalence_class_id field. The field name is confirmed at runtime — if the
-dataset schema changes, a warning is logged and we fall back to detecting the
-first field whose name contains "class" or "equivalence".
+ID_Set value (equivalence class). The field name is confirmed at runtime —
+if the dataset schema changes, a warning is logged and we fall back to
+detecting the first field whose name contains "set", "class", or "equivalence".
 """
 from __future__ import annotations
 
 import logging
-import sys
+import random
 from itertools import combinations
 
 from cache_benchmark.types import QueryPair
@@ -98,8 +98,8 @@ def load_vcache_lmarena(limit: int | None = None) -> list[QueryPair]:
                 source="vcache_lmarena",
             ))
 
-    # Negative pairs: sample cross-class pairs to match positive count
-    import random
+    # Negative pairs: sample cross-class pairs to match positive count.
+    # random.sample(k=2) always returns distinct elements, so no id_a == id_b check needed.
     class_ids = list(classes.keys())
     n_positive = len(pairs)
     neg_pairs: list[QueryPair] = []
@@ -107,8 +107,6 @@ def load_vcache_lmarena(limit: int | None = None) -> list[QueryPair]:
     while len(neg_pairs) < n_positive and attempts < n_positive * 10:
         attempts += 1
         id_a, id_b = random.sample(class_ids, 2)
-        if id_a == id_b:
-            continue
         pa = random.choice(classes[id_a])
         pb = random.choice(classes[id_b])
         neg_pairs.append(QueryPair(

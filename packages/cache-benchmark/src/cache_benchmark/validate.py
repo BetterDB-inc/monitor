@@ -72,6 +72,6 @@ async def validate_against_vcache(redis_url: str = "redis://localhost:6381") -> 
 
 
 if __name__ == "__main__":
-    redis_url = sys.argv[1] if len(sys.argv) > 1 else "redis://localhost:6379"
+    redis_url = sys.argv[1] if len(sys.argv) > 1 else "redis://localhost:6381"
     ok = asyncio.run(validate_against_vcache(redis_url=redis_url))
     sys.exit(0 if ok else 1)

@@ -1,12 +1,14 @@
 """
 RedisVL SemanticCache adapter.
 
-# To spin up Redis Stack for fair native-API comparison:
-#   docker run -d --name redis-stack-bench -p 6383:6379 redis/redis-stack-server:latest
-# Then run with redisvl_backend="redis-stack" and REDIS_STACK_URL=redis://localhost:6383.
-# Rationale: redisvl 0.18.2 uses VectorRangeQuery internally which is incompatible with
-# Valkey Search (see below). Redis Stack ships a supported search module version where the
-# native check() path works, allowing a fair apples-to-apples latency comparison.
+To spin up Redis Stack for fair native-API comparison::
+
+    docker run -d --name redis-stack-bench -p 6383:6379 redis/redis-stack-server:latest
+
+Then pass redisvl_backend="redis-stack" and set REDIS_STACK_URL=redis://localhost:6383.
+Rationale: redisvl 0.18.2 uses VectorRangeQuery internally which is incompatible with
+Valkey Search. Redis Stack ships a compatible search module version where the native
+check() path works, enabling an apples-to-apples latency comparison.
 
 Deviation note: redisvl 0.18.2 SemanticCache.check() unconditionally uses
 VectorRangeQuery internally, which is not supported by valkey-bundle's search
@@ -202,13 +204,14 @@ class RedisVLAdapter(CacheAdapter):
         t0 = time.perf_counter()
 
         t_embed0 = time.perf_counter_ns()
-        # _vectorize_prompt is synchronous; timing it gives pure embed cost
+        # _vectorize_prompt is synchronous; timing it gives pure embed cost.
+        # We pass the pre-computed vector to check() so it is not re-embedded internally.
         vector = self._cache._vectorize_prompt(prompt)
         embed_ns = time.perf_counter_ns() - t_embed0
 
         t_search0 = time.perf_counter_ns()
         try:
-            results = self._cache.check(prompt=prompt, num_results=1)
+            results = self._cache.check(vector=vector, num_results=1)
         except Exception as e:
             raise RuntimeError(
                 f"RedisVL native check() failed on Redis Stack. "
@@ -246,7 +249,6 @@ class RedisVLAdapter(CacheAdapter):
         from redisvl.extensions.cache.llm.semantic import (  # type: ignore
             CACHE_VECTOR_FIELD_NAME,
             RESPONSE_FIELD_NAME,
-            PROMPT_FIELD_NAME,
         )
 
         t0 = time.perf_counter()
@@ -280,7 +282,6 @@ class RedisVLAdapter(CacheAdapter):
         if distance > self.threshold:
             return CheckResult(hit=False, similarity_score=distance, latency_ms=latency_ms)
 
-        cached_prompt = getattr(doc, PROMPT_FIELD_NAME, None)
         cached_response = getattr(doc, RESPONSE_FIELD_NAME, None)
 
         # --debug-judge: invoke an external LLM judge on cosine hits that fall

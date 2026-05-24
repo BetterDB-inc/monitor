@@ -241,8 +241,9 @@ class GPTCacheAdapter(CacheAdapter):
     def _check_full_cohere(self, prompt: str) -> CheckResult:
         """FAISS top-3 pre-filter → Cohere Rerank API.
 
-        Cohere scores query vs cached prompt text (not the dummy response),
-        since our harness stores synthetic responses with no semantic content.
+        Cohere scores query vs cached prompt text. The harness stores
+        "Answer: {prompt_a}" as the response, but the prompt text itself
+        carries richer signal for the reranker so we use the cached question.
         """
         vec = self._embedding.to_embeddings(prompt)
         results = self._data_manager.search(vec, top_k=3)
@@ -317,14 +318,13 @@ class GPTCacheAdapter(CacheAdapter):
 
 
 if __name__ == "__main__":
-    """Sanity test: store 50 known-paraphrase pairs from PAWS-Wiki, query each with
-    prompt_b, assert hit rate > 0.7 at threshold=0.15 in local mode.
-
-    Verifies that SbertCrossencoderEvaluation is correctly wired:
-    - Scores are in [0, 1], higher = more similar (not inverted)
-    - Hit threshold 0.5 correctly separates paraphrases from non-paraphrases
-    - FAISS pre-filter at cosine distance <= 0.15 is not too aggressive
-    """
+    # Sanity test: store 50 known-paraphrase pairs from PAWS-Wiki, query each with
+    # prompt_b, assert hit rate > 0.7 at threshold=0.15 in local mode.
+    #
+    # Verifies that SbertCrossencoderEvaluation is correctly wired:
+    # - Scores are in [0, 1], higher = more similar (not inverted)
+    # - Hit threshold 0.5 correctly separates paraphrases from non-paraphrases
+    # - FAISS pre-filter at cosine distance <= 0.15 is not too aggressive
     import asyncio
     import sys
 

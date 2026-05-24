@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+
+from tqdm.asyncio import tqdm  # type: ignore
+
 from cache_benchmark.adapters.base import CacheAdapter
 from cache_benchmark.types import QueryPair, ReplayResult
 
@@ -7,18 +11,14 @@ from cache_benchmark.types import QueryPair, ReplayResult
 async def run_replay(
     adapter: CacheAdapter,
     pairs: list[QueryPair],
-    populate_with_dummy_responses: bool = True,
 ) -> list[ReplayResult]:
     """Replay labeled pairs through the cache adapter.
 
     Procedure:
     1. Clear and reinitialize the adapter.
-    2. Store prompt_a for each pair with a dummy response.
+    2. Store prompt_a for each pair with a synthetic response.
     3. Check prompt_b for each pair and record the result.
     """
-    from tqdm.asyncio import tqdm  # type: ignore
-
-    import asyncio
 
     async def _with_retry(coro_fn, retries: int = 3, delay: float = 3.0):
         """Call coro_fn(), retrying on timeout/connection errors after reinitializing."""

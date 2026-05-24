@@ -359,17 +359,19 @@ async def _run(args) -> None:
         print(f"    docker run -d --name redis-stack-bench -p 6383:6379 redis/redis-stack-server:latest")
 
     _print_table(results)
-    _print_summary(results)
+    if args.profile:
+        _print_summary(results)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Cache adapter latency profiler")
-    parser.add_argument("--profile", action="store_true", help="Enable detailed timing breakdown")
+    parser.add_argument("--profile", action="store_true",
+                        help="Print the written summary with root-cause analysis after the table")
     parser.add_argument("--queries", type=int, default=200, help="Number of check() calls to measure per scenario")
     parser.add_argument("--valkey-url", default="redis://localhost:6381", help="Valkey with search module")
     parser.add_argument("--redis-stack-url", default=os.environ.get("REDIS_STACK_URL", "redis://localhost:6383"))
     args = parser.parse_args()
-    asyncio.run(_run(args))
+    asyncio.run(_run(args))  # args.profile gates the summary section
 
 
 if __name__ == "__main__":
