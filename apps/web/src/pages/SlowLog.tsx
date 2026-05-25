@@ -211,10 +211,14 @@ export function SlowLog() {
   };
 
   // Render a banner per missing capability so each retry targets the right
-  // probe. When both are unavailable both banners stack — they need separate
-  // retry actions (SLOWLOG and COMMANDLOG re-enable independently).
-  const showSlowLogBanner = !hasSlowLog && Boolean(slowLogReason);
-  const showCommandLogBanner = !hasCommandLog && Boolean(commandLogReason);
+  // probe. A banner without a reason means the server genuinely doesn't expose
+  // the capability (e.g. Redis lacks COMMANDLOG) — for that we only surface a
+  // banner when BOTH are missing, so we never spam "COMMANDLOG not exposed"
+  // on every Redis SlowLog page.
+  const bothMissing = !hasSlowLog && !hasCommandLog;
+  const showSlowLogBanner = !hasSlowLog && (Boolean(slowLogReason) || bothMissing);
+  const showCommandLogBanner = !hasCommandLog && (Boolean(commandLogReason) || bothMissing);
+  const FALLBACK_REASON = 'Not exposed by this server.';
 
   const content = (
     <div className="space-y-6">
@@ -248,20 +252,20 @@ export function SlowLog() {
         )}
       </div>
 
-      {showSlowLogBanner && slowLogReason && (
+      {showSlowLogBanner && (
         <CapabilityStatusBanner
           featureName="Slow Log"
           command="SLOWLOG"
-          reason={slowLogReason.reason}
-          onRetry={handleRetrySlowLog}
+          reason={slowLogReason?.reason ?? FALLBACK_REASON}
+          onRetry={slowLogReason ? handleRetrySlowLog : undefined}
         />
       )}
-      {showCommandLogBanner && commandLogReason && (
+      {showCommandLogBanner && (
         <CapabilityStatusBanner
           featureName="Command Log"
           command="COMMANDLOG"
-          reason={commandLogReason.reason}
-          onRetry={handleRetryCommandLog}
+          reason={commandLogReason?.reason ?? FALLBACK_REASON}
+          onRetry={commandLogReason ? handleRetryCommandLog : undefined}
         />
       )}
 

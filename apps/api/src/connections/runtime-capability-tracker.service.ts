@@ -12,7 +12,10 @@ export const CAPABILITY_TEST_COMMAND: Record<keyof RuntimeCapabilities, [string,
   // permits LEN but blocks GET (Upstash et al.) can't pass the probe and then
   // fail on the next poll. LIMIT 1 keeps the cost negligible.
   canSlowLog: ['SLOWLOG', 'GET', '1'],
-  canCommandLog: ['COMMANDLOG', 'LEN', 'slow'],
+  // Mirror the poller's COMMANDLOG GET <count> <type> shape so a server
+  // permitting LEN but blocking GET cannot pass the probe and then fail on
+  // the next poll.
+  canCommandLog: ['COMMANDLOG', 'GET', '1', 'slow'],
   canLatency: ['LATENCY', 'LATEST'],
   // CLIENT GETNAME is O(1) and exercises the same ACL gate as CLIENT LIST
   // without scanning the connection table.
