@@ -254,6 +254,7 @@ export function SlowLog() {
 
       {showSlowLogBanner && (
         <CapabilityStatusBanner
+          key={`slowlog-${currentConnection?.id ?? 'none'}`}
           featureName="Slow Log"
           command="SLOWLOG"
           reason={slowLogReason?.reason ?? FALLBACK_REASON}
@@ -262,6 +263,7 @@ export function SlowLog() {
       )}
       {showCommandLogBanner && (
         <CapabilityStatusBanner
+          key={`commandlog-${currentConnection?.id ?? 'none'}`}
           featureName="Command Log"
           command="COMMANDLOG"
           reason={commandLogReason?.reason ?? FALLBACK_REASON}
