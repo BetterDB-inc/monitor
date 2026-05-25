@@ -210,12 +210,11 @@ export function SlowLog() {
     setSearchParams(searchParams);
   };
 
-  const slowLogUnavailable = !hasSlowLog && !hasCommandLog;
-  // When commandlog IS available but slowlog is NOT (or vice versa) we still
-  // render the page — show a banner so the operator knows the missing half
-  // and can attempt to re-enable it.
-  const showSlowLogBanner = !slowLogUnavailable && !hasSlowLog && Boolean(slowLogReason);
-  const showCommandLogBanner = !slowLogUnavailable && !hasCommandLog && Boolean(commandLogReason);
+  // Render a banner per missing capability so each retry targets the right
+  // probe. When both are unavailable both banners stack — they need separate
+  // retry actions (SLOWLOG and COMMANDLOG re-enable independently).
+  const showSlowLogBanner = !hasSlowLog && Boolean(slowLogReason);
+  const showCommandLogBanner = !hasCommandLog && Boolean(commandLogReason);
 
   const content = (
     <div className="space-y-6">
@@ -249,14 +248,6 @@ export function SlowLog() {
         )}
       </div>
 
-      {slowLogUnavailable && (slowLogReason || commandLogReason) && (
-        <CapabilityStatusBanner
-          featureName="Slow Log"
-          command="SLOWLOG/COMMANDLOG"
-          reason={(slowLogReason ?? commandLogReason)?.reason ?? ''}
-          onRetry={handleRetrySlowLog}
-        />
-      )}
       {showSlowLogBanner && slowLogReason && (
         <CapabilityStatusBanner
           featureName="Slow Log"
