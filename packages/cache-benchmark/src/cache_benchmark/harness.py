@@ -21,7 +21,14 @@ async def run_replay(
     """
 
     async def _with_retry(coro_fn, retries: int = 3, delay: float = 3.0):
-        """Call coro_fn(), retrying on timeout/connection errors after reinitializing."""
+        """Call coro_fn(), retrying on transient connection errors.
+
+        Does NOT call close()/initialize() on retry: those wipe all stored
+        entries (RedisVL drops the FT index; GPTCache removes the data
+        directory), which would silently corrupt precision/recall results
+        if a transient error occurs mid-store phase. The underlying client
+        will reconnect automatically on the next command after a sleep.
+        """
         for attempt in range(retries):
             try:
                 return await coro_fn()
@@ -30,11 +37,6 @@ async def run_replay(
                 is_transient = any(k in msg for k in ("timeout", "connection", "closed", "reset", "eof"))
                 if is_transient and attempt < retries - 1:
                     await asyncio.sleep(delay)
-                    try:
-                        await adapter.close()
-                        await adapter.initialize()
-                    except Exception:
-                        pass
                 else:
                     raise
 

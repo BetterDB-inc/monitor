@@ -22,7 +22,11 @@ from cache_benchmark.datasets.vcache_lmarena import load_vcache_lmarena
 from cache_benchmark.harness import run_replay
 from cache_benchmark.metrics import compute_metrics
 
-TARGETS_FILE = Path(__file__).parent.parent.parent.parent / "validate_targets.yaml"
+# __file__ = src/cache_benchmark/validate.py
+# .parent   = src/cache_benchmark/
+# .parent   = src/
+# .parent   = packages/cache-benchmark/  ← validate_targets.yaml lives here
+TARGETS_FILE = Path(__file__).parent.parent.parent / "validate_targets.yaml"
 
 
 async def validate_against_vcache(redis_url: str = "redis://localhost:6381") -> bool:
