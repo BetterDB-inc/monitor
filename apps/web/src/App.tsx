@@ -42,17 +42,17 @@ function AppContent() {
   const versionCheckState = useVersionCheckState();
   const currentConnectionId = connectionState.currentConnection?.id;
 
-  const refreshCapabilities = useCallback(() => {
-    metricsApi
-      .getHealth()
-      .then((health) => {
-        setCapabilitiesData({
-          static: health.capabilities ?? null,
-          runtime: health.runtimeCapabilities ?? null,
-          reasons: health.runtimeCapabilityReasons ?? {},
-        });
-      })
-      .catch(console.error);
+  const refreshCapabilities = useCallback(async (): Promise<void> => {
+    try {
+      const health = await metricsApi.getHealth();
+      setCapabilitiesData({
+        static: health.capabilities ?? null,
+        runtime: health.runtimeCapabilities ?? null,
+        reasons: health.runtimeCapabilityReasons ?? {},
+      });
+    } catch (err) {
+      console.error(err);
+    }
   }, []);
 
   const retryCapability = useCallback(
@@ -64,7 +64,7 @@ function AppContent() {
         `/connections/${encodeURIComponent(currentConnectionId)}/capabilities/${encodeURIComponent(capability)}/retry`,
         { method: 'POST' },
       );
-      refreshCapabilities();
+      await refreshCapabilities();
       return verdict;
     },
     [currentConnectionId, refreshCapabilities],

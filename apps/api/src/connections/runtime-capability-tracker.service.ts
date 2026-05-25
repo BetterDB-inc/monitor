@@ -8,7 +8,10 @@ import { RuntimeCapabilities } from '@betterdb/shared';
  * cycle.
  */
 export const CAPABILITY_TEST_COMMAND: Record<keyof RuntimeCapabilities, [string, ...string[]]> = {
-  canSlowLog: ['SLOWLOG', 'LEN'],
+  // Use the same SLOWLOG GET path the live poller / UI uses so a server that
+  // permits LEN but blocks GET (Upstash et al.) can't pass the probe and then
+  // fail on the next poll. LIMIT 1 keeps the cost negligible.
+  canSlowLog: ['SLOWLOG', 'GET', '1'],
   canCommandLog: ['COMMANDLOG', 'LEN', 'slow'],
   canLatency: ['LATENCY', 'LATEST'],
   // CLIENT GETNAME is O(1) and exercises the same ACL gate as CLIENT LIST
