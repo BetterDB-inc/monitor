@@ -76,6 +76,7 @@ function AppContent() {
   );
 
   useEffect(() => {
+    setCapabilitiesData({ static: null, runtime: null, reasons: {} });
     refreshCapabilities();
 
     workspaceApi.getMe()
