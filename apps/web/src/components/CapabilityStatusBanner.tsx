@@ -17,29 +17,41 @@ interface Props {
   onRetry?: () => Promise<CapabilityRetryVerdict | undefined> | CapabilityRetryVerdict | void;
 }
 
+interface RecordedVerdict {
+  verdict: CapabilityRetryVerdict;
+  reasonAtSubmit: string;
+}
+
 export function CapabilityStatusBanner({ featureName, command, reason, onRetry }: Props) {
   const [retrying, setRetrying] = useState(false);
-  const [lastVerdict, setLastVerdict] = useState<CapabilityRetryVerdict | null>(null);
+  const [recorded, setRecorded] = useState<RecordedVerdict | null>(null);
 
   const handleRetry = async () => {
     if (!onRetry) {
       return;
     }
+    const reasonAtSubmit = reason;
     setRetrying(true);
     try {
       await new Promise((resolve) => setTimeout(resolve, PERCEPTIBLE_RETRY_DELAY_MS));
       const verdict = await onRetry();
-      setLastVerdict(verdict ?? null);
+      setRecorded(verdict ? { verdict, reasonAtSubmit } : null);
     } finally {
       setRetrying(false);
     }
   };
 
-  const lastWasTransient = lastVerdict?.available === 'unknown';
-  const lastWasSuccess = lastVerdict?.available === true;
+  // A recorded verdict is only meaningful while the upstream disabled-reason
+  // is still the one the user retried against. Once /health delivers a
+  // different reason, the prior verdict (especially an amber 'unknown') is
+  // stale and we revert to the definitive red state.
+  const liveVerdict =
+    recorded && recorded.reasonAtSubmit === reason ? recorded.verdict : null;
+  const lastWasTransient = liveVerdict?.available === 'unknown';
+  const lastWasSuccess = liveVerdict?.available === true;
   // The verdict's reason (transient error) is fresher than the prop-level
   // disabled-because reason when the last retry was inconclusive.
-  const displayedReason = lastWasTransient && lastVerdict?.reason ? lastVerdict.reason : reason;
+  const displayedReason = lastWasTransient && liveVerdict?.reason ? liveVerdict.reason : reason;
 
   return (
     <div className="space-y-2">
