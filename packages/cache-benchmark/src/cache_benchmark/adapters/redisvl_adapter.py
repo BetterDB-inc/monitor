@@ -207,7 +207,7 @@ class RedisVLAdapter(CacheAdapter):
             return "error", str(e)
 
     async def check(self, prompt: str) -> CheckResult:
-        if self._redisvl_backend == "redis-stack":
+        if self._redisvl_backend in ("redis-os", "redis-stack"):
             return await self._check_native(prompt)
         return await self._check_valkey_workaround(prompt)
 

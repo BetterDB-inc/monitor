@@ -12,14 +12,29 @@ Deviation notes (vs. guide pseudo-code):
 - `check()` returns `CacheCheckResult` with `.hit`, `.response`, `.similarity`.
 
 Mode feature matrix (verified against betterdb-semantic-cache 0.4.0):
-  bare:  cosine-distance threshold only.
-  local: k=3 candidates + keyword-overlap rerank. No external APIs.
-  full:  k=3 candidates + keyword-overlap rerank + LLM-as-judge (OpenAI gpt-4o-mini).
-         Requires OPENAI_API_KEY. Judge fires only on uncertain hits (within uncertainty_band).
+  bare:    cosine-distance threshold only.
+  local:   k=3 candidates + keyword-overlap rerank. No external APIs.
+  full:    k=3 candidates + keyword-overlap rerank + LLM-as-judge (OpenAI gpt-4o-mini).
+           Requires OPENAI_API_KEY. Judge fires only on uncertain hits (within uncertainty_band).
+  autotune: cosine-distance threshold + in-process autotuning.
+           Threshold evolves during the run; trajectory logged per check.
 
 Not available in any mode:
   - per-category thresholds: API exists but dataset has no categories.
-  - auto-tuning: managed-service feature, not in the Python package.
+
+Autotune implementation references (chat.betterdb.com repo):
+  - lib/cache.ts:43-45: configRefresh wires the Python package's _default_threshold update
+    mechanism; when Monitor approves a proposal it writes to {name}:__config and configRefresh
+    polls every 30s to pick it up.
+  - app/api/optimize/route.ts:56-75: system prompt — recommends threshold when
+    sample_count >= 100; proposes + immediately approves threshold changes.
+  - app/api/optimize/route.ts:165-181: propose_threshold_adjust writes to {name}:__config
+    via Monitor's CacheProposalMcpController.
+  - app/api/optimize/route.ts:210-218: approve_proposal applies the change (also writes
+    to {name}:__config). configRefresh in the running process then picks it up.
+  In-process path used here: call threshold_effectiveness() directly (Python package), write
+  to {name}:__config (same key the Monitor writes), call refreshConfig() immediately.
+  No Monitor required — this is the same Valkey key path, not a simulation.
 """
 from __future__ import annotations
 
@@ -30,6 +45,15 @@ from typing import Literal
 
 from cache_benchmark.adapters.base import CacheAdapter
 from cache_benchmark.types import CheckResult
+
+# Autotune constants — mirror the Monitor's production constraints.
+# Evaluation interval: assess threshold every N checks (signal accumulates between checks).
+# Min samples: matches the /api/optimize system prompt "sample_count >= 100" guard.
+# Threshold bounds: match the Monitor's proposal validation [0.02, 0.30].
+_AUTOTUNE_EVAL_INTERVAL = 50
+_AUTOTUNE_MIN_SAMPLES = 100
+_AUTOTUNE_MIN_THRESHOLD = 0.02
+_AUTOTUNE_MAX_THRESHOLD = 0.30
 
 
 def _make_sbert_embed_fn(model_name: str):
@@ -145,6 +169,11 @@ class BetterDBAdapter(CacheAdapter):
 
         self._debug_judge = kwargs.get("debug_judge", False)
         self._judge_log_writer = kwargs.get("judge_log_writer", None)
+        self._trajectory_writer = kwargs.get("trajectory_writer", None)
+
+        # Autotune state
+        self._check_count: int = 0
+        self._last_recommendation: str = "insufficient_data"
 
         self._openai_key = None
         if mode == "full":
@@ -172,6 +201,20 @@ class BetterDBAdapter(CacheAdapter):
                 "NOT enabled: per-category thresholds (dataset has no categories)",
                 "NOT enabled: auto-tuning (managed-service feature, not in Python package)",
             ]
+        if self.mode == "autotune":
+            return [
+                f"initial cosine-distance threshold: {self.threshold}",
+                f"in-process autotuning via threshold_effectiveness() + configRefresh",
+                f"signal source: rolling similarity-score window ({{name}}:__similarity_window ZSET)",
+                "tunes: global cosine-distance threshold only",
+                f"evaluation interval: every {_AUTOTUNE_EVAL_INTERVAL} checks",
+                f"min samples before first recommendation: {_AUTOTUNE_MIN_SAMPLES}",
+                f"threshold bounds: [{_AUTOTUNE_MIN_THRESHOLD}, {_AUTOTUNE_MAX_THRESHOLD}]",
+                "NOT enabled: rerank, LLM judge (autotune mode is bare cosine + threshold evolution)",
+                "NOT enabled: per-category thresholds (dataset has no categories)",
+                "full Monitor-backed autotuning: /api/optimize endpoint "
+                "(requires BETTERDB_URL + BETTERDB_TOKEN + BETTERDB_INSTANCE_ID)",
+            ]
         # full
         return [
             "cosine-distance threshold",
@@ -179,8 +222,15 @@ class BetterDBAdapter(CacheAdapter):
             "keyword-overlap rerank (cosine 70% + word-overlap 30%)",
             "LLM-as-judge gate on uncertain hits (gpt-4o-mini, uncertainty_band=0.05)",
             "NOT enabled: per-category thresholds (dataset has no categories)",
-            "NOT enabled: auto-tuning (managed-service feature, not in Python package)",
         ]
+
+    @property
+    def current_threshold(self) -> float:
+        """The effective threshold currently in use, which may differ from the initial
+        value when autotuning has applied one or more updates."""
+        if self._cache is None:
+            return self.threshold
+        return self._cache._default_threshold
 
     async def initialize(self) -> None:
         import valkey.asyncio as valkey  # type: ignore
@@ -208,12 +258,42 @@ class BetterDBAdapter(CacheAdapter):
     async def store(self, prompt: str, response: str) -> None:
         await self._cache.store(prompt, response)
 
+    async def _autotune_step(self) -> None:
+        """Evaluate threshold effectiveness and apply recommendation if warranted.
+
+        Mirrors what the /api/optimize agent does:
+        1. Call threshold_effectiveness() to read the similarity window.
+        2. If recommendation is actionable and sample_count >= _AUTOTUNE_MIN_SAMPLES:
+           a. Write the recommended threshold to {name}:__config (same Valkey key
+              that Monitor's approve_proposal writes — chat.betterdb.com route.ts:210-218).
+           b. Call refreshConfig() immediately (rather than waiting for the 30s interval
+              used in production — lib/cache.ts:45).
+        """
+        effectiveness = await self._cache.threshold_effectiveness()
+        self._last_recommendation = effectiveness.recommendation
+
+        if (
+            effectiveness.recommendation in ("tighten_threshold", "loosen_threshold")
+            and effectiveness.sample_count >= _AUTOTUNE_MIN_SAMPLES
+            and effectiveness.recommended_threshold is not None
+        ):
+            new_threshold = float(effectiveness.recommended_threshold)
+            # Clamp to Monitor's proposal bounds (route.ts:172: min(0.02).max(0.3))
+            new_threshold = max(_AUTOTUNE_MIN_THRESHOLD, min(_AUTOTUNE_MAX_THRESHOLD, new_threshold))
+            # Write to {name}:__config — the exact key Monitor writes on proposal approval
+            await self._client.hset(
+                self._cache._config_key,
+                mapping={"threshold": str(new_threshold)},
+            )
+            # Pick up immediately without waiting for the periodic background interval
+            await self._cache.refresh_config()
+
     async def check(self, prompt: str) -> CheckResult:
         from betterdb_semantic_cache.types import CacheCheckOptions, RerankOptions, JudgeOptions  # type: ignore
 
         t0 = time.perf_counter()
 
-        if self.mode == "bare":
+        if self.mode in ("bare", "autotune"):
             result = await self._cache.check(prompt)
         elif self.mode == "local":
             opts = CacheCheckOptions(
@@ -235,6 +315,22 @@ class BetterDBAdapter(CacheAdapter):
             result = await self._cache.check(prompt, options=opts)
 
         latency_ms = (time.perf_counter() - t0) * 1000
+
+        if self.mode == "autotune":
+            self._check_count += 1
+            # Log trajectory BEFORE potential threshold update so the record reflects
+            # the threshold that was active during this check.
+            if self._trajectory_writer is not None:
+                self._trajectory_writer({
+                    "query_index": self._check_count,
+                    "effective_threshold": self.current_threshold,
+                    "hit": result.hit,
+                    "recommendation": self._last_recommendation,
+                })
+            # Evaluate and potentially update the threshold periodically.
+            if self._check_count % _AUTOTUNE_EVAL_INTERVAL == 0:
+                await self._autotune_step()
+
         return CheckResult(
             hit=result.hit,
             cached_response=result.response if result.hit else None,
@@ -246,6 +342,9 @@ class BetterDBAdapter(CacheAdapter):
         if self._cache is not None:
             await self._cache.flush()
             await self._cache.initialize()
+        # Reset autotune state so each threshold sweep starts from a clean baseline.
+        self._check_count = 0
+        self._last_recommendation = "insufficient_data"
 
     async def close(self) -> None:
         if self._cache is not None:

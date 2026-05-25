@@ -17,7 +17,7 @@ class CacheAdapter(ABC):
         threshold: float,
         embedding_model: str,
         redis_url: str | None = None,
-        mode: Literal["bare", "local", "full"] = "bare",
+        mode: Literal["bare", "local", "full", "autotune"] = "bare",
         **kwargs,
     ) -> None:
         self.threshold = threshold
