@@ -53,6 +53,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 @ApiTags('connections')
 @Controller('connections')
 export class ConnectionsController {
+  // Per-(connection, capability) in-flight probe. The underlying iovalkey
+  // `call` cannot be cancelled when our 5s ceiling fires, so we dedupe
+  // repeated retry requests onto the same outstanding command instead of
+  // stacking new ones on the server.
+  private readonly inflightProbes = new Map<string, Promise<unknown>>();
+
   constructor(
     private readonly registry: ConnectionRegistry,
     private readonly capabilityTracker: RuntimeCapabilityTracker,
@@ -180,8 +186,18 @@ export class ConnectionsController {
     }
     const adapter = this.registry.get(id);
     const [command, ...args] = CAPABILITY_TEST_COMMAND[capability];
+    const probeKey = `${id}:${capability}`;
+    let probe = this.inflightProbes.get(probeKey);
+    if (!probe) {
+      probe = adapter.call(command, args).finally(() => {
+        if (this.inflightProbes.get(probeKey) === probe) {
+          this.inflightProbes.delete(probeKey);
+        }
+      });
+      this.inflightProbes.set(probeKey, probe);
+    }
     try {
-      await withTimeout(adapter.call(command, args), CAPABILITY_PROBE_TIMEOUT_MS);
+      await withTimeout(probe, CAPABILITY_PROBE_TIMEOUT_MS);
       this.capabilityTracker.resetCapability(id, capability);
       return { available: true };
     } catch (error) {
