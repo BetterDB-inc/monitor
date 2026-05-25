@@ -9,8 +9,14 @@ Usage:
 Requirements:
     - valkey-bench on port 6381 (valkey/valkey-bundle with search module):
         docker run -d --name valkey-bench -p 6381:6379 valkey/valkey-bundle:unstable
-    - Redis Stack on port 6383 (for native RedisVL comparison):
-        docker run -d --name redis-stack-bench -p 6383:6379 redis/redis-stack-server:latest
+    - Redis 8 on port 6384 (for native RedisVL comparison, recommended):
+        docker run -d --name redis-8-bench -p 6384:6379 redis:latest
+
+Version history:
+    - First run (2026-05-25): tested redis/redis-stack-server:latest
+      (Redis 7.4.7, sha256:798ab84d9f266936b034ab11c4d04a2b8e4b441884c5aa7d17ac951eefdf742a).
+      Numbers preserved as LEGACY_REDIS_STACK_RESULT below.
+    - Second run (2026-05-25): switched to redis:latest (Redis 8.6.3, Search 8.6.7).
 """
 from __future__ import annotations
 
@@ -28,6 +34,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 THRESHOLD = 0.15
+
+# Results from the first profiler run (Redis Stack 7.4.7, 2026-05-25, 200 queries).
+# Preserved so the table can show Redis Stack vs Redis 8 side-by-side without re-running.
+LEGACY_REDIS_STACK_RESULT: "ScenarioResult | None" = None  # filled in after class definition
 
 # Fixed prompt pool for cycling test (5 prompts cycled 40× each at n=200)
 CYCLE_PROMPTS = [
@@ -62,6 +72,16 @@ class ScenarioResult(NamedTuple):
     mean_parse: float
     embed_cache_hit_rate: float
     n: int
+
+
+# Legacy numbers from first run (Redis Stack 7.4.7, sha256:798ab84d, 2026-05-25, n=200).
+LEGACY_REDIS_STACK_RESULT = ScenarioResult(
+    label="RedisVL-redis-stack-7.4.7-legacy",
+    p50=6.30, p95=6.63, p99=7.00,
+    mean_embed=2.93, mean_network=3.32, mean_parse=0.00,
+    embed_cache_hit_rate=0.0,
+    n=200,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -257,66 +277,76 @@ def _print_summary(results: list[ScenarioResult]) -> None:
     bd_u = by_label.get("BetterDB-valkey-unique")
     bd_c = by_label.get("BetterDB-valkey-cycling")
     rvl_v = by_label.get("RedisVL-valkey-workaround")
-    rvl_s = by_label.get("RedisVL-redis-stack-native")
+    rvl_legacy = by_label.get("RedisVL-redis-stack-7.4.7-legacy")
+    # Redis 8 label is dynamic (includes version string); find it by prefix
+    rvl_r8 = next((r for r in results if r.label.startswith("RedisVL-redis-") and "legacy" not in r.label), None)
 
     print("=" * 70)
     print("SUMMARY")
     print("=" * 70)
 
-    # 1. Gap on Redis Stack
-    if rvl_v and rvl_s:
-        gap_valkey = bd_u.p50 / rvl_v.p50 if bd_u and rvl_v.p50 else None
-        gap_stack = bd_u.p50 / rvl_s.p50 if bd_u and rvl_s.p50 else None
-        print(f"\n1. Valkey workaround vs Redis Stack native (RedisVL p50):")
-        print(f"   RedisVL-valkey:       {rvl_v.p50:.2f} ms")
-        print(f"   RedisVL-redis-stack:  {rvl_s.p50:.2f} ms")
-        if gap_valkey and gap_stack:
-            print(f"   BetterDB/RedisVL-valkey ratio:  {gap_valkey:.2f}x")
-            print(f"   BetterDB/RedisVL-stack ratio:   {gap_stack:.2f}x")
-        if rvl_s.p50 < rvl_v.p50 * 0.8:
-            print("   → Redis Stack native is substantially faster. Our workaround adds overhead.")
-        elif abs(rvl_s.p50 - rvl_v.p50) / rvl_v.p50 < 0.15:
-            print("   → Valkey workaround and Redis Stack native are within 15%. Workaround is not the cause.")
+    # 1. Version comparison: Redis Stack 7.4.7 vs Redis 8 native
+    print(f"\n1. Redis Stack 7.4.7 (legacy) vs Redis 8 native (RedisVL p50):")
+    if rvl_legacy:
+        print(f"   Redis Stack 7.4.7:  {rvl_legacy.p50:.2f} ms  (network: {rvl_legacy.mean_network:.2f}ms)")
+    if rvl_r8:
+        print(f"   Redis 8 native:     {rvl_r8.p50:.2f} ms  (network: {rvl_r8.mean_network:.2f}ms)")
+    if rvl_legacy and rvl_r8:
+        diff = rvl_legacy.p50 - rvl_r8.p50
+        if abs(diff) < 0.5:
+            print(f"   → Within noise ({diff:+.2f}ms). Redis 8 search internals did not meaningfully change latency.")
+        elif diff > 0:
+            print(f"   → Redis 8 is {diff:.2f}ms faster than Redis Stack 7.4.7 on native path.")
         else:
-            print(f"   → Moderate difference ({(rvl_v.p50 - rvl_s.p50)/rvl_v.p50:.0%}). Workaround adds some overhead.")
+            print(f"   → Redis 8 is {abs(diff):.2f}ms slower than Redis Stack 7.4.7 on native path.")
+
+    # 2. Valkey workaround vs Redis 8 native
+    if rvl_v and rvl_r8:
+        print(f"\n2. Valkey workaround vs Redis 8 native (RedisVL p50):")
+        print(f"   Valkey workaround:  {rvl_v.p50:.2f} ms  (network: {rvl_v.mean_network:.2f}ms)")
+        print(f"   Redis 8 native:     {rvl_r8.p50:.2f} ms  (network: {rvl_r8.mean_network:.2f}ms)")
+        delta_wka = rvl_r8.p50 - rvl_v.p50
+        if rvl_r8.p50 < rvl_v.p50 * 0.85:
+            print(f"   → Redis 8 native is substantially faster ({delta_wka:+.2f}ms). The Valkey workaround adds overhead.")
+        elif abs(delta_wka) / rvl_v.p50 < 0.15:
+            print(f"   → Within 15% ({delta_wka:+.2f}ms). The Valkey workaround is not a meaningful penalty.")
+        else:
+            print(f"   → Valkey workaround is {-delta_wka:.2f}ms faster than Redis 8 native.")
+            print(f"      The workaround avoids VectorRangeQuery overhead; Redis 8's range-then-rank path is slower.")
     else:
-        print("\n1. Redis Stack not tested (not running or skipped).")
+        print("\n2. Redis 8 not tested (not running or skipped).")
 
-    # 2. Embed/network/parse breakdown
-    print(f"\n2. Embed / network / parse breakdown (unique queries):")
-    for r in [bd_u, rvl_v, rvl_s]:
+    # 3. Embed/network/parse breakdown
+    print(f"\n3. Embed / network / parse breakdown (unique queries):")
+    for r in [bd_u, rvl_v, rvl_r8, rvl_legacy]:
         if r:
-            print(f"   {r.label:<35}  embed={r.mean_embed:.2f}ms  network={r.mean_network:.2f}ms  parse={r.mean_parse:.2f}ms")
+            print(f"   {r.label:<40}  embed={r.mean_embed:.2f}ms  network={r.mean_network:.2f}ms  parse={r.mean_parse:.2f}ms")
 
-    # 3. Embedding cache effect
+    # 4. Embedding cache effect
     if bd_u and bd_c:
-        print(f"\n3. BetterDB embedding cache effect:")
+        print(f"\n4. BetterDB embedding cache effect:")
         print(f"   Unique queries p50:  {bd_u.p50:.2f} ms  (embed cache hit rate: {bd_u.embed_cache_hit_rate:.0%})")
         print(f"   Cycling queries p50: {bd_c.p50:.2f} ms  (embed cache hit rate: {bd_c.embed_cache_hit_rate:.0%})")
         speedup = bd_u.p50 / bd_c.p50 if bd_c.p50 > 0 else 1.0
         if bd_c.embed_cache_hit_rate > 0.5 and speedup > 1.5:
             print(f"   → Embedding cache explains {speedup:.1f}x speedup on cycling queries.")
-            print(f"   → BetterDB skips SBERT compute when the same prompt is seen again.")
-            print(f"   → In the benchmark harness, each pair uses a different prompt_b, so the cache")
-            print(f"      rarely hits in practice. The benchmark numbers reflect real-world unique-query behavior.")
+            print(f"   → BetterDB skips SBERT compute when the same prompt text is seen again.")
+            print(f"   → Benchmark pairs use unique prompt_b values, so this rarely fires in practice.")
         else:
             print(f"   → Embedding cache has minimal effect at this scale (hit rate: {bd_c.embed_cache_hit_rate:.0%}).")
 
-    # 4. Root cause
-    print(f"\n4. Identified cause of BetterDB vs RedisVL latency difference:")
-    if bd_u and rvl_v:
-        delta = rvl_v.p50 - bd_u.p50
-        pct = delta / rvl_v.p50 * 100
-        embed_delta = rvl_v.mean_embed - bd_u.mean_embed
-        network_delta = rvl_v.mean_network - bd_u.mean_network
-
-        if abs(delta) < 1.0:
-            print(f"   Gap is {delta:.2f}ms ({pct:.0f}%) — within noise. No significant difference.")
+    # 5. Blog narrative verdict
+    print(f"\n5. Blog narrative:")
+    if rvl_v and rvl_r8:
+        if rvl_r8.p50 < rvl_v.p50 * 0.85:
+            print(f"   Redis 8 closes the gap — narrative: 'RedisVL on Redis 8 is faster than the Valkey workaround.'")
+        elif rvl_r8.p50 > rvl_v.p50 * 1.15:
+            print(f"   Valkey workaround is still faster on Redis 8 — narrative unchanged:")
+            print(f"   'The Valkey KNN workaround beats both Redis Stack and Redis 8 native paths because")
+            print(f"   it avoids the VectorRangeQuery pre-filter overhead that redisvl adds by default.'")
         else:
-            dominant = "embedding" if abs(embed_delta) > abs(network_delta) else "network round-trip"
-            print(f"   p50 gap: {delta:.2f}ms ({pct:.0f}%). Dominant factor: {dominant}.")
-            print(f"   embed delta:   {embed_delta:+.2f}ms  (BetterDB uses async valkey embed cache; RedisVL is synchronous)")
-            print(f"   network delta: {network_delta:+.2f}ms  (BetterDB async valkey client vs RedisVL sync redis-py client)")
+            print(f"   Results are at parity — narrative: 'RedisVL on Redis 8 and the Valkey workaround")
+            print(f"   are equivalent; latency differences are within measurement noise.'")
 
 
 async def _run(args) -> None:
@@ -344,19 +374,27 @@ async def _run(args) -> None:
     r = await _measure_redisvl(n_warmup, n, valkey_url, backend="valkey", cycling=False, label="RedisVL-valkey-workaround")
     results.append(r)
 
-    # Redis Stack — optional, skip if not running
+    # Redis 8 (redis:latest) — optional, skip if not running.
+    # "redis-stack" is kept as a backward-compatible alias for "redis-os".
     try:
         import redis as redis_py  # type: ignore
         rc = redis_py.Redis.from_url(stack_url, socket_connect_timeout=2)
         rc.ping()
+        redis_version = rc.info("server").get("redis_version", "unknown")
         rc.close()
-        print("→ RedisVL / Redis Stack native / unique queries...")
-        r = await _measure_redisvl(n_warmup, n, stack_url, backend="redis-stack", cycling=False, label="RedisVL-redis-stack-native")
+        print(f"→ RedisVL / Redis {redis_version} native / unique queries...")
+        r = await _measure_redisvl(
+            n_warmup, n, stack_url, backend="redis-os", cycling=False,
+            label=f"RedisVL-redis-{redis_version}-native",
+        )
         results.append(r)
     except Exception as e:
-        print(f"  ⚠ Redis Stack not reachable at {stack_url}: {e}")
+        print(f"  ⚠ Redis 8 not reachable at {stack_url}: {e}")
         print(f"  To run native comparison:")
-        print(f"    docker run -d --name redis-stack-bench -p 6383:6379 redis/redis-stack-server:latest")
+        print(f"    docker run -d --name redis-8-bench -p 6384:6379 redis:latest")
+
+    # Always include legacy Redis Stack numbers for side-by-side comparison.
+    results.append(LEGACY_REDIS_STACK_RESULT)
 
     _print_table(results)
     if args.profile:
@@ -369,7 +407,9 @@ def main():
                         help="Print the written summary with root-cause analysis after the table")
     parser.add_argument("--queries", type=int, default=200, help="Number of check() calls to measure per scenario")
     parser.add_argument("--valkey-url", default="redis://localhost:6381", help="Valkey with search module")
-    parser.add_argument("--redis-stack-url", default=os.environ.get("REDIS_STACK_URL", "redis://localhost:6383"))
+    parser.add_argument("--redis-stack-url",
+                        default=os.environ.get("REDIS_OS_URL", os.environ.get("REDIS_STACK_URL", "redis://localhost:6384")),
+                        help="Redis 8 / Redis OS URL for native comparison (REDIS_OS_URL env var)")
     args = parser.parse_args()
     asyncio.run(_run(args))  # args.profile gates the summary section
 

@@ -1,14 +1,20 @@
 """
 RedisVL SemanticCache adapter.
 
-To spin up Redis Stack for fair native-API comparison::
+For native-API comparison against Redis 8 (Redis Open Source, GA May 2025)::
 
-    docker run -d --name redis-stack-bench -p 6383:6379 redis/redis-stack-server:latest
+    docker run -d --name redis-8-bench -p 6384:6379 redis:latest
 
-Then pass redisvl_backend="redis-stack" and set REDIS_STACK_URL=redis://localhost:6383.
+Then pass redisvl_backend="redis-os" and set REDIS_OS_URL=redis://localhost:6384.
+redisvl_backend="redis-stack" is kept as a backward-compatible alias for "redis-os".
+
 Rationale: redisvl 0.18.2 uses VectorRangeQuery internally which is incompatible with
-Valkey Search. Redis Stack ships a compatible search module version where the native
-check() path works, enabling an apples-to-apples latency comparison.
+Valkey Search. Redis 8 (which bundles Search 8.x natively) supports the full redisvl
+native check() path, enabling an apples-to-apples latency comparison.
+
+Note: redis:latest (Redis 8.6.3, tested 2026-05-25) shows Search as a loaded module
+(redisearch.so ver 80607) even though Search is merged into core in Redis 8 — the module
+path is still reported by MODULE LIST but no external .so loading is required.
 
 Deviation note: redisvl 0.18.2 SemanticCache.check() unconditionally uses
 VectorRangeQuery internally, which is not supported by valkey-bundle's search
@@ -74,12 +80,18 @@ class RedisVLAdapter(CacheAdapter):
         self._cache = None
         self._url = redis_url or "redis://localhost:6379"
 
-        # redisvl_backend: "valkey" uses raw FT.SEARCH workaround (default, benchmark runs).
-        # "redis-stack" uses native SemanticCache.check() via Redis Stack, for fair comparison.
+        # redisvl_backend controls which server and code path to use:
+        #   "valkey"      — raw FT.SEARCH workaround (default; benchmark production runs).
+        #   "redis-os"    — native SemanticCache.check() via Redis 8 Open Source.
+        #   "redis-stack" — backward-compatible alias for "redis-os".
+        # URL is taken from REDIS_OS_URL (or legacy REDIS_STACK_URL), default port 6384.
         self._redisvl_backend: str = kwargs.get("redisvl_backend", "valkey")
-        if self._redisvl_backend == "redis-stack":
-            self._url = os.environ.get("REDIS_STACK_URL", "redis://localhost:6383")
-            self._index_name = f"bench_redisvl_rs_{uuid.uuid4().hex[:8]}"
+        if self._redisvl_backend in ("redis-os", "redis-stack"):
+            self._url = os.environ.get(
+                "REDIS_OS_URL",
+                os.environ.get("REDIS_STACK_URL", "redis://localhost:6384"),
+            )
+            self._index_name = f"bench_redisvl_ro_{uuid.uuid4().hex[:8]}"
 
         # Profiling hooks (set externally by latency_profile.py)
         self._profile_timing: dict = {}
@@ -214,9 +226,9 @@ class RedisVLAdapter(CacheAdapter):
             results = self._cache.check(vector=vector, num_results=1)
         except Exception as e:
             raise RuntimeError(
-                f"RedisVL native check() failed on Redis Stack. "
-                f"Ensure redis-stack-bench is running: "
-                f"docker run -d --name redis-stack-bench -p 6383:6379 redis/redis-stack-server:latest\n"
+                f"RedisVL native check() failed on Redis 8. "
+                f"Ensure redis-8-bench is running: "
+                f"docker run -d --name redis-8-bench -p 6384:6379 redis:latest\n"
                 f"Original error: {e}"
             ) from e
         search_ns = time.perf_counter_ns() - t_search0
