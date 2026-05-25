@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertTriangle, XCircle, RefreshCw, HelpCircle } from 'lucide-react';
+import { AlertTriangle, XCircle, RefreshCw, HelpCircle, CheckCircle2 } from 'lucide-react';
 import { Button } from './ui/button';
 import type { CapabilityRetryVerdict } from '../types/metrics';
 
@@ -36,6 +36,7 @@ export function CapabilityStatusBanner({ featureName, command, reason, onRetry }
   };
 
   const lastWasTransient = lastVerdict?.available === 'unknown';
+  const lastWasSuccess = lastVerdict?.available === true;
   // The verdict's reason (transient error) is fresher than the prop-level
   // disabled-because reason when the last retry was inconclusive.
   const displayedReason = lastWasTransient && lastVerdict?.reason ? lastVerdict.reason : reason;
@@ -65,6 +66,16 @@ export function CapabilityStatusBanner({ featureName, command, reason, onRetry }
         >
           <RefreshCw className="mt-0.5 size-4 shrink-0 animate-spin text-amber-600 dark:text-amber-400" />
           <div className="min-w-0">Force-retrying {command}…</div>
+        </div>
+      ) : lastWasSuccess ? (
+        <div
+          role="status"
+          className="flex items-start gap-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3"
+        >
+          <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+          <div className="flex-1 min-w-0 text-xs text-emerald-900 dark:text-emerald-100">
+            {command} is available — refreshing…
+          </div>
         </div>
       ) : lastWasTransient ? (
         <div

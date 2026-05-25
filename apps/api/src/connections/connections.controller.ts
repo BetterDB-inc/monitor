@@ -15,16 +15,9 @@ import {
   SuccessResponseDto,
 } from '../common/dto/connections.dto';
 
-const RUNTIME_CAPABILITY_KEYS: ReadonlyArray<keyof RuntimeCapabilities> = [
-  'canSlowLog',
-  'canClientList',
-  'canAclLog',
-  'canClusterInfo',
-  'canClusterSlotStats',
-  'canCommandLog',
-  'canLatency',
-  'canMemory',
-];
+const RUNTIME_CAPABILITY_KEYS = Object.keys(
+  CAPABILITY_TEST_COMMAND,
+) as ReadonlyArray<keyof RuntimeCapabilities>;
 
 function isRuntimeCapabilityKey(value: string): value is keyof RuntimeCapabilities {
   return RUNTIME_CAPABILITY_KEYS.includes(value as keyof RuntimeCapabilities);
