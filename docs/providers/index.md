@@ -16,7 +16,7 @@ BetterDB connects to your database in one of two ways. Most providers support bo
 
 BetterDB Cloud opens a TCP connection (with TLS) directly to your database's public endpoint. Best for managed providers that expose a public endpoint with TLS, like Upstash, Redis Cloud, and Aiven. Configure in the connection selector under **Direct** by entering the host, port, and credentials.
 
-BetterDB Cloud allows outbound connections on ports **6379**, **6380**, and **443** only. Any database on a non-standard port requires the agent.
+BetterDB Cloud allows outbound connections on ports **443**, **2000–2999**, and **6000–6999** (with a small number of sensitive infrastructure ports blocked). Any database on a port outside these ranges requires the agent.
 
 ### Via the BetterDB Agent
 

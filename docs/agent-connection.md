@@ -69,7 +69,7 @@ To enable IAM auth, set `AGENT_AUTH_MODE=elasticache-iam` plus the AWS-specific 
 | AWS ElastiCache, GCP Memorystore (VPC-only) | **Agent** |
 | Upstash, Redis Cloud, Aiven (public endpoint) | Direct connection |
 
-> BetterDB Cloud workspaces allow outbound connections on ports **6379**, **6380**, and **443** only. Any other port requires the agent.
+> BetterDB Cloud workspaces allow outbound connections on ports **443**, **2000–2999**, and **6000–6999** (with a small number of sensitive infrastructure ports blocked). Any port outside these ranges requires the agent.
 
 ## Prerequisites
 

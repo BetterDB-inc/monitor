@@ -34,6 +34,13 @@ export class ProvisioningController {
     };
   }
 
+  @Post('reconcile-network-policies')
+  @HttpCode(HttpStatus.OK)
+  async reconcileNetworkPolicies() {
+    this.logger.log('Received reconcile-network-policies request');
+    return this.provisioningService.reconcileNetworkPolicies();
+  }
+
   @Post(':id/deprovision')
   @HttpCode(HttpStatus.ACCEPTED)
   async deprovisionTenant(@Param('id') id: string) {

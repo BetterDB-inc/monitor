@@ -820,105 +820,115 @@ export class ProvisioningService {
   // Network Policy (Tenant Isolation)
   // ============================================
 
+  private tenantIsolationSpec(): Record<string, any> {
+    return {
+      podSelector: {}, // Applies to ALL pods in the namespace
+      policyTypes: ['Ingress', 'Egress'],
+      ingress: [
+        {
+          _from: [
+            {
+              // Allow traffic from ALB ingress controller in kube-system
+              namespaceSelector: {
+                matchLabels: {
+                  'kubernetes.io/metadata.name': 'kube-system',
+                },
+              },
+            },
+          ],
+        },
+      ],
+      egress: [
+        {
+          // DNS resolution
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: {
+                  'kubernetes.io/metadata.name': 'kube-system',
+                },
+              },
+            },
+          ],
+          ports: [
+            { protocol: 'UDP', port: 53 },
+            { protocol: 'TCP', port: 53 },
+          ],
+        },
+        {
+          // RDS access within VPC (10.0.0.0/16)
+          to: [
+            {
+              ipBlock: {
+                cidr: '10.0.0.0/16',
+              },
+            },
+          ],
+          ports: [
+            { protocol: 'TCP', port: 5432 },
+          ],
+        },
+        {
+          // HTTPS outbound (agent WSS connections, ECR image pulls)
+          to: [
+            {
+              ipBlock: {
+                cidr: '0.0.0.0/0',
+              },
+            },
+          ],
+          ports: [
+            { protocol: 'TCP', port: 443 },
+          ],
+        },
+        {
+          // External Redis/Valkey connections (managed providers use
+          // various ports in the 2xxx and 6xxx ranges).
+          // Sensitive infrastructure ports are excluded:
+          //   2049 (NFS), 2181 (ZooKeeper), 2375-2376 (Docker),
+          //   2379-2380 (etcd), 6443 (K8s API)
+          to: [
+            {
+              ipBlock: {
+                cidr: '0.0.0.0/0',
+              },
+            },
+          ],
+          ports: [
+            { protocol: 'TCP', port: 2000, endPort: 2048 },
+            { protocol: 'TCP', port: 2050, endPort: 2180 },
+            { protocol: 'TCP', port: 2182, endPort: 2374 },
+            { protocol: 'TCP', port: 2381, endPort: 2999 },
+            { protocol: 'TCP', port: 6000, endPort: 6442 },
+            { protocol: 'TCP', port: 6444, endPort: 6999 },
+          ],
+        },
+        {
+          // Entitlement service in system namespace
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: {
+                  'kubernetes.io/metadata.name': 'system',
+                },
+              },
+            },
+          ],
+          ports: [
+            { protocol: 'TCP', port: 3002 },
+          ],
+        },
+      ],
+    };
+  }
+
   private async createNetworkPolicy(namespace: string): Promise<void> {
     try {
       await this.networkingApi.createNamespacedNetworkPolicy({
         namespace,
         body: {
-          metadata: {
-            name: 'tenant-isolation',
-          },
-          spec: {
-            podSelector: {}, // Applies to ALL pods in the namespace
-            policyTypes: ['Ingress', 'Egress'],
-            ingress: [
-              {
-                _from: [
-                  {
-                    // Allow traffic from ALB ingress controller in kube-system
-                    namespaceSelector: {
-                      matchLabels: {
-                        'kubernetes.io/metadata.name': 'kube-system',
-                      },
-                    },
-                  },
-                ],
-              },
-            ],
-            egress: [
-              {
-                // DNS resolution
-                to: [
-                  {
-                    namespaceSelector: {
-                      matchLabels: {
-                        'kubernetes.io/metadata.name': 'kube-system',
-                      },
-                    },
-                  },
-                ],
-                ports: [
-                  { protocol: 'UDP', port: 53 },
-                  { protocol: 'TCP', port: 53 },
-                ],
-              },
-              {
-                // RDS access within VPC (10.0.0.0/16)
-                to: [
-                  {
-                    ipBlock: {
-                      cidr: '10.0.0.0/16',
-                    },
-                  },
-                ],
-                ports: [
-                  { protocol: 'TCP', port: 5432 },
-                ],
-              },
-              {
-                // HTTPS outbound (agent WSS connections, ECR image pulls)
-                to: [
-                  {
-                    ipBlock: {
-                      cidr: '0.0.0.0/0',
-                    },
-                  },
-                ],
-                ports: [
-                  { protocol: 'TCP', port: 443 },
-                ],
-              },
-              {
-                // External Redis/Valkey connections (Upstash, Redis Cloud, etc.)
-                to: [
-                  {
-                    ipBlock: {
-                      cidr: '0.0.0.0/0',
-                    },
-                  },
-                ],
-                ports: [
-                  { protocol: 'TCP', port: 6379 },
-                  { protocol: 'TCP', port: 6380 },
-                ],
-              },
-              {
-                // Entitlement service in system namespace
-                to: [
-                  {
-                    namespaceSelector: {
-                      matchLabels: {
-                        'kubernetes.io/metadata.name': 'system',
-                      },
-                    },
-                  },
-                ],
-                ports: [
-                  { protocol: 'TCP', port: 3002 },
-                ],
-              },
-            ],
-          },
+          metadata: { name: 'tenant-isolation' },
+          spec: this.tenantIsolationSpec(),
         },
       });
     } catch (error: any) {
@@ -928,6 +938,37 @@ export class ProvisioningService {
         throw error;
       }
     }
+  }
+
+  async reconcileNetworkPolicies(): Promise<{ updated: string[]; failed: string[] }> {
+    const updated: string[] = [];
+    const failed: string[] = [];
+
+    const namespaces = await this.coreApi.listNamespace({
+      labelSelector: 'app.kubernetes.io/managed-by=betterdb-entitlement',
+    });
+
+    for (const ns of namespaces.items) {
+      const name = ns.metadata!.name!;
+      try {
+        await this.networkingApi.replaceNamespacedNetworkPolicy({
+          name: 'tenant-isolation',
+          namespace: name,
+          body: {
+            metadata: { name: 'tenant-isolation' },
+            spec: this.tenantIsolationSpec(),
+          },
+        });
+        this.logger.log(`[${name}] NetworkPolicy updated`);
+        updated.push(name);
+      } catch (error: any) {
+        this.logger.error(`[${name}] Failed to update NetworkPolicy: ${error.message}`);
+        failed.push(name);
+      }
+    }
+
+    this.logger.log(`NetworkPolicy reconciliation complete: ${updated.length} updated, ${failed.length} failed`);
+    return { updated, failed };
   }
 
   private async waitForIngressHostname(namespace: string, timeoutMs: number): Promise<string> {
