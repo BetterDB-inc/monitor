@@ -25,6 +25,9 @@ class StubValkey {
   async get(key: string): Promise<string | null> {
     return this.strings[key] ?? null;
   }
+  async lrange(_key: string, _start: number, _stop: number): Promise<string[]> {
+    return [];
+  }
   async zrange(key: string, _start: string, _stop: string, mode: string): Promise<string[]> {
     const entries = this.zsets[key] ?? [];
     if (mode === 'WITHSCORES') {
@@ -246,20 +249,36 @@ describe('CacheReadonlyService', () => {
 
     it('recommends tighten_threshold when uncertain hit rate is high', async () => {
       const { service, client } = await buildService();
+      // High hit rate (>80%) with many uncertain hits near the threshold boundary.
+      // Most hits are well below the proposed new threshold so the recall-cost guard passes.
+      // threshold=0.1, uncertainty_band=0.05, proposed tighten → 0.07
       const samples = [
-        ...Array.from({ length: 50 }, (_, i) => ({
-          score: 0.09,
+        // 85 strong hits well below proposed threshold (0.07) — these survive tightening
+        ...Array.from({ length: 85 }, (_, i) => ({
+          score: 0.02 + (i % 5) * 0.01, // 0.02–0.06
           result: 'hit' as const,
           category: 'all',
           ts: Date.now() + i,
         })),
-        ...Array.from({ length: 50 }, (_, i) => ({
-          score: 0.2,
-          result: 'miss' as const,
+        // 10 uncertain hits near the boundary — trigger the signal
+        ...Array.from({ length: 10 }, (_, i) => ({
+          score: 0.08 + i * 0.001, // 0.080–0.089
+          result: 'hit' as const,
           category: 'all',
           ts: Date.now() + 100 + i,
         })),
+        // 5 misses above threshold
+        ...Array.from({ length: 5 }, (_, i) => ({
+          score: 0.2,
+          result: 'miss' as const,
+          category: 'all',
+          ts: Date.now() + 200 + i,
+        })),
       ];
+      // hitRate = 95/100 = 0.95
+      // uncertainHits (score >= 0.05): 85 hits include ~51 with score >= 0.05, plus 10 boundary = ~61
+      //   uncertainHitRate ≈ 0.64, uncertainFractionOfAll ≈ 0.61 > 0.15 ✓
+      // hitsLost (score between 0.07 and 0.1): the 10 boundary hits → recallCost = 10/95 ≈ 0.105 < 0.15 ✓
       seedSimilarityWindow(client, SEMANTIC_NAME, samples);
       const result = await service.thresholdRecommendation(CONNECTION_ID, SEMANTIC_NAME, {
         minSamples: 50,
