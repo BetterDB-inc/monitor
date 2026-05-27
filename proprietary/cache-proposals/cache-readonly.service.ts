@@ -19,6 +19,7 @@ import type {
   SimilarityDistribution,
   SimilarityDistributionBucket,
   ThresholdRecommendation,
+  ThresholdRecommendationConfidenceBreakdown,
   ThresholdRecommendationKind,
   ToolEffectivenessEntry,
   ToolEffectivenessRecommendation,
@@ -26,6 +27,11 @@ import type {
   TuningMetricsSnapshot,
 } from './cache-readonly.types';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
+import {
+  computeConfidence,
+  TIGHTEN_BOUNDARY,
+  LOOSEN_BOUNDARY,
+} from './confidence-score';
 
 export type {
   CacheHealth,
@@ -212,6 +218,8 @@ export class CacheReadonlyService {
         avg_miss_similarity: 0,
         recommendation: THRESHOLD_RECOMMENDATIONS.INSUFFICIENT_DATA,
         reasoning: THRESHOLD_REASONINGS.insufficientData(sampleCount, minSamples),
+        confidence_score: null,
+        confidence_breakdown: null,
       };
     }
     const hits = filtered.filter((s) => s.result === 'hit');
@@ -384,6 +392,35 @@ export class CacheReadonlyService {
       }
     }
 
+    let confidence_score: number | null = null;
+    let confidence_breakdown: ThresholdRecommendationConfidenceBreakdown | null = null;
+    if (
+      recommendation === THRESHOLD_RECOMMENDATIONS.TIGHTEN ||
+      recommendation === THRESHOLD_RECOMMENDATIONS.LOOSEN
+    ) {
+      const isTighten = recommendation === THRESHOLD_RECOMMENDATIONS.TIGHTEN;
+      const latestRecordedAt = filtered.reduce(
+        (acc, s) => (s.recordedAt > acc ? s.recordedAt : acc),
+        0,
+      );
+      const result = computeConfidence({
+        sampleCount,
+        signalRate: isTighten ? uncertainHitRate : nearMissRate,
+        signalBoundary: isTighten ? TIGHTEN_BOUNDARY : LOOSEN_BOUNDARY,
+        latestRecordedAt,
+        now: Date.now(),
+      });
+      confidence_score = result.score;
+      confidence_breakdown = result.breakdown;
+      this.logger.log(
+        `thresholdRecommendation ${recommendation} cache=${cache.name} ` +
+          `category=${categoryLabel} score=${confidence_score.toFixed(3)} ` +
+          `sample=${result.breakdown.sample.toFixed(3)} ` +
+          `signal=${result.breakdown.signal.toFixed(3)} ` +
+          `freshness=${result.breakdown.freshness.toFixed(3)}`,
+      );
+    }
+
     return {
       category: categoryLabel,
       sample_count: sampleCount,
@@ -400,6 +437,8 @@ export class CacheReadonlyService {
       metrics_snapshot: currentMetrics,
       dampening_factor: dampeningFactor,
       consecutive_same_direction: consecutiveSameDirection,
+      confidence_score,
+      confidence_breakdown,
     };
   }
 
