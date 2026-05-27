@@ -12,7 +12,7 @@ export const TARGET_SAMPLES = 200;
 export const SIGNAL_SAT = 0.8;
 export const FRESHNESS_WINDOW_MS = 3_600_000;
 export const TIGHTEN_BOUNDARY = 0.2;
-export const LOOSEN_BOUNDARY = 0.3;
+export const LOOSEN_BOUNDARY = 0.25;
 
 export interface ConfidenceComponents {
   sample: number;
