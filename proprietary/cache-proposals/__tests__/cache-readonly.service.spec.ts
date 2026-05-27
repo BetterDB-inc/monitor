@@ -286,6 +286,96 @@ describe('CacheReadonlyService', () => {
       expect(result.recommendation).toBe('tighten_threshold');
       expect(result.recommended_threshold).toBeLessThan(0.1);
     });
+
+    it('returns null confidence fields for insufficient_data', async () => {
+      const { service, client } = await buildService();
+      seedSimilarityWindow(
+        client,
+        SEMANTIC_NAME,
+        Array.from({ length: 5 }, (_, i) => ({
+          score: 0.05,
+          result: 'hit' as const,
+          category: 'all',
+          ts: Date.now() + i,
+        })),
+      );
+      const result = await service.thresholdRecommendation(CONNECTION_ID, SEMANTIC_NAME, {
+        minSamples: 10,
+      });
+      expect(result.recommendation).toBe('insufficient_data');
+      expect(result.confidence_score).toBeNull();
+      expect(result.confidence_breakdown).toBeNull();
+    });
+
+    it('populates confidence_score and breakdown on tighten_threshold', async () => {
+      const { service, client } = await buildService();
+      const now = Date.now();
+      const samples = [
+        ...Array.from({ length: 85 }, (_, i) => ({
+          score: 0.02 + (i % 5) * 0.01,
+          result: 'hit' as const,
+          category: 'all',
+          ts: now + i,
+        })),
+        ...Array.from({ length: 10 }, (_, i) => ({
+          score: 0.08 + i * 0.001,
+          result: 'hit' as const,
+          category: 'all',
+          ts: now + 100 + i,
+        })),
+        ...Array.from({ length: 5 }, (_, i) => ({
+          score: 0.2,
+          result: 'miss' as const,
+          category: 'all',
+          ts: now + 200 + i,
+        })),
+      ];
+      seedSimilarityWindow(client, SEMANTIC_NAME, samples);
+      const result = await service.thresholdRecommendation(CONNECTION_ID, SEMANTIC_NAME, {
+        minSamples: 50,
+      });
+      expect(result.recommendation).toBe('tighten_threshold');
+      expect(result.confidence_score).not.toBeNull();
+      expect(result.confidence_score).toBeGreaterThan(0);
+      expect(result.confidence_score).toBeLessThanOrEqual(1);
+      expect(result.confidence_breakdown).not.toBeNull();
+      const breakdown = result.confidence_breakdown!;
+      expect(breakdown.sample).toBeGreaterThan(0);
+      expect(breakdown.signal).toBeGreaterThan(0);
+      expect(breakdown.freshness).toBeGreaterThan(0);
+    });
+
+    it('drives confidence to 0 when samples are stale', async () => {
+      const { service, client } = await buildService();
+      const twoHoursAgo = Date.now() - 2 * 3_600_000;
+      const samples = [
+        ...Array.from({ length: 85 }, (_, i) => ({
+          score: 0.02 + (i % 5) * 0.01,
+          result: 'hit' as const,
+          category: 'all',
+          ts: twoHoursAgo + i,
+        })),
+        ...Array.from({ length: 10 }, (_, i) => ({
+          score: 0.08 + i * 0.001,
+          result: 'hit' as const,
+          category: 'all',
+          ts: twoHoursAgo + 100 + i,
+        })),
+        ...Array.from({ length: 5 }, (_, i) => ({
+          score: 0.2,
+          result: 'miss' as const,
+          category: 'all',
+          ts: twoHoursAgo + 100 + i,
+        })),
+      ];
+      seedSimilarityWindow(client, SEMANTIC_NAME, samples);
+      const result = await service.thresholdRecommendation(CONNECTION_ID, SEMANTIC_NAME, {
+        minSamples: 50,
+      });
+      expect(result.recommendation).toBe('tighten_threshold');
+      expect(result.confidence_score).toBe(0);
+      expect(result.confidence_breakdown!.freshness).toBe(0);
+    });
   });
 
   describe('toolEffectiveness', () => {
