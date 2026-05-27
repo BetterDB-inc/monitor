@@ -228,7 +228,7 @@ class GPTCacheAdapter(CacheAdapter):
                 continue
 
         if best_result is None or best_ce_score < _CROSSENCODER_THRESHOLD:
-            return CheckResult(hit=False, similarity_score=best_distance or float(candidates[0][0]))
+            return CheckResult(hit=False, similarity_score=best_distance if best_distance is not None else float(candidates[0][0]))
 
         cached_response = None
         try:
