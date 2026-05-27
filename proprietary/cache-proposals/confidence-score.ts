@@ -53,7 +53,12 @@ export function computeConfidence(input: ConfidenceInput): ConfidenceResult {
     (input.signalRate - input.signalBoundary) / (SIGNAL_SAT - input.signalBoundary),
   );
   const ageMs = input.now - input.latestRecordedAt;
-  const freshness = ageMs <= 0 ? 1 : clamp01(1 - ageMs / FRESHNESS_WINDOW_MS);
+  let freshness: number;
+  if (ageMs <= 0) {
+    freshness = 1;
+  } else {
+    freshness = clamp01(1 - ageMs / FRESHNESS_WINDOW_MS);
+  }
 
   const breakdown: ConfidenceComponents = { sample, signal, freshness };
 
