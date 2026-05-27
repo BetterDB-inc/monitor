@@ -29,7 +29,7 @@ Autotune implementation (mirrors chat.betterdb.com app/api/optimize/route.ts):
     2. POST /mcp/instance/{id}/cache-proposals/threshold-adjust → proposal_id
     3. POST /mcp/cache-proposals/{proposal_id}/approve → applied
   The approved threshold is written to {name}:__config by the Monitor.
-  configRefresh (enabled, 1s interval) picks it up on the next poll.
+  configRefresh (enabled, 30s interval) picks it up on the next poll.
   Monitor prefix (/api vs /) is auto-detected at startup (mirrors monitor-client.ts).
 
   References (chat.betterdb.com repo):
@@ -251,7 +251,7 @@ class BetterDBAdapter(CacheAdapter):
                 f"  POST .../cache-proposals/threshold-adjust → POST .../approve",
                 "tunes: global cosine-distance threshold only",
                 "discovery: enabled — cache visible to BetterDB agent and Monitor dashboard",
-                "configRefresh: enabled (1s interval) — picks up approved threshold changes",
+                "configRefresh: enabled (30s interval) — picks up approved threshold changes",
                 "NOT enabled: rerank, LLM judge (autotune mode is bare cosine + threshold evolution)",
                 "NOT enabled: per-category thresholds (dataset has no categories)",
             ]
@@ -263,7 +263,7 @@ class BetterDBAdapter(CacheAdapter):
                 "keyword-overlap rerank (cosine 70% + word-overlap 30%)",
                 "LLM-as-judge gate on uncertain hits (gpt-4o-mini, uncertainty_band=0.05)",
                 "discovery: enabled — cache visible to BetterDB agent and Monitor dashboard",
-                "configRefresh: enabled (1s interval) — picks up approved threshold changes",
+                "configRefresh: enabled (30s interval) — picks up approved threshold changes",
             ]
         # full
         return [
@@ -332,7 +332,7 @@ class BetterDBAdapter(CacheAdapter):
             default_threshold=self.threshold,
             analytics=AnalyticsOptions(disabled=not is_autotune),
             discovery=DiscoveryOptions(enabled=is_autotune),
-            # 1s interval: short enough that a cloud Monitor threshold change is visible
+            # 30s interval: short enough that a cloud Monitor threshold change is visible
             # within the next few check() calls even on a fast benchmark run.
             config_refresh=ConfigRefreshOptions(enabled=is_autotune, interval_ms=30_000),
         )
@@ -360,7 +360,7 @@ class BetterDBAdapter(CacheAdapter):
           3. POST .../cache-proposals/{proposal_id}/approve → applied
 
         The approved threshold is written to {name}:__config by the Monitor.
-        configRefresh (enabled with 1s interval) picks it up on the next poll.
+        configRefresh (enabled with 30s interval) picks it up on the next poll.
         """
         import httpx  # lazy import — only needed in autotune mode
 
