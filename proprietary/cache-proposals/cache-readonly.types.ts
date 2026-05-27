@@ -82,6 +82,12 @@ export const THRESHOLD_REASONINGS = {
     `Declaring optimal to break the cycle.`,
 } as const;
 
+export interface ThresholdRecommendationConfidenceBreakdown {
+  sample: number;
+  signal: number;
+  freshness: number;
+}
+
 export interface ThresholdRecommendation {
   category: string;
   sample_count: number;
@@ -100,6 +106,8 @@ export interface ThresholdRecommendation {
   metrics_snapshot?: TuningMetricsSnapshot;
   dampening_factor?: number;
   consecutive_same_direction?: number;
+  confidence_score: number | null;
+  confidence_breakdown: ThresholdRecommendationConfidenceBreakdown | null;
 }
 
 export interface TuningHistoryEntry {
