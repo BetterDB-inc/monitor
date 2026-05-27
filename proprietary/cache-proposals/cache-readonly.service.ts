@@ -22,6 +22,8 @@ import type {
   ThresholdRecommendationKind,
   ToolEffectivenessEntry,
   ToolEffectivenessRecommendation,
+  TuningHistoryEntry,
+  TuningMetricsSnapshot,
 } from './cache-readonly.types';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 
@@ -48,6 +50,19 @@ const RECENT_CHANGES_MAX_LIMIT = 200;
 
 const DEFAULT_SEMANTIC_THRESHOLD = 0.1;
 const DEFAULT_UNCERTAINTY_BAND = 0.05;
+
+// Recall-cost guard: if tightening would lose more than this fraction of
+// current hits, the TP/FP distributions overlap too much for threshold
+// adjustment to help — suggest a qualitative improvement instead.
+const RECALL_COST_MAX = 0.15;
+
+// Velocity dampening: prevent runaway tightening/loosening and oscillation.
+const TUNING_HISTORY_KEY_SUFFIX = ':__tuning_history';
+const TUNING_HISTORY_MAX_ENTRIES = 10;
+// After this many consecutive same-direction adjustments, declare optimal.
+const VELOCITY_CAP_CONSECUTIVE = 5;
+// After this many direction flips in the history window, declare optimal.
+const OSCILLATION_CAP_FLIPS = 3;
 
 interface MarkerRecord {
   name: string;
@@ -202,10 +217,27 @@ export class CacheReadonlyService {
     const hits = filtered.filter((s) => s.result === 'hit');
     const misses = filtered.filter((s) => s.result === 'miss');
     const hitRate = hits.length / sampleCount;
+
+    // Tighten signal 1: hits near the threshold boundary (uncertainty band)
     const uncertainHits = hits.filter((s) => s.score >= threshold - config.uncertainty_band);
     const uncertainHitRate = hits.length === 0 ? 0 : uncertainHits.length / hits.length;
-    const nearMisses = misses.filter((s) => s.score > threshold && s.score <= threshold + 0.03);
+
+    // Tighten signal 2: "distant hits" — matches in the upper half of [0, threshold].
+    // These are confident (not in the uncertainty band) but far from a perfect match.
+    // A high ratio means the threshold is catching many weak matches that are likely
+    // false positives. This catches the blind spot where the old algorithm said
+    // "optimal" at threshold 0.45 with 99% hit rate and 53% precision.
+    const midpoint = threshold / 2;
+    const distantHits = hits.filter((s) => s.score > midpoint);
+    const distantHitRate = hits.length === 0 ? 0 : distantHits.length / hits.length;
+
+    // Loosen signal: near-misses (misses just above the threshold).
+    // Window widened from fixed 0.03 to uncertainty_band for better sensitivity.
+    const nearMisses = misses.filter(
+      (s) => s.score > threshold && s.score <= threshold + config.uncertainty_band,
+    );
     const nearMissRate = misses.length === 0 ? 0 : nearMisses.length / misses.length;
+
     const avgHitSimilarity =
       hits.length === 0 ? 0 : hits.reduce((acc, s) => acc + s.score, 0) / hits.length;
     const avgMissSimilarity =
@@ -218,18 +250,138 @@ export class CacheReadonlyService {
     let recommendation: ThresholdRecommendationKind;
     let recommendedThreshold: number | undefined;
     let reasoning: string;
+    let signal: string | undefined;
+
+    const currentMetrics = {
+      hit_rate: hitRate,
+      uncertain_hit_rate: uncertainHitRate,
+      distant_hit_rate: distantHitRate,
+      near_miss_rate: nearMissRate,
+    };
+
     if (uncertainHitRate > 0.2) {
-      recommendation = THRESHOLD_RECOMMENDATIONS.TIGHTEN;
-      recommendedThreshold = Math.max(0, threshold - config.uncertainty_band * 1.5);
-      reasoning = THRESHOLD_REASONINGS.tighten(uncertainHitRate);
-    } else if (nearMissRate > 0.3) {
-      // avgNearMissDelta is constrained to (0, 0.03] by the nearMisses filter.
+      // Many hits at the threshold boundary — but weigh against overall hit rate.
+      // A 20% uncertain-hit rate with 70% overall hits means 14% of all ops are
+      // uncertain — that's noise, not a strong signal. Only tighten when the
+      // uncertain fraction of ALL operations (not just hits) is meaningful.
+      const uncertainFractionOfAll = uncertainHitRate * hitRate;
+      if (uncertainFractionOfAll > 0.15) {
+        recommendation = THRESHOLD_RECOMMENDATIONS.TIGHTEN;
+        signal = 'uncertain_hits';
+        const step = config.uncertainty_band * 0.6;
+        recommendedThreshold = Math.max(0, threshold - step);
+        reasoning = THRESHOLD_REASONINGS.tighten(uncertainHitRate);
+      } else {
+        recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
+        reasoning = THRESHOLD_REASONINGS.optimal(hitRate, uncertainHitRate);
+      }
+    } else if (distantHitRate > 0.25 && hits.length >= 20) {
+      // >25% of hits are weak matches (score in upper half of acceptance range).
+      // But if the hit rate is moderate (< 80%), the score distribution is
+      // naturally spread out — distant hits aren't necessarily false positives.
+      // Only tighten when the cache is hitting on almost everything (high hit rate),
+      // which means it's too loose and catching junk.
+      if (hitRate > 0.8) {
+        // Use the 75th percentile of hit scores as the target — this cuts the tail
+        // of questionable matches while preserving strong ones. Cap the step at
+        // 2× uncertainty_band to avoid overshooting on the first cycle.
+        recommendation = THRESHOLD_RECOMMENDATIONS.TIGHTEN;
+        signal = 'distant_hits';
+        const sortedHitScores = hits.map((s) => s.score).sort((a, b) => a - b);
+        const p75 = sortedHitScores[Math.floor(sortedHitScores.length * 0.75)];
+        const target = p75 + config.uncertainty_band * 0.3;
+        const maxStep = config.uncertainty_band * 2;
+        recommendedThreshold = Math.max(threshold - maxStep, Math.max(0, target));
+        reasoning = THRESHOLD_REASONINGS.tightenDistantHits(distantHitRate, hitRate);
+      } else {
+        recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
+        reasoning = THRESHOLD_REASONINGS.optimal(hitRate, uncertainHitRate);
+      }
+    } else if (nearMissRate > 0.25) {
+      // Many near-misses just above the threshold — probably too strict.
       recommendation = THRESHOLD_RECOMMENDATIONS.LOOSEN;
+      signal = 'near_misses';
       recommendedThreshold = threshold + avgNearMissDelta;
       reasoning = THRESHOLD_REASONINGS.loosen(nearMissRate);
+    } else if (hitRate < 0.05 && misses.length >= 20) {
+      // Very few hits with enough data — threshold may be too strict.
+      // Check if there are misses close to the threshold that would become hits.
+      const closeMisses = misses.filter(
+        (s) => s.score > threshold && s.score <= threshold + config.uncertainty_band * 2,
+      );
+      if (closeMisses.length / misses.length > 0.1) {
+        recommendation = THRESHOLD_RECOMMENDATIONS.LOOSEN;
+        signal = 'low_hit_rate';
+        const step = config.uncertainty_band * 0.6;
+        recommendedThreshold = threshold + step;
+        reasoning = THRESHOLD_REASONINGS.loosenLowHitRate(hitRate);
+      } else {
+        recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
+        reasoning = THRESHOLD_REASONINGS.optimal(hitRate, uncertainHitRate);
+      }
     } else {
       recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
       reasoning = THRESHOLD_REASONINGS.optimal(hitRate, uncertainHitRate);
+    }
+
+    // --- Recall-cost guard ---
+    // Before committing to a tighten, estimate how many current hits would be
+    // lost at the proposed new threshold. If the recall cost is too high, the
+    // TP/FP distributions overlap too much for threshold adjustment alone to
+    // help — declare optimal and suggest a qualitative improvement.
+    if (
+      recommendation === THRESHOLD_RECOMMENDATIONS.TIGHTEN &&
+      recommendedThreshold !== undefined &&
+      hits.length > 0
+    ) {
+      const hitsLost = hits.filter((s) => s.score > recommendedThreshold! && s.score <= threshold).length;
+      const recallCost = hitsLost / hits.length;
+      if (recallCost > RECALL_COST_MAX) {
+        recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
+        recommendedThreshold = undefined;
+        signal = undefined;
+        reasoning = THRESHOLD_REASONINGS.recallCostTooHigh(recallCost);
+      }
+    }
+
+    // --- Outcome tracking + velocity dampening ---
+    // Only applies to actionable recommendations (tighten/loosen).
+    let dampeningFactor: number | undefined;
+    let consecutiveSameDirection: number | undefined;
+    if (
+      recommendation === THRESHOLD_RECOMMENDATIONS.TIGHTEN ||
+      recommendation === THRESHOLD_RECOMMENDATIONS.LOOSEN
+    ) {
+      const direction = recommendation === THRESHOLD_RECOMMENDATIONS.TIGHTEN ? 'tighten' : 'loosen';
+      const history = await this.readTuningHistory(client, cache.prefix);
+
+      // Outcome check: did the last adjustment actually improve the signal it targeted?
+      // If not, further movement in the same direction is unlikely to help.
+      const outcomeCheck = this.checkLastOutcome(history, direction, currentMetrics);
+      if (outcomeCheck.ineffective) {
+        recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
+        recommendedThreshold = undefined;
+        reasoning = outcomeCheck.reason!;
+      } else {
+        // Velocity dampening (backstop): reduce step sizes for consecutive same-direction
+        // adjustments, or cap to optimal on oscillation.
+        const dampening = this.computeDampening(history, direction);
+        dampeningFactor = dampening.factor;
+        consecutiveSameDirection = dampening.consecutiveSameDirection;
+
+        if (dampening.capped) {
+          recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
+          recommendedThreshold = undefined;
+          reasoning = dampening.reason!;
+        } else if (dampening.factor < 1 && recommendedThreshold !== undefined) {
+          const originalStep = Math.abs(recommendedThreshold - threshold);
+          const dampenedStep = originalStep * dampening.factor;
+          recommendedThreshold =
+            direction === 'tighten'
+              ? Math.max(0, threshold - dampenedStep)
+              : threshold + dampenedStep;
+        }
+      }
     }
 
     return {
@@ -244,6 +396,10 @@ export class CacheReadonlyService {
       recommendation,
       recommended_threshold: recommendedThreshold,
       reasoning,
+      signal,
+      metrics_snapshot: currentMetrics,
+      dampening_factor: dampeningFactor,
+      consecutive_same_direction: consecutiveSameDirection,
     };
   }
 
@@ -450,9 +606,163 @@ export class CacheReadonlyService {
     return out;
   }
 
+  private async readTuningHistory(client: Valkey, prefix: string): Promise<TuningHistoryEntry[]> {
+    const key = `${prefix}${TUNING_HISTORY_KEY_SUFFIX}`;
+    let raw: string[];
+    try {
+      raw = (await client.lrange(key, 0, TUNING_HISTORY_MAX_ENTRIES - 1)) as string[];
+    } catch {
+      return [];
+    }
+    const entries: TuningHistoryEntry[] = [];
+    for (const item of raw) {
+      try {
+        const parsed = JSON.parse(item) as TuningHistoryEntry;
+        if (parsed.d && typeof parsed.from === 'number' && typeof parsed.to === 'number') {
+          entries.push(parsed);
+        }
+      } catch {
+        // ignore malformed entries
+      }
+    }
+    return entries;
+  }
+
+  private computeDampening(
+    history: TuningHistoryEntry[],
+    currentDirection: 'tighten' | 'loosen',
+  ): { factor: number; consecutiveSameDirection: number; directionFlips: number; capped: boolean; reason?: string } {
+    if (history.length === 0) {
+      return { factor: 1, consecutiveSameDirection: 0, directionFlips: 0, capped: false };
+    }
+
+    // Count consecutive same-direction entries at the head (most recent first).
+    let consecutiveSameDirection = 0;
+    for (const entry of history) {
+      if (entry.d === currentDirection) {
+        consecutiveSameDirection += 1;
+      } else {
+        break;
+      }
+    }
+
+    // Count direction flips in the full history window.
+    let directionFlips = 0;
+    for (let i = 1; i < history.length; i++) {
+      if (history[i].d !== history[i - 1].d) {
+        directionFlips += 1;
+      }
+    }
+    // Also count a flip if the current direction differs from the most recent entry.
+    if (history.length > 0 && history[0].d !== currentDirection) {
+      directionFlips += 1;
+    }
+
+    // Cap: too many consecutive same-direction adjustments.
+    if (consecutiveSameDirection >= VELOCITY_CAP_CONSECUTIVE) {
+      return {
+        factor: 0,
+        consecutiveSameDirection,
+        directionFlips,
+        capped: true,
+        reason: THRESHOLD_REASONINGS.velocityDampened(consecutiveSameDirection, currentDirection),
+      };
+    }
+
+    // Cap: oscillation (too many direction flips).
+    if (directionFlips >= OSCILLATION_CAP_FLIPS) {
+      return {
+        factor: 0,
+        consecutiveSameDirection,
+        directionFlips,
+        capped: true,
+        reason: THRESHOLD_REASONINGS.oscillationDetected(directionFlips),
+      };
+    }
+
+    // Progressive dampening: 1/(1 + n*0.5) where n = consecutive same-direction.
+    // n=0 → 1.0, n=1 → 0.67, n=2 → 0.50, n=3 → 0.40, n=4 → 0.33
+    const factor = 1 / (1 + consecutiveSameDirection * 0.5);
+    return { factor, consecutiveSameDirection, directionFlips, capped: false };
+  }
+
+  /**
+   * Outcome tracking: check whether the most recent adjustment in the same
+   * direction actually improved the signal that triggered it.  If the signal
+   * level is the same or worse, further movement in that direction is unlikely
+   * to help.
+   */
+  private checkLastOutcome(
+    history: TuningHistoryEntry[],
+    currentDirection: 'tighten' | 'loosen',
+    currentMetrics: TuningMetricsSnapshot,
+  ): { ineffective: boolean; reason?: string } {
+    // Find the most recent entry in the same direction that has a metrics snapshot.
+    const lastSame = history.find((e) => e.d === currentDirection && e.metrics);
+    if (!lastSame?.metrics || !lastSame.signal) {
+      // No prior snapshot to compare against — allow the adjustment.
+      return { ineffective: false };
+    }
+
+    // Map signal names to the metric they target.
+    // For tighten signals: the metric should decrease after tightening.
+    // For loosen signals: the metric should decrease (near_miss_rate) or
+    //   increase (hit_rate) after loosening.
+    const before = lastSame.metrics;
+    const signalName = lastSame.signal;
+    let improved: boolean;
+    let beforeValue: number;
+    let afterValue: number;
+
+    switch (signalName) {
+      case 'uncertain_hits':
+        beforeValue = before.uncertain_hit_rate;
+        afterValue = currentMetrics.uncertain_hit_rate;
+        // Tightening should reduce uncertain hit rate.
+        improved = afterValue < beforeValue * 0.8; // require 20% improvement
+        break;
+      case 'distant_hits':
+        beforeValue = before.distant_hit_rate;
+        afterValue = currentMetrics.distant_hit_rate;
+        // Tightening should reduce distant hit rate.
+        improved = afterValue < beforeValue * 0.8;
+        break;
+      case 'near_misses':
+        beforeValue = before.near_miss_rate;
+        afterValue = currentMetrics.near_miss_rate;
+        // Loosening should reduce near miss rate.
+        improved = afterValue < beforeValue * 0.8;
+        break;
+      case 'low_hit_rate':
+        beforeValue = before.hit_rate;
+        afterValue = currentMetrics.hit_rate;
+        // Loosening should increase hit rate.
+        improved = afterValue > beforeValue * 1.2; // require 20% improvement
+        break;
+      default:
+        return { ineffective: false };
+    }
+
+    if (!improved) {
+      return {
+        ineffective: true,
+        reason: THRESHOLD_REASONINGS.adjustmentIneffective(
+          currentDirection,
+          signalName,
+          beforeValue,
+          afterValue,
+        ),
+      };
+    }
+    return { ineffective: false };
+  }
+
   private async readSemanticConfig(client: Valkey, prefix: string): Promise<SemanticConfig> {
     const raw = (await client.hgetall(`${prefix}:__config`)) ?? {};
-    const defaultThreshold = Number(raw.default_threshold);
+    // The semantic-cache library writes `threshold` to __config (via configRefresh
+    // and proposal approval), while the discovery marker uses `default_threshold`.
+    // Read both, preferring `threshold` (the live/approved value).
+    const defaultThreshold = Number(raw.threshold ?? raw.default_threshold);
     const uncertaintyBand = Number(raw.uncertainty_band);
     const categoryThresholdsRaw = raw.category_thresholds;
     let categoryThresholds: Record<string, number> = {};

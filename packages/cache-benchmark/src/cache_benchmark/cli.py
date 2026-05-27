@@ -54,13 +54,19 @@ def _build_adapter(
     raise ValueError(f"Unknown adapter: {adapter_name}")
 
 
-def _load_dataset(dataset_name: str, limit: int):
+def _load_dataset(dataset_name: str, limit: int, match_threshold: float = 0.6):
     if dataset_name == "vcache_lmarena":
         from cache_benchmark.datasets.vcache_lmarena import load_vcache_lmarena
         return load_vcache_lmarena(limit=limit)
     if dataset_name == "paws_wiki":
         from cache_benchmark.datasets.paws_wiki import load_paws_wiki
         return load_paws_wiki(limit=limit)
+    if dataset_name == "stsb":
+        from cache_benchmark.datasets.stsb import load_stsb
+        return load_stsb(match_threshold=match_threshold, limit=limit)
+    if dataset_name == "sick":
+        from cache_benchmark.datasets.sick import load_sick
+        return load_sick(match_threshold=match_threshold, limit=limit)
     raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
@@ -73,9 +79,10 @@ async def _run_single(
     limit: int,
     output_dir: Path,
     mode: str,
+    match_threshold: float = 0.6,
     debug_judge: bool = False,
 ):
-    pairs = _load_dataset(dataset_name, limit)
+    pairs = _load_dataset(dataset_name, limit, match_threshold=match_threshold)
 
     judge_log_writer = None
     if debug_judge:
@@ -85,7 +92,7 @@ async def _run_single(
     # Autotune trajectory writer — one line per check() call recording the
     # effective threshold at the time of the check plus hit/miss and recommendation.
     trajectory_writer = None
-    if mode == "autotune":
+    if mode in ("autotune", "autotune-full"):
         traj_path = output_dir / f"threshold_trajectory_{adapter_name}_{mode}_{dataset_name}_{threshold}.jsonl"
         trajectory_writer = _make_judge_log_writer(traj_path)  # same append-JSONL pattern
 
@@ -100,7 +107,7 @@ async def _run_single(
     click.echo(f"[{adapter_name} {mode}] enabled: {', '.join(features)}")
     if debug_judge:
         click.echo(f"[{adapter_name} {mode}] debug-judge ON → {log_path}")
-    if mode == "autotune":
+    if mode in ("autotune", "autotune-full"):
         click.echo(f"[{adapter_name} {mode}] trajectory → {traj_path}")
 
     try:
@@ -131,7 +138,7 @@ async def _run_single(
 
     threshold_note = (
         f" (initial={threshold}, final={final_threshold:.4f})"
-        if mode == "autotune" and final_threshold != threshold
+        if mode in ("autotune", "autotune-full") and final_threshold != threshold
         else f" threshold={threshold}"
     )
     click.echo(
@@ -143,21 +150,28 @@ async def _run_single(
 
 @click.command()
 @click.option("--adapter", type=click.Choice(["betterdb", "redisvl", "gptcache", "all"]), default="betterdb", show_default=True)
-@click.option("--dataset", type=click.Choice(["vcache_lmarena", "paws_wiki"]), required=True)
+@click.option("--dataset", type=click.Choice(["vcache_lmarena", "paws_wiki", "stsb", "sick"]), required=True)
 @click.option("--limit", default=1000, show_default=True, help="Max pairs per adapter/threshold run (keep ≤1000 for valkey-bundle stability)")
 @click.option("--thresholds", default="0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45", show_default=True)
 @click.option("--embedding-model", default="sentence-transformers/all-MiniLM-L6-v2", show_default=True)
 @click.option("--redis-url", default="redis://localhost:6381", show_default=True, help="Valkey/Redis URL (must have valkey-search module)")
 @click.option("--output", default="./results", show_default=True, help="Output directory")
-@click.option("--mode", type=click.Choice(["bare", "local", "full", "autotune"]), default="bare", show_default=True,
+@click.option("--mode", type=click.Choice(["bare", "local", "full", "autotune", "autotune-full"]), default="bare", show_default=True,
               help=(
                   "bare: cosine-distance threshold only, no external APIs (reproducible baseline). "
                   "local: native library quality features that require no external APIs "
                   "(BetterDB: k=3 rerank; GPTCache: SBERT crossencoder; RedisVL: unchanged). "
                   "full: all native features including paid API integrations "
                   "(BetterDB adds LLM judge via OPENAI_API_KEY; GPTCache uses Cohere rerank via COHERE_API_KEY). "
-                  "autotune: BetterDB-specific in-process threshold autotuning; "
-                  "RedisVL and GPTCache are skipped when --adapter all is used."
+                  "autotune: BetterDB-specific threshold autotuning via Monitor API (bare cosine + threshold evolution). "
+                  "autotune-full: autotune + rerank + LLM judge (requires OPENAI_API_KEY + Monitor env vars)."
+              ))
+@click.option("--match-threshold", default=0.6, show_default=True,
+              help=(
+                  "STSb only: normalized similarity score (0-1) at or above which a pair "
+                  "is considered a semantic match. 0.6 = 3.0/5.0, the boundary between "
+                  "'roughly equivalent' and 'not equivalent' in STS annotation guidelines. "
+                  "Ignored for other datasets."
               ))
 @click.option("--debug-judge", is_flag=True, default=False,
               help=(
@@ -166,7 +180,7 @@ async def _run_single(
                   "to judge_log_{adapter}_{mode}_{dataset}_{threshold}.jsonl in --output. "
                   "Requires OPENAI_API_KEY. Changes hit/miss verdicts. Not for production runs."
               ))
-def main(adapter, dataset, limit, thresholds, embedding_model, redis_url, output, mode, debug_judge):
+def main(adapter, dataset, limit, thresholds, embedding_model, redis_url, output, mode, match_threshold, debug_judge):
     """Run cache benchmark replay harness."""
     output_dir = Path(output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -183,9 +197,9 @@ def main(adapter, dataset, limit, thresholds, embedding_model, redis_url, output
 
     async def _run_all():
         for adapter_name in adapter_names:
-            if mode == "autotune" and adapter_name != "betterdb":
+            if mode in ("autotune", "autotune-full") and adapter_name != "betterdb":
                 click.echo(
-                    f"Skipping {adapter_name}: autotune is BetterDB-specific "
+                    f"Skipping {adapter_name}: {mode} is BetterDB-specific "
                     f"(RedisVL and GPTCache do not ship native autotuning)."
                 )
                 continue
@@ -199,6 +213,7 @@ def main(adapter, dataset, limit, thresholds, embedding_model, redis_url, output
                     limit=limit,
                     output_dir=output_dir,
                     mode=mode,
+                    match_threshold=match_threshold,
                     debug_judge=debug_judge,
                 )
                 summary[f"{key[0]}_{key[1]}"] = metrics.model_dump()

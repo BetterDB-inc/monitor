@@ -27,6 +27,7 @@ dependencies = [
     "sqlalchemy>=2.0.49",
     "cohere>=7.0.0",
     "openai>=2.38.0",
+    "httpx>=0.27",
 ]
 
 [project.scripts]

@@ -12,8 +12,11 @@ import type Valkey from 'iovalkey';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { ApplyFailedError } from './errors';
+import type { TuningMetricsSnapshot } from './cache-readonly.types';
 
 const FT_SEARCH_LIMIT = 1000;
+const TUNING_HISTORY_KEY_SUFFIX = ':__tuning_history';
+const TUNING_HISTORY_MAX_ENTRIES = 10;
 
 export interface ApplyOutcome {
   actualAffected?: number;
@@ -132,6 +135,27 @@ export class CacheApplyDispatcher {
         underlying: err instanceof Error ? err.message : String(err),
       });
     }
+
+    // Record the adjustment in tuning history for outcome tracking + velocity dampening.
+    const direction = payload.new_threshold < payload.current_threshold ? 'tighten' : 'loosen';
+    const historyKey = `${cache.prefix}${TUNING_HISTORY_KEY_SUFFIX}`;
+    const snapshot = await this.computeMetricsSnapshot(client, cache.prefix, payload.current_threshold);
+    const entry = JSON.stringify({
+      d: direction,
+      from: payload.current_threshold,
+      to: payload.new_threshold,
+      ts: Date.now(),
+      signal: snapshot?.signal,
+      metrics: snapshot?.metrics,
+    });
+    try {
+      await client.lpush(historyKey, entry);
+      await client.ltrim(historyKey, 0, TUNING_HISTORY_MAX_ENTRIES - 1);
+    } catch (err) {
+      // Non-fatal: dampening degrades gracefully without history.
+      this.logger.warn(`Failed to write tuning history: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     return {
       details: {
         previous_value: payload.current_threshold,
@@ -140,6 +164,76 @@ export class CacheApplyDispatcher {
         config_key: configKey,
         field,
       },
+    };
+  }
+
+  /**
+   * Compute a metrics snapshot from the current similarity window.
+   * Used for outcome tracking: stored in the tuning history so the
+   * recommendation engine can compare "before" vs "after" on the next cycle.
+   */
+  private async computeMetricsSnapshot(
+    client: Valkey,
+    prefix: string,
+    threshold: number,
+  ): Promise<{ signal: string; metrics: TuningMetricsSnapshot } | null> {
+    const DEFAULT_UNCERTAINTY_BAND = 0.05;
+    let raw: Array<string | number>;
+    try {
+      raw = (await client.zrange(
+        `${prefix}:__similarity_window`, '0', '-1', 'WITHSCORES',
+      )) as Array<string | number>;
+    } catch {
+      return null;
+    }
+
+    // Read uncertainty_band from config (fall back to default).
+    let uncertaintyBand = DEFAULT_UNCERTAINTY_BAND;
+    try {
+      const configRaw = await client.hget(`${prefix}:__config`, 'uncertainty_band');
+      if (configRaw) {
+        const parsed = Number(configRaw);
+        if (Number.isFinite(parsed)) uncertaintyBand = parsed;
+      }
+    } catch { /* use default */ }
+
+    // Parse similarity window entries.
+    const hits: number[] = [];
+    const misses: number[] = [];
+    for (let i = 0; i < raw.length; i += 2) {
+      const member = raw[i];
+      if (typeof member !== 'string') continue;
+      try {
+        const entry = JSON.parse(member) as { score?: number; result?: string };
+        const score = typeof entry.score === 'number' ? entry.score : NaN;
+        if (!Number.isFinite(score)) continue;
+        if (entry.result === 'hit') hits.push(score);
+        else if (entry.result === 'miss') misses.push(score);
+      } catch { /* skip */ }
+    }
+
+    const total = hits.length + misses.length;
+    if (total === 0) return null;
+
+    const hitRate = hits.length / total;
+    const uncertainHitRate = hits.length === 0 ? 0
+      : hits.filter((s) => s >= threshold - uncertaintyBand).length / hits.length;
+    const midpoint = threshold / 2;
+    const distantHitRate = hits.length === 0 ? 0
+      : hits.filter((s) => s > midpoint).length / hits.length;
+    const nearMissRate = misses.length === 0 ? 0
+      : misses.filter((s) => s > threshold && s <= threshold + uncertaintyBand).length / misses.length;
+
+    // Determine dominant signal (same priority order as the recommendation engine).
+    let signal = 'optimal';
+    if (uncertainHitRate > 0.2) signal = 'uncertain_hits';
+    else if (distantHitRate > 0.25 && hits.length >= 20) signal = 'distant_hits';
+    else if (nearMissRate > 0.25) signal = 'near_misses';
+    else if (hitRate < 0.05 && misses.length >= 20) signal = 'low_hit_rate';
+
+    return {
+      signal,
+      metrics: { hit_rate: hitRate, uncertain_hit_rate: uncertainHitRate, distant_hit_rate: distantHitRate, near_miss_rate: nearMissRate },
     };
   }
 
