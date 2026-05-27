@@ -399,10 +399,12 @@ export class CacheReadonlyService {
       recommendation === THRESHOLD_RECOMMENDATIONS.LOOSEN
     ) {
       const isTighten = recommendation === THRESHOLD_RECOMMENDATIONS.TIGHTEN;
-      const latestRecordedAt = filtered.reduce(
-        (acc, s) => (s.recordedAt > acc ? s.recordedAt : acc),
-        0,
-      );
+      const latestRecordedAt = filtered.reduce((acc, s) => {
+        if (s.recordedAt > acc) {
+          return s.recordedAt;
+        }
+        return acc;
+      }, 0);
       const result = computeConfidence({
         sampleCount,
         signalRate: isTighten ? uncertainHitRate : nearMissRate,
