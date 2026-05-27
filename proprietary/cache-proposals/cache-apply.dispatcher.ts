@@ -224,10 +224,11 @@ export class CacheApplyDispatcher {
     const nearMissRate = misses.length === 0 ? 0
       : misses.filter((s) => s > threshold && s <= threshold + uncertaintyBand).length / misses.length;
 
-    // Determine dominant signal (same priority order as the recommendation engine).
+    // Determine dominant signal (must match the recommendation engine's guards exactly).
+    const uncertainFractionOfAll = uncertainHitRate * hitRate;
     let signal = 'optimal';
-    if (uncertainHitRate > 0.2) signal = 'uncertain_hits';
-    else if (distantHitRate > 0.25 && hits.length >= 20) signal = 'distant_hits';
+    if (uncertainHitRate > 0.2 && uncertainFractionOfAll > 0.15) signal = 'uncertain_hits';
+    else if (distantHitRate > 0.25 && hits.length >= 20 && hitRate > 0.8) signal = 'distant_hits';
     else if (nearMissRate > 0.25) signal = 'near_misses';
     else if (hitRate < 0.05 && misses.length >= 20) signal = 'low_hit_rate';
 

@@ -291,7 +291,7 @@ export class CacheReadonlyService {
         const p75 = sortedHitScores[Math.floor(sortedHitScores.length * 0.75)];
         const target = p75 + config.uncertainty_band * 0.3;
         const maxStep = config.uncertainty_band * 2;
-        recommendedThreshold = Math.max(threshold - maxStep, Math.max(0, target));
+        recommendedThreshold = Math.min(threshold, Math.max(threshold - maxStep, Math.max(0, target)));
         reasoning = THRESHOLD_REASONINGS.tightenDistantHits(distantHitRate, hitRate);
       } else {
         recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
