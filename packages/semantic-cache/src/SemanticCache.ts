@@ -1676,20 +1676,13 @@ export class SemanticCache {
         return;
       }
 
-      let similarityScore: number | null = null;
-      const windowRaw = (await this.client.zrange(
-        this.similarityWindowKey,
-        '0',
-        '-1',
-        'WITHSCORES',
-      )) as Array<string>;
-      for (let i = 0; i < windowRaw.length; i += 2) {
-        if (windowRaw[i] === matchedSimilarityMember) {
-          similarityScore = Number(windowRaw[i + 1]);
-          break;
-        }
+      const rawScore = await this.client.zscore(this.similarityWindowKey, matchedSimilarityMember);
+      if (rawScore === null) {
+        await this.client.zrem(this.missPendingKey, matchedEntry);
+        return;
       }
-      if (similarityScore === null) {
+      const similarityScore = Number(rawScore);
+      if (!Number.isFinite(similarityScore)) {
         await this.client.zrem(this.missPendingKey, matchedEntry);
         return;
       }

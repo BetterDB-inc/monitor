@@ -35,6 +35,11 @@ class StubValkey {
     return list.length - next.length;
   }
 
+  async zscore(key: string, member: string): Promise<string | null> {
+    const entry = (this.zsets.get(key) ?? []).find((e) => e.member === member);
+    return entry ? String(entry.score) : null;
+  }
+
   async zremrangebyscore(key: string, _min: string, maxRaw: string | number): Promise<number> {
     const maxStr = typeof maxRaw === 'string' ? maxRaw : String(maxRaw);
     const max = maxStr.startsWith('(') ? Number(maxStr.slice(1)) : Number(maxStr);

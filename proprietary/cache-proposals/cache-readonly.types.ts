@@ -116,6 +116,8 @@ export interface ThresholdRecommendation {
   cost_weighted_near_miss_rate?: number;
   total_hit_cost_usd?: number;
   uncertain_hit_cost_usd?: number;
+  total_miss_cost_usd?: number;
+  near_miss_cost_usd?: number;
 }
 
 export interface TuningHistoryEntry {

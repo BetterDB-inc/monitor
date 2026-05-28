@@ -304,6 +304,11 @@ export class CacheReadonlyService {
       // uncertain fraction of ALL operations (not just hits) is meaningful.
       // For cost-weighted mode, the effective rate already captures cost importance.
       const totalCostAcrossSides = totalHitCostMicros + totalMissCostMicros;
+      // Cost-weighted denominator is total cost across costed hits + costed
+      // misses, not "total operations". In early rollout (most miss costs still
+      // null pending the retroactive update from store()) this can be slightly
+      // more aggressive than the count-based form; it converges to the same
+      // ratio once miss costs are populated.
       const uncertainFractionOfAll = useCostWeightedTighten
         ? totalCostAcrossSides > 0
           ? uncertainHitCostMicros / totalCostAcrossSides
@@ -491,6 +496,8 @@ export class CacheReadonlyService {
     }
     if (useCostWeightedLoosen) {
       costFields.cost_weighted_near_miss_rate = costWeightedNearMissRate;
+      costFields.total_miss_cost_usd = totalMissCostMicros / 1_000_000;
+      costFields.near_miss_cost_usd = nearMissCostMicros / 1_000_000;
     }
 
     return {
