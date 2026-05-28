@@ -8,6 +8,7 @@ import { CacheReadonlyService } from './cache-readonly.service';
 import { CacheApplyDispatcher } from './cache-apply.dispatcher';
 import { CacheApplyService } from './cache-apply.service';
 import { CacheExpirationCron } from './cache-expiration.cron';
+import { CacheOutcomeEvaluator } from './cache-outcome-evaluator';
 import { CacheProposalController } from './cache-proposal.controller';
 import { CacheProposalMcpController } from './cache-proposal-mcp.controller';
 
@@ -43,6 +44,7 @@ const tokenProviders = AgentTokensServiceClass
     CacheApplyDispatcher,
     CacheApplyService,
     CacheExpirationCron,
+    CacheOutcomeEvaluator,
   ],
   exports: [
     CacheProposalService,

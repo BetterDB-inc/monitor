@@ -80,6 +80,9 @@ export const THRESHOLD_REASONINGS = {
   oscillationDetected: (flipCount: number): string =>
     `${flipCount} direction changes detected in recent history — threshold is oscillating. ` +
     `Declaring optimal to break the cycle.`,
+  signalHistoricallyIneffective: (signal: string, degradedCount: number, totalEvaluated: number): string =>
+    `Signal "${signal}" has led to degradation in ${degradedCount} of ${totalEvaluated} ` +
+    `evaluated proposals on this cache. Blocking further adjustments from this signal.`,
 } as const;
 
 export interface ThresholdRecommendation {

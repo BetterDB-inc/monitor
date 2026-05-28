@@ -57,6 +57,15 @@ function proposedValueLabel(proposal: StoredCacheProposal): string {
   return `${proposal.proposal_payload.filter_kind}=${proposal.proposal_payload.filter_value}`;
 }
 
+function outcomeVerdict(proposal: StoredCacheProposal): { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' } | null {
+  const details = (proposal.applied_result as { details?: Record<string, unknown> } | null)?.details;
+  const evaluation = details?.outcome_evaluation as { verdict?: string } | undefined;
+  if (!evaluation?.verdict) return null;
+  if (evaluation.verdict === 'improved') return { label: 'improved', variant: 'default' };
+  if (evaluation.verdict === 'degraded') return { label: 'degraded', variant: 'destructive' };
+  return { label: 'neutral', variant: 'outline' };
+}
+
 function proposalSource(proposal: StoredCacheProposal): string {
   if (proposal.proposed_by?.startsWith('mcp:')) {
     return 'mcp';
@@ -125,6 +134,7 @@ export function HistoryTable() {
               <TableHead>Proposal type</TableHead>
               <TableHead>Proposed value</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Outcome</TableHead>
               <TableHead>Reviewer</TableHead>
               <TableHead>Source</TableHead>
             </TableRow>
@@ -132,7 +142,7 @@ export function HistoryTable() {
           <TableBody>
             {(data ?? []).length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center text-sm text-muted-foreground">
+                <TableCell colSpan={9} className="text-center text-sm text-muted-foreground">
                   No proposals match the current filters.
                 </TableCell>
               </TableRow>
@@ -154,6 +164,13 @@ export function HistoryTable() {
                   </TableCell>
                   <TableCell>
                     <Badge variant={statusVariant(proposal.status)}>{proposal.status}</Badge>
+                  </TableCell>
+                  <TableCell>
+                    {(() => {
+                      const outcome = outcomeVerdict(proposal);
+                      if (!outcome) return <span className="text-xs text-muted-foreground">—</span>;
+                      return <Badge variant={outcome.variant}>{outcome.label}</Badge>;
+                    })()}
                   </TableCell>
                   <TableCell className="text-xs">{proposal.reviewed_by ?? '—'}</TableCell>
                   <TableCell className="text-xs uppercase">

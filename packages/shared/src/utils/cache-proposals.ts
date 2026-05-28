@@ -27,6 +27,7 @@ export const ProposalAuditEventSchema = z.enum([
   'applied',
   'failed',
   'expired',
+  'outcome_evaluated',
 ]);
 export type ProposalAuditEvent = z.infer<typeof ProposalAuditEventSchema>;
 

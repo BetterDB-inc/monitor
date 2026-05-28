@@ -382,6 +382,29 @@ export class CacheReadonlyService {
               : threshold + dampenedStep;
         }
       }
+
+      // Historical outcome weighting: if past proposals triggered by the same
+      // signal on this cache were evaluated as "degraded", block the adjustment.
+      // This prevents repeating adjustments that have been proven to not help.
+      if (
+        signal &&
+        recommendation !== THRESHOLD_RECOMMENDATIONS.OPTIMAL
+      ) {
+        const pastOutcomes = await this.getSignalOutcomeHistory(
+          connectionId,
+          cacheName,
+          signal,
+        );
+        if (pastOutcomes.degradedCount >= 2 && pastOutcomes.degradedCount > pastOutcomes.improvedCount) {
+          recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
+          recommendedThreshold = undefined;
+          reasoning = THRESHOLD_REASONINGS.signalHistoricallyIneffective(
+            signal,
+            pastOutcomes.degradedCount,
+            pastOutcomes.totalEvaluated,
+          );
+        }
+      }
     }
 
     return {
@@ -755,6 +778,51 @@ export class CacheReadonlyService {
       };
     }
     return { ineffective: false };
+  }
+
+  /**
+   * Read evaluated outcomes from past proposals for a given signal on this cache.
+   * Returns counts of improved, degraded, and neutral verdicts.
+   */
+  private async getSignalOutcomeHistory(
+    connectionId: string,
+    cacheName: string,
+    signal: string,
+  ): Promise<{ improvedCount: number; degradedCount: number; neutralCount: number; totalEvaluated: number }> {
+    try {
+      const proposals = await this.storage.listCacheProposals({
+        connection_id: connectionId,
+        cache_name: cacheName,
+        status: 'applied',
+        proposal_type: 'threshold_adjust',
+        limit: 20,
+      });
+
+      let improvedCount = 0;
+      let degradedCount = 0;
+      let neutralCount = 0;
+
+      for (const p of proposals) {
+        const details = p.applied_result?.details as Record<string, unknown> | undefined;
+        const evaluation = details?.outcome_evaluation as
+          | { verdict?: string; signal?: string }
+          | undefined;
+        if (!evaluation?.verdict || evaluation.signal !== signal) continue;
+
+        if (evaluation.verdict === 'improved') improvedCount += 1;
+        else if (evaluation.verdict === 'degraded') degradedCount += 1;
+        else neutralCount += 1;
+      }
+
+      return {
+        improvedCount,
+        degradedCount,
+        neutralCount,
+        totalEvaluated: improvedCount + degradedCount + neutralCount,
+      };
+    } catch {
+      return { improvedCount: 0, degradedCount: 0, neutralCount: 0, totalEvaluated: 0 };
+    }
   }
 
   private async readSemanticConfig(client: Valkey, prefix: string): Promise<SemanticConfig> {
