@@ -65,11 +65,22 @@ class StubRegistry {
   }
 }
 
+class StubLicenseService {
+  private tier: 'community' | 'pro' | 'enterprise' = 'pro';
+  setTier(t: 'community' | 'pro' | 'enterprise'): void {
+    this.tier = t;
+  }
+  getLicenseTier(): string {
+    return this.tier;
+  }
+}
+
 const buildService = async (): Promise<{
   service: CacheReadonlyService;
   client: StubValkey;
   resolver: StubResolver;
   storage: MemoryAdapter;
+  license: StubLicenseService;
 }> => {
   const client = new StubValkey();
   const resolver = new StubResolver();
@@ -78,15 +89,20 @@ const buildService = async (): Promise<{
   const storage = new MemoryAdapter();
   await storage.initialize();
   const registry = new StubRegistry(client);
+  const license = new StubLicenseService();
   const service = new CacheReadonlyService(
     registry as unknown as ConnectionRegistry,
     resolver as unknown as CacheResolverService,
     storage,
+    license as unknown as import('@proprietary/licenses').LicenseService,
   );
-  return { service, client, resolver, storage };
+  return { service, client, resolver, storage, license };
 };
 
-const seedRegistry = (client: StubValkey, entries: Record<string, { type: CacheType; prefix: string }>): void => {
+const seedRegistry = (
+  client: StubValkey,
+  entries: Record<string, { type: CacheType; prefix: string }>,
+): void => {
   client.hashes[REGISTRY_KEY] = {};
   for (const [name, marker] of Object.entries(entries)) {
     client.hashes[REGISTRY_KEY][name] = JSON.stringify({
@@ -106,6 +122,30 @@ const seedSimilarityWindow = (
   const baseTs = Date.now();
   client.zsets[`${prefix}:__similarity_window`] = samples.map((s, i) => ({
     member: JSON.stringify({ score: s.score, result: s.result, category: s.category, _n: i }),
+    score: s.ts ?? baseTs + i,
+  }));
+};
+
+const seedSamplesWithCost = (
+  client: StubValkey,
+  prefix: string,
+  samples: Array<{
+    score: number;
+    result: 'hit' | 'miss';
+    category: string;
+    ts?: number;
+    cost?: number | null;
+  }>,
+): void => {
+  const baseTs = Date.now();
+  client.zsets[`${prefix}:__similarity_window`] = samples.map((s, i) => ({
+    member: JSON.stringify({
+      score: s.score,
+      result: s.result,
+      category: s.category,
+      _n: i,
+      cost_saved_micros: s.cost === undefined ? null : s.cost,
+    }),
     score: s.ts ?? baseTs + i,
   }));
 };
@@ -414,6 +454,108 @@ describe('CacheReadonlyService', () => {
       expect(result.confidence_breakdown!.signal).toBeGreaterThan(0);
     });
 
+    it('Enterprise: single expensive uncertain hit drives TIGHTEN where count-based misses it', async () => {
+      const { service, client, license } = await buildService();
+      license.setTier('enterprise');
+      const samples: Array<{
+        score: number;
+        result: 'hit' | 'miss';
+        category: string;
+        cost: number | null;
+      }> = [];
+      for (let i = 0; i < 99; i++) {
+        samples.push({ score: 0.02, result: 'hit', category: 'all', cost: 1000 });
+      }
+      samples.push({ score: 0.08, result: 'hit', category: 'all', cost: 50_000_000 });
+      for (let i = 0; i < 50; i++) {
+        samples.push({ score: 0.5, result: 'miss', category: 'all', cost: null });
+      }
+      seedSamplesWithCost(client, SEMANTIC_NAME, samples);
+      const result = await service.thresholdRecommendation(CONNECTION_ID, SEMANTIC_NAME, {
+        minSamples: 50,
+      });
+      expect(result.recommendation).toBe('tighten_threshold');
+      expect(result.signal).toBe('uncertain_hits');
+      expect(result.cost_weighted_uncertain_hit_rate).toBeGreaterThan(0.2);
+      expect(result.uncertain_hit_cost_usd).toBeCloseTo(50, 1);
+    });
+
+    it('Enterprise with no costed samples falls back to unweighted', async () => {
+      const { service, client, license } = await buildService();
+      license.setTier('enterprise');
+      // threshold=0.10, band=0.05: uncertain = score >= 0.05
+      // proposed tighten step = 0.03 → new threshold = 0.07
+      // hits at 0.05 are uncertain (0.05 >= 0.05) but survive tightening (0.05 <= 0.07)
+      // hits at 0.06 are uncertain and are lost (0.06 > 0.07 is false) — also survive
+      // uncertainHitRate = 1.0, uncertainFractionOfAll = 1.0 * (85/90) > 0.15
+      const samples = [
+        ...Array.from({ length: 85 }, (_, i) => ({
+          score: 0.05 + (i % 2) * 0.005,
+          result: 'hit' as const,
+          category: 'all',
+          cost: null as number | null,
+          ts: Date.now() + i,
+        })),
+        ...Array.from({ length: 5 }, (_, i) => ({
+          score: 0.2,
+          result: 'miss' as const,
+          category: 'all',
+          cost: null as number | null,
+          ts: Date.now() + 100 + i,
+        })),
+      ];
+      seedSamplesWithCost(client, SEMANTIC_NAME, samples);
+      const result = await service.thresholdRecommendation(CONNECTION_ID, SEMANTIC_NAME, {
+        minSamples: 50,
+      });
+      expect(result.recommendation).toBe('tighten_threshold');
+      expect(result.cost_weighted_uncertain_hit_rate).toBeUndefined();
+      expect(result.total_hit_cost_usd).toBeUndefined();
+    });
+
+    it('Pro+ with costed samples still uses count-based decision', async () => {
+      const { service, client, license } = await buildService();
+      license.setTier('pro');
+      const samples: Array<{
+        score: number;
+        result: 'hit' | 'miss';
+        category: string;
+        cost: number | null;
+        ts: number;
+      }> = [];
+      for (let i = 0; i < 99; i++) {
+        samples.push({
+          score: 0.02,
+          result: 'hit',
+          category: 'all',
+          cost: 1000,
+          ts: Date.now() + i,
+        });
+      }
+      samples.push({
+        score: 0.08,
+        result: 'hit',
+        category: 'all',
+        cost: 50_000_000,
+        ts: Date.now() + 100,
+      });
+      for (let i = 0; i < 50; i++) {
+        samples.push({
+          score: 0.5,
+          result: 'miss',
+          category: 'all',
+          cost: null,
+          ts: Date.now() + 200 + i,
+        });
+      }
+      seedSamplesWithCost(client, SEMANTIC_NAME, samples);
+      const result = await service.thresholdRecommendation(CONNECTION_ID, SEMANTIC_NAME, {
+        minSamples: 50,
+      });
+      expect(result.recommendation).toBe('optimal');
+      expect(result.cost_weighted_uncertain_hit_rate).toBeUndefined();
+    });
+
     it('populates non-zero confidence on distant_hits TIGHTEN', async () => {
       const { service, client } = await buildService();
       // Tighten the uncertainty_band so distant != uncertain (the engine's
@@ -466,9 +608,9 @@ describe('CacheReadonlyService', () => {
   describe('toolEffectiveness', () => {
     it('errors INVALID_CACHE_TYPE on semantic_cache', async () => {
       const { service } = await buildService();
-      await expect(
-        service.toolEffectiveness(CONNECTION_ID, SEMANTIC_NAME),
-      ).rejects.toBeInstanceOf(InvalidCacheTypeError);
+      await expect(service.toolEffectiveness(CONNECTION_ID, SEMANTIC_NAME)).rejects.toBeInstanceOf(
+        InvalidCacheTypeError,
+      );
     });
 
     it('returns per-tool entries sorted by cost_saved_usd desc', async () => {

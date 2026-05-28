@@ -4,6 +4,7 @@ import type { CacheType, StoredCacheProposal } from '@betterdb/shared';
 import { AGENT_CACHE, REGISTRY_KEY, SEMANTIC_CACHE, heartbeatKeyFor } from '@betterdb/shared';
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
+import { LicenseService, Tier } from '@proprietary/licenses';
 import { CacheResolverService, type ResolvedCache } from './cache-resolver.service';
 import { CacheNotFoundError, InvalidCacheTypeError } from './errors';
 import { readIntField } from '@app/common/utils/record-fields';
@@ -88,6 +89,7 @@ export class CacheReadonlyService {
     private readonly registry: ConnectionRegistry,
     private readonly resolver: CacheResolverService,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
+    private readonly license: LicenseService,
   ) {}
 
   async listCaches(connectionId: string): Promise<CacheListEntry[]> {
@@ -242,6 +244,37 @@ export class CacheReadonlyService {
     );
     const nearMissRate = misses.length === 0 ? 0 : nearMisses.length / misses.length;
 
+    const hitsCosted = hits.filter((s) => s.cost_saved_micros !== null);
+    const missesCosted = misses.filter((s) => s.cost_saved_micros !== null);
+    const uncertainHitsCost = uncertainHits.filter((s) => s.cost_saved_micros !== null);
+    const nearMissesCost = nearMisses.filter((s) => s.cost_saved_micros !== null);
+
+    const sumCost = (xs: ReadonlyArray<{ cost_saved_micros: number | null }>): number => {
+      return xs.reduce((acc, s) => acc + (s.cost_saved_micros ?? 0), 0);
+    };
+
+    const totalHitCostMicros = sumCost(hitsCosted);
+    const uncertainHitCostMicros = sumCost(uncertainHitsCost);
+    const totalMissCostMicros = sumCost(missesCosted);
+    const nearMissCostMicros = sumCost(nearMissesCost);
+
+    const haveCostedHits = hitsCosted.length >= minSamples;
+    const haveCostedMisses = missesCosted.length >= minSamples;
+
+    const costWeightedUncertainHitRate =
+      totalHitCostMicros > 0 ? uncertainHitCostMicros / totalHitCostMicros : 0;
+    const costWeightedNearMissRate =
+      totalMissCostMicros > 0 ? nearMissCostMicros / totalMissCostMicros : 0;
+
+    const isEnterprise = this.license.getLicenseTier() === Tier.enterprise;
+    const useCostWeightedTighten = isEnterprise && haveCostedHits;
+    const useCostWeightedLoosen = isEnterprise && haveCostedMisses;
+
+    const effectiveUncertainHitRate = useCostWeightedTighten
+      ? costWeightedUncertainHitRate
+      : uncertainHitRate;
+    const effectiveNearMissRate = useCostWeightedLoosen ? costWeightedNearMissRate : nearMissRate;
+
     const avgHitSimilarity =
       hits.length === 0 ? 0 : hits.reduce((acc, s) => acc + s.score, 0) / hits.length;
     const avgMissSimilarity =
@@ -264,16 +297,19 @@ export class CacheReadonlyService {
       near_miss_rate: nearMissRate,
     };
 
-    if (uncertainHitRate > 0.2) {
+    if (effectiveUncertainHitRate > 0.2) {
       // Many hits at the threshold boundary — but weigh against overall hit rate.
       // A 20% uncertain-hit rate with 70% overall hits means 14% of all ops are
       // uncertain — that's noise, not a strong signal. Only tighten when the
       // uncertain fraction of ALL operations (not just hits) is meaningful.
-      const uncertainFractionOfAll = uncertainHitRate * hitRate;
+      // For cost-weighted mode, the effective rate already captures cost importance.
+      const uncertainFractionOfAll = useCostWeightedTighten
+        ? effectiveUncertainHitRate
+        : uncertainHitRate * hitRate;
       if (uncertainFractionOfAll > 0.15) {
         recommendation = THRESHOLD_RECOMMENDATIONS.TIGHTEN;
         signal = 'uncertain_hits';
-        signalRate = uncertainHitRate;
+        signalRate = effectiveUncertainHitRate;
         const step = config.uncertainty_band * 0.6;
         recommendedThreshold = Math.max(0, threshold - step);
         reasoning = THRESHOLD_REASONINGS.tighten(uncertainHitRate);
@@ -298,17 +334,20 @@ export class CacheReadonlyService {
         const p75 = sortedHitScores[Math.floor(sortedHitScores.length * 0.75)];
         const target = p75 + config.uncertainty_band * 0.3;
         const maxStep = config.uncertainty_band * 2;
-        recommendedThreshold = Math.min(threshold, Math.max(threshold - maxStep, Math.max(0, target)));
+        recommendedThreshold = Math.min(
+          threshold,
+          Math.max(threshold - maxStep, Math.max(0, target)),
+        );
         reasoning = THRESHOLD_REASONINGS.tightenDistantHits(distantHitRate, hitRate);
       } else {
         recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
         reasoning = THRESHOLD_REASONINGS.optimal(hitRate, uncertainHitRate);
       }
-    } else if (nearMissRate > 0.25) {
+    } else if (effectiveNearMissRate > 0.25) {
       // Many near-misses just above the threshold — probably too strict.
       recommendation = THRESHOLD_RECOMMENDATIONS.LOOSEN;
       signal = 'near_misses';
-      signalRate = nearMissRate;
+      signalRate = effectiveNearMissRate;
       recommendedThreshold = threshold + avgNearMissDelta;
       reasoning = THRESHOLD_REASONINGS.loosen(nearMissRate);
     } else if (hitRate < 0.05 && misses.length >= 20) {
@@ -344,7 +383,9 @@ export class CacheReadonlyService {
       recommendedThreshold !== undefined &&
       hits.length > 0
     ) {
-      const hitsLost = hits.filter((s) => s.score > recommendedThreshold! && s.score <= threshold).length;
+      const hitsLost = hits.filter(
+        (s) => s.score > recommendedThreshold! && s.score <= threshold,
+      ).length;
       const recallCost = hitsLost / hits.length;
       if (recallCost > RECALL_COST_MAX) {
         recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
@@ -425,6 +466,14 @@ export class CacheReadonlyService {
       );
     }
 
+    const costFields: Partial<ThresholdRecommendation> = {};
+    if (useCostWeightedTighten || useCostWeightedLoosen) {
+      costFields.cost_weighted_uncertain_hit_rate = costWeightedUncertainHitRate;
+      costFields.cost_weighted_near_miss_rate = costWeightedNearMissRate;
+      costFields.total_hit_cost_usd = totalHitCostMicros / 1_000_000;
+      costFields.uncertain_hit_cost_usd = uncertainHitCostMicros / 1_000_000;
+    }
+
     return {
       category: categoryLabel,
       sample_count: sampleCount,
@@ -443,6 +492,7 @@ export class CacheReadonlyService {
       consecutive_same_direction: consecutiveSameDirection,
       confidence_score,
       confidence_breakdown,
+      ...costFields,
     };
   }
 
@@ -596,7 +646,9 @@ export class CacheReadonlyService {
     const hits =
       readIntField(raw, 'hits') + readIntField(raw, 'llm:hits') + readIntField(raw, 'tool:hits');
     const misses =
-      readIntField(raw, 'misses') + readIntField(raw, 'llm:misses') + readIntField(raw, 'tool:misses');
+      readIntField(raw, 'misses') +
+      readIntField(raw, 'llm:misses') +
+      readIntField(raw, 'tool:misses');
     const explicitTotal = readIntField(raw, 'total');
     return { hits, misses, total: explicitTotal === 0 ? hits + misses : explicitTotal };
   }
@@ -650,11 +702,7 @@ export class CacheReadonlyService {
         }
         const rawCost = entry.cost_saved_micros;
         let cost_saved_micros: number | null;
-        if (
-          typeof rawCost === 'number' &&
-          Number.isFinite(rawCost) &&
-          rawCost >= 0
-        ) {
+        if (typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0) {
           cost_saved_micros = rawCost;
         } else {
           cost_saved_micros = null;
@@ -692,7 +740,13 @@ export class CacheReadonlyService {
   private computeDampening(
     history: TuningHistoryEntry[],
     currentDirection: 'tighten' | 'loosen',
-  ): { factor: number; consecutiveSameDirection: number; directionFlips: number; capped: boolean; reason?: string } {
+  ): {
+    factor: number;
+    consecutiveSameDirection: number;
+    directionFlips: number;
+    capped: boolean;
+    reason?: string;
+  } {
     if (history.length === 0) {
       return { factor: 1, consecutiveSameDirection: 0, directionFlips: 0, capped: false };
     }
