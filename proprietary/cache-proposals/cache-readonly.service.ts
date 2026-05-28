@@ -303,8 +303,11 @@ export class CacheReadonlyService {
       // uncertain — that's noise, not a strong signal. Only tighten when the
       // uncertain fraction of ALL operations (not just hits) is meaningful.
       // For cost-weighted mode, the effective rate already captures cost importance.
+      const totalCostAcrossSides = totalHitCostMicros + totalMissCostMicros;
       const uncertainFractionOfAll = useCostWeightedTighten
-        ? effectiveUncertainHitRate
+        ? totalCostAcrossSides > 0
+          ? uncertainHitCostMicros / totalCostAcrossSides
+          : 0
         : uncertainHitRate * hitRate;
       if (uncertainFractionOfAll > 0.15) {
         recommendation = THRESHOLD_RECOMMENDATIONS.TIGHTEN;
@@ -467,11 +470,13 @@ export class CacheReadonlyService {
     }
 
     const costFields: Partial<ThresholdRecommendation> = {};
-    if (useCostWeightedTighten || useCostWeightedLoosen) {
+    if (useCostWeightedTighten) {
       costFields.cost_weighted_uncertain_hit_rate = costWeightedUncertainHitRate;
-      costFields.cost_weighted_near_miss_rate = costWeightedNearMissRate;
       costFields.total_hit_cost_usd = totalHitCostMicros / 1_000_000;
       costFields.uncertain_hit_cost_usd = uncertainHitCostMicros / 1_000_000;
+    }
+    if (useCostWeightedLoosen) {
+      costFields.cost_weighted_near_miss_rate = costWeightedNearMissRate;
     }
 
     return {
