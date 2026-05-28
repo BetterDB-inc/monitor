@@ -168,8 +168,10 @@ export class CacheOutcomeEvaluator implements OnModuleInit, OnModuleDestroy {
     );
     if (!historyEntry?.metrics || !historyEntry.signal) return null;
 
-    // Compute current metrics from the similarity window
-    const currentMetrics = await this.computeCurrentMetrics(client, cache.prefix, targetThreshold);
+    // Compute current metrics from similarity window entries recorded AFTER
+    // the proposal was applied. Pre-adjustment entries have hit/miss labels
+    // based on the old threshold and would contaminate the metrics.
+    const currentMetrics = await this.computeCurrentMetrics(client, cache.prefix, targetThreshold, appliedAt);
     if (!currentMetrics) return null;
 
     // Compare before vs after
@@ -306,14 +308,25 @@ export class CacheOutcomeEvaluator implements OnModuleInit, OnModuleDestroy {
     client: any,
     prefix: string,
     threshold: number,
+    sinceMs: number = 0,
   ): Promise<TuningMetricsSnapshot | null> {
     const DEFAULT_UNCERTAINTY_BAND = 0.05;
 
+    // The similarity window is a ZSET scored by timestamp (epoch ms).
+    // When sinceMs > 0, only read entries recorded after the proposal was
+    // applied so pre-adjustment hit/miss classifications don't contaminate
+    // the metrics.
     let raw: Array<string | number>;
     try {
-      raw = (await client.zrange(
-        `${prefix}:__similarity_window`, '0', '-1', 'WITHSCORES',
-      )) as Array<string | number>;
+      if (sinceMs > 0) {
+        raw = (await client.zrangebyscore(
+          `${prefix}:__similarity_window`, String(sinceMs), '+inf', 'WITHSCORES',
+        )) as Array<string | number>;
+      } else {
+        raw = (await client.zrange(
+          `${prefix}:__similarity_window`, '0', '-1', 'WITHSCORES',
+        )) as Array<string | number>;
+      }
     } catch {
       return null;
     }
