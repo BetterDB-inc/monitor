@@ -1,0 +1,31 @@
+{
+  "name": "@betterdb/cache-benchmark",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "cache-bench-ts": "./dist/cli.js"
+  },
+  "scripts": {
+    "bench": "tsx src/cli.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@betterdb/semantic-cache": "workspace:*",
+    "@huggingface/transformers": "^4.2.0",
+    "@upstash/semantic-cache": "^1.0.5",
+    "@upstash/vector": "^1.2.3",
+    "commander": "^13.0.0",
+    "iovalkey": ">=0.3.0",
+    "openai": "^6.34.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
