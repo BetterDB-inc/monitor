@@ -1644,15 +1644,14 @@ export class SemanticCache {
    */
   private async applyCostToPendingMiss(prompt: string, costMicros: number): Promise<void> {
     const correlationId = correlationIdFor(prompt);
-    const now = Date.now();
-    const fiveMinutesAgo = now - 5 * 60 * 1000;
+    const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
     try {
       await this.client.zremrangebyscore(this.missPendingKey, '-inf', `(${fiveMinutesAgo}`);
 
       const raw = (await this.client.zrange(
         this.missPendingKey,
-        0,
-        -1,
+        '0',
+        '-1',
         'WITHSCORES',
       )) as Array<string>;
       let matchedEntry: string | null = null;
@@ -1680,8 +1679,8 @@ export class SemanticCache {
       let similarityScore: number | null = null;
       const windowRaw = (await this.client.zrange(
         this.similarityWindowKey,
-        0,
-        -1,
+        '0',
+        '-1',
         'WITHSCORES',
       )) as Array<string>;
       for (let i = 0; i < windowRaw.length; i += 2) {
@@ -1699,9 +1698,11 @@ export class SemanticCache {
       parsedMember.cost_saved_micros = costMicros;
       const updatedMember = JSON.stringify(parsedMember);
 
-      await this.client.zrem(this.similarityWindowKey, matchedSimilarityMember);
-      await this.client.zadd(this.similarityWindowKey, similarityScore, updatedMember);
-      await this.client.zrem(this.missPendingKey, matchedEntry);
+      const updatePipeline = this.client.pipeline();
+      updatePipeline.zrem(this.similarityWindowKey, matchedSimilarityMember);
+      updatePipeline.zadd(this.similarityWindowKey, similarityScore, updatedMember);
+      updatePipeline.zrem(this.missPendingKey, matchedEntry);
+      await updatePipeline.exec();
     } catch {
       /* never fail store() because of bookkeeping */
     }

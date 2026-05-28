@@ -51,6 +51,10 @@ class StubValkey {
         ops.push(['zadd', [key, score, member]]);
         return p;
       },
+      zrem: (key: string, member: string) => {
+        ops.push(['zrem', [key, member]]);
+        return p;
+      },
       zremrangebyscore: () => p,
       zremrangebyrank: () => p,
     } as Record<string, unknown>;
@@ -62,11 +66,17 @@ class StubValkey {
           list.push({ score, member });
           this.zsets.set(key, list);
         }
+        if (op === 'zrem') {
+          const [key, member] = args as [string, string];
+          const list = this.zsets.get(key) ?? [];
+          this.zsets.set(key, list.filter((e) => e.member !== member));
+        }
       }
       return [];
     };
     return p as {
       zadd: (k: string, s: number, m: string) => unknown;
+      zrem: (k: string, m: string) => unknown;
       zremrangebyscore: (k: string, a: string, b: string | number) => unknown;
       zremrangebyrank: (k: string, a: number, b: number) => unknown;
       exec: () => Promise<unknown[]>;
