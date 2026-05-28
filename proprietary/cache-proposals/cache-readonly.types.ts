@@ -65,6 +65,10 @@ export const THRESHOLD_REASONINGS = {
     `${formatPct(nearMissRate)} of misses are very close to the threshold — consider loosening.`,
   loosenLowHitRate: (hitRate: number): string =>
     `Hit rate is only ${formatPct(hitRate)} with near-misses just above the threshold — consider loosening.`,
+  tightenCost: (rate: number, atRiskUsd: number): string =>
+    `${formatPct(rate)} of saved cost ($${atRiskUsd.toFixed(2)}) on uncertain hits — tighten the threshold.`,
+  loosenCost: (rate: number, missedUsd: number): string =>
+    `${formatPct(rate)} of missed savings ($${missedUsd.toFixed(2)}) on near-misses — consider loosening.`,
   optimal: (hitRate: number, uncertainHitRate: number): string =>
     `Hit rate ${formatPct(hitRate)} with ${formatPct(uncertainHitRate)} uncertain hits — threshold appears well-calibrated.`,
   recallCostTooHigh: (recallCost: number): string =>
@@ -108,6 +112,10 @@ export interface ThresholdRecommendation {
   consecutive_same_direction?: number;
   confidence_score: number | null;
   confidence_breakdown: ThresholdRecommendationConfidenceBreakdown | null;
+  cost_weighted_uncertain_hit_rate?: number;
+  cost_weighted_near_miss_rate?: number;
+  total_hit_cost_usd?: number;
+  uncertain_hit_cost_usd?: number;
 }
 
 export interface TuningHistoryEntry {

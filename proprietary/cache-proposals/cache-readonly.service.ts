@@ -605,7 +605,13 @@ export class CacheReadonlyService {
     client: Valkey,
     prefix: string,
   ): Promise<
-    Array<{ score: number; result: 'hit' | 'miss'; category: string; recordedAt: number }>
+    Array<{
+      score: number;
+      result: 'hit' | 'miss';
+      category: string;
+      recordedAt: number;
+      cost_saved_micros: number | null;
+    }>
   > {
     let raw: Array<string | number>;
     try {
@@ -623,6 +629,7 @@ export class CacheReadonlyService {
       result: 'hit' | 'miss';
       category: string;
       recordedAt: number;
+      cost_saved_micros: number | null;
     }> = [];
     for (let i = 0; i < raw.length; i += 2) {
       const member = raw[i];
@@ -641,7 +648,18 @@ export class CacheReadonlyService {
         if (result !== 'hit' && result !== 'miss') {
           continue;
         }
-        out.push({ score, result, category, recordedAt });
+        const rawCost = entry.cost_saved_micros;
+        let cost_saved_micros: number | null;
+        if (
+          typeof rawCost === 'number' &&
+          Number.isFinite(rawCost) &&
+          rawCost >= 0
+        ) {
+          cost_saved_micros = rawCost;
+        } else {
+          cost_saved_micros = null;
+        }
+        out.push({ score, result, category, recordedAt, cost_saved_micros });
       } catch {
         // ignore malformed entries
       }
