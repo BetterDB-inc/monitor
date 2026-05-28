@@ -315,7 +315,14 @@ export class CacheReadonlyService {
         signalRate = effectiveUncertainHitRate;
         const step = config.uncertainty_band * 0.6;
         recommendedThreshold = Math.max(0, threshold - step);
-        reasoning = THRESHOLD_REASONINGS.tighten(uncertainHitRate);
+        if (useCostWeightedTighten) {
+          reasoning = THRESHOLD_REASONINGS.tightenCost(
+            costWeightedUncertainHitRate,
+            uncertainHitCostMicros / 1_000_000,
+          );
+        } else {
+          reasoning = THRESHOLD_REASONINGS.tighten(uncertainHitRate);
+        }
       } else {
         recommendation = THRESHOLD_RECOMMENDATIONS.OPTIMAL;
         reasoning = THRESHOLD_REASONINGS.optimal(hitRate, uncertainHitRate);
@@ -352,7 +359,14 @@ export class CacheReadonlyService {
       signal = 'near_misses';
       signalRate = effectiveNearMissRate;
       recommendedThreshold = threshold + avgNearMissDelta;
-      reasoning = THRESHOLD_REASONINGS.loosen(nearMissRate);
+      if (useCostWeightedLoosen) {
+        reasoning = THRESHOLD_REASONINGS.loosenCost(
+          costWeightedNearMissRate,
+          nearMissCostMicros / 1_000_000,
+        );
+      } else {
+        reasoning = THRESHOLD_REASONINGS.loosen(nearMissRate);
+      }
     } else if (hitRate < 0.05 && misses.length >= 20) {
       // Very few hits with enough data — threshold may be too strict.
       // Check if there are misses close to the threshold that would become hits.

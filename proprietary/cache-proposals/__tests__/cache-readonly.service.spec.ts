@@ -603,6 +603,31 @@ describe('CacheReadonlyService', () => {
       expect(result.confidence_score).toBeGreaterThan(0);
       expect(result.confidence_breakdown!.signal).toBeGreaterThan(0);
     });
+
+    it('Enterprise: reasoning includes dollars when cost-weighting fired', async () => {
+      const { service, client, license } = await buildService();
+      license.setTier('enterprise');
+      const samples: Array<{
+        score: number;
+        result: 'hit' | 'miss';
+        category: string;
+        cost: number | null;
+      }> = [];
+      for (let i = 0; i < 99; i++) {
+        samples.push({ score: 0.02, result: 'hit', category: 'all', cost: 1000 });
+      }
+      samples.push({ score: 0.08, result: 'hit', category: 'all', cost: 50_000_000 });
+      for (let i = 0; i < 50; i++) {
+        samples.push({ score: 0.5, result: 'miss', category: 'all', cost: null });
+      }
+      seedSamplesWithCost(client, SEMANTIC_NAME, samples);
+      const result = await service.thresholdRecommendation(CONNECTION_ID, SEMANTIC_NAME, {
+        minSamples: 50,
+      });
+      expect(result.recommendation).toBe('tighten_threshold');
+      expect(result.reasoning).toMatch(/\$50\.00/);
+      expect(result.reasoning).toMatch(/saved cost/);
+    });
   });
 
   describe('toolEffectiveness', () => {
