@@ -376,6 +376,91 @@ describe('CacheReadonlyService', () => {
       expect(result.confidence_score).toBe(0);
       expect(result.confidence_breakdown!.freshness).toBe(0);
     });
+
+    it('populates non-zero confidence on low_hit_rate LOOSEN even when nearMissRate is low', async () => {
+      const { service, client } = await buildService();
+      const now = Date.now();
+      // Defaults: threshold=0.10, uncertainty_band=0.05.
+      //   near-misses:  (0.10, 0.15]
+      //   close-misses: (0.10, 0.20]
+      // We want CLOSE but NOT near, so misses at score 0.18.
+      const samples = [
+        ...Array.from({ length: 3 }, (_, i) => ({
+          score: 0.03,
+          result: 'hit' as const,
+          category: 'all',
+          ts: now + i,
+        })),
+        ...Array.from({ length: 100 }, (_, i) => ({
+          score: 0.18,
+          result: 'miss' as const,
+          category: 'all',
+          ts: now + 10 + i,
+        })),
+        ...Array.from({ length: 97 }, (_, i) => ({
+          score: 0.5,
+          result: 'miss' as const,
+          category: 'all',
+          ts: now + 200 + i,
+        })),
+      ];
+      seedSimilarityWindow(client, SEMANTIC_NAME, samples);
+      const result = await service.thresholdRecommendation(CONNECTION_ID, SEMANTIC_NAME, {
+        minSamples: 50,
+      });
+      expect(result.recommendation).toBe('loosen_threshold');
+      expect(result.signal).toBe('low_hit_rate');
+      expect(result.confidence_score).toBeGreaterThan(0);
+      expect(result.confidence_breakdown!.signal).toBeGreaterThan(0);
+    });
+
+    it('populates non-zero confidence on distant_hits TIGHTEN', async () => {
+      const { service, client } = await buildService();
+      // Tighten the uncertainty_band so distant != uncertain (the engine's
+      // distant_hits branch is unreachable with the default band=0.05).
+      // threshold=0.10, band=0.01:
+      //   midpoint=0.05 → distant: score > 0.05
+      //   uncertain:    score >= 0.09  (threshold - band)
+      client.hashes[`${SEMANTIC_NAME}:__config`] = {
+        threshold: '0.10',
+        uncertainty_band: '0.01',
+        category_thresholds: '{}',
+      };
+      const now = Date.now();
+      // Need hitRate > 0.8, distantHitRate > 0.25, hits.length >= 20,
+      // uncertainFractionOfAll ≤ 0.15 so the uncertain_hits branch skips.
+      const samples = [
+        // 70 strong hits (score 0.02 — neither uncertain nor distant).
+        ...Array.from({ length: 70 }, (_, i) => ({
+          score: 0.02,
+          result: 'hit' as const,
+          category: 'all',
+          ts: now + i,
+        })),
+        // 30 distant-but-not-uncertain hits (score 0.07 — distant, not uncertain).
+        ...Array.from({ length: 30 }, (_, i) => ({
+          score: 0.07,
+          result: 'hit' as const,
+          category: 'all',
+          ts: now + 100 + i,
+        })),
+        // 10 misses → hitRate = 100/110 ≈ 0.91 (> 0.8). nearMissRate = 0.
+        ...Array.from({ length: 10 }, (_, i) => ({
+          score: 0.5,
+          result: 'miss' as const,
+          category: 'all',
+          ts: now + 200 + i,
+        })),
+      ];
+      seedSimilarityWindow(client, SEMANTIC_NAME, samples);
+      const result = await service.thresholdRecommendation(CONNECTION_ID, SEMANTIC_NAME, {
+        minSamples: 50,
+      });
+      expect(result.recommendation).toBe('tighten_threshold');
+      expect(result.signal).toBe('distant_hits');
+      expect(result.confidence_score).toBeGreaterThan(0);
+      expect(result.confidence_breakdown!.signal).toBeGreaterThan(0);
+    });
   });
 
   describe('toolEffectiveness', () => {

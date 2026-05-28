@@ -27,11 +27,7 @@ import type {
   TuningMetricsSnapshot,
 } from './cache-readonly.types';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
-import {
-  computeConfidence,
-  TIGHTEN_BOUNDARY,
-  LOOSEN_BOUNDARY,
-} from './confidence-score';
+import { computeConfidence, signalBoundaryFor } from './confidence-score';
 
 export type {
   CacheHealth,
@@ -259,6 +255,7 @@ export class CacheReadonlyService {
     let recommendedThreshold: number | undefined;
     let reasoning: string;
     let signal: string | undefined;
+    let signalRate: number | undefined;
 
     const currentMetrics = {
       hit_rate: hitRate,
@@ -276,6 +273,7 @@ export class CacheReadonlyService {
       if (uncertainFractionOfAll > 0.15) {
         recommendation = THRESHOLD_RECOMMENDATIONS.TIGHTEN;
         signal = 'uncertain_hits';
+        signalRate = uncertainHitRate;
         const step = config.uncertainty_band * 0.6;
         recommendedThreshold = Math.max(0, threshold - step);
         reasoning = THRESHOLD_REASONINGS.tighten(uncertainHitRate);
@@ -295,6 +293,7 @@ export class CacheReadonlyService {
         // 2× uncertainty_band to avoid overshooting on the first cycle.
         recommendation = THRESHOLD_RECOMMENDATIONS.TIGHTEN;
         signal = 'distant_hits';
+        signalRate = distantHitRate;
         const sortedHitScores = hits.map((s) => s.score).sort((a, b) => a - b);
         const p75 = sortedHitScores[Math.floor(sortedHitScores.length * 0.75)];
         const target = p75 + config.uncertainty_band * 0.3;
@@ -309,6 +308,7 @@ export class CacheReadonlyService {
       // Many near-misses just above the threshold — probably too strict.
       recommendation = THRESHOLD_RECOMMENDATIONS.LOOSEN;
       signal = 'near_misses';
+      signalRate = nearMissRate;
       recommendedThreshold = threshold + avgNearMissDelta;
       reasoning = THRESHOLD_REASONINGS.loosen(nearMissRate);
     } else if (hitRate < 0.05 && misses.length >= 20) {
@@ -317,9 +317,11 @@ export class CacheReadonlyService {
       const closeMisses = misses.filter(
         (s) => s.score > threshold && s.score <= threshold + config.uncertainty_band * 2,
       );
-      if (closeMisses.length / misses.length > 0.1) {
+      const closeMissFraction = closeMisses.length / misses.length;
+      if (closeMissFraction > 0.1) {
         recommendation = THRESHOLD_RECOMMENDATIONS.LOOSEN;
         signal = 'low_hit_rate';
+        signalRate = closeMissFraction;
         const step = config.uncertainty_band * 0.6;
         recommendedThreshold = threshold + step;
         reasoning = THRESHOLD_REASONINGS.loosenLowHitRate(hitRate);
@@ -394,11 +396,11 @@ export class CacheReadonlyService {
 
     let confidence_score: number | null = null;
     let confidence_breakdown: ThresholdRecommendationConfidenceBreakdown | null = null;
-    if (
+    const isActionable =
       recommendation === THRESHOLD_RECOMMENDATIONS.TIGHTEN ||
-      recommendation === THRESHOLD_RECOMMENDATIONS.LOOSEN
-    ) {
-      const isTighten = recommendation === THRESHOLD_RECOMMENDATIONS.TIGHTEN;
+      recommendation === THRESHOLD_RECOMMENDATIONS.LOOSEN;
+    const signalBoundary = signalBoundaryFor(signal);
+    if (isActionable && signalRate !== undefined && signalBoundary !== null) {
       const latestRecordedAt = filtered.reduce((acc, s) => {
         if (s.recordedAt > acc) {
           return s.recordedAt;
@@ -407,8 +409,8 @@ export class CacheReadonlyService {
       }, 0);
       const result = computeConfidence({
         sampleCount,
-        signalRate: isTighten ? uncertainHitRate : nearMissRate,
-        signalBoundary: isTighten ? TIGHTEN_BOUNDARY : LOOSEN_BOUNDARY,
+        signalRate,
+        signalBoundary,
         latestRecordedAt,
         now: Date.now(),
       });
@@ -416,9 +418,9 @@ export class CacheReadonlyService {
       confidence_breakdown = result.breakdown;
       this.logger.log(
         `thresholdRecommendation ${recommendation} cache=${cache.name} ` +
-          `category=${categoryLabel} score=${confidence_score.toFixed(3)} ` +
+          `category=${categoryLabel} signal=${signal} score=${confidence_score.toFixed(3)} ` +
           `sample=${result.breakdown.sample.toFixed(3)} ` +
-          `signal=${result.breakdown.signal.toFixed(3)} ` +
+          `signal_strength=${result.breakdown.signal.toFixed(3)} ` +
           `freshness=${result.breakdown.freshness.toFixed(3)}`,
       );
     }

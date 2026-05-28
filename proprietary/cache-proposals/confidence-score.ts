@@ -11,8 +11,30 @@
 export const TARGET_SAMPLES = 200;
 export const SIGNAL_SAT = 0.8;
 export const FRESHNESS_WINDOW_MS = 3_600_000;
+
+// Engine decision boundaries — each matches the trigger cutoff in
+// cache-readonly.service.ts thresholdRecommendation() so the signal
+// component starts at 0 right at the boundary and grows toward 1.
 export const TIGHTEN_BOUNDARY = 0.2;
+export const DISTANT_HITS_BOUNDARY = 0.25;
 export const LOOSEN_BOUNDARY = 0.25;
+export const LOW_HIT_RATE_BOUNDARY = 0.1;
+
+export function signalBoundaryFor(signal: string | undefined): number | null {
+  if (signal === 'uncertain_hits') {
+    return TIGHTEN_BOUNDARY;
+  }
+  if (signal === 'distant_hits') {
+    return DISTANT_HITS_BOUNDARY;
+  }
+  if (signal === 'near_misses') {
+    return LOOSEN_BOUNDARY;
+  }
+  if (signal === 'low_hit_rate') {
+    return LOW_HIT_RATE_BOUNDARY;
+  }
+  return null;
+}
 
 export interface ConfidenceComponents {
   sample: number;
