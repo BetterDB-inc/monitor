@@ -39,7 +39,7 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function parseHitCostMicros(raw: string | undefined): number | null {
+function parseHitCostMicros(raw: string | undefined | null): number | null {
   if (raw === undefined || raw === null) {
     return null;
   }
@@ -502,7 +502,6 @@ export class SemanticCache {
       }
       // --- End judge ---
 
-      // Parse cost before recording window
       const hitCostMicros = parseHitCostMicros(winner.fields['cost_micros']);
 
       // Record as genuine hit (moved here from before the judge block)
@@ -703,8 +702,9 @@ export class SemanticCache {
       if (costMicros !== undefined && costMicros > 0) {
         hashFields['cost_micros'] = String(costMicros);
       }
-      if (options?.temperature !== undefined)
+      if (options?.temperature !== undefined) {
         hashFields['temperature'] = String(options.temperature);
+      }
       if (options?.topP !== undefined) hashFields['top_p'] = String(options.topP);
       if (options?.seed !== undefined) hashFields['seed'] = String(options.seed);
 
