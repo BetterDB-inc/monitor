@@ -50,6 +50,10 @@ function parseHitCostMicros(raw: string | undefined | null): number | null {
   return n;
 }
 
+function correlationIdFor(prompt: string): string {
+  return createHash('sha256').update(prompt).digest('hex').slice(0, 16);
+}
+
 export class SemanticCache {
   private readonly client: Valkey;
   private readonly embedFn: EmbedFn;
@@ -58,6 +62,7 @@ export class SemanticCache {
   private readonly entryPrefix: string;
   private readonly statsKey: string;
   private readonly similarityWindowKey: string;
+  private readonly missPendingKey: string;
   private readonly configKey: string;
   private defaultThreshold: number;
   private readonly defaultTtl: number | undefined;
@@ -105,6 +110,7 @@ export class SemanticCache {
     this.entryPrefix = `${this.name}:entry:`;
     this.statsKey = `${this.name}:__stats`;
     this.similarityWindowKey = `${this.name}:__similarity_window`;
+    this.missPendingKey = `${this.name}:__miss_pending`;
     this.configKey = `${this.name}:__config`;
     this.embedKeyPrefix = `${this.name}:embed:`;
     this.defaultThreshold = options.defaultThreshold ?? 0.1;
@@ -333,7 +339,8 @@ export class SemanticCache {
       // Miss (no usable score, or score exceeds threshold)
       if (isNaN(score) || score > threshold) {
         if (!isNaN(score)) {
-          await this.recordSimilarityWindow(score, 'miss', category, null);
+          const missMember = await this.recordSimilarityWindow(score, 'miss', category, null);
+          await this.recordMissPending(promptText, missMember);
         }
         await this.recordStat('misses');
         this.telemetry.metrics.requestsTotal
@@ -374,7 +381,8 @@ export class SemanticCache {
         // Explicit bounds check: -1 means "reject all"; out-of-range is a caller bug
         // treated as a miss rather than silently falling back to the top candidate.
         if (picked === -1 || picked < 0 || picked >= indexedCandidates.length) {
-          await this.recordSimilarityWindow(score, 'miss', category, null);
+          const missMember = await this.recordSimilarityWindow(score, 'miss', category, null);
+          await this.recordMissPending(promptText, missMember);
           await this.recordStat('misses');
           this.telemetry.metrics.requestsTotal
             .labels({ cache_name: this.name, result: 'miss', category: categoryLabel })
@@ -403,7 +411,8 @@ export class SemanticCache {
           } catch {
             /* best effort */
           }
-          await this.recordSimilarityWindow(winnerScore, 'miss', category, null);
+          const missMember = await this.recordSimilarityWindow(winnerScore, 'miss', category, null);
+          await this.recordMissPending(promptText, missMember);
           this.telemetry.metrics.staleModelEvictions.labels({ cache_name: this.name }).inc();
           await this.recordStat('misses');
           this.telemetry.metrics.requestsTotal
@@ -477,7 +486,8 @@ export class SemanticCache {
           // Preserve 'uncertain'; fall through to hit-return path
         } else {
           // reject / error_reject / timeout_reject → treat as miss
-          await this.recordSimilarityWindow(winnerScore, 'miss', category, null);
+          const missMember = await this.recordSimilarityWindow(winnerScore, 'miss', category, null);
+          await this.recordMissPending(promptText, missMember);
           await this.recordStat('misses');
           this.telemetry.metrics.requestsTotal
             .labels({ cache_name: this.name, result: 'miss', category: categoryLabel })
@@ -641,6 +651,10 @@ export class SemanticCache {
         embedding_latency_ms: embedSec * 1000,
       });
 
+      if (costMicros !== undefined && costMicros >= 0) {
+        await this.applyCostToPendingMiss(promptText, costMicros);
+      }
+
       return entryKey;
     });
   }
@@ -725,6 +739,10 @@ export class SemanticCache {
         'cache.model': model || 'none',
         embedding_latency_ms: embedSec * 1000,
       });
+
+      if (costMicros !== undefined && costMicros >= 0) {
+        await this.applyCostToPendingMiss(promptText, costMicros);
+      }
 
       return entryKey;
     });
@@ -840,7 +858,8 @@ export class SemanticCache {
 
         if (isNaN(score) || score > threshold) {
           if (!isNaN(score)) {
-            await this.recordSimilarityWindow(score, 'miss', category, null);
+            const missMember = await this.recordSimilarityWindow(score, 'miss', category, null);
+            await this.recordMissPending(resolved[i].text, missMember);
           }
           await this.recordStat('misses');
           this.telemetry.metrics.requestsTotal
@@ -1599,6 +1618,93 @@ export class SemanticCache {
       /* best effort - never fail on window writes */
     }
     return member;
+  }
+
+  /**
+   * Track a miss so a subsequent store() can backfill its cost into the
+   * similarity-window record. Bounded by a 5-minute TTL on the bookkeeping
+   * zset — entries beyond that are pruned on the next store().
+   */
+  private async recordMissPending(prompt: string, similarityMember: string): Promise<void> {
+    const correlationId = correlationIdFor(prompt);
+    const now = Date.now();
+    const entry = JSON.stringify({ correlationId, similarityMember });
+    try {
+      await this.client.zadd(this.missPendingKey, now, entry);
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /**
+   * After a successful store(), find the oldest pending miss for the same
+   * query and update its similarity-window record with the now-known cost.
+   * Best-effort — silently no-op if no pending miss exists or the bookkeeping
+   * entry has already been pruned.
+   */
+  private async applyCostToPendingMiss(prompt: string, costMicros: number): Promise<void> {
+    const correlationId = correlationIdFor(prompt);
+    const now = Date.now();
+    const fiveMinutesAgo = now - 5 * 60 * 1000;
+    try {
+      await this.client.zremrangebyscore(this.missPendingKey, '-inf', `(${fiveMinutesAgo}`);
+
+      const raw = (await this.client.zrange(
+        this.missPendingKey,
+        0,
+        -1,
+        'WITHSCORES',
+      )) as Array<string>;
+      let matchedEntry: string | null = null;
+      let matchedSimilarityMember: string | null = null;
+      for (let i = 0; i < raw.length; i += 2) {
+        const entryStr = raw[i];
+        try {
+          const parsed = JSON.parse(entryStr) as {
+            correlationId: string;
+            similarityMember: string;
+          };
+          if (parsed.correlationId === correlationId) {
+            matchedEntry = entryStr;
+            matchedSimilarityMember = parsed.similarityMember;
+            break;
+          }
+        } catch {
+          /* skip malformed */
+        }
+      }
+      if (matchedEntry === null || matchedSimilarityMember === null) {
+        return;
+      }
+
+      let similarityScore: number | null = null;
+      const windowRaw = (await this.client.zrange(
+        this.similarityWindowKey,
+        0,
+        -1,
+        'WITHSCORES',
+      )) as Array<string>;
+      for (let i = 0; i < windowRaw.length; i += 2) {
+        if (windowRaw[i] === matchedSimilarityMember) {
+          similarityScore = Number(windowRaw[i + 1]);
+          break;
+        }
+      }
+      if (similarityScore === null) {
+        await this.client.zrem(this.missPendingKey, matchedEntry);
+        return;
+      }
+
+      const parsedMember = JSON.parse(matchedSimilarityMember) as Record<string, unknown>;
+      parsedMember.cost_saved_micros = costMicros;
+      const updatedMember = JSON.stringify(parsedMember);
+
+      await this.client.zrem(this.similarityWindowKey, matchedSimilarityMember);
+      await this.client.zadd(this.similarityWindowKey, similarityScore, updatedMember);
+      await this.client.zrem(this.missPendingKey, matchedEntry);
+    } catch {
+      /* never fail store() because of bookkeeping */
+    }
   }
 
   private assertInitialized(method: string): void {
