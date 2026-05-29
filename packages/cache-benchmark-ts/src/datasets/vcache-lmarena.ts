@@ -14,7 +14,7 @@ export async function loadVcacheLmarena(options: {
   const classes = new Map<number, string[]>();
   for (const row of rows) {
     const idSet = Number(row.ID_Set);
-    const prompt = String(row.Prompt);
+    const prompt = String(row.prompt ?? row.Prompt);
     if (!Number.isFinite(idSet) || !prompt) continue;
     let group = classes.get(idSet);
     if (!group) {

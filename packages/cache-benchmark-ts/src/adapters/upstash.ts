@@ -1,7 +1,16 @@
+import { createHash } from 'node:crypto';
 import { SemanticCache } from '@upstash/semantic-cache';
 import { Index } from '@upstash/vector';
 import { CacheAdapter } from './base.js';
 import type { CheckResult, AdapterMode } from '../types.js';
+
+/** Upstash Vector has a 1000-char limit on vector IDs. Hash long prompts. */
+const MAX_ID_LENGTH = 900;
+function safeId(text: string): string {
+  if (text.length <= MAX_ID_LENGTH) return text;
+  const hash = createHash('sha256').update(text).digest('hex');
+  return text.slice(0, MAX_ID_LENGTH - 65) + '|' + hash;
+}
 
 /**
  * Adapter for @upstash/semantic-cache.
@@ -60,7 +69,14 @@ export class UpstashAdapter extends CacheAdapter {
   }
 
   async store(prompt: string, response: string): Promise<void> {
-    await this.cache.set(prompt, response);
+    // Use Index.upsert directly instead of SemanticCache.set() to control
+    // the vector ID — Upstash has a 1000-char ID limit and vcache_lmarena
+    // prompts can be much longer.
+    await this.index.upsert({
+      id: safeId(prompt),
+      data: prompt,
+      metadata: { data: response, dataType: 'text' },
+    });
   }
 
   async check(prompt: string): Promise<CheckResult> {

@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 
 const BASE_URL = 'https://datasets-server.huggingface.co';
 const PAGE_SIZE = 100;
-const CONCURRENT_PAGES = 10;
+const CONCURRENT_PAGES = 1;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR = join(__dirname, '..', '..', '.cache', 'datasets');
@@ -37,7 +37,7 @@ export async function fetchDataset(
   }
 
   console.log(`  [downloading] ${dataset} / ${split} ...`);
-  const rows = await downloadDataset(dataset, config, split);
+  const rows = await downloadDataset(dataset, config, split, limit);
   await writeCache(dataset, config, split, rows);
   console.log(`  [cached] ${rows.length} rows → ${cachePath(dataset, config, split)}`);
 
@@ -50,22 +50,27 @@ async function downloadDataset(
   dataset: string,
   config: string,
   split: string,
+  maxRows?: number,
 ): Promise<DatasetRow[]> {
   const firstPage = await fetchPage(dataset, config, split, 0, PAGE_SIZE);
   const totalAvailable = firstPage.num_rows_total;
+  // When maxRows is set, only download enough rows to satisfy the limit.
+  // The vcache_lmarena dataset has 51K rows but we typically only need 5K.
+  const target = maxRows ? Math.min(maxRows, totalAvailable) : totalAvailable;
   const rows: DatasetRow[] = firstPage.rows.map((r) => r.row);
 
-  if (rows.length >= totalAvailable) {
-    return rows;
+  if (rows.length >= target) {
+    return rows.slice(0, target);
   }
 
-  const totalPages = Math.ceil(totalAvailable / PAGE_SIZE);
+  const totalPages = Math.ceil(target / PAGE_SIZE);
   for (let batch = 1; batch < totalPages; batch += CONCURRENT_PAGES) {
+    if (rows.length >= target) break;
     const end = Math.min(batch + CONCURRENT_PAGES, totalPages);
     const promises: Promise<RowsResponse>[] = [];
     for (let page = batch; page < end; page++) {
       const offset = page * PAGE_SIZE;
-      const length = Math.min(PAGE_SIZE, totalAvailable - offset);
+      const length = Math.min(PAGE_SIZE, target - offset);
       if (length <= 0) break;
       promises.push(fetchPage(dataset, config, split, offset, length));
     }
@@ -73,7 +78,7 @@ async function downloadDataset(
     for (const page of pages) {
       rows.push(...page.rows.map((r) => r.row));
     }
-    process.stdout.write(`\r  [downloading] ${rows.length}/${totalAvailable} rows`);
+    process.stdout.write(`\r  [downloading] ${rows.length}/${target} rows`);
   }
   process.stdout.write('\n');
 
@@ -86,7 +91,7 @@ async function fetchPage(
   split: string,
   offset: number,
   length: number,
-  retries = 3,
+  retries = 5,
 ): Promise<RowsResponse> {
   const params = new URLSearchParams({
     dataset,
@@ -103,7 +108,7 @@ async function fetchPage(
       return (await res.json()) as RowsResponse;
     }
     if (res.status === 429 || res.status >= 500) {
-      await delay(1000 * (attempt + 1));
+      await delay(5000 * (attempt + 1));
       continue;
     }
     throw new Error(
