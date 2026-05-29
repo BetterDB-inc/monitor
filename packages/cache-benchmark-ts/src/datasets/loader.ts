@@ -22,7 +22,7 @@ interface RowsResponse {
 /**
  * Load a HuggingFace dataset split.
  * Downloads from the API on first call, then caches locally as JSONL.
- * The full split is always cached; `limit` only trims the returned array.
+ * If a cached file has fewer rows than `limit`, it is re-downloaded.
  */
 export async function fetchDataset(
   dataset: string,
@@ -31,9 +31,12 @@ export async function fetchDataset(
   config = 'default',
 ): Promise<DatasetRow[]> {
   const cached = await readCache(dataset, config, split);
-  if (cached) {
+  if (cached && (!limit || cached.length >= limit)) {
     console.log(`  [cache hit] ${dataset} / ${split} (${cached.length} rows)`);
     return limit ? cached.slice(0, limit) : cached;
+  }
+  if (cached && limit && cached.length < limit) {
+    console.log(`  [cache stale] ${dataset} / ${split} has ${cached.length} rows, need ${limit} — re-downloading`);
   }
 
   console.log(`  [downloading] ${dataset} / ${split} ...`);
