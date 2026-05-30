@@ -107,11 +107,14 @@ class LlmCache:
                     ).inc()
                     span.set_attribute("cache.hit", True)
 
+                    stored_tokens: dict[str, int] = entry.get("tokens") or {}
                     return LlmCacheResult(
                         hit=True,
                         response=entry.get("response"),
                         content_blocks=entry.get("contentBlocks"),
                         key=key,
+                        input_tokens=int(stored_tokens.get("input", 0)),
+                        output_tokens=int(stored_tokens.get("output", 0)),
                     )
 
                 await self._inc_stats({"llm:misses": 1})

@@ -77,6 +77,68 @@ def make_client() -> MagicMock:
     return client
 
 
+def make_persisting_valkey_client() -> MagicMock:
+    """Return an async mock valkey client backed by in-memory state."""
+    kv: dict[str, str] = {}
+    hashes: dict[str, dict[str, str]] = {}
+
+    client = make_client()
+
+    async def _get(key: str):
+        return kv.get(key)
+
+    async def _set(key: str, value: str, ex=None):  # noqa: ANN001
+        _ = ex
+        kv[key] = value
+        return True
+
+    async def _delete(*keys: str):
+        deleted = 0
+        for key in keys:
+            if key in kv:
+                del kv[key]
+                deleted += 1
+            if key in hashes:
+                del hashes[key]
+                deleted += 1
+        return deleted
+
+    async def _hget(name: str, key: str):
+        return hashes.get(name, {}).get(key)
+
+    async def _hset(name: str, key: str, value: str):
+        bucket = hashes.setdefault(name, {})
+        is_new = key not in bucket
+        bucket[key] = value
+        return 1 if is_new else 0
+
+    async def _hgetall(name: str):
+        return dict(hashes.get(name, {}))
+
+    async def _hincrby(name: str, key: str, amount: int):
+        bucket = hashes.setdefault(name, {})
+        current = int(bucket.get(key, "0"))
+        updated = current + amount
+        bucket[key] = str(updated)
+        return updated
+
+    async def _scan(cursor=0, match=None, count=None):  # noqa: ANN001
+        _ = (cursor, match, count)
+        return (0, [])
+
+    client.get = AsyncMock(side_effect=_get)
+    client.set = AsyncMock(side_effect=_set)
+    client.delete = AsyncMock(side_effect=_delete)
+    client.hget = AsyncMock(side_effect=_hget)
+    client.hset = AsyncMock(side_effect=_hset)
+    client.hgetall = AsyncMock(side_effect=_hgetall)
+    client.hincrby = AsyncMock(side_effect=_hincrby)
+    client.scan = AsyncMock(side_effect=_scan)
+    client.expire = AsyncMock(return_value=1)
+
+    return client
+
+
 @pytest.fixture
 def telemetry() -> Telemetry:
     return make_telemetry()

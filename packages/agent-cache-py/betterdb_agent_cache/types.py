@@ -183,6 +183,8 @@ class LlmCacheResult:
     response: str | None = None
     content_blocks: list[ContentBlock] | None = None
     key: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass
