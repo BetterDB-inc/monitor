@@ -167,6 +167,27 @@ describe('cost instrumentation on similarity-window writes', () => {
     expect(parsed.result).toBe('miss');
   });
 
+  it('recordMissPending prunes entries older than the 5-minute bound', async () => {
+    const client = new StubValkey();
+    type CachePrivates = {
+      missPendingKey: string;
+      client: StubValkey;
+      recordMissPending: (prompt: string, member: string) => Promise<void>;
+    };
+    const cache = Object.create(SemanticCache.prototype) as CachePrivates;
+    cache.missPendingKey = 'test:__miss_pending';
+    cache.client = client;
+
+    const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+    await client.zadd('test:__miss_pending', tenMinutesAgo, '{"stale":true}');
+
+    await cache.recordMissPending('fresh query', 'member-1');
+
+    const entries = client.zsets.get('test:__miss_pending') ?? [];
+    expect(entries).toHaveLength(1);
+    expect(entries[0].member).not.toContain('stale');
+  });
+
   it('applyCostToPendingMiss is a no-op when no pending miss exists', async () => {
     const client = new StubValkey();
     type CachePrivates = {

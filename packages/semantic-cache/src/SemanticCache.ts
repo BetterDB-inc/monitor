@@ -203,6 +203,7 @@ export class SemanticCache {
 
     await this.client.del(this.statsKey);
     await this.client.del(this.similarityWindowKey);
+    await this.client.del(this.missPendingKey);
     this.analytics.capture('cache_flush');
   }
 
@@ -1623,14 +1624,16 @@ export class SemanticCache {
   /**
    * Track a miss so a subsequent store() can backfill its cost into the
    * similarity-window record. Bounded by a 5-minute TTL on the bookkeeping
-   * zset — entries beyond that are pruned on the next store().
+   * zset — entries beyond that are pruned on every record and backfill.
    */
   private async recordMissPending(prompt: string, similarityMember: string): Promise<void> {
     const correlationId = correlationIdFor(prompt);
     const now = Date.now();
+    const fiveMinutesAgo = now - 5 * 60 * 1000;
     const entry = JSON.stringify({ correlationId, similarityMember });
     try {
       await this.client.zadd(this.missPendingKey, now, entry);
+      await this.client.zremrangebyscore(this.missPendingKey, '-inf', `(${fiveMinutesAgo}`);
     } catch {
       /* best effort */
     }
