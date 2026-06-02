@@ -1379,7 +1379,7 @@ export class SqliteAdapter implements StoragePort {
       CREATE TABLE IF NOT EXISTS cache_proposal_audit (
         id TEXT PRIMARY KEY,
         proposal_id TEXT NOT NULL REFERENCES cache_proposals(id) ON DELETE CASCADE,
-        event_type TEXT NOT NULL CHECK (event_type IN ('proposed','approved','rejected','edited_and_approved','applied','failed','expired')),
+        event_type TEXT NOT NULL CHECK (event_type IN ('proposed','approved','rejected','edited_and_approved','applied','failed','expired','outcome_evaluated')),
         event_payload TEXT,
         event_at INTEGER NOT NULL,
         actor TEXT,

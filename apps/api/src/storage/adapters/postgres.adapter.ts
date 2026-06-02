@@ -1620,7 +1620,7 @@ export class PostgresAdapter implements StoragePort {
         event_at BIGINT NOT NULL,
         actor TEXT,
         actor_source TEXT NOT NULL,
-        CHECK (event_type IN ('proposed','approved','rejected','edited_and_approved','applied','failed','expired')),
+        CHECK (event_type IN ('proposed','approved','rejected','edited_and_approved','applied','failed','expired','outcome_evaluated')),
         CHECK (actor_source IN ('ui','mcp','system'))
       );
 
