@@ -6,6 +6,7 @@ import type { StoragePort } from '@app/common/interfaces/storage-port.interface'
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { CacheResolverService } from './cache-resolver.service';
 import type { TuningMetricsSnapshot } from './cache-readonly.types';
+import { computeMetricsFromSimilarityWindow } from './similarity-metrics.utils';
 
 /**
  * Post-apply outcome evaluator for threshold proposals.
@@ -192,14 +193,10 @@ export class CacheOutcomeEvaluator implements OnModuleInit, OnModuleDestroy {
     };
 
     try {
-      await this.storage.updateCacheProposalStatus({
-        id: proposal.id,
-        expected_status: ['applied'],
-        status: 'applied',  // Keep the same status
-        applied_at: proposal.applied_at,
-        applied_result: updatedResult,
-      });
-
+      // Write the audit entry BEFORE updating the proposal status.
+      // If the audit insert fails (e.g. CHECK constraint on older DBs),
+      // outcome_evaluation won't be written to details, so the guard
+      // at the top of this method won't block retry on the next tick.
       await this.storage.appendCacheProposalAudit({
         id: randomUUID(),
         proposal_id: proposal.id,
@@ -208,6 +205,14 @@ export class CacheOutcomeEvaluator implements OnModuleInit, OnModuleDestroy {
         event_at: this.now(),
         actor: 'system',
         actor_source: 'system',
+      });
+
+      await this.storage.updateCacheProposalStatus({
+        id: proposal.id,
+        expected_status: ['applied'],
+        status: 'applied',  // Keep the same status
+        applied_at: proposal.applied_at,
+        applied_result: updatedResult,
       });
     } catch (err) {
       this.logger.warn(
@@ -310,62 +315,7 @@ export class CacheOutcomeEvaluator implements OnModuleInit, OnModuleDestroy {
     threshold: number,
     sinceMs: number = 0,
   ): Promise<TuningMetricsSnapshot | null> {
-    const DEFAULT_UNCERTAINTY_BAND = 0.05;
-
-    // The similarity window is a ZSET scored by timestamp (epoch ms).
-    // When sinceMs > 0, only read entries recorded after the proposal was
-    // applied so pre-adjustment hit/miss classifications don't contaminate
-    // the metrics.
-    let raw: Array<string | number>;
-    try {
-      if (sinceMs > 0) {
-        raw = (await client.zrangebyscore(
-          `${prefix}:__similarity_window`, String(sinceMs), '+inf', 'WITHSCORES',
-        )) as Array<string | number>;
-      } else {
-        raw = (await client.zrange(
-          `${prefix}:__similarity_window`, '0', '-1', 'WITHSCORES',
-        )) as Array<string | number>;
-      }
-    } catch {
-      return null;
-    }
-
-    let uncertaintyBand = DEFAULT_UNCERTAINTY_BAND;
-    try {
-      const configRaw = await client.hget(`${prefix}:__config`, 'uncertainty_band');
-      if (configRaw) {
-        const parsed = Number(configRaw);
-        if (Number.isFinite(parsed)) uncertaintyBand = parsed;
-      }
-    } catch { /* use default */ }
-
-    const hits: number[] = [];
-    const misses: number[] = [];
-    for (let i = 0; i < raw.length; i += 2) {
-      const member = raw[i];
-      if (typeof member !== 'string') continue;
-      try {
-        const entry = JSON.parse(member) as { score?: number; result?: string };
-        const score = typeof entry.score === 'number' ? entry.score : NaN;
-        if (!Number.isFinite(score)) continue;
-        if (entry.result === 'hit') hits.push(score);
-        else if (entry.result === 'miss') misses.push(score);
-      } catch { /* skip */ }
-    }
-
-    const total = hits.length + misses.length;
-    if (total === 0) return null;
-
-    const hitRate = hits.length / total;
-    const uncertainHitRate = hits.length === 0 ? 0
-      : hits.filter((s) => s >= threshold - uncertaintyBand).length / hits.length;
-    const midpoint = threshold / 2;
-    const distantHitRate = hits.length === 0 ? 0
-      : hits.filter((s) => s > midpoint).length / hits.length;
-    const nearMissRate = misses.length === 0 ? 0
-      : misses.filter((s) => s > threshold && s <= threshold + uncertaintyBand).length / misses.length;
-
-    return { hit_rate: hitRate, uncertain_hit_rate: uncertainHitRate, distant_hit_rate: distantHitRate, near_miss_rate: nearMissRate };
+    const result = await computeMetricsFromSimilarityWindow(client, prefix, threshold, sinceMs);
+    return result?.metrics ?? null;
   }
 }
