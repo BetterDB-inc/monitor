@@ -185,8 +185,14 @@ export class BetterDBAdapter extends CacheAdapter {
     response: string;
     similarity: number;
     threshold: number;
+    cachedPrompt?: string;
   }): Promise<boolean> {
     if (!this.openai) return true;
+
+    // Use the stored prompt (cachedPrompt) when available for a fair
+    // semantic comparison. Falls back to the cached response for backward
+    // compatibility with paired mode.
+    const originalText = input.cachedPrompt || input.response;
 
     const completion = await this.openai.chat.completions.create({
       model: JUDGE_MODEL,
@@ -202,7 +208,7 @@ export class BetterDBAdapter extends CacheAdapter {
         },
         {
           role: 'user',
-          content: `New query: ${input.prompt}\nCached response: ${input.response}\nSimilarity score: ${input.similarity.toFixed(4)}`,
+          content: `New query: ${input.prompt}\nCached response: ${originalText}\nSimilarity score: ${input.similarity.toFixed(4)}`,
         },
       ],
     });

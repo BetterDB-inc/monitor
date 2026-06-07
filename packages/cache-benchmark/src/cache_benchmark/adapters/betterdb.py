@@ -120,10 +120,13 @@ def _make_openai_judge_fn(api_key: str, log_writer=None):
         from openai import AsyncOpenAI  # type: ignore
         client = AsyncOpenAI(api_key=api_key)
 
-        # The cached response is "Answer: {original_prompt}", so extract the
-        # original prompt for a fair semantic comparison.
-        cached_response = str(ctx.get('response', ''))
-        original_text = cached_response.removeprefix("Answer: ") if cached_response.startswith("Answer: ") else cached_response
+        # Use the stored prompt (cached_prompt) when available for a fair
+        # semantic comparison. Falls back to stripping the "Answer: " prefix
+        # from the cached response for backward compatibility with paired mode.
+        original_text = ctx.get('cached_prompt', '')
+        if not original_text:
+            cached_response = str(ctx.get('response', ''))
+            original_text = cached_response.removeprefix("Answer: ") if cached_response.startswith("Answer: ") else cached_response
         new_text = ctx.get('prompt', '')
 
         resp = await client.chat.completions.create(
