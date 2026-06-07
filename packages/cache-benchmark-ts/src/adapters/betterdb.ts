@@ -202,13 +202,17 @@ export class BetterDBAdapter extends CacheAdapter {
         {
           role: 'system',
           content:
-            'You are a semantic equivalence judge. Given a new query and a cached response, ' +
-            'determine if the cached response adequately answers the new query. ' +
-            'Reply with exactly YES or NO.',
+            'You are a semantic equivalence judge for a cache. ' +
+            'Say YES if the two texts are about the same thing — same topic, ' +
+            'same action, same core meaning. Rephrasings, added/missing minor ' +
+            'details (adjectives, extra context), and grammatical variations ' +
+            'all count as equivalent. Say NO only if the texts describe ' +
+            'fundamentally different events, topics, or meanings. ' +
+            'Answer only YES or NO.',
         },
         {
           role: 'user',
-          content: `New query: ${input.prompt}\nCached response: ${originalText}\nSimilarity score: ${input.similarity.toFixed(4)}`,
+          content: `Text A: ${originalText}\n\nText B: ${input.prompt}\n\nAre these two texts semantically equivalent?`,
         },
       ],
     });

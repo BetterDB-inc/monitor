@@ -161,9 +161,8 @@ def _make_openai_judge_fn(api_key: str, log_writer=None):
 
         if log_writer is not None:
             log_writer({
-                # prompt_a = cached response text (original cached prompt unavailable in ctx)
-                "prompt_a": str(ctx.get("response", "")),
-                "prompt_b": ctx.get("prompt", ""),
+                "prompt_a": original_text,
+                "prompt_b": new_text,
                 "similarity_score": ctx.get("similarity"),
                 "judge_verdict": "match" if accepted else "nomatch",
                 "judge_raw_response": raw,
