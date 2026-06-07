@@ -289,7 +289,8 @@ class SemanticCache:
                 # we can map back even when NaN-scored entries are filtered out.
                 indexed_candidates = [
                     (i, {"response": r["fields"].get("response", ""),
-                         "similarity": _safe_float(r["fields"].get("__score"))})
+                         "similarity": _safe_float(r["fields"].get("__score")),
+                         "prompt": r["fields"].get("prompt", "")})
                     for i, r in enumerate(parsed)
                     if not math.isnan(_safe_float(r["fields"].get("__score")))
                 ]
@@ -347,9 +348,11 @@ class SemanticCache:
             # produces exactly one entry with the correct outcome.
             if opts.judge is not None and is_uncertain:
                 winner_response = winner["fields"].get("response", "")
+                winner_cached_prompt = winner["fields"].get("prompt", "")
                 decision, judge_sec = await self._run_judge(
                     opts.judge, prompt_text, winner_response, winner_score, threshold,
                     category or None,
+                    cached_prompt=winner_cached_prompt,
                 )
                 self._telemetry.metrics.judge_decisions_total.labels(
                     cache_name=self._name, category=category_label, decision=decision
@@ -1494,6 +1497,7 @@ class SemanticCache:
         score: float,
         threshold: float,
         category: str | None,
+        cached_prompt: str = "",
     ) -> tuple[str, float]:
         """Invoke the LLM judge for a borderline hit.
 
@@ -1504,14 +1508,17 @@ class SemanticCache:
         timeout_s = (opts.timeout_ms if opts.timeout_ms is not None else 2000) / 1000
         start = time.perf_counter()
         try:
+            ctx: dict[str, Any] = {
+                "prompt": prompt_text,
+                "response": response,
+                "similarity": score,
+                "threshold": threshold,
+                "category": category,
+                # Reserved for consumer judge functions; not consumed by the built-in judge path.
+                "cached_prompt": cached_prompt,
+            }
             result = await asyncio.wait_for(
-                opts.judge_fn({
-                    "prompt": prompt_text,
-                    "response": response,
-                    "similarity": score,
-                    "threshold": threshold,
-                    "category": category,
-                }),
+                opts.judge_fn(ctx),
                 timeout=timeout_s,
             )
             duration_sec = time.perf_counter() - start

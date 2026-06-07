@@ -1,4 +1,4 @@
-import { SemanticCache } from '@betterdb/semantic-cache';
+import { SemanticCache, createKeywordOverlapRerank } from '@betterdb/semantic-cache';
 import { Redis as Valkey } from 'iovalkey';
 import { pipeline, type FeatureExtractionPipeline } from '@huggingface/transformers';
 import OpenAI from 'openai';
@@ -22,6 +22,12 @@ interface AutotuneConfig {
   connectionId: string;
 }
 
+export interface BetterDBAdapterOptions {
+  rerankCompare?: 'legacy' | 'prompt' | 'response';
+  rerankK?: number;
+  cosineWeight?: number;
+}
+
 export class BetterDBAdapter extends CacheAdapter {
   private cache!: SemanticCache;
   private client!: Valkey;
@@ -30,11 +36,17 @@ export class BetterDBAdapter extends CacheAdapter {
   private currentThreshold: number;
   private autotuneConfig: AutotuneConfig | null = null;
   private readonly cacheName: string;
+  private readonly rerankCompare: 'legacy' | 'prompt' | 'response';
+  private readonly rerankK: number;
+  private readonly cosineWeight: number;
 
-  constructor(threshold: number, embeddingModel: string, redisUrl: string, mode: AdapterMode) {
+  constructor(threshold: number, embeddingModel: string, redisUrl: string, mode: AdapterMode, opts?: BetterDBAdapterOptions) {
     super(threshold, embeddingModel, redisUrl, mode);
     this.currentThreshold = threshold;
     this.cacheName = `benchmark_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    this.rerankCompare = opts?.rerankCompare ?? 'legacy';
+    this.rerankK = opts?.rerankK ?? RERANK_K;
+    this.cosineWeight = opts?.cosineWeight ?? 0.7;
   }
 
   get name(): string {
@@ -102,9 +114,13 @@ export class BetterDBAdapter extends CacheAdapter {
 
     const useRerank = this.mode === 'local' || this.mode === 'full' || this.mode === 'autotune-full';
     const useJudge = this.mode === 'full' || this.mode === 'autotune-full';
+    const k = this.rerankK;
+    const rerankFn = this.rerankCompare === 'legacy'
+      ? this.legacyRerankFn.bind(this)
+      : createKeywordOverlapRerank({ compare: this.rerankCompare, cosineWeight: this.cosineWeight });
 
     const result = await this.cache.check(prompt, {
-      rerank: useRerank ? { k: RERANK_K, rerankFn: this.rerankFn.bind(this) } : undefined,
+      rerank: useRerank ? { k, rerankFn } : undefined,
       judge: useJudge
         ? {
             judgeFn: this.judgeFn.bind(this),
@@ -136,10 +152,10 @@ export class BetterDBAdapter extends CacheAdapter {
     }
   }
 
-  // --- Rerank: 70% cosine similarity + 30% keyword overlap ---
-  private async rerankFn(
+  // --- Legacy rerank: 70% cosine similarity + 30% keyword overlap (response axis) ---
+  private async legacyRerankFn(
     query: string,
-    candidates: Array<{ response: string; similarity: number }>,
+    candidates: Array<{ response: string; similarity: number; prompt: string }>,
   ): Promise<number> {
     const queryWords = new Set(tokenize(query));
     let bestIdx = 0;

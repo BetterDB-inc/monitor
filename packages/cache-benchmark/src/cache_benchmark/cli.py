@@ -34,13 +34,17 @@ def _build_adapter(
     debug_judge: bool = False,
     judge_log_writer=None,
     trajectory_writer=None,
+    rerank_compare: str = "legacy",
+    rerank_k: int = 3,
+    cosine_weight: float = 0.7,
 ) -> CacheAdapter:
     if adapter_name == "betterdb":
         from cache_benchmark.adapters.betterdb import BetterDBAdapter
         return BetterDBAdapter(
             threshold=threshold, embedding_model=embedding_model, redis_url=redis_url,
             mode=mode, debug_judge=debug_judge, judge_log_writer=judge_log_writer,
-            trajectory_writer=trajectory_writer,
+            trajectory_writer=trajectory_writer, rerank_compare=rerank_compare,
+            rerank_k=rerank_k, cosine_weight=cosine_weight,
         )
     if adapter_name == "redisvl":
         from cache_benchmark.adapters.redisvl_adapter import RedisVLAdapter
@@ -81,6 +85,10 @@ async def _run_single(
     mode: str,
     match_threshold: float = 0.6,
     debug_judge: bool = False,
+    rerank_compare: str = "legacy",
+    rerank_k: int = 3,
+    cosine_weight: float = 0.7,
+    store_mode: str = "paired",
 ):
     pairs = _load_dataset(dataset_name, limit, match_threshold=match_threshold)
 
@@ -99,7 +107,8 @@ async def _run_single(
     adapter = _build_adapter(
         adapter_name, threshold, embedding_model, redis_url, mode,
         debug_judge=debug_judge, judge_log_writer=judge_log_writer,
-        trajectory_writer=trajectory_writer,
+        trajectory_writer=trajectory_writer, rerank_compare=rerank_compare,
+        rerank_k=rerank_k, cosine_weight=cosine_weight,
     )
 
     # Transparency log
@@ -111,7 +120,7 @@ async def _run_single(
         click.echo(f"[{adapter_name} {mode}] trajectory → {traj_path}")
 
     try:
-        results = await run_replay(adapter, pairs)
+        results = await run_replay(adapter, pairs, store_mode=store_mode)
     finally:
         await adapter.close()
 
@@ -180,7 +189,13 @@ async def _run_single(
                   "to judge_log_{adapter}_{mode}_{dataset}_{threshold}.jsonl in --output. "
                   "Requires OPENAI_API_KEY. Changes hit/miss verdicts. Not for production runs."
               ))
-def main(adapter, dataset, limit, thresholds, embedding_model, redis_url, output, mode, match_threshold, debug_judge):
+@click.option("--rerank-compare", type=click.Choice(["legacy", "prompt", "response"]), default="legacy", show_default=True,
+              help="BetterDB rerank axis: 'legacy' = old inline rerank, 'prompt' or 'response' = new built-in factory.")
+@click.option("--rerank-k", default=3, show_default=True, help="Number of candidates for reranking (BetterDB only).")
+@click.option("--cosine-weight", default=0.7, show_default=True, help="Cosine weight in rerank blend (overlap = 1 - this). BetterDB built-in only.")
+@click.option("--store-mode", type=click.Choice(["paired", "dense"]), default="paired", show_default=True,
+              help="paired: one entry per pair (classic). dense: store all unique prompts, creating entity-confusable neighbors.")
+def main(adapter, dataset, limit, thresholds, embedding_model, redis_url, output, mode, match_threshold, debug_judge, rerank_compare, rerank_k, cosine_weight, store_mode):
     """Run cache benchmark replay harness."""
     output_dir = Path(output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -215,6 +230,10 @@ def main(adapter, dataset, limit, thresholds, embedding_model, redis_url, output
                     mode=mode,
                     match_threshold=match_threshold,
                     debug_judge=debug_judge,
+                    rerank_compare=rerank_compare,
+                    rerank_k=rerank_k,
+                    cosine_weight=cosine_weight,
+                    store_mode=store_mode,
                 )
                 summary[f"{key[0]}_{key[1]}"] = metrics.model_dump()
 

@@ -11,13 +11,20 @@ from cache_benchmark.types import QueryPair, ReplayResult
 async def run_replay(
     adapter: CacheAdapter,
     pairs: list[QueryPair],
+    store_mode: str = "paired",
 ) -> list[ReplayResult]:
     """Replay labeled pairs through the cache adapter.
 
     Procedure:
     1. Clear and reinitialize the adapter.
-    2. Store prompt_a for each pair with a synthetic response.
+    2. Store entries (mode determines strategy).
     3. Check prompt_b for each pair and record the result.
+
+    store_mode:
+      "paired" — (default) store one entry per pair using prompt_a. Classic mode.
+      "dense"  — store every unique prompt_a once, creating a dense cache with
+                 many entity-confusable neighbors from different equivalence
+                 classes. Tests the reranker's ability to pick the right entry.
     """
 
     async def _with_retry(coro_fn, retries: int = 3, delay: float = 3.0):
@@ -44,13 +51,26 @@ async def run_replay(
     await adapter.initialize()
 
     # Store phase
-    for pair in tqdm(pairs, desc=f"[{adapter.name}] storing", unit="pair"):
-        # Use the prompt itself as the response body so LLM-as-judge adapters
-        # receive meaningful text. Real LLM responses contain content related to
-        # the prompt; this is a fair upper bound that matches production conditions
-        # and avoids every adapter's judge seeing an unintelligible hash string.
-        dummy = f"Answer: {pair.prompt_a}"
-        await _with_retry(lambda p=pair.prompt_a, d=dummy: adapter.store(p, d))
+    if store_mode == "dense":
+        # Deduplicate: store every unique prompt_a exactly once.
+        # This populates the cache with all prompts from all equivalence classes,
+        # so the reranker has multiple entity-confusable neighbors to pick from.
+        seen: set[str] = set()
+        store_items: list[tuple[str, str]] = []
+        for pair in pairs:
+            if pair.prompt_a not in seen:
+                seen.add(pair.prompt_a)
+                store_items.append((pair.prompt_a, "The answer to your question is available in our knowledge base."))
+        for prompt, response in tqdm(store_items, desc=f"[{adapter.name}] storing (dense)", unit="entry"):
+            await _with_retry(lambda p=prompt, r=response: adapter.store(p, r))
+    else:
+        for pair in tqdm(pairs, desc=f"[{adapter.name}] storing", unit="pair"):
+            # Use the prompt itself as the response body so LLM-as-judge adapters
+            # receive meaningful text. Real LLM responses contain content related to
+            # the prompt; this is a fair upper bound that matches production conditions
+            # and avoids every adapter's judge seeing an unintelligible hash string.
+            dummy = f"Answer: {pair.prompt_a}"
+            await _with_retry(lambda p=pair.prompt_a, d=dummy: adapter.store(p, d))
 
     # Check phase
     results: list[ReplayResult] = []

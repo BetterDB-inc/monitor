@@ -94,6 +94,10 @@ Options:
   --debug-judge                   Log every LLM judge call to JSONL
 ```
 
+## Benchmark notes
+
+The `dense` store mode uses a generic constant as the stored response instead of the prompt-derived `"Answer: {prompt}"` used by the default `paired` mode. Response-axis overlap (`--rerank-compare response`) numbers generated under `dense` are not comparable to `paired` numbers, because the old response text leaked prompt tokens and inflated overlap. Prompt-axis (`--rerank-compare prompt`) and bare-cosine numbers are unaffected by this difference.
+
 ## License
 
 Apache 2.0

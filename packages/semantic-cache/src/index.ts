@@ -16,6 +16,7 @@ export type {
   JudgeOptions,
   ConfigRefreshOptions,
 } from './types';
+export { createKeywordOverlapRerank } from './rerank';
 export {
   SemanticCacheUsageError,
   EmbeddingError,

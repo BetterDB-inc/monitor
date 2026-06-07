@@ -266,6 +266,8 @@ async def test_judge_fn_receives_correct_inputs():
     assert abs(received["similarity"] - 0.08) < 1e-5
     assert received["threshold"] == THRESHOLD
     assert received["category"] == "test-cat"
+    assert "cached_prompt" in received
+    assert isinstance(received["cached_prompt"], str)
 
 
 # ── 11. check_batch raises when judge is supplied ─────────────────────────────

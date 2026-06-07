@@ -415,6 +415,8 @@ describe('judgeFn receives correct inputs', () => {
       similarity: expect.closeTo(0.08, 5),
       threshold: THRESHOLD,
       category: 'trivia',
+      // Reserved for consumer judge functions; falls back to '' when the stored entry has no prompt field.
+      cachedPrompt: '',
     });
   });
 });

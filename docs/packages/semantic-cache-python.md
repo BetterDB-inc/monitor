@@ -199,6 +199,8 @@ The judge is only invoked for uncertain hits. High-confidence hits, misses, and 
 
 Retrieve top-k candidates and select the best with a custom function:
 
+Each candidate dict carries `response` (str), `similarity` (float, cosine distance), and `prompt` (str, the stored prompt text for that entry).
+
 ```python
 from betterdb_semantic_cache.types import CacheCheckOptions, RerankOptions
 
@@ -210,6 +212,26 @@ result = await cache.check(prompt, CacheCheckOptions(
     rerank=RerankOptions(k=5, rerank_fn=my_rerank),
 ))
 ```
+
+### Built-in keyword-overlap reranker
+
+A built-in reranker that blends cosine similarity with word overlap. It catches entity mismatches that cosine similarity alone misses (e.g. "weather in Paris" vs "weather in Berlin"):
+
+```python
+from betterdb_semantic_cache import create_keyword_overlap_rerank
+from betterdb_semantic_cache.types import CacheCheckOptions, RerankOptions
+
+result = await cache.check(prompt, CacheCheckOptions(
+    rerank=RerankOptions(
+        k=3,
+        rerank_fn=create_keyword_overlap_rerank(compare="prompt"),  # default
+    ),
+))
+```
+
+`compare="prompt"` is the equivalence signal (default) — overlaps the incoming query against each candidate's stored prompt. `compare="response"` is the relevance signal — overlaps the query against the cached response.
+
+`cosine_weight` (default 0.7) controls the blend: cosine similarity gets this weight, word overlap gets `1 - cosine_weight`. The reranker is a cheap pre-gate, not a quality lift on adversarial-paraphrase inputs.
 
 ## Cost tracking
 

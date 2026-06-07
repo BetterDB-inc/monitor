@@ -133,7 +133,7 @@ export interface RerankOptions {
    */
   rerankFn: (
     query: string,
-    candidates: Array<{ response: string; similarity: number }>,
+    candidates: Array<{ response: string; similarity: number; prompt: string }>,
   ) => Promise<number>;
 }
 
@@ -170,6 +170,8 @@ export interface JudgeOptions {
     similarity: number;
     threshold: number;
     category: string | undefined;
+    /** The stored prompt text for the matched entry. */
+    cachedPrompt: string;
   }) => Promise<boolean>;
 
   /**

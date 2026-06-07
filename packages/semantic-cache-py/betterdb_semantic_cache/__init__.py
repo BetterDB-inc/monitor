@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .errors import EmbeddingError, SemanticCacheUsageError, ValkeyCommandError
+from .rerank import create_keyword_overlap_rerank
 from .normalizer import (
     BinaryNormalizer,
     BinaryRef,
@@ -70,6 +71,8 @@ __all__ = [
     "TelemetryOptions",
     "ThresholdEffectivenessResult",
     "EmbedFn",
+    # rerank
+    "create_keyword_overlap_rerank",
     # errors
     "SemanticCacheUsageError",
     "EmbeddingError",

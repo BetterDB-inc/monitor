@@ -181,9 +181,15 @@ class BetterDBAdapter(CacheAdapter):
         embedding_model: str,
         redis_url: str | None = None,
         mode: Literal["bare", "local", "full", "autotune", "autotune-full"] = "bare",
+        rerank_compare: Literal["legacy", "prompt", "response"] = "legacy",
+        rerank_k: int = 3,
+        cosine_weight: float = 0.7,
         **kwargs,
     ) -> None:
         super().__init__(threshold=threshold, embedding_model=embedding_model, redis_url=redis_url, mode=mode)
+        self._rerank_compare = rerank_compare
+        self._rerank_k = rerank_k
+        self._cosine_weight = cosine_weight
         self._cache_name = f"bench:betterdb:{uuid.uuid4().hex[:8]}"
         self._cache = None
         self._client = None
@@ -453,10 +459,19 @@ class BetterDBAdapter(CacheAdapter):
             # configRefresh will pick up the change; force an immediate refresh
             await self._cache.refresh_config()
 
+    def _make_rerank_fn(self):
+        if self._rerank_compare == "legacy":
+            return _make_keyword_overlap_rerank_fn()
+        from betterdb_semantic_cache import create_keyword_overlap_rerank  # type: ignore
+        return create_keyword_overlap_rerank(
+            compare=self._rerank_compare, cosine_weight=self._cosine_weight,
+        )
+
     async def check(self, prompt: str) -> CheckResult:
         from betterdb_semantic_cache.types import CacheCheckOptions, RerankOptions, JudgeOptions  # type: ignore
 
         t0 = time.perf_counter()
+        k = self._rerank_k
 
         if self.mode == "bare":
             result = await self._cache.check(prompt)
@@ -464,15 +479,15 @@ class BetterDBAdapter(CacheAdapter):
             result = await self._cache.check(prompt)
         elif self.mode == "local":
             opts = CacheCheckOptions(
-                k=3,
-                rerank=RerankOptions(k=3, rerank_fn=_make_keyword_overlap_rerank_fn()),
+                k=k,
+                rerank=RerankOptions(k=k, rerank_fn=self._make_rerank_fn()),
             )
             result = await self._cache.check(prompt, options=opts)
         else:  # full or autotune-full
             log_writer = self._judge_log_writer if self._debug_judge else None
             opts = CacheCheckOptions(
-                k=3,
-                rerank=RerankOptions(k=3, rerank_fn=_make_keyword_overlap_rerank_fn()),
+                k=k,
+                rerank=RerankOptions(k=k, rerank_fn=self._make_rerank_fn()),
                 judge=JudgeOptions(
                     judge_fn=_make_openai_judge_fn(self._openai_key, log_writer=log_writer),
                     on_error="accept",

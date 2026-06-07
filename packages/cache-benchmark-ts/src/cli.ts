@@ -30,7 +30,11 @@ const program = new Command()
   .option('--embedding-model <model>', 'embedding model', DEFAULT_EMBEDDING_MODEL)
   .option('--redis-url <url>', 'Valkey URL', 'redis://localhost:6381')
   .option('--output <dir>', 'output directory', './results')
-  .option('--report', 'generate markdown report', false);
+  .option('--report', 'generate markdown report', false)
+  .option('--rerank-compare <axis>', 'BetterDB rerank axis: legacy, prompt, response', 'legacy')
+  .option('--rerank-k <n>', 'rerank candidate count (BetterDB)', '3')
+  .option('--cosine-weight <n>', 'cosine weight in rerank blend (BetterDB built-in)', '0.7')
+  .option('--store-mode <mode>', 'paired: one entry per pair (classic). dense: store all unique prompts, creating entity-confusable neighbors.', 'paired');
 
 program.parse();
 
@@ -45,6 +49,10 @@ const opts = program.opts<{
   redisUrl: string;
   output: string;
   report: boolean;
+  rerankCompare: string;
+  rerankK: string;
+  cosineWeight: string;
+  storeMode: string;
 }>();
 
 async function main(): Promise<void> {
@@ -67,14 +75,19 @@ async function main(): Promise<void> {
   for (const threshold of thresholds) {
     console.log(`\n--- ${opts.adapter} | ${mode} | threshold=${threshold.toFixed(2)} ---`);
 
-    const adapter = buildAdapter(opts.adapter, threshold, opts.embeddingModel, opts.redisUrl, mode);
+    const adapter = buildAdapter(opts.adapter, threshold, opts.embeddingModel, opts.redisUrl, mode, {
+      rerankCompare: opts.rerankCompare as 'legacy' | 'prompt' | 'response',
+      rerankK: parseInt(opts.rerankK, 10),
+      cosineWeight: parseFloat(opts.cosineWeight),
+    });
 
     try {
+      const storeMode = opts.storeMode as 'paired' | 'dense';
       const results = await runReplay(adapter, pairs, (phase, current, total) => {
         if (current % 100 === 0 || current === total) {
           process.stdout.write(`\r  ${phase}: ${current}/${total}`);
         }
-      });
+      }, storeMode);
       process.stdout.write('\n');
 
       const metrics = computeMetrics(results);
@@ -151,10 +164,11 @@ function buildAdapter(
   embeddingModel: string,
   redisUrl: string,
   mode: AdapterMode,
+  rerankOpts?: { rerankCompare: 'legacy' | 'prompt' | 'response'; rerankK: number; cosineWeight: number },
 ): CacheAdapter {
   switch (name) {
     case 'betterdb':
-      return new BetterDBAdapter(threshold, embeddingModel, redisUrl, mode);
+      return new BetterDBAdapter(threshold, embeddingModel, redisUrl, mode, rerankOpts);
     case 'upstash':
       return new UpstashAdapter(threshold, embeddingModel, redisUrl, mode);
     default:

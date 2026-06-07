@@ -105,3 +105,7 @@ Output JSON uses snake_case keys for compatibility with the Python harness repor
 | `--redis-url` | `redis://localhost:6381` | Valkey connection URL |
 | `--output` | `./results` | Output directory |
 | `--report` | `false` | Generate markdown report |
+
+## Benchmark notes
+
+The `dense` store mode uses a generic constant as the stored response instead of the prompt-derived `` `Answer: ${promptA}` `` used by the default `paired` mode. Response-axis overlap (`--rerank-compare response`) numbers generated under `dense` are not comparable to `paired` numbers, because the old response text leaked prompt tokens and inflated overlap. Prompt-axis (`--rerank-compare prompt`) and bare-cosine numbers are unaffected by this difference.
