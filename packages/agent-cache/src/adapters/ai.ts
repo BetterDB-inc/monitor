@@ -22,12 +22,27 @@ interface AiSdkModelV1 {
   provider?: string;
 }
 
+interface AiSdkTool {
+  type: string;
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+  id?: string;
+  args?: unknown;
+}
+
 interface AiSdkParams {
   prompt?: AiSdkMessage[];
   model?: AiSdkModelV1;
   temperature?: number;
   topP?: number;
   maxTokens?: number;
+  maxOutputTokens?: number;
+  tools?: AiSdkTool[];
+  toolChoice?: unknown;
+  seed?: number;
+  stopSequences?: string[];
+  responseFormat?: unknown;
 }
 
 function defaultExtractModel(params: unknown, model?: unknown): string {
@@ -37,6 +52,30 @@ function defaultExtractModel(params: unknown, model?: unknown): string {
   // Fallback: older versions may include model in params
   const p = params as AiSdkParams;
   return p.model?.modelId ?? 'unknown';
+}
+
+function convertTools(tools: AiSdkTool[]): LlmCacheParams['tools'] {
+  return tools.map((t) => {
+    if (t.type === 'function') {
+      return {
+        type: 'function',
+        function: {
+          name: t.name,
+          ...(t.description != null ? { description: t.description } : {}),
+          ...(t.inputSchema != null ? { parameters: t.inputSchema } : {}),
+        },
+      };
+    }
+    // Provider-defined tools (e.g. web_search)
+    return {
+      type: t.type,
+      function: {
+        name: t.name,
+        ...(t.id != null ? { id: t.id } : {}),
+        ...(t.args != null ? { args: t.args } : {}),
+      },
+    };
+  });
 }
 
 function extractLlmParams(params: unknown, extractModel: (params: unknown, model?: unknown) => string, model?: unknown): LlmCacheParams {
@@ -49,13 +88,20 @@ function extractLlmParams(params: unknown, extractModel: (params: unknown, model
     }
   }
 
-  return {
+  const result: LlmCacheParams = {
     model: extractModel(params, model),
     messages,
     temperature: p.temperature,
     top_p: p.topP,
-    max_tokens: p.maxTokens,
+    max_tokens: p.maxTokens ?? p.maxOutputTokens,
   };
+  if (p.tools != null && p.tools.length > 0) result.tools = convertTools(p.tools);
+  if (p.toolChoice != null) result.toolChoice = p.toolChoice;
+  if (p.seed != null) result.seed = p.seed;
+  if (p.stopSequences != null) result.stop = p.stopSequences;
+  if (p.responseFormat != null) result.responseFormat = p.responseFormat;
+
+  return result;
 }
 
 interface ContentPart {

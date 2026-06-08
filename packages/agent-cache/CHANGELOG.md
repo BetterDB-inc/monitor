@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-08
+
+### Fixed
+
+- **Vercel AI SDK adapter: tool definitions now included in cache key.** Previously, the adapter only keyed on model, messages, temperature, topP, and maxTokens. Requests with identical messages but different tools could return the same cached response. `seed`, `stopSequences`, `responseFormat`, and `toolChoice` are now also part of the key.
+- **LlamaIndex adapter: tool definitions now included in cache key.** When `tools` is passed to `prepareParams()`, tool metadata (name, description, parameters) is extracted and included in the cache key. Only serializable metadata is used; the `call` closure is never serialized.
+
+### Changed
+
+- **Cache keys changed for tool-using requests on Vercel and LlamaIndex adapters.** Existing cached entries for those requests will be a one-time miss after upgrade. This is intended: the prior entries were keyed without tool information and are not safe to reuse across differing tool sets.
+- **LlamaIndex `prepareParams()` now accepts a `tools` option.** Callers must pass `tools` to get tool-schema safety. Omitting it falls back to messages-only keying (prior behavior).
+
+### Known limitations
+
+- **LangChain adapter: tool-schema drift is not reflected in the cache key.** The framework's `BaseCache` interface exposes only `(prompt, llm_string)` to the cache layer, so tool definitions are structurally unreachable. Unchanged in this release; documented as a known limitation.
+
 ## [0.6.0] - 2026-05-04
 
 ### Added

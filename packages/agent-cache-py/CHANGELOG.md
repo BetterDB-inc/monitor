@@ -1,3 +1,18 @@
+## [0.7.0] - 2026-06-08
+
+### Fixed
+
+- **LlamaIndex adapter: tool definitions now included in cache key.** When `tools` is passed to `prepare_params()`, tool metadata (name, description, parameters) is extracted and included in the cache key. Only serializable metadata is used; callable closures are never serialized.
+
+### Changed
+
+- **Cache keys changed for tool-using requests on the LlamaIndex adapter.** Existing cached entries for those requests will be a one-time miss after upgrade. This is intended: the prior entries were keyed without tool information and are not safe to reuse across differing tool sets.
+- **`prepare_params()` now accepts a `tools` keyword argument (and `LlamaIndexPrepareOptions.tools` field).** Callers must pass `tools` to get tool-schema safety. Omitting it falls back to messages-only keying (prior behavior).
+
+### Known limitations
+
+- **LangChain adapter: tool-schema drift is not reflected in the cache key.** The framework's `BaseCache` interface exposes only `(prompt, llm_string)` to the cache layer, so tool definitions are structurally unreachable. Unchanged in this release; documented as a known limitation.
+
 ## [0.6.0] - 2026-05-04
 
 ### Added
