@@ -15,6 +15,9 @@ export type {
   RerankOptions,
   JudgeOptions,
   ConfigRefreshOptions,
+  EntryAnalyticsOptions,
+  EntryAnalyticsResult,
+  EntrySummary,
 } from './types';
 export {
   SemanticCacheUsageError,

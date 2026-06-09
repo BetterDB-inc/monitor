@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-entry hit analytics** — every entry now tracks `hit_count` and
+  `last_accessed_at`, incremented atomically on each cache hit (batched into the
+  existing TTL-refresh pipeline — no extra round trip). New `entryAnalytics()`
+  method reports total / never-hit / cold entry counts and the hottest entries.
+  When the index includes usage fields, counts use server-side `FT.SEARCH` with
+  `LIMIT 0 0` (exact, no materialization); `topEntries` uses `SORTBY hit_count
+  DESC` with `LIMIT 0 topN`. Older indexes fall back to `SCAN` + pipelined
+  `HMGET` (5 fields only) over a sample of up to 10,000 entries. New
+  `entry_analytics` capability on the discovery marker. `EntryAnalyticsOptions`,
+  `EntryAnalyticsResult`, and `EntrySummary` exported from the package root.
 - **LLM-as-judge for borderline hits** — `CacheCheckOptions.judge` accepts a `judgeFn` that adjudicates hits whose cosine distance lands in the uncertainty band (`threshold - uncertaintyBand < score <= threshold`). The judge promotes accepted hits to `confidence: 'high'` and demotes rejected hits to a miss with `nearestMiss` populated. Configurable `timeoutMs` (default 2000) and `onError` (default `'accept'`, fail-open). Direct response to user feedback that single-threshold matching produced too many uncertain borderline returns on chat.betterdb.com.
 - New Prometheus metrics `{prefix}_judge_decisions_total{decision}` and `{prefix}_judge_duration_seconds{decision}` with decision labels `accept | reject | error_accept | error_reject | timeout_accept | timeout_reject`.
 - New OTel span attributes `cache.judge.invoked`, `cache.judge.decision`, `cache.judge.latency_ms`.
@@ -16,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Cache hits now incur one Valkey round trip for usage tracking even when
+  `defaultTtl` is not configured. Previously a hit was a pure read.
+- The FT index schema gains `hit_count NUMERIC SORTABLE` and `last_accessed_at
+  NUMERIC SORTABLE`. Existing indexes keep working; run `flush()` +
+  `initialize()` to rebuild the schema and enable the fast analytics path.
+  `HINCRBY` auto-creates the counter, so pre-existing entries begin tracking
+  correctly on their first hit after upgrade with no migration.
 - `nearestMiss.deltaToThreshold` may be `<= 0` when a miss originates from a judge rejection (the score did clear the threshold but the judge said no). Existing miss paths still produce `> 0`. Documented on the type.
 - `checkBatch()` throws `SemanticCacheUsageError` when `judge` is supplied, matching the existing handling of `rerank` and `staleAfterModelChange`.
 
