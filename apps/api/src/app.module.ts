@@ -25,6 +25,7 @@ import { CliModule } from './cli/cli.module';
 import { PosthogProxyModule } from './posthog-proxy/posthog-proxy.module';
 import { SystemModule } from './system/system.module';
 import { MonitorModule } from './monitor/monitor.module';
+import { CommandCaptureModule } from './command-capture/command-capture.module';
 
 let AiModule: any = null;
 let LicenseModule: any = null;
@@ -151,6 +152,7 @@ const baseImports = [
   PosthogProxyModule,
   SystemModule,
   MonitorModule,
+  CommandCaptureModule,
 ];
 
 const proprietaryImports = [

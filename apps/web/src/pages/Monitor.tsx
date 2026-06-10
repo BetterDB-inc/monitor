@@ -15,6 +15,7 @@ import { SchedulesTable } from './monitor/schedules-table';
 import { SessionsTable } from './monitor/sessions-table';
 import { StartSessionModal } from './monitor/start-session-modal';
 import { TriggersTable } from './monitor/triggers-table';
+import { CommandCaptureControl } from './command-capture/CommandCaptureControl';
 
 export function Monitor() {
   const { currentConnection } = useConnection();
@@ -25,6 +26,7 @@ export function Monitor() {
   const triggersEnabled = hasFeature(Feature.MONITOR_ANOMALY_TRIGGER);
   const schedulesEnabled = hasFeature(Feature.MONITOR_SCHEDULED_CAPTURES);
 
+  const [captureType, setCaptureType] = useState<'monitor' | 'client'>('monitor');
   const [startOpen, setStartOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [cancellingId, setCancellingId] = useState<string | undefined>();
@@ -86,20 +88,39 @@ export function Monitor() {
     <div className="space-y-6">
       <header className="flex items-baseline justify-between">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">MONITOR</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Monitor / Command Capture</h1>
           <p className="text-sm text-muted-foreground">
-            On-demand command capture sessions for Valkey/Redis instances. Start, stop, and
-            review past sessions for the currently selected connection.
+            {captureType === 'monitor'
+              ? 'On-demand command capture sessions for Valkey/Redis instances via MONITOR. ' +
+                'Start, stop, and review past sessions for the currently selected connection.'
+              : 'Capture commands from your application via the @betterdb/iovalkey-capture ' +
+                'client wrapper. Start a capture window and instrumented clients will ship ' +
+                'their commands here.'}
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <MonitorSupportIndicator connectionId={connectionId} />
-          <Button onClick={() => setStartOpen(true)} disabled={!connectionId}>
-            Start session
-          </Button>
-        </div>
+        {captureType === 'monitor' && (
+          <div className="flex items-center gap-3">
+            <MonitorSupportIndicator connectionId={connectionId} />
+            <Button onClick={() => setStartOpen(true)} disabled={!connectionId}>
+              Start session
+            </Button>
+          </div>
+        )}
       </header>
 
+      <Tabs
+        value={captureType}
+        onValueChange={(v) => setCaptureType(v as 'monitor' | 'client')}
+      >
+        <TabsList>
+          <TabsTrigger value="monitor">Server (MONITOR)</TabsTrigger>
+          <TabsTrigger value="client">Client Library</TabsTrigger>
+        </TabsList>
+      </Tabs>
+
+      {captureType === 'client' && <CommandCaptureControl />}
+
+      {captureType === 'monitor' && (
       <Tabs defaultValue="sessions" className="space-y-4">
         <TabsList>
           <TabsTrigger value="sessions">Sessions</TabsTrigger>
@@ -154,6 +175,7 @@ export function Monitor() {
           </TabsContent>
         )}
       </Tabs>
+      )}
 
       {connectionId && (
         <StartSessionModal

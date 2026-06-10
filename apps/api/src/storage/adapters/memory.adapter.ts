@@ -39,6 +39,9 @@ import {
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
   CaptureSessionPatch,
+  StoredCommandCaptureSession,
+  CommandCaptureSessionQueryOptions,
+  StoredCommandCaptureRecord,
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
@@ -1357,6 +1360,8 @@ export class MemoryAdapter implements StoragePort {
   private captureChunks: StoredCaptureChunk[] = [];
   private captureTriggers: Map<string, StoredCaptureTrigger> = new Map();
   private scheduledCaptures: Map<string, StoredScheduledCapture> = new Map();
+  private commandCaptureSessions: Map<string, StoredCommandCaptureSession> = new Map();
+  private commandCaptureRecords: StoredCommandCaptureRecord[] = [];
 
 
   private cloneProposal(p: StoredCacheProposal): StoredCacheProposal {
@@ -1691,6 +1696,64 @@ export class MemoryAdapter implements StoragePort {
     for (const [id, schedule] of this.scheduledCaptures) {
       if (schedule.createdAt < cutoffTimestamp && schedule.status === 'disabled') {
         this.scheduledCaptures.delete(id);
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
+  // -- Command Capture (iovalkey-capture wrapper) --
+
+  async saveCommandCaptureSession(session: StoredCommandCaptureSession): Promise<string> {
+    this.commandCaptureSessions.set(session.id, { ...session });
+    return session.id;
+  }
+
+  async getCommandCaptureSession(id: string): Promise<StoredCommandCaptureSession | null> {
+    return this.commandCaptureSessions.get(id) ?? null;
+  }
+
+  async getCommandCaptureSessions(options?: CommandCaptureSessionQueryOptions): Promise<StoredCommandCaptureSession[]> {
+    let sessions = Array.from(this.commandCaptureSessions.values());
+    if (options?.connectionId) {
+      sessions = sessions.filter((s) => s.connectionId === options.connectionId);
+    }
+    if (options?.status) {
+      sessions = sessions.filter((s) => s.status === options.status);
+    }
+    sessions.sort((a, b) => b.startedAt - a.startedAt);
+    if (options?.limit) {
+      sessions = sessions.slice(0, options.limit);
+    }
+    return sessions;
+  }
+
+  async updateCommandCaptureSession(
+    id: string,
+    patch: Partial<Pick<StoredCommandCaptureSession, 'status' | 'stoppedAt' | 'commandCount'>>,
+  ): Promise<boolean> {
+    const session = this.commandCaptureSessions.get(id);
+    if (!session) return false;
+    Object.assign(session, patch);
+    return true;
+  }
+
+  async saveCommandCaptureRecords(records: StoredCommandCaptureRecord[]): Promise<number> {
+    this.commandCaptureRecords.push(...records);
+    return records.length;
+  }
+
+  async pruneOldCommandCaptureRecords(cutoffTimestamp: number): Promise<number> {
+    const before = this.commandCaptureRecords.length;
+    this.commandCaptureRecords = this.commandCaptureRecords.filter((r) => r.ts >= cutoffTimestamp);
+    return before - this.commandCaptureRecords.length;
+  }
+
+  async pruneOldCommandCaptureSessions(cutoffTimestamp: number): Promise<number> {
+    let pruned = 0;
+    for (const [id, session] of this.commandCaptureSessions) {
+      if (session.startedAt < cutoffTimestamp && session.status !== 'active') {
+        this.commandCaptureSessions.delete(id);
         pruned++;
       }
     }

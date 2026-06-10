@@ -103,7 +103,7 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
             Audit Trail
           </NavItem>
           <NavItem to="/monitor" active={location.pathname === '/monitor'}>
-            MONITOR
+            Monitor / Command Capture
           </NavItem>
           <NavItem to="/webhooks" active={location.pathname === '/webhooks'} demoLocked={isDemo}>
             Webhooks
