@@ -100,6 +100,9 @@ function ftDispatch(handlers: Record<string, CallFn>): CallFn {
     if (handler !== undefined) {
       return handler(...args);
     }
+    if (cmd.startsWith('FT.')) {
+      throw new Error(`unhandled FT command in test dispatch: ${cmd}`);
+    }
     return null;
   };
 }
@@ -244,6 +247,8 @@ describe('initialize: FT.INFO existing-index path', () => {
 
     expect(callsFor(client, 'FT.CREATE')).toHaveLength(0);
     expect(embedFn).not.toHaveBeenCalled();
+    const info = await cache.indexInfo();
+    expect(info.dimension).toBe(3);
   });
 
   it('falls back to a probe embedding when the existing index dimension is unparsable', async () => {
@@ -713,5 +718,151 @@ describe('indexInfo(): FT.INFO stats path', () => {
     });
     expect(err).toBeInstanceOf(ValkeyCommandError);
     expect((err as ValkeyCommandError).command).toBe('FT.INFO');
+  });
+});
+
+describe('FT.SEARCH — batch and adapter call sites', () => {
+  interface PipelineHandle {
+    call: Mock;
+    exec: Mock;
+  }
+
+  function searchPipelineOf(client: MockClient): PipelineHandle {
+    return client.pipeline.mock.results[0].value as PipelineHandle;
+  }
+
+  async function initializedCache(
+    embedFn: EmbedFn,
+  ): Promise<{ cache: SemanticCache; client: MockClient }> {
+    const client = makeClient(
+      ftDispatch({
+        'FT.INFO': async () => {
+          return INFO_DIM3_WITH_BINARY_REFS;
+        },
+      }),
+    );
+    const cache = makeCache(client, embedFn, 'ftchar');
+    await cache.initialize();
+    return { cache, client };
+  }
+
+  it('checkBatch pipelines one FT.SEARCH per prompt in input order, never via client.call', async () => {
+    const embedFn = vi.fn(async (text: string): Promise<number[]> => {
+      if (text === 'first') {
+        return [0.1, 0.2, 0.3];
+      }
+      return [0.4, 0.5, 0.6];
+    });
+    const { cache, client } = await initializedCache(embedFn);
+
+    const results = await cache.checkBatch(['first', 'second']);
+
+    expect(results).toEqual([
+      { hit: false, confidence: 'miss' },
+      { hit: false, confidence: 'miss' },
+    ]);
+    expect(callsFor(client, 'FT.SEARCH')).toHaveLength(0);
+    const pipeline = searchPipelineOf(client);
+    expect(pipeline.exec).toHaveBeenCalledTimes(1);
+    expect(pipeline.call.mock.calls).toEqual([
+      [
+        'FT.SEARCH',
+        'ftchar:idx',
+        '*=>[KNN 1 @embedding $vec AS __score]',
+        'PARAMS',
+        '2',
+        'vec',
+        encodeFloat32([0.1, 0.2, 0.3]),
+        'LIMIT',
+        '0',
+        '1',
+        'DIALECT',
+        '2',
+      ],
+      [
+        'FT.SEARCH',
+        'ftchar:idx',
+        '*=>[KNN 1 @embedding $vec AS __score]',
+        'PARAMS',
+        '2',
+        'vec',
+        encodeFloat32([0.4, 0.5, 0.6]),
+        'LIMIT',
+        '0',
+        '1',
+        'DIALECT',
+        '2',
+      ],
+    ]);
+  });
+
+  it('checkBatch combines the user filter with sorted escaped binary refs and applies k', async () => {
+    const { cache, client } = await initializedCache(defaultEmbedFn());
+
+    await cache.checkBatch(
+      [
+        [
+          { type: 'text', text: 'compare' },
+          { type: 'binary', kind: 'image', mediaType: 'image/png', ref: 'b.png' },
+          { type: 'binary', kind: 'image', mediaType: 'image/png', ref: 'a.png' },
+        ],
+      ],
+      { filter: '@category:{faq}', k: 2 },
+    );
+
+    const pipeline = searchPipelineOf(client);
+    expect(pipeline.call.mock.calls).toEqual([
+      [
+        'FT.SEARCH',
+        'ftchar:idx',
+        '(@category:{faq} @binary_refs:{a\\.png} @binary_refs:{b\\.png})' +
+          '=>[KNN 2 @embedding $vec AS __score]',
+        'PARAMS',
+        '2',
+        'vec',
+        encodeFloat32([0.1, 0.2, 0.3]),
+        'LIMIT',
+        '0',
+        '2',
+        'DIALECT',
+        '2',
+      ],
+    ]);
+  });
+
+  it('adapter-facing _searchEntries issues SORTBY inserted_at ASC with offset-first LIMIT', async () => {
+    const searchReply: unknown[] = ['1', 'ftchar:entry:abc', ['response', '{}']];
+    const client = makeClient(
+      ftDispatch({
+        'FT.INFO': async () => {
+          return INFO_DIM3_WITH_BINARY_REFS;
+        },
+        'FT.SEARCH': async () => {
+          return searchReply;
+        },
+      }),
+    );
+    const cache = makeCache(client, defaultEmbedFn(), 'ftchar');
+    await cache.initialize();
+
+    const raw = await cache._searchEntries('@category:{memories}', 25, 50);
+
+    expect(raw).toBe(searchReply);
+    const searchCalls = callsFor(client, 'FT.SEARCH');
+    expect(searchCalls).toEqual([
+      [
+        'FT.SEARCH',
+        'ftchar:idx',
+        '@category:{memories}',
+        'SORTBY',
+        'inserted_at',
+        'ASC',
+        'LIMIT',
+        '50',
+        '25',
+        'DIALECT',
+        '2',
+      ],
+    ]);
   });
 });
