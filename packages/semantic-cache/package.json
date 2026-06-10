@@ -102,6 +102,7 @@
     "update:pricing": "node scripts/update-model-prices.mjs"
   },
   "dependencies": {
+    "@betterdb/valkey-search-kit": "workspace:*",
     "@opentelemetry/api": "^1.9.0",
     "posthog-node": ">=4.0.0",
     "prom-client": "^15.1.3"
