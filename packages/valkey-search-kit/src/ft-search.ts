@@ -1,4 +1,12 @@
 /**
+ * A single FT.SEARCH hit: the matched key and its returned fields.
+ */
+export interface FtSearchHit {
+  key: string;
+  fields: Record<string, string>;
+}
+
+/**
  * Parse a raw FT.SEARCH response from iovalkey's client.call().
  *
  * iovalkey returns FT.SEARCH results in the following shape:
@@ -8,24 +16,22 @@
  * - Each key is a string
  * - Each field list is a flat string array: [fieldName, value, fieldName, value, ...]
  *
- * Returns an array of { key: string, fields: Record<string, string> }.
+ * Returns an array of FtSearchHit.
  * Returns [] if totalCount is "0" or the response is empty/malformed.
  * Never throws — on any parse error, returns [].
  */
-export function parseFtSearchResponse(
-  raw: unknown,
-): Array<{ key: string; fields: Record<string, string> }> {
+export function parseFtSearchResponse(raw: unknown): FtSearchHit[] {
   try {
     if (!Array.isArray(raw) || raw.length < 1) {
       return [];
     }
 
     const totalCount = typeof raw[0] === 'string' ? parseInt(raw[0], 10) : Number(raw[0]);
-    if (!totalCount || totalCount <= 0) {
+    if (Number.isNaN(totalCount) || totalCount <= 0) {
       return [];
     }
 
-    const results: Array<{ key: string; fields: Record<string, string> }> = [];
+    const results: FtSearchHit[] = [];
 
     let i = 1;
     while (i < raw.length) {
@@ -47,7 +53,6 @@ export function parseFtSearchResponse(
         }
         i += 2;
       } else {
-        // No field list follows the key (e.g. RETURN 0 mode)
         results.push({ key, fields });
         i++;
         continue;

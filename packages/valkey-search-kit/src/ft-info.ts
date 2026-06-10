@@ -11,34 +11,47 @@
 export function parseDimensionFromInfo(info: unknown[]): number {
   for (let i = 0; i < info.length - 1; i += 2) {
     const key = String(info[i]);
-    if (key !== 'attributes' && key !== 'fields') continue;
+    if (key !== 'attributes' && key !== 'fields') {
+      continue;
+    }
 
     const attributes = info[i + 1];
-    if (!Array.isArray(attributes)) continue;
+    if (!Array.isArray(attributes)) {
+      continue;
+    }
 
     for (const attr of attributes) {
-      if (!Array.isArray(attr)) continue;
+      if (!Array.isArray(attr)) {
+        continue;
+      }
 
       let isVector = false;
       let dim = 0;
 
       for (let j = 0; j < attr.length - 1; j++) {
         const attrKey = String(attr[j]);
-        if (attrKey === 'type' && String(attr[j + 1]) === 'VECTOR') isVector = true;
-        if (attrKey.toLowerCase() === 'dim') dim = parseInt(String(attr[j + 1]), 10) || 0;
-        // Valkey Search 1.2 nests dimension inside an 'index' sub-array
+        if (attrKey === 'type' && String(attr[j + 1]) === 'VECTOR') {
+          isVector = true;
+        }
+        if (attrKey.toLowerCase() === 'dim') {
+          dim = parseInt(String(attr[j + 1]), 10) || 0;
+        }
         if (attrKey === 'index' && Array.isArray(attr[j + 1])) {
           const indexArr = attr[j + 1] as unknown[];
           for (let k = 0; k < indexArr.length - 1; k++) {
             if (String(indexArr[k]) === 'dimensions') {
               const d = parseInt(String(indexArr[k + 1]), 10) || 0;
-              if (d > 0) dim = d;
+              if (d > 0) {
+                dim = d;
+              }
             }
           }
         }
       }
 
-      if (isVector && dim > 0) return dim;
+      if (isVector && dim > 0) {
+        return dim;
+      }
     }
   }
 
@@ -59,8 +72,11 @@ export function parseFtInfoStats(info: unknown[]): FtIndexStats {
   let indexingState = 'unknown';
   for (let i = 0; i < info.length - 1; i += 2) {
     const key = String(info[i]);
-    if (key === 'num_docs') numDocs = parseInt(String(info[i + 1]), 10) || 0;
-    else if (key === 'indexing') indexingState = String(info[i + 1]);
+    if (key === 'num_docs') {
+      numDocs = parseInt(String(info[i + 1]), 10) || 0;
+    } else if (key === 'indexing') {
+      indexingState = String(info[i + 1]);
+    }
   }
   return { numDocs, indexingState };
 }
