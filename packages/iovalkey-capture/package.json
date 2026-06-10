@@ -1,0 +1,38 @@
+{
+  "name": "@betterdb/iovalkey-capture",
+  "version": "0.1.0",
+  "description": "Capture-only wrapper around iovalkey that tees outbound commands to BetterDB Monitor",
+  "keywords": [
+    "valkey",
+    "redis",
+    "iovalkey",
+    "capture",
+    "monitoring",
+    "betterdb"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BetterDB-inc/monitor",
+    "directory": "packages/iovalkey-capture"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "iovalkey": ">=0.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "iovalkey": "^0.3.3",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.1"
+  }
+}

@@ -15,6 +15,7 @@ import { SchedulesTable } from './monitor/schedules-table';
 import { SessionsTable } from './monitor/sessions-table';
 import { StartSessionModal } from './monitor/start-session-modal';
 import { TriggersTable } from './monitor/triggers-table';
+import { CommandCaptureControl } from './command-capture/CommandCaptureControl';
 
 export function Monitor() {
   const { currentConnection } = useConnection();
@@ -99,6 +100,8 @@ export function Monitor() {
           </Button>
         </div>
       </header>
+
+      <CommandCaptureControl />
 
       <Tabs defaultValue="sessions" className="space-y-4">
         <TabsList>

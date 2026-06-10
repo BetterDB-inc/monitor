@@ -39,6 +39,7 @@
     "seed:demo": "ts-node -r tsconfig-paths/register scripts/seed-demo-data.ts"
   },
   "dependencies": {
+    "@betterdb/iovalkey-capture": "workspace:*",
     "@betterdb/shared": "workspace:*",
     "@fastify/static": "^9.1.1",
     "@fastify/swagger": "^9.7.0",

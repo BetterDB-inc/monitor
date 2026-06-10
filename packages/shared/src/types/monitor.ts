@@ -143,3 +143,36 @@ export interface CaptureSessionPatch {
   terminationReason?: string;
   nodeSegments?: CaptureNodeSegment[];
 }
+
+// -- Command capture (iovalkey-capture wrapper) --
+
+export type CommandCaptureSessionStatus = 'active' | 'stopped' | 'expired';
+
+export interface StoredCommandCaptureSession {
+  id: string;
+  connectionId: string;
+  status: CommandCaptureSessionStatus;
+  startedAt: number;
+  durationMs: number;
+  expiresAt: number;
+  stoppedAt?: number;
+  commandCap?: number;
+  commandCount: number;
+  createdBy?: string;
+}
+
+export interface CommandCaptureSessionQueryOptions {
+  connectionId?: string;
+  status?: CommandCaptureSessionStatus;
+  limit?: number;
+}
+
+export interface StoredCommandCaptureRecord {
+  sessionId: string;
+  connectionId: string;
+  /** Wrapper-side connection identifier (per CaptureValkey instance). */
+  wrapperConnectionId: string;
+  name: string;
+  args: string[];
+  ts: number;
+}

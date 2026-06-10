@@ -61,6 +61,17 @@ export type {
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
 } from '@betterdb/shared';
+export type {
+  CommandCaptureSessionStatus,
+  StoredCommandCaptureSession,
+  CommandCaptureSessionQueryOptions,
+  StoredCommandCaptureRecord,
+} from '@betterdb/shared';
+import type {
+  StoredCommandCaptureSession,
+  CommandCaptureSessionQueryOptions,
+  StoredCommandCaptureRecord,
+} from '@betterdb/shared';
 import type {
   AppSettings,
   AuditQueryOptions,
@@ -502,6 +513,15 @@ export interface StoragePort {
   pruneOldCaptureChunks(cutoffTimestamp: number): Promise<number>;
   pruneOldCaptureTriggers(cutoffTimestamp: number): Promise<number>;
   pruneOldScheduledCaptures(cutoffTimestamp: number): Promise<number>;
+
+  // Command Capture (iovalkey-capture wrapper) — distinct from MONITOR stream capture above
+  saveCommandCaptureSession(session: StoredCommandCaptureSession): Promise<string>;
+  getCommandCaptureSession(id: string): Promise<StoredCommandCaptureSession | null>;
+  getCommandCaptureSessions(options?: CommandCaptureSessionQueryOptions): Promise<StoredCommandCaptureSession[]>;
+  updateCommandCaptureSession(id: string, patch: Partial<Pick<StoredCommandCaptureSession, 'status' | 'stoppedAt' | 'commandCount'>>): Promise<boolean>;
+  saveCommandCaptureRecords(records: StoredCommandCaptureRecord[]): Promise<number>;
+  pruneOldCommandCaptureRecords(cutoffTimestamp: number): Promise<number>;
+  pruneOldCommandCaptureSessions(cutoffTimestamp: number): Promise<number>;
 
   // Connection Management Methods (not connection-scoped, they manage connections themselves)
   saveConnection(config: DatabaseConnectionConfig): Promise<void>;

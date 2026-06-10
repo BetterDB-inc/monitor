@@ -50,6 +50,9 @@ import {
   ScheduledCapturePatch,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  StoredCommandCaptureSession,
+  CommandCaptureSessionQueryOptions,
+  StoredCommandCaptureRecord,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1472,6 +1475,36 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_scheduled_captures_conn_status
         ON scheduled_captures(connection_id, status);
+
+      -- Command Capture (iovalkey-capture wrapper)
+      CREATE TABLE IF NOT EXISTS command_capture_sessions (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        started_at INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        stopped_at INTEGER,
+        command_cap INTEGER,
+        command_count INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_cmd_capture_sessions_conn_status
+        ON command_capture_sessions(connection_id, status);
+
+      CREATE TABLE IF NOT EXISTS command_capture_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        wrapper_connection_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        args TEXT NOT NULL DEFAULT '[]',
+        ts INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_cmd_capture_records_session
+        ON command_capture_records(session_id);
+      CREATE INDEX IF NOT EXISTS idx_cmd_capture_records_ts
+        ON command_capture_records(ts);
     `);
 
     // Idempotent migration for deployments that ran the PR 19 schema before
@@ -4153,6 +4186,99 @@ export class SqliteAdapter implements StoragePort {
       lastFiredAt: (row.last_fired_at as number | null) ?? undefined,
       lastFiredSessionId: (row.last_fired_session_id as string | null) ?? undefined,
       lastSkipReason: (row.last_skip_reason as string | null) ?? undefined,
+    };
+  }
+
+  // -- Command Capture (iovalkey-capture wrapper) --
+
+  async saveCommandCaptureSession(session: StoredCommandCaptureSession): Promise<string> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare(`
+      INSERT INTO command_capture_sessions (id, connection_id, status, started_at, duration_ms, expires_at, stopped_at, command_cap, command_count, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      session.id, session.connectionId, session.status, session.startedAt,
+      session.durationMs, session.expiresAt, session.stoppedAt ?? null,
+      session.commandCap ?? null, session.commandCount, session.createdBy ?? null,
+    );
+    return session.id;
+  }
+
+  async getCommandCaptureSession(id: string): Promise<StoredCommandCaptureSession | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM command_capture_sessions WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapCommandCaptureSessionRow(row) : null;
+  }
+
+  async getCommandCaptureSessions(options?: CommandCaptureSessionQueryOptions): Promise<StoredCommandCaptureSession[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (options?.connectionId) { conditions.push('connection_id = ?'); params.push(options.connectionId); }
+    if (options?.status) { conditions.push('status = ?'); params.push(options.status); }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = options?.limit ? `LIMIT ${options.limit}` : '';
+    const rows = this.db.prepare(`SELECT * FROM command_capture_sessions ${where} ORDER BY started_at DESC ${limit}`).all(...params) as Record<string, unknown>[];
+    return rows.map((r) => this.mapCommandCaptureSessionRow(r));
+  }
+
+  async updateCommandCaptureSession(
+    id: string,
+    patch: Partial<Pick<StoredCommandCaptureSession, 'status' | 'stoppedAt' | 'commandCount'>>,
+  ): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (patch.status !== undefined) { sets.push('status = ?'); params.push(patch.status); }
+    if (patch.stoppedAt !== undefined) { sets.push('stopped_at = ?'); params.push(patch.stoppedAt); }
+    if (patch.commandCount !== undefined) { sets.push('command_count = ?'); params.push(patch.commandCount); }
+    if (sets.length === 0) return false;
+    params.push(id);
+    const result = this.db.prepare(`UPDATE command_capture_sessions SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+    return (result as { changes: number }).changes > 0;
+  }
+
+  async saveCommandCaptureRecords(records: StoredCommandCaptureRecord[]): Promise<number> {
+    if (!this.db || records.length === 0) return 0;
+    const stmt = this.db.prepare(`
+      INSERT INTO command_capture_records (session_id, connection_id, wrapper_connection_id, name, args, ts)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    let count = 0;
+    const transaction = this.db.transaction(() => {
+      for (const r of records) {
+        const result = stmt.run(r.sessionId, r.connectionId, r.wrapperConnectionId, r.name, JSON.stringify(r.args), r.ts);
+        if ((result as { changes: number }).changes > 0) count++;
+      }
+    });
+    transaction();
+    return count;
+  }
+
+  async pruneOldCommandCaptureRecords(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db.prepare('DELETE FROM command_capture_records WHERE ts < ?').run(cutoffTimestamp);
+    return (result as { changes: number }).changes;
+  }
+
+  async pruneOldCommandCaptureSessions(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db.prepare("DELETE FROM command_capture_sessions WHERE started_at < ? AND status != 'active'").run(cutoffTimestamp);
+    return (result as { changes: number }).changes;
+  }
+
+  private mapCommandCaptureSessionRow(row: Record<string, unknown>): StoredCommandCaptureSession {
+    return {
+      id: row.id as string,
+      connectionId: row.connection_id as string,
+      status: row.status as StoredCommandCaptureSession['status'],
+      startedAt: row.started_at as number,
+      durationMs: row.duration_ms as number,
+      expiresAt: row.expires_at as number,
+      stoppedAt: (row.stopped_at as number | null) ?? undefined,
+      commandCap: (row.command_cap as number | null) ?? undefined,
+      commandCount: (row.command_count as number) ?? 0,
+      createdBy: (row.created_by as string | null) ?? undefined,
     };
   }
 }
