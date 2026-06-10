@@ -1,14 +1,14 @@
-# Publish @betterdb/semantic-cache to npm
+# Publish @betterdb/valkey-search-kit to npm
 #
 # Required secrets:
-#   NPM_TOKEN — npmjs.com automation token with publish access to @betterdb/semantic-cache
+#   NPM_TOKEN — npmjs.com automation token with publish access to @betterdb/valkey-search-kit
 
-name: Publish Semantic Cache
+name: Publish Valkey Search Kit
 
 on:
   push:
     tags:
-      - 'semantic-cache-v*'
+      - 'valkey-search-kit-v*'
   workflow_dispatch:
     inputs:
       version:
@@ -67,15 +67,15 @@ jobs:
           if [ -n "$INPUT_VERSION" ]; then
             echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
           else
-            # semantic-cache-v0.1.0 → 0.1.0
-            echo "version=${GITHUB_REF_NAME#semantic-cache-v}" >> $GITHUB_OUTPUT
+            # valkey-search-kit-v0.1.0 → 0.1.0
+            echo "version=${GITHUB_REF_NAME#valkey-search-kit-v}" >> $GITHUB_OUTPUT
           fi
 
       - name: Update package.json version
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          cd packages/semantic-cache
+          cd packages/valkey-search-kit
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
@@ -83,17 +83,17 @@ jobs:
             fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
-      - name: Build semantic-cache
-        run: pnpm --filter @betterdb/semantic-cache... build
+      - name: Build valkey-search-kit
+        run: pnpm --filter @betterdb/valkey-search-kit... build
 
       - name: Verify build
         run: |
-          test -f packages/semantic-cache/dist/index.js
-          test -f packages/semantic-cache/dist/index.d.ts
+          test -f packages/valkey-search-kit/dist/index.js
+          test -f packages/valkey-search-kit/dist/index.d.ts
 
       - name: Prepare for publishing
         run: |
-          cd packages/semantic-cache
+          cd packages/valkey-search-kit
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
@@ -104,13 +104,13 @@ jobs:
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: cd packages/semantic-cache && pnpm publish --provenance --access public --no-git-checks
+        run: cd packages/valkey-search-kit && pnpm publish --provenance --access public --no-git-checks
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: semantic-cache-v${{ steps.version.outputs.version }}
-          name: Semantic Cache v${{ steps.version.outputs.version }}
+          tag_name: valkey-search-kit-v${{ steps.version.outputs.version }}
+          name: Valkey Search Kit v${{ steps.version.outputs.version }}
           draft: false
           prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           generate_release_notes: true
@@ -133,7 +133,7 @@ jobs:
           VERSION: ${{ needs.publish-npm.outputs.version }}
         run: |
           for i in 1 2 3 4 5; do
-            if npm view "@betterdb/semantic-cache@$VERSION" version; then
+            if npm view "@betterdb/valkey-search-kit@$VERSION" version; then
               echo "Package verified successfully"
               exit 0
             fi
