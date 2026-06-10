@@ -193,4 +193,53 @@ describe('CaptureValkey', () => {
     });
     void client.destroyCapture();
   });
+
+  // -- Expiry enforcement --
+
+  it('does not buffer a command after windowExpiresAt', () => {
+    const client = makeClient();
+    setCapturing(client, true);
+    // Set expiresAt in the past
+    (client as unknown as { windowExpiresAt: number }).windowExpiresAt = Date.now() - 1000;
+
+    client.sendCommand(cmd('SET', ['a', 'b']));
+
+    // Command should NOT be buffered — expiry triggers endCaptureWindow
+    expect(client.stats().capturedCount).toBe(0);
+    expect(client.stats().buffered).toBe(0);
+    // capturing should now be false
+    expect((client as unknown as { capturing: boolean }).capturing).toBe(false);
+    void client.destroyCapture();
+  });
+
+  it('flushes remaining buffer once on expiry and stops shipping', async () => {
+    const client = makeClient({ batchSize: 100 }); // high batch size so auto-flush doesn't fire
+    setCapturing(client, true);
+    (client as unknown as { windowExpiresAt: number }).windowExpiresAt = Date.now() + 60_000;
+
+    // Buffer some commands
+    client.sendCommand(cmd('SET', ['x', '1']));
+    client.sendCommand(cmd('SET', ['y', '2']));
+    expect(client.stats().buffered).toBe(2);
+
+    // Now expire
+    (client as unknown as { windowExpiresAt: number }).windowExpiresAt = Date.now() - 1;
+    client.sendCommand(cmd('GET', ['z'])); // triggers expiry check
+
+    // Let the final flush fire
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The 2 buffered commands should have been flushed, GET should not be buffered
+    expect(client.stats().capturedCount).toBe(2);
+    const batchPost = fetchCalls.find((c) => c.url.includes('/batch'));
+    expect(batchPost).toBeTruthy();
+    const body = JSON.parse(batchPost!.body);
+    expect(body.commands).toHaveLength(2);
+
+    // No further commands are buffered
+    fetchCalls = [];
+    client.sendCommand(cmd('SET', ['after', 'expiry']));
+    expect(client.stats().capturedCount).toBe(2); // unchanged
+    void client.destroyCapture();
+  });
 });

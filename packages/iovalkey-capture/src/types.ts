@@ -68,4 +68,6 @@ export interface CaptureWindowResponse {
   maxCommands?: number;
   /** Optional max duration (ms) for this window. */
   maxDurationMs?: number;
+  /** Absolute epoch-ms expiry. Wrapper uses this for per-command gating. */
+  expiresAt?: number;
 }

@@ -27,6 +27,7 @@ export class CaptureValkey extends Redis {
 
   private buffer: CapturedCommand[] = [];
   private capturing = false;
+  private windowExpiresAt: number | undefined;
   private windowCommandCap: number | undefined;
   private windowCapturedCount = 0;
 
@@ -75,7 +76,10 @@ export class CaptureValkey extends Redis {
 
   sendCommand(command: { name: string; args: unknown[] }, ...rest: unknown[]): unknown {
     if (this.capturing) {
-      try {
+      // Per-command wall-clock expiry check — O(1), no async
+      if (this.windowExpiresAt !== undefined && Date.now() >= this.windowExpiresAt) {
+        void this.endCaptureWindow();
+      } else try {
         if (this.buffer.length >= this.maxBuffered) {
           this.droppedCount++;
         } else {
@@ -166,9 +170,7 @@ export class CaptureValkey extends Redis {
         this.capturing = true;
         this.windowCapturedCount = 0;
         this.windowCommandCap = data.maxCommands;
-        if (data.maxDurationMs !== undefined) {
-          setTimeout(() => void this.endCaptureWindow(), data.maxDurationMs);
-        }
+        this.windowExpiresAt = data.expiresAt;
       } else if (!data.active && this.capturing) {
         void this.endCaptureWindow();
       }
@@ -179,6 +181,7 @@ export class CaptureValkey extends Redis {
 
   private async endCaptureWindow(): Promise<void> {
     this.capturing = false;
+    this.windowExpiresAt = undefined;
     this.windowCommandCap = undefined;
     await this.flush();
   }

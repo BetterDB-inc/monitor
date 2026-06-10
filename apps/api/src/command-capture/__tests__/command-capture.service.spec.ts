@@ -133,6 +133,39 @@ describe('CommandCaptureService', () => {
       expect(result.dropped).toBe(false);
     });
 
+    it('discards commands for an expired session (with grace)', async () => {
+      const session = await service.startSession({ connectionId: 'conn-1', durationMs: 1 });
+      // Force expiry well past the grace window
+      const stored = await storage.getCommandCaptureSession(session.id);
+      if (stored) (stored as any).expiresAt = Date.now() - 10_000;
+
+      const result = await service.ingestBatch('conn-1', {
+        connectionId: 'wrapper-uuid',
+        commands: [
+          { connectionId: 'wrapper-uuid', name: 'SET', args: ['x', 'y'], ts: Date.now() },
+        ],
+      });
+
+      expect(result.accepted).toBe(0);
+      expect(result.dropped).toBe(true);
+    });
+
+    it('discards commands when command cap is reached', async () => {
+      const session = await service.startSession({ connectionId: 'conn-1', durationMs: 60_000, commandCap: 5 });
+      // Manually set commandCount to cap
+      await storage.updateCommandCaptureSession(session.id, { commandCount: 5 });
+
+      const result = await service.ingestBatch('conn-1', {
+        connectionId: 'wrapper-uuid',
+        commands: [
+          { connectionId: 'wrapper-uuid', name: 'SET', args: ['a', 'b'], ts: Date.now() },
+        ],
+      });
+
+      expect(result.accepted).toBe(0);
+      expect(result.dropped).toBe(true);
+    });
+
     it('discards commands when no active session exists', async () => {
       const result = await service.ingestBatch('conn-1', {
         connectionId: 'wrapper-uuid',

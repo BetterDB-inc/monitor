@@ -13,6 +13,8 @@ import type {
 
 const DEFAULT_RETENTION_DAYS = 3;
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000; // prune at most once per hour
+/** Grace window for in-flight batches sent just before expiry (covers wrapper→Monitor network latency). */
+const EXPIRY_GRACE_MS = 5_000;
 
 @Injectable()
 export class CommandCaptureService {
@@ -137,6 +139,7 @@ export class CommandCaptureService {
         active: true,
         maxCommands: session.commandCap,
         maxDurationMs: session.expiresAt - Date.now(),
+        expiresAt: session.expiresAt,
       };
     }
 
@@ -151,10 +154,17 @@ export class CommandCaptureService {
       status: 'active',
       limit: 1,
     });
-    const active = sessions.find((s) => s.expiresAt > Date.now());
+    const now = Date.now();
+    const active = sessions.find((s) => s.expiresAt + EXPIRY_GRACE_MS > now);
 
     if (!active) {
-      this.logger.debug(`Ingest for connection ${connectionId}: no active session, discarding ${batch.commands.length} commands`);
+      this.logger.debug(`Ingest for connection ${connectionId}: no active/unexpired session, discarding ${batch.commands.length} commands`);
+      return { accepted: 0, dropped: true };
+    }
+
+    // Command cap enforcement — reject if already at cap
+    if (active.commandCap && active.commandCount >= active.commandCap) {
+      this.logger.debug(`Ingest for connection ${connectionId}: command cap reached (${active.commandCount}/${active.commandCap}), discarding`);
       return { accepted: 0, dropped: true };
     }
 
@@ -173,9 +183,9 @@ export class CommandCaptureService {
     });
 
     // Inline prune, throttled to at most once per PRUNE_INTERVAL_MS
-    const now = Date.now();
-    if (now - this.lastPruneAt > PRUNE_INTERVAL_MS) {
-      this.lastPruneAt = now;
+    const pruneNow = Date.now();
+    if (pruneNow - this.lastPruneAt > PRUNE_INTERVAL_MS) {
+      this.lastPruneAt = pruneNow;
       this.pruneOldRecords().catch((err) =>
         this.logger.warn(`Prune failed: ${(err as Error).message}`),
       );
