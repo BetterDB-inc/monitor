@@ -1,0 +1,45 @@
+{
+  "name": "@betterdb/valkey-search-kit",
+  "version": "0.1.0",
+  "description": "Shared Valkey Search (FT.*) helpers: vector byte encoding, FT.SEARCH reply parsing, version-skew FT.INFO parsing, and error classification",
+  "keywords": [
+    "valkey",
+    "redis",
+    "valkey-search",
+    "vector-search",
+    "ft-search"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BetterDB-inc/monitor",
+    "directory": "packages/valkey-search-kit"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
