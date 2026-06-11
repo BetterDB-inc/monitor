@@ -271,6 +271,8 @@ const model = new ChatOpenAI({
 
 The adapter implements LangChain's `BaseCache` interface.
 
+**Limitation:** LangChain's `BaseCache` interface exposes only `(prompt, llm_string)` to the cache layer. Tool definitions bound to the model are not passed through this interface, so tool-schema changes are not reflected in the cache key. If a tool's schema changes without a corresponding change to the model identity (model name, temperature, etc.), the cache may serve a stale response computed against the old schema. If this matters for your use case, incorporate a tool version string into your model configuration or use a separate cache namespace per tool revision.
+
 ### Vercel AI SDK
 
 Import from `@betterdb/agent-cache/ai`. Requires `ai` ^6.0.135 as a peer dependency.
@@ -287,6 +289,28 @@ const model = wrapLanguageModel({
 ```
 
 The middleware intercepts non-streaming `doGenerate` calls. On a cache hit, the model is not called and the response includes `providerMetadata: { agentCache: { hit: true } }` so consumers can distinguish cached responses from real zero-token calls. Responses containing tool-call parts are not cached to avoid breaking tool-calling workflows.
+
+Tool definitions, seed, stop sequences, response format, and tool choice are all included in the cache key automatically. Requests with identical messages but different tools (or different generation parameters) will not collide.
+
+### LlamaIndex
+
+Import from `@betterdb/agent-cache/llamaindex`. Requires `@llamaindex/core` >= 0.6.0 as a peer dependency.
+
+```typescript
+import { prepareParams } from '@betterdb/agent-cache/llamaindex';
+
+const params = await prepareParams(messages, {
+  model: 'gpt-4o',
+  temperature: 0,
+  tools: myTools, // BaseTool[] from LlamaIndex
+});
+
+const result = await cache.llm.check(params);
+```
+
+Tool definitions are included in the cache key when passed via the `tools` option. Only `tool.metadata` (name, description, parameters) is serialized; the `call` closure is never included.
+
+Callers must pass `tools` into `prepareParams` for tool-schema drift safety. Omitting `tools` falls back to messages-only keying (the prior behavior), meaning requests with identical messages but different tool sets will collide in the cache.
 
 ### LangGraph
 

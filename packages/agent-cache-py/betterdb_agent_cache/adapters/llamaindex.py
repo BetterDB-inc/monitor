@@ -27,6 +27,16 @@ class LlamaIndexPrepareOptions:
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
+    tools: list[Any] | None = None
+    """Tool definitions to include in the cache key.
+
+    Pass the same tools list you provide to the LLM call. Each tool must
+    expose a ``metadata`` attribute (or dict key) with at least ``name``,
+    and optionally ``description`` and ``parameters``. Only metadata is
+    serialized; callable closures are never included.
+
+    Omitting this field falls back to messages-only keying (prior behavior).
+    """
 
 
 def _parse_input(value: Any) -> Any:
@@ -87,6 +97,32 @@ async def _normalize_detail(
     return None
 
 
+def _extract_tool_metadata(tool: Any) -> dict[str, Any]:
+    """Extract serializable metadata from a LlamaIndex BaseTool."""
+    if hasattr(tool, "metadata"):
+        meta = tool.metadata
+    elif isinstance(tool, dict) and "metadata" in tool:
+        meta = tool["metadata"]
+    else:
+        meta = tool  # Already a metadata-like dict
+
+    if hasattr(meta, "name"):
+        name = meta.name
+        description = getattr(meta, "description", None)
+        parameters = getattr(meta, "parameters", None)
+    else:
+        name = meta.get("name", "")
+        description = meta.get("description")
+        parameters = meta.get("parameters")
+
+    fn: dict[str, Any] = {"name": name}
+    if description is not None:
+        fn["description"] = description
+    if parameters is not None:
+        fn["parameters"] = parameters
+    return {"type": "function", "function": fn}
+
+
 async def prepare_params(
     messages: list[dict[str, Any]],
     opts: LlamaIndexPrepareOptions | None = None,
@@ -96,6 +132,7 @@ async def prepare_params(
     temperature: float | None = None,
     top_p: float | None = None,
     max_tokens: int | None = None,
+    tools: list[Any] | None = None,
 ) -> LlmCacheParams:
     """Normalise a LlamaIndex message list to ``LlmCacheParams``.
 
@@ -103,6 +140,10 @@ async def prepare_params(
     arguments directly::
 
         params = await prepare_params(msgs, model="gpt-4o", temperature=0.7)
+
+    To include tool definitions in the cache key (recommended when using tools)::
+
+        params = await prepare_params(msgs, model="gpt-4o", tools=my_tools)
     """
     if opts is None:
         opts = LlamaIndexPrepareOptions(
@@ -111,6 +152,7 @@ async def prepare_params(
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
+            tools=tools,
         )
 
     norm = opts.normalizer
@@ -162,5 +204,7 @@ async def prepare_params(
         result["top_p"] = opts.top_p
     if opts.max_tokens is not None:
         result["max_tokens"] = opts.max_tokens
+    if opts.tools is not None and len(opts.tools) > 0:
+        result["tools"] = [_extract_tool_metadata(t) for t in opts.tools]
 
     return result

@@ -3,12 +3,38 @@ import type { ContentBlock, LlmCacheParams, TextBlock, BinaryBlock, ToolCallBloc
 import type { BinaryNormalizer, BinaryRef } from "../normalizer";
 import { defaultNormalizer } from "../normalizer";
 
+/**
+ * Minimal interface matching the serializable portion of LlamaIndex's BaseTool.metadata.
+ * Only `name` is required; `description` and `parameters` are optional.
+ */
+export interface ToolMetadataLike {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+/**
+ * Minimal interface for a LlamaIndex tool. Only `metadata` is used for cache keying.
+ */
+export interface BaseToolLike {
+  metadata: ToolMetadataLike;
+  [key: string]: unknown;
+}
+
 export interface LlamaIndexPrepareOptions {
   model: string;
   normalizer?: BinaryNormalizer;
   temperature?: number;
   topP?: number;
   maxTokens?: number;
+  /**
+   * Tool definitions to include in the cache key. Pass the same tools array
+   * you provide to the LLM call. Only `tool.metadata` (name, description,
+   * parameters) is used; the `call` closure is never serialized.
+   *
+   * Omitting this field falls back to messages-only keying (prior behavior).
+   */
+  tools?: BaseToolLike[];
 }
 
 type AnyDetail = { type: string; text?: string; image_url?: { url: string }; data?: string; mimeType?: string };
@@ -119,6 +145,16 @@ export async function prepareParams(
   if (opts.temperature != null) result.temperature = opts.temperature;
   if (opts.topP != null) result.top_p = opts.topP;
   if (opts.maxTokens != null) result.max_tokens = opts.maxTokens;
+  if (opts.tools != null && opts.tools.length > 0) {
+    result.tools = opts.tools.map((t) => ({
+      type: "function",
+      function: {
+        name: t.metadata.name,
+        ...(t.metadata.description != null ? { description: t.metadata.description } : {}),
+        ...(t.metadata.parameters != null ? { parameters: t.metadata.parameters } : {}),
+      },
+    }));
+  }
 
   return result;
 }
