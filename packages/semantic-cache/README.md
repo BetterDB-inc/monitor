@@ -103,16 +103,19 @@ When a hit lands in the uncertainty band (`threshold - uncertaintyBand < score <
 ```typescript
 const result = await cache.check(userPrompt, {
   judge: {
-    judgeFn: async ({ prompt, response, similarity, threshold, category }) => {
+    judgeFn: async ({ prompt, response, signal }) => {
       // Return true to accept (confidence → 'high')
       // Return false to reject (treated as miss with nearestMiss)
-      const verdict = await openai.chat.completions.create({
-        model: 'gpt-5-mini',
-        messages: [
-          { role: 'system', content: 'Reply YES or NO only.' },
-          { role: 'user', content: `Does this cached response correctly answer the prompt?\nPrompt: ${prompt}\nResponse: ${response}` },
-        ],
-      });
+      const verdict = await openai.chat.completions.create(
+        {
+          model: 'gpt-5-mini',
+          messages: [
+            { role: 'system', content: 'Reply YES or NO only.' },
+            { role: 'user', content: `Does this cached response correctly answer the prompt?\nPrompt: ${prompt}\nResponse: ${response}` },
+          ],
+        },
+        { signal }, // forwarded — cancelled if the judge times out
+      );
       return verdict.choices[0].message.content?.startsWith('YES') ?? false;
     },
     onError: 'accept',  // fail-open on judge errors (default)
@@ -120,6 +123,8 @@ const result = await cache.check(userPrompt, {
   },
 });
 ```
+
+Forward `signal` to your LLM client so a slow judge call is cancelled on timeout rather than running to completion in the background.
 
 **When the judge is invoked:** only for `confidence === 'uncertain'` hits. High-confidence hits, misses, and the zero-candidates case bypass the judge entirely.
 

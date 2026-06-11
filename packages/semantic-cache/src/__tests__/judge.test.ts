@@ -415,7 +415,72 @@ describe('judgeFn receives correct inputs', () => {
       similarity: expect.closeTo(0.08, 5),
       threshold: THRESHOLD,
       category: 'trivia',
+      signal: expect.any(AbortSignal),
     });
+  });
+});
+
+// --- AbortSignal on judgeFn ---
+
+describe('judgeFn AbortSignal', () => {
+  it('supplies an AbortSignal to judgeFn', async () => {
+    const registry = new Registry();
+    const client = makeMockClient(BORDERLINE_SCORE);
+    const cache = await makeCache(client, registry, 'test_judge_signal_supplied');
+    let receivedSignal: AbortSignal | undefined;
+    const judgeFn = vi.fn(async (input: { signal: AbortSignal }) => {
+      receivedSignal = input.signal;
+      return true;
+    });
+
+    await cache.check('hello', { judge: { judgeFn } });
+
+    expect(receivedSignal).toBeDefined();
+    expect(receivedSignal).toBeInstanceOf(AbortSignal);
+    expect('aborted' in (receivedSignal as AbortSignal)).toBe(true);
+  });
+
+  it('aborts the judgeFn signal when the judge times out', async () => {
+    const registry = new Registry();
+    const client = makeMockClient(BORDERLINE_SCORE);
+    const cache = await makeCache(client, registry, 'test_judge_signal_timeout');
+    let observedAbort = false;
+    const judgeFn = vi.fn((input: { signal: AbortSignal }) => {
+      return new Promise<boolean>(() => {
+        input.signal.addEventListener('abort', () => {
+          observedAbort = true;
+          // Stay pending so raceWithTimeout's timeout branch wins (real clients
+          // would reject here; resolving would promote to confidence: 'high').
+        });
+      });
+    });
+
+    const result = await cache.check('hello', {
+      judge: { judgeFn, onError: 'accept', timeoutMs: 20 },
+    });
+
+    expect(observedAbort).toBe(true);
+    expect(result.hit).toBe(true);
+    expect(result.confidence).toBe('uncertain');
+  });
+
+  it('does not abort the signal when judgeFn resolves in time', async () => {
+    const registry = new Registry();
+    const client = makeMockClient(BORDERLINE_SCORE);
+    const cache = await makeCache(client, registry, 'test_judge_signal_no_abort');
+    let abortedDuringCall = false;
+    const judgeFn = vi.fn(async (input: { signal: AbortSignal }) => {
+      abortedDuringCall = input.signal.aborted;
+      return true;
+    });
+
+    const result = await cache.check('hello', {
+      judge: { judgeFn, timeoutMs: 5000 },
+    });
+
+    expect(abortedDuringCall).toBe(false);
+    expect(result.hit).toBe(true);
+    expect(result.confidence).toBe('high');
   });
 });
 

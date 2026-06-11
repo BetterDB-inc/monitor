@@ -170,6 +170,14 @@ export interface JudgeOptions {
     similarity: number;
     threshold: number;
     category: string | undefined;
+    /**
+     * Abort signal owned by the cache. It fires when the judge `timeoutMs`
+     * elapses. Forward it to your LLM client (e.g. `fetch(url, { signal })`,
+     * the OpenAI/Anthropic SDK `signal` option) so the in-flight request is
+     * cancelled on timeout instead of running to completion and billing.
+     * A judgeFn that ignores this field still works — it just won't cancel.
+     */
+    signal: AbortSignal;
   }) => Promise<boolean>;
 
   /**
@@ -183,14 +191,14 @@ export interface JudgeOptions {
 
   /**
    * Per-call timeout in milliseconds. Default: 2000.
-   * The judge function is raced against this timeout; timeout is treated
+   * The judge function is raced against this timeout; a timeout is treated
    * the same as a thrown error and routed through onError.
    *
-   * Note: the underlying promise is not cancelled on timeout — JavaScript has
-   * no built-in cancellation primitive. A real LLM HTTP request will continue
-   * running in the background after the timeout fires, consuming API quota.
-   * To stop the underlying request, use an AbortController inside judgeFn and
-   * abort it when the signal you manage fires.
+   * On timeout the cache aborts the `AbortSignal` passed to judgeFn (see the
+   * `signal` field on the judgeFn input). Forward that signal to your LLM
+   * client to cancel the in-flight request and stop consuming API quota.
+   * If judgeFn ignores the signal, the underlying request will still run to
+   * completion in the background — JavaScript cannot force-cancel a promise.
    */
   timeoutMs?: number;
 }

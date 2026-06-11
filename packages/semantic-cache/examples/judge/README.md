@@ -26,7 +26,7 @@ pnpm start
 
 ## Key concepts
 
-- `judgeFn` receives `{ prompt, response, similarity, threshold, category }`
+- `judgeFn` receives `{ prompt, response, similarity, threshold, category, signal }`
 - Return `true` to accept (→ `confidence: 'high'`)
 - Return `false` to reject (→ `hit: false`, `nearestMiss.deltaToThreshold <= 0`)
 - `onError: 'accept'` makes the judge fail-open (safe default)

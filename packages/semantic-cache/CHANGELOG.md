@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - Unreleased
+
+### Added
+
+- **Judge cancellation via AbortSignal** — the `judgeFn` input now includes a
+  `signal: AbortSignal`. The cache creates an `AbortController` per judge
+  invocation and aborts it when `timeoutMs` elapses. Forwarding `signal` to your
+  LLM client (`fetch`, OpenAI/Anthropic SDKs) cancels the in-flight request on
+  timeout instead of leaking it to completion and burning API quota. The
+  previously documented limitation on `JudgeOptions.timeoutMs` ("the underlying
+  promise is not cancelled") no longer applies when the signal is forwarded.
+
+### Changed
+
+- `JudgeOptions.timeoutMs` JSDoc updated to describe the new abort behavior.
+
+### Breaking changes
+
+None. The `signal` field is additive — a `judgeFn` that ignores it is unaffected.
+
 ## [0.5.0] - 2026-05-13
 
 ### Added
