@@ -107,7 +107,7 @@
     "prom-client": "^15.1.3"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.90.0",
+    "@anthropic-ai/sdk": "^0.91.1",
     "@langchain/core": "^1.1.35",
     "@langchain/langgraph-checkpoint": "^0.1.0",
     "@llamaindex/core": "^0.6.23",
