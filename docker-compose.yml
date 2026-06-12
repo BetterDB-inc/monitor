@@ -32,7 +32,7 @@ services:
       --requirepass devpassword
       --slowlog-log-slower-than 0
     healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
+      test: ["CMD", "valkey-cli", "-a", "devpassword", "ping"]
       interval: 10s
       timeout: 3s
       retries: 3
