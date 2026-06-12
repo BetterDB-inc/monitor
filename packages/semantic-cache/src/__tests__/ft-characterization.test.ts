@@ -369,11 +369,23 @@ describe('initialize: FT.CREATE missing-index path', () => {
     expect(callsFor(client, 'FT.CREATE')).toHaveLength(1);
   });
 
-  it('treats any message containing "not found" as index-missing (characterized broad match)', async () => {
-    const client = missingIndexClient('something was not found somewhere');
+  it('treats index-scoped "not found" messages as index-missing', async () => {
+    const client = missingIndexClient("Index with name 'ftchar:idx' not found in database 0");
     const cache = makeCache(client, defaultEmbedFn(), 'ftchar');
     await cache.initialize();
     expect(callsFor(client, 'FT.CREATE')).toHaveLength(1);
+  });
+
+  it('wraps generic "not found" messages without index context as ValkeyCommandError', async () => {
+    const client = missingIndexClient('key not found');
+    const cache = makeCache(client, defaultEmbedFn(), 'ftchar');
+
+    const err = await cache.initialize().catch((e: unknown) => {
+      return e;
+    });
+    expect(err).toBeInstanceOf(ValkeyCommandError);
+    expect((err as ValkeyCommandError).command).toBe('FT.INFO');
+    expect(callsFor(client, 'FT.CREATE')).toHaveLength(0);
   });
 
   it('matches index-missing messages case-insensitively', async () => {
