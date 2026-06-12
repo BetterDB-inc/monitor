@@ -1,4 +1,4 @@
-import type { RetrievalSchema, FtCapabilities, FieldSpec } from './schema';
+import type { RetrievalSchema, FtCapabilities, FieldSpec, VectorSpec } from './schema';
 
 const HNSW_DEFAULTS = {
   m: 16,
@@ -6,27 +6,23 @@ const HNSW_DEFAULTS = {
   efRuntime: 10,
 };
 
-const METRIC_MAP: Record<string, string> = {
+const METRIC_MAP: Record<import('./schema').VectorMetric, string> = {
   cosine: 'COSINE',
   l2: 'L2',
   ip: 'IP',
 };
 
-function validateDims(dims: number | undefined): void {
+function requireDims(dims: number | undefined): number {
   if (dims === undefined || !Number.isInteger(dims) || dims <= 0) {
-    throw new Error(
-      'dims is required for FT.CREATE and must be a positive integer',
-    );
+    throw new Error(`dims must be a positive integer to build FT.CREATE args, got: ${dims}`);
   }
+  return dims;
 }
 
-function validateFieldNames(
-  fields: Record<string, FieldSpec>,
-  vectorFieldName: string,
-): void {
+function validateFieldNames(fields: Record<string, FieldSpec>, vectorFieldName: string): void {
   for (const name of Object.keys(fields)) {
     if (name.length === 0) {
-      throw new Error(`Invalid field name: empty field name is not allowed`);
+      throw new Error('Invalid field name: empty field name is not allowed');
     }
     if (name === vectorFieldName) {
       throw new Error(
@@ -47,28 +43,21 @@ function validateTextFieldCapabilities(
     .filter(([, spec]) => spec.type === 'text')
     .map(([name]) => name);
   if (textFieldNames.length > 0) {
-    throw new Error(
-      `Text fields require valkey-search >= 1.2: ${textFieldNames.join(', ')}`,
-    );
+    throw new Error(`Text fields require valkey-search >= 1.2: ${textFieldNames.join(', ')}`);
   }
 }
 
-function validateFlatHnswParams(
-  algorithm: string,
-  m: number | undefined,
-  efConstruction: number | undefined,
-  efRuntime: number | undefined,
-): void {
-  if (algorithm !== 'flat') {
+function validateFlatHnswParams(vector: VectorSpec): void {
+  if (vector.algorithm !== 'flat') {
     return;
   }
-  if (m !== undefined) {
+  if ('m' in vector && vector.m !== undefined) {
     throw new Error(`FLAT algorithm does not support 'm' parameter`);
   }
-  if (efConstruction !== undefined) {
+  if ('efConstruction' in vector && vector.efConstruction !== undefined) {
     throw new Error(`FLAT algorithm does not support 'efConstruction' parameter`);
   }
-  if (efRuntime !== undefined) {
+  if ('efRuntime' in vector && vector.efRuntime !== undefined) {
     throw new Error(`FLAT algorithm does not support 'efRuntime' parameter`);
   }
 }
@@ -91,12 +80,14 @@ function buildFieldArgs(name: string, spec: FieldSpec): string[] {
   return args;
 }
 
-function buildVectorArgs(schema: RetrievalSchema): string[] {
-  const { vector } = schema;
-  const fieldName = vector.fieldName ?? 'embedding';
+function resolveVectorFieldName(vector: VectorSpec): string {
+  return vector.fieldName ?? 'embedding';
+}
+
+function buildVectorArgs(vector: VectorSpec, dims: number): string[] {
+  const fieldName = resolveVectorFieldName(vector);
   const algo = vector.algorithm.toUpperCase();
   const metric = METRIC_MAP[vector.metric];
-  const dims = vector.dims as number;
 
   if (vector.algorithm === 'flat') {
     return [
@@ -137,22 +128,35 @@ function buildVectorArgs(schema: RetrievalSchema): string[] {
   ];
 }
 
+export function indexName(name: string): string {
+  if (name.trim().length === 0) {
+    throw new Error(`Index name must not be empty or whitespace-only, got: '${name}'`);
+  }
+  return `${name}:idx`;
+}
+
+export function keyPrefix(name: string): string {
+  if (name.trim().length === 0) {
+    throw new Error(`Index name must not be empty or whitespace-only, got: '${name}'`);
+  }
+  return `${name}:`;
+}
+
 export function buildFtCreateArgs(
   name: string,
   schema: RetrievalSchema,
   capabilities?: FtCapabilities,
 ): string[] {
-  const vectorFieldName = schema.vector.fieldName ?? 'embedding';
+  if (name.trim().length === 0) {
+    throw new Error(`Index name must not be empty or whitespace-only, got: '${name}'`);
+  }
 
-  validateDims(schema.vector.dims);
+  const dims = requireDims(schema.vector.dims);
+  const vectorFieldName = resolveVectorFieldName(schema.vector);
+
   validateFieldNames(schema.fields, vectorFieldName);
   validateTextFieldCapabilities(schema.fields, capabilities);
-  validateFlatHnswParams(
-    schema.vector.algorithm,
-    schema.vector.m,
-    schema.vector.efConstruction,
-    schema.vector.efRuntime,
-  );
+  validateFlatHnswParams(schema.vector);
 
   const fieldArgs: string[] = [];
   for (const [fieldName, spec] of Object.entries(schema.fields)) {
@@ -161,15 +165,15 @@ export function buildFtCreateArgs(
     }
   }
 
-  const vectorArgs = buildVectorArgs(schema);
+  const vectorArgs = buildVectorArgs(schema.vector, dims);
 
   return [
-    `${name}:idx`,
+    indexName(name),
     'ON',
     'HASH',
     'PREFIX',
     '1',
-    `${name}:`,
+    keyPrefix(name),
     'SCHEMA',
     ...fieldArgs,
     ...vectorArgs,

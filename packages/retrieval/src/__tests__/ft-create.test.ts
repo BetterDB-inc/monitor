@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { buildFtCreateArgs } from '../ft-create';
-import type { RetrievalSchema, FtCapabilities } from '../schema';
+import { buildFtCreateArgs, indexName, keyPrefix } from '../ft-create';
+import type { RetrievalSchema, FtCapabilities, VectorSpec } from '../schema';
 
 describe('buildFtCreateArgs', () => {
   describe('minimal schema: no fields, HNSW defaults', () => {
@@ -182,8 +182,9 @@ describe('buildFtCreateArgs', () => {
     it('throws when m is set on a flat algorithm', () => {
       const schema: RetrievalSchema = {
         fields: {},
-        vector: { metric: 'cosine', algorithm: 'flat', dims: 32, m: 16 },
+        vector: { metric: 'cosine', algorithm: 'flat', dims: 32 } as VectorSpec,
       };
+      (schema.vector as Record<string, unknown>)['m'] = 16;
       expect(() => {
         buildFtCreateArgs('bad', schema);
       }).toThrow();
@@ -192,8 +193,9 @@ describe('buildFtCreateArgs', () => {
     it('throws when efConstruction is set on a flat algorithm', () => {
       const schema: RetrievalSchema = {
         fields: {},
-        vector: { metric: 'cosine', algorithm: 'flat', dims: 32, efConstruction: 200 },
+        vector: { metric: 'cosine', algorithm: 'flat', dims: 32 } as VectorSpec,
       };
+      (schema.vector as Record<string, unknown>)['efConstruction'] = 200;
       expect(() => {
         buildFtCreateArgs('bad', schema);
       }).toThrow();
@@ -202,11 +204,32 @@ describe('buildFtCreateArgs', () => {
     it('throws when efRuntime is set on a flat algorithm', () => {
       const schema: RetrievalSchema = {
         fields: {},
-        vector: { metric: 'cosine', algorithm: 'flat', dims: 32, efRuntime: 10 },
+        vector: { metric: 'cosine', algorithm: 'flat', dims: 32 } as VectorSpec,
       };
+      (schema.vector as Record<string, unknown>)['efRuntime'] = 10;
       expect(() => {
         buildFtCreateArgs('bad', schema);
       }).toThrow();
+    });
+
+    it('throws when dims is missing on flat algorithm', () => {
+      const schema: RetrievalSchema = {
+        fields: {},
+        vector: { metric: 'cosine', algorithm: 'flat' },
+      };
+      expect(() => {
+        buildFtCreateArgs('bad', schema);
+      }).toThrow(/dims must be a positive integer/);
+    });
+
+    it('throws when dims is invalid on flat algorithm', () => {
+      const schema: RetrievalSchema = {
+        fields: {},
+        vector: { metric: 'cosine', algorithm: 'flat', dims: -5 },
+      };
+      expect(() => {
+        buildFtCreateArgs('bad', schema);
+      }).toThrow(/dims must be a positive integer/);
     });
   });
 
@@ -298,7 +321,7 @@ describe('buildFtCreateArgs', () => {
       };
       expect(() => {
         buildFtCreateArgs('n', schema);
-      }).toThrow(/dims/i);
+      }).toThrow(/dims must be a positive integer/);
     });
 
     it('throws when dims is zero', () => {
@@ -308,7 +331,7 @@ describe('buildFtCreateArgs', () => {
       };
       expect(() => {
         buildFtCreateArgs('n', schema);
-      }).toThrow(/dims/i);
+      }).toThrow(/dims must be a positive integer/);
     });
 
     it('throws when dims is negative', () => {
@@ -318,7 +341,7 @@ describe('buildFtCreateArgs', () => {
       };
       expect(() => {
         buildFtCreateArgs('n', schema);
-      }).toThrow(/dims/i);
+      }).toThrow(/dims must be a positive integer/);
     });
 
     it('throws when dims is a non-integer', () => {
@@ -328,7 +351,7 @@ describe('buildFtCreateArgs', () => {
       };
       expect(() => {
         buildFtCreateArgs('n', schema);
-      }).toThrow(/dims/i);
+      }).toThrow(/dims must be a positive integer/);
     });
   });
 
@@ -362,5 +385,47 @@ describe('buildFtCreateArgs', () => {
         buildFtCreateArgs('n', schema);
       }).toThrow(/vec/);
     });
+  });
+
+  describe('index name validation', () => {
+    it('throws when index name is empty', () => {
+      const schema: RetrievalSchema = {
+        fields: {},
+        vector: { metric: 'cosine', algorithm: 'hnsw', dims: 4 },
+      };
+      expect(() => {
+        buildFtCreateArgs('', schema);
+      }).toThrow(/Index name must not be empty/);
+    });
+
+    it('throws when index name is whitespace-only', () => {
+      const schema: RetrievalSchema = {
+        fields: {},
+        vector: { metric: 'cosine', algorithm: 'hnsw', dims: 4 },
+      };
+      expect(() => {
+        buildFtCreateArgs('   ', schema);
+      }).toThrow(/Index name must not be empty/);
+    });
+  });
+});
+
+describe('indexName', () => {
+  it('returns name:idx for a valid name', () => {
+    expect(indexName('docs')).toBe('docs:idx');
+  });
+
+  it('throws on empty name', () => {
+    expect(() => indexName('')).toThrow(/Index name must not be empty/);
+  });
+});
+
+describe('keyPrefix', () => {
+  it('returns name: for a valid name', () => {
+    expect(keyPrefix('docs')).toBe('docs:');
+  });
+
+  it('throws on empty name', () => {
+    expect(() => keyPrefix('')).toThrow(/Index name must not be empty/);
   });
 });
