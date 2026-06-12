@@ -168,4 +168,16 @@ export class SpikeDetector {
   getConfig(): Required<SpikeDetectorConfig> {
     return { ...this.config };
   }
+
+  updateConfig(config: SpikeDetectorConfig = {}): void {
+    this.config = {
+      warningZScore: config.warningZScore ?? 2.0,
+      criticalZScore: config.criticalZScore ?? 3.0,
+      warningThreshold: config.warningThreshold ?? Number.POSITIVE_INFINITY,
+      criticalThreshold: config.criticalThreshold ?? Number.POSITIVE_INFINITY,
+      consecutiveRequired: config.consecutiveRequired ?? 3,
+      cooldownMs: config.cooldownMs ?? 60000,
+      detectDrops: config.detectDrops !== undefined ? config.detectDrops : this.config.detectDrops,
+    };
+  }
 }
