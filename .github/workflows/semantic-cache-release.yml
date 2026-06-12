@@ -101,6 +101,12 @@ jobs:
             fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
+      - name: Verify valkey-search-kit is published
+        run: |
+          KIT_VERSION=$(node -p "require('./packages/valkey-search-kit/package.json').version")
+          npm view "@betterdb/valkey-search-kit@$KIT_VERSION" version \
+            || { echo "::error::@betterdb/valkey-search-kit@$KIT_VERSION is not on npm — publish the kit first (tag valkey-search-kit-v$KIT_VERSION)"; exit 1; }
+
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
