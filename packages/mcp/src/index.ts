@@ -935,6 +935,43 @@ server.tool(
 );
 
 server.tool(
+  'cache_propose_ttl_adjust',
+  'Propose a runtime TTL adjustment for a BetterDB SemanticCache instance. ' +
+  'The change takes effect on the next refreshConfig() tick without a process restart.',
+  {
+    cache_name: z.string().min(1).describe(
+      'The semantic cache name to adjust (the `name` option passed to SemanticCache)',
+    ),
+    new_ttl_seconds: z.number().int().min(1).max(604800).describe(
+      'Proposed TTL in seconds. Min: 1, max: 604800 (7 days)',
+    ),
+    reasoning: z.string().min(20).describe(
+      'Explanation for the TTL change (minimum 20 characters)',
+    ),
+    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+  },
+  async (params) => withTelemetry('cache_propose_ttl_adjust', async () => {
+    try {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiRequest('POST', `/mcp/instance/${id}/cache-proposals/semantic-ttl-adjust`, {
+        cache_name: params.cache_name,
+        new_ttl_seconds: params.new_ttl_seconds,
+        reasoning: params.reasoning,
+      }) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return formatProposalText(data);
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }),
+);
+
+server.tool(
   'cache_propose_tool_ttl_adjust',
   'Propose an agent-cache per-tool TTL change for review. Creates a pending proposal that requires human approval. Reasoning must be at least 20 characters.',
   {
