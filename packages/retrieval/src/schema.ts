@@ -6,15 +6,24 @@ export type FieldSpec =
 export type VectorMetric = 'cosine' | 'l2' | 'ip';
 export type VectorAlgorithm = 'hnsw' | 'flat';
 
-export interface VectorSpec {
+export interface VectorSpecBase {
   metric: VectorMetric;
-  algorithm: VectorAlgorithm;
   dims?: number;
   fieldName?: string;
+}
+
+export interface HnswVectorSpec extends VectorSpecBase {
+  algorithm: 'hnsw';
   m?: number;
   efConstruction?: number;
   efRuntime?: number;
 }
+
+export interface FlatVectorSpec extends VectorSpecBase {
+  algorithm: 'flat';
+}
+
+export type VectorSpec = HnswVectorSpec | FlatVectorSpec;
 
 export interface RetrievalSchema {
   fields: Record<string, FieldSpec>;
