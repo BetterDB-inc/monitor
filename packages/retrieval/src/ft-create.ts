@@ -81,7 +81,15 @@ function buildFieldArgs(name: string, spec: FieldSpec): string[] {
 }
 
 function resolveVectorFieldName(vector: VectorSpec): string {
-  return vector.fieldName ?? 'embedding';
+  if (vector.fieldName === undefined) {
+    return 'embedding';
+  }
+  if (vector.fieldName.trim().length === 0) {
+    throw new Error(
+      `Vector field name must not be empty or whitespace-only, got: '${vector.fieldName}'`,
+    );
+  }
+  return vector.fieldName;
 }
 
 function buildVectorArgs(vector: VectorSpec, dims: number): string[] {

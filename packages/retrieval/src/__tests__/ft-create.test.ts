@@ -408,6 +408,28 @@ describe('buildFtCreateArgs', () => {
       }).toThrow(/Index name must not be empty/);
     });
   });
+
+  describe('vector field name validation', () => {
+    it('throws when vector fieldName is empty', () => {
+      const schema: RetrievalSchema = {
+        fields: {},
+        vector: { metric: 'cosine', algorithm: 'hnsw', dims: 4, fieldName: '' },
+      };
+      expect(() => {
+        buildFtCreateArgs('n', schema);
+      }).toThrow(/Vector field name must not be empty/);
+    });
+
+    it('throws when vector fieldName is whitespace-only', () => {
+      const schema: RetrievalSchema = {
+        fields: {},
+        vector: { metric: 'cosine', algorithm: 'hnsw', dims: 4, fieldName: '   ' },
+      };
+      expect(() => {
+        buildFtCreateArgs('n', schema);
+      }).toThrow(/Vector field name must not be empty/);
+    });
+  });
 });
 
 describe('indexName', () => {
