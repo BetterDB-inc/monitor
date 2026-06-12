@@ -6,6 +6,8 @@
 export function isIndexNotFoundError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message.toLowerCase() : '';
   return (
-    msg.includes('unknown index name') || msg.includes('no such index') || msg.includes('not found')
+    msg.includes('unknown index name') ||
+    msg.includes('no such index') ||
+    (msg.includes('not found') && msg.includes('index'))
   );
 }
