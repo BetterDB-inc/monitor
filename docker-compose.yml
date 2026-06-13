@@ -22,6 +22,22 @@ services:
       retries: 3
     restart: unless-stopped
 
+  valkey-bundle:
+    image: valkey/valkey-bundle:9.1-alpine
+    container_name: betterdb-monitor-valkey-bundle
+    ports:
+      - "6384:6379"
+    command: >
+      valkey-server
+      --requirepass devpassword
+      --slowlog-log-slower-than 0
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-a", "devpassword", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
   redis:
     image: redis:8-alpine
     container_name: betterdb-monitor-redis

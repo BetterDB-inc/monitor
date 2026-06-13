@@ -18,6 +18,11 @@ import type {
 import { SemanticCacheUsageError, EmbeddingError, ValkeyCommandError } from './errors';
 import { createTelemetry, type Telemetry } from './telemetry';
 import {
+  isIndexNotFoundError,
+  parseDimensionFromInfo,
+  parseFtInfoStats,
+} from '@betterdb/valkey-search-kit';
+import {
   encodeFloat32,
   escapeTag,
   parseFtSearchResponse,
@@ -187,7 +192,7 @@ export class SemanticCache {
     try {
       await this.client.call('FT.DROPINDEX', this.indexName);
     } catch (err: unknown) {
-      if (!this.isIndexNotFoundError(err)) {
+      if (!isIndexNotFoundError(err)) {
         throw new ValkeyCommandError('FT.DROPINDEX', err);
       }
     }
@@ -1026,14 +1031,7 @@ export class SemanticCache {
       throw new ValkeyCommandError('FT.INFO', err);
     }
 
-    const info = raw as unknown[];
-    let numDocs = 0;
-    let indexingState = 'unknown';
-    for (let i = 0; i < info.length - 1; i += 2) {
-      const key = String(info[i]);
-      if (key === 'num_docs') numDocs = parseInt(String(info[i + 1]), 10) || 0;
-      else if (key === 'indexing') indexingState = String(info[i + 1]);
-    }
+    const { numDocs, indexingState } = parseFtInfoStats(raw as unknown[]);
 
     return { name: this.indexName, numDocs, dimension: this._dimension, indexingState };
   }
@@ -1418,7 +1416,7 @@ export class SemanticCache {
     // Try reading an existing index
     try {
       const info = (await this.client.call('FT.INFO', this.indexName)) as unknown[];
-      const dim = this.parseDimensionFromInfo(info);
+      const dim = parseDimensionFromInfo(info);
       const hasBinaryRefs = this.parseHasBinaryRefsFromInfo(info);
       if (dim > 0) return { dim, hasBinaryRefs };
       // Couldn't parse dimension from FT.INFO - fall back to probe
@@ -1426,7 +1424,7 @@ export class SemanticCache {
       return { dim: probeDim, hasBinaryRefs };
     } catch (err) {
       if (err instanceof EmbeddingError) throw err;
-      if (!this.isIndexNotFoundError(err)) {
+      if (!isIndexNotFoundError(err)) {
         throw new ValkeyCommandError('FT.INFO', err);
       }
     }
@@ -1722,51 +1720,6 @@ export class SemanticCache {
     }
   }
 
-  private isIndexNotFoundError(err: unknown): boolean {
-    const msg = err instanceof Error ? err.message.toLowerCase() : '';
-    return (
-      msg.includes('unknown index name') ||
-      msg.includes('no such index') ||
-      msg.includes('not found')
-    );
-  }
-
-  private parseDimensionFromInfo(info: unknown[]): number {
-    for (let i = 0; i < info.length - 1; i += 2) {
-      const key = String(info[i]);
-      if (key !== 'attributes' && key !== 'fields') continue;
-
-      const attributes = info[i + 1];
-      if (!Array.isArray(attributes)) continue;
-
-      for (const attr of attributes) {
-        if (!Array.isArray(attr)) continue;
-
-        let isVector = false;
-        let dim = 0;
-
-        for (let j = 0; j < attr.length - 1; j++) {
-          const attrKey = String(attr[j]);
-          if (attrKey === 'type' && String(attr[j + 1]) === 'VECTOR') isVector = true;
-          if (attrKey.toLowerCase() === 'dim') dim = parseInt(String(attr[j + 1]), 10) || 0;
-          // Valkey Search 1.2 nests dimension inside an 'index' sub-array
-          if (attrKey === 'index' && Array.isArray(attr[j + 1])) {
-            const indexArr = attr[j + 1] as unknown[];
-            for (let k = 0; k < indexArr.length - 1; k++) {
-              if (String(indexArr[k]) === 'dimensions') {
-                const d = parseInt(String(indexArr[k + 1]), 10) || 0;
-                if (d > 0) dim = d;
-              }
-            }
-          }
-        }
-
-        if (isVector && dim > 0) return dim;
-      }
-    }
-
-    return 0;
-  }
 }
 
 // -- ThresholdEffectiveness types --
