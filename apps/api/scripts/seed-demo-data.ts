@@ -10,6 +10,7 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
+import { ENV_DEFAULT_ID } from '../src/connections/connection.constants';
 
 // Configuration
 const DB_PATH = process.env.SQLITE_PATH || path.join(__dirname, '..', 'data', 'betterdb.sqlite');
@@ -708,7 +709,7 @@ function seedSlowLogEntries(): void {
       capturedAt: baseTs + randomInt(0, 5000), // captured shortly after
       sourceHost: SOURCE_HOST,
       sourcePort: SOURCE_PORT,
-      connectionId: 'env-default',
+      connectionId: ENV_DEFAULT_ID,
     });
   }
 
@@ -784,7 +785,7 @@ function seedLatencySnapshots(): void {
         eventName,
         latestEventTimestamp: eventTs,
         maxLatency: baseLatency, // microseconds
-        connectionId: 'env-default',
+        connectionId: ENV_DEFAULT_ID,
       });
     }
   }
@@ -856,7 +857,7 @@ function seedLatencyHistograms(): void {
       id: randomUUID(),
       timestamp: ts,
       data: JSON.stringify(data),
-      connectionId: 'env-default',
+      connectionId: ENV_DEFAULT_ID,
     });
   }
 
@@ -952,7 +953,7 @@ function seedMemorySnapshots(): void {
       cpuUser,
       ioThreadedReads: cumulativeIoReads,
       ioThreadedWrites: cumulativeIoWrites,
-      connectionId: 'env-default',
+      connectionId: ENV_DEFAULT_ID,
     });
   }
 
