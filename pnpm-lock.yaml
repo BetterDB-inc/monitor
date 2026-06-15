@@ -546,6 +546,9 @@ importers:
 
   packages/semantic-cache:
     dependencies:
+      '@betterdb/valkey-search-kit':
+        specifier: workspace:*
+        version: link:../valkey-search-kit
       '@opentelemetry/api':
         specifier: ^1.9.0
         version: 1.9.0
@@ -599,6 +602,18 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+
+  packages/valkey-search-kit:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.19.15
+        version: 22.19.15
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.1
+        version: 4.1.1(@opentelemetry/api@1.9.0)(@types/node@22.19.15)(happy-dom@20.8.9)(msw@2.12.14(@types/node@22.19.15)(typescript@5.9.3))(vite@8.0.5(@emnapi/core@1.8.1)(@emnapi/runtime@1.8.1)(@types/node@22.19.15)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0)(yaml@2.9.0))
 
   proprietary/entitlement:
     dependencies:
