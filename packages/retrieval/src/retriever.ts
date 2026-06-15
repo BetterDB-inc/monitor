@@ -10,6 +10,9 @@ import type { RetrievalSchema, FtCapabilities } from './schema';
 import { buildFtCreateArgs, indexName, keyPrefix, resolveVectorFieldName } from './ft-create';
 import { buildFtSearchQuery, type QueryFilter } from './ft-search';
 import { TEXT_FIELD, SCORE_FIELD, RESERVED_FIELD_NAMES } from './fields';
+import { buildRetrievalMarker, REGISTRY_KEY, RETRIEVAL_VERSION } from './discovery';
+import { parsePercentIndexed, type IndexHealthSnapshot, type RecallEstimator } from './health';
+import type { RetrievalMetrics, RetrievalTracer, RetrievalOperation } from './telemetry';
 
 export type EmbedFn = (text: string) => Promise<number[]>;
 
@@ -53,6 +56,9 @@ export interface RetrieverOptions {
   capabilities?: FtCapabilities;
   embedFn?: EmbedFn;
   rerankFn?: RerankFn;
+  recallEstimator?: RecallEstimator;
+  metrics?: RetrievalMetrics;
+  tracer?: RetrievalTracer;
 }
 
 export interface UpsertEntry {
@@ -68,6 +74,9 @@ export class Retriever {
   private readonly capabilities?: FtCapabilities;
   private readonly embedFn?: EmbedFn;
   private readonly rerankFn?: RerankFn;
+  private readonly recallEstimator?: RecallEstimator;
+  private readonly metrics?: RetrievalMetrics;
+  private readonly tracer?: RetrievalTracer;
   private resolvedDims?: number;
 
   constructor(options: RetrieverOptions) {
@@ -77,6 +86,20 @@ export class Retriever {
     this.capabilities = options.capabilities;
     this.embedFn = options.embedFn;
     this.rerankFn = options.rerankFn;
+    this.recallEstimator = options.recallEstimator;
+    this.metrics = options.metrics;
+    this.tracer = options.tracer;
+  }
+
+  private async instrument<T>(operation: RetrievalOperation, fn: () => Promise<T>): Promise<T> {
+    const span = this.tracer?.startSpan(`retrieval.${operation}`);
+    const start = performance.now();
+    try {
+      return await fn();
+    } finally {
+      this.metrics?.observeOperation(operation, (performance.now() - start) / 1000);
+      span?.end();
+    }
   }
 
   private async resolveDims(): Promise<number> {
@@ -94,6 +117,7 @@ export class Retriever {
       throw new Error('Cannot resolve vector dimension: provide schema.vector.dims or an embedFn');
     }
     const probe = await this.embedFn('probe');
+    this.metrics?.recordEmbeddingCall();
     if (probe.length === 0) {
       throw new Error(
         'Cannot resolve vector dimension: embedFn returned a zero-length probe embedding',
@@ -136,6 +160,7 @@ export class Retriever {
     }
     const dims = await this.resolveDims();
     const vector = await this.embedFn(text);
+    this.metrics?.recordEmbeddingCall();
     if (vector.length !== dims) {
       throw new Error(
         `Embedding dimension mismatch: index expects ${dims}, embedFn returned ${vector.length}`,
@@ -145,6 +170,10 @@ export class Retriever {
   }
 
   async upsert(entries: UpsertEntry[]): Promise<void> {
+    return this.instrument('upsert', () => this.upsertEntries(entries));
+  }
+
+  private async upsertEntries(entries: UpsertEntry[]): Promise<void> {
     const vectorField = resolveVectorFieldName(this.schema.vector);
     const writes: { key: string; args: (string | Buffer)[] }[] = [];
     for (const entry of entries) {
@@ -270,6 +299,13 @@ export class Retriever {
       throw new Error(`query k must be a positive integer, got: ${options.k}`);
     }
     const rerank = this.resolveRerank(options);
+    return this.instrument('query', () => this.runQuery(options, rerank));
+  }
+
+  private async runQuery(
+    options: QueryOptions,
+    rerank: { fn: RerankFn; text: string } | null,
+  ): Promise<QueryHit[]> {
     const vector = await this.resolveQueryVector(options);
     const queryString = buildFtSearchQuery(this.schema, options.k, options.filter);
     const raw = await this.client.call(
@@ -287,9 +323,41 @@ export class Retriever {
       '2',
     );
     const hits = parseFtSearchResponse(raw).map((hit) => this.mapHit(hit));
+    let result = hits;
     if (rerank !== null) {
-      return rerank.fn(rerank.text, hits);
+      result = await rerank.fn(rerank.text, hits);
     }
-    return hits;
+    this.metrics?.recordQueryResults(result.length);
+    return result;
+  }
+
+  async register(): Promise<void> {
+    const marker = buildRetrievalMarker({
+      name: this.name,
+      version: RETRIEVAL_VERSION,
+      startedAt: new Date().toISOString(),
+    });
+    await this.client.call('HSET', REGISTRY_KEY, this.name, JSON.stringify(marker));
+  }
+
+  async unregister(): Promise<void> {
+    await this.client.call('HDEL', REGISTRY_KEY, this.name);
+  }
+
+  async health(): Promise<IndexHealthSnapshot> {
+    const info = (await this.client.call('FT.INFO', indexName(this.name))) as unknown[];
+    const stats = parseFtInfoStats(info);
+    const snapshot = {
+      name: this.name,
+      numDocs: stats.numDocs,
+      indexingState: stats.indexingState,
+      dims: parseDimensionFromInfo(info),
+      percentIndexed: parsePercentIndexed(info),
+    };
+    let estimatedRecall: number | null = null;
+    if (this.recallEstimator !== undefined) {
+      estimatedRecall = this.recallEstimator(snapshot);
+    }
+    return { ...snapshot, estimatedRecall };
   }
 }

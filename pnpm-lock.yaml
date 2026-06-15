@@ -568,6 +568,9 @@ importers:
       '@betterdb/valkey-search-kit':
         specifier: workspace:*
         version: link:../valkey-search-kit
+      prom-client:
+        specifier: ^15.1.3
+        version: 15.1.3
     devDependencies:
       '@types/node':
         specifier: ^22.19.15
