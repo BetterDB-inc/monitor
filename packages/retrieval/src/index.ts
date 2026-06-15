@@ -10,11 +10,17 @@ export type {
   FtCapabilities,
 } from './schema';
 export { buildFtCreateArgs, indexName, keyPrefix, resolveVectorFieldName } from './ft-create';
-export { Retriever, TEXT_FIELD } from './retriever';
+export { TEXT_FIELD, SCORE_FIELD } from './fields';
+export { buildFtSearchQuery } from './ft-search';
+export type { QueryFilter } from './ft-search';
+export { Retriever } from './retriever';
 export type {
   RetrieverClient,
   RetrieverOptions,
   IndexDescription,
   EmbedFn,
   UpsertEntry,
+  RerankFn,
+  QueryHit,
+  QueryOptions,
 } from './retriever';
