@@ -80,7 +80,7 @@ function buildFieldArgs(name: string, spec: FieldSpec): string[] {
   return args;
 }
 
-function resolveVectorFieldName(vector: VectorSpec): string {
+export function resolveVectorFieldName(vector: VectorSpec): string {
   if (vector.fieldName === undefined) {
     return 'embedding';
   }
