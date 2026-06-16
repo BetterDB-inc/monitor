@@ -556,6 +556,9 @@ importers:
       '@types/node':
         specifier: ^22.19.15
         version: 22.19.15
+      iovalkey:
+        specifier: ^0.3.3
+        version: 0.3.3
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -15602,7 +15605,7 @@ snapshots:
       isstream: 0.1.2
       jsonwebtoken: 9.0.3
       mime-types: 2.1.35
-      retry-axios: 2.6.0(axios@1.16.0)
+      retry-axios: 2.6.0(axios@1.16.0(debug@4.4.3))
       tough-cookie: 4.1.4
     transitivePeerDependencies:
       - supports-color
@@ -17730,7 +17733,7 @@ snapshots:
 
   ret@0.5.0: {}
 
-  retry-axios@2.6.0(axios@1.16.0):
+  retry-axios@2.6.0(axios@1.16.0(debug@4.4.3)):
     dependencies:
       axios: 1.16.0(debug@4.4.3)
 
