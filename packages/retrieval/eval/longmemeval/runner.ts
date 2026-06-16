@@ -96,7 +96,8 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
       // measured on an incomplete graph.
       const settled = await pollUntil(async () => {
         const h = await retriever.health();
-        return h.numDocs >= chunks.length && h.percentIndexed >= 1;
+        // percentIndexed is normalized to a 0-100 scale; require full coverage.
+        return h.numDocs >= chunks.length && h.percentIndexed >= 100;
       });
       if (!settled) {
         console.warn(

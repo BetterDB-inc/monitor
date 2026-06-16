@@ -41,11 +41,13 @@ export function createOpenAIJudge(apiKey: string): Judge {
         'Reply with exactly one word: "correct" or "incorrect".';
       const user = `Question: ${question}\nGold answer: ${gold}\nModel answer: ${predicted}\n\nVerdict:`;
       const verdict = await chat(apiKey, JUDGE_MODEL, system, user);
-      // The grader is told to reply with exactly one word. Match only a leading
-      // "correct" so "incorrect", "not correct", or "partially correct" — which
-      // all contain the substring "correct" — are not scored as correct.
-      const word = verdict.trim().toLowerCase().match(/[a-z]+/)?.[0];
-      return word === 'correct';
+      const v = verdict.toLowerCase();
+      // `\bcorrect\b` does not match inside "incorrect" (no word boundary), so
+      // detect the verdict by whole word and reject negated/partial forms like
+      // "incorrect", "not correct", or "partially correct".
+      const saysCorrect = /\bcorrect\b/.test(v);
+      const negated = /\bincorrect\b/.test(v) || /\b(?:not|partially|isn't)\b[\s\S]{0,20}\bcorrect\b/.test(v);
+      return saysCorrect && !negated;
     },
   };
 }

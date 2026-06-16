@@ -1,16 +1,49 @@
 import type { UpsertEntry, QueryHit } from '../../src/index';
 import type { ChunkMode, LmeRecord, LmeSession } from './types';
 
-function sessionText(session: LmeSession): string {
-  return session.map((turn) => `${turn.role}: ${turn.content}`).join('\n');
+// text-embedding-3-small accepts at most 8191 tokens per input. Cap each chunk
+// well under that (~4 chars/token heuristic, with margin) so a long session is
+// split into multiple chunks instead of failing the embedding call. Every part
+// keeps the session's session_id, so recall (which matches on session_id) is
+// unaffected.
+const MAX_EMBED_CHARS = 24000;
+
+/** Pack a session's turns into newline-joined chunks each within `budget`. */
+function packTurns(session: LmeSession, budget: number): string[] {
+  const lines: string[] = [];
+  for (const turn of session) {
+    const line = `${turn.role}: ${turn.content}`;
+    if (line.length <= budget) {
+      lines.push(line);
+    } else {
+      // A single turn larger than the budget is hard-sliced so it still embeds.
+      for (let i = 0; i < line.length; i += budget) {
+        lines.push(line.slice(i, i + budget));
+      }
+    }
+  }
+  const chunks: string[] = [];
+  let current = '';
+  for (const line of lines) {
+    if (current.length > 0 && current.length + 1 + line.length > budget) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = current.length === 0 ? line : `${current}\n${line}`;
+    }
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
 }
 
 /**
  * Turn a LongMemEval haystack into UpsertEntry chunks.
- * - 'session' (default): one chunk per session (turns joined).
+ * - 'session' (default): one chunk per session (turns joined); sessions longer
+ *   than the embedder's input budget are split into multiple chunks that all
+ *   carry the same session_id.
  * - 'turn': one chunk per turn.
- * The id encodes the session index (+ turn index for 'turn'); fields carry the
- * session_id tag (+ date tag when present) so recall can match evidence.
+ * The id encodes the session index (+ turn/part index when split); fields carry
+ * the session_id tag (+ date tag when present) so recall can match evidence.
  */
 export function chunkRecord(record: LmeRecord, mode: ChunkMode): UpsertEntry[] {
   const entries: UpsertEntry[] = [];
@@ -31,10 +64,13 @@ export function chunkRecord(record: LmeRecord, mode: ChunkMode): UpsertEntry[] {
         });
       });
     } else {
-      entries.push({
-        id: `s${sIdx}`,
-        text: sessionText(session),
-        fields: { ...baseFields },
+      const parts = packTurns(session, MAX_EMBED_CHARS);
+      parts.forEach((text, pIdx) => {
+        entries.push({
+          id: parts.length === 1 ? `s${sIdx}` : `s${sIdx}_p${pIdx}`,
+          text,
+          fields: { ...baseFields },
+        });
       });
     }
   });
