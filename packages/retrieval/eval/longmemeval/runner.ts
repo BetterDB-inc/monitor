@@ -74,74 +74,79 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   let totalChunks = 0;
 
   const slice = records.slice(0, limit);
-  for (let i = 0; i < slice.length; i++) {
-    const record = slice[i];
-    const name = `lme_${i}_${Math.random().toString(36).slice(2, 8)}`;
-    const retriever = new Retriever({
-      client: store.client,
-      name,
-      schema,
-      embedFn: embedder.embed,
-    });
-
-    const chunks = chunkRecord(record, chunkMode);
-    totalChunks += chunks.length;
-
-    await retriever.createIndex();
-    await retriever.upsert(chunks);
-
-    if (store.isReal) {
-      // A hit-count check can pass while HNSW is still backfilling. Wait for the
-      // index to report every chunk ingested and fully indexed so recall is not
-      // measured on an incomplete graph.
-      const settled = await pollUntil(async () => {
-        const h = await retriever.health();
-        // percentIndexed is normalized to a 0-100 scale; require full coverage.
-        return h.numDocs >= chunks.length && h.percentIndexed >= 100;
+  // Flush in `finally` so a mid-run failure (embedding/Valkey/reader error)
+  // still persists the embeddings already computed — billable work must not be
+  // discarded just because the run didn't reach the end.
+  try {
+    for (let i = 0; i < slice.length; i++) {
+      const record = slice[i];
+      const name = `lme_${i}_${Math.random().toString(36).slice(2, 8)}`;
+      const retriever = new Retriever({
+        client: store.client,
+        name,
+        schema,
+        embedFn: embedder.embed,
       });
-      if (!settled) {
-        console.warn(
-          `index ${name} did not settle within the poll window (record ${i + 1}); recall may be undercounted`,
-        );
+
+      const chunks = chunkRecord(record, chunkMode);
+      totalChunks += chunks.length;
+
+      await retriever.createIndex();
+      await retriever.upsert(chunks);
+
+      if (store.isReal) {
+        // A hit-count check can pass while HNSW is still backfilling. Wait for the
+        // index to report every chunk ingested and fully indexed so recall is not
+        // measured on an incomplete graph.
+        const settled = await pollUntil(async () => {
+          const h = await retriever.health();
+          // percentIndexed is normalized to a 0-100 scale; require full coverage.
+          return h.numDocs >= chunks.length && h.percentIndexed >= 100;
+        });
+        if (!settled) {
+          console.warn(
+            `index ${name} did not settle within the poll window (record ${i + 1}); recall may be undercounted`,
+          );
+        }
       }
-    }
 
-    const hits = await retriever.query({ text: record.question, k });
-    const hit = recordIsHit(hits, record.answer_session_ids);
+      const hits = await retriever.query({ text: record.question, k });
+      const hit = recordIsHit(hits, record.answer_session_ids);
 
-    const stats = bump(byType, record.question_type);
-    stats.total++;
-    total++;
-    if (hit) {
-      stats.recallHits++;
-      recallHits++;
-    }
-
-    if (qaRun && reader !== null && judge !== null) {
-      // Temporal-reasoning questions need the session date (stored on the chunk's
-      // `date` tag) and the question's asked-on date in the prompt; passing only
-      // hit.text strips both and depresses temporal QA. Prefix each excerpt with
-      // its date and carry question_date into the question the reader sees.
-      const contexts = hits.map((h) => (h.fields.date ? `[${h.fields.date}] ${h.text}` : h.text));
-      const question =
-        record.question_date !== undefined && record.question_date !== ''
-          ? `${record.question} (question asked on ${record.question_date})`
-          : record.question;
-      const answer = await reader.answer(question, contexts);
-      // Grade against the same date-anchored question the reader saw, so the
-      // judge has the temporal anchor too and doesn't mismark temporal items.
-      const correct = await judge.grade(question, record.answer, answer);
-      if (correct) {
-        stats.qaCorrect++;
-        qaCorrect++;
+      const stats = bump(byType, record.question_type);
+      stats.total++;
+      total++;
+      if (hit) {
+        stats.recallHits++;
+        recallHits++;
       }
-    }
 
-    await retriever.delete(chunks.map((c) => c.id)).catch(() => {});
-    await retriever.dropIndex().catch(() => {});
+      if (qaRun && reader !== null && judge !== null) {
+        // Temporal-reasoning questions need the session date (stored on the chunk's
+        // `date` tag) and the question's asked-on date in the prompt; passing only
+        // hit.text strips both and depresses temporal QA. Prefix each excerpt with
+        // its date and carry question_date into the question the reader sees.
+        const contexts = hits.map((h) => (h.fields.date ? `[${h.fields.date}] ${h.text}` : h.text));
+        const question =
+          record.question_date !== undefined && record.question_date !== ''
+            ? `${record.question} (question asked on ${record.question_date})`
+            : record.question;
+        const answer = await reader.answer(question, contexts);
+        // Grade against the same date-anchored question the reader saw, so the
+        // judge has the temporal anchor too and doesn't mismark temporal items.
+        const correct = await judge.grade(question, record.answer, answer);
+        if (correct) {
+          stats.qaCorrect++;
+          qaCorrect++;
+        }
+      }
+
+      await retriever.delete(chunks.map((c) => c.id)).catch(() => {});
+      await retriever.dropIndex().catch(() => {});
+    }
+  } finally {
+    await embedder.flush?.();
   }
-
-  await embedder.flush?.();
 
   return {
     total,
