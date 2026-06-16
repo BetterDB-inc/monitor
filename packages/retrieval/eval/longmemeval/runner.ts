@@ -128,7 +128,9 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
           ? `${record.question} (question asked on ${record.question_date})`
           : record.question;
       const answer = await reader.answer(question, contexts);
-      const correct = await judge.grade(record.question, record.answer, answer);
+      // Grade against the same date-anchored question the reader saw, so the
+      // judge has the temporal anchor too and doesn't mismark temporal items.
+      const correct = await judge.grade(question, record.answer, answer);
       if (correct) {
         stats.qaCorrect++;
         qaCorrect++;
