@@ -559,6 +559,9 @@ importers:
       iovalkey:
         specifier: ^0.3.3
         version: 0.3.3
+      tsx:
+        specifier: ^4.19.2
+        version: 4.21.0
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
