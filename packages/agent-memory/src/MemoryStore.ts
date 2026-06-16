@@ -104,7 +104,27 @@ export class MemoryStore {
     }
 
     hits.sort((a, b) => b.score - a.score);
-    return hits.slice(0, k);
+    const result = hits.slice(0, k);
+
+    if (options.reinforce !== false) {
+      // Reinforcement is best-effort and must never break the recall read path.
+      await this.reinforce(result, now).catch(() => undefined);
+    }
+    return result;
+  }
+
+  private async reinforce(hits: MemoryHit[], now: number): Promise<void> {
+    for (const hit of hits) {
+      const key = `${this.name}:mem:${hit.item.id}`;
+      // Only touch live hashes: a recalled key may already be deleted (stale
+      // index) and HSET/HINCRBY would otherwise resurrect a partial record.
+      const exists = Number(await this.client.call('EXISTS', key));
+      if (exists === 0) {
+        continue;
+      }
+      await this.client.call('HSET', key, 'last_accessed_at', String(now));
+      await this.client.call('HINCRBY', key, 'access_count', '1');
+    }
   }
 
   async forget(id: string): Promise<boolean> {
