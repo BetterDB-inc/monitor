@@ -92,10 +92,18 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
 
     if (store.isReal) {
       const expected = Math.min(k, chunks.length);
-      await pollUntil(async () => {
+      const settled = await pollUntil(async () => {
         const hits = await retriever.query({ text: record.question, k });
         return hits.length >= expected;
       });
+      if (!settled) {
+        // HNSW indexing did not converge within the poll window; querying now
+        // can miss the evidence chunk, so surface it rather than silently
+        // undercounting recall for this record.
+        console.warn(
+          `index ${name} did not settle within the poll window (record ${i + 1}); recall may be undercounted`,
+        );
+      }
     }
 
     const hits = await retriever.query({ text: record.question, k });

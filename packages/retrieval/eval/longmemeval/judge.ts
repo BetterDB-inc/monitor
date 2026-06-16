@@ -21,7 +21,9 @@ export function createMockJudge(): Judge {
     grade: async (_question: string, gold: string, predicted: string) => {
       const g = normalize(gold);
       const p = normalize(predicted);
-      if (g.length === 0) return false;
+      // An empty prediction (e.g. a retrieval miss leaving the reader no
+      // context) must never grade correct — `g.includes('')` is always true.
+      if (g.length === 0 || p.length === 0) return false;
       return p === g || p.includes(g) || g.includes(p);
     },
   };
@@ -39,7 +41,11 @@ export function createOpenAIJudge(apiKey: string): Judge {
         'Reply with exactly one word: "correct" or "incorrect".';
       const user = `Question: ${question}\nGold answer: ${gold}\nModel answer: ${predicted}\n\nVerdict:`;
       const verdict = await chat(apiKey, JUDGE_MODEL, system, user);
-      return /correct/i.test(verdict) && !/incorrect/i.test(verdict);
+      // The grader is told to reply with exactly one word. Match only a leading
+      // "correct" so "incorrect", "not correct", or "partially correct" — which
+      // all contain the substring "correct" — are not scored as correct.
+      const word = verdict.trim().toLowerCase().match(/[a-z]+/)?.[0];
+      return word === 'correct';
     },
   };
 }
