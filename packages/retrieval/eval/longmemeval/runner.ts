@@ -118,8 +118,16 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
     }
 
     if (qaRun && reader !== null && judge !== null) {
-      const contexts = hits.map((h) => h.text);
-      const answer = await reader.answer(record.question, contexts);
+      // Temporal-reasoning questions need the session date (stored on the chunk's
+      // `date` tag) and the question's asked-on date in the prompt; passing only
+      // hit.text strips both and depresses temporal QA. Prefix each excerpt with
+      // its date and carry question_date into the question the reader sees.
+      const contexts = hits.map((h) => (h.fields.date ? `[${h.fields.date}] ${h.text}` : h.text));
+      const question =
+        record.question_date !== undefined && record.question_date !== ''
+          ? `${record.question} (question asked on ${record.question_date})`
+          : record.question;
+      const answer = await reader.answer(question, contexts);
       const correct = await judge.grade(record.question, record.answer, answer);
       if (correct) {
         stats.qaCorrect++;

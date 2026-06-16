@@ -8,6 +8,15 @@ import type { ChunkMode, LmeRecord, LmeSession } from './types';
 // unaffected.
 const MAX_EMBED_CHARS = 24000;
 
+/** Hard-slice a string into consecutive pieces each at most `budget` chars. */
+function sliceToBudget(text: string, budget: number): string[] {
+  const parts: string[] = [];
+  for (let i = 0; i < text.length; i += budget) {
+    parts.push(text.slice(i, i + budget));
+  }
+  return parts;
+}
+
 /** Pack a session's turns into newline-joined chunks each within `budget`. */
 function packTurns(session: LmeSession, budget: number): string[] {
   const lines: string[] = [];
@@ -17,9 +26,7 @@ function packTurns(session: LmeSession, budget: number): string[] {
       lines.push(line);
     } else {
       // A single turn larger than the budget is hard-sliced so it still embeds.
-      for (let i = 0; i < line.length; i += budget) {
-        lines.push(line.slice(i, i + budget));
-      }
+      lines.push(...sliceToBudget(line, budget));
     }
   }
   const chunks: string[] = [];
@@ -57,10 +64,16 @@ export function chunkRecord(record: LmeRecord, mode: ChunkMode): UpsertEntry[] {
 
     if (mode === 'turn') {
       session.forEach((turn, tIdx) => {
-        entries.push({
-          id: `s${sIdx}_t${tIdx}`,
-          text: `${turn.role}: ${turn.content}`,
-          fields: { ...baseFields },
+        const text = `${turn.role}: ${turn.content}`;
+        // A single turn can exceed the embedder budget too; hard-slice it like
+        // session mode so it still embeds instead of failing the chunk.
+        const parts = text.length <= MAX_EMBED_CHARS ? [text] : sliceToBudget(text, MAX_EMBED_CHARS);
+        parts.forEach((part, pIdx) => {
+          entries.push({
+            id: parts.length === 1 ? `s${sIdx}_t${tIdx}` : `s${sIdx}_t${tIdx}_p${pIdx}`,
+            text: part,
+            fields: { ...baseFields },
+          });
         });
       });
     } else {
