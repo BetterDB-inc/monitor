@@ -4,7 +4,7 @@ import type { MemoryScope } from './types';
 export const SCORE_FIELD = '__score';
 export const VECTOR_FIELD = 'vector';
 
-export function buildRecallQuery(k: number, scope: MemoryScope, tags: string[]): string {
+export function buildScopeFilter(scope: MemoryScope, tags: string[]): string {
   const clauses: string[] = [];
   if (scope.threadId !== undefined) {
     clauses.push(`@threadId:{${escapeTag(scope.threadId)}}`);
@@ -18,6 +18,12 @@ export function buildRecallQuery(k: number, scope: MemoryScope, tags: string[]):
   for (const tag of tags) {
     clauses.push(`@tags:{${escapeTag(tag)}}`);
   }
-  const filterExpr = clauses.length > 0 ? `(${clauses.join(' ')})` : '*';
-  return `${filterExpr}=>[KNN ${k} @${VECTOR_FIELD} $vec AS ${SCORE_FIELD}]`;
+  if (clauses.length === 0) {
+    return '*';
+  }
+  return `(${clauses.join(' ')})`;
+}
+
+export function buildRecallQuery(k: number, scope: MemoryScope, tags: string[]): string {
+  return `${buildScopeFilter(scope, tags)}=>[KNN ${k} @${VECTOR_FIELD} $vec AS ${SCORE_FIELD}]`;
 }
