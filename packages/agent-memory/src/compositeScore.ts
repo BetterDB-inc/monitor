@@ -12,12 +12,17 @@ export interface CompositeScoreParams {
   halfLifeSeconds: number;
 }
 
+/** True half-life decay: 1 at age 0, 0.5 at one halfLifeSeconds, approaching 0 beyond. */
+export function recencyDecay(ageSeconds: number, halfLifeSeconds: number): number {
+  return Math.exp((-Math.LN2 * ageSeconds) / halfLifeSeconds);
+}
+
 /**
  * Weighted blend of semantic similarity, recency, and importance.
  * Recency is a true half-life decay: 0.5 at one halfLifeSeconds.
  */
 export function compositeScore(params: CompositeScoreParams): number {
-  const recency = Math.exp((-Math.LN2 * params.ageSeconds) / params.halfLifeSeconds);
+  const recency = recencyDecay(params.ageSeconds, params.halfLifeSeconds);
   return (
     params.weights.similarity * params.similarity +
     params.weights.recency * recency +

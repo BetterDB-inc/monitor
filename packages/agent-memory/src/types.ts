@@ -16,6 +16,7 @@ export interface RememberOptions extends MemoryScope {
   importance?: number;
   tags?: string[];
   source?: string;
+  ttl?: number;
 }
 
 export interface MemoryItem extends MemoryScope {
