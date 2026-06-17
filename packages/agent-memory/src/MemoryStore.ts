@@ -33,6 +33,9 @@ const EVICTION_SCAN_LIMIT = 10000;
 const CONSOLIDATE_SCAN_LIMIT = 10000;
 const DEFAULT_SUMMARY_IMPORTANCE = 0.7;
 const SUMMARY_SOURCE = 'summary';
+const DEFAULT_CONFIG_REFRESH_MS = 30000;
+const MIN_CONFIG_REFRESH_MS = 1000;
+const MAX_DISTANCE = 2;
 
 // Read lazily so only discovery users pay the disk read on import (and avoid a
 // bundler hazard, since package.json is not always emitted).
@@ -45,6 +48,18 @@ export interface MemoryDiscoveryConfig {
   heartbeatIntervalMs?: number;
 }
 
+export interface MemoryConfigRefreshConfig {
+  enabled?: boolean;
+  intervalMs?: number;
+}
+
+export interface MemoryConfigSnapshot {
+  threshold: number;
+  weights: RecallWeights;
+  halfLifeSeconds: number;
+  maxItemsPerScope?: number;
+}
+
 export interface MemoryStoreOptions {
   client: MemoryStoreClient;
   name: string;
@@ -54,16 +69,23 @@ export interface MemoryStoreOptions {
   halfLifeSeconds?: number;
   maxItemsPerScope?: number;
   discovery?: boolean | MemoryDiscoveryConfig;
+  configRefresh?: boolean | MemoryConfigRefreshConfig;
 }
 
 export class MemoryStore {
   private readonly client: MemoryStoreClient;
   private readonly name: string;
   private readonly embedFn: EmbedFn;
-  private readonly defaultThreshold: number;
-  private readonly weights: RecallWeights;
-  private readonly halfLifeSeconds: number;
-  private readonly maxItemsPerScope?: number;
+  private defaultThreshold: number;
+  private weights: RecallWeights;
+  private halfLifeSeconds: number;
+  private maxItemsPerScope?: number;
+  private readonly initialThreshold: number;
+  private readonly initialWeights: RecallWeights;
+  private readonly initialHalfLifeSeconds: number;
+  private readonly initialMaxItemsPerScope?: number;
+  private readonly configKey: string;
+  private configRefreshHandle: ReturnType<typeof setInterval> | null = null;
   private readonly discovery: MemoryDiscovery | null;
   private discoveryReady: Promise<void> | null = null;
   private dims?: number;
@@ -72,11 +94,111 @@ export class MemoryStore {
     this.client = options.client;
     this.name = options.name;
     this.embedFn = options.embedFn;
-    this.defaultThreshold = options.defaultThreshold ?? DEFAULT_THRESHOLD;
-    this.weights = options.weights ?? DEFAULT_WEIGHTS;
-    this.halfLifeSeconds = options.halfLifeSeconds ?? DEFAULT_HALF_LIFE_SECONDS;
-    this.maxItemsPerScope = options.maxItemsPerScope;
+    this.initialThreshold = options.defaultThreshold ?? DEFAULT_THRESHOLD;
+    this.initialWeights = { ...(options.weights ?? DEFAULT_WEIGHTS) };
+    this.initialHalfLifeSeconds = options.halfLifeSeconds ?? DEFAULT_HALF_LIFE_SECONDS;
+    this.initialMaxItemsPerScope = options.maxItemsPerScope;
+    this.defaultThreshold = this.initialThreshold;
+    this.weights = { ...this.initialWeights };
+    this.halfLifeSeconds = this.initialHalfLifeSeconds;
+    this.maxItemsPerScope = this.initialMaxItemsPerScope;
+    this.configKey = `${this.name}:__mem_config`;
     this.discovery = this.createDiscovery(options.discovery);
+    this.startConfigRefresh(options.configRefresh);
+  }
+
+  currentConfig(): MemoryConfigSnapshot {
+    return {
+      threshold: this.defaultThreshold,
+      weights: { ...this.weights },
+      halfLifeSeconds: this.halfLifeSeconds,
+      maxItemsPerScope: this.maxItemsPerScope,
+    };
+  }
+
+  async refreshConfig(): Promise<void> {
+    try {
+      const raw = await this.client.call('HGETALL', this.configKey);
+      this.applyConfig(parseHashReply(raw));
+    } catch {
+      // Best-effort: a failed refresh keeps the last-known config in place.
+    }
+  }
+
+  private startConfigRefresh(config?: boolean | MemoryConfigRefreshConfig): void {
+    if (!config) {
+      return;
+    }
+    const settings = config === true ? {} : config;
+    if (settings.enabled === false) {
+      return;
+    }
+    const intervalMs = Math.max(
+      MIN_CONFIG_REFRESH_MS,
+      settings.intervalMs ?? DEFAULT_CONFIG_REFRESH_MS,
+    );
+    void this.refreshConfig();
+    const handle = setInterval(() => {
+      void this.refreshConfig();
+    }, intervalMs);
+    handle.unref?.();
+    this.configRefreshHandle = handle;
+  }
+
+  private applyConfig(raw: Record<string, string>): void {
+    let threshold = this.initialThreshold;
+    const weights: RecallWeights = { ...this.initialWeights };
+    let halfLifeSeconds = this.initialHalfLifeSeconds;
+    let maxItemsPerScope = this.initialMaxItemsPerScope;
+
+    for (const [field, value] of Object.entries(raw)) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) {
+        continue;
+      }
+      switch (field) {
+        case 'recall.threshold':
+          if (num >= 0 && num <= MAX_DISTANCE) {
+            threshold = num;
+          }
+          break;
+        case 'recall.weights.similarity':
+          if (num >= 0) {
+            weights.similarity = num;
+          }
+          break;
+        case 'recall.weights.recency':
+          if (num >= 0) {
+            weights.recency = num;
+          }
+          break;
+        case 'recall.weights.importance':
+          if (num >= 0) {
+            weights.importance = num;
+          }
+          break;
+        case 'recall.halfLifeSeconds':
+          if (num > 0) {
+            halfLifeSeconds = num;
+          }
+          break;
+        case 'maxItemsPerScope':
+          if (num >= 1) {
+            maxItemsPerScope = Math.floor(num);
+          }
+          break;
+        default:
+          break;
+      }
+    }
+
+    this.defaultThreshold = threshold;
+    // An all-zero weight vector would make every composite score 0 and leave
+    // recall ordering undefined, so reject it and keep the configured weights.
+    const weightSum = weights.similarity + weights.recency + weights.importance;
+    this.weights = weightSum > 0 ? weights : { ...this.initialWeights };
+    this.halfLifeSeconds = halfLifeSeconds;
+    this.maxItemsPerScope = maxItemsPerScope;
   }
 
   private createDiscovery(config?: boolean | MemoryDiscoveryConfig): MemoryDiscovery | null {
@@ -102,6 +224,10 @@ export class MemoryStore {
   }
 
   async close(): Promise<void> {
+    if (this.configRefreshHandle) {
+      clearInterval(this.configRefreshHandle);
+      this.configRefreshHandle = null;
+    }
     if (this.discoveryReady) {
       await this.discoveryReady.catch(() => undefined);
     }
@@ -480,3 +606,16 @@ function ftSearchTotal(raw: unknown): number {
   return Number.isFinite(total) && total > 0 ? total : 0;
 }
 
+function parseHashReply(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (Array.isArray(raw)) {
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      out[String(raw[i])] = String(raw[i + 1]);
+    }
+  } else if (raw !== null && typeof raw === 'object') {
+    for (const [field, value] of Object.entries(raw as Record<string, unknown>)) {
+      out[field] = String(value);
+    }
+  }
+  return out;
+}
