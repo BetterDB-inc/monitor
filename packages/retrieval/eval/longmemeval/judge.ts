@@ -1,7 +1,9 @@
 import type { Judge } from './types';
 import { chat } from './reader';
 
-const JUDGE_MODEL = 'gpt-5.5';
+// Judge model. Defaults to gpt-5.5; override with LONGMEMEVAL_JUDGE_MODEL to run
+// a like-for-like comparison config (e.g. gpt-4o) without editing the default.
+const JUDGE_MODEL = process.env.LONGMEMEVAL_JUDGE_MODEL ?? 'gpt-5.5';
 
 function normalize(text: string): string {
   return text

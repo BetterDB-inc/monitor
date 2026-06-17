@@ -1,6 +1,8 @@
 import type { Reader } from './types';
 
-const CHAT_MODEL = 'gpt-5.4';
+// Reader model. Defaults to gpt-5.4; override with LONGMEMEVAL_READER_MODEL to
+// run a like-for-like comparison config (e.g. gpt-4o) without editing the default.
+const CHAT_MODEL = process.env.LONGMEMEVAL_READER_MODEL ?? 'gpt-5.4';
 
 /**
  * GPT-5-tier reasoning models reject a non-default `temperature`; callers must
