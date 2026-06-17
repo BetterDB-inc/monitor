@@ -243,6 +243,12 @@ export class MemoryStore {
     return discovery;
   }
 
+  async ensureDiscoveryReady(): Promise<void> {
+    if (this.discoveryReady) {
+      await this.discoveryReady.catch(() => undefined);
+    }
+  }
+
   async close(): Promise<void> {
     if (this.configRefreshHandle) {
       clearInterval(this.configRefreshHandle);

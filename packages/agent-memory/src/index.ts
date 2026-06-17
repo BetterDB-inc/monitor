@@ -11,6 +11,7 @@ export type { MemoryDiscoveryDeps, MemoryMarker } from './discovery';
 export { createMemoryTelemetry, DEFAULT_METRICS_PREFIX, DEFAULT_TRACER_NAME } from './telemetry';
 export type { MemoryTelemetry, MemoryTelemetryOptions, MemoryMetrics } from './telemetry';
 export { AgentMemory } from './AgentMemory';
+export type { AgentMemoryOptions, AgentMemoryConfig } from './AgentMemory';
 export type {
   EmbedFn,
   MemoryStoreClient,
