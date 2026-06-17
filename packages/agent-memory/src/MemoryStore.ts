@@ -6,8 +6,11 @@ import { parseMemoryItem } from './parseMemoryItem';
 import { compositeScore, similarityFromDistance, type RecallWeights } from './compositeScore';
 import { selectEvictions, type EvictionCandidate } from './selectEvictions';
 import type {
+  ConsolidateOptions,
+  ConsolidateResult,
   EmbedFn,
   MemoryHit,
+  MemoryItem,
   MemoryScope,
   MemoryStoreClient,
   RecallOptions,
@@ -22,6 +25,8 @@ const RECALL_OVERFETCH = 4;
 const FORGET_BATCH_SIZE = 500;
 const FORGET_MAX_BATCHES = 10000;
 const EVICTION_SCAN_LIMIT = 10000;
+const CONSOLIDATE_SCAN_LIMIT = 10000;
+const DEFAULT_SUMMARY_IMPORTANCE = 0.7;
 
 export interface MemoryStoreOptions {
   client: MemoryStoreClient;
@@ -204,6 +209,77 @@ export class MemoryStore {
     return id;
   }
 
+  async consolidate(options: ConsolidateOptions): Promise<ConsolidateResult> {
+    const now = Date.now();
+    const tags = options.tags ?? [];
+    const scope: MemoryScope = {
+      threadId: options.threadId,
+      agentId: options.agentId,
+      namespace: options.namespace,
+    };
+
+    const hasCriteria =
+      scope.threadId !== undefined ||
+      scope.agentId !== undefined ||
+      scope.namespace !== undefined ||
+      tags.length > 0 ||
+      options.olderThanSeconds !== undefined ||
+      options.maxImportance !== undefined;
+    if (!hasCriteria) {
+      throw new Error(
+        'consolidate requires a scope, tags, olderThanSeconds, or maxImportance to select candidates',
+      );
+    }
+
+    const raw = await this.client.call(
+      'FT.SEARCH',
+      `${this.name}:mem:idx`,
+      buildScopeFilter(scope, tags),
+      'RETURN',
+      '10',
+      'content',
+      'importance',
+      'tags',
+      'created_at',
+      'last_accessed_at',
+      'access_count',
+      'source',
+      'threadId',
+      'agentId',
+      'namespace',
+      'LIMIT',
+      '0',
+      String(CONSOLIDATE_SCAN_LIMIT),
+      'DIALECT',
+      '2',
+    );
+    const candidates = parseFtSearchResponse(raw)
+      .map((hit) => parseMemoryItem(this.name, hit))
+      .filter((item) => isConsolidationCandidate(item, options, now));
+
+    if (candidates.length === 0) {
+      return { consolidated: 0, created: [], deleted: 0 };
+    }
+
+    // Write the summary before deleting sources so a failure can never destroy
+    // memories without leaving their consolidated replacement behind.
+    const summary = await options.summarize(candidates);
+    const summaryId = await this.remember(summary, {
+      ...scope,
+      tags,
+      source: 'summary',
+      importance: options.summaryImportance ?? DEFAULT_SUMMARY_IMPORTANCE,
+    });
+
+    let deleted = 0;
+    if (options.deleteSources !== false) {
+      const keys = candidates.map((item) => `${this.name}:mem:${item.id}`);
+      deleted = Number(await this.client.call('DEL', ...keys));
+    }
+
+    return { consolidated: candidates.length, created: [summaryId], deleted };
+  }
+
   private async writeRecord(key: string, fields: (string | Buffer)[], ttl?: number): Promise<void> {
     if (ttl === undefined || ttl <= 0) {
       await this.client.call('HSET', key, ...fields);
@@ -322,4 +398,21 @@ function ftSearchTotal(raw: unknown): number {
   }
   const total = typeof raw[0] === 'string' ? parseInt(raw[0], 10) : Number(raw[0]);
   return Number.isFinite(total) && total > 0 ? total : 0;
+}
+
+function isConsolidationCandidate(
+  item: MemoryItem,
+  options: ConsolidateOptions,
+  now: number,
+): boolean {
+  if (options.maxImportance !== undefined && item.importance > options.maxImportance) {
+    return false;
+  }
+  if (options.olderThanSeconds !== undefined) {
+    const ageSeconds = (now - item.createdAt) / 1000;
+    if (ageSeconds < options.olderThanSeconds) {
+      return false;
+    }
+  }
+  return true;
 }
