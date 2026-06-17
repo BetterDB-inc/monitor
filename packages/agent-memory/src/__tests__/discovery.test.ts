@@ -8,7 +8,7 @@ import {
 import { MemoryDiscovery } from '../discovery';
 import { mockClient } from './helpers/mockClient';
 
-const HEARTBEAT_KEY = `${HEARTBEAT_KEY_PREFIX}mem`;
+const HEARTBEAT_KEY = `${HEARTBEAT_KEY_PREFIX}mem:mem`;
 
 function freshClient() {
   return mockClient((command) => (command === 'HGET' ? null : 'OK'));
@@ -34,7 +34,7 @@ describe('MemoryDiscovery', () => {
     await disco.stop({ deleteHeartbeat: false });
 
     const hset = client.call.mock.calls.find((c) => c[0] === 'HSET' && c[1] === REGISTRY_KEY);
-    expect(hset?.[2]).toBe('mem');
+    expect(hset?.[2]).toBe('mem:mem');
     const marker = JSON.parse(hset?.[3] as string);
     expect(marker.type).toBe('agent_memory');
     expect(marker.prefix).toBe('mem');

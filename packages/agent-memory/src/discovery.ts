@@ -39,6 +39,7 @@ export class MemoryDiscovery {
   private readonly version: string;
   private readonly statsKey: string;
   private readonly heartbeatIntervalMs: number;
+  private readonly markerField: string;
   private readonly heartbeatKey: string;
   private readonly startedAt: string;
   private readonly onWriteFailed: () => void;
@@ -50,7 +51,11 @@ export class MemoryDiscovery {
     this.version = deps.version;
     this.statsKey = deps.statsKey;
     this.heartbeatIntervalMs = deps.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-    this.heartbeatKey = `${HEARTBEAT_KEY_PREFIX}${deps.name}`;
+    // Namespace the marker under `{name}:mem` so a memory store and an
+    // agent-cache sharing the same name register distinct registry fields and
+    // heartbeat keys instead of clobbering each other.
+    this.markerField = `${deps.name}:mem`;
+    this.heartbeatKey = `${HEARTBEAT_KEY_PREFIX}${this.markerField}`;
     this.startedAt = new Date().toISOString();
     this.onWriteFailed = deps.onWriteFailed ?? (() => {});
   }
@@ -136,12 +141,12 @@ export class MemoryDiscovery {
       this.onWriteFailed();
       return;
     }
-    await this.safeCall(() => this.client.call('HSET', REGISTRY_KEY, this.name, payload));
+    await this.safeCall(() => this.client.call('HSET', REGISTRY_KEY, this.markerField, payload));
   }
 
   private async safeHget(): Promise<string | null> {
     try {
-      const value = await this.client.call('HGET', REGISTRY_KEY, this.name);
+      const value = await this.client.call('HGET', REGISTRY_KEY, this.markerField);
       return value === null || value === undefined ? null : String(value);
     } catch {
       this.onWriteFailed();

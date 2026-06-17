@@ -4,7 +4,7 @@ import { MemoryStore } from '../MemoryStore';
 import { fakeEmbed } from './helpers/fakeEmbed';
 import { mockClient } from './helpers/mockClient';
 
-const HEARTBEAT_KEY = `${HEARTBEAT_KEY_PREFIX}mem`;
+const HEARTBEAT_KEY = `${HEARTBEAT_KEY_PREFIX}mem:mem`;
 
 describe('MemoryStore discovery wiring', () => {
   it('registers a discovery marker on construct when discovery is enabled', async () => {
@@ -19,7 +19,7 @@ describe('MemoryStore discovery wiring', () => {
     await store.close();
 
     const hset = client.call.mock.calls.find((c) => c[0] === 'HSET' && c[1] === REGISTRY_KEY);
-    expect(hset?.[2]).toBe('mem');
+    expect(hset?.[2]).toBe('mem:mem');
     const marker = JSON.parse(hset?.[3] as string);
     expect(marker.type).toBe('agent_memory');
     expect(marker.stats_key).toBe('mem:__mem_stats');
