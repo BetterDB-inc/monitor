@@ -60,8 +60,16 @@ export function createOpenAIReader(apiKey: string): Reader {
     name: `openai:${CHAT_MODEL}`,
     answer: async (question: string, contexts: string[]) => {
       const system =
-        'You answer questions about a user using only the provided conversation excerpts. ' +
-        'Answer concisely. If the excerpts do not contain the answer, say "I don\'t know".';
+        'You answer questions about a user from the provided conversation excerpts. ' +
+        'Answer concisely. ' +
+        'For factual questions, give the answer stated in the excerpts; if the excerpts do not ' +
+        'contain it, say "I don\'t know". ' +
+        'For questions asking for a recommendation, suggestion, advice, or tips, infer and give a ' +
+        'recommendation grounded in what the excerpts reveal about this user\'s preferences, ' +
+        'context, and history. Base the recommendation only on preferences and signals actually ' +
+        'present in the excerpts — do not invent preferences or recommend from general knowledge ' +
+        'unsupported by the excerpts. If the excerpts reveal nothing relevant to the request, ' +
+        'say "I don\'t know".';
       const user = `Conversation excerpts:\n${contexts
         .map((c, i) => `[${i + 1}] ${c}`)
         .join('\n\n')}\n\nQuestion: ${question}\nAnswer:`;
