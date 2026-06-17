@@ -240,6 +240,9 @@ export class MemoryStore {
     const k = options.k ?? DEFAULT_RECALL_K;
     const threshold = options.threshold ?? this.defaultThreshold;
     const weights = options.weights ?? this.weights;
+    // Snapshot the half-life alongside threshold/weights so a concurrent
+    // configRefresh can't score one recall with a mix of config versions.
+    const halfLifeSeconds = this.halfLifeSeconds;
     const fetchK = k * RECALL_OVERFETCH;
     const tags = options.tags ?? [];
     const scope = {
@@ -287,7 +290,7 @@ export class MemoryStore {
         ageSeconds,
         importance: item.importance,
         weights,
-        halfLifeSeconds: this.halfLifeSeconds,
+        halfLifeSeconds,
       });
       if (!Number.isFinite(score)) {
         continue;
