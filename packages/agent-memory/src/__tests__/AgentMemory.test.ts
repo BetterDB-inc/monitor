@@ -132,6 +132,9 @@ describe('AgentMemory facade', () => {
     );
     expect(marker).toBeDefined();
     expect(JSON.parse(marker?.[3] as string).type).toBe('agent_memory');
+    // The memory marker registers under a distinct `{name}:mem` field so it
+    // can't clobber an agent_cache marker sharing the same name.
+    expect(marker?.[2]).toBe('betterdb_ac:mem');
 
     await mem.close();
   });
