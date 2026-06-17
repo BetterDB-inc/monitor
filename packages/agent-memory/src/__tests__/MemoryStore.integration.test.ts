@@ -165,7 +165,8 @@ describe('MemoryStore integration (real valkey-search)', () => {
 
     const evictions = Number(await client.call('HGET', `${NAME}:__mem_stats`, 'evictions'));
     expect(evictions).toBeGreaterThanOrEqual(1);
-    await pollUntil(async () => (await ftCount('@namespace:{cap}')) <= 4);
+    await pollUntil(async () => (await ftCount('@namespace:{cap}')) <= 3);
+    expect(await ftCount('@namespace:{cap}')).toBeLessThanOrEqual(3);
   });
 
   it('expires a ttl-scoped memory', async () => {
