@@ -213,4 +213,19 @@ describe('Retriever query', () => {
     const searchCalls = call.mock.calls.filter((args) => args[0] === 'FT.SEARCH');
     expect(searchCalls).toHaveLength(0);
   });
+
+  it('rejects a precomputed vector against inferred dims before the index is created', async () => {
+    const embedFn = vi.fn(async () => [0, 0, 0, 0]);
+    const noDims: RetrievalSchema = {
+      fields: { source: { type: 'tag' } },
+      vector: { metric: 'cosine', algorithm: 'hnsw' },
+    };
+    const call = vi.fn(async () => searchReply([]));
+    const retriever = new Retriever({ client: { call }, name: 'docs', schema: noDims, embedFn });
+
+    await expect(retriever.query({ vector: [1, 2], k: 5 })).rejects.toThrow(/dimension/i);
+
+    const searchCalls = call.mock.calls.filter((args) => args[0] === 'FT.SEARCH');
+    expect(searchCalls).toHaveLength(0);
+  });
 });

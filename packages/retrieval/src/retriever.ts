@@ -17,6 +17,11 @@ export type RerankFn = (queryText: string, hits: QueryHit[]) => Promise<QueryHit
 
 export interface QueryHit {
   id: string;
+  /**
+   * Raw KNN `__score` from valkey-search: a vector **distance**, not a
+   * similarity. Lower means closer (a perfect match approaches 0), so rank
+   * ascending. Do not assume higher is better.
+   */
   score: number;
   text: string;
   fields: Record<string, string>;
@@ -195,12 +200,23 @@ export class Retriever {
     return this.resolvedDims;
   }
 
+  private async queryVectorDims(): Promise<number | undefined> {
+    const known = this.knownDims();
+    if (known !== undefined) {
+      return known;
+    }
+    if (this.embedFn === undefined) {
+      return undefined;
+    }
+    return this.resolveDims();
+  }
+
   private async resolveQueryVector(options: QueryOptions): Promise<number[]> {
     if (options.vector !== undefined && options.text !== undefined) {
       throw new Error('query accepts either text or a precomputed vector, not both');
     }
     if (options.vector !== undefined) {
-      const dims = this.knownDims();
+      const dims = await this.queryVectorDims();
       if (dims !== undefined && options.vector.length !== dims) {
         throw new Error(
           `Query vector dimension mismatch: index expects ${dims}, got ${options.vector.length}`,
