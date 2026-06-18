@@ -125,8 +125,9 @@ export class MemoryStore {
 
     const filter = buildScopeFilter(scope, tags);
     let deleted = 0;
+    let batch = 0;
 
-    for (let batch = 0; batch < FORGET_MAX_BATCHES; batch++) {
+    for (; batch < FORGET_MAX_BATCHES; batch++) {
       const raw = await this.client.call(
         'FT.SEARCH',
         `${this.name}:mem:idx`,
@@ -148,6 +149,15 @@ export class MemoryStore {
       if (removed === 0) {
         break;
       }
+    }
+
+    // Reaching the batch cap with work still flowing means matches may remain;
+    // surface it rather than returning a partial count that reads as complete.
+    if (batch === FORGET_MAX_BATCHES) {
+      console.warn(
+        `forgetByScope hit the ${FORGET_MAX_BATCHES}-batch safety cap for '${this.name}'; ` +
+          `${deleted} memories deleted, but some matches may remain — re-run to continue.`,
+      );
     }
 
     return deleted;

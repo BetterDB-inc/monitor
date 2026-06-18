@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { MemoryStore } from '../MemoryStore';
 import { fakeEmbed } from './helpers/fakeEmbed';
 import { mockClient } from './helpers/mockClient';
@@ -100,5 +100,23 @@ describe('MemoryStore.forgetByScope', () => {
     expect(dels).toHaveLength(2);
     expect(dels[0]).toEqual(['DEL', 'mem:mem:a', 'mem:mem:b']);
     expect(dels[1]).toEqual(['DEL', 'mem:mem:c']);
+  });
+
+  it('warns when the batch safety cap is hit so a partial delete is not silent', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const client = mockClient((command, ...args) => {
+      if (command === 'FT.SEARCH') {
+        return searchReply(['mem:mem:x']);
+      }
+      return command === 'DEL' ? args.length : 'OK';
+    });
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    const count = await store.forgetByScope({ threadId: 't' });
+
+    expect(count).toBe(10000);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/safety cap/);
+    warn.mockRestore();
   });
 });
