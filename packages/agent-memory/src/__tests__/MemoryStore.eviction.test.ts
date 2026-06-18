@@ -106,6 +106,22 @@ describe('MemoryStore capacity eviction', () => {
     expect(search?.[2]).toBe('(@namespace:{u1})');
   });
 
+  it('partitions capacity by tags so a tag-scoped write does not cap the whole index', async () => {
+    const client = mockClient((command) => (command === 'FT.SEARCH' ? searchReply(2) : 'OK'));
+    const store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      maxItemsPerScope: 2,
+    });
+
+    await store.remember('content', { tags: ['teamx'] });
+
+    const search = client.call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
+    expect(search?.[2]).toBe('(@tags:{teamx})');
+    expect(search?.[2]).not.toBe('*');
+  });
+
   it('does not evict or fetch candidates when within capacity', async () => {
     const client = mockClient((command) => (command === 'FT.SEARCH' ? searchReply(2) : 'OK'));
     const store = new MemoryStore({

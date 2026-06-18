@@ -217,14 +217,16 @@ export class MemoryStore {
     await this.client.call('EXEC');
   }
 
-  private async enforceCapacity(scope: MemoryScope, now: number): Promise<void> {
+  private async enforceCapacity(scope: MemoryScope & { tags?: string[] }, now: number): Promise<void> {
     const max = this.maxItemsPerScope;
     if (max === undefined) {
       return;
     }
     // Count-first so the common in-capacity write pays only a cheap LIMIT 0 0
-    // probe and never fetches candidate rows.
-    const filter = buildScopeFilter(scope, []);
+    // probe and never fetches candidate rows. Tags are part of the partition
+    // (as in recall/forgetByScope), so a tag-scoped write caps its own tag
+    // bucket instead of collapsing to `*` and evicting across the whole index.
+    const filter = buildScopeFilter(scope, scope.tags ?? []);
     const countRaw = await this.client.call(
       'FT.SEARCH',
       `${this.name}:mem:idx`,
