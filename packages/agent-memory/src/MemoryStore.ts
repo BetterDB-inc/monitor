@@ -515,6 +515,11 @@ export class MemoryStore {
     if (max === undefined) {
       return;
     }
+    // Snapshot the eviction tunables alongside max so an opt-in configRefresh
+    // landing mid-pass can't score victims with a different weight/half-life
+    // set than the capacity check ran with.
+    const weights = this.weights;
+    const halfLifeSeconds = this.halfLifeSeconds;
     // Tags are part of the partition (as in recall/forgetByScope), so a
     // tag-scoped write caps its own tag bucket.
     const filter = buildScopeFilter(scope, scope.tags ?? []);
@@ -573,8 +578,8 @@ export class MemoryStore {
     const dropCount = Math.min(total - max, candidates.length);
     const evictKeys = selectEvictions(candidates, candidates.length - dropCount, {
       now,
-      halfLifeSeconds: this.halfLifeSeconds,
-      weights: this.weights,
+      halfLifeSeconds,
+      weights,
     });
     if (evictKeys.length === 0) {
       return;

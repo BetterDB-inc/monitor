@@ -195,4 +195,45 @@ describe('MemoryStore capacity eviction', () => {
     expect(typeof id).toBe('string');
     expect(id.length).toBeGreaterThan(0);
   });
+
+  it('snapshots eviction weights so a mid-pass config refresh cannot change the victim', async () => {
+    let store: MemoryStore;
+    const client = mockClient((command, ...args) => {
+      if (command === 'HGETALL') {
+        return [
+          'recall.weights.similarity',
+          '0',
+          'recall.weights.recency',
+          '0.9',
+          'recall.weights.importance',
+          '0.1',
+        ];
+      }
+      if (command === 'FT.SEARCH') {
+        if (args.includes('RETURN')) {
+          return store.refreshConfig().then(() =>
+            searchReply(2, [
+              ['mem:mem:stale', fields(0.9, 1000)],
+              ['mem:mem:recent', fields(0.1, Date.now())],
+            ]),
+          );
+        }
+        return searchReply(2);
+      }
+      return 'OK';
+    });
+    store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      maxItemsPerScope: 1,
+      halfLifeSeconds: 100,
+      weights: { similarity: 0, recency: 0.1, importance: 0.9 },
+    });
+
+    await store.remember('content', { namespace: 'u1' });
+
+    const del = client.call.mock.calls.find((c) => c[0] === 'DEL');
+    expect(del).toEqual(['DEL', 'mem:mem:recent']);
+  });
 });
