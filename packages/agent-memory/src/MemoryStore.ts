@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
-import { encodeFloat32, parseFtSearchResponse } from '@betterdb/valkey-search-kit';
+import {
+  encodeFloat32,
+  isIndexNotFoundError,
+  parseFtSearchResponse,
+} from '@betterdb/valkey-search-kit';
 import { buildMemoryRecord } from './buildMemoryRecord';
+import { buildMemoryIndexArgs, memoryIndexName } from './buildMemoryIndex';
 import {
   buildConsolidateFilter,
   buildRecallQuery,
@@ -260,6 +265,26 @@ export class MemoryStore {
     if (this.discovery) {
       await this.discovery.stop({ deleteHeartbeat: true });
     }
+  }
+
+  /**
+   * Create the `{name}:mem:idx` vector index if it does not already exist.
+   * Idempotent — an existing index is left untouched. Resolves the vector
+   * dimension from `embedFn` when it has not been observed yet. Call once
+   * before the first remember/recall; the AgentMemory facade does this in
+   * initialize().
+   */
+  async ensureIndex(): Promise<void> {
+    try {
+      await this.client.call('FT.INFO', memoryIndexName(this.name));
+      return;
+    } catch (err) {
+      if (!isIndexNotFoundError(err)) {
+        throw err;
+      }
+    }
+    const dims = await this.resolveDims();
+    await this.client.call('FT.CREATE', ...buildMemoryIndexArgs(this.name, dims));
   }
 
   async recall(query: string, options: RecallOptions = {}): Promise<MemoryHit[]> {
@@ -683,6 +708,20 @@ export class MemoryStore {
     await this.client.call('HINCRBY', `${this.name}:__mem_stats`, 'evictions', String(removed));
     this.telemetry.metrics.evictions.labels(this.storeLabels).inc(removed);
     this.telemetry.metrics.items.labels(this.storeLabels).dec(removed);
+  }
+
+  private async resolveDims(): Promise<number> {
+    if (this.dims !== undefined) {
+      return this.dims;
+    }
+    const probe = await this.embedFn('probe');
+    if (probe.length === 0) {
+      throw new Error(
+        'Cannot resolve memory vector dimension: embedFn returned a zero-length embedding',
+      );
+    }
+    this.dims = probe.length;
+    return this.dims;
   }
 
   private async embed(content: string): Promise<number[]> {
