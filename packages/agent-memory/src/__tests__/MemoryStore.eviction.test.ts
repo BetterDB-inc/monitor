@@ -56,6 +56,19 @@ describe('MemoryStore TTL writes', () => {
     expect(commands).toContain('HSET');
     expect(commands).not.toContain('EXPIRE');
   });
+
+  it('DISCARDs and propagates when a ttl write fails mid-transaction', async () => {
+    const client = mockClient((command) => {
+      if (command === 'EXPIRE') {
+        throw new Error('boom');
+      }
+      return 'OK';
+    });
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    await expect(store.remember('x', { ttl: 60 })).rejects.toThrow(/boom/);
+    expect(client.call.mock.calls.some((c) => c[0] === 'DISCARD')).toBe(true);
+  });
 });
 
 describe('MemoryStore capacity eviction', () => {
@@ -145,6 +158,20 @@ describe('MemoryStore capacity eviction', () => {
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
     await store.remember('content', { namespace: 'u1' });
+
+    expect(client.call.mock.calls.some((c) => c[0] === 'FT.SEARCH')).toBe(false);
+  });
+
+  it('skips capacity enforcement for a fully-unscoped write (no global eviction)', async () => {
+    const client = mockClient(() => 'OK');
+    const store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      maxItemsPerScope: 1,
+    });
+
+    await store.remember('content');
 
     expect(client.call.mock.calls.some((c) => c[0] === 'FT.SEARCH')).toBe(false);
   });

@@ -210,11 +210,19 @@ export class MemoryStore {
       return;
     }
     // Set the hash and its expiry in one transaction so a crash between the two
-    // can't leave a memory that should expire living forever.
+    // can't leave a memory that should expire living forever. Atomicity assumes
+    // the client routes these calls to a single connection (the MemoryStoreClient
+    // contract); on a pooled client that splits them the guarantee is lost.
     await this.client.call('MULTI');
-    await this.client.call('HSET', key, ...fields);
-    await this.client.call('EXPIRE', key, String(ttl));
-    await this.client.call('EXEC');
+    try {
+      await this.client.call('HSET', key, ...fields);
+      await this.client.call('EXPIRE', key, String(ttl));
+      await this.client.call('EXEC');
+    } catch (err) {
+      // Clear the half-built transaction so the connection isn't left mid-MULTI.
+      await this.client.call('DISCARD').catch(() => undefined);
+      throw err;
+    }
   }
 
   private async enforceCapacity(scope: MemoryScope & { tags?: string[] }, now: number): Promise<void> {
@@ -222,11 +230,19 @@ export class MemoryStore {
     if (max === undefined) {
       return;
     }
-    // Count-first so the common in-capacity write pays only a cheap LIMIT 0 0
-    // probe and never fetches candidate rows. Tags are part of the partition
-    // (as in recall/forgetByScope), so a tag-scoped write caps its own tag
-    // bucket instead of collapsing to `*` and evicting across the whole index.
+    // Tags are part of the partition (as in recall/forgetByScope), so a
+    // tag-scoped write caps its own tag bucket.
     const filter = buildScopeFilter(scope, scope.tags ?? []);
+    if (filter === '*') {
+      // A fully-unscoped write has no scope to bound: enforcing here would count
+      // and evict across the entire index (every other scope's memories), which
+      // `maxItemsPerScope` does not promise. Skip — the write stays, uncapped.
+      return;
+    }
+    // Count-first so the common in-capacity write pays only a cheap LIMIT 0 0
+    // probe and never fetches candidate rows. Both the count and the candidate
+    // scan go through FT.SEARCH, so under HNSW index lag the cap is enforced
+    // approximately and up to one write behind (the unit tests mock this exact).
     const countRaw = await this.client.call(
       'FT.SEARCH',
       `${this.name}:mem:idx`,
