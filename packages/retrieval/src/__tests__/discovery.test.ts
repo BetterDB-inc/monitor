@@ -30,7 +30,7 @@ describe('buildRetrievalMarker', () => {
 
 describe('Retriever discovery', () => {
   it('registers a retrieval marker on the registry', async () => {
-    const call = vi.fn(async () => 1);
+    const call = vi.fn(async (command: string) => (command === 'HGET' ? null : 1));
     const retriever = new Retriever({ client: { call }, name: 'docs', schema });
 
     await retriever.register();
@@ -44,12 +44,39 @@ describe('Retriever discovery', () => {
     expect(typeof marker.started_at).toBe('string');
   });
 
-  it('unregisters the marker from the registry', async () => {
-    const call = vi.fn(async () => 1);
+  it('does not overwrite a different cache type sharing the registry field', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const call = vi.fn(async (command: string) =>
+      command === 'HGET' ? JSON.stringify({ type: 'agent_cache' }) : 1,
+    );
+    const retriever = new Retriever({ client: { call }, name: 'docs', schema });
+
+    await retriever.register();
+
+    expect(call.mock.calls.some((args) => args[0] === 'HSET')).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('unregisters its own marker from the registry', async () => {
+    const call = vi.fn(async (command: string) =>
+      command === 'HGET' ? JSON.stringify({ type: 'retrieval' }) : 1,
+    );
     const retriever = new Retriever({ client: { call }, name: 'docs', schema });
 
     await retriever.unregister();
 
     expect(call).toHaveBeenCalledWith('HDEL', REGISTRY_KEY, 'docs');
+  });
+
+  it('does not HDEL a registry field owned by a different cache type', async () => {
+    const call = vi.fn(async (command: string) =>
+      command === 'HGET' ? JSON.stringify({ type: 'agent_cache' }) : 1,
+    );
+    const retriever = new Retriever({ client: { call }, name: 'docs', schema });
+
+    await retriever.unregister();
+
+    expect(call.mock.calls.some((args) => args[0] === 'HDEL')).toBe(false);
   });
 });

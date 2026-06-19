@@ -16,17 +16,19 @@ function getOrCreateHistogram(
   registry: Registry,
   config: HistogramConfiguration<string>,
 ): Histogram {
+  // instanceof rather than a blind cast: a same-named metric of a different
+  // type won't be silently mis-cast (which would otherwise throw only at use).
   const existing = registry.getSingleMetric(config.name);
-  if (existing !== undefined) {
-    return existing as Histogram;
+  if (existing instanceof Histogram) {
+    return existing;
   }
   return new Histogram({ ...config, registers: [registry] });
 }
 
 function getOrCreateCounter(registry: Registry, config: CounterConfiguration<string>): Counter {
   const existing = registry.getSingleMetric(config.name);
-  if (existing !== undefined) {
-    return existing as Counter;
+  if (existing instanceof Counter) {
+    return existing;
   }
   return new Counter({ ...config, registers: [registry] });
 }
