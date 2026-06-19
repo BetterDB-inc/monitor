@@ -190,4 +190,28 @@ describe('MemoryStore.consolidate', () => {
     expect(fieldValue(hset, 'importance')).toBe('0.7');
     expect(result.deleted).toBe(1);
   });
+
+  it('writes the summary without a capacity pass so it cannot be evicted then orphaned', async () => {
+    const summarize = vi.fn(async () => 'summary');
+    const client = consolidatingClient([
+      itemHit('a', { importance: 0.2, ageSeconds: 100000 }),
+      itemHit('b', { importance: 0.2, ageSeconds: 100000 }),
+    ]);
+    const store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      maxItemsPerScope: 1,
+    });
+
+    const result = await store.consolidate({ namespace: 'u1', summarize });
+
+    expect(result.created).toHaveLength(1);
+    expect(client.call.mock.calls.some((c) => c[0] === 'HSET')).toBe(true);
+    // Exactly one FT.SEARCH (the candidate scan): the summary write triggers no
+    // capacity probe/scan, so enforceCapacity can't evict the just-written summary
+    // while the sources still inflate the count.
+    const searches = client.call.mock.calls.filter((c) => c[0] === 'FT.SEARCH');
+    expect(searches).toHaveLength(1);
+  });
 });

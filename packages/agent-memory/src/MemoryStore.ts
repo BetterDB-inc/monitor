@@ -202,12 +202,21 @@ export class MemoryStore {
     return deleted;
   }
 
-  async remember(content: string, options: RememberOptions = {}): Promise<string> {
+  private async writeMemory(
+    content: string,
+    options: RememberOptions,
+    now: number,
+  ): Promise<string> {
     const vector = await this.embed(content);
     const id = randomUUID();
-    const now = Date.now();
     const record = buildMemoryRecord(this.name, id, content, vector, options, now);
     await this.writeRecord(record.key, record.fields, options.ttl);
+    return id;
+  }
+
+  async remember(content: string, options: RememberOptions = {}): Promise<string> {
+    const now = Date.now();
+    const id = await this.writeMemory(content, options, now);
     // Capacity enforcement is best-effort: the memory is already durably stored,
     // so a failed eviction pass must not reject an otherwise successful write.
     await this.enforceCapacity(options, now).catch(() => undefined);
@@ -278,14 +287,22 @@ export class MemoryStore {
     }
 
     // Write the summary before deleting sources so a failure can never destroy
-    // memories without leaving their consolidated replacement behind.
+    // memories without leaving their consolidated replacement behind. Use the
+    // capacity-free write path: consolidation is a net reduction (N sources -> 1
+    // summary), and the sources still inflate the scope here, so an enforceCapacity
+    // pass could otherwise evict the summary we just wrote and then delete the
+    // sources — losing the content entirely.
     const summary = await options.summarize(candidates);
-    const summaryId = await this.remember(summary, {
-      ...scope,
-      tags,
-      source: SUMMARY_SOURCE,
-      importance: options.summaryImportance ?? DEFAULT_SUMMARY_IMPORTANCE,
-    });
+    const summaryId = await this.writeMemory(
+      summary,
+      {
+        ...scope,
+        tags,
+        source: SUMMARY_SOURCE,
+        importance: options.summaryImportance ?? DEFAULT_SUMMARY_IMPORTANCE,
+      },
+      now,
+    );
 
     let deleted = 0;
     if (options.deleteSources !== false) {
