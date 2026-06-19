@@ -47,6 +47,9 @@ export class AgentMemory {
 
     const memory = options.memory ?? {};
     this.memory = new MemoryStore({
+      // AgentCacheOptions.client doesn't surface the `.call` method MemoryStore
+      // needs; a real ioredis/iovalkey client has it, so we assert the contract
+      // here. A method-only client/mock would compile but fail at runtime.
       client: options.client as unknown as MemoryStoreClient,
       name,
       embedFn: options.embedFn,
