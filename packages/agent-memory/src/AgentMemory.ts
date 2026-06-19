@@ -63,8 +63,11 @@ export class AgentMemory {
   }
 
   async initialize(): Promise<void> {
+    // Surface a discovery name-collision from either tier: awaiting
+    // ensureDiscoveryReady() is AgentCache's documented strict collision check,
+    // and the memory tier already propagates, so the cache side isn't swallowed.
     await Promise.all([
-      this.cache.ensureDiscoveryReady().catch(() => undefined),
+      this.cache.ensureDiscoveryReady(),
       this.memory.ensureDiscoveryReady(),
     ]);
   }

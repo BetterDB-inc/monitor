@@ -119,6 +119,16 @@ describe('AgentMemory facade', () => {
     expect(memoryClose).toHaveBeenCalled();
   });
 
+  it('initialize() surfaces a cache discovery collision instead of swallowing it', async () => {
+    const mem = new AgentMemory(makeOptions());
+    const cache = (mem as unknown as { cache: { ensureDiscoveryReady: () => Promise<void> } }).cache;
+    vi.spyOn(cache, 'ensureDiscoveryReady').mockRejectedValue(new Error('cache name collision'));
+
+    await expect(mem.initialize()).rejects.toThrow(/collision/i);
+
+    await mem.close();
+  });
+
   it('registers a memory discovery marker by default', async () => {
     const client = fakeValkey();
     const mem = new AgentMemory(
