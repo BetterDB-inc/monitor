@@ -10,7 +10,12 @@ import type { RetrievalSchema, FtCapabilities } from './schema';
 import { buildFtCreateArgs, indexName, keyPrefix, resolveVectorFieldName } from './ft-create';
 import { buildFtSearchQuery, type QueryFilter } from './ft-search';
 import { TEXT_FIELD, SCORE_FIELD, RESERVED_FIELD_NAMES } from './fields';
-import { buildRetrievalMarker, REGISTRY_KEY, RETRIEVAL_VERSION } from './discovery';
+import {
+  buildRetrievalMarker,
+  REGISTRY_KEY,
+  RETRIEVAL_CACHE_TYPE,
+  RETRIEVAL_VERSION,
+} from './discovery';
 import { parsePercentIndexed, type IndexHealthSnapshot, type RecallEstimator } from './health';
 import type { RetrievalMetrics, RetrievalTracer, RetrievalOperation } from './telemetry';
 
@@ -331,7 +336,29 @@ export class Retriever {
     return result;
   }
 
+  private async readRegistryMarker(): Promise<{ type?: string } | null> {
+    const raw = await this.client.call('HGET', REGISTRY_KEY, this.name);
+    if (raw === null || raw === undefined) {
+      return null;
+    }
+    try {
+      return JSON.parse(String(raw)) as { type?: string };
+    } catch {
+      return null;
+    }
+  }
+
   async register(): Promise<void> {
+    // The registry field is keyed by name and shared with agent-cache, so guard
+    // against clobbering a marker we don't own: surface it instead of silently
+    // overwriting a different cache type's registration.
+    const existing = await this.readRegistryMarker();
+    if (existing?.type && existing.type !== RETRIEVAL_CACHE_TYPE) {
+      console.warn(
+        `retrieval discovery: registry field '${this.name}' already holds a '${existing.type}' marker; skipping registration`,
+      );
+      return;
+    }
     const marker = buildRetrievalMarker({
       name: this.name,
       version: RETRIEVAL_VERSION,
@@ -341,7 +368,11 @@ export class Retriever {
   }
 
   async unregister(): Promise<void> {
-    await this.client.call('HDEL', REGISTRY_KEY, this.name);
+    // Only delete a marker we own — never HDEL a foreign cache type's field.
+    const existing = await this.readRegistryMarker();
+    if (existing?.type === RETRIEVAL_CACHE_TYPE) {
+      await this.client.call('HDEL', REGISTRY_KEY, this.name);
+    }
   }
 
   async health(): Promise<IndexHealthSnapshot> {

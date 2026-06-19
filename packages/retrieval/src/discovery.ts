@@ -3,6 +3,8 @@ import { indexName } from './ft-create';
 export const REGISTRY_KEY = '__betterdb:caches';
 export const RETRIEVAL_PROTOCOL_VERSION = 1;
 export const RETRIEVAL_CACHE_TYPE = 'retrieval' as const;
+// TODO: sync with package.json rather than hardcoding (deferred follow-up) —
+// this drifts on a version bump.
 export const RETRIEVAL_VERSION = '0.1.0';
 
 export interface RetrievalMarker {
