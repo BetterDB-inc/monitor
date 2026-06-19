@@ -116,4 +116,25 @@ describe('MemoryStore.recall', () => {
 
     expect(hits.map((h) => h.item.id)).toEqual(['a']);
   });
+
+  it('ranks a reinforced (recently accessed) memory above an equally-similar stale one', async () => {
+    const old = String(now - 30 * 24 * 3600 * 1000);
+    const reply = searchReply([
+      {
+        key: 'mem:mem:stale',
+        fields: baseFields({ __score: '0.1', created_at: old, last_accessed_at: old }),
+      },
+      {
+        key: 'mem:mem:fresh',
+        fields: baseFields({ __score: '0.1', created_at: old, last_accessed_at: String(now) }),
+      },
+    ]);
+    const client = mockClient((command) => (command === 'FT.SEARCH' ? reply : 'OK'));
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    const hits = await store.recall('q', { reinforce: false });
+
+    expect(hits.map((h) => h.item.id)).toEqual(['fresh', 'stale']);
+    expect(hits[0].score).toBeGreaterThan(hits[1].score);
+  });
 });

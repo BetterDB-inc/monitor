@@ -89,7 +89,11 @@ export class MemoryStore {
         continue;
       }
       const item = parseMemoryItem(this.name, hit);
-      const ageSeconds = (now - item.createdAt) / 1000;
+      // Recency decays from the last access, not creation, so reinforcement
+      // (which bumps last_accessed_at) actually makes a memory more recallable.
+      // max() guards against a clock-skewed last_accessed_at older than created_at.
+      const lastTouched = Math.max(item.createdAt, item.lastAccessedAt);
+      const ageSeconds = (now - lastTouched) / 1000;
       const score = compositeScore({
         similarity: similarityFromDistance(distance),
         ageSeconds,
