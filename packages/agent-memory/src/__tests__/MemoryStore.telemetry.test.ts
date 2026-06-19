@@ -118,6 +118,9 @@ describe('MemoryStore metrics', () => {
         }
         return evictionSearch(3, []);
       }
+      if (command === 'DEL') {
+        return args.length;
+      }
       return 'OK';
     });
     const store = new MemoryStore({

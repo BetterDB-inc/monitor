@@ -84,6 +84,9 @@ describe('MemoryStore capacity eviction', () => {
         }
         return searchReply(3);
       }
+      if (command === 'DEL') {
+        return args.length;
+      }
       return 'OK';
     });
     const store = new MemoryStore({
@@ -97,6 +100,40 @@ describe('MemoryStore capacity eviction', () => {
 
     const del = client.call.mock.calls.find((c) => c[0] === 'DEL');
     expect(del).toEqual(['DEL', 'mem:mem:a']);
+    const hincr = client.call.mock.calls.find(
+      (c) => c[0] === 'HINCRBY' && c[1] === 'mem:__mem_stats',
+    );
+    expect(hincr).toEqual(['HINCRBY', 'mem:__mem_stats', 'evictions', '1']);
+  });
+
+  it('counts only actual removals when the index lists already-deleted keys', async () => {
+    const client = mockClient((command, ...args) => {
+      if (command === 'FT.SEARCH') {
+        if (args.includes('RETURN')) {
+          return searchReply(4, [
+            ['mem:mem:a', fields(0.1, 1000)],
+            ['mem:mem:b', fields(0.2, 2000)],
+            ['mem:mem:c', fields(0.9, 5000)],
+            ['mem:mem:d', fields(0.5, 9000)],
+          ]);
+        }
+        return searchReply(4);
+      }
+      // Two keys are evicted but only one was still live.
+      if (command === 'DEL') {
+        return 1;
+      }
+      return 'OK';
+    });
+    const store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      maxItemsPerScope: 2,
+    });
+
+    await store.remember('content', { namespace: 'u1' });
+
     const hincr = client.call.mock.calls.find(
       (c) => c[0] === 'HINCRBY' && c[1] === 'mem:__mem_stats',
     );

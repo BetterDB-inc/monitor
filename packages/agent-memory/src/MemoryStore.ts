@@ -666,15 +666,17 @@ export class MemoryStore {
     if (evictKeys.length === 0) {
       return;
     }
-    await this.client.call('DEL', ...evictKeys);
-    await this.client.call(
-      'HINCRBY',
-      `${this.name}:__mem_stats`,
-      'evictions',
-      String(evictKeys.length),
-    );
-    this.telemetry.metrics.evictions.labels(this.storeLabels).inc(evictKeys.length);
-    this.telemetry.metrics.items.labels(this.storeLabels).dec(evictKeys.length);
+    // Count actual removals, not the keys we asked to drop: the index can list
+    // already-deleted keys (stale), so DEL may remove fewer. Using the reply
+    // keeps the stats and Prometheus gauges accurate, as forget/forgetByScope/
+    // consolidate already do.
+    const removed = Number(await this.client.call('DEL', ...evictKeys));
+    if (!(removed > 0)) {
+      return;
+    }
+    await this.client.call('HINCRBY', `${this.name}:__mem_stats`, 'evictions', String(removed));
+    this.telemetry.metrics.evictions.labels(this.storeLabels).inc(removed);
+    this.telemetry.metrics.items.labels(this.storeLabels).dec(removed);
   }
 
   private async embed(content: string): Promise<number[]> {
