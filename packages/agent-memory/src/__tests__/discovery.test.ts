@@ -58,14 +58,20 @@ describe('MemoryDiscovery', () => {
     expect(heartbeat?.[4]).toBe('60');
   });
 
-  it('throws on a name collision with a different cache type', async () => {
+  it('warns (visibly) and overwrites on a collision with a different cache type', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const client = mockClient((command) =>
       command === 'HGET' ? JSON.stringify({ type: 'agent_cache' }) : 'OK',
     );
     const disco = makeDiscovery(client);
 
-    await expect(disco.register()).rejects.toThrow(/collision/i);
-    expect(client.call.mock.calls.some((c) => c[0] === 'HSET')).toBe(false);
+    // Registration must not reject into the swallowed promise; the collision is
+    // surfaced via a visible warning and registration proceeds last-writer-wins.
+    await expect(disco.register()).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/marker/i);
+    expect(client.call.mock.calls.some((c) => c[0] === 'HSET' && c[1] === REGISTRY_KEY)).toBe(true);
+    warn.mockRestore();
   });
 
   it('overwrites an existing marker of the same type without throwing', async () => {

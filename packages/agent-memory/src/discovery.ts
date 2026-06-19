@@ -76,6 +76,8 @@ export class MemoryDiscovery {
   }
 
   async register(): Promise<void> {
+    // HGET-then-HSET is not atomic (TOCTOU); acceptable for best-effort
+    // discovery — a racing writer just means last-writer-wins on the marker.
     const existing = await this.safeHget();
     if (existing !== null) {
       this.checkCollision(existing);
@@ -106,9 +108,8 @@ export class MemoryDiscovery {
   async tickHeartbeat(): Promise<void> {
     await this.writeHeartbeat();
     await this.writeMarker();
-    await this.safeCall(() =>
-      this.client.call('SET', PROTOCOL_KEY, String(PROTOCOL_VERSION), 'NX'),
-    );
+    // PROTOCOL_KEY is set once in register(); the NX SET is a guaranteed no-op
+    // on every subsequent tick, so it's not re-issued from the heartbeat path.
   }
 
   private startHeartbeat(): void {
@@ -170,8 +171,13 @@ export class MemoryDiscovery {
       return;
     }
     if (parsed.type && parsed.type !== MEMORY_CACHE_TYPE) {
-      throw new Error(
-        `memory store name collision: '${this.name}' is already registered as type '${parsed.type}' on this Valkey instance`,
+      // Reachable only if a non-agent_memory marker already occupies this field.
+      // The memory marker lives under `{name}:mem`, distinct from agent-cache's
+      // `{name}`, so the two tiers never collide here. Surface it with a visible
+      // warning rather than throwing into a swallowed registration promise;
+      // registration then proceeds last-writer-wins, matching agent-cache.
+      console.warn(
+        `agent-memory discovery: field '${this.markerField}' already holds a '${parsed.type}' marker; overwriting`,
       );
     }
   }

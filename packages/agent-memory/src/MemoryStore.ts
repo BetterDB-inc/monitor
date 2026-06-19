@@ -33,7 +33,12 @@ const EVICTION_SCAN_LIMIT = 10000;
 const CONSOLIDATE_SCAN_LIMIT = 10000;
 const DEFAULT_SUMMARY_IMPORTANCE = 0.7;
 const SUMMARY_SOURCE = 'summary';
-const PACKAGE_VERSION = (require('../package.json') as { version: string }).version;
+
+// Read lazily so only discovery users pay the disk read on import (and avoid a
+// bundler hazard, since package.json is not always emitted).
+function packageVersion(): string {
+  return (require('../package.json') as { version: string }).version;
+}
 
 export interface MemoryDiscoveryConfig {
   version?: string;
@@ -82,14 +87,14 @@ export class MemoryStore {
     const discovery = new MemoryDiscovery({
       client: this.client,
       name: this.name,
-      version: settings.version ?? PACKAGE_VERSION,
+      version: settings.version ?? packageVersion(),
       statsKey: `${this.name}:__mem_stats`,
       heartbeatIntervalMs: settings.heartbeatIntervalMs,
     });
     // Registration is fire-and-forget so construction stays synchronous;
     // close() awaits it before tearing the marker down. The floating catch
-    // keeps a rejected registration (e.g. a name collision) from surfacing as
-    // an unhandled rejection when close() is never called.
+    // keeps any rejected registration from surfacing as an unhandled rejection
+    // when close() is never called.
     const ready = discovery.register();
     ready.catch(() => undefined);
     this.discoveryReady = ready;
