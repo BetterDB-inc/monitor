@@ -89,34 +89,40 @@ describe('MemoryStore.consolidate', () => {
     expect(del?.slice(1).sort()).toEqual(['mem:mem:a', 'mem:mem:b']);
   });
 
-  it('selects only candidates older than olderThanSeconds', async () => {
+  it('pushes olderThanSeconds into the query as a created_at upper bound', async () => {
     const summarize = vi.fn(async () => 'summary');
-    const client = consolidatingClient([
-      itemHit('old', { importance: 0.2, ageSeconds: 100000 }),
-      itemHit('recent', { importance: 0.2, ageSeconds: 10 }),
-    ]);
+    const client = consolidatingClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
-    const result = await store.consolidate({ olderThanSeconds: 3600, summarize });
+    await store.consolidate({ olderThanSeconds: 3600, summarize });
 
-    expect(summarize.mock.calls[0][0].map((i: { id: string }) => i.id)).toEqual(['old']);
-    expect(result.consolidated).toBe(1);
-    const del = client.call.mock.calls.find((c) => c[0] === 'DEL');
-    expect(del?.slice(1)).toEqual(['mem:mem:old']);
+    const search = client.call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
+    const filter = search?.[2] as string;
+    // Server-side range so the scan limit applies to actual matches, not an
+    // arbitrary first window.
+    expect(filter).toMatch(/@created_at:\[-inf \d+\]/);
   });
 
-  it('selects only candidates at or below maxImportance', async () => {
+  it('pushes maxImportance into the query as an importance upper bound', async () => {
     const summarize = vi.fn(async () => 'summary');
-    const client = consolidatingClient([
-      itemHit('low', { importance: 0.2, ageSeconds: 100000 }),
-      itemHit('high', { importance: 0.9, ageSeconds: 100000 }),
-    ]);
+    const client = consolidatingClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
-    const result = await store.consolidate({ maxImportance: 0.5, summarize });
+    await store.consolidate({ maxImportance: 0.5, summarize });
 
-    expect(summarize.mock.calls[0][0].map((i: { id: string }) => i.id)).toEqual(['low']);
-    expect(result.consolidated).toBe(1);
+    const search = client.call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
+    expect(search?.[2] as string).toContain('@importance:[-inf 0.5]');
+  });
+
+  it('excludes prior summaries from the candidate scan so a default run does not re-fold them', async () => {
+    const summarize = vi.fn(async () => 'summary');
+    const client = consolidatingClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    await store.consolidate({ namespace: 'u1', summarize });
+
+    const search = client.call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
+    expect(search?.[2] as string).toContain('-@source:{summary}');
   });
 
   it('writes the summary scoped to the request at summaryImportance', async () => {

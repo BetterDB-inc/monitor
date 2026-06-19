@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { encodeFloat32, parseFtSearchResponse } from '@betterdb/valkey-search-kit';
 import { buildMemoryRecord } from './buildMemoryRecord';
-import { buildRecallQuery, buildScopeFilter, SCORE_FIELD } from './buildRecallQuery';
+import {
+  buildConsolidateFilter,
+  buildRecallQuery,
+  buildScopeFilter,
+  SCORE_FIELD,
+} from './buildRecallQuery';
 import { parseMemoryItem } from './parseMemoryItem';
 import { compositeScore, similarityFromDistance, type RecallWeights } from './compositeScore';
 import { selectEvictions, type EvictionCandidate } from './selectEvictions';
@@ -10,7 +15,6 @@ import type {
   ConsolidateResult,
   EmbedFn,
   MemoryHit,
-  MemoryItem,
   MemoryScope,
   MemoryStoreClient,
   RecallOptions,
@@ -27,6 +31,7 @@ const FORGET_MAX_BATCHES = 10000;
 const EVICTION_SCAN_LIMIT = 10000;
 const CONSOLIDATE_SCAN_LIMIT = 10000;
 const DEFAULT_SUMMARY_IMPORTANCE = 0.7;
+const SUMMARY_SOURCE = 'summary';
 
 export interface MemoryStoreOptions {
   client: MemoryStoreClient;
@@ -231,10 +236,23 @@ export class MemoryStore {
       );
     }
 
+    // Push olderThanSeconds/maxImportance into the query (both are NUMERIC
+    // indexed) so the scan limit applies to actual matches, not an arbitrary
+    // first window, and we don't transfer rows we'd only discard. Prior
+    // summaries are always excluded (-@source:{summary}) so consolidation never
+    // re-folds its own output into a new summary.
+    const filter = buildConsolidateFilter(scope, tags, {
+      maxCreatedAt:
+        options.olderThanSeconds !== undefined
+          ? now - options.olderThanSeconds * 1000
+          : undefined,
+      maxImportance: options.maxImportance,
+      excludeSource: SUMMARY_SOURCE,
+    });
     const raw = await this.client.call(
       'FT.SEARCH',
       `${this.name}:mem:idx`,
-      buildScopeFilter(scope, tags),
+      filter,
       'RETURN',
       '10',
       'content',
@@ -253,9 +271,7 @@ export class MemoryStore {
       'DIALECT',
       '2',
     );
-    const candidates = parseFtSearchResponse(raw)
-      .map((hit) => parseMemoryItem(this.name, hit))
-      .filter((item) => isConsolidationCandidate(item, options, now));
+    const candidates = parseFtSearchResponse(raw).map((hit) => parseMemoryItem(this.name, hit));
 
     if (candidates.length === 0) {
       return { consolidated: 0, created: [], deleted: 0 };
@@ -267,7 +283,7 @@ export class MemoryStore {
     const summaryId = await this.remember(summary, {
       ...scope,
       tags,
-      source: 'summary',
+      source: SUMMARY_SOURCE,
       importance: options.summaryImportance ?? DEFAULT_SUMMARY_IMPORTANCE,
     });
 
@@ -400,19 +416,3 @@ function ftSearchTotal(raw: unknown): number {
   return Number.isFinite(total) && total > 0 ? total : 0;
 }
 
-function isConsolidationCandidate(
-  item: MemoryItem,
-  options: ConsolidateOptions,
-  now: number,
-): boolean {
-  if (options.maxImportance !== undefined && item.importance > options.maxImportance) {
-    return false;
-  }
-  if (options.olderThanSeconds !== undefined) {
-    const ageSeconds = (now - item.createdAt) / 1000;
-    if (ageSeconds < options.olderThanSeconds) {
-      return false;
-    }
-  }
-  return true;
-}
