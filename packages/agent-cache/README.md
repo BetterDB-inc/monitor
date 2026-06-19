@@ -334,7 +334,12 @@ const model = wrapLanguageModel({
 });
 ```
 
-Note: Streaming responses are not cached. The middleware only caches non-streaming `generate()` calls.
+The middleware caches both non-streaming (`doGenerate`) and streaming
+(`doStream`) calls. On a streaming hit, the cached response is replayed as
+a single `text-delta` chunk and the `finish` event includes
+`providerMetadata: { agentCache: { hit: true } }` so consumers can
+distinguish cached responses from real zero-token calls. Tool-call
+responses are not cached to avoid breaking tool-calling workflows.
 
 See [`examples/vercel-ai-sdk`](./examples/vercel-ai-sdk) for a full working example. Sample output:
 
@@ -480,7 +485,6 @@ Awaits the in-flight discovery registration. Rejects with `AgentCacheUsageError`
 
 ## Known limitations
 
-- **Streaming responses:** Not cached by the Vercel AI SDK adapter. Accumulate the full response before caching.
 - **LangGraph `list()` memory usage:** The `list()` method loads all checkpoint data for a thread into memory before filtering and applying the limit. For typical agent deployments with hundreds of checkpoints per thread, this is acceptable. For threads with thousands of large checkpoints, this causes memory pressure even when requesting `limit: 1`. If you have millions of checkpoints per thread, consider using `langgraph-checkpoint-redis` with Redis 8+ instead.
 - **Session `getAll()`:** SCAN-based. Fine for dozens of fields, consider Redis HASH if you have thousands per thread.
 - **`active_sessions` gauge:** Approximate and does not survive process restarts.

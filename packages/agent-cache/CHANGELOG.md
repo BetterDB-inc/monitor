@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - Unreleased
+
+### Added
+
+- **Streaming response caching for the Vercel AI SDK adapter** —
+  `createAgentCacheMiddleware()` now implements `wrapStream` in addition to
+  the existing `wrapGenerate`. On a cache miss, the upstream stream is tee'd:
+  one branch flows back to the caller unchanged, the other accumulates
+  `text-delta` chunks and stores via `cache.llm.store()` on stream finish.
+  On a cache hit, `doStream` is skipped and the cached response is replayed
+  as one `text-delta` chunk plus `finish` with
+  `providerMetadata: { agentCache: { hit: true } }`. Closes the streaming
+  limitation documented in v0.6.x.
+
+### Behavior
+
+- Tool-call streams are not cached — mirrors the existing `wrapGenerate`
+  behavior to avoid caching half-executed agent steps.
+- Store happens asynchronously after stream completion; store failures never
+  affect the caller-facing stream.
+- Upstream errors propagate unchanged. Partial responses are not cached.
+- A `cache.llm.check()` failure falls through to upstream and is logged
+  at debug level — telemetry never breaks the cache call.
+
+### Breaking changes
+
+None. Existing `wrapGenerate`-only consumers see no difference.
+
 ## [0.7.0] - 2026-06-11
 
 ### Fixed
