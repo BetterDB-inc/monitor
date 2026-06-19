@@ -128,6 +128,38 @@ describe('MemoryDiscovery', () => {
     }
   });
 
+  it('waits for an in-flight heartbeat tick before deleting, so no write lands after stop', async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseTick: (value: unknown) => void = () => {};
+      let gateArmed = false;
+      const order: string[] = [];
+      const client = mockClient((command, ...args) => {
+        order.push(command);
+        if (gateArmed && command === 'SET' && args[0] === HEARTBEAT_KEY) {
+          return new Promise((resolve) => {
+            releaseTick = resolve;
+          });
+        }
+        return command === 'HGET' ? null : 'OK';
+      });
+      const disco = makeDiscovery(client, { heartbeatIntervalMs: 1000 });
+      await disco.register();
+
+      gateArmed = true;
+      await vi.advanceTimersByTimeAsync(1000); // fire one tick; its heartbeat SET blocks
+
+      const stopP = disco.stop({ deleteHeartbeat: true });
+      expect(order.includes('DEL')).toBe(false); // DEL waits behind the in-flight tick
+
+      releaseTick('OK');
+      await stopP;
+      expect(order[order.length - 1]).toBe('DEL'); // DEL is the final write
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('never throws when a registry write fails (best-effort)', async () => {
     const onWriteFailed = vi.fn();
     const client = mockClient((command) => {

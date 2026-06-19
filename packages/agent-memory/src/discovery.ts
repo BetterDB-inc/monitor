@@ -44,6 +44,7 @@ export class MemoryDiscovery {
   private readonly startedAt: string;
   private readonly onWriteFailed: () => void;
   private heartbeatHandle: ReturnType<typeof setInterval> | null = null;
+  private inFlightTick: Promise<void> | null = null;
 
   constructor(deps: MemoryDiscoveryDeps) {
     this.client = deps.client;
@@ -95,6 +96,11 @@ export class MemoryDiscovery {
       clearInterval(this.heartbeatHandle);
       this.heartbeatHandle = null;
     }
+    // Wait out a tick already in flight so its heartbeat/marker writes can't
+    // land after the DEL below and make the store look alive post-shutdown.
+    if (this.inFlightTick) {
+      await this.inFlightTick;
+    }
     if (!opts.deleteHeartbeat) {
       return;
     }
@@ -114,7 +120,11 @@ export class MemoryDiscovery {
 
   private startHeartbeat(): void {
     const handle = setInterval(() => {
-      void this.tickHeartbeat();
+      this.inFlightTick = this.tickHeartbeat()
+        .catch(() => undefined)
+        .finally(() => {
+          this.inFlightTick = null;
+        });
     }, this.heartbeatIntervalMs);
     handle.unref?.();
     this.heartbeatHandle = handle;
