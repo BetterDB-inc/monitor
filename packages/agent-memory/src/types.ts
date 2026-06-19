@@ -39,6 +39,13 @@ export interface RecallOptions extends MemoryScope {
 
 export interface MemoryHit {
   item: MemoryItem;
+  /**
+   * Raw KNN vector **distance** (cosine), not a similarity: lower means closer
+   * (a perfect match approaches 0). Despite the field name, do not assume
+   * higher is better — sort ascending if ranking by this alone. The composite
+   * `score` (higher is better) is the field to rank recall results by.
+   */
   similarity: number;
+  /** Composite recall score (similarity + recency + importance); higher is better. */
   score: number;
 }
