@@ -92,12 +92,14 @@ async function createIndex(): Promise<void> {
 
 beforeAll(async () => {
   client = new Valkey(VALKEY_URL, { lazyConnect: true, retryStrategy: () => null });
+  // Attach unconditionally: iovalkey emits 'error' on the client, so a mid-run
+  // connection drop on the happy path would otherwise be an unhandled rejection.
+  client.on('error', () => {});
   try {
     await client.connect();
     await client.ping();
   } catch {
     skip = true;
-    client.on('error', () => {});
     return;
   }
   await dropAndClean();
