@@ -147,7 +147,15 @@ export class MemoryStore {
 
   private applyConfig(raw: Record<string, string>): void {
     let threshold = this.initialThreshold;
-    const weights: RecallWeights = { ...this.initialWeights };
+    // Weights are a partial update: if any component is in the config, start
+    // from the LIVE weights and overlay only what's present, so tuning one knob
+    // (the proposal engine's common case) doesn't reset the others. With no
+    // weight field at all, fall back to the constructor values like the rest.
+    const weightFieldPresent =
+      raw['recall.weights.similarity'] !== undefined ||
+      raw['recall.weights.recency'] !== undefined ||
+      raw['recall.weights.importance'] !== undefined;
+    const weights: RecallWeights = { ...(weightFieldPresent ? this.weights : this.initialWeights) };
     let halfLifeSeconds = this.initialHalfLifeSeconds;
     let maxItemsPerScope = this.initialMaxItemsPerScope;
 

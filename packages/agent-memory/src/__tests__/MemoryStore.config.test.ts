@@ -159,6 +159,25 @@ describe('MemoryStore config refresh', () => {
     expect(store.currentConfig().weights).toEqual(DEFAULT_WEIGHTS);
   });
 
+  it('preserves the live weight components when only a subset is written', async () => {
+    let hash: Record<string, string> = {
+      'recall.weights.similarity': '0.2',
+      'recall.weights.recency': '0.7',
+      'recall.weights.importance': '0.1',
+    };
+    const client = mockClient((command) => (command === 'HGETALL' ? configReply(hash) : 'OK'));
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    await store.refreshConfig();
+    expect(store.currentConfig().weights).toEqual({ similarity: 0.2, recency: 0.7, importance: 0.1 });
+
+    // A partial write that nudges only similarity must keep the live recency
+    // and importance, not reset them to the constructor defaults.
+    hash = { 'recall.weights.similarity': '0.5' };
+    await store.refreshConfig();
+    expect(store.currentConfig().weights).toEqual({ similarity: 0.5, recency: 0.7, importance: 0.1 });
+  });
+
   it('live-applies a looser threshold to recall', async () => {
     const client = mockClient((command) => {
       if (command === 'HGETALL') {
