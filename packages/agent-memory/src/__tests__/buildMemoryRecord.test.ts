@@ -59,4 +59,19 @@ describe('buildMemoryRecord', () => {
       buildMemoryRecord('mem', 'id3', 'x', [0, 0], { tags: ['tool:web,search'] }, 5),
     ).toThrow(/comma/i);
   });
+
+  it('rejects an importance outside [0, 1] or non-finite, so a bad value cannot poison ranking', () => {
+    for (const bad of [NaN, Infinity, -Infinity, -0.1, 1.5, 42]) {
+      expect(() =>
+        buildMemoryRecord('mem', 'idx', 'x', [0, 0], { importance: bad }, 5),
+      ).toThrow(/importance/i);
+    }
+  });
+
+  it('accepts the inclusive [0, 1] bounds', () => {
+    for (const ok of [0, 0.5, 1]) {
+      const record = buildMemoryRecord('mem', 'idx', 'x', [0, 0], { importance: ok }, 5);
+      expect(toObject(record.fields).importance).toBe(String(ok));
+    }
+  });
 });

@@ -16,13 +16,20 @@ export function buildMemoryRecord(
   options: RememberOptions,
   now: number,
 ): MemoryWrite {
+  const importance = options.importance ?? DEFAULT_IMPORTANCE;
+  if (!Number.isFinite(importance) || importance < 0 || importance > 1) {
+    throw new Error(
+      `importance must be a finite number in [0, 1], got: ${String(options.importance)}`,
+    );
+  }
+
   const fields: (string | Buffer)[] = [
     'content',
     content,
     'vector',
     encodeFloat32(vector),
     'importance',
-    String(options.importance ?? DEFAULT_IMPORTANCE),
+    String(importance),
     'created_at',
     String(now),
     'last_accessed_at',
