@@ -20,12 +20,16 @@ export type {
   TierDefaults,
   ConfigRefreshOptions,
 } from './types';
+export { AgentCacheError, AgentCacheUsageError, ValkeyCommandError } from './errors';
+export type { DiscoveryOptions, MarkerMetadata } from './discovery';
 export {
-  AgentCacheError,
-  AgentCacheUsageError,
-  ValkeyCommandError,
-} from './errors';
-export type { DiscoveryOptions } from './discovery';
+  PROTOCOL_VERSION,
+  REGISTRY_KEY,
+  PROTOCOL_KEY,
+  HEARTBEAT_KEY_PREFIX,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_TTL_SECONDS,
+} from './discovery';
 export type { Analytics } from './analytics';
 export type {
   ContentBlock,

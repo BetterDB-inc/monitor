@@ -10,6 +10,7 @@ import {
 import { parseMemoryItem } from './parseMemoryItem';
 import { compositeScore, similarityFromDistance, type RecallWeights } from './compositeScore';
 import { selectEvictions, type EvictionCandidate } from './selectEvictions';
+import { MemoryDiscovery } from './discovery';
 import type {
   ConsolidateOptions,
   ConsolidateResult,
@@ -33,6 +34,17 @@ const CONSOLIDATE_SCAN_LIMIT = 10000;
 const DEFAULT_SUMMARY_IMPORTANCE = 0.7;
 const SUMMARY_SOURCE = 'summary';
 
+// Read lazily so only discovery users pay the disk read on import (and avoid a
+// bundler hazard, since package.json is not always emitted).
+function packageVersion(): string {
+  return (require('../package.json') as { version: string }).version;
+}
+
+export interface MemoryDiscoveryConfig {
+  version?: string;
+  heartbeatIntervalMs?: number;
+}
+
 export interface MemoryStoreOptions {
   client: MemoryStoreClient;
   name: string;
@@ -41,6 +53,7 @@ export interface MemoryStoreOptions {
   weights?: RecallWeights;
   halfLifeSeconds?: number;
   maxItemsPerScope?: number;
+  discovery?: boolean | MemoryDiscoveryConfig;
 }
 
 export class MemoryStore {
@@ -51,6 +64,8 @@ export class MemoryStore {
   private readonly weights: RecallWeights;
   private readonly halfLifeSeconds: number;
   private readonly maxItemsPerScope?: number;
+  private readonly discovery: MemoryDiscovery | null;
+  private discoveryReady: Promise<void> | null = null;
   private dims?: number;
 
   constructor(options: MemoryStoreOptions) {
@@ -61,6 +76,38 @@ export class MemoryStore {
     this.weights = options.weights ?? DEFAULT_WEIGHTS;
     this.halfLifeSeconds = options.halfLifeSeconds ?? DEFAULT_HALF_LIFE_SECONDS;
     this.maxItemsPerScope = options.maxItemsPerScope;
+    this.discovery = this.createDiscovery(options.discovery);
+  }
+
+  private createDiscovery(config?: boolean | MemoryDiscoveryConfig): MemoryDiscovery | null {
+    if (!config) {
+      return null;
+    }
+    const settings = config === true ? {} : config;
+    const discovery = new MemoryDiscovery({
+      client: this.client,
+      name: this.name,
+      version: settings.version ?? packageVersion(),
+      statsKey: `${this.name}:__mem_stats`,
+      heartbeatIntervalMs: settings.heartbeatIntervalMs,
+    });
+    // Registration is fire-and-forget so construction stays synchronous;
+    // close() awaits it before tearing the marker down. The floating catch
+    // keeps any rejected registration from surfacing as an unhandled rejection
+    // when close() is never called.
+    const ready = discovery.register();
+    ready.catch(() => undefined);
+    this.discoveryReady = ready;
+    return discovery;
+  }
+
+  async close(): Promise<void> {
+    if (this.discoveryReady) {
+      await this.discoveryReady.catch(() => undefined);
+    }
+    if (this.discovery) {
+      await this.discovery.stop({ deleteHeartbeat: true });
+    }
   }
 
   async recall(query: string, options: RecallOptions = {}): Promise<MemoryHit[]> {
