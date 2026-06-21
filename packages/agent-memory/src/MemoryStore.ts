@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { encodeFloat32, parseFtSearchResponse } from '@betterdb/valkey-search-kit';
 import { buildMemoryRecord } from './buildMemoryRecord';
-import { buildRecallQuery, SCORE_FIELD } from './buildRecallQuery';
+import { buildRecallQuery, buildScopeFilter, SCORE_FIELD } from './buildRecallQuery';
 import { parseMemoryItem } from './parseMemoryItem';
 import { compositeScore, similarityFromDistance, type RecallWeights } from './compositeScore';
 import type {
   EmbedFn,
   MemoryHit,
+  MemoryScope,
   MemoryStoreClient,
   RecallOptions,
   RememberOptions,
@@ -17,6 +18,8 @@ const DEFAULT_WEIGHTS: RecallWeights = { similarity: 0.6, recency: 0.25, importa
 const DEFAULT_HALF_LIFE_SECONDS = 604800; // 7 days
 const DEFAULT_RECALL_K = 8;
 const RECALL_OVERFETCH = 4;
+const FORGET_BATCH_SIZE = 500;
+const FORGET_MAX_BATCHES = 10000;
 
 export interface MemoryStoreOptions {
   client: MemoryStoreClient;
@@ -102,6 +105,62 @@ export class MemoryStore {
 
     hits.sort((a, b) => b.score - a.score);
     return hits.slice(0, k);
+  }
+
+  async forget(id: string): Promise<boolean> {
+    const deleted = await this.client.call('DEL', `${this.name}:mem:${id}`);
+    return Number(deleted) > 0;
+  }
+
+  async forgetByScope(scope: MemoryScope & { tags?: string[] }): Promise<number> {
+    const tags = scope.tags ?? [];
+    const hasFilter =
+      scope.threadId !== undefined ||
+      scope.agentId !== undefined ||
+      scope.namespace !== undefined ||
+      tags.length > 0;
+    if (!hasFilter) {
+      throw new Error('forgetByScope requires at least one scope field or tag');
+    }
+
+    const filter = buildScopeFilter(scope, tags);
+    let deleted = 0;
+    let batch = 0;
+
+    for (; batch < FORGET_MAX_BATCHES; batch++) {
+      const raw = await this.client.call(
+        'FT.SEARCH',
+        `${this.name}:mem:idx`,
+        filter,
+        'LIMIT',
+        '0',
+        String(FORGET_BATCH_SIZE),
+        'DIALECT',
+        '2',
+      );
+      const keys = parseFtSearchResponse(raw).map((hit) => hit.key);
+      if (keys.length === 0) {
+        break;
+      }
+      const removed = Number(await this.client.call('DEL', ...keys));
+      deleted += removed;
+      // Stop when a batch makes no progress (every match was already gone),
+      // so a lagging index that re-lists deleted keys can't loop forever.
+      if (removed === 0) {
+        break;
+      }
+    }
+
+    // Reaching the batch cap with work still flowing means matches may remain;
+    // surface it rather than returning a partial count that reads as complete.
+    if (batch === FORGET_MAX_BATCHES) {
+      console.warn(
+        `forgetByScope hit the ${FORGET_MAX_BATCHES}-batch safety cap for '${this.name}'; ` +
+          `${deleted} memories deleted, but some matches may remain — re-run to continue.`,
+      );
+    }
+
+    return deleted;
   }
 
   async remember(content: string, options: RememberOptions = {}): Promise<string> {
