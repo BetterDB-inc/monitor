@@ -66,9 +66,10 @@ export class AgentMemory {
   }
 
   async initialize(): Promise<void> {
-    // Surface a discovery name-collision from either tier: awaiting
-    // ensureDiscoveryReady() is AgentCache's documented strict collision check,
-    // and the memory tier already propagates, so the cache side isn't swallowed.
+    // AgentCache.ensureDiscoveryReady() is its documented strict collision
+    // check and throws on a name conflict. The memory tier warns and continues
+    // last-writer-wins (its ensureDiscoveryReady() swallows), so only the cache
+    // side can surface a collision here.
     await Promise.all([
       this.cache.ensureDiscoveryReady(),
       this.memory.ensureDiscoveryReady(),
