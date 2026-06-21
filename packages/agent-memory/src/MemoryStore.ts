@@ -1,11 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { encodeFloat32, parseFtSearchResponse } from '@betterdb/valkey-search-kit';
 import { buildMemoryRecord } from './buildMemoryRecord';
-import { buildRecallQuery, buildScopeFilter, SCORE_FIELD } from './buildRecallQuery';
+import {
+  buildConsolidateFilter,
+  buildRecallQuery,
+  buildScopeFilter,
+  SCORE_FIELD,
+} from './buildRecallQuery';
 import { parseMemoryItem } from './parseMemoryItem';
 import { compositeScore, similarityFromDistance, type RecallWeights } from './compositeScore';
 import { selectEvictions, type EvictionCandidate } from './selectEvictions';
 import type {
+  ConsolidateOptions,
+  ConsolidateResult,
   EmbedFn,
   MemoryHit,
   MemoryScope,
@@ -22,6 +29,9 @@ const RECALL_OVERFETCH = 4;
 const FORGET_BATCH_SIZE = 500;
 const FORGET_MAX_BATCHES = 10000;
 const EVICTION_SCAN_LIMIT = 10000;
+const CONSOLIDATE_SCAN_LIMIT = 10000;
+const DEFAULT_SUMMARY_IMPORTANCE = 0.7;
+const SUMMARY_SOURCE = 'summary';
 
 export interface MemoryStoreOptions {
   client: MemoryStoreClient;
@@ -192,16 +202,115 @@ export class MemoryStore {
     return deleted;
   }
 
-  async remember(content: string, options: RememberOptions = {}): Promise<string> {
+  private async writeMemory(
+    content: string,
+    options: RememberOptions,
+    now: number,
+  ): Promise<string> {
     const vector = await this.embed(content);
     const id = randomUUID();
-    const now = Date.now();
     const record = buildMemoryRecord(this.name, id, content, vector, options, now);
     await this.writeRecord(record.key, record.fields, options.ttl);
+    return id;
+  }
+
+  async remember(content: string, options: RememberOptions = {}): Promise<string> {
+    const now = Date.now();
+    const id = await this.writeMemory(content, options, now);
     // Capacity enforcement is best-effort: the memory is already durably stored,
     // so a failed eviction pass must not reject an otherwise successful write.
     await this.enforceCapacity(options, now).catch(() => undefined);
     return id;
+  }
+
+  async consolidate(options: ConsolidateOptions): Promise<ConsolidateResult> {
+    const now = Date.now();
+    const tags = options.tags ?? [];
+    const scope: MemoryScope = {
+      threadId: options.threadId,
+      agentId: options.agentId,
+      namespace: options.namespace,
+    };
+
+    const hasCriteria =
+      scope.threadId !== undefined ||
+      scope.agentId !== undefined ||
+      scope.namespace !== undefined ||
+      tags.length > 0 ||
+      options.olderThanSeconds !== undefined ||
+      options.maxImportance !== undefined;
+    if (!hasCriteria) {
+      throw new Error(
+        'consolidate requires a scope, tags, olderThanSeconds, or maxImportance to select candidates',
+      );
+    }
+
+    // Push olderThanSeconds/maxImportance into the query (both are NUMERIC
+    // indexed) so the scan limit applies to actual matches, not an arbitrary
+    // first window, and we don't transfer rows we'd only discard. Prior
+    // summaries are always excluded (-@source:{summary}) so consolidation never
+    // re-folds its own output into a new summary.
+    const filter = buildConsolidateFilter(scope, tags, {
+      maxCreatedAt:
+        options.olderThanSeconds !== undefined
+          ? now - options.olderThanSeconds * 1000
+          : undefined,
+      maxImportance: options.maxImportance,
+      excludeSource: SUMMARY_SOURCE,
+    });
+    const raw = await this.client.call(
+      'FT.SEARCH',
+      `${this.name}:mem:idx`,
+      filter,
+      'RETURN',
+      '10',
+      'content',
+      'importance',
+      'tags',
+      'created_at',
+      'last_accessed_at',
+      'access_count',
+      'source',
+      'threadId',
+      'agentId',
+      'namespace',
+      'LIMIT',
+      '0',
+      String(CONSOLIDATE_SCAN_LIMIT),
+      'DIALECT',
+      '2',
+    );
+    const candidates = parseFtSearchResponse(raw).map((hit) => parseMemoryItem(this.name, hit));
+
+    if (candidates.length === 0) {
+      return { consolidated: 0, created: [], deleted: 0 };
+    }
+
+    // Write the summary before deleting sources so a failure can never destroy
+    // memories without leaving their consolidated replacement behind. Use the
+    // capacity-free write path: consolidation is a net reduction (N sources -> 1
+    // summary), and the sources still inflate the scope here, so an enforceCapacity
+    // pass could otherwise evict the summary we just wrote and then delete the
+    // sources — losing the content entirely.
+    const summary = await options.summarize(candidates);
+    const summaryId = await this.writeMemory(
+      summary,
+      {
+        ...scope,
+        tags,
+        source: SUMMARY_SOURCE,
+        importance: options.summaryImportance ?? DEFAULT_SUMMARY_IMPORTANCE,
+      },
+      now,
+    );
+
+    let deleted = 0;
+    if (options.deleteSources !== false) {
+      const keys = candidates.map((item) => `${this.name}:mem:${item.id}`);
+      deleted = Number(await this.client.call('DEL', ...keys));
+    }
+
+    return { consolidated: candidates.length, created: [summaryId], deleted };
   }
 
   private async writeRecord(key: string, fields: (string | Buffer)[], ttl?: number): Promise<void> {
@@ -323,3 +432,4 @@ function ftSearchTotal(raw: unknown): number {
   const total = typeof raw[0] === 'string' ? parseInt(raw[0], 10) : Number(raw[0]);
   return Number.isFinite(total) && total > 0 ? total : 0;
 }
+

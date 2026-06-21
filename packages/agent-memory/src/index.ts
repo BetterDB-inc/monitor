@@ -10,6 +10,8 @@ export type {
   MemoryItem,
   RecallOptions,
   MemoryHit,
+  ConsolidateOptions,
+  ConsolidateResult,
 } from './types';
 export { compositeScore, similarityFromDistance } from './compositeScore';
 export type { RecallWeights, CompositeScoreParams } from './compositeScore';

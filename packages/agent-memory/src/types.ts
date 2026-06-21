@@ -50,3 +50,18 @@ export interface MemoryHit {
   /** Composite recall score (similarity + recency + importance); higher is better. */
   score: number;
 }
+
+export interface ConsolidateOptions extends MemoryScope {
+  olderThanSeconds?: number;
+  maxImportance?: number;
+  summarize: (items: MemoryItem[]) => Promise<string>;
+  deleteSources?: boolean;
+  summaryImportance?: number;
+  tags?: string[];
+}
+
+export interface ConsolidateResult {
+  consolidated: number;
+  created: string[];
+  deleted: number;
+}
