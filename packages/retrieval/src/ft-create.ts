@@ -1,4 +1,5 @@
 import type { RetrievalSchema, FtCapabilities, FieldSpec, VectorSpec } from './schema';
+import { RESERVED_FIELD_NAMES } from './fields';
 
 const HNSW_DEFAULTS = {
   m: 16,
@@ -28,6 +29,9 @@ function validateFieldNames(fields: Record<string, FieldSpec>, vectorFieldName: 
       throw new Error(
         `Field name '${name}' collides with the vector field name '${vectorFieldName}'`,
       );
+    }
+    if (RESERVED_FIELD_NAMES.includes(name)) {
+      throw new Error(`Field name '${name}' is reserved and cannot be used in the schema`);
     }
   }
 }

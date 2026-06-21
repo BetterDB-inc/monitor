@@ -451,3 +451,21 @@ describe('keyPrefix', () => {
     expect(() => keyPrefix('')).toThrow(/Index name must not be empty/);
   });
 });
+
+describe('buildFtCreateArgs reserved field names', () => {
+  it('rejects a schema field named __score', () => {
+    const schema: RetrievalSchema = {
+      fields: { __score: { type: 'tag' } },
+      vector: { metric: 'cosine', algorithm: 'hnsw', dims: 4 },
+    };
+    expect(() => buildFtCreateArgs('docs', schema)).toThrow(/reserved/i);
+  });
+
+  it('rejects a schema field named __text', () => {
+    const schema: RetrievalSchema = {
+      fields: { __text: { type: 'text' } },
+      vector: { metric: 'cosine', algorithm: 'hnsw', dims: 4 },
+    };
+    expect(() => buildFtCreateArgs('docs', schema)).toThrow(/reserved/i);
+  });
+});

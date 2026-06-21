@@ -199,6 +199,24 @@ describe('Retriever upsert', () => {
     expect(hsetCalls).toHaveLength(0);
   });
 
+  it('rejects an entry field named __score', async () => {
+    const embedFn = vi.fn(fakeEmbed(4));
+    const call = vi.fn(async () => 'OK');
+    const retriever = new Retriever({
+      client: { call },
+      name: 'docs',
+      schema: schemaWithDims,
+      embedFn,
+    });
+
+    await expect(
+      retriever.upsert([{ id: 'doc:1', text: 'x', fields: { __score: 'oops' } }]),
+    ).rejects.toThrow(/reserved/i);
+
+    const hsetCalls = call.mock.calls.filter((args) => args[0] === 'HSET');
+    expect(hsetCalls).toHaveLength(0);
+  });
+
   it('probes embedFn once and caches dims across multiple entries', async () => {
     const embedFn = vi.fn(fakeEmbed(8));
     const call = vi.fn(async () => 'OK');
