@@ -24,3 +24,15 @@ export type {
   QueryHit,
   QueryOptions,
 } from './retriever';
+export { buildRetrievalMarker, REGISTRY_KEY, RETRIEVAL_CACHE_TYPE } from './discovery';
+export type { RetrievalMarker } from './discovery';
+export { parsePercentIndexed } from './health';
+export type { IndexHealthSnapshot, RecallEstimator } from './health';
+export type {
+  RetrievalMetrics,
+  RetrievalTracer,
+  RetrievalSpan,
+  RetrievalOperation,
+} from './telemetry';
+export { createPrometheusMetrics } from './prometheus-metrics';
+export type { PrometheusMetricsOptions } from './prometheus-metrics';
