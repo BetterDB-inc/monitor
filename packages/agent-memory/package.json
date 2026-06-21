@@ -37,9 +37,12 @@
   },
   "dependencies": {
     "@betterdb/agent-cache": "workspace:*",
-    "@betterdb/valkey-search-kit": "workspace:*"
+    "@betterdb/valkey-search-kit": "workspace:*",
+    "@opentelemetry/api": "^1.9.0",
+    "prom-client": "^15.1.3"
   },
   "devDependencies": {
+    "@opentelemetry/sdk-trace-base": "^1.30.1",
     "@types/node": "^22.19.15",
     "typescript": "^5.9.3",
     "vitest": "^4.1.1"
