@@ -129,6 +129,27 @@ describe('AgentMemory facade', () => {
     await mem.close();
   });
 
+  it('initialize() creates the memory index when it does not exist', async () => {
+    const client = fakeValkey();
+    client.call = vi.fn(async (command: string) => {
+      if (command === 'FT.INFO') {
+        throw new Error("Unknown index name 'betterdb_ac:mem:idx'");
+      }
+      return 'OK';
+    });
+    const mem = new AgentMemory(
+      makeOptions({ client: client as unknown as AgentMemoryOptions['client'] }),
+    );
+
+    await mem.initialize();
+
+    const create = client.call.mock.calls.find((c) => c[0] === 'FT.CREATE');
+    expect(create).toBeDefined();
+    expect(create?.[1]).toBe('betterdb_ac:mem:idx');
+
+    await mem.close();
+  });
+
   it('registers a memory discovery marker by default', async () => {
     const client = fakeValkey();
     const mem = new AgentMemory(

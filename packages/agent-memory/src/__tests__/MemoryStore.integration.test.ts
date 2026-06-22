@@ -45,51 +45,6 @@ async function dropAndClean(): Promise<void> {
   }
 }
 
-async function createIndex(): Promise<void> {
-  await client.call(
-    'FT.CREATE',
-    INDEX,
-    'ON',
-    'HASH',
-    'PREFIX',
-    '1',
-    `${NAME}:mem:`,
-    'SCHEMA',
-    'vector',
-    'VECTOR',
-    'FLAT',
-    '6',
-    'TYPE',
-    'FLOAT32',
-    'DIM',
-    String(DIMS),
-    'DISTANCE_METRIC',
-    'COSINE',
-    'threadId',
-    'TAG',
-    'agentId',
-    'TAG',
-    'namespace',
-    'TAG',
-    'tags',
-    'TAG',
-    'SEPARATOR',
-    ',',
-    'source',
-    'TAG',
-    'importance',
-    'NUMERIC',
-    'created_at',
-    'NUMERIC',
-    'last_accessed_at',
-    'NUMERIC',
-    'access_count',
-    'NUMERIC',
-    'content',
-    'TEXT',
-  );
-}
-
 beforeAll(async () => {
   client = new Valkey(VALKEY_URL, { lazyConnect: true, retryStrategy: () => null });
   // Attach unconditionally: iovalkey emits 'error' on the client, so a mid-run
@@ -103,12 +58,13 @@ beforeAll(async () => {
     return;
   }
   await dropAndClean();
-  await createIndex();
   store = new MemoryStore({
     client: client as unknown as MemoryStoreClient,
     name: NAME,
     embedFn: fakeEmbed(DIMS),
   });
+  // Dogfood the package's own index bootstrap instead of hand-rolling FT.CREATE.
+  await store.ensureIndex();
 });
 
 afterAll(async () => {
