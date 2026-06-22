@@ -76,6 +76,38 @@ const result = await cache.check('Capital city of France?');
 | `telemetry.metricsPrefix` | `string` | `'semantic_cache'` | Prometheus metric name prefix |
 | `telemetry.registry` | `Registry` | prom-client default | Custom prom-client Registry |
 
+## Threshold and confidence
+
+`@betterdb/semantic-cache` uses **cosine distance** (0-2 scale, lower = more similar):
+
+| Distance | Meaning |
+|----------|---------|
+| 0.00 | Identical vectors |
+| 0.05-0.10 | Strong paraphrase |
+| 0.10-0.20 | Loose paraphrase / related topic |
+| 1.00 | Orthogonal (unrelated) |
+
+A lookup is a **hit** when `score <= threshold`. The default threshold is `0.1`, set per cache via `defaultThreshold`, per category via `categoryThresholds`, or per request via the `threshold` check option.
+
+### Confidence levels
+
+Every hit is graded against the `uncertaintyBand` (default `0.05`), the width of the band immediately below the threshold:
+
+| `confidence` | When | What to do |
+|---|---|---|
+| `high` | `score <= threshold - uncertaintyBand` (e.g. `<= 0.05`) | Return the cached response directly |
+| `uncertain` | `threshold - uncertaintyBand < score <= threshold` (e.g. `0.05–0.10`) | Return the response but consider flagging for review, or hand it to the [LLM-as-judge](#llm-as-judge) |
+| `miss` | `score > threshold` | No hit - call the LLM |
+
+**Recommended thresholds by use case:**
+
+| Use case | Threshold | Notes |
+|---|---|---|
+| FAQ / exact match only | `0.05` | Very strict, near-zero false positives |
+| Standard Q&A | `0.10` | Default - paraphrases land as `uncertain` |
+| Conversational / RAG | `0.15` | Paraphrases hit as `high` confidence |
+| Broad search / recall | `0.20` | High hit rate, review uncertain hits |
+
 ## Adapters
 
 All adapters are subpath exports with optional peer dependencies.
@@ -241,6 +273,41 @@ const result = await cache.check('What is 2+2?', {
 });
 // If the cached entry was stored with model='gpt-3.5-turbo', it's evicted and treated as miss
 ```
+
+## LLM-as-judge
+
+When a hit lands in the uncertainty band (`threshold - uncertaintyBand < score <= threshold`), supply a `judgeFn` to adjudicate the borderline hit automatically instead of handling `confidence: 'uncertain'` yourself. This adds a second step on top of the similarity check: `check()` first classifies the hit, and only `uncertain` hits are passed to the judge, which accepts (promotes to `high`) or rejects (treats as a miss).
+
+```typescript
+const result = await cache.check(userPrompt, {
+  judge: {
+    judgeFn: async ({ prompt, response, similarity, threshold, category }) => {
+      // Return true to accept (confidence → 'high')
+      // Return false to reject (treated as a miss with nearestMiss)
+      const verdict = await openai.chat.completions.create({
+        model: 'gpt-5-mini',
+        messages: [
+          { role: 'system', content: 'Reply YES or NO only.' },
+          { role: 'user', content: `Does this cached response correctly answer the prompt?\nPrompt: ${prompt}\nResponse: ${response}` },
+        ],
+      });
+      return verdict.choices[0].message.content?.startsWith('YES') ?? false;
+    },
+    onError: 'accept',  // fail-open on judge errors (default)
+    timeoutMs: 2000,    // per-call timeout (default)
+  },
+});
+```
+
+**When the judge is invoked:** only for `confidence === 'uncertain'` hits. High-confidence hits, misses, and the zero-candidates case bypass the judge entirely.
+
+**Accept path:** `result.hit === true`, `result.confidence === 'high'`.
+
+**Reject path:** `result.hit === false`, `result.nearestMiss` populated with `deltaToThreshold <= 0` (use this to distinguish judge rejections from regular misses, where `deltaToThreshold > 0`).
+
+**Composing with rerank:** when both `rerank` and `judge` are set, the judge receives the reranked pick's response and similarity score.
+
+**`checkBatch()` does not support `judge`.** Call `check()` individually for prompts that need adjudication.
 
 ## Rerank hook
 
