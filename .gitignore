@@ -82,3 +82,8 @@ packages/mcp/.mcpregistry_github_token
 .gitignore
 packages/mcp/.mcpregistry_registry_token
 data/license.key
+
+# LongMemEval retrieval harness: embedding cache + downloaded datasets
+packages/retrieval/eval/longmemeval/.cache/
+packages/retrieval/eval/longmemeval/longmemeval_*.json
+packages/retrieval/eval/longmemeval/*_oracle.json
