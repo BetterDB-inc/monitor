@@ -28,9 +28,11 @@ def parse_ft_search_response(raw: Any) -> list[FtSearchHit]:
 
         total_raw = raw[0]
         if isinstance(total_raw, bytes):
-            total = int(total_raw.decode())
-        else:
-            total = int(total_raw)
+            total_raw = total_raw.decode()
+        # Parse via float() so a float-formatted total (e.g. "2.0" from a RESP3
+        # double) yields its integer value instead of raising and collapsing to
+        # no hits — matching TS parseInt and this package's FT.INFO _to_int.
+        total = int(float(total_raw))
 
         if total <= 0:
             return []
