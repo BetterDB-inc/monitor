@@ -77,6 +77,12 @@ export interface MemoryConfigSnapshot {
   maxItemsPerScope?: number;
 }
 
+export interface MemoryStats {
+  itemCount: number;
+  evictions: number;
+  config: MemoryConfigSnapshot;
+}
+
 export interface MemoryStoreOptions {
   client: MemoryStoreClient;
   name: string;
@@ -182,6 +188,26 @@ export class MemoryStore {
     const items = parseFtSearchResponse(raw).map((hit) => parseMemoryItem(this.name, hit));
     items.sort((a, b) => b.createdAt - a.createdAt);
     return { items: items.slice(offset, offset + limit), total };
+  }
+
+  async stats(): Promise<MemoryStats> {
+    const countRaw = await this.client.call(
+      'FT.SEARCH',
+      `${this.name}:mem:idx`,
+      '*',
+      'LIMIT',
+      '0',
+      '0',
+      'DIALECT',
+      '2',
+    );
+    const statsFields = parseHashReply(await this.client.call('HGETALL', `${this.name}:__mem_stats`));
+    const evictions = Number(statsFields.evictions ?? '0');
+    return {
+      itemCount: ftSearchTotal(countRaw),
+      evictions: Number.isFinite(evictions) ? evictions : 0,
+      config: this.currentConfig(),
+    };
   }
 
   async refreshConfig(): Promise<void> {
