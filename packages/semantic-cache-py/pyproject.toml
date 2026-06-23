@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "betterdb-semantic-cache"
-version = "0.5.0"
+version = "0.6.0"
 description = "Semantic cache for AI workloads backed by Valkey vector search. Embeddings-based similarity matching with OpenTelemetry and Prometheus instrumentation."
 keywords = ["valkey", "redis", "semantic-cache", "vector-search", "embeddings", "llm", "opentelemetry", "prometheus", "langchain", "langgraph"]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "betterdb-valkey-search-kit>=0.1.0",
     "valkey[asyncio]>=6.0.0",
     "opentelemetry-api>=1.20.0",
     "prometheus-client>=0.19.0",
@@ -43,6 +44,9 @@ all = [
 
 [project.urls]
 Repository = "https://github.com/BetterDB-inc/monitor"
+
+[tool.uv.sources]
+betterdb-valkey-search-kit = { path = "../valkey-search-kit-py", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["betterdb_semantic_cache"]
