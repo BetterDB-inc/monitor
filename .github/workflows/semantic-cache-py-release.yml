@@ -116,12 +116,11 @@ jobs:
           # the artifact). Publish the kit to PyPI first, or a published
           # semantic-cache is uninstallable via pip. Fail before publishing.
           SPEC=$(python - <<'EOF'
-          import re, pathlib
-          content = pathlib.Path("pyproject.toml").read_text()
-          for line in content.splitlines():
-              s = line.strip().strip('"').strip("'")
-              if s.startswith("betterdb-valkey-search-kit"):
-                  print(s)
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          for dep in data.get("project", {}).get("dependencies", []):
+              if dep.replace(" ", "").startswith("betterdb-valkey-search-kit"):
+                  print(dep)
                   break
           EOF
           )
