@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MemoryStore } from '../MemoryStore';
+import { MATCH_ALL_MEMORY_QUERY } from '../buildRecallQuery';
 import { mockClient } from './helpers/mockClient';
 
 function searchReply(rows: Array<{ key: string; fields: Record<string, string> }>): unknown[] {
@@ -46,5 +47,19 @@ describe('MemoryStore.list', () => {
 
     expect(result.items.map((i) => i.id)).toEqual(['c']);
     expect(result.total).toBe(3);
+  });
+
+  it('uses the match-all range query (not bare "*") when no scope is given', async () => {
+    const reply = searchReply([
+      { key: 'mem:mem:a', fields: { content: 'x', created_at: '100', importance: '0.5' } },
+    ]);
+    const client = mockClient((command) => (command === 'FT.SEARCH' ? reply : 'OK'));
+    const store = new MemoryStore({ client, name: 'mem' });
+
+    await store.list({});
+
+    const search = client.call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
+    expect(search?.[2]).toBe(MATCH_ALL_MEMORY_QUERY);
+    expect(search?.[2]).not.toBe('*');
   });
 });

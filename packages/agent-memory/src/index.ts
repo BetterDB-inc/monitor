@@ -28,3 +28,4 @@ export type {
 } from './types';
 export { compositeScore, similarityFromDistance } from './compositeScore';
 export type { RecallWeights, CompositeScoreParams } from './compositeScore';
+export { MATCH_ALL_MEMORY_QUERY } from './buildRecallQuery';

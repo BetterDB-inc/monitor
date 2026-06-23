@@ -12,6 +12,7 @@ import {
   buildConsolidateFilter,
   buildRecallQuery,
   buildScopeFilter,
+  MATCH_ALL_MEMORY_QUERY,
   SCORE_FIELD,
 } from './buildRecallQuery';
 import { parseMemoryItem } from './parseMemoryItem';
@@ -708,7 +709,7 @@ export class MemoryStore {
     // Tags are part of the partition (as in recall/forgetByScope), so a
     // tag-scoped write caps its own tag bucket.
     const filter = buildScopeFilter(scope, scope.tags ?? []);
-    if (filter === '*') {
+    if (filter === MATCH_ALL_MEMORY_QUERY) {
       // A fully-unscoped write has no scope to bound: enforcing here would count
       // and evict across the entire index (every other scope's memories), which
       // `maxItemsPerScope` does not promise. Skip — the write stays, uncapped.

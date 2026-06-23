@@ -186,4 +186,25 @@ describe('MemoryStore integration (real valkey-search)', () => {
     const hits = await store.recallByVector(vector, { threadId: 'rt-vec', reinforce: false });
     expect(hits.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('list({}) with no scope returns >= 1 result without erroring', async () => {
+    if (skip) return;
+    const text = 'unscoped list probe';
+    await store.remember(text, { namespace: 'unscoped-list-probe' });
+    await pollUntil(async () => (await ftCount('@namespace:{unscoped-list-probe}')) >= 1);
+
+    const result = await store.list({});
+    expect(result.total).toBeGreaterThanOrEqual(1);
+  });
+
+  it('recallByVector({}) with no scope returns >= 1 result without erroring', async () => {
+    if (skip) return;
+    const text = 'unscoped vector probe';
+    await store.remember(text, { namespace: 'unscoped-vec-probe' });
+    const vector = await embed(text);
+    await pollUntil(async () => (await ftCount('@namespace:{unscoped-vec-probe}')) >= 1);
+
+    const hits = await store.recallByVector(vector, { reinforce: false });
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+  });
 });
