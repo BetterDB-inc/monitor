@@ -27,6 +27,7 @@ import type {
   ConsolidateResult,
   EmbedFn,
   MemoryHit,
+  MemoryItem,
   MemoryScope,
   MemoryStoreClient,
   RecallOptions,
@@ -131,6 +132,15 @@ export class MemoryStore {
       halfLifeSeconds: this.halfLifeSeconds,
       maxItemsPerScope: this.maxItemsPerScope,
     };
+  }
+
+  async get(id: string): Promise<MemoryItem | null> {
+    const key = `${this.name}:mem:${id}`;
+    const fields = parseHashReply(await this.client.call('HGETALL', key));
+    if (Object.keys(fields).length === 0) {
+      return null;
+    }
+    return parseMemoryItem(this.name, { key, fields });
   }
 
   async refreshConfig(): Promise<void> {
