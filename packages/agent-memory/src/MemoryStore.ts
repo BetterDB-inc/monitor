@@ -75,7 +75,7 @@ export interface MemoryConfigSnapshot {
 export interface MemoryStoreOptions {
   client: MemoryStoreClient;
   name: string;
-  embedFn: EmbedFn;
+  embedFn?: EmbedFn;
   defaultThreshold?: number;
   weights?: RecallWeights;
   halfLifeSeconds?: number;
@@ -88,7 +88,7 @@ export interface MemoryStoreOptions {
 export class MemoryStore {
   private readonly client: MemoryStoreClient;
   private readonly name: string;
-  private readonly embedFn: EmbedFn;
+  private readonly embedFn?: EmbedFn;
   private defaultThreshold: number;
   private weights: RecallWeights;
   private halfLifeSeconds: number;
@@ -710,11 +710,20 @@ export class MemoryStore {
     this.telemetry.metrics.items.labels(this.storeLabels).dec(removed);
   }
 
+  private requireEmbedFn(): EmbedFn {
+    if (!this.embedFn) {
+      throw new Error(
+        'MemoryStore was constructed without an embedFn; remember(), recall(), and ensureIndex() require one. Use get/list/stats/recallByVector for read-only access.',
+      );
+    }
+    return this.embedFn;
+  }
+
   private async resolveDims(): Promise<number> {
     if (this.dims !== undefined) {
       return this.dims;
     }
-    const probe = await this.embedFn('probe');
+    const probe = await this.requireEmbedFn()('probe');
     if (probe.length === 0) {
       throw new Error(
         'Cannot resolve memory vector dimension: embedFn returned a zero-length embedding',
@@ -726,7 +735,7 @@ export class MemoryStore {
 
   private async embed(content: string): Promise<number[]> {
     this.telemetry.metrics.embeddingCalls.labels(this.storeLabels).inc();
-    const vector = await this.embedFn(content);
+    const vector = await this.requireEmbedFn()(content);
     if (this.dims === undefined) {
       this.dims = vector.length;
     } else if (vector.length !== this.dims) {
