@@ -59,6 +59,42 @@ describe('Retriever index lifecycle', () => {
       const createCalls = call.mock.calls.filter((args) => args[0] === 'FT.CREATE');
       expect(createCalls).toHaveLength(0);
     });
+
+    it('tolerates a concurrent creation racing the FT.INFO probe', async () => {
+      // FT.INFO says not-found, but a racing worker creates the index before our
+      // FT.CREATE, which then throws "Index already exists" — must be swallowed.
+      const call = vi.fn(async (command: string) => {
+        if (command === 'FT.INFO') {
+          throw indexNotFoundError();
+        }
+        if (command === 'FT.CREATE') {
+          throw new Error('Index already exists');
+        }
+        return 'OK';
+      });
+      const retriever = new Retriever({ client: { call }, name: 'docs', schema });
+
+      await expect(retriever.createIndex()).resolves.toBeUndefined();
+
+      const createCalls = call.mock.calls.filter((args) => args[0] === 'FT.CREATE');
+      expect(createCalls).toHaveLength(1);
+    });
+
+    it('rethrows when FT.CREATE fails with a non-already-exists error', async () => {
+      const boom = new Error("OOM command not allowed when used memory > 'maxmemory'");
+      const call = vi.fn(async (command: string) => {
+        if (command === 'FT.INFO') {
+          throw indexNotFoundError();
+        }
+        if (command === 'FT.CREATE') {
+          throw boom;
+        }
+        return 'OK';
+      });
+      const retriever = new Retriever({ client: { call }, name: 'docs', schema });
+
+      await expect(retriever.createIndex()).rejects.toThrow(boom);
+    });
   });
 
   describe('dropIndex', () => {
