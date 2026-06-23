@@ -207,4 +207,16 @@ describe('MemoryStore integration (real valkey-search)', () => {
     const hits = await store.recallByVector(vector, { reinforce: false });
     expect(hits.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('list returns newest-first via server-side SORTBY', async () => {
+    if (skip) return;
+    const id1 = await store.remember('older memory', { namespace: 'order-test' });
+    await sleep(50);
+    const id2 = await store.remember('newer memory', { namespace: 'order-test' });
+    await pollUntil(async () => (await store.list({ namespace: 'order-test' })).total >= 2);
+
+    const result = await store.list({ namespace: 'order-test' });
+    expect(result.items[0].id).toBe(id2);
+    expect(result.items[1].id).toBe(id1);
+  });
 });

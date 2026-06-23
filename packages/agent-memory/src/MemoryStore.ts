@@ -54,7 +54,6 @@ const DEFAULT_CONFIG_REFRESH_MS = 30000;
 const MIN_CONFIG_REFRESH_MS = 1000;
 const MAX_DISTANCE = 2;
 const DEFAULT_LIST_LIMIT = 20;
-const LIST_SCAN_LIMIT = 10000;
 
 // Read lazily so only discovery users pay the disk read on import (and avoid a
 // bundler hazard, since package.json is not always emitted).
@@ -164,7 +163,6 @@ export class MemoryStore {
     };
     const limit = options.limit ?? DEFAULT_LIST_LIMIT;
     const offset = options.offset ?? 0;
-    // Results scanned up to LIST_SCAN_LIMIT; paging beyond that window is approximate.
     const raw = await this.client.call(
       'FT.SEARCH',
       `${this.name}:mem:idx`,
@@ -181,16 +179,18 @@ export class MemoryStore {
       'threadId',
       'agentId',
       'namespace',
+      'SORTBY',
+      'created_at',
+      'DESC',
       'LIMIT',
-      '0',
-      String(LIST_SCAN_LIMIT),
+      String(offset),
+      String(limit),
       'DIALECT',
       '2',
     );
     const total = ftSearchTotal(raw);
     const items = parseFtSearchResponse(raw).map((hit) => parseMemoryItem(this.name, hit));
-    items.sort((a, b) => b.createdAt - a.createdAt);
-    return { items: items.slice(offset, offset + limit), total };
+    return { items, total };
   }
 
   async stats(): Promise<MemoryStats> {
