@@ -28,6 +28,8 @@ import type {
   EmbedFn,
   MemoryHit,
   MemoryItem,
+  MemoryListOptions,
+  MemoryListResult,
   MemoryScope,
   MemoryStoreClient,
   RecallOptions,
@@ -49,6 +51,8 @@ const DEFAULT_IMPORTANCE = 0.5;
 const DEFAULT_CONFIG_REFRESH_MS = 30000;
 const MIN_CONFIG_REFRESH_MS = 1000;
 const MAX_DISTANCE = 2;
+const DEFAULT_LIST_LIMIT = 20;
+const LIST_SCAN_LIMIT = 10000;
 
 // Read lazily so only discovery users pay the disk read on import (and avoid a
 // bundler hazard, since package.json is not always emitted).
@@ -141,6 +145,43 @@ export class MemoryStore {
       return null;
     }
     return parseMemoryItem(this.name, { key, fields });
+  }
+
+  async list(options: MemoryListOptions = {}): Promise<MemoryListResult> {
+    const tags = options.tags ?? [];
+    const scope: MemoryScope = {
+      threadId: options.threadId,
+      agentId: options.agentId,
+      namespace: options.namespace,
+    };
+    const limit = options.limit ?? DEFAULT_LIST_LIMIT;
+    const offset = options.offset ?? 0;
+    const raw = await this.client.call(
+      'FT.SEARCH',
+      `${this.name}:mem:idx`,
+      buildScopeFilter(scope, tags),
+      'RETURN',
+      '10',
+      'content',
+      'importance',
+      'tags',
+      'created_at',
+      'last_accessed_at',
+      'access_count',
+      'source',
+      'threadId',
+      'agentId',
+      'namespace',
+      'LIMIT',
+      '0',
+      String(LIST_SCAN_LIMIT),
+      'DIALECT',
+      '2',
+    );
+    const total = ftSearchTotal(raw);
+    const items = parseFtSearchResponse(raw).map((hit) => parseMemoryItem(this.name, hit));
+    items.sort((a, b) => b.createdAt - a.createdAt);
+    return { items: items.slice(offset, offset + limit), total };
   }
 
   async refreshConfig(): Promise<void> {

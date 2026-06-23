@@ -1,0 +1,50 @@
+import { describe, it, expect } from 'vitest';
+import { MemoryStore } from '../MemoryStore';
+import { mockClient } from './helpers/mockClient';
+
+function searchReply(rows: Array<{ key: string; fields: Record<string, string> }>): unknown[] {
+  const out: unknown[] = [String(rows.length)];
+  for (const row of rows) {
+    const flat: string[] = [];
+    for (const [k, v] of Object.entries(row.fields)) {
+      flat.push(k, v);
+    }
+    out.push(row.key, flat);
+  }
+  return out;
+}
+
+describe('MemoryStore.list', () => {
+  it('FT.SEARCHes by scope and returns items sorted by created_at desc with the total', async () => {
+    const reply = searchReply([
+      { key: 'mem:mem:a', fields: { content: 'old', created_at: '100', importance: '0.5' } },
+      { key: 'mem:mem:b', fields: { content: 'new', created_at: '300', importance: '0.5' } },
+      { key: 'mem:mem:c', fields: { content: 'mid', created_at: '200', importance: '0.5' } },
+    ]);
+    const client = mockClient((command) => (command === 'FT.SEARCH' ? reply : 'OK'));
+    const store = new MemoryStore({ client, name: 'mem' });
+
+    const result = await store.list({ threadId: 't1' });
+
+    const search = client.call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
+    expect(search?.[1]).toBe('mem:mem:idx');
+    expect(search?.[2]).toBe('(@threadId:{t1})');
+    expect(result.total).toBe(3);
+    expect(result.items.map((i) => i.id)).toEqual(['b', 'c', 'a']);
+  });
+
+  it('applies offset and limit after sorting', async () => {
+    const reply = searchReply([
+      { key: 'mem:mem:a', fields: { content: 'x', created_at: '100' } },
+      { key: 'mem:mem:b', fields: { content: 'x', created_at: '300' } },
+      { key: 'mem:mem:c', fields: { content: 'x', created_at: '200' } },
+    ]);
+    const client = mockClient((command) => (command === 'FT.SEARCH' ? reply : 'OK'));
+    const store = new MemoryStore({ client, name: 'mem' });
+
+    const result = await store.list({ limit: 1, offset: 1 });
+
+    expect(result.items.map((i) => i.id)).toEqual(['c']);
+    expect(result.total).toBe(3);
+  });
+});
