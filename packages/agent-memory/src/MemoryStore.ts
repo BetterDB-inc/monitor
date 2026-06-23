@@ -164,6 +164,7 @@ export class MemoryStore {
     };
     const limit = options.limit ?? DEFAULT_LIST_LIMIT;
     const offset = options.offset ?? 0;
+    // Results scanned up to LIST_SCAN_LIMIT; paging beyond that window is approximate.
     const raw = await this.client.call(
       'FT.SEARCH',
       `${this.name}:mem:idx`,
@@ -360,17 +361,17 @@ export class MemoryStore {
 
   async recall(query: string, options: RecallOptions = {}): Promise<MemoryHit[]> {
     return this.traced('recall', async (span) => {
+      const startedAt = Date.now();
       const vector = await this.embed(query);
-      return this.runRecall(vector, options, span);
+      return this.runRecall(vector, options, span, startedAt);
     });
   }
 
   async recallByVector(vector: number[], options: RecallOptions = {}): Promise<MemoryHit[]> {
-    return this.traced('recall', (span) => this.runRecall(vector, options, span));
+    return this.traced('recall', (span) => this.runRecall(vector, options, span, Date.now()));
   }
 
-  private async runRecall(vector: number[], options: RecallOptions, span: Span): Promise<MemoryHit[]> {
-    const startedAt = Date.now();
+  private async runRecall(vector: number[], options: RecallOptions, span: Span, startedAt: number): Promise<MemoryHit[]> {
     const k = options.k ?? DEFAULT_RECALL_K;
     const threshold = options.threshold ?? this.defaultThreshold;
     const weights = options.weights ?? this.weights;
