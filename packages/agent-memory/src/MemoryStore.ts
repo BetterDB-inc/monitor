@@ -366,81 +366,83 @@ export class MemoryStore {
 
   async recall(query: string, options: RecallOptions = {}): Promise<MemoryHit[]> {
     return this.traced('recall', async (span) => {
-      const startedAt = Date.now();
-      const k = options.k ?? DEFAULT_RECALL_K;
-      const threshold = options.threshold ?? this.defaultThreshold;
-      const weights = options.weights ?? this.weights;
-      // Snapshot the half-life alongside threshold/weights so a concurrent
-      // configRefresh can't score one recall with a mix of config versions.
-      const halfLifeSeconds = this.halfLifeSeconds;
-      const fetchK = k * RECALL_OVERFETCH;
-      const tags = options.tags ?? [];
-      const scope = {
-        threadId: options.threadId,
-        agentId: options.agentId,
-        namespace: options.namespace,
-      };
-      span.setAttribute('recall.k', k);
-
       const vector = await this.embed(query);
-      const queryString = buildRecallQuery(fetchK, scope, tags);
-      const raw = await this.client.call(
-        'FT.SEARCH',
-        `${this.name}:mem:idx`,
-        queryString,
-        'PARAMS',
-        '2',
-        'vec',
-        encodeFloat32(vector),
-        'LIMIT',
-        '0',
-        String(fetchK),
-        'DIALECT',
-        '2',
-      );
-
-      const now = Date.now();
-      const hits: MemoryHit[] = [];
-      for (const hit of parseFtSearchResponse(raw)) {
-        const rawScore = hit.fields[SCORE_FIELD];
-        if (rawScore === undefined || rawScore.trim() === '') {
-          continue;
-        }
-        const distance = Number(rawScore);
-        if (!Number.isFinite(distance) || distance > threshold) {
-          continue;
-        }
-        const item = parseMemoryItem(this.name, hit);
-        // Recency decays from the last access, not creation, so reinforcement
-        // (which bumps last_accessed_at) actually makes a memory more recallable.
-        // max() guards against a clock-skewed last_accessed_at older than created_at.
-        const lastTouched = Math.max(item.createdAt, item.lastAccessedAt);
-        const ageSeconds = (now - lastTouched) / 1000;
-        const score = compositeScore({
-          similarity: similarityFromDistance(distance),
-          ageSeconds,
-          importance: item.importance,
-          weights,
-          halfLifeSeconds,
-        });
-        if (!Number.isFinite(score)) {
-          continue;
-        }
-        hits.push({ item, similarity: distance, score });
-      }
-
-      hits.sort((a, b) => b.score - a.score);
-      const result = hits.slice(0, k);
-      span.setAttribute('recall.candidate_count', hits.length);
-      span.setAttribute('recall.result_count', result.length);
-      this.recordRecall(result.length, (Date.now() - startedAt) / 1000);
-
-      if (options.reinforce !== false) {
-        // Reinforcement is best-effort and must never break the recall read path.
-        await this.reinforce(result, now).catch(() => undefined);
-      }
-      return result;
+      return this.runRecall(vector, options, span);
     });
+  }
+
+  async recallByVector(vector: number[], options: RecallOptions = {}): Promise<MemoryHit[]> {
+    return this.traced('recall', (span) => this.runRecall(vector, options, span));
+  }
+
+  private async runRecall(vector: number[], options: RecallOptions, span: Span): Promise<MemoryHit[]> {
+    const startedAt = Date.now();
+    const k = options.k ?? DEFAULT_RECALL_K;
+    const threshold = options.threshold ?? this.defaultThreshold;
+    const weights = options.weights ?? this.weights;
+    const halfLifeSeconds = this.halfLifeSeconds;
+    const fetchK = k * RECALL_OVERFETCH;
+    const tags = options.tags ?? [];
+    const scope = {
+      threadId: options.threadId,
+      agentId: options.agentId,
+      namespace: options.namespace,
+    };
+    span.setAttribute('recall.k', k);
+
+    const queryString = buildRecallQuery(fetchK, scope, tags);
+    const raw = await this.client.call(
+      'FT.SEARCH',
+      `${this.name}:mem:idx`,
+      queryString,
+      'PARAMS',
+      '2',
+      'vec',
+      encodeFloat32(vector),
+      'LIMIT',
+      '0',
+      String(fetchK),
+      'DIALECT',
+      '2',
+    );
+
+    const now = Date.now();
+    const hits: MemoryHit[] = [];
+    for (const hit of parseFtSearchResponse(raw)) {
+      const rawScore = hit.fields[SCORE_FIELD];
+      if (rawScore === undefined || rawScore.trim() === '') {
+        continue;
+      }
+      const distance = Number(rawScore);
+      if (!Number.isFinite(distance) || distance > threshold) {
+        continue;
+      }
+      const item = parseMemoryItem(this.name, hit);
+      const lastTouched = Math.max(item.createdAt, item.lastAccessedAt);
+      const ageSeconds = (now - lastTouched) / 1000;
+      const score = compositeScore({
+        similarity: similarityFromDistance(distance),
+        ageSeconds,
+        importance: item.importance,
+        weights,
+        halfLifeSeconds,
+      });
+      if (!Number.isFinite(score)) {
+        continue;
+      }
+      hits.push({ item, similarity: distance, score });
+    }
+
+    hits.sort((a, b) => b.score - a.score);
+    const result = hits.slice(0, k);
+    span.setAttribute('recall.candidate_count', hits.length);
+    span.setAttribute('recall.result_count', result.length);
+    this.recordRecall(result.length, (Date.now() - startedAt) / 1000);
+
+    if (options.reinforce !== false) {
+      await this.reinforce(result, now).catch(() => undefined);
+    }
+    return result;
   }
 
   private recordRecall(resultCount: number, latencySeconds: number): void {
