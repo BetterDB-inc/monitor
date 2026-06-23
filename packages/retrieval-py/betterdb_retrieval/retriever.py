@@ -38,6 +38,33 @@ _logger = logging.getLogger(__name__)
 
 EmbedFn = Callable[[str], Awaitable[list[float]]]
 
+# Atomic compare-and-set for the shared registry field. REGISTRY_KEY is keyed by
+# name and shared with agent-cache, so a plain HGET -> compare -> HSET/HDEL has a
+# TOCTOU window in which a foreign marker written in between gets clobbered. These
+# scripts collapse read-compare-write into one server-side round trip.
+_REGISTER_SCRIPT = """
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if raw then
+  local ok, parsed = pcall(cjson.decode, raw)
+  if ok and type(parsed) == 'table' and parsed.type and parsed.type ~= ARGV[3] then
+    return parsed.type
+  end
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+return false
+"""
+
+_UNREGISTER_SCRIPT = """
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if raw then
+  local ok, parsed = pcall(cjson.decode, raw)
+  if ok and type(parsed) == 'table' and parsed.type == ARGV[2] then
+    return redis.call('HDEL', KEYS[1], ARGV[1])
+  end
+end
+return 0
+"""
+
 
 @dataclass
 class QueryHit:
@@ -157,9 +184,16 @@ class Retriever:
             "fields": self._schema["fields"],
             "vector": {**self._schema["vector"], "dims": dims},
         }
-        await self._client.execute_command(
-            "FT.CREATE", *build_ft_create_args(self._name, schema, self._capabilities)
-        )
+        try:
+            await self._client.execute_command(
+                "FT.CREATE", *build_ft_create_args(self._name, schema, self._capabilities)
+            )
+        except Exception as err:
+            # Tolerate a concurrent creation: another worker may create the index
+            # between our FT.INFO probe and this FT.CREATE (common on multi-worker
+            # boot). The idempotent contract holds as long as the index exists.
+            if "already exists" not in str(err).lower():
+                raise
 
     def _assert_no_reserved_fields(self, entry: UpsertEntry, vector_field: str) -> None:
         for field_name in entry.fields:
@@ -331,43 +365,46 @@ class Retriever:
             self._metrics.record_query_results(len(result))
         return result
 
-    async def _read_registry_marker(self) -> Optional[dict[str, Any]]:
-        raw = await self._client.execute_command("HGET", REGISTRY_KEY, self._name)
-        if raw is None:
-            return None
-        try:
-            if isinstance(raw, bytes):
-                raw = raw.decode()
-            parsed = json.loads(str(raw))
-            return parsed if isinstance(parsed, dict) else None
-        except (ValueError, TypeError):
-            return None
-
     async def register(self) -> None:
-        # The registry field is keyed by name and shared with agent-cache, so
-        # guard against clobbering a marker we don't own.
-        existing = await self._read_registry_marker()
-        existing_type = existing.get("type") if existing else None
-        if existing_type and existing_type != RETRIEVAL_CACHE_TYPE:
-            _logger.warning(
-                "retrieval discovery: registry field '%s' already holds a '%s' marker; "
-                "skipping registration",
-                self._name,
-                existing_type,
-            )
-            return
+        # The registry field is keyed by name and shared with agent-cache. Compare
+        # the existing marker's type and write ours in a single atomic round trip
+        # (_REGISTER_SCRIPT) so a foreign marker can't be clobbered through a
+        # check-then-act window. The script returns the foreign type when it skips.
         marker = build_retrieval_marker(
             name=self._name,
             version=RETRIEVAL_VERSION,
             started_at=datetime.now(timezone.utc).isoformat(),
         )
-        await self._client.execute_command("HSET", REGISTRY_KEY, self._name, json.dumps(marker))
+        foreign = await self._client.execute_command(
+            "EVAL",
+            _REGISTER_SCRIPT,
+            1,
+            REGISTRY_KEY,
+            self._name,
+            json.dumps(marker),
+            RETRIEVAL_CACHE_TYPE,
+        )
+        if foreign is not None:
+            if isinstance(foreign, bytes):
+                foreign = foreign.decode()
+            _logger.warning(
+                "retrieval discovery: registry field '%s' already holds a '%s' marker; "
+                "skipping registration",
+                self._name,
+                foreign,
+            )
 
     async def unregister(self) -> None:
-        # Only delete a marker we own — never HDEL a foreign cache type's field.
-        existing = await self._read_registry_marker()
-        if existing and existing.get("type") == RETRIEVAL_CACHE_TYPE:
-            await self._client.execute_command("HDEL", REGISTRY_KEY, self._name)
+        # Only delete a marker we own — compared and HDEL'd in one atomic round
+        # trip (_UNREGISTER_SCRIPT) so we never delete a foreign cache type's field.
+        await self._client.execute_command(
+            "EVAL",
+            _UNREGISTER_SCRIPT,
+            1,
+            REGISTRY_KEY,
+            self._name,
+            RETRIEVAL_CACHE_TYPE,
+        )
 
     async def health(self) -> IndexHealthSnapshot:
         info = await self._client.execute_command("FT.INFO", index_name(self._name))

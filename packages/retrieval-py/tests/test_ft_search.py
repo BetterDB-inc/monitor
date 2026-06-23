@@ -53,3 +53,9 @@ def test_text_field_not_filterable() -> None:
 def test_numeric_filter_requires_number() -> None:
     with pytest.raises(ValueError, match="(?i)numeric"):
         build_ft_search_query(schema, 5, {"updated": "recent"})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_numeric_filter_rejects_non_finite(value: float) -> None:
+    with pytest.raises(ValueError, match="(?i)finite"):
+        build_ft_search_query(schema, 5, {"updated": value})

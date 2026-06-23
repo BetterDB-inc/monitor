@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from betterdb_valkey_search_kit import escape_tag
 
 from .fields import SCORE_FIELD
@@ -24,6 +26,10 @@ def _build_filter_clause(field: str, value: str | int | float, schema: Retrieval
         if not _is_number(value):
             raise ValueError(
                 f"Numeric filter on field '{field}' requires a number, got: {type(value).__name__}"
+            )
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(
+                f"Numeric filter on field '{field}' requires a finite number, got: {value!r}"
             )
         return f"@{field}:[{value} {value}]"
     raise ValueError(

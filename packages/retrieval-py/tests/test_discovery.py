@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from betterdb_retrieval import Retriever
 from betterdb_retrieval.discovery import REGISTRY_KEY, build_retrieval_marker
@@ -29,46 +30,60 @@ def test_build_retrieval_marker() -> None:
 
 
 async def test_register_writes_marker() -> None:
-    client = FakeClient(lambda args: None if args[0] == "HGET" else 1)
+    # The atomic register script returns nil when it wrote our marker.
+    client = FakeClient(lambda args: None)
     retriever = Retriever(client=client, name="docs", schema=schema)
 
     await retriever.register()
 
-    hset = client.calls_for("HSET")[0]
-    assert hset[1] == REGISTRY_KEY
-    assert hset[2] == "docs"
-    marker = json.loads(hset[3])
+    eval_call = client.calls_for("EVAL")[0]
+    # ("EVAL", script, numkeys, KEYS[1], ARGV[1], ARGV[2], ARGV[3])
+    assert eval_call[3] == REGISTRY_KEY
+    assert eval_call[4] == "docs"
+    marker = json.loads(eval_call[5])
     assert marker["type"] == "retrieval"
     assert marker["prefix"] == "docs"
     assert isinstance(marker["started_at"], str)
-
-
-async def test_register_does_not_overwrite_foreign_marker(caplog) -> None:
-    client = FakeClient(
-        lambda args: json.dumps({"type": "agent_cache"}) if args[0] == "HGET" else 1
-    )
-    retriever = Retriever(client=client, name="docs", schema=schema)
-
-    await retriever.register()
-
+    assert eval_call[6] == "retrieval"
+    # Never a raw HSET — the compare-and-set happens atomically server-side.
     assert client.calls_for("HSET") == []
 
 
+async def test_register_does_not_overwrite_foreign_marker(caplog) -> None:
+    # The script returns the foreign type when it skips the write.
+    client = FakeClient(lambda args: b"agent_cache")
+    retriever = Retriever(client=client, name="docs", schema=schema)
+
+    with caplog.at_level(logging.WARNING):
+        await retriever.register()
+
+    assert client.calls_for("HSET") == []
+    assert any("agent_cache" in r.getMessage() for r in caplog.records)
+
+
 async def test_unregister_deletes_own_marker() -> None:
-    client = FakeClient(lambda args: json.dumps({"type": "retrieval"}) if args[0] == "HGET" else 1)
+    # The atomic unregister script returns the HDEL count when it owned the field.
+    client = FakeClient(lambda args: 1)
     retriever = Retriever(client=client, name="docs", schema=schema)
 
     await retriever.unregister()
 
-    assert ("HDEL", REGISTRY_KEY, "docs") in client.calls
+    eval_call = client.calls_for("EVAL")[0]
+    # ("EVAL", script, numkeys, KEYS[1], ARGV[1], ARGV[2])
+    assert eval_call[3] == REGISTRY_KEY
+    assert eval_call[4] == "docs"
+    assert eval_call[5] == "retrieval"
+    # Never a raw HDEL — the ownership check happens atomically server-side.
+    assert client.calls_for("HDEL") == []
 
 
-async def test_unregister_does_not_delete_foreign_marker() -> None:
-    client = FakeClient(
-        lambda args: json.dumps({"type": "agent_cache"}) if args[0] == "HGET" else 1
-    )
+async def test_unregister_never_issues_a_raw_hdel() -> None:
+    # Even when the field is foreign (script returns 0), we only ever delegate to
+    # the ownership-guarded script, never a direct HDEL that could clobber it.
+    client = FakeClient(lambda args: 0)
     retriever = Retriever(client=client, name="docs", schema=schema)
 
     await retriever.unregister()
 
     assert client.calls_for("HDEL") == []
+    assert client.calls_for("EVAL")[0][5] == "retrieval"

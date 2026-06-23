@@ -69,7 +69,7 @@ hits = await retriever.query(
 
 ## Observability
 
-Pass `metrics` (a `RetrievalMetrics`) and/or `tracer` (a `RetrievalTracer`) to instrument every operation. `create_prometheus_metrics()` provides a ready-made [prometheus-client](https://github.com/prometheus/client_python) implementation (install the `prometheus` extra).
+Pass `metrics` (a `RetrievalMetrics`) and/or `tracer` (a `RetrievalTracer`) to instrument every operation. `create_prometheus_metrics()` provides a ready-made [prometheus-client](https://github.com/prometheus/client_python) implementation.
 
 ## Development
 

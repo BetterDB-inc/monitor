@@ -60,6 +60,39 @@ async def test_create_index_rethrows_non_index_error() -> None:
     assert client.calls_for("FT.CREATE") == []
 
 
+async def test_create_index_tolerates_concurrent_creation() -> None:
+    # FT.INFO says not-found, but a racing worker creates the index before our
+    # FT.CREATE, which then raises "Index already exists" — must be swallowed.
+    def handler(args):
+        if args[0] == "FT.INFO":
+            raise index_not_found_error()
+        if args[0] == "FT.CREATE":
+            raise RuntimeError("Index already exists")
+        return "OK"
+
+    client = FakeClient(handler)
+    retriever = Retriever(client=client, name="docs", schema=schema)
+
+    await retriever.create_index()
+
+    assert client.calls_for("FT.CREATE") != []
+
+
+async def test_create_index_rethrows_non_already_exists_create_error() -> None:
+    def handler(args):
+        if args[0] == "FT.INFO":
+            raise index_not_found_error()
+        if args[0] == "FT.CREATE":
+            raise RuntimeError("OOM command not allowed when used memory > 'maxmemory'")
+        return "OK"
+
+    client = FakeClient(handler)
+    retriever = Retriever(client=client, name="docs", schema=schema)
+
+    with pytest.raises(RuntimeError, match="OOM"):
+        await retriever.create_index()
+
+
 async def test_drop_index_issues_ft_dropindex() -> None:
     client = FakeClient(lambda args: "OK")
     retriever = Retriever(client=client, name="docs", schema=schema)
