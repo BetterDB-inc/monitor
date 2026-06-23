@@ -3,6 +3,7 @@ import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import {
   encodeFloat32,
   isIndexNotFoundError,
+  parseFtInfoStats,
   parseFtSearchResponse,
 } from '@betterdb/valkey-search-kit';
 import { buildMemoryRecord } from './buildMemoryRecord';
@@ -191,20 +192,12 @@ export class MemoryStore {
   }
 
   async stats(): Promise<MemoryStats> {
-    const countRaw = await this.client.call(
-      'FT.SEARCH',
-      `${this.name}:mem:idx`,
-      '*',
-      'LIMIT',
-      '0',
-      '0',
-      'DIALECT',
-      '2',
-    );
+    const infoRaw = await this.client.call('FT.INFO', memoryIndexName(this.name));
+    const { numDocs } = parseFtInfoStats(infoRaw as unknown[]);
     const statsFields = parseHashReply(await this.client.call('HGETALL', `${this.name}:__mem_stats`));
     const evictions = Number(statsFields.evictions ?? '0');
     return {
-      itemCount: ftSearchTotal(countRaw),
+      itemCount: numDocs,
       evictions: Number.isFinite(evictions) ? evictions : 0,
       config: this.currentConfig(),
     };
