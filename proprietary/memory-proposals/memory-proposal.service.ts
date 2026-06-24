@@ -187,9 +187,13 @@ export class MemoryProposalService {
     }
     if (
       existing.status === 'approved' ||
+      existing.status === 'applying' ||
       existing.status === 'applied' ||
       existing.status === 'failed'
     ) {
+      // Already past pending (in-flight or done): hand back to MemoryApplyService,
+      // which short-circuits or returns the in-progress state via its claim — a
+      // retry/duplicate approve must not throw NotPending here.
       return existing;
     }
     if (existing.status !== 'pending') {

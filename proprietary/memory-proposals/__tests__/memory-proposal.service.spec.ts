@@ -114,6 +114,25 @@ describe('MemoryProposalService.approve', () => {
     ).rejects.toBeInstanceOf(MemoryProposalNotFoundError);
   });
 
+  it('does not throw or re-dispatch when re-approving an in-flight (applying) proposal', async () => {
+    const { service, storage, dispatch } = build();
+    const { proposal } = await service.proposeForget(CONNECTION_ID, {
+      storeName: STORE,
+      reasoning: REASON,
+      memoryId: 'm1',
+    });
+    // Simulate a forget already mid-flight (the claim transitions to applying).
+    await storage.updateMemoryProposalStatus({
+      id: proposal.id,
+      expected_status: ['pending'],
+      status: 'applying',
+    });
+
+    const res = await service.approve({ proposalId: proposal.id, actor: null, actorSource: 'mcp' });
+    expect(res.proposal.status).toBe('applying');
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it('claims the proposal so a concurrent approve cannot dispatch the forget twice', async () => {
     const { service, storage, applyService, dispatch } = build();
     const { proposal } = await service.proposeForget(CONNECTION_ID, {
