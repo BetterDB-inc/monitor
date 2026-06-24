@@ -150,7 +150,8 @@ class MemoryStore:
 
         self._config_refresh_task: asyncio.Task[None] | None = None
         self._config_refresh_interval_s = DEFAULT_CONFIG_REFRESH_MS / 1000
-        self._start_config_refresh(config_refresh)
+        self._config_refresh_enabled = self._resolve_config_refresh(config_refresh)
+        self._schedule_config_refresh()
 
     # -- config -----------------------------------------------------------
 
@@ -170,22 +171,38 @@ class MemoryStore:
             # Best-effort: a failed refresh keeps the last-known config in place.
             pass
 
-    def _start_config_refresh(self, config: bool | MemoryConfigRefreshConfig | None) -> None:
+    def _resolve_config_refresh(self, config: bool | MemoryConfigRefreshConfig | None) -> bool:
         if not config:
-            return
+            return False
         settings = MemoryConfigRefreshConfig() if config is True else config
         if settings.enabled is False:
-            return
+            return False
         interval_ms = settings.interval_ms
         if interval_ms is None:
             interval_ms = DEFAULT_CONFIG_REFRESH_MS
         interval_ms = max(MIN_CONFIG_REFRESH_MS, interval_ms)
         self._config_refresh_interval_s = interval_ms / 1000
+        return True
+
+    def _schedule_config_refresh(self) -> None:
+        # Mirror of _schedule_discovery: creating the polling task needs a running
+        # event loop, which the typical sync constructor (before AgentMemory.initialize)
+        # does not have. When there is no loop yet, defer until
+        # ensure_config_refresh_started() runs under one. Idempotent.
+        if not self._config_refresh_enabled or self._config_refresh_task is not None:
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
         self._config_refresh_task = loop.create_task(self._config_refresh_loop())
+
+    async def ensure_config_refresh_started(self) -> None:
+        # Re-attempt the deferred start once a running loop exists. TS starts the
+        # refresh via setInterval in the constructor (no running-loop precondition);
+        # asyncio needs this retry to reach parity. No-op when disabled or already
+        # running. AgentMemory.initialize() drives this for the common sync-ctor path.
+        self._schedule_config_refresh()
 
     async def _config_refresh_loop(self) -> None:
         try:

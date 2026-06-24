@@ -219,6 +219,40 @@ async def test_reads_immediately_and_on_interval_and_stops_on_close() -> None:
     assert after_close == after_tick
 
 
+async def test_config_refresh_deferred_until_started_without_running_loop() -> None:
+    client = config_client({"recall.threshold": "0.4"})
+
+    # Construct with no running event loop (a worker thread has none) — the typical
+    # sync-ctor-before-initialize path. The polling task cannot start yet.
+    store = await asyncio.to_thread(
+        lambda: MemoryStore(
+            client=client,
+            name="mem",
+            embed_fn=fake_embed(8),
+            config_refresh=MemoryConfigRefreshConfig(interval_ms=1000),
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert len(client.calls_for("HGETALL")) == 0
+
+    # Re-driven under a running loop (what AgentMemory.initialize does) it starts;
+    # a second call is a no-op (single task).
+    await store.ensure_config_refresh_started()
+    await store.ensure_config_refresh_started()
+    await asyncio.sleep(0.05)
+    assert len(client.calls_for("HGETALL")) == 1
+
+    await store.close()
+
+
+async def test_ensure_config_refresh_started_is_noop_when_disabled() -> None:
+    client = config_client({"recall.threshold": "0.4"})
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
+    await store.ensure_config_refresh_started()
+    await asyncio.sleep(0.05)
+    assert len(client.calls_for("HGETALL")) == 0
+
+
 async def test_never_throws_when_config_read_fails() -> None:
     def handler(command: str, *args: Any) -> Any:
         if command == "HGETALL":

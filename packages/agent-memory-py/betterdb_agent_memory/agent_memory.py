@@ -68,6 +68,7 @@ class AgentMemory:
         await asyncio.gather(
             self._cache.ensure_discovery_ready(),
             self.memory.ensure_discovery_ready(),
+            self.memory.ensure_config_refresh_started(),
         )
 
     async def close(self) -> None:
