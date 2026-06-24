@@ -104,5 +104,31 @@ describe('McpMemoryService read delegations', () => {
     expect(String(search?.[2])).toContain('KNN');
     const reinforced = call.mock.calls.some((c) => c[0] === 'HINCRBY' || c[0] === 'HSET');
     expect(reinforced).toBe(false);
+    const loadedConfig = call.mock.calls.some(
+      (c) => c[0] === 'HGETALL' && c[1] === 'demo:__mem_config',
+    );
+    expect(loadedConfig).toBe(true);
+  });
+
+  it('stats reflects the live store config, not constructor defaults', async () => {
+    const call = jest.fn(async (cmd: string, ...args: unknown[]) => {
+      if (cmd === 'FT.INFO') {
+        return ['num_docs', '7'];
+      }
+      if (cmd === 'HGETALL' && args[0] === 'demo:__mem_config') {
+        return ['recall.threshold', '0.4'];
+      }
+      if (cmd === 'HGETALL' && args[0] === 'demo:__mem_stats') {
+        return ['evictions', '3'];
+      }
+      return 'OK';
+    });
+    const svc = new McpMemoryService(makeRegistry(call));
+
+    const stats = await svc.stats('inst1', 'demo');
+
+    expect(stats.itemCount).toBe(7);
+    expect(stats.evictions).toBe(3);
+    expect(stats.config.threshold).toBe(0.4);
   });
 });

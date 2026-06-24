@@ -51,7 +51,9 @@ export class McpMemoryService {
   }
 
   async stats(id: string, name: string): Promise<MemoryStats> {
-    return this.buildStore(id, name).stats();
+    const store = this.buildStore(id, name);
+    await store.refreshConfig();
+    return store.stats();
   }
 
   async recall(
@@ -60,7 +62,9 @@ export class McpMemoryService {
     vector: number[],
     options: RecallOptions,
   ): Promise<MemoryHit[]> {
-    return this.buildStore(id, name).recallByVector(vector, { ...options, reinforce: false });
+    const store = this.buildStore(id, name);
+    await store.refreshConfig();
+    return store.recallByVector(vector, { ...options, reinforce: false });
   }
 
   async discoverStores(id: string): Promise<MemoryStoreInfo[]> {
