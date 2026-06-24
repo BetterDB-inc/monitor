@@ -32,9 +32,23 @@ export class MemoryApplyService {
       return { proposal: approved, appliedResult: cached };
     }
 
+    // Atomically claim the proposal before dispatching so two concurrent
+    // approvals cannot run the forget twice: only the first `approved -> applied`
+    // transition wins; the loser returns the persisted result without dispatching.
+    const claimed = await this.storage.updateMemoryProposalStatus({
+      id: approved.id,
+      expected_status: ['approved'],
+      status: 'applied',
+    });
+    if (claimed === null) {
+      const current = (await this.storage.getMemoryProposal(approved.id)) ?? approved;
+      const cached = current.applied_result ?? { success: current.status === 'applied' };
+      return { proposal: current, appliedResult: cached };
+    }
+
     const appliedAt = Date.now();
     try {
-      const outcome = await this.dispatcher.dispatch(approved);
+      const outcome = await this.dispatcher.dispatch(claimed);
       const appliedResult: AppliedResult = {
         success: true,
         details: {
@@ -45,13 +59,13 @@ export class MemoryApplyService {
       };
       const updated = await this.storage.updateMemoryProposalStatus({
         id: approved.id,
-        expected_status: ['approved'],
+        expected_status: ['applied'],
         status: 'applied',
         applied_at: appliedAt,
         applied_result: appliedResult,
       });
       await this.appendAudit(approved.id, 'applied', appliedResult.details ?? null, context);
-      return { proposal: updated ?? approved, appliedResult };
+      return { proposal: updated ?? claimed, appliedResult };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`Memory forget apply failed for ${approved.id}: ${message}`);
@@ -62,13 +76,13 @@ export class MemoryApplyService {
       };
       const updated = await this.storage.updateMemoryProposalStatus({
         id: approved.id,
-        expected_status: ['approved'],
+        expected_status: ['applied'],
         status: 'failed',
         applied_at: appliedAt,
         applied_result: appliedResult,
       });
       await this.appendAudit(approved.id, 'failed', { error: message }, context);
-      return { proposal: updated ?? approved, appliedResult };
+      return { proposal: updated ?? claimed, appliedResult };
     }
   }
 

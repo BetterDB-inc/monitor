@@ -22,7 +22,7 @@ function build(outcome?: ApplyOutcome) {
   const dispatcher = { dispatch } as unknown as MemoryApplyDispatcher;
   const applyService = new MemoryApplyService(storage, dispatcher);
   const service = new MemoryProposalService(storage, applyService);
-  return { storage, service, dispatch };
+  return { storage, service, applyService, dispatch };
 }
 
 describe('MemoryProposalService.proposeForget', () => {
@@ -110,6 +110,30 @@ describe('MemoryProposalService.approve', () => {
     await expect(
       service.approve({ proposalId: 'missing', actor: null, actorSource: 'mcp' }),
     ).rejects.toBeInstanceOf(MemoryProposalNotFoundError);
+  });
+
+  it('claims the proposal so a concurrent approve cannot dispatch the forget twice', async () => {
+    const { service, storage, applyService, dispatch } = build();
+    const { proposal } = await service.proposeForget(CONNECTION_ID, {
+      storeName: STORE,
+      reasoning: REASON,
+      memoryId: 'm1',
+    });
+    const approved = await storage.updateMemoryProposalStatus({
+      id: proposal.id,
+      expected_status: ['pending'],
+      status: 'approved',
+    });
+
+    // Two callers race with the same stale "approved" snapshot.
+    const [a, b] = await Promise.all([
+      applyService.apply(approved!, { actor: null, actorSource: 'mcp' }),
+      applyService.apply(approved!, { actor: null, actorSource: 'mcp' }),
+    ]);
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(a.proposal.status).toBe('applied');
+    expect(b.proposal.status).toBe('applied');
   });
 });
 
