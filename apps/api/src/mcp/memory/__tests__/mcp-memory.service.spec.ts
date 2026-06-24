@@ -66,4 +66,41 @@ describe('McpMemoryService read delegations', () => {
     const search = call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
     expect(search?.[1]).toBe('demo:mem:idx');
   });
+
+  it('recall delegates to MemoryStore.recallByVector with the supplied vector', async () => {
+    const reply = (() => {
+      const fields = {
+        __score: '0.1',
+        content: 'hit',
+        importance: '0.5',
+        created_at: '100',
+        last_accessed_at: '100',
+        access_count: '0',
+      };
+      const flat: string[] = [];
+      for (const [k, v] of Object.entries(fields)) {
+        flat.push(k, v);
+      }
+      return ['1', 'demo:mem:a', flat];
+    })();
+    const call = jest.fn(async (cmd: string, ..._args: unknown[]) => {
+      if (cmd === 'FT.SEARCH') {
+        return reply;
+      }
+      if (cmd === 'EXISTS') {
+        return 1;
+      }
+      return 'OK';
+    });
+    const svc = new McpMemoryService(makeRegistry(call));
+
+    const hits = await svc.recall('inst1', 'demo', [0, 1, 0, 0, 0, 0, 0, 0], {
+      threadId: 't1',
+      reinforce: false,
+    });
+
+    expect(hits.map((h) => h.item.id)).toEqual(['a']);
+    const search = call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
+    expect(String(search?.[2])).toContain('KNN');
+  });
 });

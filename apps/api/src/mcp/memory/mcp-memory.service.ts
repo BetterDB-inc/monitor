@@ -6,6 +6,8 @@ import {
   type MemoryListResult,
   type MemoryItem,
   type MemoryStats,
+  type RecallOptions,
+  type MemoryHit,
 } from '@betterdb/agent-memory';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 
@@ -50,6 +52,15 @@ export class McpMemoryService {
 
   async stats(id: string, name: string): Promise<MemoryStats> {
     return this.buildStore(id, name).stats();
+  }
+
+  async recall(
+    id: string,
+    name: string,
+    vector: number[],
+    options: RecallOptions,
+  ): Promise<MemoryHit[]> {
+    return this.buildStore(id, name).recallByVector(vector, options);
   }
 
   async discoverStores(id: string): Promise<MemoryStoreInfo[]> {
