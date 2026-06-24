@@ -1,0 +1,69 @@
+# Default values = the simple, self-host profile.
+# Cloud tenants layer values-cloud-tenant.yaml on top of these.
+
+image:
+  repository: valkey/valkey-bundle # search module (FT.*) is bundled
+  tag: "9.1-alpine" # do NOT use :latest — it double-loads the module and crashes
+  pullPolicy: IfNotPresent
+
+# A single ACL user the libraries connect as. The chart renders a Secret holding
+# both the password and a users.acl file; the StatefulSet loads the file at boot
+# so the user survives restarts (runtime ACL SETUSER would not).
+auth:
+  username: betterdb
+  # Leave empty to auto-generate a password on first install. On `helm upgrade`
+  # the chart reuses the existing Secret's value (lookup), so it never rotates
+  # out from under connected clients.
+  password: ""
+  # Bring-your-own Secret instead of chart-managed generation. The cloud path
+  # sets this so the entitlement service owns the credential. The Secret must
+  # contain keys: password, users.acl.
+  existingSecret: ""
+
+# Lock down a publicly reachable instance. FT.* is NOT in @dangerous, so search
+# keeps working (verified against valkey-bundle).
+hardening:
+  disableDangerousCommands: true
+
+persistence:
+  enabled: false # self-host default: ephemeral. Cloud/durable installs flip this on.
+  appendonly: true # AOF when persistence is enabled
+  size: 1Gi
+  storageClass: ""
+
+valkey:
+  # Set a maxmemory ceiling and policy. Empty maxmemory => no ceiling.
+  maxmemory: ""
+  maxmemoryPolicy: noeviction
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+service:
+  type: ClusterIP
+  port: 6379
+
+# Public TLS exposure — OFF by default. Only cloud tenants enable this. The
+# wildcard cert + TLS-terminating SNI proxy live once at the cluster level; the
+# chart only registers a per-host route into the shared proxy entrypoint.
+exposure:
+  public: false
+  host: "" # e.g. acme.valkey.betterdb.com
+  sniRoute:
+    enabled: false
+    entryPoint: valkey-tls # shared NLB-fronted Traefik entrypoint
+
+podSecurityContext:
+  fsGroup: 1000
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

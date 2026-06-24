@@ -1,0 +1,32 @@
+# Example override the entitlement service layers on per tenant.
+# Usage:
+#   helm upgrade --install valkey-acme charts/valkey-search \
+#     -n tenant-acme -f charts/valkey-search/values-cloud-tenant.yaml
+
+auth:
+  username: tenant-acme
+  # Entitlement pre-creates this Secret (keys: password, users.acl) with a strong
+  # password, so credential ownership stays out of Helm entirely.
+  existingSecret: valkey-acme-auth
+
+persistence:
+  enabled: true
+  size: 2Gi # ~2.5x maxmemory: holds RDB + AOF + rewrite headroom
+
+valkey:
+  maxmemory: 768mb # ~75% of the 1Gi limit
+  maxmemoryPolicy: noeviction
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi
+
+exposure:
+  public: true
+  host: acme.valkey.betterdb.com
+  sniRoute:
+    enabled: true

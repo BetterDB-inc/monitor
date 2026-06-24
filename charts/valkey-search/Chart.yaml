@@ -1,0 +1,19 @@
+apiVersion: v2
+name: valkey-search
+description: Valkey with the search module (FT.*) for BetterDB libraries
+type: application
+# Chart version — bump on chart changes.
+version: 0.1.0
+# Tracks the valkey-bundle release the defaults are validated against.
+appVersion: "9.1"
+keywords:
+  - valkey
+  - redis
+  - vector-search
+  - cache
+  - agent-memory
+home: https://betterdb.com
+sources:
+  - https://github.com/BetterDB-inc/monitor
+maintainers:
+  - name: BetterDB

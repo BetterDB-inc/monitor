@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "valkey-search.fullname" . }}
+  labels:
+    {{- include "valkey-search.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "valkey-search.fullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "valkey-search.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "valkey-search.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Roll the pod when the credential/ACL changes so a rotated password
+        # or ACL rule takes effect (the file is mounted, loaded at boot).
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: valkey
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # args (not command) so the image's bundle-docker-entrypoint.sh runs and
+          # auto-appends --loadmodule for the search module. Overriding command:
+          # would bypass the entrypoint and FT.* would be unknown.
+          args:
+            - valkey-server
+            - --aclfile
+            - /etc/valkey/users.acl
+            {{- if .Values.persistence.enabled }}
+            {{- if .Values.persistence.appendonly }}
+            - --appendonly
+            - "yes"
+            {{- end }}
+            - --dir
+            - /data
+            {{- end }}
+            {{- if .Values.valkey.maxmemory }}
+            - --maxmemory
+            - {{ .Values.valkey.maxmemory | quote }}
+            - --maxmemory-policy
+            - {{ .Values.valkey.maxmemoryPolicy | quote }}
+            {{- end }}
+          ports:
+            - name: valkey
+              containerPort: 6379
+          env:
+            # Exposed to the probe commands below. default is OFF so probes must
+            # auth as the named user.
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valkey-search.secretName" . }}
+                  key: password
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'valkey-cli --user {{ .Values.auth.username }} --pass "$VALKEY_PASSWORD" ping'
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'valkey-cli --user {{ .Values.auth.username }} --pass "$VALKEY_PASSWORD" ping'
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: acl
+              mountPath: /etc/valkey
+              readOnly: true
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+      volumes:
+        - name: acl
+          secret:
+            secretName: {{ include "valkey-search.secretName" . }}
+            items:
+              - key: users.acl
+                path: users.acl
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}
+  {{- end }}

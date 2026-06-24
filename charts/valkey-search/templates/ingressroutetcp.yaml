@@ -1,0 +1,24 @@
+{{- if and .Values.exposure.public .Values.exposure.sniRoute.enabled }}
+{{- /*
+  Per-tenant route into the SHARED TLS-terminating Traefik entrypoint. The
+  wildcard cert (*.valkey.betterdb.com) and the SNI proxy live once at the
+  cluster level; this only registers a HostSNI match for this tenant's host
+  and forwards the decrypted RESP stream to the tenant Service.
+*/}}
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: {{ include "valkey-search.fullname" . }}
+  labels:
+    {{- include "valkey-search.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    - {{ .Values.exposure.sniRoute.entryPoint }}
+  routes:
+    - match: HostSNI(`{{ required "exposure.host is required when sniRoute is enabled" .Values.exposure.host }}`)
+      services:
+        - name: {{ include "valkey-search.fullname" . }}
+          port: {{ .Values.service.port }}
+  tls:
+    passthrough: false
+{{- end }}

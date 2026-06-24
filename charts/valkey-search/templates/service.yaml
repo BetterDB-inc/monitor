@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valkey-search.fullname" . }}
+  labels:
+    {{- include "valkey-search.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: valkey
+      port: {{ .Values.service.port }}
+      targetPort: valkey
+  selector:
+    {{- include "valkey-search.selectorLabels" . | nindent 4 }}
