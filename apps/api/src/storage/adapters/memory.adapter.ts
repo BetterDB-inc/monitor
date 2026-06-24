@@ -55,10 +55,20 @@ import type {
   StoredCacheProposalAudit,
   CreateCacheProposalInput,
   ListCacheProposalsOptions,
+  StoredMemoryProposal,
+  StoredMemoryProposalAudit,
+  CreateMemoryProposalInput,
+  ListMemoryProposalsOptions,
+  UpdateMemoryProposalStatusInput,
+  AppendMemoryProposalAuditInput,
   UpdateProposalStatusInput,
   AppendProposalAuditInput,
 } from '@betterdb/shared';
-import { PROPOSAL_DEFAULT_EXPIRY_MS, variantPayloadSchemaFor } from '@betterdb/shared';
+import {
+  PROPOSAL_DEFAULT_EXPIRY_MS,
+  variantPayloadSchemaFor,
+  MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
+} from '@betterdb/shared';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
 
 const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
@@ -76,6 +86,16 @@ function pendingProposalSubDiscriminator(
     return typeof toolName === 'string' ? toolName : NULL_SUB_DISCRIMINATOR;
   }
   return null;
+}
+
+function memoryProposalTargetDiscriminator(payload: unknown): string {
+  const p = payload as Record<string, unknown> | null | undefined;
+  if (p?.target_kind === 'id') {
+    return `id:${String(p.memory_id)}`;
+  }
+  const scope = (p?.scope ?? {}) as Record<string, unknown>;
+  const tags = Array.isArray(p?.tags) ? [...(p.tags as string[])].sort() : [];
+  return `scope:${JSON.stringify(scope)}|tags:${tags.join(',')}`;
 }
 
 export class MemoryAdapter implements StoragePort {
@@ -1353,6 +1373,8 @@ export class MemoryAdapter implements StoragePort {
 
   private cacheProposals: Map<string, StoredCacheProposal> = new Map();
   private cacheProposalAudit: Map<string, StoredCacheProposalAudit> = new Map();
+  private memoryProposals: Map<string, StoredMemoryProposal> = new Map();
+  private memoryProposalAudit: Map<string, StoredMemoryProposalAudit> = new Map();
   private captureSessions: Map<string, StoredCaptureSession> = new Map();
   private captureChunks: StoredCaptureChunk[] = [];
   private captureTriggers: Map<string, StoredCaptureTrigger> = new Map();
@@ -1511,6 +1533,123 @@ export class MemoryAdapter implements StoragePort {
       .filter((a) => a.proposal_id === proposalId)
       .sort((a, b) => a.event_at - b.event_at)
       .map((a) => this.cloneAudit(a));
+  }
+
+  async createMemoryProposal(input: CreateMemoryProposalInput): Promise<StoredMemoryProposal> {
+    const discriminator = memoryProposalTargetDiscriminator(input.proposal_payload);
+    for (const existing of this.memoryProposals.values()) {
+      if (
+        existing.status === 'pending' &&
+        existing.connection_id === input.connection_id &&
+        existing.store_name === input.store_name &&
+        memoryProposalTargetDiscriminator(existing.proposal_payload) === discriminator
+      ) {
+        throw new Error(
+          `UNIQUE constraint failed: memory_proposals (connection_id, store_name, target) where status='pending'`,
+        );
+      }
+    }
+    const proposedAt = input.proposed_at ?? Date.now();
+    const expiresAt = input.expires_at ?? proposedAt + MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS;
+    const proposal: StoredMemoryProposal = structuredClone({
+      ...input,
+      reasoning: input.reasoning ?? null,
+      status: 'pending',
+      proposed_by: input.proposed_by ?? null,
+      proposed_at: proposedAt,
+      reviewed_by: null,
+      reviewed_at: null,
+      applied_at: null,
+      applied_result: null,
+      expires_at: expiresAt,
+    });
+    this.memoryProposals.set(proposal.id, proposal);
+    return structuredClone(proposal);
+  }
+
+  async getMemoryProposal(id: string): Promise<StoredMemoryProposal | null> {
+    const found = this.memoryProposals.get(id);
+    return found ? structuredClone(found) : null;
+  }
+
+  async listMemoryProposals(options: ListMemoryProposalsOptions): Promise<StoredMemoryProposal[]> {
+    if (Array.isArray(options.status) && options.status.length === 0) {
+      return [];
+    }
+    let filtered = [...this.memoryProposals.values()].filter(
+      (p) => p.connection_id === options.connection_id,
+    );
+    if (options.status !== undefined) {
+      const statuses = Array.isArray(options.status) ? options.status : [options.status];
+      filtered = filtered.filter((p) => statuses.includes(p.status));
+    }
+    if (options.store_name) {
+      filtered = filtered.filter((p) => p.store_name === options.store_name);
+    }
+    filtered.sort((a, b) => b.proposed_at - a.proposed_at);
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    return filtered.slice(offset, offset + limit).map((p) => structuredClone(p));
+  }
+
+  async updateMemoryProposalStatus(
+    input: UpdateMemoryProposalStatusInput,
+  ): Promise<StoredMemoryProposal | null> {
+    const existing = this.memoryProposals.get(input.id);
+    if (!existing) {
+      return null;
+    }
+    if (input.expected_status !== undefined) {
+      const allowed = Array.isArray(input.expected_status)
+        ? input.expected_status
+        : [input.expected_status];
+      if (allowed.length === 0 || !allowed.includes(existing.status)) {
+        return null;
+      }
+    }
+    const updated = structuredClone(existing);
+    updated.status = input.status;
+    if (input.reviewed_by !== undefined) {
+      updated.reviewed_by = input.reviewed_by;
+    }
+    if (input.reviewed_at !== undefined) {
+      updated.reviewed_at = input.reviewed_at;
+    }
+    if (input.applied_at !== undefined) {
+      updated.applied_at = input.applied_at;
+    }
+    if (input.applied_result !== undefined) {
+      updated.applied_result =
+        input.applied_result === null ? null : structuredClone(input.applied_result);
+    }
+    if (input.proposal_payload !== undefined) {
+      updated.proposal_payload = structuredClone(input.proposal_payload);
+    }
+    this.memoryProposals.set(input.id, updated);
+    return structuredClone(updated);
+  }
+
+  async appendMemoryProposalAudit(
+    input: AppendMemoryProposalAuditInput,
+  ): Promise<StoredMemoryProposalAudit> {
+    const audit: StoredMemoryProposalAudit = structuredClone({
+      id: input.id,
+      proposal_id: input.proposal_id,
+      event_type: input.event_type,
+      event_payload: input.event_payload ?? null,
+      event_at: input.event_at ?? Date.now(),
+      actor: input.actor ?? null,
+      actor_source: input.actor_source,
+    });
+    this.memoryProposalAudit.set(audit.id, audit);
+    return structuredClone(audit);
+  }
+
+  async getMemoryProposalAudit(proposalId: string): Promise<StoredMemoryProposalAudit[]> {
+    return [...this.memoryProposalAudit.values()]
+      .filter((a) => a.proposal_id === proposalId)
+      .sort((a, b) => a.event_at - b.event_at)
+      .map((a) => structuredClone(a));
   }
 
   async saveCaptureSession(
