@@ -1,10 +1,24 @@
 import { z } from 'zod';
 import {
-  ProposalStatusSchema,
   ProposalAuditEventSchema,
   ActorSourceSchema,
   AppliedResultSchema,
 } from './cache-proposals';
+
+// Memory proposals add an intermediate `applying` state between `approved` and
+// `applied`: the forget is claimed (approved -> applying) before it runs, and
+// only reaches `applied` once the deletion succeeds. A crash mid-apply therefore
+// leaves a visible `applying` row rather than a false `applied`.
+export const MemoryProposalStatusSchema = z.enum([
+  'pending',
+  'approved',
+  'applying',
+  'applied',
+  'failed',
+  'rejected',
+  'expired',
+]);
+export type MemoryProposalStatus = z.infer<typeof MemoryProposalStatusSchema>;
 
 export const MemoryProposalTypeSchema = z.literal('forget');
 export type MemoryProposalType = z.infer<typeof MemoryProposalTypeSchema>;
@@ -66,7 +80,7 @@ export const StoredMemoryProposalSchema = z.object({
   connection_id: z.string(),
   store_name: z.string(),
   reasoning: z.string().nullable(),
-  status: ProposalStatusSchema,
+  status: MemoryProposalStatusSchema,
   proposed_by: z.string().nullable(),
   proposed_at: epochMs,
   reviewed_by: z.string().nullable(),
@@ -105,7 +119,7 @@ export type CreateMemoryProposalInput = z.infer<typeof CreateMemoryProposalInput
 
 export const ListMemoryProposalsOptionsSchema = z.object({
   connection_id: z.string(),
-  status: z.union([ProposalStatusSchema, z.array(ProposalStatusSchema)]).optional(),
+  status: z.union([MemoryProposalStatusSchema, z.array(MemoryProposalStatusSchema)]).optional(),
   store_name: z.string().optional(),
   limit: z.number().int().min(1).max(1000).optional(),
   offset: z.number().int().min(0).optional(),
@@ -114,8 +128,10 @@ export type ListMemoryProposalsOptions = z.infer<typeof ListMemoryProposalsOptio
 
 export const UpdateMemoryProposalStatusInputSchema = z.object({
   id: z.string(),
-  expected_status: z.union([ProposalStatusSchema, z.array(ProposalStatusSchema)]).optional(),
-  status: ProposalStatusSchema,
+  expected_status: z
+    .union([MemoryProposalStatusSchema, z.array(MemoryProposalStatusSchema)])
+    .optional(),
+  status: MemoryProposalStatusSchema,
   reviewed_by: z.string().nullish(),
   reviewed_at: z.number().nullish(),
   applied_at: z.number().nullish(),

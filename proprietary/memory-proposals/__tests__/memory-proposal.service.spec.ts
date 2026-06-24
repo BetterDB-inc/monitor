@@ -132,8 +132,10 @@ describe('MemoryProposalService.approve', () => {
     ]);
 
     expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(a.proposal.status).toBe('applied');
-    expect(b.proposal.status).toBe('applied');
+    const final = await storage.getMemoryProposal(proposal.id);
+    expect(final?.status).toBe('applied');
+    // Exactly one caller drove the apply to completion; the loser never re-ran forget.
+    expect([a.proposal.status, b.proposal.status]).toContain('applied');
   });
 });
 

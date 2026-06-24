@@ -1681,7 +1681,7 @@ export class PostgresAdapter implements StoragePort {
         applied_result JSONB,
         expires_at BIGINT NOT NULL,
         CHECK (proposal_type = 'forget'),
-        CHECK (status IN ('pending','approved','rejected','applied','failed','expired'))
+        CHECK (status IN ('pending','approved','applying','applied','failed','rejected','expired'))
       );
 
       CREATE INDEX IF NOT EXISTS idx_memory_proposals_conn_status_proposed

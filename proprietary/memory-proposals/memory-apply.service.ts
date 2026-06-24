@@ -33,17 +33,19 @@ export class MemoryApplyService {
     }
 
     // Atomically claim the proposal before dispatching so two concurrent
-    // approvals cannot run the forget twice: only the first `approved -> applied`
-    // transition wins; the loser returns the persisted result without dispatching.
+    // approvals cannot run the forget twice: only the first `approved -> applying`
+    // transition wins. Status stays `applying` (not `applied`) until the forget
+    // actually completes, so a crash mid-apply leaves a visible in-flight row
+    // rather than a false success; the loser returns the persisted state without
+    // dispatching.
     const claimed = await this.storage.updateMemoryProposalStatus({
       id: approved.id,
       expected_status: ['approved'],
-      status: 'applied',
+      status: 'applying',
     });
     if (claimed === null) {
       const current = (await this.storage.getMemoryProposal(approved.id)) ?? approved;
-      const cached = current.applied_result ?? { success: current.status === 'applied' };
-      return { proposal: current, appliedResult: cached };
+      return { proposal: current, appliedResult: resultFor(current) };
     }
 
     const appliedAt = Date.now();
@@ -59,7 +61,7 @@ export class MemoryApplyService {
       };
       const updated = await this.storage.updateMemoryProposalStatus({
         id: approved.id,
-        expected_status: ['applied'],
+        expected_status: ['applying'],
         status: 'applied',
         applied_at: appliedAt,
         applied_result: appliedResult,
@@ -76,7 +78,7 @@ export class MemoryApplyService {
       };
       const updated = await this.storage.updateMemoryProposalStatus({
         id: approved.id,
-        expected_status: ['applied'],
+        expected_status: ['applying'],
         status: 'failed',
         applied_at: appliedAt,
         applied_result: appliedResult,
@@ -102,4 +104,14 @@ export class MemoryApplyService {
       actor_source: context.actorSource,
     });
   }
+}
+
+function resultFor(proposal: StoredMemoryProposal): AppliedResult {
+  if (proposal.status === 'applied') {
+    return proposal.applied_result ?? { success: true };
+  }
+  if (proposal.status === 'failed') {
+    return proposal.applied_result ?? { success: false };
+  }
+  return proposal.applied_result ?? { success: false, details: { status: proposal.status } };
 }

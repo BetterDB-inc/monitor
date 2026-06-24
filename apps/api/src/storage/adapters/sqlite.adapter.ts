@@ -1434,7 +1434,7 @@ export class SqliteAdapter implements StoragePort {
         proposal_type TEXT NOT NULL CHECK (proposal_type = 'forget'),
         proposal_payload TEXT NOT NULL,
         reasoning TEXT,
-        status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','applied','failed','expired')),
+        status TEXT NOT NULL CHECK (status IN ('pending','approved','applying','applied','failed','rejected','expired')),
         proposed_by TEXT,
         proposed_at INTEGER NOT NULL,
         reviewed_by TEXT,
