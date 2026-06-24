@@ -94,13 +94,15 @@ describe('McpMemoryService read delegations', () => {
     });
     const svc = new McpMemoryService(makeRegistry(call));
 
+    // Caller does NOT opt out of reinforcement; the read endpoint must force it off.
     const hits = await svc.recall('inst1', 'demo', [0, 1, 0, 0, 0, 0, 0, 0], {
       threadId: 't1',
-      reinforce: false,
     });
 
     expect(hits.map((h) => h.item.id)).toEqual(['a']);
     const search = call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
     expect(String(search?.[2])).toContain('KNN');
+    const reinforced = call.mock.calls.some((c) => c[0] === 'HINCRBY' || c[0] === 'HSET');
+    expect(reinforced).toBe(false);
   });
 });

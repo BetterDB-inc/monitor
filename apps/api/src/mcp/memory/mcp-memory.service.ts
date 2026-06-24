@@ -60,7 +60,7 @@ export class McpMemoryService {
     vector: number[],
     options: RecallOptions,
   ): Promise<MemoryHit[]> {
-    return this.buildStore(id, name).recallByVector(vector, options);
+    return this.buildStore(id, name).recallByVector(vector, { ...options, reinforce: false });
   }
 
   async discoverStores(id: string): Promise<MemoryStoreInfo[]> {
