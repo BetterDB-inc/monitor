@@ -75,6 +75,17 @@ import {
   StoredCacheProposalSchema,
   StoredCacheProposalAuditSchema,
   variantPayloadSchemaFor,
+  MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
+  StoredMemoryProposalSchema,
+  StoredMemoryProposalAuditSchema,
+} from '@betterdb/shared';
+import type {
+  StoredMemoryProposal,
+  StoredMemoryProposalAudit,
+  CreateMemoryProposalInput,
+  ListMemoryProposalsOptions,
+  UpdateMemoryProposalStatusInput,
+  AppendMemoryProposalAuditInput,
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
@@ -138,6 +149,33 @@ interface CacheProposalRow {
 }
 
 interface CacheProposalAuditRow {
+  id: string;
+  proposal_id: string;
+  event_type: ProposalAuditEvent;
+  event_payload: string | null;
+  event_at: number;
+  actor: string | null;
+  actor_source: ActorSource;
+}
+
+interface MemoryProposalRow {
+  id: string;
+  connection_id: string;
+  store_name: string;
+  proposal_type: 'forget';
+  proposal_payload: string;
+  reasoning: string | null;
+  status: ProposalStatus;
+  proposed_by: string | null;
+  proposed_at: number;
+  reviewed_by: string | null;
+  reviewed_at: number | null;
+  applied_at: number | null;
+  applied_result: string | null;
+  expires_at: number;
+}
+
+interface MemoryProposalAuditRow {
   id: string;
   proposal_id: string;
   event_type: ProposalAuditEvent;
@@ -1388,6 +1426,42 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_cache_proposal_audit_proposal
         ON cache_proposal_audit(proposal_id, event_at DESC);
+
+      CREATE TABLE IF NOT EXISTS memory_proposals (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        store_name TEXT NOT NULL,
+        proposal_type TEXT NOT NULL CHECK (proposal_type = 'forget'),
+        proposal_payload TEXT NOT NULL,
+        reasoning TEXT,
+        status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','applied','failed','expired')),
+        proposed_by TEXT,
+        proposed_at INTEGER NOT NULL,
+        reviewed_by TEXT,
+        reviewed_at INTEGER,
+        applied_at INTEGER,
+        applied_result TEXT,
+        expires_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_proposals_conn_status_proposed
+        ON memory_proposals(connection_id, status, proposed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_proposals_pending_lookup
+        ON memory_proposals(connection_id, store_name)
+        WHERE status = 'pending';
+
+      CREATE TABLE IF NOT EXISTS memory_proposal_audit (
+        id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL REFERENCES memory_proposals(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL CHECK (event_type IN ('proposed','approved','rejected','edited_and_approved','applied','failed','expired','outcome_evaluated')),
+        event_payload TEXT,
+        event_at INTEGER NOT NULL,
+        actor TEXT,
+        actor_source TEXT NOT NULL CHECK (actor_source IN ('ui','mcp','system'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_proposal_audit_proposal
+        ON memory_proposal_audit(proposal_id, event_at DESC);
 
       -- Monitor Capture Sessions Table
       CREATE TABLE IF NOT EXISTS capture_sessions (
@@ -3692,6 +3766,188 @@ export class SqliteAdapter implements StoragePort {
       )
       .all(proposalId) as CacheProposalAuditRow[];
     return rows.map((row) => this.mapCacheProposalAuditRow(row));
+  }
+
+  private mapMemoryProposalRow(row: MemoryProposalRow): StoredMemoryProposal {
+    return StoredMemoryProposalSchema.parse(row);
+  }
+
+  private mapMemoryProposalAuditRow(row: MemoryProposalAuditRow): StoredMemoryProposalAudit {
+    return StoredMemoryProposalAuditSchema.parse(row);
+  }
+
+  async createMemoryProposal(input: CreateMemoryProposalInput): Promise<StoredMemoryProposal> {
+    if (!this.db) throw new Error('Database not initialized');
+    const proposedAt = input.proposed_at ?? Date.now();
+    const expiresAt = input.expires_at ?? proposedAt + MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS;
+    this.db
+      .prepare(
+        `INSERT INTO memory_proposals (
+          id, connection_id, store_name, proposal_type,
+          proposal_payload, reasoning, status, proposed_by, proposed_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      )
+      .run(
+        input.id,
+        input.connection_id,
+        input.store_name,
+        input.proposal_type,
+        JSON.stringify(input.proposal_payload),
+        input.reasoning ?? null,
+        input.proposed_by ?? null,
+        proposedAt,
+        expiresAt,
+      );
+    const row = this.db
+      .prepare('SELECT * FROM memory_proposals WHERE id = ?')
+      .get(input.id) as MemoryProposalRow;
+    return this.mapMemoryProposalRow(row);
+  }
+
+  async getMemoryProposal(id: string): Promise<StoredMemoryProposal | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare('SELECT * FROM memory_proposals WHERE id = ?')
+      .get(id) as MemoryProposalRow | undefined;
+    if (!row) {
+      return null;
+    }
+    return this.mapMemoryProposalRow(row);
+  }
+
+  async listMemoryProposals(options: ListMemoryProposalsOptions): Promise<StoredMemoryProposal[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (Array.isArray(options.status) && options.status.length === 0) {
+      return [];
+    }
+    const conditions: string[] = ['connection_id = ?'];
+    const params: (string | number)[] = [options.connection_id];
+
+    if (options.status !== undefined) {
+      const statuses = Array.isArray(options.status) ? options.status : [options.status];
+      const placeholders = statuses.map(() => '?').join(', ');
+      conditions.push(`status IN (${placeholders})`);
+      params.push(...statuses);
+    }
+    if (options.store_name) {
+      conditions.push('store_name = ?');
+      params.push(options.store_name);
+    }
+
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_proposals
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY proposed_at DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as MemoryProposalRow[];
+    return rows.map((row) => this.mapMemoryProposalRow(row));
+  }
+
+  async updateMemoryProposalStatus(
+    input: UpdateMemoryProposalStatusInput,
+  ): Promise<StoredMemoryProposal | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (input.expected_status !== undefined) {
+      const existing = await this.getMemoryProposal(input.id);
+      if (existing === null) {
+        return null;
+      }
+      const allowed = Array.isArray(input.expected_status)
+        ? input.expected_status
+        : [input.expected_status];
+      if (allowed.length === 0 || !allowed.includes(existing.status)) {
+        return null;
+      }
+    }
+    const sets: string[] = ['status = ?'];
+    const params: (string | number | null)[] = [input.status];
+    const whereClauses: string[] = ['id = ?'];
+    const whereParams: (string | number)[] = [];
+
+    if (input.reviewed_by !== undefined) {
+      sets.push('reviewed_by = ?');
+      params.push(input.reviewed_by);
+    }
+    if (input.reviewed_at !== undefined) {
+      sets.push('reviewed_at = ?');
+      params.push(input.reviewed_at);
+    }
+    if (input.applied_at !== undefined) {
+      sets.push('applied_at = ?');
+      params.push(input.applied_at);
+    }
+    if (input.applied_result !== undefined) {
+      sets.push('applied_result = ?');
+      params.push(input.applied_result === null ? null : JSON.stringify(input.applied_result));
+    }
+    if (input.proposal_payload !== undefined) {
+      sets.push('proposal_payload = ?');
+      params.push(JSON.stringify(input.proposal_payload));
+    }
+
+    whereParams.push(input.id);
+
+    if (input.expected_status !== undefined) {
+      const expected = Array.isArray(input.expected_status)
+        ? input.expected_status
+        : [input.expected_status];
+      if (expected.length === 0) {
+        return null;
+      }
+      const placeholders = expected.map(() => '?').join(', ');
+      whereClauses.push(`status IN (${placeholders})`);
+      whereParams.push(...expected);
+    }
+
+    const result = this.db
+      .prepare(
+        `UPDATE memory_proposals SET ${sets.join(', ')} WHERE ${whereClauses.join(' AND ')}`,
+      )
+      .run(...params, ...whereParams);
+    if (result.changes === 0) {
+      return null;
+    }
+    return this.getMemoryProposal(input.id);
+  }
+
+  async appendMemoryProposalAudit(
+    input: AppendMemoryProposalAuditInput,
+  ): Promise<StoredMemoryProposalAudit> {
+    if (!this.db) throw new Error('Database not initialized');
+    const eventAt = input.event_at ?? Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO memory_proposal_audit (
+          id, proposal_id, event_type, event_payload, event_at, actor, actor_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.id,
+        input.proposal_id,
+        input.event_type,
+        input.event_payload == null ? null : JSON.stringify(input.event_payload),
+        eventAt,
+        input.actor ?? null,
+        input.actor_source,
+      );
+    const row = this.db
+      .prepare('SELECT * FROM memory_proposal_audit WHERE id = ?')
+      .get(input.id) as MemoryProposalAuditRow;
+    return this.mapMemoryProposalAuditRow(row);
+  }
+
+  async getMemoryProposalAudit(proposalId: string): Promise<StoredMemoryProposalAudit[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM memory_proposal_audit WHERE proposal_id = ? ORDER BY event_at ASC',
+      )
+      .all(proposalId) as MemoryProposalAuditRow[];
+    return rows.map((row) => this.mapMemoryProposalAuditRow(row));
   }
 
   async saveCaptureSession(
