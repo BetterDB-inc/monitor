@@ -91,6 +91,29 @@ class MemoryConfigSnapshot:
 
 
 @dataclass
+class MemoryStats:
+    item_count: int
+    evictions: int
+    config: MemoryConfigSnapshot
+
+
+@dataclass
+class MemoryListOptions:
+    thread_id: str | None = None
+    agent_id: str | None = None
+    namespace: str | None = None
+    tags: list[str] | None = None
+    limit: int | None = None
+    offset: int | None = None
+
+
+@dataclass
+class MemoryListResult:
+    items: list[MemoryItem]
+    total: int
+
+
+@dataclass
 class AgentMemoryRecallConfig:
     weights: RecallWeights | None = None
     half_life_seconds: float | None = None

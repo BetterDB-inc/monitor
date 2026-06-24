@@ -9,6 +9,12 @@ from .types import MemoryScope
 SCORE_FIELD = "__score"
 VECTOR_FIELD = "vector"
 
+# valkey-search rejects a bare '*' on VECTOR-schema indexes with
+# "Invalid query string syntax". Every memory record has created_at
+# (set at write time), so this numeric range matches all documents
+# and is accepted by the vector index schema.
+MATCH_ALL_MEMORY_QUERY = "@created_at:[-inf +inf]"
+
 
 def _scope_clauses(scope: MemoryScope, tags: list[str]) -> list[str]:
     clauses: list[str] = []
@@ -25,7 +31,7 @@ def _scope_clauses(scope: MemoryScope, tags: list[str]) -> list[str]:
 
 def _join_clauses(clauses: list[str]) -> str:
     if len(clauses) == 0:
-        return "*"
+        return MATCH_ALL_MEMORY_QUERY
     return f"({' '.join(clauses)})"
 
 

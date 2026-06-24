@@ -49,7 +49,9 @@ def test_indexes_scope_tag_fields_and_tags_separator() -> None:
 
 def test_indexes_numeric_tunables_and_content_text() -> None:
     joined = " ".join(build_memory_index_args("mem", 16))
-    for field in ["importance", "created_at", "last_accessed_at", "access_count"]:
+    assert "importance NUMERIC" in joined
+    assert "created_at NUMERIC SORTABLE" in joined
+    for field in ["last_accessed_at", "access_count"]:
         assert f"{field} NUMERIC" in joined
     assert "content TEXT" in joined
 

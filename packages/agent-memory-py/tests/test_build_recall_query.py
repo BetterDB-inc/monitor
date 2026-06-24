@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from betterdb_agent_memory.build_recall_query import (
+    MATCH_ALL_MEMORY_QUERY,
     ConsolidateFilterOptions,
     build_consolidate_filter,
     build_recall_query,
@@ -8,8 +9,11 @@ from betterdb_agent_memory.build_recall_query import (
 from betterdb_agent_memory.types import MemoryScope
 
 
-def test_bare_knn_query_without_filters() -> None:
-    assert build_recall_query(32, MemoryScope(), []) == "*=>[KNN 32 @vector $vec AS __score]"
+def test_match_all_query_without_filters() -> None:
+    assert (
+        build_recall_query(32, MemoryScope(), [])
+        == f"{MATCH_ALL_MEMORY_QUERY}=>[KNN 32 @vector $vec AS __score]"
+    )
 
 
 def test_filters_by_scope_and_tags_with_and_semantics() -> None:

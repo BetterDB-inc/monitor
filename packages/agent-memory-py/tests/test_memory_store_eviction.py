@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from betterdb_agent_memory import MemoryStore
+from betterdb_agent_memory import MATCH_ALL_MEMORY_QUERY, MemoryStore
 from betterdb_agent_memory.types import RecallWeights
 
 from .conftest import fake_client, fake_embed, ft_reply, now_ms
@@ -146,7 +146,7 @@ async def test_partitions_capacity_by_tags() -> None:
     search = client.find_call("FT.SEARCH")
     assert search is not None
     assert search[2] == "(@tags:{teamx})"
-    assert search[2] != "*"
+    assert search[2] != MATCH_ALL_MEMORY_QUERY
 
 
 async def test_does_not_evict_or_fetch_candidates_within_capacity() -> None:
