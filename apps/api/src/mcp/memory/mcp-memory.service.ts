@@ -1,5 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import { MemoryStore, type MemoryStoreClient } from '@betterdb/agent-memory';
+import {
+  MemoryStore,
+  type MemoryStoreClient,
+  type MemoryListOptions,
+  type MemoryListResult,
+  type MemoryItem,
+  type MemoryStats,
+} from '@betterdb/agent-memory';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 
 const REGISTRY_KEY = '__betterdb:caches';
@@ -31,6 +38,18 @@ export class McpMemoryService {
 
   buildStore(id: string, name: string): MemoryStore {
     return new MemoryStore({ client: this.rawClient(id), name });
+  }
+
+  async list(id: string, name: string, options: MemoryListOptions): Promise<MemoryListResult> {
+    return this.buildStore(id, name).list(options);
+  }
+
+  async get(id: string, name: string, memoryId: string): Promise<MemoryItem | null> {
+    return this.buildStore(id, name).get(memoryId);
+  }
+
+  async stats(id: string, name: string): Promise<MemoryStats> {
+    return this.buildStore(id, name).stats();
   }
 
   async discoverStores(id: string): Promise<MemoryStoreInfo[]> {

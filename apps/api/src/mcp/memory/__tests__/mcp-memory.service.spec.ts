@@ -38,3 +38,32 @@ describe('McpMemoryService.discoverStores', () => {
     ]);
   });
 });
+
+describe('McpMemoryService read delegations', () => {
+  function searchReply(rows: Array<{ key: string; fields: Record<string, string> }>): unknown[] {
+    const out: unknown[] = [String(rows.length)];
+    for (const row of rows) {
+      const flat: string[] = [];
+      for (const [k, v] of Object.entries(row.fields)) {
+        flat.push(k, v);
+      }
+      out.push(row.key, flat);
+    }
+    return out;
+  }
+
+  it('list delegates to MemoryStore.list against the instance client', async () => {
+    const reply = searchReply([{ key: 'demo:mem:a', fields: { content: 'x', created_at: '100' } }]);
+    const call = jest.fn(async (cmd: string, ..._args: unknown[]) =>
+      cmd === 'FT.SEARCH' ? reply : 'OK',
+    );
+    const svc = new McpMemoryService(makeRegistry(call));
+
+    const res = await svc.list('inst1', 'demo', { threadId: 't1' });
+
+    expect(res.total).toBe(1);
+    expect(res.items[0].id).toBe('a');
+    const search = call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
+    expect(search?.[1]).toBe('demo:mem:idx');
+  });
+});
