@@ -71,6 +71,17 @@ import {
   StoredCacheProposalSchema,
   StoredCacheProposalAuditSchema,
   variantPayloadSchemaFor,
+  MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
+  StoredMemoryProposalSchema,
+  StoredMemoryProposalAuditSchema,
+} from '@betterdb/shared';
+import type {
+  StoredMemoryProposal,
+  StoredMemoryProposalAudit,
+  CreateMemoryProposalInput,
+  ListMemoryProposalsOptions,
+  UpdateMemoryProposalStatusInput,
+  AppendMemoryProposalAuditInput,
 } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
@@ -106,6 +117,33 @@ interface CacheProposalRow {
 }
 
 interface CacheProposalAuditRow {
+  id: string;
+  proposal_id: string;
+  event_type: ProposalAuditEvent;
+  event_payload: PgJsonb<Record<string, unknown>> | null;
+  event_at: PgNumeric;
+  actor: string | null;
+  actor_source: ActorSource;
+}
+
+interface MemoryProposalRow {
+  id: string;
+  connection_id: string;
+  store_name: string;
+  proposal_type: 'forget';
+  proposal_payload: PgJsonb<Record<string, unknown>>;
+  reasoning: string | null;
+  status: ProposalStatus;
+  proposed_by: string | null;
+  proposed_at: PgNumeric;
+  reviewed_by: string | null;
+  reviewed_at: PgNumeric | null;
+  applied_at: PgNumeric | null;
+  applied_result: PgJsonb<AppliedResult> | null;
+  expires_at: PgNumeric;
+}
+
+interface MemoryProposalAuditRow {
   id: string;
   proposal_id: string;
   event_type: ProposalAuditEvent;
@@ -1626,6 +1664,46 @@ export class PostgresAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_cache_proposal_audit_proposal
         ON cache_proposal_audit(proposal_id, event_at DESC);
+
+      CREATE TABLE IF NOT EXISTS memory_proposals (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        store_name TEXT NOT NULL,
+        proposal_type TEXT NOT NULL,
+        proposal_payload JSONB NOT NULL,
+        reasoning TEXT,
+        status TEXT NOT NULL,
+        proposed_by TEXT,
+        proposed_at BIGINT NOT NULL,
+        reviewed_by TEXT,
+        reviewed_at BIGINT,
+        applied_at BIGINT,
+        applied_result JSONB,
+        expires_at BIGINT NOT NULL,
+        CHECK (proposal_type = 'forget'),
+        CHECK (status IN ('pending','approved','rejected','applied','failed','expired'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_proposals_conn_status_proposed
+        ON memory_proposals(connection_id, status, proposed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_proposals_pending_lookup
+        ON memory_proposals(connection_id, store_name)
+        WHERE status = 'pending';
+
+      CREATE TABLE IF NOT EXISTS memory_proposal_audit (
+        id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL REFERENCES memory_proposals(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL,
+        event_payload JSONB,
+        event_at BIGINT NOT NULL,
+        actor TEXT,
+        actor_source TEXT NOT NULL,
+        CHECK (event_type IN ('proposed','approved','rejected','edited_and_approved','applied','failed','expired','outcome_evaluated')),
+        CHECK (actor_source IN ('ui','mcp','system'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_proposal_audit_proposal
+        ON memory_proposal_audit(proposal_id, event_at DESC);
 
       -- Monitor Capture Sessions Table
       CREATE TABLE IF NOT EXISTS capture_sessions (
@@ -3956,6 +4034,184 @@ export class PostgresAdapter implements StoragePort {
       [proposalId],
     );
     return result.rows.map((row: CacheProposalAuditRow) => this.mapCacheProposalAuditRow(row));
+  }
+
+  private mapMemoryProposalRow(row: MemoryProposalRow): StoredMemoryProposal {
+    return StoredMemoryProposalSchema.parse(row);
+  }
+
+  private mapMemoryProposalAuditRow(row: MemoryProposalAuditRow): StoredMemoryProposalAudit {
+    return StoredMemoryProposalAuditSchema.parse(row);
+  }
+
+  async createMemoryProposal(input: CreateMemoryProposalInput): Promise<StoredMemoryProposal> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const proposedAt = input.proposed_at ?? Date.now();
+    const expiresAt = input.expires_at ?? proposedAt + MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS;
+    const result = await this.pool.query(
+      `INSERT INTO memory_proposals (
+        id, connection_id, store_name, proposal_type,
+        proposal_payload, reasoning, status, proposed_by, proposed_at, expires_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9)
+      RETURNING *`,
+      [
+        input.id,
+        input.connection_id,
+        input.store_name,
+        input.proposal_type,
+        JSON.stringify(input.proposal_payload),
+        input.reasoning ?? null,
+        input.proposed_by ?? null,
+        proposedAt,
+        expiresAt,
+      ],
+    );
+    return this.mapMemoryProposalRow(result.rows[0]);
+  }
+
+  async getMemoryProposal(id: string): Promise<StoredMemoryProposal | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query('SELECT * FROM memory_proposals WHERE id = $1', [id]);
+    if (result.rows.length === 0) {
+      return null;
+    }
+    return this.mapMemoryProposalRow(result.rows[0]);
+  }
+
+  async listMemoryProposals(options: ListMemoryProposalsOptions): Promise<StoredMemoryProposal[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (Array.isArray(options.status) && options.status.length === 0) {
+      return [];
+    }
+    const conditions: string[] = ['connection_id = $1'];
+    const params: unknown[] = [options.connection_id];
+    let idx = 2;
+
+    if (options.status !== undefined) {
+      const statuses = Array.isArray(options.status) ? options.status : [options.status];
+      const placeholders = statuses.map(() => `$${idx++}`).join(', ');
+      conditions.push(`status IN (${placeholders})`);
+      params.push(...statuses);
+    }
+    if (options.store_name) {
+      conditions.push(`store_name = $${idx++}`);
+      params.push(options.store_name);
+    }
+
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    const limitIdx = idx;
+    const offsetIdx = idx + 1;
+    const query = `
+      SELECT * FROM memory_proposals
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY proposed_at DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+    `;
+    params.push(limit, offset);
+
+    const result = await this.pool.query(query, params);
+    return result.rows.map((row: MemoryProposalRow) => this.mapMemoryProposalRow(row));
+  }
+
+  async updateMemoryProposalStatus(
+    input: UpdateMemoryProposalStatusInput,
+  ): Promise<StoredMemoryProposal | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (input.expected_status !== undefined) {
+      const existing = await this.getMemoryProposal(input.id);
+      if (existing === null) {
+        return null;
+      }
+      const allowed = Array.isArray(input.expected_status)
+        ? input.expected_status
+        : [input.expected_status];
+      if (allowed.length === 0 || !allowed.includes(existing.status)) {
+        return null;
+      }
+    }
+    const sets: string[] = ['status = $2'];
+    const params: unknown[] = [input.id, input.status];
+    let nextPlaceholder = 3;
+    const whereClauses: string[] = ['id = $1'];
+
+    if (input.expected_status !== undefined) {
+      const expected = Array.isArray(input.expected_status)
+        ? input.expected_status
+        : [input.expected_status];
+      if (expected.length === 0) {
+        return null;
+      }
+      const placeholders = expected.map(() => `$${nextPlaceholder++}`).join(', ');
+      whereClauses.push(`status IN (${placeholders})`);
+      params.push(...expected);
+    }
+
+    const pushSet = (column: string, value: unknown): void => {
+      sets.push(`${column} = $${nextPlaceholder}`);
+      params.push(value);
+      nextPlaceholder += 1;
+    };
+
+    if (input.reviewed_by !== undefined) {
+      pushSet('reviewed_by', input.reviewed_by);
+    }
+    if (input.reviewed_at !== undefined) {
+      pushSet('reviewed_at', input.reviewed_at);
+    }
+    if (input.applied_at !== undefined) {
+      pushSet('applied_at', input.applied_at);
+    }
+    if (input.applied_result !== undefined) {
+      pushSet(
+        'applied_result',
+        input.applied_result === null ? null : JSON.stringify(input.applied_result),
+      );
+    }
+    if (input.proposal_payload !== undefined) {
+      pushSet('proposal_payload', JSON.stringify(input.proposal_payload));
+    }
+
+    const result = await this.pool.query(
+      `UPDATE memory_proposals SET ${sets.join(', ')} WHERE ${whereClauses.join(' AND ')} RETURNING *`,
+      params,
+    );
+    if (result.rows.length === 0) {
+      return null;
+    }
+    return this.mapMemoryProposalRow(result.rows[0]);
+  }
+
+  async appendMemoryProposalAudit(
+    input: AppendMemoryProposalAuditInput,
+  ): Promise<StoredMemoryProposalAudit> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const eventAt = input.event_at ?? Date.now();
+    const result = await this.pool.query(
+      `INSERT INTO memory_proposal_audit (
+        id, proposal_id, event_type, event_payload, event_at, actor, actor_source
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *`,
+      [
+        input.id,
+        input.proposal_id,
+        input.event_type,
+        input.event_payload == null ? null : JSON.stringify(input.event_payload),
+        eventAt,
+        input.actor ?? null,
+        input.actor_source,
+      ],
+    );
+    return this.mapMemoryProposalAuditRow(result.rows[0]);
+  }
+
+  async getMemoryProposalAudit(proposalId: string): Promise<StoredMemoryProposalAudit[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      'SELECT * FROM memory_proposal_audit WHERE proposal_id = $1 ORDER BY event_at ASC',
+      [proposalId],
+    );
+    return result.rows.map((row: MemoryProposalAuditRow) => this.mapMemoryProposalAuditRow(row));
   }
 
   async saveCaptureSession(
