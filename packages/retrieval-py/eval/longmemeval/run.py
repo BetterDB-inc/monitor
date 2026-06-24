@@ -42,45 +42,47 @@ async def main() -> None:
     else:
         embedder = create_mock_embedder()
 
-    # STORE seam.
+    # STORE seam. Everything after the store is opened runs under try/finally so
+    # a failure in dataset loading or the banner prints still closes the live
+    # Valkey connection rather than leaking it.
     store: Optional[Store] = await create_real_store(valkey_url)
     if store is None:
         store = create_mock_store()
 
-    # READER + JUDGE seams (Tier 2 only).
-    reader: Optional[Reader] = None
-    judge: Optional[Judge] = None
-    if qa:
-        if api_key:
-            reader = create_openai_reader(api_key)
-            judge = create_openai_judge(api_key)
-        else:
-            reader = create_mock_reader()
-            judge = create_mock_judge()
-
-    records, source = load_dataset(data_path)
-
-    if qa:
-        tier = "Tier 2 (retrieval + QA)"
-    elif store.is_real or embedder.dims == 1536:
-        tier = "Tier 1 (real recall)"
-    else:
-        tier = "Tier 0 (offline)"
-
-    print("=" * 64)
-    print("LongMemEval retrieval harness — betterdb-retrieval")
-    print("=" * 64)
-    print(f"tier      : {tier}")
-    print(f"embedder  : {embedder.name}  (dims={embedder.dims})")
-    unreachable = "" if store.is_real else "  (Valkey unreachable → mock)"
-    print(f"store     : {store.name}{unreachable}")
-    print(f"reader    : {'disabled' if reader is None else reader.name}")
-    print(f"judge     : {'disabled' if judge is None else judge.name}")
-    print(f"dataset   : {source}  ({len(records)} records)")
-    print(f"params    : limit={limit} k={k} chunk={chunk_mode} qa={qa}")
-    print("=" * 64)
-
     try:
+        # READER + JUDGE seams (Tier 2 only).
+        reader: Optional[Reader] = None
+        judge: Optional[Judge] = None
+        if qa:
+            if api_key:
+                reader = create_openai_reader(api_key)
+                judge = create_openai_judge(api_key)
+            else:
+                reader = create_mock_reader()
+                judge = create_mock_judge()
+
+        records, source = load_dataset(data_path)
+
+        if qa:
+            tier = "Tier 2 (retrieval + QA)"
+        elif store.is_real or embedder.dims == 1536:
+            tier = "Tier 1 (real recall)"
+        else:
+            tier = "Tier 0 (offline)"
+
+        print("=" * 64)
+        print("LongMemEval retrieval harness — betterdb-retrieval")
+        print("=" * 64)
+        print(f"tier      : {tier}")
+        print(f"embedder  : {embedder.name}  (dims={embedder.dims})")
+        unreachable = "" if store.is_real else "  (Valkey unreachable → mock)"
+        print(f"store     : {store.name}{unreachable}")
+        print(f"reader    : {'disabled' if reader is None else reader.name}")
+        print(f"judge     : {'disabled' if judge is None else judge.name}")
+        print(f"dataset   : {source}  ({len(records)} records)")
+        print(f"params    : limit={limit} k={k} chunk={chunk_mode} qa={qa}")
+        print("=" * 64)
+
         summary = await run_eval(
             RunConfig(
                 records=records,
