@@ -133,6 +133,32 @@ describe('MemoryProposalService.approve', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it('does not mark failed when the forget succeeds but finalize bookkeeping throws', async () => {
+    const storage = new MemoryAdapter();
+    const realUpdate = storage.updateMemoryProposalStatus.bind(storage);
+    jest.spyOn(storage, 'updateMemoryProposalStatus').mockImplementation(async (input) => {
+      if (input.status === 'applied') {
+        throw new Error('db write failed');
+      }
+      return realUpdate(input);
+    });
+    const dispatch = jest.fn(async () => ({ actualAffected: 1, durationMs: 1, details: {} }));
+    const applyService = new MemoryApplyService(storage, {
+      dispatch,
+    } as unknown as MemoryApplyDispatcher);
+    const service = new MemoryProposalService(storage, applyService);
+    const { proposal } = await service.proposeForget(CONNECTION_ID, {
+      storeName: STORE,
+      reasoning: REASON,
+      memoryId: 'm1',
+    });
+
+    const res = await service.approve({ proposalId: proposal.id, actor: null, actorSource: 'mcp' });
+    expect(res.appliedResult.success).toBe(true);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect((await storage.getMemoryProposal(proposal.id))?.status).not.toBe('failed');
+  });
+
   it('claims the proposal so a concurrent approve cannot dispatch the forget twice', async () => {
     const { service, storage, applyService, dispatch } = build();
     const { proposal } = await service.proposeForget(CONNECTION_ID, {

@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import type { StoredMemoryProposal, AppliedResult, ActorSource } from '@betterdb/shared';
 import type { StoragePort } from '@app/common/interfaces/storage-port.interface';
-import { MemoryApplyDispatcher } from './memory-apply.dispatcher';
+import { MemoryApplyDispatcher, type ApplyOutcome } from './memory-apply.dispatcher';
 
 export interface MemoryApplyContext {
   actor: string | null;
@@ -49,27 +49,12 @@ export class MemoryApplyService {
     }
 
     const appliedAt = Date.now();
+
+    // Only the forget itself (the irreversible side effect) decides success vs
+    // failure. If it throws, nothing was deleted, so record `failed`.
+    let outcome: ApplyOutcome;
     try {
-      const outcome = await this.dispatcher.dispatch(claimed);
-      const appliedResult: AppliedResult = {
-        success: true,
-        details: {
-          ...outcome.details,
-          actualAffected: outcome.actualAffected,
-          durationMs: outcome.durationMs,
-        },
-      };
-      // We hold the exclusive claim (the `approved -> applying` transition), so
-      // this finalize is unconditional: guarding on `applying` here could return
-      // null and strand the row in `applying` after the forget already ran.
-      const updated = await this.storage.updateMemoryProposalStatus({
-        id: approved.id,
-        status: 'applied',
-        applied_at: appliedAt,
-        applied_result: appliedResult,
-      });
-      await this.appendAudit(approved.id, 'applied', appliedResult.details ?? null, context);
-      return { proposal: updated ?? claimed, appliedResult };
+      outcome = await this.dispatcher.dispatch(claimed);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`Memory forget apply failed for ${approved.id}: ${message}`);
@@ -84,9 +69,41 @@ export class MemoryApplyService {
         applied_at: appliedAt,
         applied_result: appliedResult,
       });
-      await this.appendAudit(approved.id, 'failed', { error: message }, context);
+      await this.appendAudit(approved.id, 'failed', { error: message }, context).catch(
+        () => undefined,
+      );
       return { proposal: updated ?? claimed, appliedResult };
     }
+
+    // The forget succeeded and is durable. Finalize + audit are best-effort from
+    // here: a bookkeeping error must never re-record an already-applied forget as
+    // failed. We hold the exclusive `applying` claim, so the finalize is
+    // unconditional.
+    const appliedResult: AppliedResult = {
+      success: true,
+      details: {
+        ...outcome.details,
+        actualAffected: outcome.actualAffected,
+        durationMs: outcome.durationMs,
+      },
+    };
+    let updated: StoredMemoryProposal | null = null;
+    try {
+      updated = await this.storage.updateMemoryProposalStatus({
+        id: approved.id,
+        status: 'applied',
+        applied_at: appliedAt,
+        applied_result: appliedResult,
+      });
+      await this.appendAudit(approved.id, 'applied', appliedResult.details ?? null, context);
+    } catch (err) {
+      this.logger.warn(
+        `Memory forget applied for ${approved.id} but finalize bookkeeping failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    return { proposal: updated ?? claimed, appliedResult };
   }
 
   private async appendAudit(
