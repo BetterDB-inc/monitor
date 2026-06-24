@@ -1225,6 +1225,112 @@ server.tool(
   }),
 );
 
+// --- Memory tools ---
+server.tool(
+  'memory_stores',
+  'List agent-memory stores discovered on an instance (name, capabilities, stats key).',
+  { instanceId: z.string().optional().describe('Optional instance ID override') },
+  async ({ instanceId }) => withTelemetry('memory_stores', async () => {
+    const id = resolveInstanceId(instanceId);
+    const data = await apiFetch(`/mcp/instance/${id}/memory/stores`);
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    };
+  }),
+);
+
+server.tool(
+  'memory_list',
+  'List memories in a store, newest first, with optional scope and tag filters.',
+  {
+    memory_name: z.string().min(1).describe('The memory store name (from memory_stores)'),
+    threadId: z.string().optional().describe('Filter by thread ID'),
+    agentId: z.string().optional().describe('Filter by agent ID'),
+    namespace: z.string().optional().describe('Filter by namespace'),
+    tags: z.array(z.string()).optional().describe('Filter by tags (AND)'),
+    limit: z.number().int().min(1).max(100).optional().describe('Max results (default 20)'),
+    offset: z.number().int().min(0).optional().describe('Pagination offset'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async (params) => withTelemetry('memory_list', async () => {
+    const id = resolveInstanceId(params.instanceId);
+    const query = new URLSearchParams();
+    if (params.threadId !== undefined) query.set('threadId', params.threadId);
+    if (params.agentId !== undefined) query.set('agentId', params.agentId);
+    if (params.namespace !== undefined) query.set('namespace', params.namespace);
+    if (params.tags !== undefined && params.tags.length > 0) query.set('tags', params.tags.join(','));
+    if (params.limit !== undefined) query.set('limit', String(params.limit));
+    if (params.offset !== undefined) query.set('offset', String(params.offset));
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    const data = await apiFetch(`/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/list${suffix}`);
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    };
+  }),
+);
+
+server.tool(
+  'memory_get',
+  'Fetch a single memory by ID from a store.',
+  {
+    memory_name: z.string().min(1).describe('The memory store name (from memory_stores)'),
+    id: z.string().min(1).describe('The memory ID'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async (params) => withTelemetry('memory_get', async () => {
+    const id = resolveInstanceId(params.instanceId);
+    const data = await apiFetch(`/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/get/${encodeURIComponent(params.id)}`);
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    };
+  }),
+);
+
+server.tool(
+  'memory_stats',
+  'Get item count, eviction count, and live config for a memory store.',
+  {
+    memory_name: z.string().min(1).describe('The memory store name (from memory_stores)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async (params) => withTelemetry('memory_stats', async () => {
+    const id = resolveInstanceId(params.instanceId);
+    const data = await apiFetch(`/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/stats`);
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    };
+  }),
+);
+
+server.tool(
+  'memory_recall',
+  'Recall memories from a store by a precomputed query vector (the caller supplies the embedding).',
+  {
+    memory_name: z.string().min(1).describe('The memory store name (from memory_stores)'),
+    vector: z.array(z.number()).min(1).describe('Precomputed query embedding'),
+    k: z.number().int().min(1).max(100).optional().describe('Max results'),
+    threshold: z.number().min(0).max(2).optional().describe('Max cosine distance'),
+    tags: z.array(z.string()).optional().describe('Filter by tags (AND)'),
+    threadId: z.string().optional().describe('Filter by thread ID'),
+    agentId: z.string().optional().describe('Filter by agent ID'),
+    namespace: z.string().optional().describe('Filter by namespace'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async (params) => withTelemetry('memory_recall', async () => {
+    const id = resolveInstanceId(params.instanceId);
+    const data = await apiRequest('POST', `/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/recall`, {
+      vector: params.vector,
+      k: params.k,
+      threshold: params.threshold,
+      tags: params.tags,
+      scope: { threadId: params.threadId, agentId: params.agentId, namespace: params.namespace },
+    });
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    };
+  }),
+);
+
 try {
   if (AUTOSTART) {
     const { startMonitor } = await import('./autostart.js');
