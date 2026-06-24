@@ -8,6 +8,9 @@ node_modules
 # Testing
 coverage
 
+# LongMemEval datasets (downloaded from HF; only fixture.json is bundled)
+longmemeval_*.json
+
 # Production
 dist
 build
