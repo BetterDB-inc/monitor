@@ -1331,6 +1331,94 @@ server.tool(
   }),
 );
 
+// --- Memory forget tools (human-gated propose/approve) ---
+server.tool(
+  'memory_forget',
+  'Propose forgetting memories (by id, or by scope/tags). Creates a pending proposal that a human must approve before anything is deleted.',
+  {
+    memory_name: z.string().min(1).describe('The memory store name (from memory_stores)'),
+    id: z.string().optional().describe('Forget a single memory by id'),
+    threadId: z.string().optional().describe('Scope: thread id'),
+    agentId: z.string().optional().describe('Scope: agent id'),
+    namespace: z.string().optional().describe('Scope: namespace'),
+    tags: z.array(z.string()).optional().describe('Scope: forget memories carrying all these tags'),
+    reasoning: z.string().min(20).describe('Why these memories should be forgotten (min 20 chars)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async (params) => withTelemetry('memory_forget', async () => {
+    const id = resolveInstanceId(params.instanceId);
+    const data = await apiRequest('POST', `/mcp/instance/${id}/memory-proposals/forget`, {
+      memory_name: params.memory_name,
+      id: params.id,
+      scope: { threadId: params.threadId, agentId: params.agentId, namespace: params.namespace },
+      tags: params.tags,
+      reasoning: params.reasoning,
+    }) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
+    return formatProposalText(data);
+  }),
+);
+
+server.tool(
+  'memory_list_pending_forgets',
+  'List pending forget proposals awaiting approval on an instance.',
+  {
+    memory_name: z.string().optional().describe('Filter by memory store name'),
+    limit: z.number().int().min(1).max(200).optional().describe('Max results (default 50)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async (params) => withTelemetry('memory_list_pending_forgets', async () => {
+    const id = resolveInstanceId(params.instanceId);
+    const query = new URLSearchParams();
+    if (params.memory_name !== undefined) query.set('memory_name', params.memory_name);
+    if (params.limit !== undefined) query.set('limit', String(params.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    const data = await apiFetch(`/mcp/instance/${id}/memory-proposals/pending${suffix}`);
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    };
+  }),
+);
+
+server.tool(
+  'memory_approve_forget',
+  'Approve a pending forget proposal, applying the deletion against the live store.',
+  {
+    proposal_id: z.string().min(1).describe('The proposal id (from memory_forget or memory_list_pending_forgets)'),
+    actor: z.string().optional().describe('Who is approving (recorded in the audit log)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async (params) => withTelemetry('memory_approve_forget', async () => {
+    resolveInstanceId(params.instanceId);
+    const data = await apiRequest('POST', `/mcp/memory-proposals/${encodeURIComponent(params.proposal_id)}/approve`, {
+      actor: params.actor,
+    });
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    };
+  }),
+);
+
+server.tool(
+  'memory_reject_forget',
+  'Reject a pending forget proposal without deleting anything.',
+  {
+    proposal_id: z.string().min(1).describe('The proposal id'),
+    reason: z.string().optional().describe('Why the proposal is being rejected'),
+    actor: z.string().optional().describe('Who is rejecting (recorded in the audit log)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async (params) => withTelemetry('memory_reject_forget', async () => {
+    resolveInstanceId(params.instanceId);
+    const data = await apiRequest('POST', `/mcp/memory-proposals/${encodeURIComponent(params.proposal_id)}/reject`, {
+      reason: params.reason,
+      actor: params.actor,
+    });
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    };
+  }),
+);
+
 try {
   if (AUTOSTART) {
     const { startMonitor } = await import('./autostart.js');
