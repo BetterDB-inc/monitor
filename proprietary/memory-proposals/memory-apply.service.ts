@@ -59,9 +59,11 @@ export class MemoryApplyService {
           durationMs: outcome.durationMs,
         },
       };
+      // We hold the exclusive claim (the `approved -> applying` transition), so
+      // this finalize is unconditional: guarding on `applying` here could return
+      // null and strand the row in `applying` after the forget already ran.
       const updated = await this.storage.updateMemoryProposalStatus({
         id: approved.id,
-        expected_status: ['applying'],
         status: 'applied',
         applied_at: appliedAt,
         applied_result: appliedResult,
@@ -78,7 +80,6 @@ export class MemoryApplyService {
       };
       const updated = await this.storage.updateMemoryProposalStatus({
         id: approved.id,
-        expected_status: ['applying'],
         status: 'failed',
         applied_at: appliedAt,
         applied_result: appliedResult,
