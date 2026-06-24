@@ -587,4 +587,5 @@ export interface StoragePort {
     input: AppendMemoryProposalAuditInput,
   ): Promise<StoredMemoryProposalAudit>;
   getMemoryProposalAudit(proposalId: string): Promise<StoredMemoryProposalAudit[]>;
+  expireMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]>;
 }

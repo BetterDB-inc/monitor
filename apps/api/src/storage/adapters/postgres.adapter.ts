@@ -4214,6 +4214,18 @@ export class PostgresAdapter implements StoragePort {
     return result.rows.map((row: MemoryProposalAuditRow) => this.mapMemoryProposalAuditRow(row));
   }
 
+  async expireMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `UPDATE memory_proposals
+       SET status = 'expired'
+       WHERE status = 'pending' AND expires_at <= $1
+       RETURNING *`,
+      [now],
+    );
+    return result.rows.map((row: MemoryProposalRow) => this.mapMemoryProposalRow(row));
+  }
+
   async saveCaptureSession(
     session: StoredCaptureSession,
     connectionId: string,

@@ -3950,6 +3950,19 @@ export class SqliteAdapter implements StoragePort {
     return rows.map((row) => this.mapMemoryProposalAuditRow(row));
   }
 
+  async expireMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        `UPDATE memory_proposals
+         SET status = 'expired'
+         WHERE status = 'pending' AND expires_at <= ?
+         RETURNING *`,
+      )
+      .all(now) as MemoryProposalRow[];
+    return rows.map((row) => this.mapMemoryProposalRow(row));
+  }
+
   async saveCaptureSession(
     session: StoredCaptureSession,
     connectionId: string,

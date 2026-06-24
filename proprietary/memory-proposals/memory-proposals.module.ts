@@ -5,6 +5,7 @@ import { AgentTokenGuard, MCP_TOKEN_SERVICE } from '@app/common/guards/agent-tok
 import { MemoryProposalService } from './memory-proposal.service';
 import { MemoryApplyDispatcher } from './memory-apply.dispatcher';
 import { MemoryApplyService } from './memory-apply.service';
+import { MemoryExpirationCron } from './memory-expiration.cron';
 import { MemoryProposalMcpController } from './memory-proposal-mcp.controller';
 
 const logger = new Logger('MemoryProposalsModule');
@@ -39,6 +40,7 @@ const tokenProviders = AgentTokensServiceClass
     MemoryProposalService,
     MemoryApplyDispatcher,
     MemoryApplyService,
+    MemoryExpirationCron,
   ],
   exports: [MemoryProposalService, MemoryApplyService],
 })

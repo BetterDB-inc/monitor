@@ -114,6 +114,26 @@ export class MemoryProposalService {
     return this.storage.getMemoryProposal(proposalId);
   }
 
+  async expireProposals(now: number, actorSource: ActorSource = 'system'): Promise<number> {
+    const expired = await this.storage.expireMemoryProposalsBefore(now);
+    for (const proposal of expired) {
+      try {
+        await this.appendAudit(
+          proposal.id,
+          'expired',
+          { expires_at: proposal.expires_at },
+          'system',
+          actorSource,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Failed to write expired audit for ${proposal.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return expired.length;
+  }
+
   async approve(input: {
     proposalId: string;
     actor: string | null;

@@ -1,7 +1,9 @@
+import { randomUUID } from 'crypto';
 import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import { MemoryProposalService } from '../memory-proposal.service';
 import { MemoryApplyService } from '../memory-apply.service';
 import type { MemoryApplyDispatcher, ApplyOutcome } from '../memory-apply.dispatcher';
+import { MemoryExpirationCron } from '../memory-expiration.cron';
 import {
   MemoryProposalValidationError,
   DuplicatePendingMemoryProposalError,
@@ -169,5 +171,41 @@ describe('MemoryProposalService.reject', () => {
     await expect(
       service.reject({ proposalId: proposal.id, actor: 'human', actorSource: 'mcp' }),
     ).rejects.toBeInstanceOf(MemoryProposalNotPendingError);
+  });
+});
+
+describe('MemoryProposalService.expireProposals', () => {
+  async function seedExpired(storage: MemoryAdapter, expiresAt: number) {
+    return storage.createMemoryProposal({
+      id: randomUUID(),
+      connection_id: CONNECTION_ID,
+      store_name: STORE,
+      proposal_type: 'forget',
+      proposal_payload: { target_kind: 'id', memory_id: 'm1' },
+      reasoning: REASON,
+      proposed_by: null,
+      proposed_at: 1,
+      expires_at: expiresAt,
+    });
+  }
+
+  it('expires stale pending proposals and audits each as expired', async () => {
+    const { service, storage } = build();
+    const stale = await seedExpired(storage, 100);
+
+    const count = await service.expireProposals(500);
+    expect(count).toBe(1);
+    expect((await storage.getMemoryProposal(stale.id))?.status).toBe('expired');
+    const audit = await storage.getMemoryProposalAudit(stale.id);
+    expect(audit.map((a) => a.event_type)).toContain('expired');
+  });
+
+  it('the cron tick delegates to expireProposals with its clock', async () => {
+    const { service, storage } = build();
+    await seedExpired(storage, 100);
+    const cron = new MemoryExpirationCron(service);
+    cron.configureForTesting({ now: () => 500 });
+
+    expect(await cron.tick()).toBe(1);
   });
 });

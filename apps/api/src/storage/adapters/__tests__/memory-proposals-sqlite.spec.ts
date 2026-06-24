@@ -131,4 +131,21 @@ describe('Memory proposal storage (SQLite)', () => {
     expect(audit.map((a) => a.event_type)).toEqual(['applied', 'approved']);
     expect(audit[0].event_payload).toEqual({ actualAffected: 1 });
   });
+
+  it('expires pending proposals past their expiry, returning the rows', async () => {
+    const stale = build({ proposed_at: 1, expires_at: 100 });
+    const fresh = build({
+      proposed_at: 1,
+      expires_at: 10_000,
+      proposal_payload: { target_kind: 'id', memory_id: 'mem-2' },
+    });
+    await storage.createMemoryProposal(stale);
+    await storage.createMemoryProposal(fresh);
+
+    const expired = await storage.expireMemoryProposalsBefore(500);
+    expect(expired.map((p) => p.id)).toEqual([stale.id]);
+    expect(expired[0].status).toBe('expired');
+    expect((await storage.getMemoryProposal(fresh.id))?.status).toBe('pending');
+    expect(await storage.expireMemoryProposalsBefore(500)).toEqual([]);
+  });
 });

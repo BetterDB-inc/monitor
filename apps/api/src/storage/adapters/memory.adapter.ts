@@ -1652,6 +1652,18 @@ export class MemoryAdapter implements StoragePort {
       .map((a) => structuredClone(a));
   }
 
+  async expireMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]> {
+    const expired: StoredMemoryProposal[] = [];
+    for (const proposal of this.memoryProposals.values()) {
+      if (proposal.status === 'pending' && proposal.expires_at <= now) {
+        const updated = structuredClone({ ...proposal, status: 'expired' as const });
+        this.memoryProposals.set(proposal.id, updated);
+        expired.push(structuredClone(updated));
+      }
+    }
+    return expired;
+  }
+
   async saveCaptureSession(
     session: StoredCaptureSession,
     connectionId: string,

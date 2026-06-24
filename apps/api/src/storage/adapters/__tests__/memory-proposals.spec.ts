@@ -138,4 +138,24 @@ describe('MemoryAdapter memory proposals', () => {
     const audit = await adapter.getMemoryProposalAudit(input.id);
     expect(audit.map((a) => a.event_type)).toEqual(['applied', 'approved']);
   });
+
+  it('expires only pending proposals past their expiry', async () => {
+    const adapter = new MemoryAdapter();
+    const stale = buildForget({ proposed_at: 1, expires_at: 100 });
+    const fresh = buildForget({
+      proposed_at: 1,
+      expires_at: 10_000,
+      proposal_payload: { target_kind: 'id', memory_id: 'mem-2' },
+    });
+    await adapter.createMemoryProposal(stale);
+    await adapter.createMemoryProposal(fresh);
+
+    const expired = await adapter.expireMemoryProposalsBefore(500);
+    expect(expired.map((p) => p.id)).toEqual([stale.id]);
+    expect(expired[0].status).toBe('expired');
+    expect((await adapter.getMemoryProposal(fresh.id))?.status).toBe('pending');
+
+    // Idempotent: a second sweep finds nothing already-expired.
+    expect(await adapter.expireMemoryProposalsBefore(500)).toEqual([]);
+  });
 });
