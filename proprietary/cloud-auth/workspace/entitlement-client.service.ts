@@ -94,13 +94,16 @@ export class EntitlementClientService {
     });
   }
 
-  async getValkeyInstanceCredentials(id: string) {
-    return this.request<any>(`/valkey-instances/${id}/credentials`);
+  async getValkeyInstanceCredentials(id: string, tenantId: string) {
+    return this.request<any>(
+      `/valkey-instances/${id}/credentials?tenantId=${encodeURIComponent(tenantId)}`,
+    );
   }
 
-  async deleteValkeyInstance(id: string) {
-    return this.request<any>(`/valkey-instances/${id}`, {
-      method: 'DELETE',
-    });
+  async deleteValkeyInstance(id: string, tenantId: string) {
+    return this.request<any>(
+      `/valkey-instances/${id}?tenantId=${encodeURIComponent(tenantId)}`,
+      { method: 'DELETE' },
+    );
   }
 }

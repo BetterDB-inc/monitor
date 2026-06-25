@@ -341,15 +341,27 @@ export class ProvisioningService {
       // Wait for the StatefulSet to become ready.
       await this.waitForStatefulSetReady(namespace, release, 6 * 60 * 1000);
 
-      await this.prisma.valkeyInstance.update({
-        where: { id: instanceId },
+      // Only flip to ready if the row is still provisioning — a concurrent
+      // delete may have moved it to 'deleting' while we were waiting.
+      const { count } = await this.prisma.valkeyInstance.updateMany({
+        where: { id: instanceId, status: 'provisioning' },
         data: { status: 'ready', statusMessage: null, host, port: 6379 },
       });
+      if (count === 0) {
+        this.logger.warn(
+          `[${instance.name}] status changed during provisioning; not marking ready`,
+        );
+        return;
+      }
       this.logger.log(`[${instance.name}] Valkey instance ready at ${host}:6379`);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       this.logger.error(`[${instance.name}] Valkey provisioning failed: ${errorMessage}`);
-      await this.updateValkeyInstanceStatus(instanceId, 'error', errorMessage);
+      // Same guard: don't clobber a concurrent 'deleting'.
+      await this.prisma.valkeyInstance.updateMany({
+        where: { id: instanceId, status: 'provisioning' },
+        data: { status: 'error', statusMessage: errorMessage },
+      });
       throw error;
     }
   }

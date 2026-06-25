@@ -85,7 +85,9 @@ enum ValkeyInstanceStatus {
 model ValkeyInstance {
   id            String               @id @default(cuid())
   tenantId      String               @map("tenant_id")
-  name          String
+  // Globally unique: the name doubles as the public SNI host
+  // (<name>.valkey.betterdb.com) on the shared wildcard endpoint.
+  name          String               @unique
   status        ValkeyInstanceStatus @default(pending)
   statusMessage String?              @map("status_message")
   // Public TLS endpoint, populated once provisioning reaches `ready`.

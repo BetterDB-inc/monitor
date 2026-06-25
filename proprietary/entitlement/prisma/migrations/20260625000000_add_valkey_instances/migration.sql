@@ -20,6 +20,9 @@ CREATE TABLE "valkey_instances" (
 );
 
 -- CreateIndex
+CREATE UNIQUE INDEX "valkey_instances_name_key" ON "valkey_instances"("name");
+
+-- CreateIndex
 CREATE INDEX "valkey_instances_tenant_id_idx" ON "valkey_instances"("tenant_id");
 
 -- CreateIndex

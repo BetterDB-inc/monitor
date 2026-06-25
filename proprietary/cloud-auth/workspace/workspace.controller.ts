@@ -148,7 +148,8 @@ export class WorkspaceController {
   ) {
     const cloudUser = this.getCloudUser(req);
     this.requireAdminOrOwner(cloudUser);
-    return this.entitlementClient.getValkeyInstanceCredentials(id);
+    const tenantId = this.tenantId || cloudUser.tenantId;
+    return this.entitlementClient.getValkeyInstanceCredentials(id, tenantId);
   }
 
   @Delete('databases/:id')
@@ -158,6 +159,7 @@ export class WorkspaceController {
   ) {
     const cloudUser = this.getCloudUser(req);
     this.requireAdminOrOwner(cloudUser);
-    return this.entitlementClient.deleteValkeyInstance(id);
+    const tenantId = this.tenantId || cloudUser.tenantId;
+    return this.entitlementClient.deleteValkeyInstance(id, tenantId);
   }
 }

@@ -59,14 +59,23 @@ export class ValkeyInstanceController {
   }
 
   @Get(':id/credentials')
-  getCredentials(@Param('id') id: string) {
+  async getCredentials(
+    @Param('id') id: string,
+    @Query('tenantId') tenantId?: string,
+  ) {
+    // Scope to the caller's workspace so a tenant can't read another
+    // tenant's credentials by id.
+    await this.valkeyInstances.getInstanceForTenant(id, tenantId);
     return this.provisioning.getValkeyInstanceCredentials(id);
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.ACCEPTED)
-  async deleteInstance(@Param('id') id: string) {
-    const instance = await this.valkeyInstances.markForDeletion(id);
+  async deleteInstance(
+    @Param('id') id: string,
+    @Query('tenantId') tenantId?: string,
+  ) {
+    const instance = await this.valkeyInstances.markForDeletion(id, tenantId);
 
     this.provisioning.deprovisionValkeyInstance(id).catch((error) => {
       this.logger.error(
