@@ -8,12 +8,37 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+def _env_positive_float(name: str, fallback: float) -> float:
+    # os.environ.get(name, default) returns "" when the var is set but empty
+    # (common in deployment manifests), so guard the parse instead of letting
+    # float("") raise ValueError at import time.
+    raw = os.environ.get(name)
+    if not raw:
+        return fallback
+    try:
+        value = float(raw)
+    except ValueError:
+        return fallback
+    return value if value > 0 else fallback
+
+
+def _env_positive_int(name: str, fallback: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return fallback
+    try:
+        value = int(raw)
+    except ValueError:
+        return fallback
+    return value if value > 0 else fallback
+
+
 # Per-request wall-clock timeout (seconds) and retry budget for OpenAI calls.
 # The TS harness used a bare ``fetch`` with no timeout, so a single hung reasoning
 # request could stall the whole eval indefinitely; cap each request and retry a
 # few times on timeout / rate-limit / 5xx so one slow call doesn't kill the run.
-HTTP_TIMEOUT_S = float(os.environ.get("LONGMEMEVAL_HTTP_TIMEOUT", "60"))
-MAX_ATTEMPTS = max(1, int(os.environ.get("LONGMEMEVAL_HTTP_RETRIES", "3")))
+HTTP_TIMEOUT_S = _env_positive_float("LONGMEMEVAL_HTTP_TIMEOUT", 60.0)
+MAX_ATTEMPTS = _env_positive_int("LONGMEMEVAL_HTTP_RETRIES", 3)
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 

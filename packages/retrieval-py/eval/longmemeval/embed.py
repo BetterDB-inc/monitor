@@ -62,10 +62,14 @@ class _EmbedCache:
         self._dirty = False
         self._map: dict[str, list[float]] = {}
         try:
-            self._map = json.loads(Path(path).read_text(encoding="utf8"))
+            loaded = json.loads(Path(path).read_text(encoding="utf8"))
         except (OSError, ValueError):
             # No cache yet; start empty.
-            self._map = {}
+            loaded = {}
+        # A valid-but-non-object cache (null, a list, ...) must not replace the
+        # dict, or the first get()/set() would raise AttributeError.
+        if isinstance(loaded, dict):
+            self._map = loaded
 
     def get(self, key: str) -> list[float] | None:
         return self._map.get(key)
