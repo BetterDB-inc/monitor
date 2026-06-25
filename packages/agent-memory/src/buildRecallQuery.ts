@@ -4,6 +4,12 @@ import type { MemoryScope } from './types';
 export const SCORE_FIELD = '__score';
 export const VECTOR_FIELD = 'vector';
 
+// valkey-search rejects a bare '*' on VECTOR-schema indexes with
+// "Invalid query string syntax". Every memory record has created_at
+// (set at write time), so this numeric range matches all documents
+// and is accepted by the vector index schema.
+export const MATCH_ALL_MEMORY_QUERY = '@created_at:[-inf +inf]';
+
 function scopeClauses(scope: MemoryScope, tags: string[]): string[] {
   const clauses: string[] = [];
   if (scope.threadId !== undefined) {
@@ -23,7 +29,7 @@ function scopeClauses(scope: MemoryScope, tags: string[]): string[] {
 
 function joinClauses(clauses: string[]): string {
   if (clauses.length === 0) {
-    return '*';
+    return MATCH_ALL_MEMORY_QUERY;
   }
   return `(${clauses.join(' ')})`;
 }

@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { buildRecallQuery, buildConsolidateFilter } from '../buildRecallQuery';
+import { buildRecallQuery, buildConsolidateFilter, MATCH_ALL_MEMORY_QUERY } from '../buildRecallQuery';
 
 describe('buildRecallQuery', () => {
-  it('builds a bare KNN query when there are no filters', () => {
-    expect(buildRecallQuery(32, {}, [])).toBe('*=>[KNN 32 @vector $vec AS __score]');
+  it('uses the match-all range query (not bare "*") when there are no filters', () => {
+    expect(buildRecallQuery(32, {}, [])).toBe(
+      `${MATCH_ALL_MEMORY_QUERY}=>[KNN 32 @vector $vec AS __score]`,
+    );
   });
 
   it('filters by scope and tags with AND semantics', () => {

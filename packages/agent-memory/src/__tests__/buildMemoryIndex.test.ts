@@ -53,7 +53,9 @@ describe('buildMemoryIndex', () => {
     const args = buildMemoryIndexArgs('mem', 16);
     const joined = args.join(' ');
 
-    for (const field of ['importance', 'created_at', 'last_accessed_at', 'access_count']) {
+    expect(joined).toContain('importance NUMERIC');
+    expect(joined).toContain('created_at NUMERIC SORTABLE');
+    for (const field of ['last_accessed_at', 'access_count']) {
       expect(joined).toContain(`${field} NUMERIC`);
     }
     expect(joined).toContain('content TEXT');

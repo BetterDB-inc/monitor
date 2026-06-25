@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MemoryStore } from '../MemoryStore';
+import { MATCH_ALL_MEMORY_QUERY } from '../buildRecallQuery';
 import { fakeEmbed } from './helpers/fakeEmbed';
 import { mockClient } from './helpers/mockClient';
 
@@ -169,7 +170,7 @@ describe('MemoryStore capacity eviction', () => {
 
     const search = client.call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
     expect(search?.[2]).toBe('(@tags:{teamx})');
-    expect(search?.[2]).not.toBe('*');
+    expect(search?.[2]).not.toBe(MATCH_ALL_MEMORY_QUERY);
   });
 
   it('does not evict or fetch candidates when within capacity', async () => {
