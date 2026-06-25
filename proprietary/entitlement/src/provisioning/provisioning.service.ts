@@ -348,9 +348,27 @@ export class ProvisioningService {
         data: { status: 'ready', statusMessage: null, host, port: 6379 },
       });
       if (count === 0) {
+        // A concurrent delete moved the row out of 'provisioning' (or removed
+        // it) while we were applying manifests / waiting on the StatefulSet.
+        // The deprovision path may have already torn down (or never saw) the
+        // objects we just created, so clean them up here to avoid orphans.
         this.logger.warn(
-          `[${instance.name}] status changed during provisioning; not marking ready`,
+          `[${instance.name}] status changed during provisioning; tearing down freshly created resources`,
         );
+        try {
+          await this.teardownValkeyResources({
+            release,
+            namespace,
+            username: instance.username,
+            secretName: instance.secretName,
+            host,
+            maxmemory: instance.maxmemory,
+          });
+        } catch (cleanupError) {
+          const msg =
+            cleanupError instanceof Error ? cleanupError.message : 'Unknown error';
+          this.logger.warn(`[${instance.name}] Orphan cleanup failed: ${msg}`);
+        }
         return;
       }
       this.logger.log(`[${instance.name}] Valkey instance ready at ${host}:6379`);
@@ -386,8 +404,7 @@ export class ProvisioningService {
     try {
       await this.updateValkeyInstanceStatus(instanceId, 'deleting');
 
-      // Delete the workload objects by re-rendering the chart and removing each.
-      const manifests = await this.renderValkeyChart({
+      await this.teardownValkeyResources({
         release,
         namespace,
         username: instance.username,
@@ -395,19 +412,6 @@ export class ProvisioningService {
         host,
         maxmemory: instance.maxmemory,
       });
-      await this.deleteManifests(manifests, namespace);
-
-      // volumeClaimTemplates leave PVCs behind after the StatefulSet is gone.
-      await this.deleteValkeyPvcs(namespace, release);
-
-      // Delete the credential Secret.
-      try {
-        await this.coreApi.deleteNamespacedSecret({ name: instance.secretName, namespace });
-      } catch (error: any) {
-        if (error.response?.statusCode !== 404 && !this.isNotFoundError(error)) {
-          this.logger.warn(`[${instance.name}] Error deleting secret: ${error.message}`);
-        }
-      }
 
       await this.prisma.valkeyInstance.delete({ where: { id: instanceId } });
       this.logger.log(`[${instance.name}] Valkey instance deprovisioned`);
@@ -416,6 +420,44 @@ export class ProvisioningService {
       this.logger.error(`[${instance.name}] Valkey deprovisioning failed: ${errorMessage}`);
       await this.updateValkeyInstanceStatus(instanceId, 'error', `Deprovision failed: ${errorMessage}`);
       throw error;
+    }
+  }
+
+  // Removes the k8s objects for a Valkey instance without touching the DB row.
+  // Shared by deprovision and by the provision lost-race cleanup. Re-renders
+  // the chart so deletion targets exactly what an apply would have created;
+  // deleteManifests tolerates not-found, so calling this twice is idempotent.
+  private async teardownValkeyResources(params: {
+    release: string;
+    namespace: string;
+    username: string;
+    secretName: string;
+    host: string;
+    maxmemory: string | null;
+  }): Promise<void> {
+    const manifests = await this.renderValkeyChart({
+      release: params.release,
+      namespace: params.namespace,
+      username: params.username,
+      secretName: params.secretName,
+      host: params.host,
+      maxmemory: params.maxmemory,
+    });
+    await this.deleteManifests(manifests, params.namespace);
+
+    // volumeClaimTemplates leave PVCs behind after the StatefulSet is gone.
+    await this.deleteValkeyPvcs(params.namespace, params.release);
+
+    // Delete the credential Secret.
+    try {
+      await this.coreApi.deleteNamespacedSecret({
+        name: params.secretName,
+        namespace: params.namespace,
+      });
+    } catch (error: any) {
+      if (error.response?.statusCode !== 404 && !this.isNotFoundError(error)) {
+        this.logger.warn(`Error deleting secret ${params.secretName}: ${error.message}`);
+      }
     }
   }
 
