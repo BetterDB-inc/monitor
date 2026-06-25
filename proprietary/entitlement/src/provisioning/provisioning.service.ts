@@ -1408,19 +1408,31 @@ export class ProvisioningService {
   // (creating it if absent). Used by the Valkey provision path so tenants that
   // predate the Traefik ingress rule get it without a full reconcile run.
   private async ensureTenantNetworkPolicy(namespace: string): Promise<void> {
-    const body = {
-      metadata: { name: 'tenant-isolation' },
-      spec: this.tenantIsolationSpec(),
-    };
+    const spec = this.tenantIsolationSpec();
     try {
+      // Read first so the PUT carries the current resourceVersion (a replace
+      // with a missing/stale resourceVersion is rejected with 409).
+      const existing = await this.networkingApi.readNamespacedNetworkPolicy({
+        name: 'tenant-isolation',
+        namespace,
+      });
       await this.networkingApi.replaceNamespacedNetworkPolicy({
         name: 'tenant-isolation',
         namespace,
-        body,
+        body: {
+          metadata: {
+            name: 'tenant-isolation',
+            resourceVersion: existing.metadata?.resourceVersion,
+          },
+          spec,
+        },
       });
     } catch (error: any) {
       if (this.isNotFoundError(error)) {
-        await this.networkingApi.createNamespacedNetworkPolicy({ namespace, body });
+        await this.networkingApi.createNamespacedNetworkPolicy({
+          namespace,
+          body: { metadata: { name: 'tenant-isolation' }, spec },
+        });
       } else {
         throw error;
       }
