@@ -92,7 +92,7 @@ export class ProvisioningService {
 
     // Valkey instance provisioning config (chart bundled into the image)
     this.valkeyChartPath = this.config.get<string>('VALKEY_CHART_PATH', '/app/charts/valkey-search');
-    this.valkeyDomain = this.config.get<string>('VALKEY_DOMAIN', 'valkey.betterdb.com');
+    this.valkeyDomain = this.config.get<string>('VALKEY_DOMAIN', 'valkey.app.betterdb.com');
     this.valkeyImageTag = this.config.get<string>('VALKEY_IMAGE_TAG', '9.1-alpine');
     // The cluster has no default StorageClass, so the PVC must name one
     // explicitly or it stays unbound. gp2 is the EBS class present on EKS.
