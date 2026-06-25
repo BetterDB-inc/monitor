@@ -376,10 +376,33 @@ export class ProvisioningService {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       this.logger.error(`[${instance.name}] Valkey provisioning failed: ${errorMessage}`);
       // Same guard: don't clobber a concurrent 'deleting'.
-      await this.prisma.valkeyInstance.updateMany({
+      const { count } = await this.prisma.valkeyInstance.updateMany({
         where: { id: instanceId, status: 'provisioning' },
         data: { status: 'error', statusMessage: errorMessage },
       });
+      if (count === 0) {
+        // A concurrent delete already moved the row out of 'provisioning' (or
+        // removed it). Its deprovision may have torn down before we applied the
+        // objects we created, so clean them up here too. Mirrors the
+        // success-path race handler.
+        this.logger.warn(
+          `[${instance.name}] status changed during failed provisioning; tearing down freshly created resources`,
+        );
+        try {
+          await this.teardownValkeyResources({
+            release,
+            namespace,
+            username: instance.username,
+            secretName: instance.secretName,
+            host,
+            maxmemory: instance.maxmemory,
+          });
+        } catch (cleanupError) {
+          const msg =
+            cleanupError instanceof Error ? cleanupError.message : 'Unknown error';
+          this.logger.warn(`[${instance.name}] Orphan cleanup failed: ${msg}`);
+        }
+      }
       throw error;
     }
   }
