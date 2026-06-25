@@ -43,6 +43,11 @@ export interface UnifiedDatabaseAdapterConfig {
   tls?: boolean;
 }
 
+function isIpAddress(host: string): boolean {
+  // IPv4 or anything containing ':' (IPv6). SNI servername must be a hostname.
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
+}
+
 export class UnifiedDatabaseAdapter implements DatabasePort {
   private readonly logger = new Logger(UnifiedDatabaseAdapter.name);
   private client: Valkey;
@@ -60,7 +65,16 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       lazyConnect: true,
       enableOfflineQueue: false,
       connectionName,
-      tls: this.config.tls ? {} : undefined,
+      // iovalkey does not default the TLS SNI servername from the host, so
+      // SNI-routed endpoints (e.g. Traefik HostSNI in front of managed Valkey)
+      // would otherwise get the default cert and a non-RESP response
+      // ("Protocol error, got 'H'"). Send the hostname as servername unless it
+      // is a bare IP, which SNI does not allow.
+      tls: this.config.tls
+        ? isIpAddress(this.config.host)
+          ? {}
+          : { servername: this.config.host }
+        : undefined,
     });
   }
 

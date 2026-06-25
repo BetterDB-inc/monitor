@@ -159,11 +159,6 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
             Feedback
           </button>
           {cloudUser && (
-            <NavItem to="/workspace/databases" active={location.pathname === '/workspace/databases'} demoLocked={isDemo}>
-              Databases
-            </NavItem>
-          )}
-          {cloudUser && (
             <NavItem to="/workspace/members" active={location.pathname === '/workspace/members'} demoLocked={isDemo}>
               Team
             </NavItem>

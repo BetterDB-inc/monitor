@@ -3,6 +3,9 @@ import { useIsDemo } from '../contexts/DemoContext';
 import { useConnection } from '../hooks/useConnection';
 import { fetchApi } from '../api/client';
 import { agentTokensApi, GeneratedToken, TokenListItem } from '../api/agent-tokens';
+import { databasesApi, Database, DatabaseStatus, DatabaseCredentials } from '../api/databases';
+import { workspaceApi } from '../api/workspace';
+import type { Connection } from '../hooks/useConnection';
 import type { AgentConnectionInfo } from '@betterdb/shared';
 import {
   Select,
@@ -48,7 +51,7 @@ const defaultFormData: ConnectionFormData = {
   tls: false,
 };
 
-type AddTab = 'direct' | 'agent';
+type AddTab = 'direct' | 'agent' | 'valkey';
 
 export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   const emptyFormData = isCloudMode ? { ...defaultFormData, host: '' } : defaultFormData;
@@ -281,7 +284,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           setTestResult(null);
         }
       }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className={isCloudMode ? (addTab === 'valkey' ? 'sm:max-w-3xl' : 'sm:max-w-2xl') : 'sm:max-w-md'}>
           <DialogHeader>
             <DialogTitle>Add Connection</DialogTitle>
           </DialogHeader>
@@ -291,7 +294,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
             <div className="flex border-b">
               <button
                 onClick={() => setAddTab('direct')}
-                className={`flex-1 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${addTab === 'direct'
+                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${addTab === 'direct'
                   ? 'border-primary text-primary'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
                   }`}
@@ -300,17 +303,37 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
               </button>
               <button
                 onClick={() => setAddTab('agent')}
-                className={`flex-1 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${addTab === 'agent'
+                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${addTab === 'agent'
                   ? 'border-primary text-primary'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
                   }`}
               >
                 Via Agent
               </button>
+              <button
+                onClick={() => setAddTab('valkey')}
+                className={`flex-1 whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${addTab === 'valkey'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+                  }`}
+              >
+                BetterDB Valkey instances
+              </button>
             </div>
           )}
 
-          {addTab === 'direct' ? (
+          {addTab === 'valkey' ? (
+            <ValkeyInstancesTab
+              connections={connections}
+              onClose={() => {
+                setShowAddDialog(false);
+                setFormData(emptyFormData);
+                setTestResult(null);
+                setAddTab('direct');
+              }}
+              refreshConnections={refreshConnections}
+            />
+          ) : addTab === 'direct' ? (
             <>
               <div className="space-y-4">
                 <div>
@@ -800,6 +823,344 @@ function AgentTab({
         <div className="p-3 rounded-md text-sm bg-destructive/10 text-destructive">
           {error}
         </div>
+      )}
+
+      <div className="flex justify-end pt-2 border-t">
+        <button
+          onClick={onClose}
+          className="px-4 py-2 text-sm border rounded-md hover:bg-muted"
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// --- BetterDB Valkey Instances Tab ---
+
+const MAX_VALKEY_INSTANCES = 1;
+const VALKEY_NAME_MAX_LENGTH = 25;
+const VALKEY_ACTIVE_STATUSES: DatabaseStatus[] = ['pending', 'provisioning', 'deleting'];
+
+function ValkeyInstancesTab({
+  connections,
+  onClose,
+  refreshConnections,
+}: {
+  connections: Connection[];
+  onClose: () => void;
+  refreshConnections: () => Promise<void>;
+}) {
+  const [databases, setDatabases] = useState<Database[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [isAdminOrOwner, setIsAdminOrOwner] = useState(false);
+  const [name, setName] = useState('');
+  const [maxmemory, setMaxmemory] = useState('768mb');
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [credentials, setCredentials] = useState<Record<string, DatabaseCredentials>>({});
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Instances we've already wired a Monitor connection for, so polling
+  // doesn't keep recreating one on every tick.
+  const linkedRef = useRef<Set<string>>(new Set());
+
+  const atCapacity = databases.length >= MAX_VALKEY_INSTANCES;
+
+  const loadData = async () => {
+    try {
+      const data = await databasesApi.list();
+      setDatabases(data);
+    } catch (err) {
+      console.error('Failed to load databases:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+    workspaceApi
+      .getMe()
+      .then((me) => setIsAdminOrOwner(me.role === 'admin' || me.role === 'owner'))
+      .catch(() => {});
+  }, []);
+
+  // Poll while any instance is still settling.
+  useEffect(() => {
+    const settling = databases.some((db) => VALKEY_ACTIVE_STATUSES.includes(db.status));
+    if (settling && !pollRef.current) {
+      pollRef.current = setInterval(loadData, 4000);
+    } else if (!settling && pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [databases]);
+
+  // Whenever an instance becomes ready, wire up a direct Monitor connection
+  // to it so it appears in the connection dropdown.
+  useEffect(() => {
+    const ready = databases.filter((db) => db.status === 'ready' && db.host);
+    for (const db of ready) {
+      if (linkedRef.current.has(db.id)) continue;
+      const alreadyConnected = connections.some(
+        (c) => c.host === db.host && c.port === db.port,
+      );
+      if (alreadyConnected) {
+        linkedRef.current.add(db.id);
+        continue;
+      }
+      linkedRef.current.add(db.id);
+      (async () => {
+        try {
+          const creds = await databasesApi.credentials(db.id);
+          await fetchApi('/connections', {
+            method: 'POST',
+            body: JSON.stringify({
+              name: db.name,
+              host: creds.host,
+              port: creds.port,
+              username: creds.username,
+              password: creds.password,
+              dbIndex: 0,
+              tls: true,
+              setAsDefault: connections.length === 0,
+            }),
+          });
+          await refreshConnections();
+        } catch (err) {
+          // If linking fails, allow a later attempt.
+          linkedRef.current.delete(db.id);
+          console.error('Failed to add connection for instance:', err);
+        }
+      })();
+    }
+  }, [databases, connections, refreshConnections]);
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    try {
+      setCreating(true);
+      setError(null);
+      setSuccess(null);
+      await databasesApi.create({
+        name: name.trim().toLowerCase(),
+        maxmemory: maxmemory.trim() || undefined,
+      });
+      setSuccess(`Creating instance '${name.trim().toLowerCase()}'`);
+      setName('');
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create instance');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleDelete = async (db: Database) => {
+    if (!confirm(`Delete instance '${db.name}'? This permanently destroys its data.`)) return;
+    try {
+      setError(null);
+      await databasesApi.remove(db.id);
+      setSuccess(`Deleting instance '${db.name}'`);
+      linkedRef.current.delete(db.id);
+      setCredentials((prev) => {
+        const next = { ...prev };
+        delete next[db.id];
+        return next;
+      });
+      // Remove the Monitor connection(s) that were auto-added for this instance
+      // so they don't linger in the dropdown after the instance is gone.
+      const orphans = connections.filter((c) => c.host === db.host && c.port === db.port);
+      for (const c of orphans) {
+        try {
+          await fetchApi(`/connections/${c.id}`, { method: 'DELETE' });
+        } catch (err) {
+          console.error('Failed to remove linked connection:', err);
+        }
+      }
+      if (orphans.length > 0) await refreshConnections();
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete instance');
+    }
+  };
+
+  const handleToggleConnectionString = async (db: Database) => {
+    if (credentials[db.id]) {
+      setCredentials((prev) => {
+        const next = { ...prev };
+        delete next[db.id];
+        return next;
+      });
+      return;
+    }
+    try {
+      setError(null);
+      const creds = await databasesApi.credentials(db.id);
+      setCredentials((prev) => ({ ...prev, [db.id]: creds }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load connection string');
+    }
+  };
+
+  return (
+    <div className="space-y-4 max-h-[70vh] overflow-y-auto">
+      <p className="text-sm text-muted-foreground">
+        Provision a managed Valkey instance with the Search module, reachable over TLS.
+        Once ready, it's added to your connections automatically.
+      </p>
+
+      {error && (
+        <div className="p-3 rounded-md bg-destructive/10 text-destructive text-sm">{error}</div>
+      )}
+      {success && (
+        <div className="p-3 rounded-md bg-green-500/10 text-green-600 text-sm">{success}</div>
+      )}
+
+      {isAdminOrOwner && !atCapacity && (
+        <form onSubmit={handleCreate} className="space-y-3 border rounded-md p-3">
+          <div className="flex items-end gap-3 flex-wrap">
+            <div className="flex-1 min-w-[180px]">
+              <label className="block text-sm font-medium mb-1">Name</label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="my-cache"
+                required
+                maxLength={VALKEY_NAME_MAX_LENGTH}
+                pattern="[a-z][a-z0-9-]*[a-z0-9]"
+                title="Lowercase letters, digits and hyphens; must start with a letter"
+                className="w-full px-3 py-2 border rounded-md bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">Max memory</label>
+              <select
+                value={maxmemory}
+                onChange={(e) => setMaxmemory(e.target.value)}
+                className="px-3 py-2 border rounded-md bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+              >
+                <option value="256mb">256mb</option>
+                <option value="768mb">768mb</option>
+                <option value="2gb">2gb</option>
+              </select>
+            </div>
+            <button
+              type="submit"
+              disabled={creating || !name.trim()}
+              className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
+            >
+              {creating ? 'Creating...' : 'Create'}
+            </button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            The name becomes the public hostname, so it must be unique and at most{' '}
+            {VALKEY_NAME_MAX_LENGTH} characters. One instance per workspace for now.
+          </p>
+        </form>
+      )}
+
+      {loading ? (
+        <p className="text-sm text-muted-foreground">Loading...</p>
+      ) : databases.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No instances yet. {isAdminOrOwner ? 'Create one above to get started.' : ''}
+        </p>
+      ) : (
+        databases.map((db) => (
+          <div key={db.id} className="border rounded-md p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="font-medium">{db.name}</span>
+                <span
+                  className={`text-xs px-1.5 py-0.5 rounded ${
+                    db.status === 'ready'
+                      ? 'bg-green-500/10 text-green-600'
+                      : db.status === 'error'
+                        ? 'bg-destructive/10 text-destructive'
+                        : 'bg-yellow-500/10 text-yellow-600'
+                  }`}
+                >
+                  {db.status}
+                </span>
+              </div>
+              {isAdminOrOwner && db.status !== 'deleting' && (
+                <button
+                  onClick={() => handleDelete(db)}
+                  className="text-xs px-2 py-1 border border-destructive/50 text-destructive rounded hover:bg-destructive/10"
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+
+            {db.statusMessage && db.status === 'error' && (
+              <p className="text-sm text-destructive">{db.statusMessage}</p>
+            )}
+
+            {db.status === 'ready' && db.host ? (
+              <div className="space-y-2">
+                <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-0.5 text-sm">
+                  <dt className="text-muted-foreground">Host</dt>
+                  <dd className="font-mono break-all">{db.host}</dd>
+                  <dt className="text-muted-foreground">Port</dt>
+                  <dd className="font-mono">{db.port}</dd>
+                  <dt className="text-muted-foreground">Username</dt>
+                  <dd className="font-mono">{db.username}</dd>
+                  <dt className="text-muted-foreground">TLS</dt>
+                  <dd className="font-mono">required</dd>
+                </dl>
+
+                {isAdminOrOwner && (
+                  <button
+                    onClick={() => handleToggleConnectionString(db)}
+                    className="text-sm text-primary hover:text-primary/80"
+                  >
+                    {credentials[db.id] ? 'Hide connection string' : 'Show connection string'}
+                  </button>
+                )}
+
+                {credentials[db.id] && (
+                  <div className="space-y-2 rounded-md border bg-muted/40 p-3">
+                    <div>
+                      <div className="text-xs text-muted-foreground mb-1">Connection URL</div>
+                      <code className="block break-all font-mono text-xs">
+                        rediss://{credentials[db.id].username}:{credentials[db.id].password}@
+                        {credentials[db.id].host}:{credentials[db.id].port}
+                      </code>
+                    </div>
+                    <div>
+                      <div className="text-xs text-muted-foreground mb-1">valkey-cli</div>
+                      <code className="block break-all font-mono text-xs">
+                        valkey-cli --tls --sni {credentials[db.id].host} -h{' '}
+                        {credentials[db.id].host} -p {credentials[db.id].port} --user{' '}
+                        {credentials[db.id].username} --pass {credentials[db.id].password}
+                      </code>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {db.status === 'deleting'
+                  ? 'Tearing down...'
+                  : db.status === 'error'
+                    ? 'Provisioning failed.'
+                    : 'Provisioning, this can take a couple of minutes...'}
+              </p>
+            )}
+          </div>
+        ))
       )}
 
       <div className="flex justify-end pt-2 border-t">
