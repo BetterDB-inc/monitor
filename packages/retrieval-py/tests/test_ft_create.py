@@ -199,6 +199,24 @@ def test_flat_invalid_dims() -> None:
         build_ft_create_args("bad", schema)
 
 
+def test_missing_algorithm_raises() -> None:
+    schema: RetrievalSchema = {
+        "fields": {},
+        "vector": {"metric": "cosine", "dims": 4},  # type: ignore[typeddict-item]
+    }
+    with pytest.raises(ValueError, match="Vector algorithm must be one of"):
+        build_ft_create_args("bad", schema)
+
+
+def test_invalid_algorithm_raises() -> None:
+    schema: RetrievalSchema = {
+        "fields": {},
+        "vector": {"metric": "cosine", "algorithm": "bogus", "dims": 4},  # type: ignore[typeddict-item]
+    }
+    with pytest.raises(ValueError, match="Vector algorithm must be one of"):
+        build_ft_create_args("bad", schema)
+
+
 @pytest.mark.parametrize("metric,expected", [("cosine", "COSINE"), ("l2", "L2"), ("ip", "IP")])
 def test_metric_mapping(metric: str, expected: str) -> None:
     schema: RetrievalSchema = {
