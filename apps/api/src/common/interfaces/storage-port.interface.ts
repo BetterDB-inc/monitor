@@ -44,6 +44,12 @@ export type {
   UpdateProposalStatusInput,
   AppendProposalAuditInput,
   AppliedResult,
+  StoredMemoryProposal,
+  StoredMemoryProposalAudit,
+  CreateMemoryProposalInput,
+  ListMemoryProposalsOptions,
+  UpdateMemoryProposalStatusInput,
+  AppendMemoryProposalAuditInput,
 } from '@betterdb/shared';
 export type {
   CaptureSessionStatus,
@@ -90,6 +96,12 @@ import type {
   ListCacheProposalsOptions,
   UpdateProposalStatusInput,
   AppendProposalAuditInput,
+  StoredMemoryProposal,
+  StoredMemoryProposalAudit,
+  CreateMemoryProposalInput,
+  ListMemoryProposalsOptions,
+  UpdateMemoryProposalStatusInput,
+  AppendMemoryProposalAuditInput,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
@@ -563,4 +575,17 @@ export interface StoragePort {
   expireCacheProposalsBefore(now: number): Promise<StoredCacheProposal[]>;
   appendCacheProposalAudit(input: AppendProposalAuditInput): Promise<StoredCacheProposalAudit>;
   getCacheProposalAudit(proposalId: string): Promise<StoredCacheProposalAudit[]>;
+
+  // Memory Proposal Methods
+  createMemoryProposal(input: CreateMemoryProposalInput): Promise<StoredMemoryProposal>;
+  getMemoryProposal(id: string): Promise<StoredMemoryProposal | null>;
+  listMemoryProposals(options: ListMemoryProposalsOptions): Promise<StoredMemoryProposal[]>;
+  updateMemoryProposalStatus(
+    input: UpdateMemoryProposalStatusInput,
+  ): Promise<StoredMemoryProposal | null>;
+  appendMemoryProposalAudit(
+    input: AppendMemoryProposalAuditInput,
+  ): Promise<StoredMemoryProposalAudit>;
+  getMemoryProposalAudit(proposalId: string): Promise<StoredMemoryProposalAudit[]>;
+  expireMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]>;
 }
