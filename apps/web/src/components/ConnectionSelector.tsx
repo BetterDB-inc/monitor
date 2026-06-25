@@ -862,9 +862,6 @@ function ValkeyInstancesTab({
   const [success, setSuccess] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<Record<string, DatabaseCredentials>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Instances we've already wired a Monitor connection for, so polling
-  // doesn't keep recreating one on every tick.
-  const linkedRef = useRef<Set<string>>(new Set());
 
   const atCapacity = databases.length >= MAX_VALKEY_INSTANCES;
 
@@ -904,45 +901,8 @@ function ValkeyInstancesTab({
     };
   }, [databases]);
 
-  // Whenever an instance becomes ready, wire up a direct Monitor connection
-  // to it so it appears in the connection dropdown.
-  useEffect(() => {
-    const ready = databases.filter((db) => db.status === 'ready' && db.host);
-    for (const db of ready) {
-      if (linkedRef.current.has(db.id)) continue;
-      const alreadyConnected = connections.some(
-        (c) => c.host === db.host && c.port === db.port,
-      );
-      if (alreadyConnected) {
-        linkedRef.current.add(db.id);
-        continue;
-      }
-      linkedRef.current.add(db.id);
-      (async () => {
-        try {
-          const creds = await databasesApi.credentials(db.id);
-          await fetchApi('/connections', {
-            method: 'POST',
-            body: JSON.stringify({
-              name: db.name,
-              host: creds.host,
-              port: creds.port,
-              username: creds.username,
-              password: creds.password,
-              dbIndex: 0,
-              tls: true,
-              setAsDefault: connections.length === 0,
-            }),
-          });
-          await refreshConnections();
-        } catch (err) {
-          // If linking fails, allow a later attempt.
-          linkedRef.current.delete(db.id);
-          console.error('Failed to add connection for instance:', err);
-        }
-      })();
-    }
-  }, [databases, connections, refreshConnections]);
+  // Ready instances are mirrored into the connection list by useValkeyAutoLink
+  // (mounted app-wide in AppLayout) so linking survives this dialog closing.
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -971,7 +931,6 @@ function ValkeyInstancesTab({
       setError(null);
       await databasesApi.remove(db.id);
       setSuccess(`Deleting instance '${db.name}'`);
-      linkedRef.current.delete(db.id);
       setCredentials((prev) => {
         const next = { ...prev };
         delete next[db.id];
