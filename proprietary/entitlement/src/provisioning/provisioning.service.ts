@@ -12,9 +12,29 @@ import { Route53Client, ChangeResourceRecordSetsCommand, ListResourceRecordSetsC
 
 const execFileAsync = promisify(execFile);
 
-// A Valkey instance name must be a single DNS label so it can form
-// <name>.valkey.betterdb.com and a Helm release name.
+// A Valkey instance name must be a single DNS label so it can form a Helm
+// release name (valkey-<name>). The public SNI host is derived from the
+// instance id, not the name (see valkeyHostLabel), so names need not be
+// globally unique.
 const VALKEY_NAME_PATTERN = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
+
+// The public SNI host is an opaque, stable label derived from the instance id
+// rather than its name: this keeps it globally unique on the shared wildcard
+// endpoint (no cross-tenant collisions) without leaking the friendly name.
+function valkeyHostLabel(instanceId: string): string {
+  const hash = crypto.createHash('sha256').update(instanceId).digest('hex');
+  // 'vk' prefix guarantees a leading letter (valid DNS label).
+  return `vk${hash.slice(0, 16)}`;
+}
+
+// ACL rules for the app user. +@all minus an explicit deny-list of genuinely
+// destructive commands (kept in sync with charts/valkey-search secret.yaml).
+// Blanket -@dangerous is too broad: it strips the observability commands
+// (INFO/CLIENT/SLOWLOG/LATENCY/CONFIG GET/MONITOR) Monitor relies on.
+const VALKEY_USER_ACL_RULES =
+  '~* &* +@all -flushall -flushdb -swapdb -shutdown -debug -failover ' +
+  '-replicaof -slaveof -save -bgsave -bgrewriteaof -migrate -module ' +
+  '-config|set -config|rewrite -acl|setuser -acl|deluser -acl|load -acl|save';
 
 @Injectable()
 export class ProvisioningService {
@@ -32,6 +52,7 @@ export class ProvisioningService {
   private readonly valkeyChartPath: string;
   private readonly valkeyDomain: string;
   private readonly valkeyImageTag: string;
+  private readonly valkeyStorageClass: string;
   private readonly helmBin: string;
 
   // Infrastructure constants
@@ -73,6 +94,9 @@ export class ProvisioningService {
     this.valkeyChartPath = this.config.get<string>('VALKEY_CHART_PATH', '/app/charts/valkey-search');
     this.valkeyDomain = this.config.get<string>('VALKEY_DOMAIN', 'valkey.betterdb.com');
     this.valkeyImageTag = this.config.get<string>('VALKEY_IMAGE_TAG', '9.1-alpine');
+    // The cluster has no default StorageClass, so the PVC must name one
+    // explicitly or it stays unbound. gp2 is the EBS class present on EKS.
+    this.valkeyStorageClass = this.config.get<string>('VALKEY_STORAGE_CLASS', 'gp2');
     this.helmBin = this.config.get<string>('HELM_BIN', 'helm');
 
     // Load infrastructure config
@@ -312,7 +336,7 @@ export class ProvisioningService {
 
     const namespace = `tenant-${tenant.subdomain}`;
     const release = `valkey-${instance.name}`;
-    const host = `${instance.name}.${this.valkeyDomain}`;
+    const host = `${valkeyHostLabel(instance.id)}.${this.valkeyDomain}`;
 
     this.logger.log(`Provisioning valkey instance ${instance.name} (${instanceId}) in ${namespace}`);
 
@@ -426,7 +450,7 @@ export class ProvisioningService {
 
     const namespace = `tenant-${tenant.subdomain}`;
     const release = `valkey-${instance.name}`;
-    const host = `${instance.name}.${this.valkeyDomain}`;
+    const host = `${valkeyHostLabel(instance.id)}.${this.valkeyDomain}`;
 
     this.logger.log(`Deprovisioning valkey instance ${instance.name} (${instanceId})`);
 
@@ -547,9 +571,15 @@ export class ProvisioningService {
     username: string,
     password: string,
   ): Promise<void> {
-    // default off — only the named user can connect. -@dangerous strips
-    // FLUSHALL/CONFIG/DEBUG/etc while leaving FT.* (search) working.
-    const acl = `user default off\nuser ${username} on >${password} ~* &* +@all -@dangerous\n`;
+    // default off — only the named user can connect. We grant +@all then deny
+    // an explicit list of genuinely destructive commands. A blanket -@dangerous
+    // is too broad: it also strips INFO/CLIENT/SLOWLOG/LATENCY/CONFIG GET/MONITOR,
+    // which Monitor needs to observe the instance (capability detection runs INFO,
+    // so the connection would be rejected outright). The deny-list blocks data
+    // loss, server takeover, persistence DoS, exfiltration/code loading,
+    // reconfiguration and privilege escalation while leaving observability and
+    // FT.* (search) working.
+    const acl = `user default off\nuser ${username} on >${password} ${VALKEY_USER_ACL_RULES}\n`;
     try {
       await this.coreApi.createNamespacedSecret({
         namespace,
@@ -593,6 +623,8 @@ export class ProvisioningService {
       `auth.username=${opts.username}`,
       '--set',
       'persistence.enabled=true',
+      '--set',
+      `persistence.storageClass=${this.valkeyStorageClass}`,
       '--set',
       'exposure.public=true',
       '--set',

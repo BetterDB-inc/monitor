@@ -29,8 +29,8 @@ export class ValkeyInstanceService {
 
     try {
       // Serializable so two concurrent creates can't both pass the cap check.
-      // The name doubles as the public SNI host, so it also carries a DB-level
-      // unique constraint (handled by the P2002 catch below).
+      // The name is unique per tenant (composite DB constraint, handled by the
+      // P2002 catch below); the public SNI host is a separate opaque hash.
       const instance = await this.prisma.$transaction(
         async (tx) => {
           const existingCount = await tx.valkeyInstance.count({

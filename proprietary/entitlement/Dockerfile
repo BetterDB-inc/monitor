@@ -58,6 +58,9 @@ COPY --from=builder /app/proprietary/entitlement/node_modules ./proprietary/enti
 COPY --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
 COPY --from=builder /app/proprietary/entitlement/dist ./proprietary/entitlement/dist
 COPY --from=builder /app/proprietary/entitlement/prisma ./proprietary/entitlement/prisma
+# prisma.config.ts supplies the datasource URL (ENTITLEMENT_DATABASE_URL) for
+# `prisma migrate deploy` run in-cluster against prod RDS.
+COPY --from=builder /app/proprietary/entitlement/prisma.config.ts ./proprietary/entitlement/prisma.config.ts
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/packages/shared/package.json ./packages/shared/package.json
 COPY --from=builder /app/package.json ./package.json
