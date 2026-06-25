@@ -15,9 +15,13 @@ def _s(x: Any) -> str:
 
 
 def _to_int(x: Any) -> int:
+    # Mirror TS ``parseInt(String(x), 10) || 0``: parse via float() so a
+    # float-formatted token (e.g. a RESP3 double rendered as "42.0") still
+    # yields its integer value instead of falling back to 0. OverflowError
+    # guards "inf"/"Infinity"; non-numeric tokens fall back to 0.
     try:
-        return int(_s(x))
-    except ValueError:
+        return int(float(_s(x)))
+    except (ValueError, TypeError, OverflowError):
         return 0
 
 

@@ -63,3 +63,14 @@ def test_stats_coerces_unparseable_num_docs_to_zero():
     assert parse_ft_info_stats(["num_docs", "garbage"]) == FtIndexStats(
         num_docs=0, indexing_state="unknown"
     )
+
+
+def test_stats_reads_a_float_formatted_num_docs():
+    # A RESP3 double may surface as "42.0"; match TS parseInt and read 42
+    # rather than strict int() falling back to 0.
+    assert parse_ft_info_stats(["num_docs", "42.0"]).num_docs == 42
+
+
+def test_parses_a_float_formatted_dim():
+    info = ["attributes", [["identifier", "embedding", "type", "VECTOR", "DIM", "1536.0"]]]
+    assert parse_dimension_from_info(info) == 1536

@@ -33,6 +33,7 @@ let AnomalyModule: any = null;
 let WebhookProModule: any = null;
 let InferenceLatencyProModule: any = null;
 let CacheProposalsModule: any = null;
+let MemoryProposalsModule: any = null;
 let AgentModule: any = null;
 let DataRetentionModule: any = null;
 
@@ -89,6 +90,14 @@ try {
   const cacheProposalsModule = require('../../../proprietary/cache-proposals/cache-proposals.module');
   CacheProposalsModule = cacheProposalsModule.CacheProposalsModule;
   console.log('[CacheProposals] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
+  const memoryProposalsModule = require('../../../proprietary/memory-proposals/memory-proposals.module');
+  MemoryProposalsModule = memoryProposalsModule.MemoryProposalsModule;
+  console.log('[MemoryProposals] Proprietary module loaded');
 } catch {
   // Proprietary module not available
 }
@@ -160,6 +169,7 @@ const proprietaryImports = [
   WebhookProModule,
   InferenceLatencyProModule,
   CacheProposalsModule,
+  MemoryProposalsModule,
   AiModule,
   AgentModule,
   DataRetentionModule,

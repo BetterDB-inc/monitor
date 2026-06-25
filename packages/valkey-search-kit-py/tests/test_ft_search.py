@@ -84,6 +84,24 @@ def test_return_zero_mode_keys_without_field_list():
     assert result[1] == {"key": "key:b", "fields": {}}
 
 
+def test_parses_a_float_formatted_total():
+    # A RESP3 double may surface the total as "2.0"; match TS parseInt and
+    # still return the hits instead of collapsing to [].
+    raw = ["2.0", "key:a", ["f1", "v1"], "key:b", ["f2", "v2"]]
+    result = parse_ft_search_response(raw)
+    assert len(result) == 2
+    assert result[0]["key"] == "key:a"
+    assert result[1]["key"] == "key:b"
+
+
+def test_parses_a_float_formatted_total_in_bytes():
+    raw = [b"1", b"key:a", [b"f1", b"v1"]]
+    raw[0] = b"1.0"
+    result = parse_ft_search_response(raw)
+    assert len(result) == 1
+    assert result[0]["key"] == "key:a"
+
+
 def test_never_raises_on_garbage():
     assert parse_ft_search_response("garbage") == []
     assert parse_ft_search_response(123) == []

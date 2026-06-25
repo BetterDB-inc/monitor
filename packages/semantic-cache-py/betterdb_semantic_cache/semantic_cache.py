@@ -35,6 +35,11 @@ from .types import (
     SemanticCacheOptions,
     ThresholdEffectivenessResult,
 )
+from betterdb_valkey_search_kit import (
+    is_index_not_found_error,
+    parse_dimension_from_info,
+)
+
 from .normalizer import BinaryNormalizer, default_normalizer
 from .utils import ContentBlock, encode_float32, decode_float32, escape_tag, extract_binary_refs, extract_text, parse_ft_search_response
 
@@ -1320,64 +1325,7 @@ class SemanticCache:
     def _parse_dimension_from_info(self, info: Any) -> int:
         if not isinstance(info, (list, tuple)):
             return 0
-        i = 0
-        while i < len(info) - 1:
-            key = info[i]
-            if isinstance(key, bytes):
-                key = key.decode()
-            if key not in ("attributes", "fields"):
-                i += 2
-                continue
-            attributes = info[i + 1]
-            if not isinstance(attributes, (list, tuple)):
-                i += 2
-                continue
-            for attr in attributes:
-                if not isinstance(attr, (list, tuple)):
-                    continue
-                is_vector = False
-                dim = 0
-                j = 0
-                while j < len(attr) - 1:
-                    ak = attr[j]
-                    av = attr[j + 1]
-                    if isinstance(ak, bytes):
-                        ak = ak.decode()
-                    ak = str(ak)
-                    if isinstance(av, bytes):
-                        av_str = av.decode()
-                    else:
-                        av_str = str(av)
-                    if ak == "type" and av_str == "VECTOR":
-                        is_vector = True
-                    elif ak.lower() == "dim":
-                        try:
-                            dim = int(av_str)
-                        except (ValueError, TypeError):
-                            pass
-                    elif ak == "index" and isinstance(av, (list, tuple)):
-                        # Valkey Search 1.2 nests dimension inside 'index' sub-array
-                        k = 0
-                        while k < len(av) - 1:
-                            ik = av[k]
-                            iv = av[k + 1]
-                            if isinstance(ik, bytes):
-                                ik = ik.decode()
-                            if str(ik) == "dimensions":
-                                if isinstance(iv, bytes):
-                                    iv = iv.decode()
-                                try:
-                                    d = int(str(iv))
-                                    if d > 0:
-                                        dim = d
-                                except (ValueError, TypeError):
-                                    pass
-                            k += 2
-                    j += 2
-                if is_vector and dim > 0:
-                    return dim
-            i += 2
-        return 0
+        return parse_dimension_from_info(info)
 
     def _resolve_prompt(self, prompt: str | list[ContentBlock]) -> tuple[str, list[str]]:
         if isinstance(prompt, str):
@@ -1531,13 +1479,7 @@ class SemanticCache:
             return f"error_{on_error}", duration_sec
 
     def _is_index_not_found_error(self, err: Exception) -> bool:
-        msg = str(err).lower()
-        return (
-            "unknown index name" in msg
-            or "no such index" in msg
-            # Valkey Search 1.2: "index with name <n> not found in database 0"
-            or ("index" in msg and "not found" in msg)
-        )
+        return is_index_not_found_error(err)
 
 
 def _safe_float(value: Any, default: float = float("nan")) -> float:
