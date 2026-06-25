@@ -346,7 +346,8 @@ server.tool(
   },
   async ({ section, instanceId }) => withTelemetry('get_info', async () => {
     const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/info`) as Record<string, unknown>;
+    const query = section ? `?section=${encodeURIComponent(section)}` : '';
+    const data = await apiFetch(`/mcp/instance/${id}/info${query}`) as Record<string, unknown>;
     if (section && data[section] !== undefined) {
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({ [section]: data[section] }, null, 2) }],
