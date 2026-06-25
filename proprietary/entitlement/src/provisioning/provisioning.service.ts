@@ -2,11 +2,19 @@ import { Injectable, Logger, NotFoundException, BadRequestException } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailService } from '../email/email.service';
-import { TenantStatus } from '@prisma/client';
+import { TenantStatus, ValkeyInstanceStatus } from '@prisma/client';
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { Route53Client, ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand } from '@aws-sdk/client-route-53';
+
+const execFileAsync = promisify(execFile);
+
+// A Valkey instance name must be a single DNS label so it can form
+// <name>.valkey.betterdb.com and a Helm release name.
+const VALKEY_NAME_PATTERN = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
 
 @Injectable()
 export class ProvisioningService {
@@ -16,6 +24,15 @@ export class ProvisioningService {
   private readonly appsApi: k8s.AppsV1Api;
   private readonly batchApi: k8s.BatchV1Api;
   private readonly networkingApi: k8s.NetworkingV1Api;
+  // Generic object client used to apply the rendered valkey-search chart,
+  // including the Traefik IngressRouteTCP CRD that the typed clients can't.
+  private readonly objectApi: k8s.KubernetesObjectApi;
+
+  // Valkey instance provisioning config
+  private readonly valkeyChartPath: string;
+  private readonly valkeyDomain: string;
+  private readonly valkeyImageTag: string;
+  private readonly helmBin: string;
 
   // Infrastructure constants
   private readonly ecrImage: string;
@@ -50,6 +67,13 @@ export class ProvisioningService {
     this.appsApi = this.kc.makeApiClient(k8s.AppsV1Api);
     this.batchApi = this.kc.makeApiClient(k8s.BatchV1Api);
     this.networkingApi = this.kc.makeApiClient(k8s.NetworkingV1Api);
+    this.objectApi = k8s.KubernetesObjectApi.makeApiClient(this.kc);
+
+    // Valkey instance provisioning config (chart bundled into the image)
+    this.valkeyChartPath = this.config.get<string>('VALKEY_CHART_PATH', '/app/charts/valkey-search');
+    this.valkeyDomain = this.config.get<string>('VALKEY_DOMAIN', 'valkey.betterdb.com');
+    this.valkeyImageTag = this.config.get<string>('VALKEY_IMAGE_TAG', '9.1-alpine');
+    this.helmBin = this.config.get<string>('HELM_BIN', 'helm');
 
     // Load infrastructure config
     this.ecrImage = this.config.get<string>('ECR_IMAGE', '811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb');
@@ -250,6 +274,338 @@ export class ProvisioningService {
       await this.updateTenantStatus(tenantId, 'error', `Deprovision failed: ${errorMessage}`);
       throw error;
     }
+  }
+
+  // ============================================
+  // Valkey Instance Provisioning
+  // ============================================
+  //
+  // Renders charts/valkey-search with `helm template` (a stateless local
+  // render — no cluster state, no Helm release Secrets) and applies the result
+  // with the generic KubernetesObjectApi. This reuses the chart as the single
+  // source of truth while keeping a clean, SDK-based apply/failure path.
+  //
+  // The Secret (password + users.acl) is created here in TS and the chart is
+  // rendered with auth.existingSecret so its own secret.yaml (which relies on
+  // Helm `lookup`/`randAlphaNum`, unavailable under `helm template`) is skipped.
+  // Each instance reuses its tenant namespace; public DNS is the shared
+  // *.valkey.betterdb.com wildcard, so no per-instance Route53 record is made.
+
+  async provisionValkeyInstance(instanceId: string): Promise<void> {
+    const instance = await this.prisma.valkeyInstance.findUnique({ where: { id: instanceId } });
+    if (!instance) {
+      throw new NotFoundException(`Valkey instance ${instanceId} not found`);
+    }
+    if (instance.status !== 'pending' && instance.status !== 'error') {
+      throw new BadRequestException(
+        `Cannot provision instance with status '${instance.status}'. Must be 'pending' or 'error'.`,
+      );
+    }
+    if (!VALKEY_NAME_PATTERN.test(instance.name)) {
+      throw new BadRequestException(`Invalid valkey instance name: ${instance.name}`);
+    }
+
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: instance.tenantId } });
+    if (!tenant) {
+      throw new NotFoundException(`Tenant ${instance.tenantId} not found`);
+    }
+
+    const namespace = `tenant-${tenant.subdomain}`;
+    const release = `valkey-${instance.name}`;
+    const host = `${instance.name}.${this.valkeyDomain}`;
+
+    this.logger.log(`Provisioning valkey instance ${instance.name} (${instanceId}) in ${namespace}`);
+
+    try {
+      await this.updateValkeyInstanceStatus(instanceId, 'provisioning');
+
+      // The tenant namespace already exists for cloud tenants, but a user may
+      // create an instance before the Monitor app is provisioned — ensure it.
+      await this.createNamespace(namespace, tenant.subdomain);
+
+      // Generate the credential and create the Secret the chart will reference.
+      const password = crypto.randomBytes(24).toString('base64url');
+      await this.createValkeySecret(namespace, instance.secretName, instance.username, password);
+
+      // Render + apply the chart.
+      const manifests = await this.renderValkeyChart({
+        release,
+        namespace,
+        username: instance.username,
+        secretName: instance.secretName,
+        host,
+        maxmemory: instance.maxmemory,
+      });
+      await this.applyManifests(manifests, namespace);
+
+      // Wait for the StatefulSet to become ready.
+      await this.waitForStatefulSetReady(namespace, release, 6 * 60 * 1000);
+
+      await this.prisma.valkeyInstance.update({
+        where: { id: instanceId },
+        data: { status: 'ready', statusMessage: null, host, port: 6379 },
+      });
+      this.logger.log(`[${instance.name}] Valkey instance ready at ${host}:6379`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`[${instance.name}] Valkey provisioning failed: ${errorMessage}`);
+      await this.updateValkeyInstanceStatus(instanceId, 'error', errorMessage);
+      throw error;
+    }
+  }
+
+  async deprovisionValkeyInstance(instanceId: string): Promise<void> {
+    const instance = await this.prisma.valkeyInstance.findUnique({ where: { id: instanceId } });
+    if (!instance) {
+      throw new NotFoundException(`Valkey instance ${instanceId} not found`);
+    }
+
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: instance.tenantId } });
+    if (!tenant) {
+      throw new NotFoundException(`Tenant ${instance.tenantId} not found`);
+    }
+
+    const namespace = `tenant-${tenant.subdomain}`;
+    const release = `valkey-${instance.name}`;
+    const host = `${instance.name}.${this.valkeyDomain}`;
+
+    this.logger.log(`Deprovisioning valkey instance ${instance.name} (${instanceId})`);
+
+    try {
+      await this.updateValkeyInstanceStatus(instanceId, 'deleting');
+
+      // Delete the workload objects by re-rendering the chart and removing each.
+      const manifests = await this.renderValkeyChart({
+        release,
+        namespace,
+        username: instance.username,
+        secretName: instance.secretName,
+        host,
+        maxmemory: instance.maxmemory,
+      });
+      await this.deleteManifests(manifests, namespace);
+
+      // volumeClaimTemplates leave PVCs behind after the StatefulSet is gone.
+      await this.deleteValkeyPvcs(namespace, release);
+
+      // Delete the credential Secret.
+      try {
+        await this.coreApi.deleteNamespacedSecret({ name: instance.secretName, namespace });
+      } catch (error: any) {
+        if (error.response?.statusCode !== 404 && !this.isNotFoundError(error)) {
+          this.logger.warn(`[${instance.name}] Error deleting secret: ${error.message}`);
+        }
+      }
+
+      await this.prisma.valkeyInstance.delete({ where: { id: instanceId } });
+      this.logger.log(`[${instance.name}] Valkey instance deprovisioned`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`[${instance.name}] Valkey deprovisioning failed: ${errorMessage}`);
+      await this.updateValkeyInstanceStatus(instanceId, 'error', `Deprovision failed: ${errorMessage}`);
+      throw error;
+    }
+  }
+
+  // Returns the connection details for a ready instance, reading the password
+  // from the k8s Secret (it is never stored in Postgres).
+  async getValkeyInstanceCredentials(instanceId: string): Promise<{
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+  }> {
+    const instance = await this.prisma.valkeyInstance.findUnique({ where: { id: instanceId } });
+    if (!instance) {
+      throw new NotFoundException(`Valkey instance ${instanceId} not found`);
+    }
+    if (instance.status !== 'ready' || !instance.host) {
+      throw new BadRequestException(`Valkey instance ${instanceId} is not ready`);
+    }
+
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: instance.tenantId } });
+    if (!tenant) {
+      throw new NotFoundException(`Tenant ${instance.tenantId} not found`);
+    }
+    const namespace = `tenant-${tenant.subdomain}`;
+
+    const secret = await this.coreApi.readNamespacedSecret({
+      name: instance.secretName,
+      namespace,
+    });
+    const encoded = secret.data?.password;
+    if (!encoded) {
+      throw new NotFoundException(`Credential secret for instance ${instanceId} not found`);
+    }
+    const password = Buffer.from(encoded, 'base64').toString('utf8');
+
+    return {
+      host: instance.host,
+      port: instance.port,
+      username: instance.username,
+      password,
+    };
+  }
+
+  private async updateValkeyInstanceStatus(
+    id: string,
+    status: ValkeyInstanceStatus,
+    statusMessage?: string,
+  ): Promise<void> {
+    await this.prisma.valkeyInstance.update({
+      where: { id },
+      data: { status, statusMessage: statusMessage || null },
+    });
+  }
+
+  private async createValkeySecret(
+    namespace: string,
+    secretName: string,
+    username: string,
+    password: string,
+  ): Promise<void> {
+    // default off — only the named user can connect. -@dangerous strips
+    // FLUSHALL/CONFIG/DEBUG/etc while leaving FT.* (search) working.
+    const acl = `user default off\nuser ${username} on >${password} ~* &* +@all -@dangerous\n`;
+    try {
+      await this.coreApi.createNamespacedSecret({
+        namespace,
+        body: {
+          metadata: {
+            name: secretName,
+            labels: { 'app.kubernetes.io/managed-by': 'betterdb-entitlement' },
+          },
+          type: 'Opaque',
+          stringData: { password, 'users.acl': acl },
+        },
+      });
+    } catch (error: any) {
+      if (this.isAlreadyExistsError(error)) {
+        this.logger.warn(`Secret ${secretName} already exists in ${namespace}, continuing...`);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  private async renderValkeyChart(opts: {
+    release: string;
+    namespace: string;
+    username: string;
+    secretName: string;
+    host: string;
+    maxmemory: string | null;
+  }): Promise<k8s.KubernetesObject[]> {
+    const args = [
+      'template',
+      opts.release,
+      this.valkeyChartPath,
+      '--namespace',
+      opts.namespace,
+      '--set',
+      `image.tag=${this.valkeyImageTag}`,
+      '--set',
+      `auth.existingSecret=${opts.secretName}`,
+      '--set',
+      `auth.username=${opts.username}`,
+      '--set',
+      'persistence.enabled=true',
+      '--set',
+      'exposure.public=true',
+      '--set',
+      `exposure.host=${opts.host}`,
+      '--set',
+      'exposure.sniRoute.enabled=true',
+    ];
+    if (opts.maxmemory) {
+      args.push('--set', `valkey.maxmemory=${opts.maxmemory}`);
+    }
+
+    let stdout: string;
+    try {
+      ({ stdout } = await execFileAsync(this.helmBin, args, { maxBuffer: 16 * 1024 * 1024 }));
+    } catch (error: any) {
+      throw new Error(`helm template failed: ${error.stderr || error.message}`);
+    }
+
+    return k8s.loadAllYaml(stdout).filter((obj): obj is k8s.KubernetesObject => !!obj && !!obj.kind);
+  }
+
+  private async applyManifests(manifests: k8s.KubernetesObject[], namespace: string): Promise<void> {
+    for (const manifest of manifests) {
+      manifest.metadata = { ...manifest.metadata, namespace };
+      try {
+        await this.objectApi.create(manifest);
+        this.logger.log(`[${namespace}] Created ${manifest.kind} ${manifest.metadata?.name}`);
+      } catch (error: any) {
+        if (this.isAlreadyExistsError(error)) {
+          this.logger.warn(`[${namespace}] ${manifest.kind} ${manifest.metadata?.name} already exists, continuing...`);
+        } else {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private async deleteManifests(manifests: k8s.KubernetesObject[], namespace: string): Promise<void> {
+    for (const manifest of manifests) {
+      manifest.metadata = { ...manifest.metadata, namespace };
+      try {
+        await this.objectApi.delete(manifest);
+        this.logger.log(`[${namespace}] Deleted ${manifest.kind} ${manifest.metadata?.name}`);
+      } catch (error: any) {
+        if (this.isNotFoundError(error)) {
+          this.logger.warn(`[${namespace}] ${manifest.kind} ${manifest.metadata?.name} not found, skipping...`);
+        } else {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private async deleteValkeyPvcs(namespace: string, release: string): Promise<void> {
+    try {
+      const pvcs = await this.coreApi.listNamespacedPersistentVolumeClaim({
+        namespace,
+        labelSelector: `app.kubernetes.io/instance=${release}`,
+      });
+      for (const pvc of pvcs.items) {
+        await this.coreApi.deleteNamespacedPersistentVolumeClaim({ name: pvc.metadata!.name!, namespace });
+        this.logger.log(`[${namespace}] Deleted PVC ${pvc.metadata!.name}`);
+      }
+    } catch (error: any) {
+      this.logger.warn(`[${namespace}] Error deleting PVCs: ${error.message}`);
+    }
+  }
+
+  private async waitForStatefulSetReady(namespace: string, release: string, timeoutMs: number): Promise<void> {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      try {
+        const list = await this.appsApi.listNamespacedStatefulSet({
+          namespace,
+          labelSelector: `app.kubernetes.io/instance=${release}`,
+        });
+        const sts = list.items[0];
+        if (sts?.status?.readyReplicas && sts.status.readyReplicas >= 1) {
+          this.logger.log(`[${namespace}] StatefulSet ready`);
+          return;
+        }
+        this.logger.debug(`[${namespace}] Waiting for StatefulSet... (ready: ${sts?.status?.readyReplicas || 0})`);
+      } catch (error: any) {
+        this.logger.warn(`[${namespace}] Error checking StatefulSet status: ${error.message}`);
+      }
+      await this.sleep(5000);
+    }
+    throw new Error(`StatefulSet readiness timeout after ${timeoutMs / 1000}s`);
+  }
+
+  private isNotFoundError(error: any): boolean {
+    const code = error.statusCode ?? error.response?.statusCode ?? error.status ?? error.body?.code;
+    if (code === 404) return true;
+    if (error.body?.reason === 'NotFound') return true;
+    if (typeof error.message === 'string' && error.message.startsWith('HTTP-Code: 404')) return true;
+    return false;
   }
 
   private async updateTenantStatus(id: string, status: TenantStatus, statusMessage?: string): Promise<void> {

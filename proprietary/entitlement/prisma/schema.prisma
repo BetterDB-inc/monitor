@@ -62,14 +62,47 @@ model Tenant {
   createdAt     DateTime     @default(now()) @map("created_at")
   updatedAt     DateTime     @updatedAt @map("updated_at")
 
-  customer      Customer?    @relation(fields: [customerId], references: [id])
-  users         User[]
-  invitations   Invitation[]
+  customer        Customer?        @relation(fields: [customerId], references: [id])
+  users           User[]
+  invitations     Invitation[]
+  valkeyInstances ValkeyInstance[]
 
   @@index([subdomain])
   @@index([status])
   @@index([customerId])
   @@map("tenants")
+}
+
+enum ValkeyInstanceStatus {
+  pending
+  provisioning
+  ready
+  error
+  suspended
+  deleting
+}
+
+model ValkeyInstance {
+  id            String               @id @default(cuid())
+  tenantId      String               @map("tenant_id")
+  name          String
+  status        ValkeyInstanceStatus @default(pending)
+  statusMessage String?              @map("status_message")
+  // Public TLS endpoint, populated once provisioning reaches `ready`.
+  host          String?
+  port          Int                  @default(6379)
+  // Name of the K8s Secret (password + users.acl) in the tenant namespace.
+  secretName    String               @map("secret_name")
+  username      String
+  maxmemory     String?
+  createdAt     DateTime             @default(now()) @map("created_at")
+  updatedAt     DateTime             @updatedAt @map("updated_at")
+
+  tenant        Tenant               @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@index([status])
+  @@map("valkey_instances")
 }
 
 model License {

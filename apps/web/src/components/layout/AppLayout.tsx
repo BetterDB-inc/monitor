@@ -31,6 +31,7 @@ import { CacheProposals } from '../../pages/CacheProposals';
 import { Monitor } from '../../pages/Monitor';
 import { MonitorSession } from '../../pages/MonitorSession';
 import { Members } from '../../pages/Members';
+import { Databases } from '../../pages/Databases';
 
 import { CloudUser } from '../../api/workspace';
 import { AppSidebar } from './AppSidebar.tsx';
@@ -234,6 +235,16 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                   </NoConnectionsGuard>
                 }
               />
+              {cloudUser && (
+                <Route
+                  path="/workspace/databases"
+                  element={
+                    <DemoGuardedRoute>
+                      <Databases cloudUser={cloudUser} />
+                    </DemoGuardedRoute>
+                  }
+                />
+              )}
               {cloudUser && (
                 <Route
                   path="/workspace/members"

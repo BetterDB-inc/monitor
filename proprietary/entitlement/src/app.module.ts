@@ -9,6 +9,7 @@ import { AdminModule } from './admin/admin.module';
 import { HealthModule } from './health/health.module';
 import { TenantModule } from './tenant/tenant.module';
 import { ProvisioningModule } from './provisioning/provisioning.module';
+import { ValkeyInstanceModule } from './valkey-instance/valkey-instance.module';
 import { UserModule } from './user/user.module';
 import { AuthModule } from './auth/auth.module';
 import { InvitationModule } from './invitation/invitation.module';
@@ -32,6 +33,7 @@ import { EmailModule } from './email/email.module';
     AdminModule,
     TenantModule,
     ProvisioningModule,
+    ValkeyInstanceModule,
     UserModule,
     AuthModule,
     InvitationModule,
