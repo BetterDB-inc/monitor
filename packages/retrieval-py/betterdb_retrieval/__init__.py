@@ -6,6 +6,7 @@ lifecycle, upsert, and vector + filtered query backed by Valkey Search (FT.*).
 
 from __future__ import annotations
 
+from .analytics import Analytics, create_analytics
 from .discovery import (
     REGISTRY_KEY,
     RETRIEVAL_CACHE_TYPE,
@@ -93,4 +94,7 @@ __all__ = [
     # prometheus
     "create_prometheus_metrics",
     "PrometheusRetrievalMetrics",
+    # analytics
+    "Analytics",
+    "create_analytics",
 ]

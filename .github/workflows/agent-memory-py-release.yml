@@ -3,6 +3,10 @@
 # Uses PyPI Trusted Publisher (OIDC) — no API token required.
 # Trusted publisher is registered at pypi.org/manage/account/publishing/
 #
+# Optional secrets (baked into the wheel at build time for product analytics):
+#   POSTHOG_API_KEY
+#   POSTHOG_HOST
+#
 # Trigger by pushing a tag: agent-memory-py-v0.1.0
 #
 # Publish betterdb-valkey-search-kit and betterdb-agent-cache BEFORE this: the
@@ -143,6 +147,9 @@ jobs:
 
       - name: Build wheel and sdist
         working-directory: packages/agent-memory-py
+        env:
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
         run: python -m build
 
       - name: Verify build artifacts

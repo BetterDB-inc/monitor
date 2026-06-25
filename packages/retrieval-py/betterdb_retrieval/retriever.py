@@ -16,6 +16,7 @@ from betterdb_valkey_search_kit import (
     parse_ft_search_response,
 )
 
+from .analytics import NOOP_ANALYTICS, Analytics, create_analytics
 from .discovery import (
     RETRIEVAL_CACHE_TYPE,
     RETRIEVAL_VERSION,
@@ -125,6 +126,7 @@ class Retriever:
         recall_estimator: RecallEstimator | None = None,
         metrics: RetrievalMetrics | None = None,
         tracer: RetrievalTracer | None = None,
+        analytics: bool = True,
     ) -> None:
         self._client = client
         self._name = name
@@ -136,6 +138,37 @@ class Retriever:
         self._metrics = metrics
         self._tracer = tracer
         self._resolved_dims: Optional[int] = None
+        self._analytics_disabled = not analytics
+        self._analytics: Analytics = NOOP_ANALYTICS
+        self._analytics_started = False
+
+    async def _ensure_analytics_started(self) -> None:
+        # Fire-once, fire-and-forget: product analytics has no running event loop
+        # in __init__, so defer initialization until the first async lifecycle call.
+        if self._analytics_started:
+            return
+        self._analytics_started = True
+        try:
+            analytics = await create_analytics(disabled=self._analytics_disabled)
+            self._analytics = analytics
+            await analytics.init(
+                self._client,
+                self._name,
+                {
+                    "fieldCount": len(self._schema["fields"]),
+                    "vectorMetric": self._schema["vector"].get("metric"),
+                    "vectorAlgorithm": self._schema["vector"].get("algorithm"),
+                    "hasEmbedFn": self._embed_fn is not None,
+                    "hasRerankFn": self._rerank_fn is not None,
+                },
+            )
+        except Exception:
+            # never let analytics break the retriever
+            self._analytics = NOOP_ANALYTICS
+
+    async def close(self) -> None:
+        """Tear down product analytics (flushes any pending events)."""
+        await self._analytics.shutdown()
 
     async def _instrument(
         self, operation: RetrievalOperation, fn: Callable[[], Awaitable[Any]]
@@ -173,6 +206,7 @@ class Retriever:
         return self._resolved_dims
 
     async def create_index(self) -> None:
+        await self._ensure_analytics_started()
         try:
             await self._client.execute_command("FT.INFO", index_name(self._name))
             return
@@ -194,6 +228,8 @@ class Retriever:
             # boot). The idempotent contract holds as long as the index exists.
             if "already exists" not in str(err).lower():
                 raise
+            return
+        self._analytics.capture("index_created", {"dims": dims})
 
     def _assert_no_reserved_fields(self, entry: UpsertEntry, vector_field: str) -> None:
         for field_name in entry.fields:

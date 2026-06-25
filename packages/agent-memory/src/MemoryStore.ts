@@ -24,6 +24,12 @@ import {
   type MemoryTelemetry,
   type MemoryTelemetryOptions,
 } from './telemetry';
+import {
+  createAnalytics,
+  NOOP_ANALYTICS,
+  type Analytics,
+  type AnalyticsOptions,
+} from './analytics';
 import type {
   ConsolidateOptions,
   ConsolidateResult,
@@ -95,6 +101,7 @@ export interface MemoryStoreOptions {
   discovery?: boolean | MemoryDiscoveryConfig;
   configRefresh?: boolean | MemoryConfigRefreshConfig;
   telemetry?: MemoryTelemetryOptions;
+  analytics?: AnalyticsOptions;
 }
 
 export class MemoryStore {
@@ -116,6 +123,8 @@ export class MemoryStore {
   private readonly telemetry: MemoryTelemetry;
   private readonly storeLabels: Record<string, string>;
   private dims?: number;
+  private analytics: Analytics = NOOP_ANALYTICS;
+  private shutdownCalled = false;
 
   constructor(options: MemoryStoreOptions) {
     this.client = options.client;
@@ -134,6 +143,25 @@ export class MemoryStore {
     this.configKey = `${this.name}:__mem_config`;
     this.discovery = this.createDiscovery(options.discovery);
     this.startConfigRefresh(options.configRefresh);
+
+    const analyticsOpts = options.analytics;
+    createAnalytics({
+      apiKey: analyticsOpts?.apiKey,
+      host: analyticsOpts?.host,
+      disabled: analyticsOpts?.disabled,
+    })
+      .then((a) => {
+        if (this.shutdownCalled) {
+          return a.shutdown();
+        }
+        this.analytics = a;
+        return a.init(this.client, this.name, {
+          hasEmbedFn: this.embedFn !== undefined,
+          maxItemsPerScope: this.maxItemsPerScope,
+          discovery: this.discovery !== null,
+        });
+      })
+      .catch(() => {});
   }
 
   currentConfig(): MemoryConfigSnapshot {
@@ -337,6 +365,8 @@ export class MemoryStore {
     if (this.discovery) {
       await this.discovery.stop({ deleteHeartbeat: true });
     }
+    this.shutdownCalled = true;
+    await this.analytics.shutdown();
   }
 
   /**
@@ -357,6 +387,7 @@ export class MemoryStore {
     }
     const dims = await this.resolveDims();
     await this.client.call('FT.CREATE', ...buildMemoryIndexArgs(this.name, dims));
+    this.analytics.capture('index_created', { dims });
   }
 
   async recall(query: string, options: RecallOptions = {}): Promise<MemoryHit[]> {

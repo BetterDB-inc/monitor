@@ -18,6 +18,7 @@ from betterdb_valkey_search_kit import (
 from opentelemetry.trace import Span, Status, StatusCode
 
 from ._num import js_number
+from .analytics import NOOP_ANALYTICS, Analytics, create_analytics
 from .build_memory_index import build_memory_index_args, memory_index_name
 from .build_memory_record import build_memory_record
 from .build_recall_query import (
@@ -129,10 +130,14 @@ class MemoryStore:
         discovery: bool | MemoryDiscoveryConfig = False,
         config_refresh: bool | MemoryConfigRefreshConfig | None = None,
         telemetry: MemoryTelemetryOptions | None = None,
+        analytics: bool = True,
     ) -> None:
         self._client = client
         self._name = name
         self._embed_fn = embed_fn
+        self._analytics_disabled = not analytics
+        self._analytics: Analytics = NOOP_ANALYTICS
+        self._analytics_started = False
         self._telemetry = create_memory_telemetry(telemetry)
         self._store_labels = {"store_name": name}
         self._initial_threshold = (
@@ -372,6 +377,28 @@ class MemoryStore:
         if self._discovery_task is not None:
             await self._discovery_task
 
+    async def _ensure_analytics_started(self) -> None:
+        # Fire-once, fire-and-forget: product analytics has no running event loop
+        # in __init__, so defer initialization until the first async lifecycle call.
+        if self._analytics_started:
+            return
+        self._analytics_started = True
+        try:
+            analytics = await create_analytics(disabled=self._analytics_disabled)
+            self._analytics = analytics
+            await analytics.init(
+                self._client,
+                self._name,
+                {
+                    "hasEmbedFn": self._embed_fn is not None,
+                    "maxItemsPerScope": self._max_items_per_scope,
+                    "discovery": self._discovery is not None,
+                },
+            )
+        except Exception:
+            # never let analytics break the memory store
+            self._analytics = NOOP_ANALYTICS
+
     async def close(self) -> None:
         if self._config_refresh_task is not None:
             self._config_refresh_task.cancel()
@@ -385,6 +412,7 @@ class MemoryStore:
             if self._discovery_task is not None:
                 await self._discovery_task
             await self._discovery.stop(delete_heartbeat=True)
+        await self._analytics.shutdown()
 
     # -- index ------------------------------------------------------------
 
@@ -394,6 +422,7 @@ class MemoryStore:
         Idempotent — an existing index is left untouched. Resolves the vector
         dimension from ``embed_fn`` when it has not been observed yet.
         """
+        await self._ensure_analytics_started()
         try:
             await self._client.execute_command("FT.INFO", memory_index_name(self._name))
             return
@@ -402,6 +431,7 @@ class MemoryStore:
                 raise
         dims = await self._resolve_dims()
         await self._client.execute_command("FT.CREATE", *build_memory_index_args(self._name, dims))
+        self._analytics.capture("index_created", {"dims": dims})
 
     # -- recall -----------------------------------------------------------
 

@@ -15,6 +15,7 @@ dependencies = [
     "betterdb-agent-cache>=0.7.0",
     "opentelemetry-api>=1.20.0",
     "prometheus-client>=0.19.0",
+    "posthog>=3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +34,9 @@ betterdb-agent-cache = { path = "../agent-cache-py", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["betterdb_agent_memory"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

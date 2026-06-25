@@ -18,6 +18,7 @@ import {
 } from './discovery';
 import { parsePercentIndexed, type IndexHealthSnapshot, type RecallEstimator } from './health';
 import type { RetrievalMetrics, RetrievalTracer, RetrievalOperation } from './telemetry';
+import { createAnalytics, NOOP_ANALYTICS, type Analytics, type AnalyticsOptions } from './analytics';
 
 // Atomic compare-and-set for the shared registry field. REGISTRY_KEY is keyed by
 // name and shared with agent-cache, so a plain HGET -> compare -> HSET/HDEL has a
@@ -91,6 +92,7 @@ export interface RetrieverOptions {
   recallEstimator?: RecallEstimator;
   metrics?: RetrievalMetrics;
   tracer?: RetrievalTracer;
+  analytics?: AnalyticsOptions;
 }
 
 export interface UpsertEntry {
@@ -110,6 +112,8 @@ export class Retriever {
   private readonly metrics?: RetrievalMetrics;
   private readonly tracer?: RetrievalTracer;
   private resolvedDims?: number;
+  private analytics: Analytics = NOOP_ANALYTICS;
+  private shutdownCalled = false;
 
   constructor(options: RetrieverOptions) {
     this.client = options.client;
@@ -121,6 +125,36 @@ export class Retriever {
     this.recallEstimator = options.recallEstimator;
     this.metrics = options.metrics;
     this.tracer = options.tracer;
+
+    // Fire-and-forget: initialize product analytics.
+    const analyticsOpts = options.analytics;
+    createAnalytics({
+      apiKey: analyticsOpts?.apiKey,
+      host: analyticsOpts?.host,
+      disabled: analyticsOpts?.disabled,
+    })
+      .then((a) => {
+        if (this.shutdownCalled) {
+          // If close() won the race, tear down the late-created client so its
+          // internal timers do not keep the process alive.
+          return a.shutdown();
+        }
+        this.analytics = a;
+        return a.init(this.client, this.name, {
+          fieldCount: this.schema.fields.length,
+          vectorMetric: this.schema.vector.metric,
+          vectorAlgorithm: this.schema.vector.algorithm,
+          hasEmbedFn: this.embedFn !== undefined,
+          hasRerankFn: this.rerankFn !== undefined,
+        });
+      })
+      .catch(() => {});
+  }
+
+  /** Tear down product analytics (flushes any pending events). */
+  async close(): Promise<void> {
+    this.shutdownCalled = true;
+    await this.analytics.shutdown();
   }
 
   private async instrument<T>(operation: RetrievalOperation, fn: () => Promise<T>): Promise<T> {
@@ -186,6 +220,7 @@ export class Retriever {
         throw err;
       }
     }
+    this.analytics.capture('index_created', { dims });
   }
 
   private assertNoReservedFields(entry: UpsertEntry, vectorField: string): void {

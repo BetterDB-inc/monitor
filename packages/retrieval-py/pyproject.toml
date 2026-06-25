@@ -13,6 +13,7 @@ requires-python = ">=3.11"
 dependencies = [
     "betterdb-valkey-search-kit>=0.1.0",
     "prometheus-client>=0.19.0",
+    "posthog>=3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +36,9 @@ betterdb-valkey-search-kit = { path = "../valkey-search-kit-py", editable = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["betterdb_retrieval"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
