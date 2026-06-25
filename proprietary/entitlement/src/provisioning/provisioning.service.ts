@@ -982,11 +982,16 @@ export class ProvisioningService {
       });
     } catch (error: any) {
       if (this.isAlreadyExistsError(error)) {
-        await this.coreApi.patchNamespacedResourceQuota({
-          name: 'tenant-quota',
-          namespace,
-          body: { spec: quotaSpec },
-        });
+        // Default patch content type is JSON Patch (an array of ops); send a
+        // merge patch so the { spec } object is accepted.
+        await this.coreApi.patchNamespacedResourceQuota(
+          {
+            name: 'tenant-quota',
+            namespace,
+            body: { spec: quotaSpec },
+          },
+          k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
+        );
       } else {
         throw error;
       }
