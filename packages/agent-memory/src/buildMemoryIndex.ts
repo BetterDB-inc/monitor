@@ -48,6 +48,7 @@ export function buildMemoryIndexArgs(name: string, dims: number): string[] {
     'NUMERIC',
     'created_at',
     'NUMERIC',
+    'SORTABLE',
     'last_accessed_at',
     'NUMERIC',
     'access_count',
