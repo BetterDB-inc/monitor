@@ -14,9 +14,9 @@ spec:
   issuerRef:
     name: letsencrypt-valkey
     kind: ClusterIssuer
-  commonName: "*.valkey.betterdb.com"
+  commonName: "*.valkey.app.betterdb.com"
   dnsNames:
-    - "*.valkey.betterdb.com"
+    - "*.valkey.app.betterdb.com"
   # Renew 30 days before the 90-day Let's Encrypt cert expires.
   duration: 2160h # 90d
   renewBefore: 720h # 30d

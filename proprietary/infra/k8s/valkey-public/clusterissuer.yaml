@@ -21,10 +21,10 @@ spec:
       - dns01:
           route53:
             region: us-east-1
-            # hostedZoneID is optional; cert-manager auto-discovers it from the
-            # DNS name. Pin it to avoid a ListHostedZonesByName call if the IRSA
-            # role is scoped to a single zone.
-            # hostedZoneID: ZXXXXXXXXXXXXX
+            # valkey.app.betterdb.com lives inside the existing app.betterdb.com
+            # hosted zone (no separate delegation), so pin that zone's ID. This
+            # also matches the IRSA role being scoped to a single zone.
+            hostedZoneID: Z071377925BCBHU7WUE59
         selector:
           dnsZones:
-            - valkey.betterdb.com
+            - valkey.app.betterdb.com
