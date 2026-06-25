@@ -32,6 +32,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "eval:longmemeval": "tsx eval/longmemeval/run.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -41,6 +42,7 @@
   "devDependencies": {
     "@types/node": "^22.19.15",
     "iovalkey": "^0.3.3",
+    "tsx": "^4.19.2",
     "typescript": "^5.9.3",
     "vitest": "^4.1.1"
   },

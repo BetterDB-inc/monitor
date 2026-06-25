@@ -65,3 +65,14 @@ export interface ConsolidateResult {
   created: string[];
   deleted: number;
 }
+
+export interface MemoryListOptions extends MemoryScope {
+  tags?: string[];
+  limit?: number;
+  offset?: number;
+}
+
+export interface MemoryListResult {
+  items: MemoryItem[];
+  total: number;
+}

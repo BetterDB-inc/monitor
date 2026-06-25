@@ -40,6 +40,9 @@ jobs:
         working-directory: proprietary/entitlement
         run: pnpm prisma:generate
 
+      - name: Build workspace packages
+        run: pnpm build --filter @betterdb/agent-memory...
+
       - name: Run API tests
         working-directory: apps/api
         run: pnpm test

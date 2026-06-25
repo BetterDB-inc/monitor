@@ -5,6 +5,7 @@ export type {
   MemoryDiscoveryConfig,
   MemoryConfigRefreshConfig,
   MemoryConfigSnapshot,
+  MemoryStats,
 } from './MemoryStore';
 export { MemoryDiscovery, MEMORY_CACHE_TYPE, MEMORY_CAPABILITIES } from './discovery';
 export type { MemoryDiscoveryDeps, MemoryMarker } from './discovery';
@@ -22,6 +23,9 @@ export type {
   MemoryHit,
   ConsolidateOptions,
   ConsolidateResult,
+  MemoryListOptions,
+  MemoryListResult,
 } from './types';
 export { compositeScore, similarityFromDistance } from './compositeScore';
 export type { RecallWeights, CompositeScoreParams } from './compositeScore';
+export { MATCH_ALL_MEMORY_QUERY } from './buildRecallQuery';
