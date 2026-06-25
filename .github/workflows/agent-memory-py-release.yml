@@ -1,0 +1,194 @@
+# Publish betterdb-agent-memory to PyPI
+#
+# Uses PyPI Trusted Publisher (OIDC) — no API token required.
+# Trusted publisher is registered at pypi.org/manage/account/publishing/
+#
+# Trigger by pushing a tag: agent-memory-py-v0.1.0
+#
+# Publish betterdb-valkey-search-kit and betterdb-agent-cache BEFORE this: the
+# built wheel carries unqualified `Requires-Dist` entries on both, resolved from
+# PyPI (the [tool.uv.sources] editable paths are dev-only and dropped from the
+# artifact).
+
+name: Publish Agent Memory (Python)
+
+on:
+  push:
+    tags:
+      - 'agent-memory-py-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.1.0)'
+        required: true
+        type: string
+      skip_pypi:
+        description: 'Skip PyPI publish (dry run)'
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      valkey:
+        image: valkey/valkey-bundle:8
+        ports:
+          - 6399:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: packages/agent-memory-py
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        working-directory: packages/agent-memory-py
+        run: pytest tests/ -v
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    # skip_pypi is only populated on workflow_dispatch; on tag push it is null/falsy,
+    # so !inputs.skip_pypi is always true for tag events (publish always runs).
+    # Dry-run is only available via manual workflow_dispatch with skip_pypi=true.
+    if: ${{ !inputs.skip_pypi }}
+    environment: pypi
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: pip install build hatchling
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
+          else
+            # agent-memory-py-v0.1.0 → 0.1.0
+            echo "version=${GITHUB_REF_NAME#agent-memory-py-v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update pyproject.toml version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        working-directory: packages/agent-memory-py
+        run: |
+          python - <<'EOF'
+          import re, os, pathlib
+          path = pathlib.Path("pyproject.toml")
+          content = path.read_text()
+          content = re.sub(
+              r'^version\s*=\s*"[^"]+"',
+              f'version = "{os.environ["VERSION"]}"',
+              content,
+              flags=re.MULTILINE,
+          )
+          path.write_text(content)
+          EOF
+
+      - name: Verify betterdb dependencies are on PyPI
+        working-directory: packages/agent-memory-py
+        run: |
+          # The built wheel ships unqualified Requires-Dist entries on the
+          # internal betterdb packages (the [tool.uv.sources] editable paths are
+          # dev-only and dropped from the artifact). Publish those to PyPI first,
+          # or a published betterdb-agent-memory is uninstallable via pip. Fail
+          # before publishing.
+          SPECS=$(python - <<'EOF'
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          prefixes = ("betterdb-valkey-search-kit", "betterdb-agent-cache")
+          for dep in data.get("project", {}).get("dependencies", []):
+              if dep.replace(" ", "").startswith(prefixes):
+                  print(dep)
+          EOF
+          )
+          if [ -z "$SPECS" ]; then
+            echo "Could not find betterdb-* dependencies in pyproject.toml"
+            exit 1
+          fi
+          while IFS= read -r SPEC; do
+            [ -z "$SPEC" ] && continue
+            echo "Resolving '$SPEC' from PyPI..."
+            pip install "$SPEC" --dry-run --quiet
+            echo "Dependency '$SPEC' is resolvable on PyPI"
+          done <<< "$SPECS"
+
+      - name: Build wheel and sdist
+        working-directory: packages/agent-memory-py
+        run: python -m build
+
+      - name: Verify build artifacts
+        working-directory: packages/agent-memory-py
+        run: |
+          ls dist/
+          test -n "$(ls dist/*.whl 2>/dev/null)"
+          test -n "$(ls dist/*.tar.gz 2>/dev/null)"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/agent-memory-py/dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: agent-memory-py-v${{ steps.version.outputs.version }}
+          name: Agent Memory Python v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          body_path: packages/agent-memory-py/RELEASE_NOTES.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    needs: publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify PyPI package (with retry)
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if pip install "betterdb-agent-memory==$VERSION" --dry-run --quiet 2>/dev/null; then
+              echo "Package betterdb-agent-memory==$VERSION verified"
+              exit 0
+            fi
+            echo "Attempt $i: not yet available, retrying in 30s…"
+            sleep 30
+          done
+          echo "Package not available after 5 attempts"
+          exit 1
