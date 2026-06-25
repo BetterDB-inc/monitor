@@ -7,6 +7,8 @@ _HNSW_DEFAULTS = {"m": 16, "efConstruction": 200, "efRuntime": 10}
 
 _METRIC_MAP = {"cosine": "COSINE", "l2": "L2", "ip": "IP"}
 
+_ALGORITHM_MAP = {"hnsw": "HNSW", "flat": "FLAT"}
+
 
 def _is_positive_int(value: object) -> bool:
     """Mirror ``Number.isInteger(x) && x > 0`` (accepts integral floats)."""
@@ -87,7 +89,12 @@ def resolve_vector_field_name(vector: VectorSpec) -> str:
 
 def _build_vector_args(vector: VectorSpec, dims: int) -> list[str]:
     field_name = resolve_vector_field_name(vector)
-    algo = str(vector["algorithm"]).upper()
+    algorithm = vector.get("algorithm")
+    if algorithm not in _ALGORITHM_MAP:
+        raise ValueError(
+            f"Vector algorithm must be one of {sorted(_ALGORITHM_MAP)}, got: {algorithm!r}"
+        )
+    algo = _ALGORITHM_MAP[algorithm]
     metric = _METRIC_MAP[vector["metric"]]
 
     if vector.get("algorithm") == "flat":
