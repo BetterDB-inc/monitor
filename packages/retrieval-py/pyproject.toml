@@ -20,6 +20,12 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
 ]
+# Optional extras for the LongMemEval harness (eval/longmemeval). The offline
+# Tier 0 path (mock store + hashed embedder) needs nothing here; OpenAI calls use
+# the stdlib. ``eval`` only adds the valkey client for the real-store tier.
+eval = [
+    "valkey>=6.0.0",
+]
 
 [project.urls]
 Repository = "https://github.com/BetterDB-inc/monitor"
