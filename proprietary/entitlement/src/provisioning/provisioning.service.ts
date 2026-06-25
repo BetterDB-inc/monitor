@@ -195,9 +195,14 @@ export class ProvisioningService {
       this.logger.log(`[${tenant.subdomain}] Creating K8s network policy`);
       await this.createNetworkPolicy(namespace);
 
-      // Step 6: Create K8s ResourceQuota
+      // Step 6: Create K8s ResourceQuota. Keep the Valkey headroom if this
+      // tenant already has a managed instance, so re-provisioning the tenant
+      // doesn't shrink the quota below what the running Valkey pod needs.
       this.logger.log(`[${tenant.subdomain}] Creating K8s resource quota`);
-      await this.createResourceQuota(namespace);
+      const existingValkey = await this.prisma.valkeyInstance.count({
+        where: { tenantId, status: { not: 'deleting' } },
+      });
+      await this.createResourceQuota(namespace, existingValkey > 0);
 
       // Step 7: Create K8s Deployment
       this.logger.log(`[${tenant.subdomain}] Creating K8s deployment`);
@@ -341,7 +346,20 @@ export class ProvisioningService {
     this.logger.log(`Provisioning valkey instance ${instance.name} (${instanceId}) in ${namespace}`);
 
     try {
-      await this.updateValkeyInstanceStatus(instanceId, 'provisioning');
+      // Claim the row for provisioning only if it's still pending/error. A
+      // concurrent delete may have moved it to 'deleting' between the read above
+      // and here; an unconditional update would clobber that back to
+      // 'provisioning' and we'd end up flipping a deleted instance to 'ready'.
+      const { count: claimed } = await this.prisma.valkeyInstance.updateMany({
+        where: { id: instanceId, status: { in: ['pending', 'error'] } },
+        data: { status: 'provisioning', statusMessage: null },
+      });
+      if (claimed === 0) {
+        this.logger.warn(
+          `[${instance.name}] status changed before provisioning could start; skipping`,
+        );
+        return;
+      }
 
       // The tenant namespace already exists for cloud tenants, but a user may
       // create an instance before the Monitor app is provisioned — ensure it.
