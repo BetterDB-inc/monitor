@@ -50,6 +50,7 @@ def build_memory_index_args(name: str, dims: int) -> list[str]:
         "NUMERIC",
         "created_at",
         "NUMERIC",
+        "SORTABLE",
         "last_accessed_at",
         "NUMERIC",
         "access_count",

@@ -12,6 +12,7 @@ from typing import Any
 from betterdb_valkey_search_kit import (
     encode_float32,
     is_index_not_found_error,
+    parse_ft_info_stats,
     parse_ft_search_response,
 )
 from opentelemetry.trace import Span, Status, StatusCode
@@ -20,6 +21,7 @@ from ._num import js_number
 from .build_memory_index import build_memory_index_args, memory_index_name
 from .build_memory_record import build_memory_record
 from .build_recall_query import (
+    MATCH_ALL_MEMORY_QUERY,
     SCORE_FIELD,
     ConsolidateFilterOptions,
     build_consolidate_filter,
@@ -38,7 +40,11 @@ from .types import (
     MemoryConfigSnapshot,
     MemoryDiscoveryConfig,
     MemoryHit,
+    MemoryItem,
+    MemoryListOptions,
+    MemoryListResult,
     MemoryScope,
+    MemoryStats,
     MemoryStoreClient,
     RecallWeights,
     SummarizeFn,
@@ -59,6 +65,7 @@ DEFAULT_IMPORTANCE = 0.5
 DEFAULT_CONFIG_REFRESH_MS = 30000
 MIN_CONFIG_REFRESH_MS = 1000
 MAX_DISTANCE = 2
+DEFAULT_LIST_LIMIT = 20
 
 
 def _package_version() -> str:
@@ -114,7 +121,7 @@ class MemoryStore:
         *,
         client: MemoryStoreClient,
         name: str,
-        embed_fn: EmbedFn,
+        embed_fn: EmbedFn | None = None,
         default_threshold: float | None = None,
         weights: RecallWeights | None = None,
         half_life_seconds: float | None = None,
@@ -161,6 +168,67 @@ class MemoryStore:
             weights=_copy_weights(self._weights),
             half_life_seconds=self._half_life_seconds,
             max_items_per_scope=self._max_items_per_scope,
+        )
+
+    # -- read methods -----------------------------------------------------
+
+    async def get(self, id: str) -> MemoryItem | None:
+        key = f"{self._name}:mem:{id}"
+        fields = _parse_hash_reply(await self._client.execute_command("HGETALL", key))
+        if len(fields) == 0:
+            return None
+        return parse_memory_item(self._name, {"key": key, "fields": fields})
+
+    async def list(self, options: MemoryListOptions | None = None) -> MemoryListResult:
+        opts = options if options is not None else MemoryListOptions()
+        tags = opts.tags if opts.tags is not None else []
+        scope = MemoryScope(
+            thread_id=opts.thread_id,
+            agent_id=opts.agent_id,
+            namespace=opts.namespace,
+        )
+        limit = opts.limit if opts.limit is not None else DEFAULT_LIST_LIMIT
+        offset = opts.offset if opts.offset is not None else 0
+        raw = await self._client.execute_command(
+            "FT.SEARCH",
+            f"{self._name}:mem:idx",
+            build_scope_filter(scope, tags),
+            "RETURN",
+            "10",
+            "content",
+            "importance",
+            "tags",
+            "created_at",
+            "last_accessed_at",
+            "access_count",
+            "source",
+            "threadId",
+            "agentId",
+            "namespace",
+            "SORTBY",
+            "created_at",
+            "DESC",
+            "LIMIT",
+            str(offset),
+            str(limit),
+            "DIALECT",
+            "2",
+        )
+        total = _ft_search_total(raw)
+        items = [parse_memory_item(self._name, hit) for hit in parse_ft_search_response(raw)]
+        return MemoryListResult(items=items, total=total)
+
+    async def stats(self) -> MemoryStats:
+        info_raw = await self._client.execute_command("FT.INFO", memory_index_name(self._name))
+        index_stats = parse_ft_info_stats(info_raw)
+        stats_fields = _parse_hash_reply(
+            await self._client.execute_command("HGETALL", f"{self._name}:__mem_stats")
+        )
+        evictions = js_number(stats_fields.get("evictions", "0"))
+        return MemoryStats(
+            item_count=index_stats.num_docs,
+            evictions=int(evictions) if math.isfinite(evictions) else 0,
+            config=self.current_config(),
         )
 
     async def refresh_config(self) -> None:
@@ -352,73 +420,130 @@ class MemoryStore:
     ) -> list[MemoryHit]:
         with self._span("recall") as span:
             started_at = time.monotonic()
-            k_value = k if k is not None else DEFAULT_RECALL_K
-            threshold_value = threshold if threshold is not None else self._default_threshold
-            weights_value = weights if weights is not None else self._weights
-            # Snapshot the half-life alongside threshold/weights so a concurrent
-            # configRefresh can't score one recall with a mix of config versions.
-            half_life_seconds = self._half_life_seconds
-            fetch_k = k_value * RECALL_OVERFETCH
-            tag_list = tags if tags is not None else []
-            scope = MemoryScope(thread_id=thread_id, agent_id=agent_id, namespace=namespace)
-            span.set_attribute("recall.k", k_value)
-
             vector = await self._embed(query)
-            query_string = build_recall_query(fetch_k, scope, tag_list)
-            raw = await self._client.execute_command(
-                "FT.SEARCH",
-                f"{self._name}:mem:idx",
-                query_string,
-                "PARAMS",
-                "2",
-                "vec",
-                encode_float32(vector),
-                "LIMIT",
-                "0",
-                str(fetch_k),
-                "DIALECT",
-                "2",
+            return await self._run_recall(
+                vector,
+                span=span,
+                started_at=started_at,
+                k=k,
+                threshold=threshold,
+                tags=tags,
+                weights=weights,
+                reinforce=reinforce,
+                thread_id=thread_id,
+                agent_id=agent_id,
+                namespace=namespace,
             )
 
-            now = self._now_ms()
-            hits: list[MemoryHit] = []
-            for hit in parse_ft_search_response(raw):
-                raw_score = hit["fields"].get(SCORE_FIELD)
-                if raw_score is None or raw_score.strip() == "":
-                    continue
-                distance = js_number(raw_score)
-                if not math.isfinite(distance) or distance > threshold_value:
-                    continue
-                item = parse_memory_item(self._name, hit)
-                # Recency decays from the last access, not creation, so
-                # reinforcement (which bumps last_accessed_at) makes a memory
-                # more recallable. max() guards a clock-skewed last_accessed_at.
-                last_touched = max(item.created_at, item.last_accessed_at)
-                age_seconds = (now - last_touched) / 1000
-                score = composite_score(
-                    similarity=similarity_from_distance(distance),
-                    age_seconds=age_seconds,
-                    importance=item.importance,
-                    weights=weights_value,
-                    half_life_seconds=half_life_seconds,
-                )
-                if not math.isfinite(score):
-                    continue
-                hits.append(MemoryHit(item=item, similarity=distance, score=score))
+    async def recall_by_vector(
+        self,
+        vector: list[float],
+        *,
+        k: int | None = None,
+        threshold: float | None = None,
+        tags: list[str] | None = None,
+        weights: RecallWeights | None = None,
+        reinforce: bool | None = None,
+        thread_id: str | None = None,
+        agent_id: str | None = None,
+        namespace: str | None = None,
+    ) -> list[MemoryHit]:
+        with self._span("recall") as span:
+            return await self._run_recall(
+                vector,
+                span=span,
+                started_at=time.monotonic(),
+                k=k,
+                threshold=threshold,
+                tags=tags,
+                weights=weights,
+                reinforce=reinforce,
+                thread_id=thread_id,
+                agent_id=agent_id,
+                namespace=namespace,
+            )
 
-            hits.sort(key=lambda h: h.score, reverse=True)
-            result = hits[:k_value]
-            span.set_attribute("recall.candidate_count", len(hits))
-            span.set_attribute("recall.result_count", len(result))
-            self._record_recall(len(result), time.monotonic() - started_at)
+    async def _run_recall(
+        self,
+        vector: list[float],
+        *,
+        span: Span,
+        started_at: float,
+        k: int | None,
+        threshold: float | None,
+        tags: list[str] | None,
+        weights: RecallWeights | None,
+        reinforce: bool | None,
+        thread_id: str | None,
+        agent_id: str | None,
+        namespace: str | None,
+    ) -> list[MemoryHit]:
+        k_value = k if k is not None else DEFAULT_RECALL_K
+        threshold_value = threshold if threshold is not None else self._default_threshold
+        weights_value = weights if weights is not None else self._weights
+        # Snapshot the half-life alongside threshold/weights so a concurrent
+        # configRefresh can't score one recall with a mix of config versions.
+        half_life_seconds = self._half_life_seconds
+        fetch_k = k_value * RECALL_OVERFETCH
+        tag_list = tags if tags is not None else []
+        scope = MemoryScope(thread_id=thread_id, agent_id=agent_id, namespace=namespace)
+        span.set_attribute("recall.k", k_value)
 
-            if reinforce is not False:
-                # Reinforcement is best-effort and must never break the read path.
-                try:
-                    await self._reinforce(result, now)
-                except Exception:
-                    pass
-            return result
+        query_string = build_recall_query(fetch_k, scope, tag_list)
+        raw = await self._client.execute_command(
+            "FT.SEARCH",
+            f"{self._name}:mem:idx",
+            query_string,
+            "PARAMS",
+            "2",
+            "vec",
+            encode_float32(vector),
+            "LIMIT",
+            "0",
+            str(fetch_k),
+            "DIALECT",
+            "2",
+        )
+
+        now = self._now_ms()
+        hits: list[MemoryHit] = []
+        for hit in parse_ft_search_response(raw):
+            raw_score = hit["fields"].get(SCORE_FIELD)
+            if raw_score is None or raw_score.strip() == "":
+                continue
+            distance = js_number(raw_score)
+            if not math.isfinite(distance) or distance > threshold_value:
+                continue
+            item = parse_memory_item(self._name, hit)
+            # Recency decays from the last access, not creation, so
+            # reinforcement (which bumps last_accessed_at) makes a memory
+            # more recallable. max() guards a clock-skewed last_accessed_at.
+            last_touched = max(item.created_at, item.last_accessed_at)
+            age_seconds = (now - last_touched) / 1000
+            score = composite_score(
+                similarity=similarity_from_distance(distance),
+                age_seconds=age_seconds,
+                importance=item.importance,
+                weights=weights_value,
+                half_life_seconds=half_life_seconds,
+            )
+            if not math.isfinite(score):
+                continue
+            hits.append(MemoryHit(item=item, similarity=distance, score=score))
+
+        hits.sort(key=lambda h: h.score, reverse=True)
+        result = hits[:k_value]
+        span.set_attribute("recall.candidate_count", len(hits))
+        span.set_attribute("recall.result_count", len(result))
+        self._record_recall(len(result), time.monotonic() - started_at)
+
+        if reinforce is not False:
+            # Reinforcement is best-effort and must never break the read path.
+            try:
+                await self._reinforce(result, now)
+            except Exception:
+                pass
+        return result
 
     def _record_recall(self, result_count: int, latency_seconds: float) -> None:
         metrics = self._telemetry.metrics
@@ -725,7 +850,7 @@ class MemoryStore:
         weights = _copy_weights(self._weights)
         half_life_seconds = self._half_life_seconds
         filter_query = build_scope_filter(scope, tags)
-        if filter_query == "*":
+        if filter_query == MATCH_ALL_MEMORY_QUERY:
             # A fully-unscoped write has no scope to bound: enforcing here would
             # count and evict across the entire index, which maxItemsPerScope does
             # not promise. Skip — the write stays, uncapped.
@@ -790,10 +915,19 @@ class MemoryStore:
 
     # -- embedding --------------------------------------------------------
 
+    def _require_embed_fn(self) -> EmbedFn:
+        if self._embed_fn is None:
+            raise ValueError(
+                "MemoryStore was constructed without an embed_fn; remember(), recall(), "
+                "and ensure_index() require one. Use get/list/stats/recall_by_vector for "
+                "read-only access."
+            )
+        return self._embed_fn
+
     async def _resolve_dims(self) -> int:
         if self._dims is not None:
             return self._dims
-        probe = await self._embed_fn("probe")
+        probe = await self._require_embed_fn()("probe")
         if len(probe) == 0:
             raise ValueError(
                 "Cannot resolve memory vector dimension: embed_fn returned a zero-length embedding"
@@ -803,7 +937,7 @@ class MemoryStore:
 
     async def _embed(self, content: str) -> list[float]:
         self._telemetry.metrics.embedding_calls.labels(**self._store_labels).inc()
-        vector = await self._embed_fn(content)
+        vector = await self._require_embed_fn()(content)
         if self._dims is None:
             self._dims = len(vector)
         elif len(vector) != self._dims:

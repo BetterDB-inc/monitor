@@ -10,6 +10,7 @@ import betterdb_agent_cache as _agent_cache
 from betterdb_agent_cache import *  # noqa: F401,F403
 
 from .agent_memory import AgentMemory, AgentMemoryOptions
+from .build_recall_query import MATCH_ALL_MEMORY_QUERY
 from .composite_score import (
     composite_score,
     recency_decay,
@@ -35,7 +36,10 @@ from .types import (
     MemoryDiscoveryConfig,
     MemoryHit,
     MemoryItem,
+    MemoryListOptions,
+    MemoryListResult,
     MemoryScope,
+    MemoryStats,
     MemoryStoreClient,
     RecallWeights,
     SummarizeFn,
@@ -68,12 +72,16 @@ __all__ = [
     "MemoryScope",
     "MemoryItem",
     "MemoryHit",
+    "MemoryListOptions",
+    "MemoryListResult",
+    "MemoryStats",
     "ConsolidateResult",
     "SummarizeFn",
     "RecallWeights",
     "MemoryConfigSnapshot",
     "MemoryDiscoveryConfig",
     "MemoryConfigRefreshConfig",
+    "MATCH_ALL_MEMORY_QUERY",
 ]
 
 # Surface everything agent-cache exports so consumers need only one import.
