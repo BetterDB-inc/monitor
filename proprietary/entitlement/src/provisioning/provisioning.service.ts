@@ -323,6 +323,12 @@ export class ProvisioningService {
       // create an instance before the Monitor app is provisioned — ensure it.
       await this.createNamespace(namespace, tenant.subdomain);
 
+      // Existing tenants were provisioned before Valkey support: widen the
+      // quota to fit the Valkey pod and open the isolation policy so the
+      // shared Traefik proxy can route to it. Both are idempotent.
+      await this.createResourceQuota(namespace, true);
+      await this.ensureTenantNetworkPolicy(namespace);
+
       // Generate the credential and create the Secret the chart will reference.
       const password = crypto.randomBytes(24).toString('base64url');
       await this.createValkeySecret(namespace, instance.secretName, instance.username, password);
@@ -948,15 +954,26 @@ export class ProvisioningService {
     }
   }
 
-  private async createResourceQuota(namespace: string): Promise<void> {
+  private async createResourceQuota(namespace: string, includeValkey = false): Promise<void> {
+    // Base budget covers the Monitor app pod (250m/256Mi req, 500m/512Mi lim)
+    // plus a transient schema job. includeValkey adds headroom for one managed
+    // Valkey pod (100m/256Mi req, 500m/1Gi lim) so the chart can schedule.
     const quotaSpec = {
-      hard: {
-        'requests.cpu': '300m',
-        'requests.memory': '320Mi',
-        'limits.cpu': '600m',
-        'limits.memory': '640Mi',
-        'pods': '2', // Allow 2 pods: 1 for app + 1 for schema jobs
-      },
+      hard: includeValkey
+        ? {
+            'requests.cpu': '450m',
+            'requests.memory': '640Mi',
+            'limits.cpu': '1200m',
+            'limits.memory': '2Gi',
+            'pods': '3', // app + schema job + valkey
+          }
+        : {
+            'requests.cpu': '300m',
+            'requests.memory': '320Mi',
+            'limits.cpu': '600m',
+            'limits.memory': '640Mi',
+            'pods': '2', // Allow 2 pods: 1 for app + 1 for schema jobs
+          },
     };
     try {
       await this.coreApi.createNamespacedResourceQuota({
@@ -1270,6 +1287,20 @@ export class ProvisioningService {
             },
           ],
         },
+        {
+          // Allow the shared Traefik proxy (traefik namespace) to reach the
+          // managed Valkey pod for public SNI/TLS routing on 6379.
+          _from: [
+            {
+              namespaceSelector: {
+                matchLabels: {
+                  'kubernetes.io/metadata.name': 'traefik',
+                },
+              },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 6379 }],
+        },
       ],
       egress: [
         {
@@ -1367,6 +1398,29 @@ export class ProvisioningService {
     } catch (error: any) {
       if (this.isAlreadyExistsError(error)) {
         this.logger.warn(`NetworkPolicy already exists in ${namespace}, continuing...`);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  // Idempotently brings a namespace's isolation policy up to the current spec
+  // (creating it if absent). Used by the Valkey provision path so tenants that
+  // predate the Traefik ingress rule get it without a full reconcile run.
+  private async ensureTenantNetworkPolicy(namespace: string): Promise<void> {
+    const body = {
+      metadata: { name: 'tenant-isolation' },
+      spec: this.tenantIsolationSpec(),
+    };
+    try {
+      await this.networkingApi.replaceNamespacedNetworkPolicy({
+        name: 'tenant-isolation',
+        namespace,
+        body,
+      });
+    } catch (error: any) {
+      if (this.isNotFoundError(error)) {
+        await this.networkingApi.createNamespacedNetworkPolicy({ namespace, body });
       } else {
         throw error;
       }
