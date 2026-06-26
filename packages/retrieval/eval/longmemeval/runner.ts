@@ -1,10 +1,11 @@
 import { Retriever } from '../../src/index';
 import type { RetrievalSchema } from '../../src/index';
 import { chunkRecord, recordIsHit } from './adapter';
+import { createHybridRerank } from './rerank';
 import type { ChunkMode, Embedder, Judge, LmeRecord, Reader, Store } from './types';
 
 export interface RunConfig {
-  records: LmeRecord[];
+  records: AsyncIterable<LmeRecord> | Iterable<LmeRecord>;
   embedder: Embedder;
   store: Store;
   reader: Reader | null;
@@ -12,6 +13,9 @@ export interface RunConfig {
   k: number;
   chunkMode: ChunkMode;
   limit: number;
+  // When > k, over-fetch this many candidates and hybrid-rerank them down to k.
+  // Equal to k (the default) disables reranking and preserves baseline behavior.
+  rerankPool: number;
 }
 
 export interface TypeStats {
@@ -63,8 +67,11 @@ function bump(byType: Map<string, TypeStats>, type: string): TypeStats {
 }
 
 export async function runEval(config: RunConfig): Promise<EvalSummary> {
-  const { records, embedder, store, reader, judge, k, chunkMode, limit } = config;
+  const { records, embedder, store, reader, judge, k, chunkMode, limit, rerankPool } = config;
   const qaRun = reader !== null && judge !== null;
+  const useRerank = rerankPool > k;
+  const fetchK = useRerank ? rerankPool : k;
+  const rerankFn = useRerank ? createHybridRerank() : undefined;
   const schema = buildSchema(embedder.dims);
   const byType = new Map<string, TypeStats>();
 
@@ -73,25 +80,30 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   let qaCorrect = 0;
   let totalChunks = 0;
 
-  const slice = records.slice(0, limit);
   // Flush in `finally` so a mid-run failure (embedding/Valkey/reader error)
   // still persists the embeddings already computed — billable work must not be
   // discarded just because the run didn't reach the end.
   try {
-    for (let i = 0; i < slice.length; i++) {
-      const record = slice[i];
+    let i = 0;
+    for await (const record of records) {
+      if (i >= limit) break;
       const name = `lme_${i}_${Math.random().toString(36).slice(2, 8)}`;
       const retriever = new Retriever({
         client: store.client,
         name,
         schema,
         embedFn: embedder.embed,
+        rerankFn,
       });
 
       const chunks = chunkRecord(record, chunkMode);
       totalChunks += chunks.length;
 
       await retriever.createIndex();
+      // Batch-embed every chunk up front so the per-entry embed calls inside
+      // upsert hit the warm cache instead of making one serial HTTP request
+      // each — the dominant cost on large haystacks (longmemeval_m).
+      await embedder.prewarm?.(chunks.map((c) => c.text));
       await retriever.upsert(chunks);
 
       if (store.isReal) {
@@ -110,7 +122,15 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
         }
       }
 
-      const hits = await retriever.query({ text: record.question, k });
+      // Over-fetch fetchK candidates and hybrid-rerank them, then keep the top k
+      // so recall/QA are measured on exactly k hits in both modes. When rerank is
+      // off, fetchK === k and this is a plain top-k query.
+      const pool = await retriever.query({
+        text: record.question,
+        k: fetchK,
+        ...(useRerank ? { hybrid: 'rerank' as const } : {}),
+      });
+      const hits = pool.slice(0, k);
       const hit = recordIsHit(hits, record.answer_session_ids);
 
       const stats = bump(byType, record.question_type);
@@ -143,6 +163,7 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
 
       await retriever.delete(chunks.map((c) => c.id)).catch(() => {});
       await retriever.dropIndex().catch(() => {});
+      i++;
     }
   } finally {
     await embedder.flush?.();

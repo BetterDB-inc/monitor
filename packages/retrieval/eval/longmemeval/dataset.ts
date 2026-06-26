@@ -1,6 +1,8 @@
+import { createReadStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { streamArray } from 'stream-json/streamers/stream-array.js';
 import type { LmeRecord } from './types';
 
 function fixturePath(): string {
@@ -14,15 +16,33 @@ export async function loadFixture(): Promise<LmeRecord[]> {
 }
 
 /**
- * Load the dataset: the real LongMemEval json at `dataPath` when given, else
- * the bundled fixture. Returns records plus a human-readable source label.
+ * Stream records one at a time from a top-level JSON array, yielding at most
+ * `limit`. Avoids reading the file into a single string (V8 caps strings near
+ * 0.5 GB) and never holds every record in heap at once — required for
+ * longmemeval_m (~2.7 GB). Falls back to the bundled fixture when no path.
  */
-export async function loadDataset(
+export async function* loadRecords(
   dataPath: string | undefined,
-): Promise<{ records: LmeRecord[]; source: string }> {
-  if (dataPath !== undefined && dataPath !== '') {
-    const raw = await readFile(dataPath, 'utf8');
-    return { records: JSON.parse(raw) as LmeRecord[], source: dataPath };
+  limit: number,
+): AsyncGenerator<LmeRecord> {
+  if (dataPath === undefined || dataPath === '') {
+    const records = await loadFixture();
+    for (const record of records.slice(0, limit)) yield record;
+    return;
   }
-  return { records: await loadFixture(), source: 'bundled fixture' };
+  const pipeline = createReadStream(dataPath).pipe(streamArray.withParserAsStream());
+  let n = 0;
+  try {
+    for await (const item of pipeline as AsyncIterable<{ value: LmeRecord }>) {
+      yield item.value;
+      if (++n >= limit) break;
+    }
+  } finally {
+    pipeline.destroy();
+  }
+}
+
+/** Human-readable dataset label for the run banner. */
+export function sourceLabel(dataPath: string | undefined): string {
+  return dataPath !== undefined && dataPath !== '' ? dataPath : 'bundled fixture';
 }

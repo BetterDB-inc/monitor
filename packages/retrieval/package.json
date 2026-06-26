@@ -42,7 +42,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.15",
+    "@types/stream-json": "^1.7.8",
+    "gpt-tokenizer": "^3.4.0",
     "iovalkey": "^0.3.3",
+    "stream-json": "^3.4.0",
     "tsx": "^4.19.2",
     "typescript": "^5.9.3",
     "vitest": "^4.1.1"

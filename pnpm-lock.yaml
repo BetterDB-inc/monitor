@@ -590,9 +590,18 @@ importers:
       '@types/node':
         specifier: ^22.19.15
         version: 22.19.15
+      '@types/stream-json':
+        specifier: ^1.7.8
+        version: 1.7.8
+      gpt-tokenizer:
+        specifier: ^3.4.0
+        version: 3.4.0
       iovalkey:
         specifier: ^0.3.3
         version: 0.3.3
+      stream-json:
+        specifier: ^3.4.0
+        version: 3.4.0
       tsx:
         specifier: ^4.19.2
         version: 4.21.0
@@ -4590,6 +4599,12 @@ packages:
   '@types/stream-buffers@3.0.8':
     resolution: {integrity: sha512-J+7VaHKNvlNPJPEJXX/fKa9DZtR/xPMwuIbe+yNOwp1YB+ApUOBv2aUpEoBJEi8nJgbgs1x8e73ttg0r1rSUdw==}
 
+  '@types/stream-chain@2.1.0':
+    resolution: {integrity: sha512-guDyAl6s/CAzXUOWpGK2bHvdiopLIwpGu8v10+lb9hnQOyo4oj/ZUQFOvqFjKGsE3wJP1fpIesCcMvbXuWsqOg==}
+
+  '@types/stream-json@1.7.8':
+    resolution: {integrity: sha512-MU1OB1eFLcYWd1LjwKXrxdoPtXSRzRmAnnxs4Js/ayB5O/NvHraWwuOaqMWIebpYwM6khFlsJOHEhI9xK/ab4Q==}
+
   '@types/superagent@8.1.9':
     resolution: {integrity: sha512-pTVjI73witn+9ILmoJdajHGW2jkSaOzhiFYF1Rd3EQ94kymLqB9PjD9ISg7WaALC7+dCHT0FGe9T2LktLq/3GQ==}
 
@@ -6425,6 +6440,9 @@ packages:
   gopd@1.2.0:
     resolution: {integrity: sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==}
     engines: {node: '>= 0.4'}
+
+  gpt-tokenizer@3.4.0:
+    resolution: {integrity: sha512-wxFLnhIXTDjYebd9A9pGl3e31ZpSypbpIJSOswbgop5jLte/AsZVDvjlbEuVFlsqZixVKqbcoNmRlFDf6pz/UQ==}
 
   graceful-fs@4.2.11:
     resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
@@ -8619,6 +8637,14 @@ packages:
   stream-buffers@3.0.3:
     resolution: {integrity: sha512-pqMqwQCso0PBJt2PQmDO0cFj0lyqmiwOMiMSkVtRokl7e+ZTRYgDHKnuZNbqjiJXgsg4nuqtD/zxuo9KqTp0Yw==}
     engines: {node: '>= 0.10.0'}
+
+  stream-chain@4.2.5:
+    resolution: {integrity: sha512-Wtyq3bNE3ggLR0v2vftqvuhltym3WbZAkZpfIrkr5F/6vpeUmWmwTgXa16zD87gpahwJ/Qulq3zVfUlgIc0J2A==}
+    engines: {node: '>=22'}
+
+  stream-json@3.4.0:
+    resolution: {integrity: sha512-7NEiOhtS0W7ZrwnqJc/fugsGQMdpNJng+v1s2xLTrmfBN2vcYDyBglCK2+eITif0VkHLXnTdALgQI9TnZMBhYA==}
+    engines: {node: '>=22'}
 
   streamx@2.23.0:
     resolution: {integrity: sha512-kn+e44esVfn2Fa/O0CPFcex27fjIL6MkVae0Mm6q+E6f0hWv578YCERbv+4m02cjxvDsPKLnmxral/rR6lBMAg==}
@@ -13571,6 +13597,15 @@ snapshots:
     dependencies:
       '@types/node': 22.19.15
 
+  '@types/stream-chain@2.1.0':
+    dependencies:
+      '@types/node': 22.19.15
+
+  '@types/stream-json@1.7.8':
+    dependencies:
+      '@types/node': 22.19.15
+      '@types/stream-chain': 2.1.0
+
   '@types/superagent@8.1.9':
     dependencies:
       '@types/cookiejar': 2.1.5
@@ -15592,6 +15627,8 @@ snapshots:
       gopd: 1.2.0
 
   gopd@1.2.0: {}
+
+  gpt-tokenizer@3.4.0: {}
 
   graceful-fs@4.2.11: {}
 
@@ -18193,6 +18230,12 @@ snapshots:
   stdin-discarder@0.2.2: {}
 
   stream-buffers@3.0.3: {}
+
+  stream-chain@4.2.5: {}
+
+  stream-json@3.4.0:
+    dependencies:
+      stream-chain: 4.2.5
 
   streamx@2.23.0:
     dependencies:

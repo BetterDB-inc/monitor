@@ -19,6 +19,7 @@ describe('longmemeval Tier 0 smoke', () => {
       k: 2,
       chunkMode: 'session',
       limit: 20,
+      rerankPool: 2,
     });
 
     expect(summary.total).toBe(records.length);
@@ -38,6 +39,7 @@ describe('longmemeval Tier 0 smoke', () => {
         k: 2,
         chunkMode: 'session',
         limit: 20,
+        rerankPool: 2,
       });
 
     const a = await run();
@@ -57,6 +59,7 @@ describe('longmemeval Tier 0 smoke', () => {
       k: 2,
       chunkMode: 'session',
       limit: 20,
+      rerankPool: 2,
     });
 
     expect(summary.qaRun).toBe(true);
@@ -75,9 +78,29 @@ describe('longmemeval Tier 0 smoke', () => {
       k: 3,
       chunkMode: 'turn',
       limit: 20,
+      rerankPool: 3,
     });
 
     expect(summary.total).toBe(records.length);
     expect(summary.totalChunks).toBeGreaterThan(records.length);
+  });
+
+  it('hybrid rerank over-fetch still retrieves the evidence session', async () => {
+    const records = await loadFixture();
+    const summary = await runEval({
+      records,
+      embedder: createMockEmbedder(),
+      store: createMockStore(),
+      reader: null,
+      judge: null,
+      k: 2,
+      chunkMode: 'session',
+      limit: 20,
+      // Over-fetch 8 candidates, hybrid-rerank (dense + lexical) down to k=2.
+      rerankPool: 8,
+    });
+
+    expect(summary.total).toBe(records.length);
+    expect(summary.recallAtK).toBeGreaterThanOrEqual(0.75);
   });
 });

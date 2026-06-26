@@ -1,28 +1,44 @@
+import { decode, encode } from 'gpt-tokenizer';
 import type { UpsertEntry, QueryHit } from '../../src/index';
 import type { ChunkMode, LmeRecord, LmeSession } from './types';
 
-// text-embedding-3-small accepts at most 8191 tokens per input. Cap each chunk
-// well under that (~4 chars/token heuristic, with margin) so a long session is
-// split into multiple chunks instead of failing the embedding call. Every part
+// text-embedding-3-small accepts at most 8191 tokens per input. A char-based cap
+// can't bound tokens safely (some characters encode to multiple BPE tokens), so
+// budget by actual token count (cl100k_base, the model's encoding). Keep a wide
+// margin under the hard limit: our local count can run slightly under OpenAI's
+// own tokenizer, and decode/re-encode at split boundaries can drift, so cap well
+// below 8191 (the embedder self-heals any residual over-long input). Every part
 // keeps the session's session_id, so recall (which matches on session_id) is
 // unaffected.
-const MAX_EMBED_CHARS = 24000;
+const MAX_EMBED_TOKENS = 6000;
 
-/** Hard-slice a string into consecutive pieces each at most `budget` chars. */
+// Conversation text can contain literal special-token strings (e.g.
+// "<|endoftext|>"); encode them as ordinary text rather than throwing, matching
+// how the embeddings API treats raw input.
+const ENCODE_OPTS = { disallowedSpecial: new Set<string>() };
+
+/** Token count of `text` under the embedder's encoding (cl100k_base). */
+function tokenLen(text: string): number {
+  return encode(text, ENCODE_OPTS).length;
+}
+
+/** Hard-slice a string into consecutive pieces each at most `budget` tokens. */
 function sliceToBudget(text: string, budget: number): string[] {
+  const tokens = encode(text, ENCODE_OPTS);
+  if (tokens.length <= budget) return [text];
   const parts: string[] = [];
-  for (let i = 0; i < text.length; i += budget) {
-    parts.push(text.slice(i, i + budget));
+  for (let i = 0; i < tokens.length; i += budget) {
+    parts.push(decode(tokens.slice(i, i + budget)));
   }
   return parts;
 }
 
-/** Pack a session's turns into newline-joined chunks each within `budget`. */
+/** Pack a session's turns into newline-joined chunks each within `budget` tokens. */
 function packTurns(session: LmeSession, budget: number): string[] {
   const lines: string[] = [];
   for (const turn of session) {
     const line = `${turn.role}: ${turn.content}`;
-    if (line.length <= budget) {
+    if (tokenLen(line) <= budget) {
       lines.push(line);
     } else {
       // A single turn larger than the budget is hard-sliced so it still embeds.
@@ -32,7 +48,7 @@ function packTurns(session: LmeSession, budget: number): string[] {
   const chunks: string[] = [];
   let current = '';
   for (const line of lines) {
-    if (current.length > 0 && current.length + 1 + line.length > budget) {
+    if (current.length > 0 && tokenLen(`${current}\n${line}`) > budget) {
       chunks.push(current);
       current = line;
     } else {
@@ -67,7 +83,7 @@ export function chunkRecord(record: LmeRecord, mode: ChunkMode): UpsertEntry[] {
         const text = `${turn.role}: ${turn.content}`;
         // A single turn can exceed the embedder budget too; hard-slice it like
         // session mode so it still embeds instead of failing the chunk.
-        const parts = text.length <= MAX_EMBED_CHARS ? [text] : sliceToBudget(text, MAX_EMBED_CHARS);
+        const parts = sliceToBudget(text, MAX_EMBED_TOKENS);
         parts.forEach((part, pIdx) => {
           entries.push({
             id: parts.length === 1 ? `s${sIdx}_t${tIdx}` : `s${sIdx}_t${tIdx}_p${pIdx}`,
@@ -77,7 +93,7 @@ export function chunkRecord(record: LmeRecord, mode: ChunkMode): UpsertEntry[] {
         });
       });
     } else {
-      const parts = packTurns(session, MAX_EMBED_CHARS);
+      const parts = packTurns(session, MAX_EMBED_TOKENS);
       parts.forEach((text, pIdx) => {
         entries.push({
           id: parts.length === 1 ? `s${sIdx}` : `s${sIdx}_p${pIdx}`,
