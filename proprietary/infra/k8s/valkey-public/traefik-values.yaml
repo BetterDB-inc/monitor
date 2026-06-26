@@ -1,0 +1,55 @@
+# Helm values for the shared Traefik proxy that fronts every public Valkey
+# instance. One internet-facing NLB, one TLS entrypoint (valkey-tls), SNI-based
+# routing to per-tenant Services via IngressRouteTCP (HostSNI).
+#
+#   helm repo add traefik https://traefik.github.io/charts
+#   helm upgrade --install traefik traefik/traefik \
+#     -n traefik --create-namespace -f traefik-values.yaml
+#
+# The per-instance IngressRouteTCP objects are rendered from the
+# charts/valkey-search Helm chart by the entitlement provisioner and live in the
+# tenant namespaces, so Traefik must watch CRDs across namespaces.
+
+providers:
+  kubernetesCRD:
+    enabled: true
+    allowCrossNamespace: true
+  kubernetesIngress:
+    enabled: false
+
+# Only expose the Valkey TLS entrypoint on the NLB. HTTP(S) ingress for the
+# Monitor app is handled separately by the AWS ALB controller, so drop web /
+# websecure from this load balancer.
+ports:
+  web:
+    expose:
+      default: false
+  websecure:
+    expose:
+      default: false
+  valkey-tls:
+    port: 6379
+    exposedPort: 6379
+    protocol: TCP
+    expose:
+      default: true
+
+service:
+  type: LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+
+# Modest footprint; bump replicas for HA once there is real traffic.
+deployment:
+  replicas: 2
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi

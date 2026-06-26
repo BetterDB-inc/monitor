@@ -15,17 +15,23 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "create", "delete"]
-  # Pod/Service/Secret management in tenant namespaces
+  # Pod/Service/Secret/PVC management in tenant namespaces
+  # PVCs: valkey-search uses a StatefulSet volumeClaimTemplate; the PVCs are
+  # left behind on delete, so the provisioner cleans them up explicitly.
   - apiGroups: [""]
-    resources: ["pods", "services", "secrets", "resourcequotas"]
+    resources: ["pods", "services", "secrets", "resourcequotas", "persistentvolumeclaims"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
   # Pod logs (for schema job debugging)
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
-  # Deployment management
+  # Deployment + StatefulSet management (StatefulSet backs valkey-search)
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Traefik IngressRouteTCP for public Valkey exposure (SNI routing)
+  - apiGroups: ["traefik.io"]
+    resources: ["ingressroutetcps"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
   # Job management (schema init/drop)
   - apiGroups: ["batch"]

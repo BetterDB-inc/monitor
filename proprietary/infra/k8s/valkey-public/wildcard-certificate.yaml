@@ -1,0 +1,37 @@
+# Wildcard certificate for every per-tenant Valkey hostname
+# (<instance>.valkey.betterdb.com). Traefik terminates TLS with this cert and
+# routes the decrypted RESP stream by SNI (HostSNI) to the per-tenant Service.
+#
+# The Secret MUST live in the same namespace as Traefik (traefik) so the
+# TLSStore below can reference it.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: valkey-wildcard
+  namespace: traefik
+spec:
+  secretName: valkey-wildcard-tls
+  issuerRef:
+    name: letsencrypt-valkey
+    kind: ClusterIssuer
+  commonName: "*.valkey.app.betterdb.com"
+  dnsNames:
+    - "*.valkey.app.betterdb.com"
+  # Renew 30 days before the 90-day Let's Encrypt cert expires.
+  duration: 2160h # 90d
+  renewBefore: 720h # 30d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+---
+# Traefik's default TLS store. With no per-route certResolver/secretName on the
+# IngressRouteTCP, Traefik serves this cert for any SNI under the wildcard.
+apiVersion: traefik.io/v1alpha1
+kind: TLSStore
+metadata:
+  name: default
+  namespace: traefik
+spec:
+  defaultCertificate:
+    secretName: valkey-wildcard-tls

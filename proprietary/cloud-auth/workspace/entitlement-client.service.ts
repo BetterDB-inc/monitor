@@ -17,13 +17,20 @@ export class EntitlementClientService {
     const timeout = setTimeout(() => controller.abort(), 10000);
 
     try {
+      const headers: Record<string, string> = {
+        'Authorization': `Bearer ${this.apiKey}`,
+        ...(options?.headers as Record<string, string> | undefined),
+      };
+      // Only declare a JSON content-type when there is a body. Entitlement's
+      // Fastify rejects bodyless requests (e.g. DELETE) that set
+      // Content-Type: application/json with a 400.
+      if (options?.body !== undefined && headers['Content-Type'] === undefined) {
+        headers['Content-Type'] = 'application/json';
+      }
+
       const response = await fetch(url, {
         ...options,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiKey}`,
-          ...options?.headers,
-        },
+        headers,
         signal: controller.signal,
       });
 
@@ -79,5 +86,31 @@ export class EntitlementClientService {
     return this.request<any>(`/users/${userId}`, {
       method: 'DELETE',
     });
+  }
+
+  async listValkeyInstances(tenantId: string) {
+    return this.request<any[]>(
+      `/valkey-instances?tenantId=${encodeURIComponent(tenantId)}`,
+    );
+  }
+
+  async createValkeyInstance(data: { tenantId: string; name: string; maxmemory?: string }) {
+    return this.request<any>('/valkey-instances', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getValkeyInstanceCredentials(id: string, tenantId: string) {
+    return this.request<any>(
+      `/valkey-instances/${id}/credentials?tenantId=${encodeURIComponent(tenantId)}`,
+    );
+  }
+
+  async deleteValkeyInstance(id: string, tenantId: string) {
+    return this.request<any>(
+      `/valkey-instances/${id}?tenantId=${encodeURIComponent(tenantId)}`,
+      { method: 'DELETE' },
+    );
   }
 }

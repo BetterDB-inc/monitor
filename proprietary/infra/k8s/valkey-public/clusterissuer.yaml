@@ -1,0 +1,30 @@
+# cert-manager ClusterIssuer that solves ACME DNS-01 challenges via Route53.
+# Used to issue the wildcard cert *.valkey.betterdb.com that Traefik serves on
+# the public Valkey TLS endpoint.
+#
+# Credentials: cert-manager authenticates to Route53 via IRSA (the cert-manager
+# controller ServiceAccount is annotated with an IAM role that has the
+# route53:ChangeResourceRecordSets / ListHostedZonesByName permissions). With
+# IRSA in place no static keys are needed here — the route53 solver uses the
+# pod's ambient credentials. See README.md "1. cert-manager".
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-valkey
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ops@betterdb.com
+    privateKeySecretRef:
+      name: letsencrypt-valkey-account-key
+    solvers:
+      - dns01:
+          route53:
+            region: us-east-1
+            # valkey.app.betterdb.com lives inside the existing app.betterdb.com
+            # hosted zone (no separate delegation), so pin that zone's ID. This
+            # also matches the IRSA role being scoped to a single zone.
+            hostedZoneID: Z071377925BCBHU7WUE59
+        selector:
+          dnsZones:
+            - valkey.app.betterdb.com

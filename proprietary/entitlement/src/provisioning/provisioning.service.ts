@@ -2,11 +2,39 @@ import { Injectable, Logger, NotFoundException, BadRequestException } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailService } from '../email/email.service';
-import { TenantStatus } from '@prisma/client';
+import { TenantStatus, ValkeyInstanceStatus } from '@prisma/client';
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { Route53Client, ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand } from '@aws-sdk/client-route-53';
+
+const execFileAsync = promisify(execFile);
+
+// A Valkey instance name must be a single DNS label so it can form a Helm
+// release name (valkey-<name>). The public SNI host is derived from the
+// instance id, not the name (see valkeyHostLabel), so names need not be
+// globally unique.
+const VALKEY_NAME_PATTERN = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
+
+// The public SNI host is an opaque, stable label derived from the instance id
+// rather than its name: this keeps it globally unique on the shared wildcard
+// endpoint (no cross-tenant collisions) without leaking the friendly name.
+function valkeyHostLabel(instanceId: string): string {
+  const hash = crypto.createHash('sha256').update(instanceId).digest('hex');
+  // 'vk' prefix guarantees a leading letter (valid DNS label).
+  return `vk${hash.slice(0, 16)}`;
+}
+
+// ACL rules for the app user. +@all minus an explicit deny-list of genuinely
+// destructive commands (kept in sync with charts/valkey-search secret.yaml).
+// Blanket -@dangerous is too broad: it strips the observability commands
+// (INFO/CLIENT/SLOWLOG/LATENCY/CONFIG GET/MONITOR) Monitor relies on.
+const VALKEY_USER_ACL_RULES =
+  '~* &* +@all -flushall -flushdb -swapdb -shutdown -debug -failover ' +
+  '-replicaof -slaveof -save -bgsave -bgrewriteaof -migrate -module ' +
+  '-config|set -config|rewrite -acl|setuser -acl|deluser -acl|load -acl|save';
 
 @Injectable()
 export class ProvisioningService {
@@ -16,6 +44,16 @@ export class ProvisioningService {
   private readonly appsApi: k8s.AppsV1Api;
   private readonly batchApi: k8s.BatchV1Api;
   private readonly networkingApi: k8s.NetworkingV1Api;
+  // Generic object client used to apply the rendered valkey-search chart,
+  // including the Traefik IngressRouteTCP CRD that the typed clients can't.
+  private readonly objectApi: k8s.KubernetesObjectApi;
+
+  // Valkey instance provisioning config
+  private readonly valkeyChartPath: string;
+  private readonly valkeyDomain: string;
+  private readonly valkeyImageTag: string;
+  private readonly valkeyStorageClass: string;
+  private readonly helmBin: string;
 
   // Infrastructure constants
   private readonly ecrImage: string;
@@ -50,6 +88,16 @@ export class ProvisioningService {
     this.appsApi = this.kc.makeApiClient(k8s.AppsV1Api);
     this.batchApi = this.kc.makeApiClient(k8s.BatchV1Api);
     this.networkingApi = this.kc.makeApiClient(k8s.NetworkingV1Api);
+    this.objectApi = k8s.KubernetesObjectApi.makeApiClient(this.kc);
+
+    // Valkey instance provisioning config (chart bundled into the image)
+    this.valkeyChartPath = this.config.get<string>('VALKEY_CHART_PATH', '/app/charts/valkey-search');
+    this.valkeyDomain = this.config.get<string>('VALKEY_DOMAIN', 'valkey.app.betterdb.com');
+    this.valkeyImageTag = this.config.get<string>('VALKEY_IMAGE_TAG', '9.1-alpine');
+    // The cluster has no default StorageClass, so the PVC must name one
+    // explicitly or it stays unbound. gp2 is the EBS class present on EKS.
+    this.valkeyStorageClass = this.config.get<string>('VALKEY_STORAGE_CLASS', 'gp2');
+    this.helmBin = this.config.get<string>('HELM_BIN', 'helm');
 
     // Load infrastructure config
     this.ecrImage = this.config.get<string>('ECR_IMAGE', '811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb');
@@ -147,9 +195,14 @@ export class ProvisioningService {
       this.logger.log(`[${tenant.subdomain}] Creating K8s network policy`);
       await this.createNetworkPolicy(namespace);
 
-      // Step 6: Create K8s ResourceQuota
+      // Step 6: Create K8s ResourceQuota. Keep the Valkey headroom if this
+      // tenant already has a managed instance, so re-provisioning the tenant
+      // doesn't shrink the quota below what the running Valkey pod needs.
       this.logger.log(`[${tenant.subdomain}] Creating K8s resource quota`);
-      await this.createResourceQuota(namespace);
+      const existingValkey = await this.prisma.valkeyInstance.count({
+        where: { tenantId, status: { not: 'deleting' } },
+      });
+      await this.createResourceQuota(namespace, existingValkey > 0);
 
       // Step 7: Create K8s Deployment
       this.logger.log(`[${tenant.subdomain}] Creating K8s deployment`);
@@ -250,6 +303,442 @@ export class ProvisioningService {
       await this.updateTenantStatus(tenantId, 'error', `Deprovision failed: ${errorMessage}`);
       throw error;
     }
+  }
+
+  // ============================================
+  // Valkey Instance Provisioning
+  // ============================================
+  //
+  // Renders charts/valkey-search with `helm template` (a stateless local
+  // render — no cluster state, no Helm release Secrets) and applies the result
+  // with the generic KubernetesObjectApi. This reuses the chart as the single
+  // source of truth while keeping a clean, SDK-based apply/failure path.
+  //
+  // The Secret (password + users.acl) is created here in TS and the chart is
+  // rendered with auth.existingSecret so its own secret.yaml (which relies on
+  // Helm `lookup`/`randAlphaNum`, unavailable under `helm template`) is skipped.
+  // Each instance reuses its tenant namespace; public DNS is the shared
+  // *.valkey.betterdb.com wildcard, so no per-instance Route53 record is made.
+
+  async provisionValkeyInstance(instanceId: string): Promise<void> {
+    const instance = await this.prisma.valkeyInstance.findUnique({ where: { id: instanceId } });
+    if (!instance) {
+      throw new NotFoundException(`Valkey instance ${instanceId} not found`);
+    }
+    if (instance.status !== 'pending' && instance.status !== 'error') {
+      throw new BadRequestException(
+        `Cannot provision instance with status '${instance.status}'. Must be 'pending' or 'error'.`,
+      );
+    }
+    if (!VALKEY_NAME_PATTERN.test(instance.name)) {
+      throw new BadRequestException(`Invalid valkey instance name: ${instance.name}`);
+    }
+
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: instance.tenantId } });
+    if (!tenant) {
+      throw new NotFoundException(`Tenant ${instance.tenantId} not found`);
+    }
+
+    const namespace = `tenant-${tenant.subdomain}`;
+    const release = `valkey-${instance.name}`;
+    const host = `${valkeyHostLabel(instance.id)}.${this.valkeyDomain}`;
+
+    this.logger.log(`Provisioning valkey instance ${instance.name} (${instanceId}) in ${namespace}`);
+
+    try {
+      // Claim the row for provisioning only if it's still pending/error. A
+      // concurrent delete may have moved it to 'deleting' between the read above
+      // and here; an unconditional update would clobber that back to
+      // 'provisioning' and we'd end up flipping a deleted instance to 'ready'.
+      const { count: claimed } = await this.prisma.valkeyInstance.updateMany({
+        where: { id: instanceId, status: { in: ['pending', 'error'] } },
+        data: { status: 'provisioning', statusMessage: null },
+      });
+      if (claimed === 0) {
+        this.logger.warn(
+          `[${instance.name}] status changed before provisioning could start; skipping`,
+        );
+        return;
+      }
+
+      // The tenant namespace already exists for cloud tenants, but a user may
+      // create an instance before the Monitor app is provisioned — ensure it.
+      await this.createNamespace(namespace, tenant.subdomain);
+
+      // Existing tenants were provisioned before Valkey support: widen the
+      // quota to fit the Valkey pod and open the isolation policy so the
+      // shared Traefik proxy can route to it. Both are idempotent.
+      await this.createResourceQuota(namespace, true);
+      await this.ensureTenantNetworkPolicy(namespace);
+
+      // Generate the credential and create the Secret the chart will reference.
+      const password = crypto.randomBytes(24).toString('base64url');
+      await this.createValkeySecret(namespace, instance.secretName, instance.username, password);
+
+      // Render + apply the chart.
+      const manifests = await this.renderValkeyChart({
+        release,
+        namespace,
+        username: instance.username,
+        secretName: instance.secretName,
+        host,
+        maxmemory: instance.maxmemory,
+      });
+      await this.applyManifests(manifests, namespace);
+
+      // Wait for the StatefulSet to become ready.
+      await this.waitForStatefulSetReady(namespace, release, 6 * 60 * 1000);
+
+      // Only flip to ready if the row is still provisioning — a concurrent
+      // delete may have moved it to 'deleting' while we were waiting.
+      const { count } = await this.prisma.valkeyInstance.updateMany({
+        where: { id: instanceId, status: 'provisioning' },
+        data: { status: 'ready', statusMessage: null, host, port: 6379 },
+      });
+      if (count === 0) {
+        // A concurrent delete moved the row out of 'provisioning' (or removed
+        // it) while we were applying manifests / waiting on the StatefulSet.
+        // The deprovision path may have already torn down (or never saw) the
+        // objects we just created, so clean them up here to avoid orphans.
+        this.logger.warn(
+          `[${instance.name}] status changed during provisioning; tearing down freshly created resources`,
+        );
+        try {
+          await this.teardownValkeyResources({
+            release,
+            namespace,
+            username: instance.username,
+            secretName: instance.secretName,
+            host,
+            maxmemory: instance.maxmemory,
+          });
+        } catch (cleanupError) {
+          const msg =
+            cleanupError instanceof Error ? cleanupError.message : 'Unknown error';
+          this.logger.warn(`[${instance.name}] Orphan cleanup failed: ${msg}`);
+        }
+        return;
+      }
+      this.logger.log(`[${instance.name}] Valkey instance ready at ${host}:6379`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`[${instance.name}] Valkey provisioning failed: ${errorMessage}`);
+      // Same guard: don't clobber a concurrent 'deleting'.
+      const { count } = await this.prisma.valkeyInstance.updateMany({
+        where: { id: instanceId, status: 'provisioning' },
+        data: { status: 'error', statusMessage: errorMessage },
+      });
+      if (count === 0) {
+        // A concurrent delete already moved the row out of 'provisioning' (or
+        // removed it). Its deprovision may have torn down before we applied the
+        // objects we created, so clean them up here too. Mirrors the
+        // success-path race handler.
+        this.logger.warn(
+          `[${instance.name}] status changed during failed provisioning; tearing down freshly created resources`,
+        );
+        try {
+          await this.teardownValkeyResources({
+            release,
+            namespace,
+            username: instance.username,
+            secretName: instance.secretName,
+            host,
+            maxmemory: instance.maxmemory,
+          });
+        } catch (cleanupError) {
+          const msg =
+            cleanupError instanceof Error ? cleanupError.message : 'Unknown error';
+          this.logger.warn(`[${instance.name}] Orphan cleanup failed: ${msg}`);
+        }
+      }
+      throw error;
+    }
+  }
+
+  async deprovisionValkeyInstance(instanceId: string): Promise<void> {
+    const instance = await this.prisma.valkeyInstance.findUnique({ where: { id: instanceId } });
+    if (!instance) {
+      throw new NotFoundException(`Valkey instance ${instanceId} not found`);
+    }
+
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: instance.tenantId } });
+    if (!tenant) {
+      throw new NotFoundException(`Tenant ${instance.tenantId} not found`);
+    }
+
+    const namespace = `tenant-${tenant.subdomain}`;
+    const release = `valkey-${instance.name}`;
+    const host = `${valkeyHostLabel(instance.id)}.${this.valkeyDomain}`;
+
+    this.logger.log(`Deprovisioning valkey instance ${instance.name} (${instanceId})`);
+
+    try {
+      await this.updateValkeyInstanceStatus(instanceId, 'deleting');
+
+      await this.teardownValkeyResources({
+        release,
+        namespace,
+        username: instance.username,
+        secretName: instance.secretName,
+        host,
+        maxmemory: instance.maxmemory,
+      });
+
+      await this.prisma.valkeyInstance.delete({ where: { id: instanceId } });
+      this.logger.log(`[${instance.name}] Valkey instance deprovisioned`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`[${instance.name}] Valkey deprovisioning failed: ${errorMessage}`);
+      await this.updateValkeyInstanceStatus(instanceId, 'error', `Deprovision failed: ${errorMessage}`);
+      throw error;
+    }
+  }
+
+  // Removes the k8s objects for a Valkey instance without touching the DB row.
+  // Shared by deprovision and by the provision lost-race cleanup. Re-renders
+  // the chart so deletion targets exactly what an apply would have created;
+  // deleteManifests tolerates not-found, so calling this twice is idempotent.
+  private async teardownValkeyResources(params: {
+    release: string;
+    namespace: string;
+    username: string;
+    secretName: string;
+    host: string;
+    maxmemory: string | null;
+  }): Promise<void> {
+    const manifests = await this.renderValkeyChart({
+      release: params.release,
+      namespace: params.namespace,
+      username: params.username,
+      secretName: params.secretName,
+      host: params.host,
+      maxmemory: params.maxmemory,
+    });
+    await this.deleteManifests(manifests, params.namespace);
+
+    // volumeClaimTemplates leave PVCs behind after the StatefulSet is gone.
+    await this.deleteValkeyPvcs(params.namespace, params.release);
+
+    // Delete the credential Secret.
+    try {
+      await this.coreApi.deleteNamespacedSecret({
+        name: params.secretName,
+        namespace: params.namespace,
+      });
+    } catch (error: any) {
+      if (error.response?.statusCode !== 404 && !this.isNotFoundError(error)) {
+        this.logger.warn(`Error deleting secret ${params.secretName}: ${error.message}`);
+      }
+    }
+  }
+
+  // Returns the connection details for a ready instance, reading the password
+  // from the k8s Secret (it is never stored in Postgres).
+  async getValkeyInstanceCredentials(instanceId: string): Promise<{
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+  }> {
+    const instance = await this.prisma.valkeyInstance.findUnique({ where: { id: instanceId } });
+    if (!instance) {
+      throw new NotFoundException(`Valkey instance ${instanceId} not found`);
+    }
+    if (instance.status !== 'ready' || !instance.host) {
+      throw new BadRequestException(`Valkey instance ${instanceId} is not ready`);
+    }
+
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: instance.tenantId } });
+    if (!tenant) {
+      throw new NotFoundException(`Tenant ${instance.tenantId} not found`);
+    }
+    const namespace = `tenant-${tenant.subdomain}`;
+
+    const secret = await this.coreApi.readNamespacedSecret({
+      name: instance.secretName,
+      namespace,
+    });
+    const encoded = secret.data?.password;
+    if (!encoded) {
+      throw new NotFoundException(`Credential secret for instance ${instanceId} not found`);
+    }
+    const password = Buffer.from(encoded, 'base64').toString('utf8');
+
+    return {
+      host: instance.host,
+      port: instance.port,
+      username: instance.username,
+      password,
+    };
+  }
+
+  private async updateValkeyInstanceStatus(
+    id: string,
+    status: ValkeyInstanceStatus,
+    statusMessage?: string,
+  ): Promise<void> {
+    await this.prisma.valkeyInstance.update({
+      where: { id },
+      data: { status, statusMessage: statusMessage || null },
+    });
+  }
+
+  private async createValkeySecret(
+    namespace: string,
+    secretName: string,
+    username: string,
+    password: string,
+  ): Promise<void> {
+    // default off — only the named user can connect. We grant +@all then deny
+    // an explicit list of genuinely destructive commands. A blanket -@dangerous
+    // is too broad: it also strips INFO/CLIENT/SLOWLOG/LATENCY/CONFIG GET/MONITOR,
+    // which Monitor needs to observe the instance (capability detection runs INFO,
+    // so the connection would be rejected outright). The deny-list blocks data
+    // loss, server takeover, persistence DoS, exfiltration/code loading,
+    // reconfiguration and privilege escalation while leaving observability and
+    // FT.* (search) working.
+    const acl = `user default off\nuser ${username} on >${password} ${VALKEY_USER_ACL_RULES}\n`;
+    try {
+      await this.coreApi.createNamespacedSecret({
+        namespace,
+        body: {
+          metadata: {
+            name: secretName,
+            labels: { 'app.kubernetes.io/managed-by': 'betterdb-entitlement' },
+          },
+          type: 'Opaque',
+          stringData: { password, 'users.acl': acl },
+        },
+      });
+    } catch (error: any) {
+      if (this.isAlreadyExistsError(error)) {
+        this.logger.warn(`Secret ${secretName} already exists in ${namespace}, continuing...`);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  private async renderValkeyChart(opts: {
+    release: string;
+    namespace: string;
+    username: string;
+    secretName: string;
+    host: string;
+    maxmemory: string | null;
+  }): Promise<k8s.KubernetesObject[]> {
+    const args = [
+      'template',
+      opts.release,
+      this.valkeyChartPath,
+      '--namespace',
+      opts.namespace,
+      '--set',
+      `image.tag=${this.valkeyImageTag}`,
+      '--set',
+      `auth.existingSecret=${opts.secretName}`,
+      '--set',
+      `auth.username=${opts.username}`,
+      '--set',
+      'persistence.enabled=true',
+      '--set',
+      `persistence.storageClass=${this.valkeyStorageClass}`,
+      '--set',
+      'exposure.public=true',
+      '--set',
+      `exposure.host=${opts.host}`,
+      '--set',
+      'exposure.sniRoute.enabled=true',
+    ];
+    if (opts.maxmemory) {
+      args.push('--set', `valkey.maxmemory=${opts.maxmemory}`);
+    }
+
+    let stdout: string;
+    try {
+      ({ stdout } = await execFileAsync(this.helmBin, args, { maxBuffer: 16 * 1024 * 1024 }));
+    } catch (error: any) {
+      throw new Error(`helm template failed: ${error.stderr || error.message}`);
+    }
+
+    return k8s.loadAllYaml(stdout).filter((obj): obj is k8s.KubernetesObject => !!obj && !!obj.kind);
+  }
+
+  private async applyManifests(manifests: k8s.KubernetesObject[], namespace: string): Promise<void> {
+    for (const manifest of manifests) {
+      manifest.metadata = { ...manifest.metadata, namespace };
+      try {
+        await this.objectApi.create(manifest);
+        this.logger.log(`[${namespace}] Created ${manifest.kind} ${manifest.metadata?.name}`);
+      } catch (error: any) {
+        if (this.isAlreadyExistsError(error)) {
+          this.logger.warn(`[${namespace}] ${manifest.kind} ${manifest.metadata?.name} already exists, continuing...`);
+        } else {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private async deleteManifests(manifests: k8s.KubernetesObject[], namespace: string): Promise<void> {
+    for (const manifest of manifests) {
+      manifest.metadata = { ...manifest.metadata, namespace };
+      try {
+        await this.objectApi.delete(manifest);
+        this.logger.log(`[${namespace}] Deleted ${manifest.kind} ${manifest.metadata?.name}`);
+      } catch (error: any) {
+        if (this.isNotFoundError(error)) {
+          this.logger.warn(`[${namespace}] ${manifest.kind} ${manifest.metadata?.name} not found, skipping...`);
+        } else {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private async deleteValkeyPvcs(namespace: string, release: string): Promise<void> {
+    try {
+      const pvcs = await this.coreApi.listNamespacedPersistentVolumeClaim({
+        namespace,
+        labelSelector: `app.kubernetes.io/instance=${release}`,
+      });
+      for (const pvc of pvcs.items) {
+        await this.coreApi.deleteNamespacedPersistentVolumeClaim({ name: pvc.metadata!.name!, namespace });
+        this.logger.log(`[${namespace}] Deleted PVC ${pvc.metadata!.name}`);
+      }
+    } catch (error: any) {
+      this.logger.warn(`[${namespace}] Error deleting PVCs: ${error.message}`);
+    }
+  }
+
+  private async waitForStatefulSetReady(namespace: string, release: string, timeoutMs: number): Promise<void> {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      try {
+        const list = await this.appsApi.listNamespacedStatefulSet({
+          namespace,
+          labelSelector: `app.kubernetes.io/instance=${release}`,
+        });
+        const sts = list.items[0];
+        if (sts?.status?.readyReplicas && sts.status.readyReplicas >= 1) {
+          this.logger.log(`[${namespace}] StatefulSet ready`);
+          return;
+        }
+        this.logger.debug(`[${namespace}] Waiting for StatefulSet... (ready: ${sts?.status?.readyReplicas || 0})`);
+      } catch (error: any) {
+        this.logger.warn(`[${namespace}] Error checking StatefulSet status: ${error.message}`);
+      }
+      await this.sleep(5000);
+    }
+    throw new Error(`StatefulSet readiness timeout after ${timeoutMs / 1000}s`);
+  }
+
+  private isNotFoundError(error: any): boolean {
+    const code = error.statusCode ?? error.response?.statusCode ?? error.status ?? error.body?.code;
+    if (code === 404) return true;
+    if (error.body?.reason === 'NotFound') return true;
+    if (typeof error.message === 'string' && error.message.startsWith('HTTP-Code: 404')) return true;
+    return false;
   }
 
   private async updateTenantStatus(id: string, status: TenantStatus, statusMessage?: string): Promise<void> {
@@ -515,15 +1004,26 @@ export class ProvisioningService {
     }
   }
 
-  private async createResourceQuota(namespace: string): Promise<void> {
+  private async createResourceQuota(namespace: string, includeValkey = false): Promise<void> {
+    // Base budget covers the Monitor app pod (250m/256Mi req, 500m/512Mi lim)
+    // plus a transient schema job. includeValkey adds headroom for one managed
+    // Valkey pod (100m/256Mi req, 500m/1Gi lim) so the chart can schedule.
     const quotaSpec = {
-      hard: {
-        'requests.cpu': '300m',
-        'requests.memory': '320Mi',
-        'limits.cpu': '600m',
-        'limits.memory': '640Mi',
-        'pods': '2', // Allow 2 pods: 1 for app + 1 for schema jobs
-      },
+      hard: includeValkey
+        ? {
+            'requests.cpu': '450m',
+            'requests.memory': '640Mi',
+            'limits.cpu': '1200m',
+            'limits.memory': '2Gi',
+            'pods': '3', // app + schema job + valkey
+          }
+        : {
+            'requests.cpu': '300m',
+            'requests.memory': '320Mi',
+            'limits.cpu': '600m',
+            'limits.memory': '640Mi',
+            'pods': '2', // Allow 2 pods: 1 for app + 1 for schema jobs
+          },
     };
     try {
       await this.coreApi.createNamespacedResourceQuota({
@@ -532,11 +1032,16 @@ export class ProvisioningService {
       });
     } catch (error: any) {
       if (this.isAlreadyExistsError(error)) {
-        await this.coreApi.patchNamespacedResourceQuota({
-          name: 'tenant-quota',
-          namespace,
-          body: { spec: quotaSpec },
-        });
+        // Default patch content type is JSON Patch (an array of ops); send a
+        // merge patch so the { spec } object is accepted.
+        await this.coreApi.patchNamespacedResourceQuota(
+          {
+            name: 'tenant-quota',
+            namespace,
+            body: { spec: quotaSpec },
+          },
+          k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
+        );
       } else {
         throw error;
       }
@@ -837,6 +1342,20 @@ export class ProvisioningService {
             },
           ],
         },
+        {
+          // Allow the shared Traefik proxy (traefik namespace) to reach the
+          // managed Valkey pod for public SNI/TLS routing on 6379.
+          _from: [
+            {
+              namespaceSelector: {
+                matchLabels: {
+                  'kubernetes.io/metadata.name': 'traefik',
+                },
+              },
+            },
+          ],
+          ports: [{ protocol: 'TCP', port: 6379 }],
+        },
       ],
       egress: [
         {
@@ -934,6 +1453,41 @@ export class ProvisioningService {
     } catch (error: any) {
       if (this.isAlreadyExistsError(error)) {
         this.logger.warn(`NetworkPolicy already exists in ${namespace}, continuing...`);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  // Idempotently brings a namespace's isolation policy up to the current spec
+  // (creating it if absent). Used by the Valkey provision path so tenants that
+  // predate the Traefik ingress rule get it without a full reconcile run.
+  private async ensureTenantNetworkPolicy(namespace: string): Promise<void> {
+    const spec = this.tenantIsolationSpec();
+    try {
+      // Read first so the PUT carries the current resourceVersion (a replace
+      // with a missing/stale resourceVersion is rejected with 409).
+      const existing = await this.networkingApi.readNamespacedNetworkPolicy({
+        name: 'tenant-isolation',
+        namespace,
+      });
+      await this.networkingApi.replaceNamespacedNetworkPolicy({
+        name: 'tenant-isolation',
+        namespace,
+        body: {
+          metadata: {
+            name: 'tenant-isolation',
+            resourceVersion: existing.metadata?.resourceVersion,
+          },
+          spec,
+        },
+      });
+    } catch (error: any) {
+      if (this.isNotFoundError(error)) {
+        await this.networkingApi.createNamespacedNetworkPolicy({
+          namespace,
+          body: { metadata: { name: 'tenant-isolation' }, spec },
+        });
       } else {
         throw error;
       }

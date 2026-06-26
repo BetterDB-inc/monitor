@@ -5,6 +5,7 @@ import { DemoBanner } from '../DemoBanner';
 import { useIdleTracker } from '../../hooks/useIdleTracker';
 import { useNavigationTracker } from '../../hooks/useNavigationTracker';
 import { useCliPanel } from '../../hooks/useCliPanel';
+import { useValkeyAutoLink } from '../../hooks/useValkeyAutoLink';
 import { UpdateBanner } from '../UpdateBanner';
 import { NoConnectionsGuard } from '../NoConnectionsGuard';
 import { VectorSearchGuard } from '../VectorSearchGuard';
@@ -49,6 +50,9 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
   const cliPanel = useCliPanel();
   useIdleTracker();
   useNavigationTracker();
+  // Mirror ready managed Valkey instances into the connection list app-wide, so
+  // linking doesn't depend on the Add Connection dialog staying open.
+  useValkeyAutoLink(cloudUser);
 
   return (
     <SidebarProvider>

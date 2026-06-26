@@ -113,4 +113,53 @@ export class WorkspaceController {
 
     return this.entitlementClient.deleteUser(userId);
   }
+
+  @Get('databases')
+  async listDatabases(@Req() req: FastifyRequest) {
+    const cloudUser = this.getCloudUser(req);
+    const tenantId = this.tenantId || cloudUser.tenantId;
+    return this.entitlementClient.listValkeyInstances(tenantId);
+  }
+
+  @Post('databases')
+  async createDatabase(
+    @Req() req: FastifyRequest,
+    @Body() body: { name: string; maxmemory?: string },
+  ) {
+    const cloudUser = this.getCloudUser(req);
+    this.requireAdminOrOwner(cloudUser);
+
+    if (!body.name) {
+      throw new BadRequestException('Name is required');
+    }
+
+    const tenantId = this.tenantId || cloudUser.tenantId;
+    return this.entitlementClient.createValkeyInstance({
+      tenantId,
+      name: body.name,
+      maxmemory: body.maxmemory,
+    });
+  }
+
+  @Get('databases/:id/credentials')
+  async getDatabaseCredentials(
+    @Req() req: FastifyRequest,
+    @Param('id') id: string,
+  ) {
+    const cloudUser = this.getCloudUser(req);
+    this.requireAdminOrOwner(cloudUser);
+    const tenantId = this.tenantId || cloudUser.tenantId;
+    return this.entitlementClient.getValkeyInstanceCredentials(id, tenantId);
+  }
+
+  @Delete('databases/:id')
+  async deleteDatabase(
+    @Req() req: FastifyRequest,
+    @Param('id') id: string,
+  ) {
+    const cloudUser = this.getCloudUser(req);
+    this.requireAdminOrOwner(cloudUser);
+    const tenantId = this.tenantId || cloudUser.tenantId;
+    return this.entitlementClient.deleteValkeyInstance(id, tenantId);
+  }
 }

@@ -62,14 +62,53 @@ model Tenant {
   createdAt     DateTime     @default(now()) @map("created_at")
   updatedAt     DateTime     @updatedAt @map("updated_at")
 
-  customer      Customer?    @relation(fields: [customerId], references: [id])
-  users         User[]
-  invitations   Invitation[]
+  customer        Customer?        @relation(fields: [customerId], references: [id])
+  users           User[]
+  invitations     Invitation[]
+  valkeyInstances ValkeyInstance[]
 
   @@index([subdomain])
   @@index([status])
   @@index([customerId])
   @@map("tenants")
+}
+
+enum ValkeyInstanceStatus {
+  pending
+  provisioning
+  ready
+  error
+  suspended
+  deleting
+}
+
+model ValkeyInstance {
+  id            String               @id @default(cuid())
+  tenantId      String               @map("tenant_id")
+  // Friendly display name, unique per tenant (see @@unique below). The public
+  // SNI host is an opaque hash derived from `id`, not the name, so two tenants
+  // can reuse the same name without colliding on the shared wildcard endpoint.
+  name          String
+  status        ValkeyInstanceStatus @default(pending)
+  statusMessage String?              @map("status_message")
+  // Public TLS endpoint (opaque hash host), populated once provisioning reaches
+  // `ready`. Unique because every instance shares the valkey.app.betterdb.com
+  // wildcard, so the SNI host must be globally unique.
+  host          String?              @unique
+  port          Int                  @default(6379)
+  // Name of the K8s Secret (password + users.acl) in the tenant namespace.
+  secretName    String               @map("secret_name")
+  username      String
+  maxmemory     String?
+  createdAt     DateTime             @default(now()) @map("created_at")
+  updatedAt     DateTime             @updatedAt @map("updated_at")
+
+  tenant        Tenant               @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@index([status])
+  @@map("valkey_instances")
 }
 
 model License {
