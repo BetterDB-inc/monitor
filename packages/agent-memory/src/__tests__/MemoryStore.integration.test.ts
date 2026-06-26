@@ -9,6 +9,8 @@ const NAME = 'agentmem_it';
 const INDEX = `${NAME}:mem:idx`;
 const DIMS = 16;
 
+const embed = fakeEmbed(DIMS);
+
 let client: Valkey;
 let store: MemoryStore;
 let skip = false;
@@ -61,7 +63,7 @@ beforeAll(async () => {
   store = new MemoryStore({
     client: client as unknown as MemoryStoreClient,
     name: NAME,
-    embedFn: fakeEmbed(DIMS),
+    embedFn: embed,
   });
   // Dogfood the package's own index bootstrap instead of hand-rolling FT.CREATE.
   await store.ensureIndex();
@@ -113,7 +115,7 @@ describe('MemoryStore integration (real valkey-search)', () => {
     const capped = new MemoryStore({
       client: client as unknown as MemoryStoreClient,
       name: NAME,
-      embedFn: fakeEmbed(DIMS),
+      embedFn: embed,
       maxItemsPerScope: 3,
     });
     for (let i = 0; i < 5; i++) {
@@ -154,5 +156,67 @@ describe('MemoryStore integration (real valkey-search)', () => {
       const hits = await store.recall('Summary of 2 notes', { namespace: 'cons', k: 5 });
       return hits.some((h) => h.item.source === 'summary');
     });
+  });
+
+  it('get/list/stats round-trip a remembered memory', async () => {
+    if (skip) return;
+    const id = await store.remember('integration get/list/stats', {
+      threadId: 'rt-readtools',
+      importance: 0.5,
+    });
+
+    const got = await store.get(id);
+    expect(got?.content).toBe('integration get/list/stats');
+
+    await pollUntil(async () => (await store.list({ threadId: 'rt-readtools' })).total >= 1);
+    const listed = await store.list({ threadId: 'rt-readtools' });
+    expect(listed.items.some((i) => i.id === id)).toBe(true);
+
+    const stats = await store.stats();
+    expect(stats.itemCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('recallByVector returns a remembered memory without an embedFn call', async () => {
+    if (skip) return;
+    await store.remember('vector recall target', { threadId: 'rt-vec' });
+    const vector = await embed('vector recall target');
+    await pollUntil(
+      async () => (await store.recallByVector(vector, { threadId: 'rt-vec' })).length >= 1,
+    );
+    const hits = await store.recallByVector(vector, { threadId: 'rt-vec', reinforce: false });
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('list({}) with no scope returns >= 1 result without erroring', async () => {
+    if (skip) return;
+    const text = 'unscoped list probe';
+    await store.remember(text, { namespace: 'unscoped-list-probe' });
+    await pollUntil(async () => (await ftCount('@namespace:{unscoped-list-probe}')) >= 1);
+
+    const result = await store.list({});
+    expect(result.total).toBeGreaterThanOrEqual(1);
+  });
+
+  it('recallByVector({}) with no scope returns >= 1 result without erroring', async () => {
+    if (skip) return;
+    const text = 'unscoped vector probe';
+    await store.remember(text, { namespace: 'unscoped-vec-probe' });
+    const vector = await embed(text);
+    await pollUntil(async () => (await ftCount('@namespace:{unscoped-vec-probe}')) >= 1);
+
+    const hits = await store.recallByVector(vector, { reinforce: false });
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('list returns newest-first via server-side SORTBY', async () => {
+    if (skip) return;
+    const id1 = await store.remember('older memory', { namespace: 'order-test' });
+    await sleep(50);
+    const id2 = await store.remember('newer memory', { namespace: 'order-test' });
+    await pollUntil(async () => (await store.list({ namespace: 'order-test' })).total >= 2);
+
+    const result = await store.list({ namespace: 'order-test' });
+    expect(result.items[0].id).toBe(id2);
+    expect(result.items[1].id).toBe(id1);
   });
 });

@@ -1,0 +1,130 @@
+[
+  {
+    "question_id": "fix_001",
+    "question_type": "single-session-user",
+    "question": "What programming language do I use at work?",
+    "answer": "Python",
+    "question_date": "2024-05-01",
+    "haystack_session_ids": ["A_s0", "A_s1", "A_s2", "A_s3", "A_s4"],
+    "haystack_dates": ["2024-01-03", "2024-01-10", "2024-02-02", "2024-02-20", "2024-03-15"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I tried a new ramen place downtown last night." },
+        { "role": "assistant", "content": "How was the broth?" }
+      ],
+      [
+        { "role": "user", "content": "At work I write Python every day for our data pipelines.", "has_answer": true },
+        { "role": "assistant", "content": "Python is a solid choice for data engineering." }
+      ],
+      [
+        { "role": "user", "content": "The weather has been rainy all week here." },
+        { "role": "assistant", "content": "Hopefully it clears up soon." }
+      ],
+      [
+        { "role": "user", "content": "I watched a documentary about deep sea creatures." },
+        { "role": "assistant", "content": "Those are fascinating." }
+      ],
+      [
+        { "role": "user", "content": "My knee felt better after the morning run." },
+        { "role": "assistant", "content": "Glad the recovery is going well." }
+      ]
+    ],
+    "answer_session_ids": ["A_s1"]
+  },
+  {
+    "question_id": "fix_002",
+    "question_type": "single-session-preference",
+    "question": "Which city did I book a flight to?",
+    "answer": "Tokyo",
+    "question_date": "2024-05-02",
+    "haystack_session_ids": ["B_s0", "B_s1", "B_s2", "B_s3", "B_s4"],
+    "haystack_dates": ["2024-01-05", "2024-01-22", "2024-02-11", "2024-03-01", "2024-03-30"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I reorganized my bookshelf by color this weekend." },
+        { "role": "assistant", "content": "That sounds satisfying." }
+      ],
+      [
+        { "role": "user", "content": "My sourdough starter finally rose properly." },
+        { "role": "assistant", "content": "Nice, persistence pays off." }
+      ],
+      [
+        { "role": "user", "content": "I just booked a flight to Tokyo for next spring.", "has_answer": true },
+        { "role": "assistant", "content": "Exciting, Tokyo in spring is beautiful." }
+      ],
+      [
+        { "role": "user", "content": "The team standup ran long again today." },
+        { "role": "assistant", "content": "Long meetings are draining." }
+      ],
+      [
+        { "role": "user", "content": "I planted tomatoes and basil on the balcony." },
+        { "role": "assistant", "content": "Fresh herbs are the best." }
+      ]
+    ],
+    "answer_session_ids": ["B_s2"]
+  },
+  {
+    "question_id": "fix_003",
+    "question_type": "single-session-user",
+    "question": "What is my dog's name?",
+    "answer": "Rex",
+    "question_date": "2024-05-03",
+    "haystack_session_ids": ["C_s0", "C_s1", "C_s2", "C_s3", "C_s4"],
+    "haystack_dates": ["2024-01-08", "2024-01-19", "2024-02-14", "2024-02-28", "2024-03-21"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I finished reading a long fantasy novel finally." },
+        { "role": "assistant", "content": "Which series was it?" }
+      ],
+      [
+        { "role": "user", "content": "My dog Rex loves to play fetch in the park every morning.", "has_answer": true },
+        { "role": "assistant", "content": "Rex sounds full of energy." }
+      ],
+      [
+        { "role": "user", "content": "I switched my coffee order to a flat white." },
+        { "role": "assistant", "content": "A good choice." }
+      ],
+      [
+        { "role": "user", "content": "The car needed an oil change this week." },
+        { "role": "assistant", "content": "Routine maintenance helps." }
+      ],
+      [
+        { "role": "user", "content": "I repainted the spare bedroom a soft green." },
+        { "role": "assistant", "content": "Calming color." }
+      ]
+    ],
+    "answer_session_ids": ["C_s1"]
+  },
+  {
+    "question_id": "fix_004",
+    "question_type": "multi-session",
+    "question": "How many siblings do I have?",
+    "answer": "two",
+    "question_date": "2024-05-04",
+    "haystack_session_ids": ["D_s0", "D_s1", "D_s2", "D_s3", "D_s4"],
+    "haystack_dates": ["2024-01-12", "2024-01-25", "2024-02-09", "2024-03-05", "2024-03-27"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I upgraded my laptop's memory over the weekend." },
+        { "role": "assistant", "content": "More RAM always helps." }
+      ],
+      [
+        { "role": "user", "content": "We tried indoor rock climbing for the first time." },
+        { "role": "assistant", "content": "How did it go?" }
+      ],
+      [
+        { "role": "user", "content": "I grew up with two siblings, an older brother and a younger sister.", "has_answer": true },
+        { "role": "assistant", "content": "A middle child then." }
+      ],
+      [
+        { "role": "user", "content": "The bakery near my office started selling pretzels." },
+        { "role": "assistant", "content": "Warm pretzels are great." }
+      ],
+      [
+        { "role": "user", "content": "I set up a standing desk to fix my posture." },
+        { "role": "assistant", "content": "Your back will thank you." }
+      ]
+    ],
+    "answer_session_ids": ["D_s2"]
+  }
+]

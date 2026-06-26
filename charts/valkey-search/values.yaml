@@ -14,6 +14,11 @@ auth:
   # Leave empty to auto-generate a password on first install. On `helm upgrade`
   # the chart reuses the existing Secret's value (lookup), so it never rotates
   # out from under connected clients.
+  #
+  # GitOps note: Argo CD / Flux render with `helm template` (no cluster access),
+  # so the lookup returns empty and a NEW password is minted on every sync —
+  # rotating the Secret/ACL and breaking connected clients. GitOps installs must
+  # set either a fixed auth.password or an auth.existingSecret.
   password: ""
   # Bring-your-own Secret instead of chart-managed generation. The cloud path
   # sets this so the entitlement service owns the credential. The Secret must

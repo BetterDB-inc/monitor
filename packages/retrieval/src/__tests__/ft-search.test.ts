@@ -45,4 +45,10 @@ describe('buildFtSearchQuery', () => {
   it('throws when a NUMERIC filter value is not a number', () => {
     expect(() => buildFtSearchQuery(schema, 5, { updated: 'recent' })).toThrow(/numeric/i);
   });
+
+  it('throws when a NUMERIC filter value is not finite', () => {
+    for (const value of [NaN, Infinity, -Infinity]) {
+      expect(() => buildFtSearchQuery(schema, 5, { updated: value })).toThrow(/finite/i);
+    }
+  });
 });

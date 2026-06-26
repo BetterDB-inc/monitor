@@ -17,6 +17,9 @@ function buildFilterClause(field: string, value: string | number, schema: Retrie
     if (typeof value !== 'number') {
       throw new Error(`Numeric filter on field '${field}' requires a number, got: ${typeof value}`);
     }
+    if (!Number.isFinite(value)) {
+      throw new Error(`Numeric filter on field '${field}' requires a finite number, got: ${value}`);
+    }
     return `@${field}:[${value} ${value}]`;
   }
   throw new Error(

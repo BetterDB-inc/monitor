@@ -16,8 +16,15 @@ spec:
         {{- include "valkey-search.selectorLabels" . | nindent 8 }}
       annotations:
         # Roll the pod when the credential/ACL changes so a rotated password
-        # or ACL rule takes effect (the file is mounted, loaded at boot).
+        # or ACL rule takes effect (the file is mounted, loaded at boot). For an
+        # entitlement-owned existingSecret the chart renders no Secret, so hash
+        # the live Secret's data instead — otherwise the checksum is constant and
+        # pods never roll when that external Secret rotates.
+        {{- if .Values.auth.existingSecret }}
+        checksum/secret: {{ (lookup "v1" "Secret" .Release.Namespace .Values.auth.existingSecret).data | toYaml | sha256sum }}
+        {{- else }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
     spec:
       {{- with .Values.podSecurityContext }}
       securityContext:
@@ -83,12 +90,17 @@ spec:
                 - 'valkey-cli --user {{ .Values.auth.username }} --pass "$VALKEY_PASSWORD" ping'
             initialDelaySeconds: 10
             periodSeconds: 10
+          # Readiness verifies the search module actually loaded, not just that
+          # the server answers. A non-crashing module-load failure (FT.* unknown
+          # while valkey-server stays up) would otherwise report Ready while the
+          # chart's whole purpose is broken. COMMAND INFO returns the command's
+          # entry only when it is registered.
           readinessProbe:
             exec:
               command:
                 - sh
                 - -c
-                - 'valkey-cli --user {{ .Values.auth.username }} --pass "$VALKEY_PASSWORD" ping'
+                - 'valkey-cli --user {{ .Values.auth.username }} --pass "$VALKEY_PASSWORD" COMMAND INFO FT.SEARCH | grep -q FT.SEARCH'
             initialDelaySeconds: 5
             periodSeconds: 5
           resources:

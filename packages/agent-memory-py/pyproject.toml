@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "betterdb-agent-memory"
+version = "0.1.0"
+description = "Long-term memory tier for AI agents backed by Valkey Search: semantic recall with recency/importance ranking, scoped capacity eviction, and consolidation. Pairs with @betterdb/agent-cache."
+keywords = ["valkey", "redis", "agent", "memory", "vector-search", "llm", "opentelemetry", "prometheus"]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "betterdb-valkey-search-kit>=0.1.0",
+    "betterdb-agent-cache>=0.7.0",
+    "opentelemetry-api>=1.20.0",
+    "prometheus-client>=0.19.0",
+    "posthog>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "opentelemetry-sdk>=1.20.0",
+]
+
+[project.urls]
+Repository = "https://github.com/BetterDB-inc/monitor"
+
+[tool.uv.sources]
+betterdb-valkey-search-kit = { path = "../valkey-search-kit-py", editable = true }
+betterdb-agent-cache = { path = "../agent-cache-py", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["betterdb_agent_memory"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100

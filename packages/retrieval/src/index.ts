@@ -36,3 +36,5 @@ export type {
 } from './telemetry';
 export { createPrometheusMetrics } from './prometheus-metrics';
 export type { PrometheusMetricsOptions } from './prometheus-metrics';
+export { createAnalytics, NOOP_ANALYTICS } from './analytics';
+export type { Analytics, AnalyticsOptions, AnalyticsClient } from './analytics';

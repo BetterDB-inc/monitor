@@ -11,10 +11,13 @@ auth:
 
 persistence:
   enabled: true
-  size: 2Gi # ~2.5x maxmemory: holds RDB + AOF + rewrite headroom
+  size: 2Gi # ~4x maxmemory: holds RDB + AOF + rewrite headroom
 
 valkey:
-  maxmemory: 768mb # ~75% of the 1Gi limit
+  # ~50% of the 1Gi limit. With appendonly, a BGREWRITEAOF/RDB-save fork's
+  # copy-on-write pages plus rewrite buffers can spike RSS well above maxmemory
+  # under write load; staying near half the limit avoids OOMKills mid-rewrite.
+  maxmemory: 512mb
   maxmemoryPolicy: noeviction
 
 resources:

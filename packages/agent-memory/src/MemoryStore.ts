@@ -3,6 +3,7 @@ import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import {
   encodeFloat32,
   isIndexNotFoundError,
+  parseFtInfoStats,
   parseFtSearchResponse,
 } from '@betterdb/valkey-search-kit';
 import { buildMemoryRecord } from './buildMemoryRecord';
@@ -11,6 +12,7 @@ import {
   buildConsolidateFilter,
   buildRecallQuery,
   buildScopeFilter,
+  MATCH_ALL_MEMORY_QUERY,
   SCORE_FIELD,
 } from './buildRecallQuery';
 import { parseMemoryItem } from './parseMemoryItem';
@@ -22,11 +24,20 @@ import {
   type MemoryTelemetry,
   type MemoryTelemetryOptions,
 } from './telemetry';
+import {
+  createAnalytics,
+  NOOP_ANALYTICS,
+  type Analytics,
+  type AnalyticsOptions,
+} from './analytics';
 import type {
   ConsolidateOptions,
   ConsolidateResult,
   EmbedFn,
   MemoryHit,
+  MemoryItem,
+  MemoryListOptions,
+  MemoryListResult,
   MemoryScope,
   MemoryStoreClient,
   RecallOptions,
@@ -48,6 +59,7 @@ const DEFAULT_IMPORTANCE = 0.5;
 const DEFAULT_CONFIG_REFRESH_MS = 30000;
 const MIN_CONFIG_REFRESH_MS = 1000;
 const MAX_DISTANCE = 2;
+const DEFAULT_LIST_LIMIT = 20;
 
 // Read lazily so only discovery users pay the disk read on import (and avoid a
 // bundler hazard, since package.json is not always emitted).
@@ -72,10 +84,16 @@ export interface MemoryConfigSnapshot {
   maxItemsPerScope?: number;
 }
 
+export interface MemoryStats {
+  itemCount: number;
+  evictions: number;
+  config: MemoryConfigSnapshot;
+}
+
 export interface MemoryStoreOptions {
   client: MemoryStoreClient;
   name: string;
-  embedFn: EmbedFn;
+  embedFn?: EmbedFn;
   defaultThreshold?: number;
   weights?: RecallWeights;
   halfLifeSeconds?: number;
@@ -83,12 +101,13 @@ export interface MemoryStoreOptions {
   discovery?: boolean | MemoryDiscoveryConfig;
   configRefresh?: boolean | MemoryConfigRefreshConfig;
   telemetry?: MemoryTelemetryOptions;
+  analytics?: AnalyticsOptions;
 }
 
 export class MemoryStore {
   private readonly client: MemoryStoreClient;
   private readonly name: string;
-  private readonly embedFn: EmbedFn;
+  private readonly embedFn?: EmbedFn;
   private defaultThreshold: number;
   private weights: RecallWeights;
   private halfLifeSeconds: number;
@@ -104,6 +123,9 @@ export class MemoryStore {
   private readonly telemetry: MemoryTelemetry;
   private readonly storeLabels: Record<string, string>;
   private dims?: number;
+  private readonly analyticsOptions?: AnalyticsOptions;
+  private analytics: Analytics = NOOP_ANALYTICS;
+  private analyticsStarted = false;
 
   constructor(options: MemoryStoreOptions) {
     this.client = options.client;
@@ -122,6 +144,32 @@ export class MemoryStore {
     this.configKey = `${this.name}:__mem_config`;
     this.discovery = this.createDiscovery(options.discovery);
     this.startConfigRefresh(options.configRefresh);
+    this.analyticsOptions = options.analytics;
+  }
+
+  // Fire-once: defer analytics startup to the first index-lifecycle call so the
+  // real client is awaited before any event is captured (the constructor cannot
+  // await). Never lets analytics break the memory store.
+  private async ensureAnalyticsStarted(): Promise<void> {
+    if (this.analyticsStarted) {
+      return;
+    }
+    this.analyticsStarted = true;
+    try {
+      const analytics = await createAnalytics({
+        apiKey: this.analyticsOptions?.apiKey,
+        host: this.analyticsOptions?.host,
+        disabled: this.analyticsOptions?.disabled,
+      });
+      this.analytics = analytics;
+      await analytics.init(this.client, this.name, {
+        hasEmbedFn: this.embedFn !== undefined,
+        maxItemsPerScope: this.maxItemsPerScope,
+        discovery: this.discovery !== null,
+      });
+    } catch {
+      this.analytics = NOOP_ANALYTICS;
+    }
   }
 
   currentConfig(): MemoryConfigSnapshot {
@@ -130,6 +178,66 @@ export class MemoryStore {
       weights: { ...this.weights },
       halfLifeSeconds: this.halfLifeSeconds,
       maxItemsPerScope: this.maxItemsPerScope,
+    };
+  }
+
+  async get(id: string): Promise<MemoryItem | null> {
+    const key = `${this.name}:mem:${id}`;
+    const fields = parseHashReply(await this.client.call('HGETALL', key));
+    if (Object.keys(fields).length === 0) {
+      return null;
+    }
+    return parseMemoryItem(this.name, { key, fields });
+  }
+
+  async list(options: MemoryListOptions = {}): Promise<MemoryListResult> {
+    const tags = options.tags ?? [];
+    const scope: MemoryScope = {
+      threadId: options.threadId,
+      agentId: options.agentId,
+      namespace: options.namespace,
+    };
+    const limit = options.limit ?? DEFAULT_LIST_LIMIT;
+    const offset = options.offset ?? 0;
+    const raw = await this.client.call(
+      'FT.SEARCH',
+      `${this.name}:mem:idx`,
+      buildScopeFilter(scope, tags),
+      'RETURN',
+      '10',
+      'content',
+      'importance',
+      'tags',
+      'created_at',
+      'last_accessed_at',
+      'access_count',
+      'source',
+      'threadId',
+      'agentId',
+      'namespace',
+      'SORTBY',
+      'created_at',
+      'DESC',
+      'LIMIT',
+      String(offset),
+      String(limit),
+      'DIALECT',
+      '2',
+    );
+    const total = ftSearchTotal(raw);
+    const items = parseFtSearchResponse(raw).map((hit) => parseMemoryItem(this.name, hit));
+    return { items, total };
+  }
+
+  async stats(): Promise<MemoryStats> {
+    const infoRaw = await this.client.call('FT.INFO', memoryIndexName(this.name));
+    const { numDocs } = parseFtInfoStats(infoRaw as unknown[]);
+    const statsFields = parseHashReply(await this.client.call('HGETALL', `${this.name}:__mem_stats`));
+    const evictions = Number(statsFields.evictions ?? '0');
+    return {
+      itemCount: numDocs,
+      evictions: Number.isFinite(evictions) ? evictions : 0,
+      config: this.currentConfig(),
     };
   }
 
@@ -265,6 +373,7 @@ export class MemoryStore {
     if (this.discovery) {
       await this.discovery.stop({ deleteHeartbeat: true });
     }
+    await this.analytics.shutdown();
   }
 
   /**
@@ -275,6 +384,7 @@ export class MemoryStore {
    * initialize().
    */
   async ensureIndex(): Promise<void> {
+    await this.ensureAnalyticsStarted();
     try {
       await this.client.call('FT.INFO', memoryIndexName(this.name));
       return;
@@ -285,85 +395,88 @@ export class MemoryStore {
     }
     const dims = await this.resolveDims();
     await this.client.call('FT.CREATE', ...buildMemoryIndexArgs(this.name, dims));
+    this.analytics.capture('index_created', { dims });
   }
 
   async recall(query: string, options: RecallOptions = {}): Promise<MemoryHit[]> {
     return this.traced('recall', async (span) => {
       const startedAt = Date.now();
-      const k = options.k ?? DEFAULT_RECALL_K;
-      const threshold = options.threshold ?? this.defaultThreshold;
-      const weights = options.weights ?? this.weights;
-      // Snapshot the half-life alongside threshold/weights so a concurrent
-      // configRefresh can't score one recall with a mix of config versions.
-      const halfLifeSeconds = this.halfLifeSeconds;
-      const fetchK = k * RECALL_OVERFETCH;
-      const tags = options.tags ?? [];
-      const scope = {
-        threadId: options.threadId,
-        agentId: options.agentId,
-        namespace: options.namespace,
-      };
-      span.setAttribute('recall.k', k);
-
       const vector = await this.embed(query);
-      const queryString = buildRecallQuery(fetchK, scope, tags);
-      const raw = await this.client.call(
-        'FT.SEARCH',
-        `${this.name}:mem:idx`,
-        queryString,
-        'PARAMS',
-        '2',
-        'vec',
-        encodeFloat32(vector),
-        'LIMIT',
-        '0',
-        String(fetchK),
-        'DIALECT',
-        '2',
-      );
-
-      const now = Date.now();
-      const hits: MemoryHit[] = [];
-      for (const hit of parseFtSearchResponse(raw)) {
-        const rawScore = hit.fields[SCORE_FIELD];
-        if (rawScore === undefined || rawScore.trim() === '') {
-          continue;
-        }
-        const distance = Number(rawScore);
-        if (!Number.isFinite(distance) || distance > threshold) {
-          continue;
-        }
-        const item = parseMemoryItem(this.name, hit);
-        // Recency decays from the last access, not creation, so reinforcement
-        // (which bumps last_accessed_at) actually makes a memory more recallable.
-        // max() guards against a clock-skewed last_accessed_at older than created_at.
-        const lastTouched = Math.max(item.createdAt, item.lastAccessedAt);
-        const ageSeconds = (now - lastTouched) / 1000;
-        const score = compositeScore({
-          similarity: similarityFromDistance(distance),
-          ageSeconds,
-          importance: item.importance,
-          weights,
-          halfLifeSeconds,
-        });
-        if (!Number.isFinite(score)) {
-          continue;
-        }
-        hits.push({ item, similarity: distance, score });
-      }
-
-      hits.sort((a, b) => b.score - a.score);
-      const result = hits.slice(0, k);
-      span.setAttribute('recall.candidate_count', hits.length);
-      span.setAttribute('recall.result_count', result.length);
-      this.recordRecall(result.length, (Date.now() - startedAt) / 1000);
-
-      if (options.reinforce !== false) {
-        // Reinforcement is best-effort and must never break the recall read path.
-        await this.reinforce(result, now).catch(() => undefined);
-      }
-      return result;
+      return this.runRecall(vector, options, span, startedAt);
     });
+  }
+
+  async recallByVector(vector: number[], options: RecallOptions = {}): Promise<MemoryHit[]> {
+    return this.traced('recall', (span) => this.runRecall(vector, options, span, Date.now()));
+  }
+
+  private async runRecall(vector: number[], options: RecallOptions, span: Span, startedAt: number): Promise<MemoryHit[]> {
+    const k = options.k ?? DEFAULT_RECALL_K;
+    const threshold = options.threshold ?? this.defaultThreshold;
+    const weights = options.weights ?? this.weights;
+    const halfLifeSeconds = this.halfLifeSeconds;
+    const fetchK = k * RECALL_OVERFETCH;
+    const tags = options.tags ?? [];
+    const scope = {
+      threadId: options.threadId,
+      agentId: options.agentId,
+      namespace: options.namespace,
+    };
+    span.setAttribute('recall.k', k);
+
+    const queryString = buildRecallQuery(fetchK, scope, tags);
+    const raw = await this.client.call(
+      'FT.SEARCH',
+      `${this.name}:mem:idx`,
+      queryString,
+      'PARAMS',
+      '2',
+      'vec',
+      encodeFloat32(vector),
+      'LIMIT',
+      '0',
+      String(fetchK),
+      'DIALECT',
+      '2',
+    );
+
+    const now = Date.now();
+    const hits: MemoryHit[] = [];
+    for (const hit of parseFtSearchResponse(raw)) {
+      const rawScore = hit.fields[SCORE_FIELD];
+      if (rawScore === undefined || rawScore.trim() === '') {
+        continue;
+      }
+      const distance = Number(rawScore);
+      if (!Number.isFinite(distance) || distance > threshold) {
+        continue;
+      }
+      const item = parseMemoryItem(this.name, hit);
+      const lastTouched = Math.max(item.createdAt, item.lastAccessedAt);
+      const ageSeconds = (now - lastTouched) / 1000;
+      const score = compositeScore({
+        similarity: similarityFromDistance(distance),
+        ageSeconds,
+        importance: item.importance,
+        weights,
+        halfLifeSeconds,
+      });
+      if (!Number.isFinite(score)) {
+        continue;
+      }
+      hits.push({ item, similarity: distance, score });
+    }
+
+    hits.sort((a, b) => b.score - a.score);
+    const result = hits.slice(0, k);
+    span.setAttribute('recall.candidate_count', hits.length);
+    span.setAttribute('recall.result_count', result.length);
+    this.recordRecall(result.length, (Date.now() - startedAt) / 1000);
+
+    if (options.reinforce !== false) {
+      await this.reinforce(result, now).catch(() => undefined);
+    }
+    return result;
   }
 
   private recordRecall(resultCount: number, latencySeconds: number): void {
@@ -636,7 +749,7 @@ export class MemoryStore {
     // Tags are part of the partition (as in recall/forgetByScope), so a
     // tag-scoped write caps its own tag bucket.
     const filter = buildScopeFilter(scope, scope.tags ?? []);
-    if (filter === '*') {
+    if (filter === MATCH_ALL_MEMORY_QUERY) {
       // A fully-unscoped write has no scope to bound: enforcing here would count
       // and evict across the entire index (every other scope's memories), which
       // `maxItemsPerScope` does not promise. Skip — the write stays, uncapped.
@@ -710,11 +823,20 @@ export class MemoryStore {
     this.telemetry.metrics.items.labels(this.storeLabels).dec(removed);
   }
 
+  private requireEmbedFn(): EmbedFn {
+    if (!this.embedFn) {
+      throw new Error(
+        'MemoryStore was constructed without an embedFn; remember(), recall(), and ensureIndex() require one. Use get/list/stats/recallByVector for read-only access.',
+      );
+    }
+    return this.embedFn;
+  }
+
   private async resolveDims(): Promise<number> {
     if (this.dims !== undefined) {
       return this.dims;
     }
-    const probe = await this.embedFn('probe');
+    const probe = await this.requireEmbedFn()('probe');
     if (probe.length === 0) {
       throw new Error(
         'Cannot resolve memory vector dimension: embedFn returned a zero-length embedding',
@@ -726,7 +848,7 @@ export class MemoryStore {
 
   private async embed(content: string): Promise<number[]> {
     this.telemetry.metrics.embeddingCalls.labels(this.storeLabels).inc();
-    const vector = await this.embedFn(content);
+    const vector = await this.requireEmbedFn()(content);
     if (this.dims === undefined) {
       this.dims = vector.length;
     } else if (vector.length !== this.dims) {

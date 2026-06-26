@@ -89,6 +89,9 @@ jobs:
           "
 
       - name: Build agent-memory
+        env:
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
         run: pnpm --filter @betterdb/agent-memory... build
 
       - name: Verify build

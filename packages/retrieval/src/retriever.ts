@@ -18,6 +18,34 @@ import {
 } from './discovery';
 import { parsePercentIndexed, type IndexHealthSnapshot, type RecallEstimator } from './health';
 import type { RetrievalMetrics, RetrievalTracer, RetrievalOperation } from './telemetry';
+import { createAnalytics, NOOP_ANALYTICS, type Analytics, type AnalyticsOptions } from './analytics';
+
+// Atomic compare-and-set for the shared registry field. REGISTRY_KEY is keyed by
+// name and shared with agent-cache, so a plain HGET -> compare -> HSET/HDEL has a
+// TOCTOU window in which a foreign marker written in between gets clobbered. These
+// scripts collapse read-compare-write into one server-side round trip.
+const REGISTER_SCRIPT = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if raw then
+  local ok, parsed = pcall(cjson.decode, raw)
+  if ok and type(parsed) == 'table' and parsed.type and parsed.type ~= ARGV[3] then
+    return parsed.type
+  end
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+return false
+`;
+
+const UNREGISTER_SCRIPT = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if raw then
+  local ok, parsed = pcall(cjson.decode, raw)
+  if ok and type(parsed) == 'table' and parsed.type == ARGV[2] then
+    return redis.call('HDEL', KEYS[1], ARGV[1])
+  end
+end
+return 0
+`;
 
 export type EmbedFn = (text: string) => Promise<number[]>;
 
@@ -64,6 +92,7 @@ export interface RetrieverOptions {
   recallEstimator?: RecallEstimator;
   metrics?: RetrievalMetrics;
   tracer?: RetrievalTracer;
+  analytics?: AnalyticsOptions;
 }
 
 export interface UpsertEntry {
@@ -83,6 +112,9 @@ export class Retriever {
   private readonly metrics?: RetrievalMetrics;
   private readonly tracer?: RetrievalTracer;
   private resolvedDims?: number;
+  private readonly analyticsOptions?: AnalyticsOptions;
+  private analytics: Analytics = NOOP_ANALYTICS;
+  private analyticsStarted = false;
 
   constructor(options: RetrieverOptions) {
     this.client = options.client;
@@ -94,6 +126,39 @@ export class Retriever {
     this.recallEstimator = options.recallEstimator;
     this.metrics = options.metrics;
     this.tracer = options.tracer;
+    this.analyticsOptions = options.analytics;
+  }
+
+  // Fire-once: defer analytics startup to the first index-lifecycle call so the
+  // real client is awaited before any event is captured (the constructor cannot
+  // await). Never lets analytics break the retriever.
+  private async ensureAnalyticsStarted(): Promise<void> {
+    if (this.analyticsStarted) {
+      return;
+    }
+    this.analyticsStarted = true;
+    try {
+      const analytics = await createAnalytics({
+        apiKey: this.analyticsOptions?.apiKey,
+        host: this.analyticsOptions?.host,
+        disabled: this.analyticsOptions?.disabled,
+      });
+      this.analytics = analytics;
+      await analytics.init(this.client, this.name, {
+        fieldCount: this.schema.fields.length,
+        vectorMetric: this.schema.vector.metric,
+        vectorAlgorithm: this.schema.vector.algorithm,
+        hasEmbedFn: this.embedFn !== undefined,
+        hasRerankFn: this.rerankFn !== undefined,
+      });
+    } catch {
+      this.analytics = NOOP_ANALYTICS;
+    }
+  }
+
+  /** Tear down product analytics (flushes any pending events). */
+  async close(): Promise<void> {
+    await this.analytics.shutdown();
   }
 
   private async instrument<T>(operation: RetrievalOperation, fn: () => Promise<T>): Promise<T> {
@@ -133,6 +198,7 @@ export class Retriever {
   }
 
   async createIndex(): Promise<void> {
+    await this.ensureAnalyticsStarted();
     try {
       await this.client.call('FT.INFO', indexName(this.name));
       return;
@@ -146,7 +212,23 @@ export class Retriever {
       ...this.schema,
       vector: { ...this.schema.vector, dims },
     };
-    await this.client.call('FT.CREATE', ...buildFtCreateArgs(this.name, schema, this.capabilities));
+    try {
+      await this.client.call(
+        'FT.CREATE',
+        ...buildFtCreateArgs(this.name, schema, this.capabilities),
+      );
+    } catch (err) {
+      // Tolerate a concurrent creation: another worker may create the index
+      // between our FT.INFO probe and this FT.CREATE (common on multi-worker
+      // boot). The idempotent contract holds as long as the index exists.
+      if (!String(err).toLowerCase().includes('already exists')) {
+        throw err;
+      }
+      // This worker did not create the index — skip the telemetry event so a
+      // multi-worker boot does not over-count index creation.
+      return;
+    }
+    this.analytics.capture('index_created', { dims });
   }
 
   private assertNoReservedFields(entry: UpsertEntry, vectorField: string): void {
@@ -336,43 +418,43 @@ export class Retriever {
     return result;
   }
 
-  private async readRegistryMarker(): Promise<{ type?: string } | null> {
-    const raw = await this.client.call('HGET', REGISTRY_KEY, this.name);
-    if (raw === null || raw === undefined) {
-      return null;
-    }
-    try {
-      return JSON.parse(String(raw)) as { type?: string };
-    } catch {
-      return null;
-    }
-  }
-
   async register(): Promise<void> {
-    // The registry field is keyed by name and shared with agent-cache, so guard
-    // against clobbering a marker we don't own: surface it instead of silently
-    // overwriting a different cache type's registration.
-    const existing = await this.readRegistryMarker();
-    if (existing?.type && existing.type !== RETRIEVAL_CACHE_TYPE) {
-      console.warn(
-        `retrieval discovery: registry field '${this.name}' already holds a '${existing.type}' marker; skipping registration`,
-      );
-      return;
-    }
+    // The registry field is keyed by name and shared with agent-cache. Compare
+    // the existing marker's type and write ours in a single atomic round trip
+    // (REGISTER_SCRIPT) so a foreign marker can't be clobbered through a
+    // check-then-act window. The script returns the foreign type when it skips.
     const marker = buildRetrievalMarker({
       name: this.name,
       version: RETRIEVAL_VERSION,
       startedAt: new Date().toISOString(),
     });
-    await this.client.call('HSET', REGISTRY_KEY, this.name, JSON.stringify(marker));
+    const foreign = await this.client.call(
+      'EVAL',
+      REGISTER_SCRIPT,
+      1,
+      REGISTRY_KEY,
+      this.name,
+      JSON.stringify(marker),
+      RETRIEVAL_CACHE_TYPE,
+    );
+    if (foreign !== null && foreign !== undefined) {
+      console.warn(
+        `retrieval discovery: registry field '${this.name}' already holds a '${String(foreign)}' marker; skipping registration`,
+      );
+    }
   }
 
   async unregister(): Promise<void> {
-    // Only delete a marker we own — never HDEL a foreign cache type's field.
-    const existing = await this.readRegistryMarker();
-    if (existing?.type === RETRIEVAL_CACHE_TYPE) {
-      await this.client.call('HDEL', REGISTRY_KEY, this.name);
-    }
+    // Only delete a marker we own — compared and HDEL'd in one atomic round trip
+    // (UNREGISTER_SCRIPT) so we never delete a foreign cache type's field.
+    await this.client.call(
+      'EVAL',
+      UNREGISTER_SCRIPT,
+      1,
+      REGISTRY_KEY,
+      this.name,
+      RETRIEVAL_CACHE_TYPE,
+    );
   }
 
   async health(): Promise<IndexHealthSnapshot> {
