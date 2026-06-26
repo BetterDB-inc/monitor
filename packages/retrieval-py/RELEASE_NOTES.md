@@ -1,8 +1,14 @@
-# betterdb-retrieval v0.1.0
+# betterdb-retrieval v0.2.0
 
-Python port of `@betterdb/retrieval`. Developer-facing retrieval SDK over
-Valkey Search — typed schema, idempotent index lifecycle, upsert/delete, and
-vector + filtered + hybrid query, with built-in observability seams.
+Developer-facing retrieval SDK over Valkey Search — typed schema, idempotent
+index lifecycle, upsert/delete, and vector + filtered + hybrid query, with
+built-in observability seams.
+
+## What's new in v0.2.0
+
+- Opt-out anonymous usage analytics (PostHog). Disable with
+  `BETTERDB_TELEMETRY=false` (or `0`/`no`/`off`), or per-instance via options.
+  Instance id is an anonymous UUID persisted in Valkey; no payload data is sent.
 
 Requires Valkey 8+ with the **valkey-search** module (vector index support).
 Works with ElastiCache for Valkey, Memorystore for Valkey, and MemoryDB.
