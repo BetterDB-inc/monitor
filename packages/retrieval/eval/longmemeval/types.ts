@@ -36,6 +36,12 @@ export interface Embedder {
   name: string;
   dims: number;
   embed: (text: string) => Promise<number[]>;
+  /**
+   * Batch-embed many texts up front into the embedder's cache so later per-text
+   * `embed` calls are cache hits. Cuts the ~one-HTTP-call-per-chunk serial cost
+   * on large haystacks (longmemeval_m). Optional; absence falls back to `embed`.
+   */
+  prewarm?: (texts: string[]) => Promise<void>;
   /** Persist any cache to disk (no-op for the mock). */
   flush?: () => Promise<void>;
 }
