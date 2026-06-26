@@ -22,7 +22,12 @@ This instance is NOT publicly exposed. Port-forward to reach it locally:
   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "valkey-search.fullname" . }} 6379:{{ .Values.service.port }}
 {{- end }}
 
+{{- if .Values.auth.existingSecret }}
+ACLs come from the externally-owned Secret "{{ .Values.auth.existingSecret }}";
+the chart's hardening flag does not control runtime permissions here.
+{{- else }}
 The "default" user is disabled; only "{{ .Values.auth.username }}" can connect.
 {{- if .Values.hardening.disableDangerousCommands }}
-Dangerous commands (FLUSHALL, CONFIG, DEBUG, ...) are blocked; FT.* search works.
+Dangerous commands (FLUSHALL, CONFIG, DEBUG, ...) are blocked; FT.* search and INFO work.
+{{- end }}
 {{- end }}

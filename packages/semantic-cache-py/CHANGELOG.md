@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0] - 2026-06-23
+
+### Changed
+
+- **Shared Valkey Search primitives extracted to `betterdb-valkey-search-kit`.** `encode_float32`, `decode_float32`, `escape_tag`, and `parse_ft_search_response` now live in the new `betterdb-valkey-search-kit` package and are re-exported from `betterdb_semantic_cache.utils` for backward compatibility (no import changes required). Internal FT.INFO dimension parsing and "index not found" error classification also delegate to the kit. No behavior change.
+- Added `betterdb-valkey-search-kit>=0.1.0` as a dependency.
+
 ## [0.5.0] - 2026-06-11
 
 ### Added

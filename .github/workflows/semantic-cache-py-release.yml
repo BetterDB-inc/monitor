@@ -108,6 +108,30 @@ jobs:
           path.write_text(content)
           EOF
 
+      - name: Verify betterdb-valkey-search-kit is on PyPI
+        working-directory: packages/semantic-cache-py
+        run: |
+          # The built wheel ships an unqualified Requires-Dist on the kit
+          # (the [tool.uv.sources] editable path is dev-only and dropped from
+          # the artifact). Publish the kit to PyPI first, or a published
+          # semantic-cache is uninstallable via pip. Fail before publishing.
+          SPEC=$(python - <<'EOF'
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          for dep in data.get("project", {}).get("dependencies", []):
+              if dep.replace(" ", "").startswith("betterdb-valkey-search-kit"):
+                  print(dep)
+                  break
+          EOF
+          )
+          if [ -z "$SPEC" ]; then
+            echo "Could not find betterdb-valkey-search-kit in pyproject.toml dependencies"
+            exit 1
+          fi
+          echo "Resolving '$SPEC' from PyPI..."
+          pip install "$SPEC" --dry-run --quiet
+          echo "Kit dependency '$SPEC' is resolvable on PyPI"
+
       - name: Refresh default cost table
         working-directory: packages/semantic-cache-py
         run: python scripts/update_model_prices.py

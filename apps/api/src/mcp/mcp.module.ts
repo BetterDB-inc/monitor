@@ -1,6 +1,8 @@
 import { Module, Logger } from '@nestjs/common';
 import { StorageModule } from '../storage/storage.module';
 import { McpController } from './mcp.controller';
+import { McpMemoryController } from './memory/mcp-memory.controller';
+import { McpMemoryService } from './memory/mcp-memory.service';
 import { AgentTokenGuard, MCP_TOKEN_SERVICE } from '../common/guards/agent-token.guard';
 import { MetricsModule } from '../metrics/metrics.module';
 import { CommandLogAnalyticsModule } from '../commandlog-analytics/commandlog-analytics.module';
@@ -42,7 +44,7 @@ const optionalImports = [AnomalyModule].filter(Boolean);
 
 @Module({
   imports: [StorageModule, MetricsModule, CommandLogAnalyticsModule, ClientAnalyticsModule, ClusterModule, TelemetryModule, ...optionalImports],
-  controllers: [McpController],
-  providers: [AgentTokenGuard, ...tokenProviders],
+  controllers: [McpController, McpMemoryController],
+  providers: [AgentTokenGuard, McpMemoryService, ...tokenProviders],
 })
 export class McpModule {}
