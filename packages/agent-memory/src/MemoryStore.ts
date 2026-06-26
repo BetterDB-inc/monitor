@@ -123,8 +123,9 @@ export class MemoryStore {
   private readonly telemetry: MemoryTelemetry;
   private readonly storeLabels: Record<string, string>;
   private dims?: number;
+  private readonly analyticsOptions?: AnalyticsOptions;
   private analytics: Analytics = NOOP_ANALYTICS;
-  private shutdownCalled = false;
+  private analyticsStarted = false;
 
   constructor(options: MemoryStoreOptions) {
     this.client = options.client;
@@ -143,25 +144,32 @@ export class MemoryStore {
     this.configKey = `${this.name}:__mem_config`;
     this.discovery = this.createDiscovery(options.discovery);
     this.startConfigRefresh(options.configRefresh);
+    this.analyticsOptions = options.analytics;
+  }
 
-    const analyticsOpts = options.analytics;
-    createAnalytics({
-      apiKey: analyticsOpts?.apiKey,
-      host: analyticsOpts?.host,
-      disabled: analyticsOpts?.disabled,
-    })
-      .then((a) => {
-        if (this.shutdownCalled) {
-          return a.shutdown();
-        }
-        this.analytics = a;
-        return a.init(this.client, this.name, {
-          hasEmbedFn: this.embedFn !== undefined,
-          maxItemsPerScope: this.maxItemsPerScope,
-          discovery: this.discovery !== null,
-        });
-      })
-      .catch(() => {});
+  // Fire-once: defer analytics startup to the first index-lifecycle call so the
+  // real client is awaited before any event is captured (the constructor cannot
+  // await). Never lets analytics break the memory store.
+  private async ensureAnalyticsStarted(): Promise<void> {
+    if (this.analyticsStarted) {
+      return;
+    }
+    this.analyticsStarted = true;
+    try {
+      const analytics = await createAnalytics({
+        apiKey: this.analyticsOptions?.apiKey,
+        host: this.analyticsOptions?.host,
+        disabled: this.analyticsOptions?.disabled,
+      });
+      this.analytics = analytics;
+      await analytics.init(this.client, this.name, {
+        hasEmbedFn: this.embedFn !== undefined,
+        maxItemsPerScope: this.maxItemsPerScope,
+        discovery: this.discovery !== null,
+      });
+    } catch {
+      this.analytics = NOOP_ANALYTICS;
+    }
   }
 
   currentConfig(): MemoryConfigSnapshot {
@@ -365,7 +373,6 @@ export class MemoryStore {
     if (this.discovery) {
       await this.discovery.stop({ deleteHeartbeat: true });
     }
-    this.shutdownCalled = true;
     await this.analytics.shutdown();
   }
 
@@ -377,6 +384,7 @@ export class MemoryStore {
    * initialize().
    */
   async ensureIndex(): Promise<void> {
+    await this.ensureAnalyticsStarted();
     try {
       await this.client.call('FT.INFO', memoryIndexName(this.name));
       return;

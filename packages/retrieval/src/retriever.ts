@@ -112,8 +112,9 @@ export class Retriever {
   private readonly metrics?: RetrievalMetrics;
   private readonly tracer?: RetrievalTracer;
   private resolvedDims?: number;
+  private readonly analyticsOptions?: AnalyticsOptions;
   private analytics: Analytics = NOOP_ANALYTICS;
-  private shutdownCalled = false;
+  private analyticsStarted = false;
 
   constructor(options: RetrieverOptions) {
     this.client = options.client;
@@ -125,35 +126,38 @@ export class Retriever {
     this.recallEstimator = options.recallEstimator;
     this.metrics = options.metrics;
     this.tracer = options.tracer;
+    this.analyticsOptions = options.analytics;
+  }
 
-    // Fire-and-forget: initialize product analytics.
-    const analyticsOpts = options.analytics;
-    createAnalytics({
-      apiKey: analyticsOpts?.apiKey,
-      host: analyticsOpts?.host,
-      disabled: analyticsOpts?.disabled,
-    })
-      .then((a) => {
-        if (this.shutdownCalled) {
-          // If close() won the race, tear down the late-created client so its
-          // internal timers do not keep the process alive.
-          return a.shutdown();
-        }
-        this.analytics = a;
-        return a.init(this.client, this.name, {
-          fieldCount: this.schema.fields.length,
-          vectorMetric: this.schema.vector.metric,
-          vectorAlgorithm: this.schema.vector.algorithm,
-          hasEmbedFn: this.embedFn !== undefined,
-          hasRerankFn: this.rerankFn !== undefined,
-        });
-      })
-      .catch(() => {});
+  // Fire-once: defer analytics startup to the first index-lifecycle call so the
+  // real client is awaited before any event is captured (the constructor cannot
+  // await). Never lets analytics break the retriever.
+  private async ensureAnalyticsStarted(): Promise<void> {
+    if (this.analyticsStarted) {
+      return;
+    }
+    this.analyticsStarted = true;
+    try {
+      const analytics = await createAnalytics({
+        apiKey: this.analyticsOptions?.apiKey,
+        host: this.analyticsOptions?.host,
+        disabled: this.analyticsOptions?.disabled,
+      });
+      this.analytics = analytics;
+      await analytics.init(this.client, this.name, {
+        fieldCount: this.schema.fields.length,
+        vectorMetric: this.schema.vector.metric,
+        vectorAlgorithm: this.schema.vector.algorithm,
+        hasEmbedFn: this.embedFn !== undefined,
+        hasRerankFn: this.rerankFn !== undefined,
+      });
+    } catch {
+      this.analytics = NOOP_ANALYTICS;
+    }
   }
 
   /** Tear down product analytics (flushes any pending events). */
   async close(): Promise<void> {
-    this.shutdownCalled = true;
     await this.analytics.shutdown();
   }
 
@@ -194,6 +198,7 @@ export class Retriever {
   }
 
   async createIndex(): Promise<void> {
+    await this.ensureAnalyticsStarted();
     try {
       await this.client.call('FT.INFO', indexName(this.name));
       return;
@@ -219,6 +224,9 @@ export class Retriever {
       if (!String(err).toLowerCase().includes('already exists')) {
         throw err;
       }
+      // This worker did not create the index — skip the telemetry event so a
+      // multi-worker boot does not over-count index creation.
+      return;
     }
     this.analytics.capture('index_created', { dims });
   }
