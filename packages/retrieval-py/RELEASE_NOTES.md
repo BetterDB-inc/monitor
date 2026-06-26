@@ -1,10 +1,17 @@
-# betterdb-retrieval v0.2.0
+# betterdb-retrieval v0.3.0
 
 Developer-facing retrieval SDK over Valkey Search — typed schema, idempotent
 index lifecycle, upsert/delete, and vector + filtered + hybrid query, with
 built-in observability seams.
 
-## What's new in v0.2.0
+## What's new in v0.3.0
+
+- Product analytics now start on the first data-path call (`query`, `upsert`,
+  `delete`, `describe_index`, `health`, `drop_index`), not only on
+  `create_index`. Apps that attach to an existing index and only query now
+  report usage analytics as expected. Opt out with `BETTERDB_TELEMETRY=false`.
+
+## Analytics (since v0.2.0)
 
 - Opt-out anonymous usage analytics (PostHog). Disable with
   `BETTERDB_TELEMETRY=false` (or `0`/`no`/`off`), or per-instance via options.

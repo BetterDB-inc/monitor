@@ -178,6 +178,7 @@ class MemoryStore:
     # -- read methods -----------------------------------------------------
 
     async def get(self, id: str) -> MemoryItem | None:
+        await self._ensure_analytics_started()
         key = f"{self._name}:mem:{id}"
         fields = _parse_hash_reply(await self._client.execute_command("HGETALL", key))
         if len(fields) == 0:
@@ -185,6 +186,7 @@ class MemoryStore:
         return parse_memory_item(self._name, {"key": key, "fields": fields})
 
     async def list(self, options: MemoryListOptions | None = None) -> MemoryListResult:
+        await self._ensure_analytics_started()
         opts = options if options is not None else MemoryListOptions()
         tags = opts.tags if opts.tags is not None else []
         scope = MemoryScope(
@@ -224,6 +226,7 @@ class MemoryStore:
         return MemoryListResult(items=items, total=total)
 
     async def stats(self) -> MemoryStats:
+        await self._ensure_analytics_started()
         info_raw = await self._client.execute_command("FT.INFO", memory_index_name(self._name))
         index_stats = parse_ft_info_stats(info_raw)
         stats_fields = _parse_hash_reply(
@@ -448,6 +451,7 @@ class MemoryStore:
         agent_id: str | None = None,
         namespace: str | None = None,
     ) -> list[MemoryHit]:
+        await self._ensure_analytics_started()
         with self._span("recall") as span:
             started_at = time.monotonic()
             vector = await self._embed(query)
@@ -478,6 +482,7 @@ class MemoryStore:
         agent_id: str | None = None,
         namespace: str | None = None,
     ) -> list[MemoryHit]:
+        await self._ensure_analytics_started()
         with self._span("recall") as span:
             return await self._run_recall(
                 vector,
@@ -598,6 +603,7 @@ class MemoryStore:
     # -- forget -----------------------------------------------------------
 
     async def forget(self, id: str) -> bool:
+        await self._ensure_analytics_started()
         removed = int(await self._client.execute_command("DEL", f"{self._name}:mem:{id}"))
         if removed > 0:
             self._telemetry.metrics.items.labels(**self._store_labels).dec(removed)
@@ -611,6 +617,7 @@ class MemoryStore:
         namespace: str | None = None,
         tags: list[str] | None = None,
     ) -> int:
+        await self._ensure_analytics_started()
         tag_list = tags if tags is not None else []
         has_filter = (
             thread_id is not None
@@ -708,6 +715,7 @@ class MemoryStore:
         agent_id: str | None = None,
         namespace: str | None = None,
     ) -> str:
+        await self._ensure_analytics_started()
         with self._span("remember") as span:
             span.set_attribute(
                 "memory.importance",
@@ -749,6 +757,7 @@ class MemoryStore:
         agent_id: str | None = None,
         namespace: str | None = None,
     ) -> ConsolidateResult:
+        await self._ensure_analytics_started()
         with self._span("consolidate") as span:
             now = self._now_ms()
             tag_list = tags if tags is not None else []

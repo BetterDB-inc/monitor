@@ -182,6 +182,7 @@ export class MemoryStore {
   }
 
   async get(id: string): Promise<MemoryItem | null> {
+    await this.ensureAnalyticsStarted();
     const key = `${this.name}:mem:${id}`;
     const fields = parseHashReply(await this.client.call('HGETALL', key));
     if (Object.keys(fields).length === 0) {
@@ -191,6 +192,7 @@ export class MemoryStore {
   }
 
   async list(options: MemoryListOptions = {}): Promise<MemoryListResult> {
+    await this.ensureAnalyticsStarted();
     const tags = options.tags ?? [];
     const scope: MemoryScope = {
       threadId: options.threadId,
@@ -230,6 +232,7 @@ export class MemoryStore {
   }
 
   async stats(): Promise<MemoryStats> {
+    await this.ensureAnalyticsStarted();
     const infoRaw = await this.client.call('FT.INFO', memoryIndexName(this.name));
     const { numDocs } = parseFtInfoStats(infoRaw as unknown[]);
     const statsFields = parseHashReply(await this.client.call('HGETALL', `${this.name}:__mem_stats`));
@@ -399,6 +402,7 @@ export class MemoryStore {
   }
 
   async recall(query: string, options: RecallOptions = {}): Promise<MemoryHit[]> {
+    await this.ensureAnalyticsStarted();
     return this.traced('recall', async (span) => {
       const startedAt = Date.now();
       const vector = await this.embed(query);
@@ -407,6 +411,7 @@ export class MemoryStore {
   }
 
   async recallByVector(vector: number[], options: RecallOptions = {}): Promise<MemoryHit[]> {
+    await this.ensureAnalyticsStarted();
     return this.traced('recall', (span) => this.runRecall(vector, options, span, Date.now()));
   }
 
@@ -520,6 +525,7 @@ export class MemoryStore {
   }
 
   async forget(id: string): Promise<boolean> {
+    await this.ensureAnalyticsStarted();
     const removed = Number(await this.client.call('DEL', `${this.name}:mem:${id}`));
     if (removed > 0) {
       this.telemetry.metrics.items.labels(this.storeLabels).dec(removed);
@@ -528,6 +534,7 @@ export class MemoryStore {
   }
 
   async forgetByScope(scope: MemoryScope & { tags?: string[] }): Promise<number> {
+    await this.ensureAnalyticsStarted();
     const tags = scope.tags ?? [];
     const hasFilter =
       scope.threadId !== undefined ||
@@ -595,6 +602,7 @@ export class MemoryStore {
   }
 
   async remember(content: string, options: RememberOptions = {}): Promise<string> {
+    await this.ensureAnalyticsStarted();
     return this.traced('remember', async (span) => {
       span.setAttribute('memory.importance', options.importance ?? DEFAULT_IMPORTANCE);
       if (options.ttl !== undefined) {
@@ -610,6 +618,7 @@ export class MemoryStore {
   }
 
   async consolidate(options: ConsolidateOptions): Promise<ConsolidateResult> {
+    await this.ensureAnalyticsStarted();
     return this.traced('consolidate', (span) => this.runConsolidate(options, span));
   }
 

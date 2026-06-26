@@ -253,6 +253,7 @@ class Retriever:
         return vector
 
     async def upsert(self, entries: list[UpsertEntry]) -> None:
+        await self._ensure_analytics_started()
         await self._instrument("upsert", lambda: self._upsert_entries(entries))
 
     async def _upsert_entries(self, entries: list[UpsertEntry]) -> None:
@@ -271,12 +272,14 @@ class Retriever:
             await self._client.execute_command("HSET", key, *args)
 
     async def delete(self, ids: list[str]) -> None:
+        await self._ensure_analytics_started()
         if len(ids) == 0:
             return
         keys = [f"{key_prefix(self._name)}{entry_id}" for entry_id in ids]
         await self._client.execute_command("DEL", *keys)
 
     async def drop_index(self) -> None:
+        await self._ensure_analytics_started()
         try:
             await self._client.execute_command("FT.DROPINDEX", index_name(self._name))
         except Exception as err:
@@ -284,6 +287,7 @@ class Retriever:
                 raise
 
     async def describe_index(self) -> IndexDescription:
+        await self._ensure_analytics_started()
         info = await self._client.execute_command("FT.INFO", index_name(self._name))
         stats = parse_ft_info_stats(info)
         return IndexDescription(
@@ -361,6 +365,7 @@ class Retriever:
         filter: Optional[QueryFilter] = None,
         hybrid: Optional[str] = None,
     ) -> list[QueryHit]:
+        await self._ensure_analytics_started()
         if not _is_positive_int(k):
             raise ValueError(f"query k must be a positive integer, got: {k}")
         rerank = self._resolve_rerank(hybrid, text)
@@ -443,6 +448,7 @@ class Retriever:
         )
 
     async def health(self) -> IndexHealthSnapshot:
+        await self._ensure_analytics_started()
         info = await self._client.execute_command("FT.INFO", index_name(self._name))
         stats = parse_ft_info_stats(info)
         snapshot = IndexHealthSnapshot(

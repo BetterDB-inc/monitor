@@ -257,6 +257,7 @@ export class Retriever {
   }
 
   async upsert(entries: UpsertEntry[]): Promise<void> {
+    await this.ensureAnalyticsStarted();
     return this.instrument('upsert', () => this.upsertEntries(entries));
   }
 
@@ -280,6 +281,7 @@ export class Retriever {
   }
 
   async delete(ids: string[]): Promise<void> {
+    await this.ensureAnalyticsStarted();
     if (ids.length === 0) {
       return;
     }
@@ -288,6 +290,7 @@ export class Retriever {
   }
 
   async dropIndex(): Promise<void> {
+    await this.ensureAnalyticsStarted();
     try {
       await this.client.call('FT.DROPINDEX', indexName(this.name));
     } catch (err) {
@@ -298,6 +301,7 @@ export class Retriever {
   }
 
   async describeIndex(): Promise<IndexDescription> {
+    await this.ensureAnalyticsStarted();
     const info = (await this.client.call('FT.INFO', indexName(this.name))) as unknown[];
     const stats = parseFtInfoStats(info);
     return {
@@ -382,6 +386,7 @@ export class Retriever {
   }
 
   async query(options: QueryOptions): Promise<QueryHit[]> {
+    await this.ensureAnalyticsStarted();
     if (!Number.isInteger(options.k) || options.k <= 0) {
       throw new Error(`query k must be a positive integer, got: ${options.k}`);
     }
@@ -458,6 +463,7 @@ export class Retriever {
   }
 
   async health(): Promise<IndexHealthSnapshot> {
+    await this.ensureAnalyticsStarted();
     const info = (await this.client.call('FT.INFO', indexName(this.name))) as unknown[];
     const stats = parseFtInfoStats(info);
     const snapshot = {

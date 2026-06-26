@@ -1,10 +1,18 @@
-# betterdb-agent-memory v0.2.0
+# betterdb-agent-memory v0.3.0
 
 Long-term memory tier for AI agents backed by Valkey Search — semantic recall
 with recency/importance ranking, scoped capacity eviction, and consolidation.
 Pairs with `betterdb-agent-cache`.
 
-## What's new in v0.2.0
+## What's new in v0.3.0
+
+- Product analytics now start on the first data-path call (`remember`,
+  `recall`, `recall_by_vector`, `get`, `list`, `stats`, `forget`,
+  `forget_by_scope`, `consolidate`), not only on `ensure_index`. Apps that
+  attach to an existing index now report usage analytics as expected. Opt out
+  with `BETTERDB_TELEMETRY=false`.
+
+## Analytics (since v0.2.0)
 
 - Opt-out anonymous usage analytics (PostHog). Disable with
   `BETTERDB_TELEMETRY=false` (or `0`/`no`/`off`), or per-instance via options.
