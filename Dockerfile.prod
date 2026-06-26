@@ -16,6 +16,12 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/web/package.json ./apps/web/
 COPY packages/shared/package.json ./packages/shared/
+# api depends on @betterdb/agent-memory (MCP memory + memory proposals), which in
+# turn pulls @betterdb/agent-cache and @betterdb/valkey-search-kit. They must be
+# present so the workspace install + build resolve them.
+COPY packages/agent-memory/package.json ./packages/agent-memory/
+COPY packages/agent-cache/package.json ./packages/agent-cache/
+COPY packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
 
 # Install dependencies (including devDeps needed for build - we'll remove them later)
 RUN pnpm install --frozen-lockfile --filter '!@app/entitlement'
@@ -24,6 +30,9 @@ RUN pnpm install --frozen-lockfile --filter '!@app/entitlement'
 COPY apps/api ./apps/api
 COPY apps/web ./apps/web
 COPY packages/shared ./packages/shared
+COPY packages/agent-memory ./packages/agent-memory
+COPY packages/agent-cache ./packages/agent-cache
+COPY packages/valkey-search-kit ./packages/valkey-search-kit
 COPY proprietary ./proprietary
 
 # Create symlink for proprietary node_modules (symlinks don't copy properly)
@@ -41,8 +50,9 @@ ENV VITE_PUBLIC_POSTHOG_HOST=$VITE_PUBLIC_POSTHOG_HOST
 ARG VITE_REGISTRATION_URL=https://www.betterdb.com/api/register
 ENV VITE_REGISTRATION_URL=$VITE_REGISTRATION_URL
 
-# Build only api, web, and shared (exclude entitlement)
-RUN pnpm --filter api --filter web --filter @betterdb/shared build
+# Build api, web, and their workspace dependencies (exclude entitlement). The
+# "..." suffix pulls in @betterdb/shared plus the agent-memory dependency chain.
+RUN pnpm --filter "api..." --filter "web..." build
 
 # ============================================
 # Cleanup Stage - Remove AI dependencies
@@ -149,6 +159,17 @@ COPY packages/shared/package.json ./packages/shared/
 COPY --from=cleanup /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/web/dist ./apps/api/public
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+
+# Copy the agent-memory dependency chain that api imports at runtime. valkey-search-kit
+# has no dependencies so it carries no node_modules of its own.
+COPY --from=builder /app/packages/agent-memory/package.json ./packages/agent-memory/
+COPY --from=builder /app/packages/agent-memory/dist ./packages/agent-memory/dist
+COPY --from=builder /app/packages/agent-memory/node_modules ./packages/agent-memory/node_modules
+COPY --from=builder /app/packages/agent-cache/package.json ./packages/agent-cache/
+COPY --from=builder /app/packages/agent-cache/dist ./packages/agent-cache/dist
+COPY --from=builder /app/packages/agent-cache/node_modules ./packages/agent-cache/node_modules
+COPY --from=builder /app/packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
+COPY --from=builder /app/packages/valkey-search-kit/dist ./packages/valkey-search-kit/dist
 
 # Create symlink for @proprietary path alias (ai module already excluded)
 RUN mkdir -p /app/node_modules/@proprietary && \
