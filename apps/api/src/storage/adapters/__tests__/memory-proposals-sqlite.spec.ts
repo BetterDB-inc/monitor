@@ -148,4 +148,38 @@ describe('Memory proposal storage (SQLite)', () => {
     expect((await storage.getMemoryProposal(fresh.id))?.status).toBe('pending');
     expect(await storage.expireMemoryProposalsBefore(500)).toEqual([]);
   });
+
+  it('fails stale applying proposals, returning the rows', async () => {
+    const stale = build({ proposed_at: 1, expires_at: 10_000 });
+    const fresh = build({
+      proposed_at: 1,
+      expires_at: 10_000,
+      proposal_payload: { target_kind: 'id', memory_id: 'mem-2' },
+    });
+    await storage.createMemoryProposal(stale);
+    await storage.createMemoryProposal(fresh);
+    await storage.updateMemoryProposalStatus({
+      id: stale.id,
+      expected_status: ['pending'],
+      status: 'applying',
+      reviewed_at: 100,
+    });
+    await storage.updateMemoryProposalStatus({
+      id: fresh.id,
+      expected_status: ['pending'],
+      status: 'applying',
+      reviewed_at: 1_000,
+    });
+
+    const failed = await storage.failStaleApplyingMemoryProposalsBefore(500);
+    expect(failed.map((p) => p.id)).toEqual([stale.id]);
+    expect(failed[0].status).toBe('failed');
+    expect(failed[0].applied_result).toEqual({
+      success: false,
+      error: 'stale_apply',
+      details: { reviewed_at: 100 },
+    });
+    expect((await storage.getMemoryProposal(fresh.id))?.status).toBe('applying');
+    expect(await storage.failStaleApplyingMemoryProposalsBefore(500)).toEqual([]);
+  });
 });

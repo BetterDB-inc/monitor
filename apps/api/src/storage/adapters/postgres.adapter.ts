@@ -4226,6 +4226,24 @@ export class PostgresAdapter implements StoragePort {
     return result.rows.map((row: MemoryProposalRow) => this.mapMemoryProposalRow(row));
   }
 
+  async failStaleApplyingMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `UPDATE memory_proposals
+       SET status = 'failed',
+           applied_at = $1,
+           applied_result = jsonb_build_object(
+             'success', false,
+             'error', 'stale_apply',
+             'details', jsonb_build_object('reviewed_at', reviewed_at)
+           )
+       WHERE status = 'applying' AND reviewed_at IS NOT NULL AND reviewed_at <= $1
+       RETURNING *`,
+      [now],
+    );
+    return result.rows.map((row: MemoryProposalRow) => this.mapMemoryProposalRow(row));
+  }
+
   async saveCaptureSession(
     session: StoredCaptureSession,
     connectionId: string,

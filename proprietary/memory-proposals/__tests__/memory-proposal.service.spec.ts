@@ -31,7 +31,11 @@ describe('MemoryProposalService.proposeForget', () => {
   it('rejects reasoning shorter than the minimum', async () => {
     const { service } = build();
     await expect(
-      service.proposeForget(CONNECTION_ID, { storeName: STORE, reasoning: 'too short', memoryId: 'm1' }),
+      service.proposeForget(CONNECTION_ID, {
+        storeName: STORE,
+        reasoning: 'too short',
+        memoryId: 'm1',
+      }),
     ).rejects.toBeInstanceOf(MemoryProposalValidationError);
   });
 
@@ -58,7 +62,11 @@ describe('MemoryProposalService.proposeForget', () => {
 
   it('rejects a duplicate pending proposal for the same target', async () => {
     const { service } = build();
-    await service.proposeForget(CONNECTION_ID, { storeName: STORE, reasoning: REASON, memoryId: 'm1' });
+    await service.proposeForget(CONNECTION_ID, {
+      storeName: STORE,
+      reasoning: REASON,
+      memoryId: 'm1',
+    });
     await expect(
       service.proposeForget(CONNECTION_ID, { storeName: STORE, reasoning: REASON, memoryId: 'm1' }),
     ).rejects.toBeInstanceOf(DuplicatePendingMemoryProposalError);
@@ -74,12 +82,20 @@ describe('MemoryProposalService.approve', () => {
       memoryId: 'm1',
     });
 
-    const first = await service.approve({ proposalId: proposal.id, actor: 'human', actorSource: 'mcp' });
+    const first = await service.approve({
+      proposalId: proposal.id,
+      actor: 'human',
+      actorSource: 'mcp',
+    });
     expect(first.proposal.status).toBe('applied');
     expect(first.appliedResult.success).toBe(true);
     expect(dispatch).toHaveBeenCalledTimes(1);
 
-    const second = await service.approve({ proposalId: proposal.id, actor: 'human', actorSource: 'mcp' });
+    const second = await service.approve({
+      proposalId: proposal.id,
+      actor: 'human',
+      actorSource: 'mcp',
+    });
     expect(second.proposal.status).toBe('applied');
     expect(dispatch).toHaveBeenCalledTimes(1);
 
@@ -101,7 +117,11 @@ describe('MemoryProposalService.approve', () => {
       memoryId: 'm1',
     });
 
-    const result = await service.approve({ proposalId: proposal.id, actor: null, actorSource: 'mcp' });
+    const result = await service.approve({
+      proposalId: proposal.id,
+      actor: null,
+      actorSource: 'mcp',
+    });
     expect(result.proposal.status).toBe('failed');
     expect(result.appliedResult.success).toBe(false);
     expect(result.appliedResult.error).toContain('valkey down');
@@ -243,6 +263,46 @@ describe('MemoryProposalService.expireProposals', () => {
     expect((await storage.getMemoryProposal(stale.id))?.status).toBe('expired');
     const audit = await storage.getMemoryProposalAudit(stale.id);
     expect(audit.map((a) => a.event_type)).toContain('expired');
+  });
+
+  it('fails stale applying proposals and audits each as failed', async () => {
+    const { service, storage } = build();
+    const stale = await seedExpired(storage, 10_000);
+    await storage.updateMemoryProposalStatus({
+      id: stale.id,
+      expected_status: ['pending'],
+      status: 'applying',
+      reviewed_at: 1_000,
+    });
+
+    const count = await service.expireProposals(3_601_000);
+    const reread = await storage.getMemoryProposal(stale.id);
+    expect(count).toBe(1);
+    expect(reread?.status).toBe('failed');
+    expect(reread?.applied_result).toEqual({
+      success: false,
+      error: 'stale_apply',
+      details: { reviewed_at: 1_000 },
+    });
+    const audit = await storage.getMemoryProposalAudit(stale.id);
+    expect(audit.map((a) => a.event_type)).toContain('failed');
+    expect(audit.find((a) => a.event_type === 'failed')?.event_payload).toMatchObject({
+      reason: 'stale_apply',
+    });
+  });
+
+  it('leaves recently applying proposals visible as applying', async () => {
+    const { service, storage } = build();
+    const fresh = await seedExpired(storage, 10_000);
+    await storage.updateMemoryProposalStatus({
+      id: fresh.id,
+      expected_status: ['pending'],
+      status: 'applying',
+      reviewed_at: 3_500_000,
+    });
+
+    expect(await service.expireProposals(3_601_000)).toBe(0);
+    expect((await storage.getMemoryProposal(fresh.id))?.status).toBe('applying');
   });
 
   it('the cron tick delegates to expireProposals with its clock', async () => {
