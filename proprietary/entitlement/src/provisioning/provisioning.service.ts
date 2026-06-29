@@ -265,20 +265,27 @@ export class ProvisioningService {
       // Step 1: Update status to deleting
       await this.updateTenantStatus(tenantId, 'deleting');
 
-      // Step 2: Drop PostgreSQL schema via K8s Job (must run before namespace deletion)
+      // Step 2: Scale the tenant app down to zero so its pods release the
+      // namespace ResourceQuota. The app deployment requests the full quota, so
+      // without this the schema-drop Job pod is rejected ("exceeded quota") and
+      // can never be scheduled.
+      this.logger.log(`[${tenant.subdomain}] Scaling tenant app down to free namespace quota`);
+      await this.scaleDownTenantApp(namespace);
+
+      // Step 3: Drop PostgreSQL schema via K8s Job (must run before namespace deletion)
       try {
         this.logger.log(`[${tenant.subdomain}] Dropping PostgreSQL schema via K8s Job: ${schemaName}`);
         await this.dropSchemaViaJob(namespace, schemaName);
       } catch (error: any) {
         // If namespace doesn't exist, skip schema drop (already cleaned up)
-        if (error.response?.statusCode === 404) {
+        if (this.isNotFoundError(error)) {
           this.logger.warn(`[${tenant.subdomain}] Namespace not found, skipping schema drop`);
         } else {
           throw error;
         }
       }
 
-      // Step 3: Delete Route53 CNAME record
+      // Step 4: Delete Route53 CNAME record
       this.logger.log(`[${tenant.subdomain}] Deleting Route53 CNAME record`);
       await this.deleteRoute53Record(tenant.subdomain);
 
@@ -287,14 +294,14 @@ export class ProvisioningService {
         await this.deleteRoute53Record('demo');
       }
 
-      // Step 4: Delete K8s Namespace (cascades to all resources)
+      // Step 5: Delete K8s Namespace (cascades to all resources)
       this.logger.log(`[${tenant.subdomain}] Deleting K8s namespace: ${namespace}`);
       await this.deleteNamespace(namespace);
 
-      // Step 5: Hard delete tenant record. Dependent rows reference the tenant
+      // Step 6: Hard delete tenant record. Dependent rows reference the tenant
       // with RESTRICT (no cascade), so they must be removed first or the delete
       // throws a foreign-key violation. The tenant's k8s resources (including any
-      // Valkey instances) are already gone with the namespace in Step 4.
+      // Valkey instances) are already gone with the namespace in Step 5.
       this.logger.log(`[${tenant.subdomain}] Deleting tenant record`);
       await this.prisma.$transaction([
         this.prisma.user.deleteMany({ where: { tenantId } }),
@@ -741,6 +748,43 @@ export class ProvisioningService {
     throw new Error(`StatefulSet readiness timeout after ${timeoutMs / 1000}s`);
   }
 
+  private async scaleDownTenantApp(namespace: string): Promise<void> {
+    try {
+      await this.appsApi.patchNamespacedDeploymentScale(
+        { name: 'betterdb', namespace, body: { spec: { replicas: 0 } } },
+        k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
+      );
+    } catch (error: any) {
+      if (this.isNotFoundError(error)) {
+        this.logger.warn(`[${namespace}] betterdb deployment not found, skipping scale-down`);
+        return;
+      }
+      throw error;
+    }
+
+    // Wait for the app pods to terminate so the namespace ResourceQuota frees
+    // up before the schema-drop Job pod is created.
+    const startTime = Date.now();
+    while (Date.now() - startTime < 60000) {
+      try {
+        const pods = await this.coreApi.listNamespacedPod({
+          namespace,
+          labelSelector: 'app=betterdb',
+        });
+        if (!pods.items || pods.items.length === 0) {
+          return;
+        }
+      } catch (error: any) {
+        if (this.isNotFoundError(error)) {
+          return;
+        }
+        throw error;
+      }
+      await this.sleep(2000);
+    }
+    this.logger.warn(`[${namespace}] betterdb pods still present after scale-down wait, continuing`);
+  }
+
   private isNotFoundError(error: any): boolean {
     const code = error.statusCode ?? error.response?.statusCode ?? error.status ?? error.body?.code;
     if (code === 404) return true;
@@ -817,7 +861,7 @@ export class ProvisioningService {
       });
       await this.sleep(2000); // Wait for cleanup
     } catch (error: any) {
-      if (error.response?.statusCode !== 404) {
+      if (!this.isNotFoundError(error)) {
         this.logger.warn(`Error cleaning up existing job: ${error.message}`);
       }
     }
@@ -955,7 +999,7 @@ export class ProvisioningService {
       // Wait for namespace to be fully deleted
       await this.waitForNamespaceDeletion(namespace, 60000);
     } catch (error: any) {
-      if (error.response?.statusCode === 404) {
+      if (this.isNotFoundError(error)) {
         this.logger.warn(`Namespace ${namespace} not found, skipping deletion`);
       } else {
         throw error;
@@ -970,7 +1014,7 @@ export class ProvisioningService {
         await this.coreApi.readNamespace({ name: namespace });
         await this.sleep(2000);
       } catch (error: any) {
-        if (error.response?.statusCode === 404) {
+        if (this.isNotFoundError(error)) {
           return; // Namespace deleted
         }
         throw error;
