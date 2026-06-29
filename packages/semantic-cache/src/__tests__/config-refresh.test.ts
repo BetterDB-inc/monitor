@@ -289,3 +289,142 @@ describe('config refresh', () => {
     }
   });
 });
+
+describe('TTL runtime override', () => {
+  it('reads ttl field and updates defaultTtl', async () => {
+    const client = makeMockClient({ ttl: '120' });
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'ttl_cfg',
+      defaultTtl: 300,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    await cache.store('prompt', 'response');
+    expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 120);
+  });
+
+  it('falls back to constructor value when ttl field is absent', async () => {
+    const client = makeMockClient({});
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'ttl_fallback',
+      defaultTtl: 300,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    await cache.store('prompt', 'response');
+    expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 300);
+  });
+
+  it('restores constructor value when ttl field removed after being set', async () => {
+    const client = makeMockClient({ ttl: '120' });
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'ttl_restore',
+      defaultTtl: 300,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    await cache.store('p1', 'r1');
+    expect(client.expire).toHaveBeenLastCalledWith(expect.stringMatching(/:entry:/), 120);
+
+    client.setConfigResponse({});
+    await cache.refreshConfig();
+    client.expire.mockClear();
+    await cache.store('p2', 'r2');
+    expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 300);
+  });
+
+  it('ignores ttl = 0', async () => {
+    const client = makeMockClient({ ttl: '0' });
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'ttl_zero',
+      defaultTtl: 300,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    await cache.store('prompt', 'response');
+    expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 300);
+  });
+
+  it('ignores negative ttl', async () => {
+    const client = makeMockClient({ ttl: '-1' });
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'ttl_neg',
+      defaultTtl: 300,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    await cache.store('prompt', 'response');
+    expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 300);
+  });
+
+  it('ignores non-integer ttl', async () => {
+    const client = makeMockClient({ ttl: '1.5' });
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'ttl_float',
+      defaultTtl: 300,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    await cache.store('prompt', 'response');
+    expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 300);
+  });
+
+  it('ignores non-numeric ttl string', async () => {
+    const client = makeMockClient({ ttl: 'invalid' });
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'ttl_nan',
+      defaultTtl: 300,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    await cache.store('prompt', 'response');
+    expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 300);
+  });
+
+  it('timer propagation: new store() uses updated TTL after refresh tick', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeMockClient({ ttl: '60' });
+      const cache = new SemanticCache({
+        client: client as unknown as Valkey,
+        embedFn: vi.fn(async () => [0.1, 0.2]),
+        name: 'ttl_tick',
+        defaultTtl: 300,
+        configRefresh: { intervalMs: 2000 },
+        embeddingCache: { enabled: false },
+      });
+      await cache.initialize();
+      await flushMicrotasks(5);
+
+      client.setConfigResponse({ ttl: '90' });
+      vi.advanceTimersByTime(2000);
+      await flushMicrotasks(5);
+      client.expire.mockClear();
+      await cache.store('prompt', 'response');
+      expect(client.expire).toHaveBeenCalledWith(expect.stringMatching(/:entry:/), 90);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
