@@ -291,9 +291,17 @@ export class ProvisioningService {
       this.logger.log(`[${tenant.subdomain}] Deleting K8s namespace: ${namespace}`);
       await this.deleteNamespace(namespace);
 
-      // Step 5: Hard delete tenant record
+      // Step 5: Hard delete tenant record. Dependent rows reference the tenant
+      // with RESTRICT (no cascade), so they must be removed first or the delete
+      // throws a foreign-key violation. The tenant's k8s resources (including any
+      // Valkey instances) are already gone with the namespace in Step 4.
       this.logger.log(`[${tenant.subdomain}] Deleting tenant record`);
-      await this.prisma.tenant.delete({ where: { id: tenantId } });
+      await this.prisma.$transaction([
+        this.prisma.user.deleteMany({ where: { tenantId } }),
+        this.prisma.invitation.deleteMany({ where: { tenantId } }),
+        this.prisma.valkeyInstance.deleteMany({ where: { tenantId } }),
+        this.prisma.tenant.delete({ where: { id: tenantId } }),
+      ]);
 
       this.logger.log(`[${tenant.subdomain}] Deprovisioning complete`);
 
@@ -788,7 +796,7 @@ export class ProvisioningService {
 
     this.logger.log(`[${namespace}] Dropping schema via K8s Job`);
 
-    await this.runPostgresJob(namespace, jobName, connectionUrl, sqlCommand, 30000);
+    await this.runPostgresJob(namespace, jobName, connectionUrl, sqlCommand, 300000);
 
     this.logger.log(`[${namespace}] Schema drop job completed successfully`);
   }
