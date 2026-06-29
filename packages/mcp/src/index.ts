@@ -2,8 +2,12 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { initTelemetry, trackToolCall, stopTelemetry } from './telemetry.js';
+
+const require = createRequire(import.meta.url);
+const { version: PACKAGE_VERSION = '1.2.0' } = require('../package.json') as { version?: string };
 
 // --- CLI arg parsing ---
 
@@ -180,7 +184,7 @@ async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): P
 
 const server = new McpServer({
   name: 'betterdb',
-  version: '0.1.0',
+  version: PACKAGE_VERSION,
 });
 
 server.tool(
