@@ -3568,6 +3568,43 @@ export class SqliteAdapter implements StoragePort {
 
   async createCacheProposal(input: CreateCacheProposalInput): Promise<StoredCacheProposal> {
     if (!this.db) throw new Error('Database not initialized');
+
+    const validTypes: Record<string, string[]> = {
+      semantic_cache: ['threshold_adjust', 'invalidate'],
+      agent_cache: ['tool_ttl_adjust', 'invalidate'],
+    };
+    if (!validTypes[input.cache_type]?.includes(input.proposal_type)) {
+      throw new Error(
+        `CHECK constraint failed: invalid combination cache_type='${input.cache_type}' proposal_type='${input.proposal_type}'`,
+      );
+    }
+
+    const payload = input.proposal_payload as Record<string, unknown>;
+    if (input.proposal_type === 'threshold_adjust') {
+      const category = payload.category ?? null;
+      const dupe = this.db
+        .prepare(
+          `SELECT id FROM cache_proposals
+           WHERE connection_id = ? AND cache_name = ? AND proposal_type = 'threshold_adjust'
+             AND status = 'pending'
+             AND COALESCE(json_extract(proposal_payload, '$.category'), '__betterdb_null__') = ?`,
+        )
+        .get(input.connection_id, input.cache_name, category ?? '__betterdb_null__');
+      if (dupe) throw new Error('UNIQUE constraint failed: duplicate pending threshold_adjust');
+    }
+    if (input.proposal_type === 'tool_ttl_adjust') {
+      const toolName = payload.tool_name ?? null;
+      const dupe = this.db
+        .prepare(
+          `SELECT id FROM cache_proposals
+           WHERE connection_id = ? AND cache_name = ? AND proposal_type = 'tool_ttl_adjust'
+             AND status = 'pending'
+             AND COALESCE(json_extract(proposal_payload, '$.tool_name'), '__betterdb_null__') = ?`,
+        )
+        .get(input.connection_id, input.cache_name, toolName ?? '__betterdb_null__');
+      if (dupe) throw new Error('UNIQUE constraint failed: duplicate pending tool_ttl_adjust');
+    }
+
     const proposedAt = input.proposed_at ?? Date.now();
     const expiresAt = input.expires_at ?? proposedAt + PROPOSAL_DEFAULT_EXPIRY_MS;
     this.db
