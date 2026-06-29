@@ -133,6 +133,67 @@ describe('WebhookProcessorService', () => {
     });
   });
 
+  describe('Adaptive scheduling loop', () => {
+    let processRetriesSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      processRetriesSpy = jest.spyOn(service, 'processRetries');
+    });
+
+    afterEach(() => {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    });
+
+    it('schedules at FAST interval when processRetries returns true', async () => {
+      processRetriesSpy.mockResolvedValue(true);
+      (service as any).startRetryProcessor();
+
+      await jest.advanceTimersByTimeAsync(0);
+
+      await jest.advanceTimersByTimeAsync(1999);
+      expect(processRetriesSpy).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(processRetriesSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('schedules at BASE interval when processRetries returns false', async () => {
+      processRetriesSpy.mockResolvedValue(false);
+      (service as any).startRetryProcessor();
+
+      await jest.advanceTimersByTimeAsync(0);
+
+      await jest.advanceTimersByTimeAsync(9999);
+      expect(processRetriesSpy).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(processRetriesSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not reschedule when isShuttingDown is true', async () => {
+      processRetriesSpy.mockResolvedValue(true);
+      (service as any).isShuttingDown = true;
+      (service as any).startRetryProcessor();
+
+      await jest.advanceTimersByTimeAsync(0);
+
+      expect(jest.getTimerCount()).toBe(0);
+      expect(processRetriesSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to BASE interval when processRetries throws', async () => {
+      processRetriesSpy.mockRejectedValue(new Error('storage error'));
+      (service as any).startRetryProcessor();
+
+      await jest.advanceTimersByTimeAsync(0);
+
+      await jest.advanceTimersByTimeAsync(9999);
+      expect(processRetriesSpy).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(processRetriesSpy).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('Exponential Backoff', () => {
     it('should calculate correct retry delays', () => {
       const retryPolicy = {
