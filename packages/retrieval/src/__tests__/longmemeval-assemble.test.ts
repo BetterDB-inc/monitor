@@ -70,6 +70,17 @@ describe('assembleContexts', () => {
     expect(out.some((c) => c.includes('cat loves tuna'))).toBe(true);
     expect(out.some((c) => c.includes('revenue grew'))).toBe(true);
   });
+
+  it('respects the incoming pool order (rerank) over raw vector distance', () => {
+    // Array order is the rerank order (best first); .score is raw vector
+    // distance. Here the rerank-best hit (first) has a WORSE distance than its
+    // near-duplicate, so a distance-based dedup would wrongly keep the latter.
+    const hits = [
+      hit('A', 'the quick brown fox jumps high', 's1', '2026-01-01', 0.3),
+      hit('B', 'the quick brown fox jumps', 's1', '2026-01-01', 0.1),
+    ];
+    expect(assembleContexts(hits, 1)).toEqual(['[2026-01-01] the quick brown fox jumps high']);
+  });
 });
 
 function spyReader(): { reader: Reader; calls: string[][] } {
