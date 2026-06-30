@@ -56,6 +56,39 @@ describe('reconcile', () => {
     );
     expect(ops).toEqual([{ type: 'delete', subject: 'employer' }]);
   });
+
+  it('supersedes a fact added earlier in the same batch', () => {
+    const ops = reconcile(
+      [
+        fact('employer', 'works at Google', '2026-01-01'),
+        fact('employer', 'works at Meta', '2026-03-01'),
+      ],
+      [],
+    );
+    expect(ops).toEqual([
+      {
+        type: 'add',
+        fact: { subject: 'employer', statement: 'works at Google', date: '2026-01-01' },
+      },
+      {
+        type: 'update',
+        subject: 'employer',
+        fact: { subject: 'employer', statement: 'works at Meta', date: '2026-03-01' },
+      },
+    ]);
+  });
+
+  it('applies a same-batch tombstone against a fact added earlier in the batch', () => {
+    const ops = reconcile(
+      [fact('pet', 'has a dog', '2026-01-01'), { subject: 'pet', statement: '', tombstone: true }],
+      [],
+    );
+    expect(ops).toEqual([
+      { type: 'add', fact: { subject: 'pet', statement: 'has a dog', date: '2026-01-01' } },
+      { type: 'delete', subject: 'pet' },
+    ]);
+    expect(applyOps([], ops)).toEqual([]);
+  });
 });
 
 describe('applyOps', () => {
