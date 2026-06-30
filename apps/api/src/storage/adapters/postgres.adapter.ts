@@ -1250,9 +1250,13 @@ export class PostgresAdapter implements StoragePort {
         freq_score INTEGER,
         idle_seconds INTEGER,
         memory_bytes BIGINT,
+        cardinality BIGINT,
+        key_type TEXT,
         ttl INTEGER,
         rank INTEGER NOT NULL
       );
+      ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS cardinality BIGINT;
+      ALTER TABLE hot_key_stats ADD COLUMN IF NOT EXISTS key_type TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_hks_connection_captured
         ON hot_key_stats(connection_id, captured_at DESC);
@@ -2445,7 +2449,7 @@ export class PostgresAdapter implements StoragePort {
 
     for (const entry of entries) {
       values.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
+        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`,
       );
       params.push(
         entry.id,
@@ -2456,6 +2460,8 @@ export class PostgresAdapter implements StoragePort {
         entry.freqScore ?? null,
         entry.idleSeconds ?? null,
         entry.memoryBytes ?? null,
+        entry.cardinality ?? null,
+        entry.keyType ?? null,
         entry.ttl ?? null,
         entry.rank,
       );
@@ -2465,7 +2471,7 @@ export class PostgresAdapter implements StoragePort {
       `
       INSERT INTO hot_key_stats (
         id, key_name, connection_id, captured_at, signal_type,
-        freq_score, idle_seconds, memory_bytes, ttl, rank
+        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
       ) VALUES ${values.join(', ')}
     `,
       params,
@@ -2477,10 +2483,16 @@ export class PostgresAdapter implements StoragePort {
   async getHotKeys(options: HotKeyQueryOptions = {}): Promise<HotKeyEntry[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
+    // Default to access signals so legacy callers never surface cardinality (largest-key) rows.
+    const signalTypes = options.signalTypes ?? ['lfu', 'idletime'];
+
     const conditions: string[] = [];
     const params: any[] = [];
     let paramIndex = 1;
 
+    const signalPlaceholders = signalTypes.map(() => `$${paramIndex++}`).join(', ');
+    conditions.push(`signal_type IN (${signalPlaceholders})`);
+    params.push(...signalTypes);
     if (options.connectionId) {
       conditions.push(`connection_id = $${paramIndex++}`);
       params.push(options.connectionId);
@@ -2495,7 +2507,9 @@ export class PostgresAdapter implements StoragePort {
     }
     if (options.latest || options.oldest) {
       const agg = options.latest ? 'MAX' : 'MIN';
-      const subConditions: string[] = [];
+      const subSignalPlaceholders = signalTypes.map(() => `$${paramIndex++}`).join(', ');
+      const subConditions: string[] = [`signal_type IN (${subSignalPlaceholders})`];
+      params.push(...signalTypes);
       if (options.connectionId) {
         subConditions.push(`connection_id = $${paramIndex++}`);
         params.push(options.connectionId);
@@ -2519,7 +2533,7 @@ export class PostgresAdapter implements StoragePort {
     const result = await this.pool.query(
       `
       SELECT id, key_name, connection_id, captured_at, signal_type,
-             freq_score, idle_seconds, memory_bytes, ttl, rank
+             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
       FROM hot_key_stats
       ${whereClause}
       ORDER BY captured_at DESC, rank ASC
@@ -2537,6 +2551,8 @@ export class PostgresAdapter implements StoragePort {
       freqScore: row.freq_score ?? undefined,
       idleSeconds: row.idle_seconds ?? undefined,
       memoryBytes: row.memory_bytes ?? undefined,
+      cardinality: row.cardinality != null ? parseInt(row.cardinality) : undefined,
+      keyType: row.key_type ?? undefined,
       ttl: row.ttl ?? undefined,
       rank: row.rank,
     }));
