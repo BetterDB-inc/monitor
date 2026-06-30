@@ -29,6 +29,13 @@ function isNewer(candidate: Fact, prior: Fact): boolean {
   return (candidate.date ?? '') >= (prior.date ?? '');
 }
 
+// A tombstone is stale only when both dates are known and it predates the
+// curated fact; a dateless tombstone still deletes (it carries no temporal
+// claim to lose against).
+function isStaleTombstone(tombstone: Fact, prior: Fact): boolean {
+  return tombstone.date !== undefined && prior.date !== undefined && tombstone.date < prior.date;
+}
+
 export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
   const bySubject = new Map<string, Fact>();
   for (const fact of existing) {
@@ -41,7 +48,7 @@ export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
   for (const fact of incoming) {
     const prior = bySubject.get(fact.subject);
     if (fact.tombstone === true) {
-      if (prior === undefined) {
+      if (prior === undefined || isStaleTombstone(fact, prior)) {
         ops.push({ type: 'noop', subject: fact.subject });
       } else {
         ops.push({ type: 'delete', subject: fact.subject });
@@ -154,11 +161,12 @@ export async function consolidateRecordFacts(
   extract: FactExtractor,
 ): Promise<{ chunks: UpsertEntry[]; llmCalls: number }> {
   let curated: Fact[] = [];
-  // Track every session that asserted a fact's CURRENT statement, so a fact
-  // restated across sessions (NOOP — same subject + statement) is findable under
-  // each source session, not just the first. A fact chunk's session_id must match
-  // an evidence session for recall to count it.
-  const sources = new Map<string, Set<string>>();
+  // Track every session that asserted a fact's CURRENT statement, mapped to that
+  // session's own date. A fact restated across sessions (NOOP — same subject +
+  // statement) is then findable under each source session's id (recall matches on
+  // session_id) and each chunk carries that session's date (not just the first
+  // assertion's), so temporal ordering matches the evidence.
+  const sources = new Map<string, Map<string, string | undefined>>();
   let llmCalls = 0;
   for (let i = 0; i < record.haystack_sessions.length; i++) {
     const session = record.haystack_sessions[i];
@@ -176,10 +184,10 @@ export async function consolidateRecordFacts(
         continue;
       }
       if (priorStatement.get(fact.subject) !== fact.statement) {
-        sources.set(fact.subject, new Set([sessionId]));
+        sources.set(fact.subject, new Map([[sessionId, fact.date]]));
       } else {
-        const seen = sources.get(fact.subject) ?? new Set<string>();
-        seen.add(sessionId);
+        const seen = sources.get(fact.subject) ?? new Map<string, string | undefined>();
+        seen.set(sessionId, fact.date);
         sources.set(fact.subject, seen);
       }
     }
@@ -187,12 +195,12 @@ export async function consolidateRecordFacts(
   const chunks: UpsertEntry[] = [];
   let idx = 0;
   for (const fact of curated) {
-    const sessionIds = sources.get(fact.subject) ?? new Set([fact.sessionId ?? '']);
-    for (const sessionId of sessionIds) {
+    const seen = sources.get(fact.subject) ?? new Map([[fact.sessionId ?? '', fact.date]]);
+    for (const [sessionId, sessionDate] of seen) {
       chunks.push({
         id: `fact_${idx}`,
         text: fact.statement,
-        fields: factFields(sessionId, fact.date),
+        fields: factFields(sessionId, sessionDate),
       });
       idx++;
     }

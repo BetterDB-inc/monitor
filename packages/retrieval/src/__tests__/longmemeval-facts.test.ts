@@ -63,6 +63,15 @@ describe('reconcile', () => {
     expect(ops).toEqual([{ type: 'delete', subject: 'employer' }]);
   });
 
+  it('ignores a stale tombstone dated before the curated fact', () => {
+    const existing = [fact('employer', 'works at Meta', '2026-03-01')];
+    const ops = reconcile(
+      [{ subject: 'employer', statement: '', date: '2026-01-01', tombstone: true }],
+      existing,
+    );
+    expect(ops).toEqual([{ type: 'noop', subject: 'employer' }]);
+  });
+
   it('supersedes a fact added earlier in the same batch', () => {
     const ops = reconcile(
       [
@@ -196,5 +205,29 @@ describe('consolidateRecordFacts', () => {
 
     const { chunks } = await consolidateRecordFacts(record, extract);
     expect(chunks.map((c) => c.fields.session_id).sort()).toEqual(['S1', 'S2']);
+  });
+
+  it('tags each restated fact chunk with its own source session date', async () => {
+    const record: LmeRecord = {
+      question_id: 'q',
+      question_type: 't',
+      question: '?',
+      answer: 'a',
+      haystack_session_ids: ['S1', 'S2'],
+      haystack_dates: ['2026-01-01', '2026-02-01'],
+      haystack_sessions: [
+        [{ role: 'user', content: 'I like tea' }],
+        [{ role: 'user', content: 'I like tea' }],
+      ],
+      answer_session_ids: ['S2'],
+    };
+    const extract: FactExtractor = async () => [{ subject: 'beverage', statement: 'likes tea' }];
+
+    const { chunks } = await consolidateRecordFacts(record, extract);
+    const tagged = chunks.map((c) => [c.fields.session_id, c.fields.date]).sort();
+    expect(tagged).toEqual([
+      ['S1', '2026-01-01'],
+      ['S2', '2026-02-01'],
+    ]);
   });
 });
