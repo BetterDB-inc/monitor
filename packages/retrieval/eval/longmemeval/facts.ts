@@ -35,6 +35,8 @@ export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
     bySubject.set(fact.subject, fact);
   }
 
+  // Fold each op into `bySubject` as we go so later facts in the same batch see
+  // earlier adds/updates/deletes — not just the initial `existing` snapshot.
   const ops: FactOp[] = [];
   for (const fact of incoming) {
     const prior = bySubject.get(fact.subject);
@@ -43,11 +45,13 @@ export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
         ops.push({ type: 'noop', subject: fact.subject });
       } else {
         ops.push({ type: 'delete', subject: fact.subject });
+        bySubject.delete(fact.subject);
       }
       continue;
     }
     if (prior === undefined) {
       ops.push({ type: 'add', fact });
+      bySubject.set(fact.subject, fact);
       continue;
     }
     if (prior.statement === fact.statement) {
@@ -56,6 +60,7 @@ export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
     }
     if (isNewer(fact, prior)) {
       ops.push({ type: 'update', subject: fact.subject, fact });
+      bySubject.set(fact.subject, fact);
       continue;
     }
     ops.push({ type: 'noop', subject: fact.subject });
