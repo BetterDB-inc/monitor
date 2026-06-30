@@ -103,13 +103,20 @@ export function createMockFactExtractor(): FactExtractor {
   };
 }
 
-function parseFacts(raw: string): Fact[] {
+export function parseFacts(raw: string): Fact[] {
   const start = raw.indexOf('[');
   const end = raw.lastIndexOf(']');
   if (start < 0 || end <= start) {
     return [];
   }
-  const parsed: unknown = JSON.parse(raw.slice(start, end + 1));
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    // A malformed reply (or prose with stray brackets) degrades to no facts for
+    // this session rather than aborting the whole eval run.
+    return [];
+  }
   if (!Array.isArray(parsed)) {
     return [];
   }

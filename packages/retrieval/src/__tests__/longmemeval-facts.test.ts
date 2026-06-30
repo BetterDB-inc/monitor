@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { reconcile, applyOps, consolidateRecordFacts } from '../../eval/longmemeval/facts';
+import {
+  reconcile,
+  applyOps,
+  consolidateRecordFacts,
+  parseFacts,
+} from '../../eval/longmemeval/facts';
 import type { Fact, FactOp, FactExtractor } from '../../eval/longmemeval/facts';
 import type { LmeRecord } from '../../eval/longmemeval/types';
 import { createMockEmbedder } from '../../eval/longmemeval/embed';
@@ -152,6 +157,23 @@ describe('facts lever integration', () => {
     expect(withFacts.levers).toEqual(['facts']);
     expect(withFacts.costs.find((c) => c.name === 'facts')?.llmCalls).toBe(totalSessions);
     expect(withFacts.recallAtK).toBeGreaterThanOrEqual(baseline.recallAtK);
+  });
+});
+
+describe('parseFacts', () => {
+  it('parses a JSON array of facts', () => {
+    const raw = '[{"subject":"employer","statement":"works at Meta"}]';
+    expect(parseFacts(raw)).toEqual([
+      { subject: 'employer', statement: 'works at Meta', tombstone: false },
+    ]);
+  });
+
+  it('returns [] for malformed JSON instead of throwing', () => {
+    expect(parseFacts('[{"subject": "x", ')).toEqual([]);
+  });
+
+  it('returns [] when prose brackets produce invalid JSON', () => {
+    expect(parseFacts('I found [some] facts: [{"subject":"a","statement":"b"}]')).toEqual([]);
   });
 });
 
