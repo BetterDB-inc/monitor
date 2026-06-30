@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { reconcile, applyOps } from '../../eval/longmemeval/facts';
+import { reconcile, applyOps, consolidateRecordFacts } from '../../eval/longmemeval/facts';
 import type { Fact, FactOp, FactExtractor } from '../../eval/longmemeval/facts';
+import type { LmeRecord } from '../../eval/longmemeval/types';
 import { createMockEmbedder } from '../../eval/longmemeval/embed';
 import { createMockStore } from '../../eval/longmemeval/store';
 import { loadFixture } from '../../eval/longmemeval/dataset';
@@ -151,5 +152,27 @@ describe('facts lever integration', () => {
     expect(withFacts.levers).toEqual(['facts']);
     expect(withFacts.costs.find((c) => c.name === 'facts')?.llmCalls).toBe(totalSessions);
     expect(withFacts.recallAtK).toBeGreaterThanOrEqual(baseline.recallAtK);
+  });
+});
+
+describe('consolidateRecordFacts', () => {
+  it('emits a fact chunk for every source session when a fact is restated', async () => {
+    const record: LmeRecord = {
+      question_id: 'q',
+      question_type: 't',
+      question: '?',
+      answer: 'a',
+      haystack_session_ids: ['S1', 'S2'],
+      haystack_dates: ['2026-01-01', '2026-02-01'],
+      haystack_sessions: [
+        [{ role: 'user', content: 'I like tea' }],
+        [{ role: 'user', content: 'I like tea' }],
+      ],
+      answer_session_ids: ['S2'],
+    };
+    const extract: FactExtractor = async () => [{ subject: 'beverage', statement: 'likes tea' }];
+
+    const { chunks } = await consolidateRecordFacts(record, extract);
+    expect(chunks.map((c) => c.fields.session_id).sort()).toEqual(['S1', 'S2']);
   });
 });

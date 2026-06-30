@@ -85,10 +85,10 @@ export function applyOps(existing: Fact[], ops: FactOp[]): Fact[] {
   return [...bySubject.values()];
 }
 
-function factFields(fact: Fact): Record<string, string> {
-  const fields: Record<string, string> = { session_id: fact.sessionId ?? '' };
-  if (fact.date !== undefined && fact.date !== '') {
-    fields.date = fact.date;
+function factFields(sessionId: string, date: string | undefined): Record<string, string> {
+  const fields: Record<string, string> = { session_id: sessionId };
+  if (date !== undefined && date !== '') {
+    fields.date = date;
   }
   return fields;
 }
@@ -147,6 +147,11 @@ export async function consolidateRecordFacts(
   extract: FactExtractor,
 ): Promise<{ chunks: UpsertEntry[]; llmCalls: number }> {
   let curated: Fact[] = [];
+  // Track every session that asserted a fact's CURRENT statement, so a fact
+  // restated across sessions (NOOP — same subject + statement) is findable under
+  // each source session, not just the first. A fact chunk's session_id must match
+  // an evidence session for recall to count it.
+  const sources = new Map<string, Set<string>>();
   let llmCalls = 0;
   for (let i = 0; i < record.haystack_sessions.length; i++) {
     const session = record.haystack_sessions[i];
@@ -155,12 +160,35 @@ export async function consolidateRecordFacts(
     const extracted = await extract(session, { sessionId, date });
     llmCalls++;
     const stamped = extracted.map((fact) => ({ ...fact, sessionId, date: fact.date ?? date }));
+    const priorStatement = new Map(curated.map((fact) => [fact.subject, fact.statement]));
     curated = applyOps(curated, reconcile(stamped, curated));
+    const curatedBySubject = new Map(curated.map((fact) => [fact.subject, fact]));
+    for (const fact of stamped) {
+      const current = curatedBySubject.get(fact.subject);
+      if (current === undefined || current.statement !== fact.statement) {
+        continue;
+      }
+      if (priorStatement.get(fact.subject) !== fact.statement) {
+        sources.set(fact.subject, new Set([sessionId]));
+      } else {
+        const seen = sources.get(fact.subject) ?? new Set<string>();
+        seen.add(sessionId);
+        sources.set(fact.subject, seen);
+      }
+    }
   }
-  const chunks = curated.map((fact, idx) => ({
-    id: `fact_${idx}`,
-    text: fact.statement,
-    fields: factFields(fact),
-  }));
+  const chunks: UpsertEntry[] = [];
+  let idx = 0;
+  for (const fact of curated) {
+    const sessionIds = sources.get(fact.subject) ?? new Set([fact.sessionId ?? '']);
+    for (const sessionId of sessionIds) {
+      chunks.push({
+        id: `fact_${idx}`,
+        text: fact.statement,
+        fields: factFields(sessionId, fact.date),
+      });
+      idx++;
+    }
+  }
   return { chunks, llmCalls };
 }
