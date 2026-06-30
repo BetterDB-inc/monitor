@@ -2,6 +2,8 @@ import { Retriever } from '../../src/index';
 import type { RetrievalSchema } from '../../src/index';
 import { chunkRecord, recordIsHit } from './adapter';
 import { createHybridRerank } from './rerank';
+import { createCostReport } from './levers';
+import type { CostReport, LeverCostEntry, LeverName } from './levers';
 import type { ChunkMode, Embedder, Judge, LmeRecord, Reader, Store } from './types';
 
 export interface RunConfig {
@@ -16,6 +18,11 @@ export interface RunConfig {
   // When > k, over-fetch this many candidates and hybrid-rerank them down to k.
   // Equal to k (the default) disables reranking and preserves baseline behavior.
   rerankPool: number;
+  // Levers enabled for this run, in canonical ablation order. Empty (the default)
+  // reproduces the frozen baseline.
+  levers?: LeverName[];
+  // Accumulator levers report their added embedding/LLM/latency cost into.
+  costReport?: CostReport;
 }
 
 export interface TypeStats {
@@ -35,6 +42,8 @@ export interface EvalSummary {
   k: number;
   totalChunks: number;
   byType: Map<string, TypeStats>;
+  levers: LeverName[];
+  costs: LeverCostEntry[];
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -68,6 +77,8 @@ function bump(byType: Map<string, TypeStats>, type: string): TypeStats {
 
 export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const { records, embedder, store, reader, judge, k, chunkMode, limit, rerankPool } = config;
+  const levers = config.levers ?? [];
+  const costReport = config.costReport ?? createCostReport();
   const qaRun = reader !== null && judge !== null;
   const useRerank = rerankPool > k;
   const fetchK = useRerank ? rerankPool : k;
@@ -179,6 +190,8 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
     k,
     totalChunks,
     byType,
+    levers,
+    costs: costReport.entries(),
   };
 }
 
@@ -207,6 +220,17 @@ export function formatSummary(summary: EvalSummary): string {
     summary.recallAtK,
   ).padStart(8)}`;
   lines.push(summary.qaRun ? `${overall}   ${pct(summary.qaAccuracy).padStart(6)}` : overall);
+
+  if (summary.levers.length > 0) {
+    lines.push('');
+    lines.push(`Levers (ablation order): ${summary.levers.join(' → ')}`);
+    for (const cost of summary.costs) {
+      lines.push(
+        `  ${cost.name.padEnd(14)} embed=${cost.embedCalls}  llm=${cost.llmCalls}  +${cost.latencyMs}ms`,
+      );
+    }
+  }
+
   lines.push('');
   return lines.join('\n');
 }
