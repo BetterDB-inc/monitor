@@ -30,9 +30,12 @@ function containment(a: Set<string>, b: Set<string>): number {
 }
 
 function dedupe(hits: QueryHit[], threshold: number): QueryHit[] {
+  // Iterate in the given pool order, which is already best-first (hybrid rerank
+  // when enabled, raw KNN distance otherwise). Re-sorting by QueryHit.score here
+  // would discard the rerank order and keep the wrong near-duplicate.
   const kept: QueryHit[] = [];
   const keptTokens: Set<string>[] = [];
-  for (const hit of [...hits].sort((a, b) => a.score - b.score)) {
+  for (const hit of hits) {
     const tokens = tokenize(hit.text);
     const isDuplicate = keptTokens.some((prior) => {
       return containment(tokens, prior) >= threshold;
@@ -50,9 +53,14 @@ function byDate(a: QueryHit, b: QueryHit): number {
 }
 
 function mmrSelect(hits: QueryHit[], k: number, lambda: number): QueryHit[] {
-  const pool = hits
-    .map((hit) => ({ hit, tokens: tokenize(hit.text) }))
-    .sort((a, b) => a.hit.score - b.hit.score);
+  // Relevance follows the incoming pool order (rerank order when enabled), not
+  // QueryHit.score (raw vector distance) — using the latter would diverge from
+  // the hybrid ranking. Earlier position => higher relevance.
+  const pool = hits.map((hit, index) => ({
+    hit,
+    tokens: tokenize(hit.text),
+    relevance: hits.length > 0 ? 1 - index / hits.length : 0,
+  }));
   const selected: { hit: QueryHit; tokens: Set<string> }[] = [];
 
   while (selected.length < k && pool.length > 0) {
@@ -60,7 +68,7 @@ function mmrSelect(hits: QueryHit[], k: number, lambda: number): QueryHit[] {
     let bestScore = -Infinity;
     for (let i = 0; i < pool.length; i++) {
       const candidate = pool[i];
-      const relevance = 1 - candidate.hit.score;
+      const relevance = candidate.relevance;
       let maxSimilarity = 0;
       for (const chosen of selected) {
         const similarity = containment(candidate.tokens, chosen.tokens);
