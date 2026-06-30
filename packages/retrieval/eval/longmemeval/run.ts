@@ -8,6 +8,8 @@ import { loadRecords, sourceLabel } from './dataset';
 import { runEval, formatSummary } from './runner';
 import { resolveEnabledLevers, createCostReport } from './levers';
 import { resolveAssembleOptions } from './assemble';
+import { createMockFactExtractor, createOpenAIFactExtractor } from './facts';
+import type { FactExtractor } from './facts';
 import type { ChunkMode, Embedder, Judge, Reader, Store } from './types';
 
 function envInt(name: string, fallback: number): number {
@@ -31,6 +33,14 @@ async function main(): Promise<void> {
   const levers = resolveEnabledLevers(process.env);
   const costReport = createCostReport();
   const assembleOptions = resolveAssembleOptions(process.env);
+
+  let factExtractor: FactExtractor | undefined;
+  if (levers.includes('facts')) {
+    factExtractor =
+      apiKey !== undefined && apiKey !== ''
+        ? createOpenAIFactExtractor(apiKey)
+        : createMockFactExtractor();
+  }
 
   const cachePath = join(dirname(fileURLToPath(import.meta.url)), '.cache', 'embeddings.json');
 
@@ -116,6 +126,7 @@ async function main(): Promise<void> {
       levers,
       costReport,
       assembleOptions,
+      factExtractor,
     });
     console.log(formatSummary(summary));
   } finally {

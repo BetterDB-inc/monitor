@@ -4,6 +4,8 @@ import { chunkRecord, recordIsHit } from './adapter';
 import { createHybridRerank } from './rerank';
 import { assembleContexts } from './assemble';
 import type { AssembleOptions } from './assemble';
+import { consolidateRecordFacts } from './facts';
+import type { FactExtractor } from './facts';
 import { createCostReport } from './levers';
 import type { CostReport, LeverCostEntry, LeverName } from './levers';
 import type { ChunkMode, Embedder, Judge, LmeRecord, Reader, Store } from './types';
@@ -28,6 +30,9 @@ export interface RunConfig {
   // Opt-in structure features for the assemble lever (dedup / MMR / grouping).
   // Without any set, the lever only date-prefixes the rerank-ordered top-k.
   assembleOptions?: AssembleOptions;
+  // LLM seam for the facts lever. Required when 'facts' is enabled; extracts
+  // atomic facts per session for consolidation into curated fact chunks.
+  factExtractor?: FactExtractor;
 }
 
 export interface TypeStats {
@@ -85,6 +90,7 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const levers = config.levers ?? [];
   const costReport = config.costReport ?? createCostReport();
   const assembleOn = levers.includes('assemble');
+  const factsOn = levers.includes('facts') && config.factExtractor !== undefined;
   const qaRun = reader !== null && judge !== null;
   const useRerank = rerankPool > k;
   const fetchK = useRerank ? rerankPool : k;
@@ -113,7 +119,16 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
         rerankFn,
       });
 
-      const chunks = chunkRecord(record, chunkMode);
+      let chunks = chunkRecord(record, chunkMode);
+      if (factsOn && config.factExtractor !== undefined) {
+        const startedAt = Date.now();
+        const { chunks: factChunks, llmCalls } = await consolidateRecordFacts(
+          record,
+          config.factExtractor,
+        );
+        costReport.record('facts', { llmCalls, latencyMs: Date.now() - startedAt });
+        chunks = [...chunks, ...factChunks];
+      }
       totalChunks += chunks.length;
 
       await retriever.createIndex();
