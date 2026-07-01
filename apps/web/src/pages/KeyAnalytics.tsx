@@ -995,6 +995,11 @@ export function KeyAnalytics() {
                                   <XAxis dataKey="bucket" />
                                   <YAxis />
                                   <Tooltip
+                                    contentStyle={{
+                                      backgroundColor: 'var(--popover)',
+                                      borderColor: 'var(--border)',
+                                      color: 'var(--popover-foreground)',
+                                    }}
                                     formatter={(value) => [
                                       formatNumber(numericFromTooltipValue(value)),
                                       'keys',
