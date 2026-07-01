@@ -86,7 +86,7 @@ cp .env.example .env
 
 3. Start local database instances (Valkey on 6380, Redis on 6382):
 ```bash
-pnpm docker:up
+pnpm docker:dev
 ```
 
 To connect to Redis instead of Valkey, update `.env`:
