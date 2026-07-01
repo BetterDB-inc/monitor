@@ -34,6 +34,8 @@ export interface RunConfig {
   // LLM seam for the facts lever. Required when 'facts' is enabled; extracts
   // atomic facts per session for consolidation into curated fact chunks.
   factExtractor?: FactExtractor;
+  // Max concurrent per-session extraction calls for the facts lever.
+  factsConcurrency?: number;
   // Model seam for the rerank-cross lever. When 'rerank-cross' is enabled (and
   // rerankPool > k), the pool is reordered by this scorer instead of the hybrid
   // reranker.
@@ -157,6 +159,7 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
         const { chunks: factChunks, llmCalls } = await consolidateRecordFacts(
           record,
           config.factExtractor,
+          config.factsConcurrency,
         );
         costReport.record('facts', { llmCalls, latencyMs: Date.now() - startedAt });
         chunks = [...chunks, ...factChunks];

@@ -33,6 +33,7 @@ async function main(): Promise<void> {
   const rerankPool = Math.max(envInt('LONGMEMEVAL_RERANK_POOL', k), k);
   const chunkMode: ChunkMode = process.env.LONGMEMEVAL_CHUNK === 'turn' ? 'turn' : 'session';
   const qa = process.env.LONGMEMEVAL_QA === '1';
+  const factsConcurrency = envInt('LONGMEMEVAL_FACTS_CONCURRENCY', 8);
   const levers = resolveEnabledLevers(process.env);
   const costReport = createCostReport();
 
@@ -128,6 +129,7 @@ async function main(): Promise<void> {
       levers,
       costReport,
       factExtractor,
+      factsConcurrency,
       crossEncoderScorer,
       decomposer,
     });
