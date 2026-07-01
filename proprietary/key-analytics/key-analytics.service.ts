@@ -115,7 +115,10 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
         return;
       }
 
-      const samplingRatio = result.scanned / result.dbSize;
+      // SCAN can return the same key more than once, so `scanned` may exceed
+      // `dbSize` (always does on a full scan). Clamp to 1 so extrapolated
+      // pattern totals are never scaled *down* below the observed counts.
+      const samplingRatio = Math.min(1, result.scanned / result.dbSize);
       const snapshots: KeyPatternSnapshot[] = [];
 
       for (const stats of result.patterns) {
