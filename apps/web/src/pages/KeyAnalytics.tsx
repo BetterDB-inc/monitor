@@ -112,7 +112,7 @@ export function KeyAnalytics() {
     refetchKey: currentConnection?.id,
   });
 
-  const { data: rawPatterns, loading: patternsLoading } = usePolling({
+  const { data: rawPatterns, loading: patternsLoading, refresh: refetchPatterns } = usePolling({
     fetcher: () => keyAnalyticsApi.getPatterns({ limit: 100 }),
     interval: 60000,
     refetchKey: currentConnection?.id,
@@ -125,7 +125,7 @@ export function KeyAnalytics() {
   const isHotKeyTimeFiltered = hotKeyStartTime !== undefined && hotKeyEndTime !== undefined;
 
   // Fetch the latest snapshot within the selected date range (or overall if no range)
-  const { data: hotKeys, loading: hotKeysLoading } = usePolling({
+  const { data: hotKeys, loading: hotKeysLoading, refresh: refetchHotKeys } = usePolling({
     fetcher: () => keyAnalyticsApi.getHotKeys({
       limit: 50,
       latest: true,
@@ -156,14 +156,14 @@ export function KeyAnalytics() {
     });
   }, [rawPatterns]);
 
-  const { data: keySizes, loading: keySizesLoading } = usePolling({
+  const { data: keySizes, loading: keySizesLoading, refresh: refetchKeySizes } = usePolling({
     fetcher: () => keyAnalyticsApi.getKeySizes(),
     interval: 60000,
     refetchKey: currentConnection?.id,
     enabled: activeTab === 'key-sizes',
   });
 
-  const { data: largestKeys, loading: largestKeysLoading } = usePolling({
+  const { data: largestKeys, loading: largestKeysLoading, refresh: refetchLargestKeys } = usePolling({
     fetcher: () => keyAnalyticsApi.getLargestKeys({ limit: 50, latest: true }),
     interval: 60000,
     refetchKey: currentConnection?.id,
@@ -180,6 +180,10 @@ export function KeyAnalytics() {
       await keyAnalyticsApi.triggerCollection(deep);
       setTimeout(() => {
         refetchSummary();
+        refetchPatterns();
+        refetchHotKeys();
+        refetchLargestKeys();
+        refetchKeySizes();
         setBusy(false);
       }, deep ? 4000 : 2000);
     } catch (error) {
