@@ -1,6 +1,8 @@
 import { Retriever } from '../../src/index';
-import type { RetrievalSchema, RerankFn } from '../../src/index';
+import type { RetrievalSchema, RerankFn, QueryHit } from '../../src/index';
 import { chunkRecord, recordIsHit } from './adapter';
+import { mergeHits } from './decompose';
+import type { QueryDecomposer } from './decompose';
 import { createHybridRerank } from './rerank';
 import { createCrossEncoderRerank, SCORER_BATCH_SIZE } from './cross-encoder';
 import type { CrossEncoderScorer } from './cross-encoder';
@@ -40,6 +42,10 @@ export interface RunConfig {
   // rerankPool > k), the pool is reordered by this scorer instead of the hybrid
   // reranker.
   crossEncoderScorer?: CrossEncoderScorer;
+  // LLM seam for the decompose lever. When 'decompose' is enabled, the question
+  // is split into sub-queries; each (plus the original) is retrieved and the
+  // union is merged into the pool.
+  decomposer?: QueryDecomposer;
 }
 
 export interface TypeStats {
@@ -123,6 +129,7 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const assembleOn = levers.includes('assemble');
   const temporalOn = levers.includes('temporal');
   const factsOn = levers.includes('facts') && config.factExtractor !== undefined;
+  const decomposeOn = levers.includes('decompose') && config.decomposer !== undefined;
   const qaRun = reader !== null && judge !== null;
   const useRerank = rerankPool > k;
   const fetchK = useRerank ? rerankPool : k;
@@ -205,12 +212,31 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
 
       // Over-fetch fetchK candidates and hybrid-rerank them, then keep the top k
       // so recall/QA are measured on exactly k hits in both modes. When rerank is
-      // off, fetchK === k and this is a plain top-k query.
-      const pool = await retriever.query({
-        text: record.question,
-        k: fetchK,
-        ...(useRerank ? { hybrid: 'rerank' as const } : {}),
-      });
+      // off, fetchK === k and this is a plain top-k query. When the decompose
+      // lever is on, retrieve for the original question plus each sub-query and
+      // merge the union into the pool.
+      let pool: QueryHit[];
+      if (decomposeOn && config.decomposer !== undefined) {
+        const subQueries = await config.decomposer(record.question);
+        costReport.record('decompose', { llmCalls: 1, embedCalls: subQueries.length });
+        const queries = [record.question, ...subQueries];
+        const perQuery = await Promise.all(
+          queries.map((query) => {
+            return retriever.query({
+              text: query,
+              k: fetchK,
+              ...(useRerank ? { hybrid: 'rerank' as const } : {}),
+            });
+          }),
+        );
+        pool = mergeHits(perQuery, fetchK);
+      } else {
+        pool = await retriever.query({
+          text: record.question,
+          k: fetchK,
+          ...(useRerank ? { hybrid: 'rerank' as const } : {}),
+        });
+      }
       const hits = pool.slice(0, k);
       const hit = recordIsHit(hits, record.answer_session_ids);
 
