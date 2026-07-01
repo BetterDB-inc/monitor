@@ -3,12 +3,14 @@ import { createAnalytics, NOOP_ANALYTICS, type AnalyticsClient } from '../analyt
 
 const phState = vi.hoisted(() => ({
   capture: vi.fn(),
+  flush: vi.fn().mockResolvedValue(undefined),
   shutdown: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('posthog-node', () => ({
   PostHog: class {
     capture = phState.capture;
+    flush = phState.flush;
     shutdown = phState.shutdown;
   },
 }));
@@ -28,7 +30,11 @@ describe('analytics', () => {
 
   beforeEach(() => {
     delete process.env.BETTERDB_TELEMETRY;
+    // Pin the per-install identity so distinctId is deterministic and the test
+    // never reads/writes the real ~/.betterdb/instance_id.
+    process.env.BETTERDB_INSTANCE_ID = 'install-123';
     phState.capture.mockReset();
+    phState.flush.mockReset().mockResolvedValue(undefined);
     phState.shutdown.mockReset().mockResolvedValue(undefined);
   });
 
@@ -74,13 +80,14 @@ describe('analytics', () => {
   });
 
   describe('PostHogAnalytics via createAnalytics', () => {
-    it('init persists new UUID via SET when no existing ID', async () => {
+    it('uses the per-install id as distinctId and persists a deployment id via SET', async () => {
       const analytics = await createAnalytics({ apiKey: 'phc_test_key' });
       expect(analytics).not.toBe(NOOP_ANALYTICS);
 
       const client = createMockClient(null);
       await analytics.init(client, 'myprefix', { fieldCount: 3 });
 
+      // The Valkey-scoped deployment id is still generated and persisted.
       expect(client.call).toHaveBeenCalledWith('GET', 'myprefix:__instance_id');
       expect(client.call).toHaveBeenCalledWith(
         'SET',
@@ -88,25 +95,35 @@ describe('analytics', () => {
         expect.stringMatching(/^[0-9a-f-]{36}$/),
       );
 
+      // distinctId identifies the install, not the Valkey store; the deployment
+      // id rides along as a property for roll-up.
       expect(phState.capture).toHaveBeenCalledWith(
         expect.objectContaining({
           event: 'retrieval:retriever_init',
-          properties: { fieldCount: 3 },
+          distinctId: 'install-123',
+          properties: expect.objectContaining({
+            fieldCount: 3,
+            deployment_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+          }),
         }),
       );
+      // The start event is flushed immediately so it lands without an exit hook.
+      expect(phState.flush).toHaveBeenCalled();
     });
 
-    it('init reuses existing UUID from GET', async () => {
+    it('reuses an existing deployment id without a SET write', async () => {
       const analytics = await createAnalytics({ apiKey: 'phc_test_key' });
 
-      const existingId = 'existing-uuid-1234';
-      const client = createMockClient(existingId);
+      const client = createMockClient('stable-id');
       await analytics.init(client, 'myprefix');
 
       const setCalls = client.call.mock.calls.filter((c) => c[0] === 'SET');
       expect(setCalls).toHaveLength(0);
       expect(phState.capture).toHaveBeenCalledWith(
-        expect.objectContaining({ distinctId: existingId }),
+        expect.objectContaining({
+          distinctId: 'install-123',
+          properties: expect.objectContaining({ deployment_id: 'stable-id' }),
+        }),
       );
     });
 

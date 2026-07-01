@@ -126,6 +126,18 @@ export class MemoryStore {
   private readonly analyticsOptions?: AnalyticsOptions;
   private analytics: Analytics = NOOP_ANALYTICS;
   private analyticsStarted = false;
+  // Aggregate flow counts captured once as a `memory_session` roll-up on exit,
+  // so we learn how the store is actually used without a per-operation event.
+  private readonly sessionCounts = {
+    remembered: 0,
+    recalled: 0,
+    recallHits: 0,
+    forgotten: 0,
+    consolidated: 0,
+    evicted: 0,
+  };
+  private sessionFlushed = false;
+  private sessionExitHandler: (() => void) | null = null;
 
   constructor(options: MemoryStoreOptions) {
     this.client = options.client;
@@ -167,9 +179,46 @@ export class MemoryStore {
         maxItemsPerScope: this.maxItemsPerScope,
         discovery: this.discovery !== null,
       });
+      // Short-lived consumers frequently never call close(), so emit the
+      // session roll-up when the event loop drains as a backstop. close()
+      // supersedes and unregisters it.
+      if (analytics !== NOOP_ANALYTICS && this.sessionExitHandler === null) {
+        this.sessionExitHandler = () => {
+          this.captureSession();
+          void this.analytics.flush();
+        };
+        process.once('beforeExit', this.sessionExitHandler);
+      }
     } catch {
       this.analytics = NOOP_ANALYTICS;
     }
+  }
+
+  // Emit the aggregate flow counts once. Guarded so the close() path and the
+  // beforeExit backstop can't double-count. Silent when nothing happened.
+  private captureSession(): void {
+    if (this.sessionFlushed) {
+      return;
+    }
+    this.sessionFlushed = true;
+    const counts = this.sessionCounts;
+    const total =
+      counts.remembered +
+      counts.recalled +
+      counts.forgotten +
+      counts.consolidated +
+      counts.evicted;
+    if (total === 0) {
+      return;
+    }
+    this.analytics.capture('memory_session', {
+      remembered: counts.remembered,
+      recalled: counts.recalled,
+      recall_hits: counts.recallHits,
+      forgotten: counts.forgotten,
+      consolidated: counts.consolidated,
+      evicted: counts.evicted,
+    });
   }
 
   currentConfig(): MemoryConfigSnapshot {
@@ -376,6 +425,11 @@ export class MemoryStore {
     if (this.discovery) {
       await this.discovery.stop({ deleteHeartbeat: true });
     }
+    this.captureSession();
+    if (this.sessionExitHandler) {
+      process.removeListener('beforeExit', this.sessionExitHandler);
+      this.sessionExitHandler = null;
+    }
     await this.analytics.shutdown();
   }
 
@@ -477,6 +531,10 @@ export class MemoryStore {
     span.setAttribute('recall.candidate_count', hits.length);
     span.setAttribute('recall.result_count', result.length);
     this.recordRecall(result.length, (Date.now() - startedAt) / 1000);
+    this.sessionCounts.recalled += 1;
+    if (result.length > 0) {
+      this.sessionCounts.recallHits += 1;
+    }
 
     if (options.reinforce !== false) {
       await this.reinforce(result, now).catch(() => undefined);
@@ -529,6 +587,7 @@ export class MemoryStore {
     const removed = Number(await this.client.call('DEL', `${this.name}:mem:${id}`));
     if (removed > 0) {
       this.telemetry.metrics.items.labels(this.storeLabels).dec(removed);
+      this.sessionCounts.forgotten += removed;
     }
     return removed > 0;
   }
@@ -584,6 +643,7 @@ export class MemoryStore {
 
     if (deleted > 0) {
       this.telemetry.metrics.items.labels(this.storeLabels).dec(deleted);
+      this.sessionCounts.forgotten += deleted;
     }
     return deleted;
   }
@@ -610,6 +670,7 @@ export class MemoryStore {
       }
       const now = Date.now();
       const id = await this.writeMemory(content, options, now);
+      this.sessionCounts.remembered += 1;
       // Capacity enforcement is best-effort: the memory is already durably stored,
       // so a failed eviction pass must not reject an otherwise successful write.
       await this.enforceCapacity(options, now).catch(() => undefined);
@@ -719,6 +780,11 @@ export class MemoryStore {
     }
 
     this.telemetry.metrics.consolidations.labels(this.storeLabels).inc();
+    this.sessionCounts.consolidated += 1;
+    this.analytics.capture('memory_consolidated', {
+      sources: candidates.length,
+      deleted,
+    });
     span.setAttribute('consolidate.created', 1);
     span.setAttribute('consolidate.deleted', deleted);
     return { consolidated: candidates.length, created: [summaryId], deleted };
@@ -830,6 +896,7 @@ export class MemoryStore {
     await this.client.call('HINCRBY', `${this.name}:__mem_stats`, 'evictions', String(removed));
     this.telemetry.metrics.evictions.labels(this.storeLabels).inc(removed);
     this.telemetry.metrics.items.labels(this.storeLabels).dec(removed);
+    this.sessionCounts.evicted += removed;
   }
 
   private requireEmbedFn(): EmbedFn {

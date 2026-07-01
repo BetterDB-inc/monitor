@@ -13,6 +13,9 @@ describe('analytics', () => {
 
   beforeEach(() => {
     delete process.env.BETTERDB_TELEMETRY;
+    // Pin the per-install identity so distinctId is deterministic and the test
+    // never reads/writes the real ~/.betterdb/instance_id.
+    process.env.BETTERDB_INSTANCE_ID = 'install-123';
   });
 
   afterEach(() => {
@@ -70,14 +73,16 @@ describe('analytics', () => {
     // we mock the dynamic import. We do this at a higher level by testing
     // init/capture/shutdown behavior through the factory.
 
-    it('init persists new UUID via Valkey SET when no existing ID', async () => {
+    it('uses the per-install id as distinctId and persists a deployment id via Valkey SET', async () => {
       const mockCapture = vi.fn();
+      const mockFlush = vi.fn().mockResolvedValue(undefined);
       const mockShutdown = vi.fn().mockResolvedValue(undefined);
 
       // Mock the dynamic import of posthog-node
       vi.doMock('posthog-node', () => ({
         PostHog: class {
           capture = mockCapture;
+          flush = mockFlush;
           shutdown = mockShutdown;
         },
       }));
@@ -93,31 +98,40 @@ describe('analytics', () => {
 
       await analytics.init(client, 'myprefix', { defaultTtl: 300 });
 
-      // Should have called GET then SET
+      // The Valkey-scoped deployment id is still generated and persisted.
       expect(client.get).toHaveBeenCalledWith('myprefix:__instance_id');
       expect(client.set).toHaveBeenCalledWith(
         'myprefix:__instance_id',
         expect.stringMatching(/^[0-9a-f-]{36}$/),
       );
 
-      // Should have captured cache_init
+      // distinctId identifies the install; the deployment id rides along as a
+      // property for roll-up.
       expect(mockCapture).toHaveBeenCalledWith(
         expect.objectContaining({
           event: 'agent_cache:cache_init',
-          properties: { defaultTtl: 300 },
+          distinctId: 'install-123',
+          properties: expect.objectContaining({
+            defaultTtl: 300,
+            deployment_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+          }),
         }),
       );
+      // The start event is flushed immediately so it lands without an exit hook.
+      expect(mockFlush).toHaveBeenCalled();
 
       vi.doUnmock('posthog-node');
     });
 
-    it('init reuses existing UUID from Valkey GET', async () => {
+    it('reuses an existing deployment id without a Valkey SET write', async () => {
       const mockCapture = vi.fn();
+      const mockFlush = vi.fn().mockResolvedValue(undefined);
       const mockShutdown = vi.fn().mockResolvedValue(undefined);
 
       vi.doMock('posthog-node', () => ({
         PostHog: class {
           capture = mockCapture;
+          flush = mockFlush;
           shutdown = mockShutdown;
         },
       }));
@@ -126,18 +140,17 @@ describe('analytics', () => {
       const analytics = await create({ apiKey: 'phc_test_key' });
 
       const client = createMockValkeyClient();
-      const existingId = 'existing-uuid-1234';
-      client.get.mockResolvedValue(existingId);
+      client.get.mockResolvedValue('stable-id');
 
       await analytics.init(client, 'myprefix');
 
-      // Should NOT have called SET since ID already exists
+      // Should NOT have called SET since the deployment id already exists.
       expect(client.set).not.toHaveBeenCalled();
 
-      // Should use existing ID as distinctId
       expect(mockCapture).toHaveBeenCalledWith(
         expect.objectContaining({
-          distinctId: existingId,
+          distinctId: 'install-123',
+          properties: expect.objectContaining({ deployment_id: 'stable-id' }),
         }),
       );
 
