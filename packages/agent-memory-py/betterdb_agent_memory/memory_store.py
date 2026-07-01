@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import math
 import time
 import uuid
@@ -138,6 +139,21 @@ class MemoryStore:
         self._analytics_disabled = not analytics
         self._analytics: Analytics = NOOP_ANALYTICS
         self._analytics_started = False
+        # In-process aggregate usage counters emitted as a single low-volume
+        # `memory_session` event at exit. Content is never captured — only
+        # integer counts — so this stays privacy-safe. The session event and
+        # analytics flush are wired to atexit in _ensure_analytics_started so
+        # short-lived consumers that never call close() still report usage.
+        self._session_counts = {
+            "remembered": 0,
+            "recalled": 0,
+            "recall_hits": 0,
+            "forgotten": 0,
+            "consolidated": 0,
+            "evicted": 0,
+        }
+        self._session_flushed = False
+        self._session_atexit_registered = False
         self._telemetry = create_memory_telemetry(telemetry)
         self._store_labels = {"store_name": name}
         self._initial_threshold = (
@@ -398,9 +414,28 @@ class MemoryStore:
                     "discovery": self._discovery is not None,
                 },
             )
+            if not self._session_atexit_registered:
+                atexit.register(self._session_atexit)
+                self._session_atexit_registered = True
         except Exception:
             # never let analytics break the memory store
             self._analytics = NOOP_ANALYTICS
+
+    def _capture_session(self) -> None:
+        # Emit the aggregate usage summary exactly once, only if there was
+        # activity worth reporting. Safe to call from both close() and atexit.
+        if self._session_flushed:
+            return
+        self._session_flushed = True
+        if not any(self._session_counts.values()):
+            return
+        self._analytics.capture("memory_session", dict(self._session_counts))
+
+    def _session_atexit(self) -> None:
+        # Backstop for consumers that never call close(): summarize the session
+        # and drain the analytics queue before the interpreter exits.
+        self._capture_session()
+        self._analytics.flush()
 
     async def close(self) -> None:
         if self._config_refresh_task is not None:
@@ -415,6 +450,11 @@ class MemoryStore:
             if self._discovery_task is not None:
                 await self._discovery_task
             await self._discovery.stop(delete_heartbeat=True)
+        self._capture_session()
+        try:
+            atexit.unregister(self._session_atexit)
+        except Exception:
+            pass
         await self._analytics.shutdown()
 
     # -- index ------------------------------------------------------------
@@ -571,6 +611,9 @@ class MemoryStore:
         span.set_attribute("recall.candidate_count", len(hits))
         span.set_attribute("recall.result_count", len(result))
         self._record_recall(len(result), time.monotonic() - started_at)
+        self._session_counts["recalled"] += 1
+        if len(result) > 0:
+            self._session_counts["recall_hits"] += 1
 
         if reinforce is not False:
             # Reinforcement is best-effort and must never break the read path.
@@ -607,6 +650,7 @@ class MemoryStore:
         removed = int(await self._client.execute_command("DEL", f"{self._name}:mem:{id}"))
         if removed > 0:
             self._telemetry.metrics.items.labels(**self._store_labels).dec(removed)
+            self._session_counts["forgotten"] += removed
         return removed > 0
 
     async def forget_by_scope(
@@ -667,6 +711,7 @@ class MemoryStore:
 
         if deleted > 0:
             self._telemetry.metrics.items.labels(**self._store_labels).dec(deleted)
+            self._session_counts["forgotten"] += deleted
         return deleted
 
     # -- write ------------------------------------------------------------
@@ -735,6 +780,7 @@ class MemoryStore:
                 ttl=ttl,
                 now=now,
             )
+            self._session_counts["remembered"] += 1
             # Capacity enforcement is best-effort: the memory is already durably
             # stored, so a failed eviction pass must not reject the write.
             try:
@@ -854,6 +900,11 @@ class MemoryStore:
                     self._telemetry.metrics.items.labels(**self._store_labels).dec(deleted)
 
             self._telemetry.metrics.consolidations.labels(**self._store_labels).inc()
+            self._session_counts["consolidated"] += 1
+            self._analytics.capture(
+                "memory_consolidated",
+                {"sources": len(candidates), "deleted": deleted},
+            )
             span.set_attribute("consolidate.created", 1)
             span.set_attribute("consolidate.deleted", deleted)
             return ConsolidateResult(
@@ -951,6 +1002,7 @@ class MemoryStore:
         )
         self._telemetry.metrics.evictions.labels(**self._store_labels).inc(removed)
         self._telemetry.metrics.items.labels(**self._store_labels).dec(removed)
+        self._session_counts["evicted"] += removed
 
     # -- embedding --------------------------------------------------------
 
