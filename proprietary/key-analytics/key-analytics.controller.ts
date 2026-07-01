@@ -74,6 +74,30 @@ export class KeyAnalyticsController {
     });
   }
 
+  @Get('largest-keys')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature('keyAnalytics')
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getLargestKeys(
+    @ConnectionId() connectionId?: string,
+    @Query('limit') limit?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+    @Query('latest') latest?: string,
+    @Query('oldest') oldest?: string,
+  ) {
+    const wantOldest = oldest === 'true';
+    return this.keyAnalytics.getLargestKeys({
+      connectionId,
+      limit: safeInt(limit, 50, MAX_LIMIT),
+      startTime: safeInt(startTime),
+      endTime: safeInt(endTime),
+      // Default to the latest snapshot unless an explicit time range or oldest is requested.
+      latest: wantOldest ? false : latest !== 'false',
+      oldest: wantOldest,
+    });
+  }
+
   @Get('trends')
   @UseGuards(LicenseGuard)
   @RequiresFeature('keyAnalytics')
@@ -94,9 +118,21 @@ export class KeyAnalyticsController {
   @UseGuards(LicenseGuard)
   @RequiresFeature('keyAnalytics')
   @HttpCode(HttpStatus.ACCEPTED)
-  async triggerCollection() {
-    this.keyAnalytics.triggerCollection().catch(() => { });
-    return { message: 'Key analytics collection triggered', status: 'processing' };
+  async triggerCollection(@Query('deep') deep?: string) {
+    const fullScan = deep === 'true';
+    this.keyAnalytics.triggerCollection(fullScan).catch(() => { });
+    return {
+      message: `Key analytics ${fullScan ? 'deep-scan ' : ''}collection triggered`,
+      status: 'processing',
+    };
+  }
+
+  @Get('key-sizes')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature('keyAnalytics')
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getKeySizes(@ConnectionId() connectionId?: string) {
+    return this.keyAnalytics.getKeySizes(connectionId);
   }
 
   @Delete('snapshots')

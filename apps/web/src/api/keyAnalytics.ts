@@ -1,7 +1,7 @@
 import { fetchApi } from './client';
-import type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend, HotKeyEntry } from '@betterdb/shared';
+import type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend, HotKeyEntry, KeySizeDistribution } from '@betterdb/shared';
 
-export type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend, HotKeyEntry };
+export type { KeyPatternSnapshot, KeyAnalyticsSummary, PatternTrend, HotKeyEntry, KeySizeDistribution };
 
 export const keyAnalyticsApi = {
   getSummary: (startTime?: number, endTime?: number) => {
@@ -27,8 +27,24 @@ export const keyAnalyticsApi = {
     return fetchApi<PatternTrend[]>(`/key-analytics/trends?${params}`);
   },
 
-  triggerCollection: () => {
-    return fetchApi<{ message: string; status: string }>('/key-analytics/collect', { method: 'POST' });
+  triggerCollection: (deep?: boolean) => {
+    const path = deep ? '/key-analytics/collect?deep=true' : '/key-analytics/collect';
+    return fetchApi<{ message: string; status: string }>(path, { method: 'POST' });
+  },
+
+  getKeySizes: () => {
+    return fetchApi<KeySizeDistribution>('/key-analytics/key-sizes');
+  },
+
+  getLargestKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean }) => {
+    const params = new URLSearchParams();
+    if (options?.limit) params.append('limit', options.limit.toString());
+    if (options?.startTime) params.append('startTime', options.startTime.toString());
+    if (options?.endTime) params.append('endTime', options.endTime.toString());
+    if (options?.latest !== undefined) params.append('latest', options.latest ? 'true' : 'false');
+    if (options?.oldest) params.append('oldest', 'true');
+    const query = params.toString();
+    return fetchApi<HotKeyEntry[]>(query ? `/key-analytics/largest-keys?${query}` : '/key-analytics/largest-keys');
   },
 
   getHotKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean }) => {

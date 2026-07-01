@@ -31,8 +31,8 @@ import {
   parseSearchConfig, parseProfileResponse,
   sanitizeFilter, FIELD_NAME_RE, INDEX_NAME_RE,
 } from '../parsers/vector-index.parser';
-import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyPatternData } from '@betterdb/shared';
-import { extractPattern } from '@betterdb/shared';
+import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyDetail, KeyPatternData } from '@betterdb/shared';
+import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT } from '@betterdb/shared';
 
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
@@ -519,13 +519,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
 
     const patternsMap = new Map<string, KeyPatternData>();
-    const keyDetails: Array<{
-      keyName: string;
-      freqScore: number | null;
-      idleSeconds: number | null;
-      memoryBytes: number | null;
-      ttl: number | null;
-    }> = [];
+    let keyDetails: KeyDetail[] = [];
     let cursor = '0';
     let scanned = 0;
 
@@ -534,7 +528,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       cursor = newCursor;
 
       for (const key of keys) {
-        if (scanned >= options.sampleSize) break;
+        if (!options.fullScan && scanned >= options.sampleSize) break;
         scanned++;
 
         const pattern = extractPattern(key);
@@ -543,6 +537,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
           count: 0,
           totalMemory: 0,
           maxMemory: 0,
+          totalCardinality: 0,
+          maxCardinality: 0,
           totalIdleTime: 0,
           withTtl: 0,
           withoutTtl: 0,
@@ -556,16 +552,46 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
           pipeline.object('IDLETIME', key);
           pipeline.object('FREQ', key);
           pipeline.ttl(key);
+          pipeline.type(key);
+          // Per-type size probes; wrong-type calls return WRONGTYPE errors we ignore,
+          // and we read only the one matching TYPE. Single round-trip per key.
+          pipeline.strlen(key);
+          pipeline.llen(key);
+          pipeline.hlen(key);
+          pipeline.scard(key);
+          pipeline.zcard(key);
+          pipeline.xlen(key);
 
           const results = (await pipeline.exec()) || [];
-          const [memResult, idleResult, freqResult, ttlResult] = results;
+          const [
+            memResult, idleResult, freqResult, ttlResult, typeResult,
+            strlenResult, llenResult, hlenResult, scardResult, zcardResult, xlenResult,
+          ] = results;
 
           stats.count++;
+
+          const num = (r: [Error | null, unknown] | undefined): number | null =>
+            r && !r[0] && r[1] != null ? (r[1] as number) : null;
 
           const mem = (memResult && !memResult[0] && memResult[1] != null) ? memResult[1] as number : null;
           if (mem !== null) {
             stats.totalMemory += mem;
             if (mem > stats.maxMemory) stats.maxMemory = mem;
+          }
+
+          const keyType = (typeResult && !typeResult[0] && typeResult[1] != null) ? String(typeResult[1]) : null;
+          let cardinality: number | null = null;
+          switch (keyType) {
+            case 'string': cardinality = num(strlenResult); break;
+            case 'list': cardinality = num(llenResult); break;
+            case 'hash': cardinality = num(hlenResult); break;
+            case 'set': cardinality = num(scardResult); break;
+            case 'zset': cardinality = num(zcardResult); break;
+            case 'stream': cardinality = num(xlenResult); break;
+          }
+          if (cardinality !== null) {
+            stats.totalCardinality += cardinality;
+            if (cardinality > stats.maxCardinality) stats.maxCardinality = cardinality;
           }
 
           const idle = (idleResult && !idleResult[0] && idleResult[1] != null) ? idleResult[1] as number : null;
@@ -590,6 +616,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
           keyDetails.push({
             keyName: key,
+            keyType,
+            cardinality,
             freqScore: freq,
             idleSeconds: idle,
             memoryBytes: mem,
@@ -600,14 +628,20 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         }
       }
 
-      if (scanned >= options.sampleSize) break;
+      // Bound memory during a full-keyspace scan: keep only the keys that can
+      // still surface as top-N hot / largest keys downstream.
+      if (keyDetails.length >= KEY_DETAILS_PRUNE_AT) {
+        keyDetails = pruneKeyDetails(keyDetails);
+      }
+
+      if (!options.fullScan && scanned >= options.sampleSize) break;
     } while (cursor !== '0');
 
     return {
       dbSize,
       scanned,
       patterns: Array.from(patternsMap.values()),
-      keyDetails,
+      keyDetails: pruneKeyDetails(keyDetails),
     };
   }
 

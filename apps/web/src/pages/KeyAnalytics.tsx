@@ -10,6 +10,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '../components/ui/table';
 import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
+import { Tooltip as UITooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import {
   BarChart,
   Bar,
@@ -24,7 +25,7 @@ import {
   Legend,
   type TooltipValueType,
 } from 'recharts';
-import { BarChart3 } from 'lucide-react';
+import { BarChart3, HelpCircle } from 'lucide-react';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 
 function getRankDelta(currentRank: number, keyName: string, prevKeys: HotKeyEntry[] | null): { label: string; className: string } {
@@ -91,7 +92,7 @@ const COLORS = ['var(--primary)', 'var(--secondary)', 'var(--chart-2)', 'var(--c
 
 export function KeyAnalytics() {
   const { currentConnection } = useConnection();
-  const [activeTab, setActiveTab] = useState<'patterns' | 'hot-keys'>('patterns');
+  const [activeTab, setActiveTab] = useState<'patterns' | 'hot-keys' | 'largest-keys' | 'key-sizes'>('patterns');
   const [sortField, setSortField] = useState<SortField>('keyCount');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [selectedPattern, setSelectedPattern] = useState<string | null>(null);
@@ -112,7 +113,7 @@ export function KeyAnalytics() {
     refetchKey: currentConnection?.id,
   });
 
-  const { data: rawPatterns, loading: patternsLoading } = usePolling({
+  const { data: rawPatterns, loading: patternsLoading, refresh: refetchPatterns } = usePolling({
     fetcher: () => keyAnalyticsApi.getPatterns({ limit: 100 }),
     interval: 60000,
     refetchKey: currentConnection?.id,
@@ -125,7 +126,7 @@ export function KeyAnalytics() {
   const isHotKeyTimeFiltered = hotKeyStartTime !== undefined && hotKeyEndTime !== undefined;
 
   // Fetch the latest snapshot within the selected date range (or overall if no range)
-  const { data: hotKeys, loading: hotKeysLoading } = usePolling({
+  const { data: hotKeys, loading: hotKeysLoading, refresh: refetchHotKeys } = usePolling({
     fetcher: () => keyAnalyticsApi.getHotKeys({
       limit: 50,
       latest: true,
@@ -156,19 +157,39 @@ export function KeyAnalytics() {
     });
   }, [rawPatterns]);
 
-  const [isCollecting, setIsCollecting] = useState(false);
+  const { data: keySizes, loading: keySizesLoading, refresh: refetchKeySizes } = usePolling({
+    fetcher: () => keyAnalyticsApi.getKeySizes(),
+    interval: 60000,
+    refetchKey: currentConnection?.id,
+    enabled: activeTab === 'key-sizes',
+  });
 
-  const handleTriggerCollection = async () => {
-    setIsCollecting(true);
+  const { data: largestKeys, loading: largestKeysLoading, refresh: refetchLargestKeys } = usePolling({
+    fetcher: () => keyAnalyticsApi.getLargestKeys({ limit: 50, latest: true }),
+    interval: 60000,
+    refetchKey: currentConnection?.id,
+    enabled: activeTab === 'largest-keys',
+  });
+
+  const [isCollecting, setIsCollecting] = useState(false);
+  const [isDeepScanning, setIsDeepScanning] = useState(false);
+
+  const handleTriggerCollection = async (deep = false) => {
+    const setBusy = deep ? setIsDeepScanning : setIsCollecting;
+    setBusy(true);
     try {
-      await keyAnalyticsApi.triggerCollection();
+      await keyAnalyticsApi.triggerCollection(deep);
       setTimeout(() => {
         refetchSummary();
-        setIsCollecting(false);
-      }, 2000);
+        refetchPatterns();
+        refetchHotKeys();
+        refetchLargestKeys();
+        refetchKeySizes();
+        setBusy(false);
+      }, deep ? 4000 : 2000);
     } catch (error) {
       console.error('Failed to trigger collection:', error);
-      setIsCollecting(false);
+      setBusy(false);
     }
   };
 
@@ -259,7 +280,7 @@ export function KeyAnalytics() {
 
   return (
     <div className="space-y-6">
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'patterns' | 'hot-keys')}>
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'patterns' | 'hot-keys' | 'largest-keys' | 'key-sizes')}>
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-3xl font-bold">Key Analytics</h1>
@@ -271,13 +292,23 @@ export function KeyAnalytics() {
             <TabsList>
               <TabsTrigger value="patterns">Patterns</TabsTrigger>
               <TabsTrigger value="hot-keys">Hot Keys</TabsTrigger>
+              <TabsTrigger value="largest-keys">Largest Keys</TabsTrigger>
+              <TabsTrigger value="key-sizes">Key Sizes</TabsTrigger>
             </TabsList>
             <button
-              onClick={handleTriggerCollection}
-              disabled={isCollecting}
+              onClick={() => handleTriggerCollection(false)}
+              disabled={isCollecting || isDeepScanning}
               className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 text-sm"
             >
               {isCollecting ? 'Collecting...' : 'Trigger Collection'}
+            </button>
+            <button
+              onClick={() => handleTriggerCollection(true)}
+              disabled={isCollecting || isDeepScanning}
+              title="Scan the entire keyspace instead of a sample (slower, more accurate)"
+              className="px-4 py-2 border border-border rounded hover:bg-muted disabled:opacity-50 text-sm"
+            >
+              {isDeepScanning ? 'Deep Scanning...' : 'Deep Scan'}
             </button>
           </div>
         </div>
@@ -791,6 +822,202 @@ export function KeyAnalytics() {
                 </div>
               </div>
             )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="largest-keys">
+          <div className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>Largest Keys</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Top 50 keys by cardinality — element count for collections, byte length for
+                  strings (the valkey big-key metric). Sampled from the most recent collection.
+                </p>
+              </CardHeader>
+              <CardContent>
+                {largestKeysLoading && !largestKeys ? (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-12">#</TableHead>
+                        <TableHead>Key Name</TableHead>
+                        <TableHead>Type</TableHead>
+                        <TableHead>
+                          <UITooltip>
+                            <TooltipTrigger className="inline-flex items-center gap-1 cursor-help">
+                              Cardinality
+                              <HelpCircle className="h-3 w-3 text-muted-foreground" />
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              The valkey big-key metric: number of elements for collections
+                              (list/set/hash/zset/stream) and byte length for strings. Larger
+                              cardinality = slower operations like HGETALL.
+                            </TooltipContent>
+                          </UITooltip>
+                        </TableHead>
+                        <TableHead>Memory</TableHead>
+                        <TableHead>TTL</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {Array.from({ length: 5 }).map((_, i) => (
+                        <TableRow key={i}>
+                          <TableCell><Skeleton className="h-4 w-6" /></TableCell>
+                          <TableCell><Skeleton className="h-4 w-48" /></TableCell>
+                          <TableCell><Skeleton className="h-4 w-16" /></TableCell>
+                          <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                          <TableCell><Skeleton className="h-4 w-16" /></TableCell>
+                          <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : !largestKeys || largestKeys.length === 0 ? (
+                  <div className="text-center py-12 text-muted-foreground">
+                    No largest-key data yet. Click "Trigger Collection" (or "Deep Scan" for full
+                    coverage) to analyze keys.
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-12">#</TableHead>
+                        <TableHead>Key Name</TableHead>
+                        <TableHead>Type</TableHead>
+                        <TableHead>
+                          <UITooltip>
+                            <TooltipTrigger className="inline-flex items-center gap-1 cursor-help">
+                              Cardinality
+                              <HelpCircle className="h-3 w-3 text-muted-foreground" />
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              The valkey big-key metric: number of elements for collections
+                              (list/set/hash/zset/stream) and byte length for strings. Larger
+                              cardinality = slower operations like HGETALL.
+                            </TooltipContent>
+                          </UITooltip>
+                        </TableHead>
+                        <TableHead>Memory</TableHead>
+                        <TableHead>TTL</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {largestKeys.map((entry: HotKeyEntry) => (
+                        <TableRow
+                          key={entry.id}
+                          className={entry.rank <= 10 ? 'border-l-2 border-l-primary' : ''}
+                        >
+                          <TableCell className="text-muted-foreground font-medium">
+                            {entry.rank}
+                          </TableCell>
+                          <TableCell className="font-mono text-sm">{entry.keyName}</TableCell>
+                          <TableCell>
+                            {entry.keyType ? (
+                              <Badge variant="secondary">{entry.keyType}</Badge>
+                            ) : (
+                              '\u2014'
+                            )}
+                          </TableCell>
+                          <TableCell className="font-bold">
+                            {entry.cardinality == null ? (
+                              '\u2014'
+                            ) : entry.keyType === 'string' ? (
+                              <>
+                                {formatBytes(entry.cardinality)}
+                                <span className="ml-1 text-xs font-normal text-muted-foreground">
+                                  string length
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                {formatNumber(entry.cardinality)}
+                                <span className="ml-1 text-xs font-normal text-muted-foreground">
+                                  elements
+                                </span>
+                              </>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {entry.memoryBytes != null ? formatBytes(entry.memoryBytes) : '\u2014'}
+                          </TableCell>
+                          <TableCell>{formatTtl(entry.ttl)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="key-sizes">
+          <div className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>Key Size Distribution</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Server-side histograms from{' '}
+                  <code className="font-mono text-xs">INFO keysizes</code> — element counts
+                  (collections) and byte lengths (strings) per database. No key scanning required.
+                </p>
+              </CardHeader>
+              <CardContent>
+                {keySizesLoading && !keySizes ? (
+                  <div className="text-center py-12">
+                    <Skeleton className="h-48 w-full" />
+                  </div>
+                ) : !keySizes || !keySizes.available ? (
+                  <div className="text-center py-12 text-muted-foreground">
+                    No key size data available. The{' '}
+                    <code className="font-mono text-xs">keysizes</code> INFO section is only
+                    exposed by Redis 8.0+; Valkey does not currently emit it.
+                  </div>
+                ) : (
+                  <div className="space-y-8">
+                    {Object.entries(keySizes.databases).map(([db, types]) => (
+                      <div key={db} className="space-y-4">
+                        <h3 className="text-sm font-semibold uppercase text-muted-foreground">
+                          {db}
+                        </h3>
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                          {Object.entries(types).map(([type, dist]) => (
+                            <div key={type}>
+                              <div className="mb-2 text-sm font-medium capitalize">
+                                {type}{' '}
+                                <span className="text-xs text-muted-foreground">
+                                  ({dist.metric === 'items' ? 'element count' : 'byte length'})
+                                </span>
+                              </div>
+                              <ResponsiveContainer width="100%" height={220}>
+                                <BarChart data={dist.buckets}>
+                                  <CartesianGrid strokeDasharray="3 3" />
+                                  <XAxis dataKey="bucket" />
+                                  <YAxis />
+                                  <Tooltip
+                                    contentStyle={{
+                                      backgroundColor: 'var(--popover)',
+                                      borderColor: 'var(--border)',
+                                      color: 'var(--popover-foreground)',
+                                    }}
+                                    formatter={(value) => [
+                                      formatNumber(numericFromTooltipValue(value)),
+                                      'keys',
+                                    ]}
+                                  />
+                                  <Bar dataKey="count" fill="var(--primary)" />
+                                </BarChart>
+                              </ResponsiveContainer>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </div>
         </TabsContent>
       </Tabs>

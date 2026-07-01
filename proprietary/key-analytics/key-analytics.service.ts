@@ -4,9 +4,17 @@ import { MultiConnectionPoller, ConnectionContext } from '@app/common/services/m
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { Tier } from '@proprietary/licenses/types';
+import { KeySizeDistribution, parseKeySizeDistribution, KEY_DETAILS_TOP_N } from '@betterdb/shared';
 import { randomUUID } from 'crypto';
 
-const HOT_KEYS_TOP_N = 50;
+// The collectors prune keyDetails mid-scan to the top KEY_DETAILS_TOP_N keys per
+// ranking signal (LFU / idletime / cardinality). Because each per-key signal is
+// fixed once measured, a key outside the top-N for a signal can never re-enter it
+// as more keys are scanned, so the prune is lossless — as long as the downstream
+// selection never asks for more than the collectors retained. Deriving these from
+// the shared constant keeps that invariant true by construction.
+const HOT_KEYS_TOP_N = KEY_DETAILS_TOP_N;
+const LARGEST_KEYS_TOP_N = KEY_DETAILS_TOP_N;
 
 /** Retention in days per tier. null = keep indefinitely. */
 const TIER_RETENTION_DAYS: Record<Tier, number | null> = {
@@ -89,6 +97,10 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    return this.collect(ctx, false);
+  }
+
+  private async collect(ctx: ConnectionContext, fullScan: boolean): Promise<void> {
     if (this.isRunning.get(ctx.connectionId)) {
       this.logger.debug(`Key analytics collection already running for ${ctx.connectionName}, skipping`);
       return;
@@ -101,6 +113,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       const result = await ctx.client.collectKeyAnalytics({
         sampleSize: this.sampleSize,
         scanBatchSize: this.scanBatchSize,
+        fullScan,
       });
 
       if (result.dbSize === 0) {
@@ -108,6 +121,14 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
         return;
       }
 
+      // `scanned` counts key VISITS, not distinct keys: SCAN can return the same
+      // key more than once (rehashing), so during a full scan it usually exceeds
+      // the distinct `dbSize`. Per-pattern `stats.count` is inflated by the same
+      // duplicate visits, so dividing by scanned/dbSize (which is >1 here) is the
+      // correct normalization — it deflates the visit-inflated totals back to a
+      // dbSize-consistent estimate (summed over patterns it yields exactly
+      // dbSize). Do NOT clamp to 1: that would persist raw visit counts and
+      // over-count keys/memory on deep scans.
       const samplingRatio = result.scanned / result.dbSize;
       const snapshots: KeyPatternSnapshot[] = [];
 
@@ -208,11 +229,33 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
         if (hotKeys.length > 0) {
           await this.storage.saveHotKeys(hotKeys, ctx.connectionId);
         }
+
+        // Largest keys (valkey #1827): rank by cardinality (element count / byte length).
+        const largestKeys: HotKeyEntry[] = result.keyDetails
+          .filter((kd) => kd.cardinality !== null)
+          .sort((a, b) => (b.cardinality ?? 0) - (a.cardinality ?? 0))
+          .slice(0, LARGEST_KEYS_TOP_N)
+          .map((kd, idx) => ({
+            id: randomUUID(),
+            keyName: kd.keyName,
+            connectionId: ctx.connectionId,
+            capturedAt,
+            signalType: 'cardinality' as const,
+            cardinality: kd.cardinality ?? undefined,
+            keyType: kd.keyType ?? undefined,
+            memoryBytes: kd.memoryBytes ?? undefined,
+            ttl: kd.ttl ?? undefined,
+            rank: idx + 1,
+          }));
+
+        if (largestKeys.length > 0) {
+          await this.storage.saveHotKeys(largestKeys, ctx.connectionId);
+        }
       }
 
       const duration = Date.now() - startTime;
       this.logger.log(
-        `Key Analytics (${ctx.connectionName}): sampled ${result.scanned}/${result.dbSize} keys (${(samplingRatio * 100).toFixed(1)}%), ` +
+        `Key Analytics (${ctx.connectionName}): ${fullScan ? 'deep-scanned' : 'sampled'} ${result.scanned}/${result.dbSize} keys (${(Math.min(1, samplingRatio) * 100).toFixed(1)}%), ` +
         `found ${result.patterns.length} patterns in ${duration}ms`,
       );
     } catch (error) {
@@ -245,6 +288,11 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     return this.storage.getHotKeys(options);
   }
 
+  /** Top-N largest keys by cardinality (element count / byte length). */
+  async getLargestKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
+    return this.storage.getHotKeys({ ...options, signalTypes: ['cardinality'] });
+  }
+
   async pruneOldSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     return this.storage.pruneOldKeyPatternSnapshots(cutoffTimestamp, connectionId);
   }
@@ -253,7 +301,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
    * Manually trigger key analytics collection for all connected databases.
    * Returns a promise that resolves when collection is complete for all connections.
    */
-  async triggerCollection(): Promise<void> {
+  async triggerCollection(fullScan = false): Promise<void> {
     const connections = this.connectionRegistry.list();
     const connectedConnections = connections.filter((conn) => conn.isConnected);
 
@@ -262,18 +310,23 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       return;
     }
 
-    this.logger.log(`Manually triggering key analytics collection for ${connectedConnections.length} connection(s)`);
+    this.logger.log(
+      `Manually triggering ${fullScan ? 'deep-scan ' : ''}key analytics collection for ${connectedConnections.length} connection(s)`,
+    );
 
     const promises = connectedConnections.map(async (conn) => {
       try {
         const client = this.connectionRegistry.get(conn.id);
-        await this.pollConnection({
-          connectionId: conn.id,
-          connectionName: conn.name,
-          client,
-          host: conn.host,
-          port: conn.port,
-        });
+        await this.collect(
+          {
+            connectionId: conn.id,
+            connectionName: conn.name,
+            client,
+            host: conn.host,
+            port: conn.port,
+          },
+          fullScan,
+        );
       } catch (error) {
         this.logger.warn(
           `Manual collection failed for ${conn.name}: ${error instanceof Error ? error.message : error}`,
@@ -282,5 +335,35 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     });
 
     await Promise.allSettled(promises);
+  }
+
+  /**
+   * Whole-keyspace size distribution via `INFO keysizes` (server-maintained,
+   * no key scanning). Returns `available: false` if the server lacks the section.
+   */
+  async getKeySizes(connectionId?: string): Promise<KeySizeDistribution> {
+    let targetId = connectionId;
+    if (!targetId) {
+      const connected = this.connectionRegistry.list().filter((conn) => conn.isConnected);
+      if (connected.length === 0) {
+        return { databases: {}, available: false };
+      }
+      targetId = connected[0].id;
+    }
+
+    const client = this.connectionRegistry.get(targetId);
+    if (!client) {
+      return { databases: {}, available: false };
+    }
+
+    try {
+      const raw = (await client.call('INFO', ['keysizes'])) as string;
+      return parseKeySizeDistribution(raw ?? '');
+    } catch {
+      // Servers without the keysizes section may reject the argument outright
+      // (e.g. an ERR reply) rather than returning an empty string. Treat any
+      // failure as "section unavailable" so the tab shows its empty state.
+      return { databases: {}, available: false };
+    }
   }
 }

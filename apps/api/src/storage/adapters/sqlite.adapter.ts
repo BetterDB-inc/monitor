@@ -268,6 +268,21 @@ export class SqliteAdapter implements StoragePort {
       }
     }
 
+    // Lazy ALTERs for hot_key_stats columns added to support largest-key ranking.
+    const hotKeyInfo = this.db.prepare('PRAGMA table_info(hot_key_stats)').all() as {
+      name: string;
+    }[];
+    const hotKeyColumns = new Set(hotKeyInfo.map((col) => col.name));
+    const hotKeyMigrations = [
+      { name: 'cardinality', type: 'INTEGER' },
+      { name: 'key_type', type: 'TEXT' },
+    ];
+    for (const col of hotKeyMigrations) {
+      if (!hotKeyColumns.has(col.name)) {
+        this.db.exec(`ALTER TABLE hot_key_stats ADD COLUMN ${col.name} ${col.type}`);
+      }
+    }
+
     // Migrate connection_id to all data tables for multi-database support
     this.migrateConnectionId();
   }
@@ -1168,6 +1183,8 @@ export class SqliteAdapter implements StoragePort {
         freq_score INTEGER,
         idle_seconds INTEGER,
         memory_bytes INTEGER,
+        cardinality INTEGER,
+        key_type TEXT,
         ttl INTEGER,
         rank INTEGER NOT NULL
       );
@@ -2194,8 +2211,8 @@ export class SqliteAdapter implements StoragePort {
     const stmt = this.db.prepare(`
       INSERT INTO hot_key_stats (
         id, key_name, connection_id, captured_at, signal_type,
-        freq_score, idle_seconds, memory_bytes, ttl, rank
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const insertMany = this.db.transaction((entries: HotKeyEntry[], connId: string) => {
@@ -2209,6 +2226,8 @@ export class SqliteAdapter implements StoragePort {
           entry.freqScore ?? null,
           entry.idleSeconds ?? null,
           entry.memoryBytes ?? null,
+          entry.cardinality ?? null,
+          entry.keyType ?? null,
           entry.ttl ?? null,
           entry.rank,
         );
@@ -2222,9 +2241,15 @@ export class SqliteAdapter implements StoragePort {
   async getHotKeys(options: HotKeyQueryOptions = {}): Promise<HotKeyEntry[]> {
     if (!this.db) throw new Error('Database not initialized');
 
+    // Default to access signals so legacy callers never surface cardinality (largest-key) rows.
+    const signalTypes = options.signalTypes ?? ['lfu', 'idletime'];
+    const signalPlaceholders = signalTypes.map(() => '?').join(', ');
+
     const conditions: string[] = [];
     const params: any[] = [];
 
+    conditions.push(`signal_type IN (${signalPlaceholders})`);
+    params.push(...signalTypes);
     if (options.connectionId) {
       conditions.push('connection_id = ?');
       params.push(options.connectionId);
@@ -2239,8 +2264,8 @@ export class SqliteAdapter implements StoragePort {
     }
     if (options.latest || options.oldest) {
       const agg = options.latest ? 'MAX' : 'MIN';
-      const subConditions: string[] = [];
-      const subParams: any[] = [];
+      const subConditions: string[] = [`signal_type IN (${signalPlaceholders})`];
+      const subParams: any[] = [...signalTypes];
       if (options.connectionId) {
         subConditions.push('connection_id = ?');
         subParams.push(options.connectionId);
@@ -2267,7 +2292,7 @@ export class SqliteAdapter implements StoragePort {
       .prepare(
         `
       SELECT id, key_name, connection_id, captured_at, signal_type,
-             freq_score, idle_seconds, memory_bytes, ttl, rank
+             freq_score, idle_seconds, memory_bytes, cardinality, key_type, ttl, rank
       FROM hot_key_stats
       ${whereClause}
       ORDER BY captured_at DESC, rank ASC
@@ -2285,6 +2310,8 @@ export class SqliteAdapter implements StoragePort {
       freqScore: row.freq_score ?? undefined,
       idleSeconds: row.idle_seconds ?? undefined,
       memoryBytes: row.memory_bytes ?? undefined,
+      cardinality: row.cardinality ?? undefined,
+      keyType: row.key_type ?? undefined,
       ttl: row.ttl ?? undefined,
       rank: row.rank,
     }));
