@@ -11,6 +11,8 @@ import { createMockFactExtractor, createOpenAIFactExtractor } from './facts';
 import type { FactExtractor } from './facts';
 import { createMockCrossEncoderScorer, createOpenAICrossEncoderScorer } from './cross-encoder';
 import type { CrossEncoderScorer } from './cross-encoder';
+import { createMockDecomposer, createOpenAIDecomposer } from './decompose';
+import type { QueryDecomposer } from './decompose';
 import type { ChunkMode, Embedder, Judge, Reader, Store } from './types';
 
 function envInt(name: string, fallback: number): number {
@@ -48,6 +50,14 @@ async function main(): Promise<void> {
       apiKey !== undefined && apiKey !== ''
         ? createOpenAICrossEncoderScorer(apiKey)
         : createMockCrossEncoderScorer();
+  }
+
+  let decomposer: QueryDecomposer | undefined;
+  if (levers.includes('decompose')) {
+    decomposer =
+      apiKey !== undefined && apiKey !== ''
+        ? createOpenAIDecomposer(apiKey)
+        : createMockDecomposer();
   }
 
   const cachePath = join(dirname(fileURLToPath(import.meta.url)), '.cache', 'embeddings.json');
@@ -119,6 +129,7 @@ async function main(): Promise<void> {
       costReport,
       factExtractor,
       crossEncoderScorer,
+      decomposer,
     });
     console.log(formatSummary(summary));
   } finally {
