@@ -4,11 +4,17 @@ import { MultiConnectionPoller, ConnectionContext } from '@app/common/services/m
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { Tier } from '@proprietary/licenses/types';
-import { KeySizeDistribution, parseKeySizeDistribution } from '@betterdb/shared';
+import { KeySizeDistribution, parseKeySizeDistribution, KEY_DETAILS_TOP_N } from '@betterdb/shared';
 import { randomUUID } from 'crypto';
 
-const HOT_KEYS_TOP_N = 50;
-const LARGEST_KEYS_TOP_N = 50;
+// The collectors prune keyDetails mid-scan to the top KEY_DETAILS_TOP_N keys per
+// ranking signal (LFU / idletime / cardinality). Because each per-key signal is
+// fixed once measured, a key outside the top-N for a signal can never re-enter it
+// as more keys are scanned, so the prune is lossless — as long as the downstream
+// selection never asks for more than the collectors retained. Deriving these from
+// the shared constant keeps that invariant true by construction.
+const HOT_KEYS_TOP_N = KEY_DETAILS_TOP_N;
+const LARGEST_KEYS_TOP_N = KEY_DETAILS_TOP_N;
 
 /** Retention in days per tier. null = keep indefinitely. */
 const TIER_RETENTION_DAYS: Record<Tier, number | null> = {
