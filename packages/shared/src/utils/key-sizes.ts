@@ -16,6 +16,13 @@ export const KEY_DETAILS_PRUNE_AT = 512;
  * cardinality (desc), deduplicated. A full-keyspace deep scan would otherwise
  * grow this array linearly with key count and serialize the whole thing across
  * the agent path, risking OOM / timeouts.
+ *
+ * Pruning mid-scan is LOSSLESS for the final top-`topN` per signal, provided the
+ * downstream selection never asks for more than `topN`: each per-key signal is
+ * fixed once measured, so scanning more keys can only push a key's rank down,
+ * never up. A key outside a signal's top-`topN` at prune time is already
+ * outranked by `topN` keys that all remain in the keyspace, so it can never be
+ * in the global top-`topN` — dropping it discards no eventual winner.
  */
 export function pruneKeyDetails(details: KeyDetail[], topN = KEY_DETAILS_TOP_N): KeyDetail[] {
   const byFreq = details
