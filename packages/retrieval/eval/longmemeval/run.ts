@@ -9,6 +9,8 @@ import { runEval, formatSummary } from './runner';
 import { resolveEnabledLevers, createCostReport } from './levers';
 import { createMockFactExtractor, createOpenAIFactExtractor } from './facts';
 import type { FactExtractor } from './facts';
+import { createMockCrossEncoderScorer, createOpenAICrossEncoderScorer } from './cross-encoder';
+import type { CrossEncoderScorer } from './cross-encoder';
 import type { ChunkMode, Embedder, Judge, Reader, Store } from './types';
 
 function envInt(name: string, fallback: number): number {
@@ -38,6 +40,14 @@ async function main(): Promise<void> {
       apiKey !== undefined && apiKey !== ''
         ? createOpenAIFactExtractor(apiKey)
         : createMockFactExtractor();
+  }
+
+  let crossEncoderScorer: CrossEncoderScorer | undefined;
+  if (levers.includes('rerank-cross')) {
+    crossEncoderScorer =
+      apiKey !== undefined && apiKey !== ''
+        ? createOpenAICrossEncoderScorer(apiKey)
+        : createMockCrossEncoderScorer();
   }
 
   const cachePath = join(dirname(fileURLToPath(import.meta.url)), '.cache', 'embeddings.json');
@@ -108,6 +118,7 @@ async function main(): Promise<void> {
       levers,
       costReport,
       factExtractor,
+      crossEncoderScorer,
     });
     console.log(formatSummary(summary));
   } finally {

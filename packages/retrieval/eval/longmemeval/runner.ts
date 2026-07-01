@@ -1,7 +1,9 @@
 import { Retriever } from '../../src/index';
-import type { RetrievalSchema } from '../../src/index';
+import type { RetrievalSchema, RerankFn } from '../../src/index';
 import { chunkRecord, recordIsHit } from './adapter';
 import { createHybridRerank } from './rerank';
+import { createCrossEncoderRerank } from './cross-encoder';
+import type { CrossEncoderScorer } from './cross-encoder';
 import { assembleContexts } from './assemble';
 import { resolveTemporal } from './temporal';
 import { consolidateRecordFacts } from './facts';
@@ -30,6 +32,10 @@ export interface RunConfig {
   // LLM seam for the facts lever. Required when 'facts' is enabled; extracts
   // atomic facts per session for consolidation into curated fact chunks.
   factExtractor?: FactExtractor;
+  // Model seam for the rerank-cross lever. When 'rerank-cross' is enabled (and
+  // rerankPool > k), the pool is reordered by this scorer instead of the hybrid
+  // reranker.
+  crossEncoderScorer?: CrossEncoderScorer;
 }
 
 export interface TypeStats {
@@ -82,6 +88,26 @@ function bump(byType: Map<string, TypeStats>, type: string): TypeStats {
   return stats;
 }
 
+function resolveRerankFn(
+  useRerank: boolean,
+  crossScorer: CrossEncoderScorer | undefined,
+  costReport: CostReport,
+): RerankFn | undefined {
+  if (useRerank === false) {
+    return undefined;
+  }
+  if (crossScorer === undefined) {
+    return createHybridRerank();
+  }
+  const counted: CrossEncoderScorer = async (query, documents) => {
+    const startedAt = Date.now();
+    const scores = await crossScorer(query, documents);
+    costReport.record('rerank-cross', { llmCalls: 1, latencyMs: Date.now() - startedAt });
+    return scores;
+  };
+  return createCrossEncoderRerank(counted);
+}
+
 export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const { records, embedder, store, reader, judge, k, chunkMode, limit, rerankPool } = config;
   const levers = config.levers ?? [];
@@ -92,7 +118,8 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const qaRun = reader !== null && judge !== null;
   const useRerank = rerankPool > k;
   const fetchK = useRerank ? rerankPool : k;
-  const rerankFn = useRerank ? createHybridRerank() : undefined;
+  const crossScorer = levers.includes('rerank-cross') ? config.crossEncoderScorer : undefined;
+  const rerankFn = resolveRerankFn(useRerank, crossScorer, costReport);
   const schema = buildSchema(embedder.dims);
   const byType = new Map<string, TypeStats>();
 
