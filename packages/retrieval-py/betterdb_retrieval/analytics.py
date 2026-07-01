@@ -32,6 +32,10 @@ def _is_opted_out() -> bool:
 
 _INSTALL_ID_ENV = "BETTERDB_INSTANCE_ID"
 
+# Process-lifetime fallback for when the on-disk id can't be read or written, so
+# a single process doesn't mint a fresh id (and a new distinct_id) on every call.
+_ephemeral_install_id: str | None = None
+
 
 def _install_id_path() -> Path:
     base = os.environ.get("XDG_STATE_HOME")
@@ -58,12 +62,15 @@ def _get_install_id() -> str:
             return existing
     except Exception:
         pass
-    new_id = str(uuid.uuid4())
+    global _ephemeral_install_id
+    new_id = _ephemeral_install_id or str(uuid.uuid4())
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(new_id)
     except Exception:
-        pass
+        # Persistence failed — hold the id for the rest of this process so
+        # repeated calls return a stable ephemeral identity.
+        _ephemeral_install_id = new_id
     return new_id
 
 

@@ -114,6 +114,29 @@ async def test_install_id_persists_to_disk(
     assert (tmp_path / "instance_id").read_text().strip() == first
 
 
+async def test_install_id_stable_when_unpersistable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    from betterdb_retrieval import analytics as analytics_mod
+
+    monkeypatch.delenv("BETTERDB_INSTANCE_ID", raising=False)
+    monkeypatch.setattr(analytics_mod, "_ephemeral_install_id", None)
+
+    def _raise(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("read-only fs")
+
+    # Neither read nor write can succeed — the id can never be persisted.
+    monkeypatch.setattr(Path, "read_text", _raise)
+    monkeypatch.setattr(Path, "write_text", _raise)
+
+    first = analytics_mod._get_install_id()
+    second = analytics_mod._get_install_id()
+    # A single process must report one stable ephemeral id, not a fresh one per call.
+    assert first == second
+
+
 async def test_posthog_capture_never_raises() -> None:
     class Boom:
         def capture(self, **kwargs: Any) -> None:
