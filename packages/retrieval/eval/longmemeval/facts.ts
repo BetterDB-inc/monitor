@@ -1,8 +1,10 @@
 import type { UpsertEntry } from '../../src/index';
 import { chat } from './reader';
+import { mapWithConcurrency } from './concurrency';
 import type { LmeRecord, LmeSession } from './types';
 
 const EXTRACT_MODEL = process.env.LONGMEMEVAL_FACTS_MODEL ?? 'gpt-5.4';
+const DEFAULT_FACTS_CONCURRENCY = 8;
 
 export interface Fact {
   subject: string;
@@ -159,7 +161,23 @@ export function createOpenAIFactExtractor(apiKey: string): FactExtractor {
 export async function consolidateRecordFacts(
   record: LmeRecord,
   extract: FactExtractor,
+  concurrency: number = DEFAULT_FACTS_CONCURRENCY,
 ): Promise<{ chunks: UpsertEntry[]; llmCalls: number }> {
+  // Per-session extraction is independent, so run it with bounded concurrency —
+  // _m averages ~475 sessions per record, far too many to extract serially. Only
+  // the reconcile pass below needs session order, so it stays sequential.
+  const stampedPerSession = await mapWithConcurrency(
+    record.haystack_sessions,
+    concurrency,
+    async (session, i) => {
+      const sessionId = record.haystack_session_ids[i] ?? `session_${i}`;
+      const date = record.haystack_dates?.[i];
+      const extracted = await extract(session, { sessionId, date });
+      return extracted.map((fact) => ({ ...fact, sessionId, date: fact.date ?? date }));
+    },
+  );
+  const llmCalls = record.haystack_sessions.length;
+
   let curated: Fact[] = [];
   // Track every session that asserted a fact's CURRENT statement, mapped to that
   // session's own date. A fact restated across sessions (NOOP — same subject +
@@ -167,14 +185,7 @@ export async function consolidateRecordFacts(
   // session_id) and each chunk carries that session's date (not just the first
   // assertion's), so temporal ordering matches the evidence.
   const sources = new Map<string, Map<string, string | undefined>>();
-  let llmCalls = 0;
-  for (let i = 0; i < record.haystack_sessions.length; i++) {
-    const session = record.haystack_sessions[i];
-    const sessionId = record.haystack_session_ids[i] ?? `session_${i}`;
-    const date = record.haystack_dates?.[i];
-    const extracted = await extract(session, { sessionId, date });
-    llmCalls++;
-    const stamped = extracted.map((fact) => ({ ...fact, sessionId, date: fact.date ?? date }));
+  for (const stamped of stampedPerSession) {
     const priorStatement = new Map(curated.map((fact) => [fact.subject, fact.statement]));
     curated = applyOps(curated, reconcile(stamped, curated));
     const curatedBySubject = new Map(curated.map((fact) => [fact.subject, fact]));
@@ -183,6 +194,7 @@ export async function consolidateRecordFacts(
       if (current === undefined || current.statement !== fact.statement) {
         continue;
       }
+      const sessionId = fact.sessionId ?? '';
       if (priorStatement.get(fact.subject) !== fact.statement) {
         sources.set(fact.subject, new Map([[sessionId, fact.date]]));
       } else {
