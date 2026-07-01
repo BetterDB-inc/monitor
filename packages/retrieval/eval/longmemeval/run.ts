@@ -6,6 +6,7 @@ import { createMockReader, createOpenAIReader } from './reader';
 import { createMockJudge, createOpenAIJudge } from './judge';
 import { loadRecords, sourceLabel } from './dataset';
 import { runEval, formatSummary } from './runner';
+import { resolveEnabledLevers, createCostReport } from './levers';
 import type { ChunkMode, Embedder, Judge, Reader, Store } from './types';
 
 function envInt(name: string, fallback: number): number {
@@ -26,6 +27,8 @@ async function main(): Promise<void> {
   const rerankPool = Math.max(envInt('LONGMEMEVAL_RERANK_POOL', k), k);
   const chunkMode: ChunkMode = process.env.LONGMEMEVAL_CHUNK === 'turn' ? 'turn' : 'session';
   const qa = process.env.LONGMEMEVAL_QA === '1';
+  const levers = resolveEnabledLevers(process.env);
+  const costReport = createCostReport();
 
   const cachePath = join(dirname(fileURLToPath(import.meta.url)), '.cache', 'embeddings.json');
 
@@ -59,7 +62,11 @@ async function main(): Promise<void> {
   const records = loadRecords(dataPath, limit);
   const source = sourceLabel(dataPath);
 
-  const tier = qa ? 'Tier 2 (retrieval + QA)' : store.isReal || embedder.dims === 1536 ? 'Tier 1 (real recall)' : 'Tier 0 (offline)';
+  const tier = qa
+    ? 'Tier 2 (retrieval + QA)'
+    : store.isReal || embedder.dims === 1536
+      ? 'Tier 1 (real recall)'
+      : 'Tier 0 (offline)';
 
   console.log('='.repeat(64));
   console.log('LongMemEval retrieval harness — @betterdb/retrieval');
@@ -71,7 +78,10 @@ async function main(): Promise<void> {
   console.log(`judge     : ${judge === null ? 'disabled' : judge.name}`);
   console.log(`dataset   : ${source}  (limit ${limit})`);
   const rerankLabel = rerankPool > k ? `hybrid pool=${rerankPool}→${k}` : 'off';
-  console.log(`params    : limit=${limit} k=${k} chunk=${chunkMode} qa=${qa} rerank=${rerankLabel}`);
+  console.log(
+    `params    : limit=${limit} k=${k} chunk=${chunkMode} qa=${qa} rerank=${rerankLabel}`,
+  );
+  console.log(`levers    : ${levers.length > 0 ? levers.join(' → ') : 'none (baseline)'}`);
   console.log('='.repeat(64));
 
   try {
@@ -85,6 +95,8 @@ async function main(): Promise<void> {
       chunkMode,
       limit,
       rerankPool,
+      levers,
+      costReport,
     });
     console.log(formatSummary(summary));
   } finally {
