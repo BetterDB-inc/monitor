@@ -338,7 +338,18 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     }
 
     const client = this.connectionRegistry.get(targetId);
-    const raw = (await client.call('INFO', ['keysizes'])) as string;
-    return parseKeySizeDistribution(raw ?? '');
+    if (!client) {
+      return { databases: {}, available: false };
+    }
+
+    try {
+      const raw = (await client.call('INFO', ['keysizes'])) as string;
+      return parseKeySizeDistribution(raw ?? '');
+    } catch {
+      // Servers without the keysizes section may reject the argument outright
+      // (e.g. an ERR reply) rather than returning an empty string. Treat any
+      // failure as "section unavailable" so the tab shows its empty state.
+      return { databases: {}, available: false };
+    }
   }
 }

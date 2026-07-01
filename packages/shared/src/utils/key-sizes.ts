@@ -1,4 +1,46 @@
-import type { KeySizeDistribution, KeySizeTypeDistribution } from '../types/key-analytics';
+import type { KeyDetail, KeySizeDistribution, KeySizeTypeDistribution } from '../types/key-analytics';
+
+/**
+ * Number of top entries retained per ranking signal. Downstream only persists
+ * the top-N hot keys (LFU / idletime) and top-N largest keys (cardinality),
+ * so we never need to keep more than this per metric.
+ */
+export const KEY_DETAILS_TOP_N = 50;
+
+/** Prune once the working set exceeds this, to bound memory during a full scan. */
+export const KEY_DETAILS_PRUNE_AT = 512;
+
+/**
+ * Bound an accumulating `keyDetails` list to the keys that can actually surface
+ * downstream: the top `topN` by LFU frequency (desc), by idle time (asc), and by
+ * cardinality (desc), deduplicated. A full-keyspace deep scan would otherwise
+ * grow this array linearly with key count and serialize the whole thing across
+ * the agent path, risking OOM / timeouts.
+ */
+export function pruneKeyDetails(details: KeyDetail[], topN = KEY_DETAILS_TOP_N): KeyDetail[] {
+  const byFreq = details
+    .filter((d) => d.freqScore !== null)
+    .sort((a, b) => (b.freqScore ?? 0) - (a.freqScore ?? 0))
+    .slice(0, topN);
+  const byIdle = details
+    .filter((d) => d.idleSeconds !== null)
+    .sort((a, b) => (a.idleSeconds ?? 0) - (b.idleSeconds ?? 0))
+    .slice(0, topN);
+  const byCardinality = details
+    .filter((d) => d.cardinality !== null)
+    .sort((a, b) => (b.cardinality ?? 0) - (a.cardinality ?? 0))
+    .slice(0, topN);
+
+  const seen = new Set<string>();
+  const pruned: KeyDetail[] = [];
+  for (const d of [...byFreq, ...byIdle, ...byCardinality]) {
+    if (!seen.has(d.keyName)) {
+      seen.add(d.keyName);
+      pruned.push(d);
+    }
+  }
+  return pruned;
+}
 
 // Matches lines like: db0_distrib_strings_sizes:1=19,2=655,4=3918,16K=3
 const LINE_RE = /^db(\d+)_distrib_([a-z]+)_(sizes|items):(.+)$/;

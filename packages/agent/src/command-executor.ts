@@ -1,6 +1,6 @@
 import Valkey from 'iovalkey';
-import type { KeyAnalyticsOptions, KeyPatternData } from '@betterdb/shared';
-import { extractPattern, checkBlocked, checkSafeMode } from '@betterdb/shared';
+import type { KeyAnalyticsOptions, KeyDetail, KeyPatternData } from '@betterdb/shared';
+import { extractPattern, checkBlocked, checkSafeMode, pruneKeyDetails, KEY_DETAILS_PRUNE_AT } from '@betterdb/shared';
 
 export class CommandExecutor {
   private readonly unsafeMode: boolean;
@@ -104,15 +104,7 @@ export class CommandExecutor {
     }
 
     const patternsMap = new Map<string, KeyPatternData>();
-    const keyDetails: Array<{
-      keyName: string;
-      keyType: string | null;
-      cardinality: number | null;
-      freqScore: number | null;
-      idleSeconds: number | null;
-      memoryBytes: number | null;
-      ttl: number | null;
-    }> = [];
+    let keyDetails: KeyDetail[] = [];
     let cursor = '0';
     let scanned = 0;
 
@@ -229,6 +221,13 @@ export class CommandExecutor {
         }
       }
 
+      // Bound memory during a full-keyspace scan: keep only the keys that can
+      // still surface as top-N hot / largest keys downstream. This also keeps
+      // the JSON payload serialized back over the agent path small.
+      if (keyDetails.length >= KEY_DETAILS_PRUNE_AT) {
+        keyDetails = pruneKeyDetails(keyDetails);
+      }
+
       if (!options.fullScan && scanned >= options.sampleSize) break;
     } while (cursor !== '0');
 
@@ -236,7 +235,7 @@ export class CommandExecutor {
       dbSize,
       scanned,
       patterns: Array.from(patternsMap.values()),
-      keyDetails,
+      keyDetails: pruneKeyDetails(keyDetails),
     });
   }
 }

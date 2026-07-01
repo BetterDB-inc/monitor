@@ -102,20 +102,22 @@ export interface KeyPatternData {
   accessFrequencies: number[];
 }
 
+export interface KeyDetail {
+  keyName: string;
+  keyType: string | null;
+  /** #elements for collections, byte length for strings (valkey #1827 "bigkey" metric) */
+  cardinality: number | null;
+  freqScore: number | null;
+  idleSeconds: number | null;
+  memoryBytes: number | null;
+  ttl: number | null;
+}
+
 export interface KeyAnalyticsResult {
   dbSize: number;
   scanned: number;
   patterns: KeyPatternData[];
-  keyDetails?: Array<{
-    keyName: string;
-    keyType: string | null;
-    /** #elements for collections, byte length for strings (valkey #1827 "bigkey" metric) */
-    cardinality: number | null;
-    freqScore: number | null;
-    idleSeconds: number | null;
-    memoryBytes: number | null;
-    ttl: number | null;
-  }>;
+  keyDetails?: KeyDetail[];
 }
 
 /**

@@ -31,8 +31,8 @@ import {
   parseSearchConfig, parseProfileResponse,
   sanitizeFilter, FIELD_NAME_RE, INDEX_NAME_RE,
 } from '../parsers/vector-index.parser';
-import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyPatternData } from '@betterdb/shared';
-import { extractPattern } from '@betterdb/shared';
+import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyDetail, KeyPatternData } from '@betterdb/shared';
+import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT } from '@betterdb/shared';
 
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
@@ -519,15 +519,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
 
     const patternsMap = new Map<string, KeyPatternData>();
-    const keyDetails: Array<{
-      keyName: string;
-      keyType: string | null;
-      cardinality: number | null;
-      freqScore: number | null;
-      idleSeconds: number | null;
-      memoryBytes: number | null;
-      ttl: number | null;
-    }> = [];
+    let keyDetails: KeyDetail[] = [];
     let cursor = '0';
     let scanned = 0;
 
@@ -636,6 +628,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         }
       }
 
+      // Bound memory during a full-keyspace scan: keep only the keys that can
+      // still surface as top-N hot / largest keys downstream.
+      if (keyDetails.length >= KEY_DETAILS_PRUNE_AT) {
+        keyDetails = pruneKeyDetails(keyDetails);
+      }
+
       if (!options.fullScan && scanned >= options.sampleSize) break;
     } while (cursor !== '0');
 
@@ -643,7 +641,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       dbSize,
       scanned,
       patterns: Array.from(patternsMap.values()),
-      keyDetails,
+      keyDetails: pruneKeyDetails(keyDetails),
     };
   }
 
