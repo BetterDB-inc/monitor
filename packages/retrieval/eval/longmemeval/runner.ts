@@ -3,6 +3,7 @@ import type { RetrievalSchema } from '../../src/index';
 import { chunkRecord, recordIsHit } from './adapter';
 import { createHybridRerank } from './rerank';
 import { assembleContexts } from './assemble';
+import { resolveTemporal } from './temporal';
 import { consolidateRecordFacts } from './facts';
 import type { FactExtractor } from './facts';
 import { createCostReport } from './levers';
@@ -86,6 +87,7 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const levers = config.levers ?? [];
   const costReport = config.costReport ?? createCostReport();
   const assembleOn = levers.includes('assemble');
+  const temporalOn = levers.includes('temporal');
   const factsOn = levers.includes('facts') && config.factExtractor !== undefined;
   const qaRun = reader !== null && judge !== null;
   const useRerank = rerankPool > k;
@@ -178,13 +180,22 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
         // When the assemble lever is on, structure the wider rerank `pool` (group by
         // session, order chronologically, dedup, MMR) into the reader's contexts;
         // recall above is still measured on the unmodified rerank top-k.
+        let readerPool = pool;
+        if (temporalOn) {
+          const startedAt = Date.now();
+          readerPool = resolveTemporal(pool, { asOf: record.question_date });
+          costReport.record('temporal', { latencyMs: Date.now() - startedAt });
+        }
+
         let contexts: string[];
         if (assembleOn) {
           const startedAt = Date.now();
-          contexts = assembleContexts(pool, k);
+          contexts = assembleContexts(readerPool, k);
           costReport.record('assemble', { latencyMs: Date.now() - startedAt });
         } else {
-          contexts = hits.map((h) => (h.fields.date ? `[${h.fields.date}] ${h.text}` : h.text));
+          contexts = readerPool
+            .slice(0, k)
+            .map((h) => (h.fields.date ? `[${h.fields.date}] ${h.text}` : h.text));
         }
         const question =
           record.question_date !== undefined && record.question_date !== ''
