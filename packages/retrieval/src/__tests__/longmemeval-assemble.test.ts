@@ -16,49 +16,52 @@ const hit = (id: string, text: string, session_id: string, date: string, score =
   fields: { session_id, date },
 });
 
-describe('assembleContexts', () => {
-  it('orders a single session chronologically and prefixes the date', () => {
-    const hits = [hit('b', 'second', 's1', '2026-02-01'), hit('a', 'first', 's1', '2026-01-01')];
-    expect(assembleContexts(hits, 10)).toEqual(['[2026-01-01] first', '[2026-02-01] second']);
-  });
-
-  it('keeps each session contiguous when sessions share a date and interleave in rank order', () => {
+describe('assembleContexts (default: relevance-first, non-destructive)', () => {
+  it('keeps the top-k in pool order without dedup, MMR, or re-sort, prefixing the date', () => {
     const hits = [
-      hit('s1a', 'alpha-1', 's1', '2026-01-01'),
-      hit('s2a', 'beta-1', 's2', '2026-01-01'),
-      hit('s1b', 'alpha-2', 's1', '2026-01-01'),
-      hit('s2b', 'beta-2', 's2', '2026-01-01'),
+      hit('a', 'the quick brown fox jumps', 's2', '2026-03-01'),
+      hit('b', 'the quick brown fox jumps over', 's1', '2026-01-01'),
+      hit('c', 'unrelated zebra content', 's1', '2026-01-01'),
     ];
-    expect(assembleContexts(hits, 10)).toEqual([
-      '[2026-01-01] alpha-1',
-      '[2026-01-01] alpha-2',
-      '[2026-01-01] beta-1',
-      '[2026-01-01] beta-2',
+    // No dedup (b, a near-duplicate, both kept), no chronological re-sort (a's
+    // later date does not move it), no dropping — just the rerank-ordered top-k.
+    expect(assembleContexts(hits, 3)).toEqual([
+      '[2026-03-01] the quick brown fox jumps',
+      '[2026-01-01] the quick brown fox jumps over',
+      '[2026-01-01] unrelated zebra content',
     ]);
   });
 
-  it('orders sessions chronologically by their earliest date, not rank order', () => {
+  it('truncates to k in pool order', () => {
     const hits = [
-      hit('late', 'march', 's_late', '2026-03-01'),
-      hit('early', 'january', 's_early', '2026-01-01'),
+      hit('a', 'first', 's1', '2026-01-01'),
+      hit('b', 'second', 's2', '2026-02-01'),
+      hit('c', 'third', 's3', '2026-03-01'),
     ];
-    expect(assembleContexts(hits, 10)).toEqual(['[2026-01-01] january', '[2026-03-01] march']);
+    expect(assembleContexts(hits, 2)).toEqual(['[2026-01-01] first', '[2026-02-01] second']);
   });
 
-  it('drops near-duplicate chunks, keeping the higher-ranked one', () => {
+  it('renders hits without a date as bare text', () => {
+    const hits: QueryHit[] = [{ id: 'a', text: 'no date', score: 0, fields: { session_id: 's1' } }];
+    expect(assembleContexts(hits, 5)).toEqual(['no date']);
+  });
+});
+
+describe('assembleContexts (opt-in structure)', () => {
+  it('dedups near-duplicates only when dedupThreshold is set', () => {
     const hits = [
-      hit('dupA', 'the quick brown fox jumps', 's1', '2026-01-01', 0.1),
-      hit('dupB', 'the quick brown fox jumps over', 's1', '2026-01-01', 0.3),
-      hit('other', 'completely unrelated zebra content here', 's1', '2026-01-01', 0.2),
+      hit('a', 'the quick brown fox jumps', 's1', '2026-01-01'),
+      hit('b', 'the quick brown fox jumps over', 's1', '2026-01-01'),
+      hit('c', 'unrelated zebra content here', 's1', '2026-01-01'),
     ];
-    const out = assembleContexts(hits, 10);
-    expect(out).toHaveLength(2);
-    expect(out).toContain('[2026-01-01] the quick brown fox jumps');
-    expect(out).toContain('[2026-01-01] completely unrelated zebra content here');
-    expect(out).not.toContain('[2026-01-01] the quick brown fox jumps over');
+    const out = assembleContexts(hits, 10, { dedupThreshold: 0.9 });
+    expect(out).toEqual([
+      '[2026-01-01] the quick brown fox jumps',
+      '[2026-01-01] unrelated zebra content here',
+    ]);
   });
 
-  it('uses MMR to fill k slots with diverse hits, not near-identical clusters', () => {
+  it('applies MMR diversity only when mmrLambda is set', () => {
     const hits = [
       hit('cat1', 'my cat loves tuna fish snacks', 's1', '2026-01-01', 0.1),
       hit('cat2', 'my cat enjoys tuna fish treats', 's2', '2026-01-02', 0.12),
@@ -71,15 +74,19 @@ describe('assembleContexts', () => {
     expect(out.some((c) => c.includes('revenue grew'))).toBe(true);
   });
 
-  it('respects the incoming pool order (rerank) over raw vector distance', () => {
-    // Array order is the rerank order (best first); .score is raw vector
-    // distance. Here the rerank-best hit (first) has a WORSE distance than its
-    // near-duplicate, so a distance-based dedup would wrongly keep the latter.
+  it('groups by session and orders chronologically only when group is set', () => {
     const hits = [
-      hit('A', 'the quick brown fox jumps high', 's1', '2026-01-01', 0.3),
-      hit('B', 'the quick brown fox jumps', 's1', '2026-01-01', 0.1),
+      hit('s2a', 'beta-1', 's2', '2026-03-01'),
+      hit('s1a', 'alpha-1', 's1', '2026-01-01'),
+      hit('s2b', 'beta-2', 's2', '2026-03-01'),
+      hit('s1b', 'alpha-2', 's1', '2026-01-01'),
     ];
-    expect(assembleContexts(hits, 1)).toEqual(['[2026-01-01] the quick brown fox jumps high']);
+    expect(assembleContexts(hits, 10, { group: true })).toEqual([
+      '[2026-01-01] alpha-1',
+      '[2026-01-01] alpha-2',
+      '[2026-03-01] beta-1',
+      '[2026-03-01] beta-2',
+    ]);
   });
 });
 
@@ -95,40 +102,42 @@ function spyReader(): { reader: Reader; calls: string[][] } {
   return { reader, calls };
 }
 
-function leadingDates(contexts: string[]): string[] {
-  return contexts
-    .map((c) => /^\[([^\]]+)\]/.exec(c)?.[1])
-    .filter((d): d is string => d !== undefined);
-}
-
 describe('assemble lever integration', () => {
-  it('feeds the reader chronologically-assembled contexts and records a zero-cost entry', async () => {
-    const { reader, calls } = spyReader();
-    const costReport = createCostReport();
-    const summary = await runEval({
-      records: await loadFixture(),
+  it('feeds the reader relevance-first contexts and records a zero-cost entry, no recall regression', async () => {
+    const baseConfig = {
       embedder: createMockEmbedder(),
       store: createMockStore(),
-      reader,
-      judge: createMockJudge(),
       k: 2,
-      chunkMode: 'session',
+      chunkMode: 'session' as const,
       limit: 20,
       rerankPool: 2,
+    };
+    const baseline = await runEval({
+      ...baseConfig,
+      records: await loadFixture(),
+      reader: null,
+      judge: null,
+    });
+
+    const { reader, calls } = spyReader();
+    const costReport = createCostReport();
+    const withAssemble = await runEval({
+      ...baseConfig,
+      records: await loadFixture(),
+      reader,
+      judge: createMockJudge(),
       levers: ['assemble'],
       costReport,
     });
 
-    expect(summary.levers).toEqual(['assemble']);
-    const assembleCost = summary.costs.find((c) => c.name === 'assemble');
-    expect(assembleCost).toBeDefined();
-    expect(assembleCost?.embedCalls).toBe(0);
-    expect(assembleCost?.llmCalls).toBe(0);
-
+    expect(withAssemble.levers).toEqual(['assemble']);
+    const cost = withAssemble.costs.find((c) => c.name === 'assemble');
+    expect(cost?.embedCalls).toBe(0);
+    expect(cost?.llmCalls).toBe(0);
     expect(calls.length).toBeGreaterThan(0);
     for (const contexts of calls) {
-      const dates = leadingDates(contexts);
-      expect(dates).toEqual([...dates].sort());
+      expect(contexts.length).toBeLessThanOrEqual(2);
     }
+    expect(withAssemble.recallAtK).toBeGreaterThanOrEqual(baseline.recallAtK);
   });
 });

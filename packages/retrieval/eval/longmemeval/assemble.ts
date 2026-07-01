@@ -1,12 +1,15 @@
 import type { QueryHit } from '../../src/index';
 import { tokenize } from './rerank';
 
-const DEFAULT_DEDUP_THRESHOLD = 0.9;
-const DEFAULT_MMR_LAMBDA = 0.5;
-
 export interface AssembleOptions {
+  // Structure features are OPT-IN. By default assembleContexts is relevance-first
+  // and non-destructive: it keeps the rerank-ordered top-k and only prefixes the
+  // date. On real LongMemEval-M, enabling dedup + MMR + chronological re-sort by
+  // default regressed QA hard (evidence dropped/reordered before the reader), so
+  // each structure feature is now behind its own flag for isolated A/B.
   dedupThreshold?: number;
   mmrLambda?: number;
+  group?: boolean;
 }
 
 function renderContext(hit: QueryHit): string {
@@ -104,25 +107,35 @@ function groupBySession(hits: QueryHit[]): Map<string, QueryHit[]> {
   return groups;
 }
 
-export function assembleContexts(
-  hits: QueryHit[],
-  k: number,
-  options: AssembleOptions = {},
-): string[] {
-  const dedupThreshold = options.dedupThreshold ?? DEFAULT_DEDUP_THRESHOLD;
-  const mmrLambda = options.mmrLambda ?? DEFAULT_MMR_LAMBDA;
-
-  const deduped = dedupe(hits, dedupThreshold);
-  const selected = mmrSelect(deduped, k, mmrLambda);
-  const sessions = [...groupBySession(selected).values()]
+function groupChronologically(hits: QueryHit[]): QueryHit[] {
+  const sessions = [...groupBySession(hits).values()]
     .map((group) => [...group].sort(byDate))
     .sort((a, b) => byDate(a[0], b[0]));
-
   const ordered: QueryHit[] = [];
   for (const session of sessions) {
     for (const hit of session) {
       ordered.push(hit);
     }
   }
-  return ordered.map(renderContext);
+  return ordered;
+}
+
+export function assembleContexts(
+  hits: QueryHit[],
+  k: number,
+  options: AssembleOptions = {},
+): string[] {
+  let selected = hits;
+  if (options.dedupThreshold !== undefined) {
+    selected = dedupe(selected, options.dedupThreshold);
+  }
+  if (options.mmrLambda !== undefined) {
+    selected = mmrSelect(selected, k, options.mmrLambda);
+  } else {
+    selected = selected.slice(0, k);
+  }
+  if (options.group === true) {
+    selected = groupChronologically(selected);
+  }
+  return selected.map(renderContext);
 }
