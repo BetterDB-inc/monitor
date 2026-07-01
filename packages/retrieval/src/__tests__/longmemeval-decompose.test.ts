@@ -10,18 +10,36 @@ import { createCostReport } from '../../eval/longmemeval/levers';
 
 const hit = (id: string): QueryHit => ({ id, text: id, score: 0, fields: { session_id: id } });
 
-describe('mergeHits', () => {
-  it('unions per-query hits, deduping by id with original-query order first', () => {
+describe('mergeHits (reciprocal rank fusion)', () => {
+  it('unions per-query hits, deduping by id', () => {
     const q0 = [hit('a'), hit('b')];
     const q1 = [hit('b'), hit('c')];
     const q2 = [hit('d')];
-    expect(mergeHits([q0, q1, q2], 10).map((h) => h.id)).toEqual(['a', 'b', 'c', 'd']);
+    expect(
+      mergeHits([q0, q1, q2], 10)
+        .map((h) => h.id)
+        .sort(),
+    ).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('surfaces a top sub-query hit even when the primary query fills the cap', () => {
+    const primary = [hit('a'), hit('b')];
+    const sub = [hit('c'), hit('a')];
+    // Old behaviour concatenated then truncated, dropping c. RRF lets c (rank 0
+    // in the sub-query) into the merged pool at cap 2.
+    expect(mergeHits([primary, sub], 2).map((h) => h.id)).toContain('c');
+  });
+
+  it('ranks a hit corroborated across queries above singletons', () => {
+    const q0 = [hit('a'), hit('b')];
+    const q1 = [hit('b'), hit('c')];
+    // b appears in both queries, so its fused score beats the singletons.
+    expect(mergeHits([q0, q1], 10)[0].id).toBe('b');
   });
 
   it('handles empty input and truncates the union to limit', () => {
     expect(mergeHits([], 5)).toEqual([]);
-    const merged = mergeHits([[hit('a'), hit('b'), hit('c')], []], 2);
-    expect(merged.map((h) => h.id)).toEqual(['a', 'b']);
+    expect(mergeHits([[hit('a'), hit('b'), hit('c')], []], 2)).toHaveLength(2);
   });
 });
 
