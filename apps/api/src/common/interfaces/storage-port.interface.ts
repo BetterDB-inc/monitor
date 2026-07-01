@@ -480,7 +480,9 @@ export interface StoragePort {
     samples: Omit<StoredCommandStatsSample, 'id' | 'connectionId'>[],
     connectionId: string,
   ): Promise<number>;
-  getCommandStatsHistory(options: CommandStatsHistoryQueryOptions): Promise<StoredCommandStatsSample[]>;
+  getCommandStatsHistory(
+    options: CommandStatsHistoryQueryOptions,
+  ): Promise<StoredCommandStatsSample[]>;
   pruneOldCommandStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Vector Index Snapshot Methods
@@ -588,4 +590,5 @@ export interface StoragePort {
   ): Promise<StoredMemoryProposalAudit>;
   getMemoryProposalAudit(proposalId: string): Promise<StoredMemoryProposalAudit[]>;
   expireMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]>;
+  failStaleApplyingMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]>;
 }

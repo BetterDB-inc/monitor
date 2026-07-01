@@ -1664,6 +1664,31 @@ export class MemoryAdapter implements StoragePort {
     return expired;
   }
 
+  async failStaleApplyingMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]> {
+    const failed: StoredMemoryProposal[] = [];
+    for (const proposal of this.memoryProposals.values()) {
+      if (
+        proposal.status === 'applying' &&
+        proposal.reviewed_at !== null &&
+        proposal.reviewed_at <= now
+      ) {
+        const updated = structuredClone({
+          ...proposal,
+          status: 'failed' as const,
+          applied_at: now,
+          applied_result: {
+            success: false,
+            error: 'stale_apply',
+            details: { reviewed_at: proposal.reviewed_at },
+          },
+        });
+        this.memoryProposals.set(proposal.id, updated);
+        failed.push(structuredClone(updated));
+      }
+    }
+    return failed;
+  }
+
   async saveCaptureSession(
     session: StoredCaptureSession,
     connectionId: string,
