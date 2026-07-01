@@ -47,17 +47,27 @@ export function createOpenAIDecomposer(apiKey: string): QueryDecomposer {
   };
 }
 
+// Reciprocal Rank Fusion constant — dampens the contribution of lower ranks so
+// a hit's position across queries matters more than its absolute rank.
+const RRF_K = 60;
+
+// Merge per-query ranked hit lists by Reciprocal Rank Fusion: each hit scores
+// sum(1 / (RRF_K + rank)) across the queries it appears in, so evidence a
+// sub-query surfaces competes with the primary query's hits (a plain
+// concatenate-then-truncate would drop it once the primary fills the cap), and
+// hits corroborated across queries are boosted.
 export function mergeHits(perQueryHits: QueryHit[][], limit: number): QueryHit[] {
-  const seen = new Set<string>();
-  const merged: QueryHit[] = [];
+  const scoreById = new Map<string, number>();
+  const hitById = new Map<string, QueryHit>();
   for (const hits of perQueryHits) {
-    for (const hit of hits) {
-      if (seen.has(hit.id)) {
-        continue;
+    hits.forEach((hit, rank) => {
+      scoreById.set(hit.id, (scoreById.get(hit.id) ?? 0) + 1 / (RRF_K + rank));
+      if (hitById.has(hit.id) === false) {
+        hitById.set(hit.id, hit);
       }
-      seen.add(hit.id);
-      merged.push(hit);
-    }
+    });
   }
-  return merged.slice(0, limit);
+  return [...hitById.values()]
+    .sort((a, b) => (scoreById.get(b.id) ?? 0) - (scoreById.get(a.id) ?? 0))
+    .slice(0, limit);
 }
