@@ -10,6 +10,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '../components/ui/table';
 import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
+import { Tooltip as UITooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import {
   BarChart,
   Bar,
@@ -24,7 +25,7 @@ import {
   Legend,
   type TooltipValueType,
 } from 'recharts';
-import { BarChart3 } from 'lucide-react';
+import { BarChart3, HelpCircle } from 'lucide-react';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 
 function getRankDelta(currentRank: number, keyName: string, prevKeys: HotKeyEntry[] | null): { label: string; className: string } {
@@ -842,7 +843,19 @@ export function KeyAnalytics() {
                         <TableHead className="w-12">#</TableHead>
                         <TableHead>Key Name</TableHead>
                         <TableHead>Type</TableHead>
-                        <TableHead>Cardinality</TableHead>
+                        <TableHead>
+                          <UITooltip>
+                            <TooltipTrigger className="inline-flex items-center gap-1 cursor-help">
+                              Cardinality
+                              <HelpCircle className="h-3 w-3 text-muted-foreground" />
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              The valkey big-key metric: number of elements for collections
+                              (list/set/hash/zset/stream) and byte length for strings. Larger
+                              cardinality = slower operations like HGETALL.
+                            </TooltipContent>
+                          </UITooltip>
+                        </TableHead>
                         <TableHead>Memory</TableHead>
                         <TableHead>TTL</TableHead>
                       </TableRow>
@@ -872,7 +885,19 @@ export function KeyAnalytics() {
                         <TableHead className="w-12">#</TableHead>
                         <TableHead>Key Name</TableHead>
                         <TableHead>Type</TableHead>
-                        <TableHead>Cardinality</TableHead>
+                        <TableHead>
+                          <UITooltip>
+                            <TooltipTrigger className="inline-flex items-center gap-1 cursor-help">
+                              Cardinality
+                              <HelpCircle className="h-3 w-3 text-muted-foreground" />
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              The valkey big-key metric: number of elements for collections
+                              (list/set/hash/zset/stream) and byte length for strings. Larger
+                              cardinality = slower operations like HGETALL.
+                            </TooltipContent>
+                          </UITooltip>
+                        </TableHead>
                         <TableHead>Memory</TableHead>
                         <TableHead>TTL</TableHead>
                       </TableRow>
@@ -895,9 +920,22 @@ export function KeyAnalytics() {
                             )}
                           </TableCell>
                           <TableCell className="font-bold">
-                            {entry.cardinality != null ? formatNumber(entry.cardinality) : '\u2014'}
-                            {entry.keyType === 'string' && entry.cardinality != null && (
-                              <span className="text-xs text-muted-foreground"> B</span>
+                            {entry.cardinality == null ? (
+                              '\u2014'
+                            ) : entry.keyType === 'string' ? (
+                              <>
+                                {formatBytes(entry.cardinality)}
+                                <span className="ml-1 text-xs font-normal text-muted-foreground">
+                                  string length
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                {formatNumber(entry.cardinality)}
+                                <span className="ml-1 text-xs font-normal text-muted-foreground">
+                                  elements
+                                </span>
+                              </>
                             )}
                           </TableCell>
                           <TableCell>
