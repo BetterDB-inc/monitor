@@ -121,10 +121,15 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
         return;
       }
 
-      // SCAN can return the same key more than once, so `scanned` may exceed
-      // `dbSize` (always does on a full scan). Clamp to 1 so extrapolated
-      // pattern totals are never scaled *down* below the observed counts.
-      const samplingRatio = Math.min(1, result.scanned / result.dbSize);
+      // `scanned` counts key VISITS, not distinct keys: SCAN can return the same
+      // key more than once (rehashing), so during a full scan it usually exceeds
+      // the distinct `dbSize`. Per-pattern `stats.count` is inflated by the same
+      // duplicate visits, so dividing by scanned/dbSize (which is >1 here) is the
+      // correct normalization — it deflates the visit-inflated totals back to a
+      // dbSize-consistent estimate (summed over patterns it yields exactly
+      // dbSize). Do NOT clamp to 1: that would persist raw visit counts and
+      // over-count keys/memory on deep scans.
+      const samplingRatio = result.scanned / result.dbSize;
       const snapshots: KeyPatternSnapshot[] = [];
 
       for (const stats of result.patterns) {
@@ -250,7 +255,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
 
       const duration = Date.now() - startTime;
       this.logger.log(
-        `Key Analytics (${ctx.connectionName}): ${fullScan ? 'deep-scanned' : 'sampled'} ${result.scanned}/${result.dbSize} keys (${(samplingRatio * 100).toFixed(1)}%), ` +
+        `Key Analytics (${ctx.connectionName}): ${fullScan ? 'deep-scanned' : 'sampled'} ${result.scanned}/${result.dbSize} keys (${(Math.min(1, samplingRatio) * 100).toFixed(1)}%), ` +
         `found ${result.patterns.length} patterns in ${duration}ms`,
       );
     } catch (error) {
