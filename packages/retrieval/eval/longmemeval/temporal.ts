@@ -15,9 +15,11 @@ function applyAsOf(hits: QueryHit[], asOf: string | undefined): QueryHit[] {
   return kept.length > 0 ? kept : hits;
 }
 
+// As-of filter ONLY: drop chunks dated after the question, preserving the
+// incoming rerank order. An earlier version also re-sorted survivors
+// newest-first, but that fed a recency-ordered pool into the assembler's
+// position-based relevance and regressed QA on LongMemEval-M — ordering is left
+// to the rerank / assembler stages.
 export function resolveTemporal(hits: QueryHit[], options: TemporalOptions = {}): QueryHit[] {
-  const scoped = applyAsOf(hits, options.asOf);
-  return [...scoped].sort((a, b) => {
-    return (b.fields.date ?? '').localeCompare(a.fields.date ?? '');
-  });
+  return applyAsOf(hits, options.asOf);
 }
