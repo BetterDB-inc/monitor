@@ -970,8 +970,9 @@ export function KeyAnalytics() {
                   </div>
                 ) : !keySizes || !keySizes.available ? (
                   <div className="text-center py-12 text-muted-foreground">
-                    No key size data available. This requires a Valkey server that exposes the{' '}
-                    <code className="font-mono text-xs">keysizes</code> INFO section.
+                    No key size data available. The{' '}
+                    <code className="font-mono text-xs">keysizes</code> INFO section is only
+                    exposed by Redis 8.0+; Valkey does not currently emit it.
                   </div>
                 ) : (
                   <div className="space-y-8">
