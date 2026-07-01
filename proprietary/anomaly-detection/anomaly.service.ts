@@ -26,6 +26,21 @@ interface MetricExtractor {
   (info: Record<string, string>): number | null;
 }
 
+interface PersistenceChildTrack {
+  startedAt: number;
+  lastProcessed: number;
+  lastAdvanceTs: number;
+  warnedLong: boolean;
+  reportedStall: boolean;
+}
+
+interface ConnectionPersistenceState {
+  rdb?: PersistenceChildTrack;
+  aof?: PersistenceChildTrack;
+  rdbLastStatus?: string;
+  aofLastStatus?: string;
+}
+
 @Injectable()
 export class AnomalyService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(AnomalyService.name);
@@ -40,11 +55,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private lastSlowlogId = new Map<string, number>();
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
+  private lastPersistenceState = new Map<string, ConnectionPersistenceState>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
 
   private readonly metricExtractors: Map<MetricType, MetricExtractor>;
+  // Persistence-child (BGSAVE / AOF rewrite) stall thresholds, in seconds.
+  private readonly persistenceStallSec: number;
+  private readonly persistenceWarnSec: number;
+  private readonly persistenceCritSec: number;
   private readonly correlationIntervalMs = 5000;
   private correlationInterval: NodeJS.Timeout | null = null;
   private prometheusSummaryInterval: NodeJS.Timeout | null = null;
@@ -64,6 +84,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs);
     this.metricExtractors = this.initializeMetricExtractors();
+
+    const positiveNumber = (value: unknown, fallback: number): number => {
+      const n = Number(value);
+      return Number.isFinite(n) && n > 0 ? n : fallback;
+    };
+    this.persistenceStallSec = positiveNumber(this.configService.get('MONITOR_PERSISTENCE_STALL_SEC'), 60);
+    this.persistenceWarnSec = positiveNumber(this.configService.get('MONITOR_PERSISTENCE_WARN_SEC'), 120);
+    this.persistenceCritSec = positiveNumber(this.configService.get('MONITOR_PERSISTENCE_CRIT_SEC'), 600);
   }
 
   protected getIntervalMs(): number {
@@ -190,8 +218,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
-      // REPLICATION_ROLE, CLUSTER_STATE, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
+      // REPLICATION_ROLE, CLUSTER_STATE, PERSISTENCE_CHILD, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
+      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.PERSISTENCE_CHILD || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -207,6 +235,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.lastSlowlogId.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
+    this.lastPersistenceState.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
@@ -443,10 +472,181 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           this.logger.debug(`Failed to get cluster info for ${ctx.connectionName}: ${clusterErr instanceof Error ? clusterErr.message : clusterErr}`);
         }
       }
+
+      // Persistence-child stall detection (stuck BGSAVE / AOF rewrite) — state-based, not z-score
+      await this.detectPersistenceStall(info, ctx, timestamp);
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
     }
+  }
+
+  /**
+   * Detect a stalled or failed persistence fork child (BGSAVE / AOF rewrite).
+   *
+   * This is state-based rather than statistical: a stuck fork shows the in-progress
+   * flag set with its elapsed time climbing while save-key progress stays frozen
+   * (see valkey-io/valkey#2322). Signals come from the INFO persistence section.
+   */
+  private async detectPersistenceStall(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    const state = this.lastPersistenceState.get(ctx.connectionId) ?? {};
+
+    await this.evaluatePersistenceChild(
+      'rdb',
+      {
+        inProgress: info['rdb_bgsave_in_progress'] === '1',
+        elapsedSec: this.parseNumber(info['rdb_current_bgsave_time_sec']),
+        // These two counters are intentionally NOT rdb_-prefixed in INFO persistence.
+        processed: this.parseNumber(info['current_save_keys_processed']),
+        total: this.parseNumber(info['current_save_keys_total']),
+        lastStatus: info['rdb_last_bgsave_status'],
+      },
+      state,
+      ctx,
+      timestamp,
+    );
+
+    await this.evaluatePersistenceChild(
+      'aof',
+      {
+        inProgress: info['aof_rewrite_in_progress'] === '1',
+        elapsedSec: this.parseNumber(info['aof_current_rewrite_time_sec']),
+        // AOF rewrite exposes no per-key progress counter, so frozen-progress
+        // stall detection does not apply; it relies on the elapsed-time ceiling.
+        processed: null,
+        total: null,
+        lastStatus: info['aof_last_bgrewrite_status'],
+      },
+      state,
+      ctx,
+      timestamp,
+    );
+
+    this.lastPersistenceState.set(ctx.connectionId, state);
+  }
+
+  private async evaluatePersistenceChild(
+    kind: 'rdb' | 'aof',
+    signals: {
+      inProgress: boolean;
+      elapsedSec: number | null;
+      processed: number | null;
+      total: number | null;
+      lastStatus: string | undefined;
+    },
+    state: ConnectionPersistenceState,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    // Completed-status transition to error (e.g. failed BGSAVE — the case #2322
+    // users disable stop-writes-on-bgsave-error around).
+    const status = signals.lastStatus;
+    if (status !== undefined && status !== '') {
+      const prevStatus = kind === 'rdb' ? state.rdbLastStatus : state.aofLastStatus;
+      if (prevStatus !== undefined && prevStatus !== status && status === 'err') {
+        await this.addAnomaly(this.buildPersistenceEvent(kind, 'error', 0, signals, timestamp, ctx), ctx);
+      }
+      if (kind === 'rdb') state.rdbLastStatus = status;
+      else state.aofLastStatus = status;
+    }
+
+    if (!signals.inProgress) {
+      // Episode ended (or never started) — clear per-episode tracking.
+      if (kind === 'rdb') delete state.rdb;
+      else delete state.aof;
+      return;
+    }
+
+    // INFO reports -1 for elapsed when no child is running; clamp to 0.
+    const elapsedSec = signals.elapsedSec !== null && signals.elapsedSec >= 0 ? signals.elapsedSec : 0;
+
+    let track = kind === 'rdb' ? state.rdb : state.aof;
+    if (!track) {
+      // First observation of this episode — establish a baseline to measure progress against.
+      track = {
+        startedAt: timestamp,
+        lastProcessed: signals.processed ?? 0,
+        lastAdvanceTs: timestamp,
+        warnedLong: false,
+        reportedStall: false,
+      };
+      if (kind === 'rdb') state.rdb = track;
+      else state.aof = track;
+      return;
+    }
+
+    // Advance tracking (RDB only exposes processed-keys progress).
+    if (signals.processed !== null && signals.processed > track.lastProcessed) {
+      track.lastProcessed = signals.processed;
+      track.lastAdvanceTs = timestamp;
+    }
+
+    const stalledForMs = timestamp - track.lastAdvanceTs;
+    const frozenStall = signals.processed !== null && stalledForMs >= this.persistenceStallSec * 1000;
+    const tooLong = elapsedSec >= this.persistenceCritSec;
+
+    if (!track.reportedStall && (frozenStall || tooLong)) {
+      track.reportedStall = true;
+      await this.addAnomaly(this.buildPersistenceEvent(kind, 'stall', elapsedSec, signals, timestamp, ctx), ctx);
+      return;
+    }
+
+    if (!track.reportedStall && !track.warnedLong && elapsedSec >= this.persistenceWarnSec) {
+      track.warnedLong = true;
+      await this.addAnomaly(this.buildPersistenceEvent(kind, 'long', elapsedSec, signals, timestamp, ctx), ctx);
+    }
+  }
+
+  private buildPersistenceEvent(
+    kind: 'rdb' | 'aof',
+    reason: 'error' | 'stall' | 'long',
+    elapsedSec: number,
+    signals: { processed: number | null; total: number | null },
+    timestamp: number,
+    ctx: ConnectionContext,
+  ): AnomalyEvent {
+    const label = kind === 'rdb' ? { name: 'RDB save', op: 'BGSAVE' } : { name: 'AOF rewrite', op: 'BGREWRITEAOF' };
+    let severity: AnomalySeverity;
+    let message: string;
+    let threshold: number;
+
+    if (reason === 'error') {
+      severity = AnomalySeverity.CRITICAL;
+      threshold = 0;
+      message = `CRITICAL: last ${label.name} (${label.op}) reported an error — persistence may be failing`;
+    } else if (reason === 'stall') {
+      severity = AnomalySeverity.CRITICAL;
+      threshold = this.persistenceStallSec;
+      const progress =
+        signals.processed !== null && signals.total !== null
+          ? ` (processed ${signals.processed}/${signals.total} keys)`
+          : '';
+      message = `CRITICAL: ${label.name} (${label.op}) appears stuck — running ${elapsedSec}s with no progress${progress}`;
+    } else {
+      severity = AnomalySeverity.WARNING;
+      threshold = this.persistenceWarnSec;
+      message = `WARNING: ${label.name} (${label.op}) running long — ${elapsedSec}s elapsed`;
+    }
+
+    return {
+      id: `${ctx.connectionId}-persistence-${kind}-${reason}-${timestamp}`,
+      timestamp,
+      metricType: MetricType.PERSISTENCE_CHILD,
+      anomalyType: AnomalyType.SPIKE,
+      severity,
+      value: elapsedSec,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold,
+      message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
   }
 
   private convertInfoToRecord(infoResponse: any): Record<string, string> {
