@@ -12,6 +12,7 @@ import { consolidateRecordFacts } from './facts';
 import type { FactExtractor } from './facts';
 import { buildEntityGraph, traverseGraph } from './graph';
 import type { EntityGraph, EntityLinker } from './graph';
+import { isPreferenceQuestion, promotePreferenceHits, PREFERENCE_ID_PREFIX } from './preference';
 import { createCostReport } from './levers';
 import type { CostReport, LeverCostEntry, LeverName } from './levers';
 import type { ChunkMode, Embedder, Judge, LmeRecord, Reader, Store } from './types';
@@ -55,6 +56,13 @@ export interface RunConfig {
   graphHops?: number;
   // Max traversed facts appended to the reader contexts per question (default 5).
   graphMaxFacts?: number;
+  // LLM seam for the preference lever. When 'preference' is enabled, per-session
+  // preference statements are consolidated and indexed as pref_ chunks; on
+  // recommendation-shaped questions (question-derived heuristic, never the
+  // dataset's question_type label) they are importance-boosted into the top-k.
+  preferenceExtractor?: FactExtractor;
+  // Max preference chunks promoted into the top-k window (default 2).
+  preferencePromoteCap?: number;
 }
 
 export interface TypeStats {
@@ -137,6 +145,7 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const decomposeOn = levers.includes('decompose') && config.decomposer !== undefined;
   // The graph is built over curated facts, so the lever is inert without 'facts'.
   const graphOn = levers.includes('graph') && factsOn && config.entityLinker !== undefined;
+  const preferenceOn = levers.includes('preference') && config.preferenceExtractor !== undefined;
   const qaRun = reader !== null && judge !== null;
   const useRerank = rerankPool > k;
   const fetchK = useRerank ? rerankPool : k;
@@ -183,6 +192,19 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
           costReport.record('graph', { llmCalls: 1, latencyMs: Date.now() - linkStartedAt });
           graph = buildEntityGraph(facts, entities);
         }
+      }
+      if (preferenceOn && config.preferenceExtractor !== undefined) {
+        const startedAt = Date.now();
+        const { chunks: prefChunks, llmCalls } = await consolidateRecordFacts(
+          record,
+          config.preferenceExtractor,
+          config.factsConcurrency,
+        );
+        costReport.record('preference', { llmCalls, latencyMs: Date.now() - startedAt });
+        chunks = [
+          ...chunks,
+          ...prefChunks.map((chunk) => ({ ...chunk, id: `${PREFERENCE_ID_PREFIX}${chunk.id}` })),
+        ];
       }
       totalChunks += chunks.length;
 
@@ -235,6 +257,12 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
           k: fetchK,
           ...(useRerank ? { hybrid: 'rerank' as const } : {}),
         });
+      }
+      // Importance boost: on recommendation-shaped questions, promote extracted
+      // preference chunks into the top-k window before recall/QA are measured.
+      // Other questions keep the unmodified pool byte-for-byte.
+      if (preferenceOn && isPreferenceQuestion(record.question)) {
+        pool = promotePreferenceHits(pool, k, config.preferencePromoteCap);
       }
       const hits = pool.slice(0, k);
       const hit = recordIsHit(hits, record.answer_session_ids);

@@ -31,6 +31,17 @@ export function createMockJudge(): Judge {
   };
 }
 
+export function verdictIsCorrect(verdict: string): boolean {
+  const v = verdict.toLowerCase();
+  // `\bcorrect\b` does not match inside "incorrect" (no word boundary), so
+  // detect the verdict by whole word and reject negated/partial forms like
+  // "incorrect", "not correct", or "partially correct".
+  const saysCorrect = /\bcorrect\b/.test(v);
+  const negated =
+    /\bincorrect\b/.test(v) || /\b(?:not|partially|isn't)\b[\s\S]{0,20}\bcorrect\b/.test(v);
+  return saysCorrect && !negated;
+}
+
 /** Real judge: GPT grader returning correct/incorrect, LongMemEval-style. */
 export function createOpenAIJudge(apiKey: string): Judge {
   return {
@@ -43,13 +54,7 @@ export function createOpenAIJudge(apiKey: string): Judge {
         'Reply with exactly one word: "correct" or "incorrect".';
       const user = `Question: ${question}\nGold answer: ${gold}\nModel answer: ${predicted}\n\nVerdict:`;
       const verdict = await chat(apiKey, JUDGE_MODEL, system, user);
-      const v = verdict.toLowerCase();
-      // `\bcorrect\b` does not match inside "incorrect" (no word boundary), so
-      // detect the verdict by whole word and reject negated/partial forms like
-      // "incorrect", "not correct", or "partially correct".
-      const saysCorrect = /\bcorrect\b/.test(v);
-      const negated = /\bincorrect\b/.test(v) || /\b(?:not|partially|isn't)\b[\s\S]{0,20}\bcorrect\b/.test(v);
-      return saysCorrect && !negated;
+      return verdictIsCorrect(verdict);
     },
   };
 }
