@@ -198,7 +198,6 @@ export class MemoryStore {
     if (this.sessionFlushed) {
       return;
     }
-    this.sessionFlushed = true;
     const counts = this.sessionCounts;
     const total =
       counts.remembered +
@@ -207,8 +206,11 @@ export class MemoryStore {
       counts.consolidated +
       counts.evicted;
     if (total === 0) {
+      // Nothing worth reporting yet — leave the one-shot armed so a later
+      // close() (after real activity) can still emit the summary.
       return;
     }
+    this.sessionFlushed = true;
     this.analytics.capture('memory_session', {
       remembered: counts.remembered,
       recalled: counts.recalled,

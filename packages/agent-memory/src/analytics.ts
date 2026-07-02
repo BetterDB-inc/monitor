@@ -49,6 +49,10 @@ function isTelemetryOptedOut(): boolean {
 
 const INSTALL_ID_ENV = 'BETTERDB_INSTANCE_ID';
 
+// Holds a minted id for the rest of the process when persistence fails, so
+// repeated calls (or parallel init) return one stable ephemeral identity.
+let ephemeralInstallId: string | undefined;
+
 function installIdPath(): string {
   const base = process.env.XDG_STATE_HOME;
   const root = base ? base : join(homedir(), '.betterdb');
@@ -73,12 +77,14 @@ function getInstallId(): string {
   } catch {
     // no existing id
   }
-  const newId = crypto.randomUUID();
+  const newId = ephemeralInstallId ?? crypto.randomUUID();
   try {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, newId);
   } catch {
-    // read-only fs — fall back to ephemeral id
+    // Persistence failed — hold the id for the rest of this process so
+    // repeated calls return a stable ephemeral identity.
+    ephemeralInstallId = newId;
   }
   return newId;
 }
