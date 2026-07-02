@@ -1,19 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createAnalytics, NOOP_ANALYTICS, type AnalyticsClient } from '../analytics';
+import { createAnalytics, NOOP_ANALYTICS, PostHogAnalytics, type AnalyticsClient } from '../analytics';
 
-const phState = vi.hoisted(() => ({
+const phState = {
   capture: vi.fn(),
   flush: vi.fn().mockResolvedValue(undefined),
   shutdown: vi.fn().mockResolvedValue(undefined),
-}));
-
-vi.mock('posthog-node', () => ({
-  PostHog: class {
-    capture = phState.capture;
-    flush = phState.flush;
-    shutdown = phState.shutdown;
-  },
-}));
+};
 
 function createMockClient(getResult: unknown = null): AnalyticsClient & { call: ReturnType<typeof vi.fn> } {
   return {
@@ -43,7 +35,7 @@ describe('analytics', () => {
   });
 
   it('returns noop when disabled option is true', async () => {
-    const analytics = await createAnalytics({ apiKey: 'phc_test', disabled: true });
+    const analytics = await createAnalytics({ disabled: true });
     expect(analytics).toBe(NOOP_ANALYTICS);
   });
 
@@ -54,13 +46,13 @@ describe('analytics', () => {
 
   it('returns noop when BETTERDB_TELEMETRY=false', async () => {
     process.env.BETTERDB_TELEMETRY = 'false';
-    const analytics = await createAnalytics({ apiKey: 'phc_test' });
+    const analytics = await createAnalytics();
     expect(analytics).toBe(NOOP_ANALYTICS);
   });
 
   it('returns noop when BETTERDB_TELEMETRY=0', async () => {
     process.env.BETTERDB_TELEMETRY = '0';
-    const analytics = await createAnalytics({ apiKey: 'phc_test' });
+    const analytics = await createAnalytics();
     expect(analytics).toBe(NOOP_ANALYTICS);
   });
 
@@ -79,10 +71,9 @@ describe('analytics', () => {
     });
   });
 
-  describe('PostHogAnalytics via createAnalytics', () => {
+  describe('PostHogAnalytics', () => {
     it('uses the per-install id as distinctId and persists a deployment id via SET', async () => {
-      const analytics = await createAnalytics({ apiKey: 'phc_test_key' });
-      expect(analytics).not.toBe(NOOP_ANALYTICS);
+      const analytics = new PostHogAnalytics(phState);
 
       const client = createMockClient(null);
       await analytics.init(client, 'myprefix', { fieldCount: 3 });
@@ -112,7 +103,7 @@ describe('analytics', () => {
     });
 
     it('reuses an existing deployment id without a SET write', async () => {
-      const analytics = await createAnalytics({ apiKey: 'phc_test_key' });
+      const analytics = new PostHogAnalytics(phState);
 
       const client = createMockClient('stable-id');
       await analytics.init(client, 'myprefix');
@@ -132,7 +123,7 @@ describe('analytics', () => {
         throw new Error('PostHog error');
       });
 
-      const analytics = await createAnalytics({ apiKey: 'phc_test_key' });
+      const analytics = new PostHogAnalytics(phState);
       const client = createMockClient();
       await analytics.init(client, 'test');
       expect(() => analytics.capture('some_event')).not.toThrow();
@@ -140,7 +131,7 @@ describe('analytics', () => {
 
     it('shutdown never throws even if posthog throws', async () => {
       phState.shutdown.mockRejectedValue(new Error('shutdown error'));
-      const analytics = await createAnalytics({ apiKey: 'phc_test_key' });
+      const analytics = new PostHogAnalytics(phState);
       await expect(analytics.shutdown()).resolves.toBeUndefined();
     });
   });

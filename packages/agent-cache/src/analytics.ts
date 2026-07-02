@@ -23,8 +23,6 @@ export interface Analytics {
 }
 
 export interface AnalyticsOptions {
-  apiKey?: string;
-  host?: string;
   disabled?: boolean;
 }
 
@@ -89,7 +87,7 @@ type PostHogClient = {
   shutdown: () => Promise<void>;
 };
 
-class PostHogAnalytics implements Analytics {
+export class PostHogAnalytics implements Analytics {
   private posthog: PostHogClient;
   private distinctId = '';
   private deploymentId = '';
@@ -174,16 +172,12 @@ export async function createAnalytics(opts?: AnalyticsOptions): Promise<Analytic
     return NOOP_ANALYTICS;
   }
 
-  const apiKey =
-    opts?.apiKey ??
-    (BAKED_POSTHOG_API_KEY.startsWith('__') ? undefined : BAKED_POSTHOG_API_KEY);
+  const apiKey = BAKED_POSTHOG_API_KEY.startsWith('__') ? undefined : BAKED_POSTHOG_API_KEY;
   if (!apiKey) {
     return NOOP_ANALYTICS;
   }
 
-  const host =
-    opts?.host ??
-    (BAKED_POSTHOG_HOST.startsWith('__') ? undefined : BAKED_POSTHOG_HOST);
+  const host = BAKED_POSTHOG_HOST.startsWith('__') ? undefined : BAKED_POSTHOG_HOST;
 
   try {
     // @ts-ignore — posthog-node is an optional peer dep

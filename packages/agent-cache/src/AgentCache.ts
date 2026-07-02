@@ -127,8 +127,6 @@ export class AgentCache {
     // Fire-and-forget: initialize product analytics
     const analyticsOpts = options.analytics;
     createAnalytics({
-      apiKey: analyticsOpts?.apiKey,
-      host: analyticsOpts?.host,
       disabled: analyticsOpts?.disabled,
     })
       .then((a) => {

@@ -23,8 +23,6 @@ export interface Analytics {
 }
 
 export interface AnalyticsOptions {
-  apiKey?: string;
-  host?: string;
   disabled?: boolean;
   /** Interval in ms for periodic stats snapshots. Default: 300_000 (5 min). 0 to disable. */
   statsIntervalMs?: number;
@@ -91,7 +89,7 @@ type PostHogClient = {
   shutdown: () => Promise<void>;
 };
 
-class PostHogAnalytics implements Analytics {
+export class PostHogAnalytics implements Analytics {
   private posthog: PostHogClient;
   private distinctId = '';
   private deploymentId = '';
@@ -176,15 +174,12 @@ export async function createAnalytics(opts?: AnalyticsOptions): Promise<Analytic
     return NOOP_ANALYTICS;
   }
 
-  // Key resolution: opts.apiKey → BETTERDB_POSTHOG_API_KEY env var → baked wheel value
-  const bakedKey = BAKED_POSTHOG_API_KEY.startsWith('__') ? undefined : BAKED_POSTHOG_API_KEY;
-  const apiKey = opts?.apiKey ?? process.env.BETTERDB_POSTHOG_API_KEY ?? bakedKey;
+  const apiKey = BAKED_POSTHOG_API_KEY.startsWith('__') ? undefined : BAKED_POSTHOG_API_KEY;
   if (!apiKey) {
     return NOOP_ANALYTICS;
   }
 
-  const bakedHost = BAKED_POSTHOG_HOST.startsWith('__') ? undefined : BAKED_POSTHOG_HOST;
-  const host = opts?.host ?? process.env.BETTERDB_POSTHOG_HOST ?? bakedHost;
+  const host = BAKED_POSTHOG_HOST.startsWith('__') ? undefined : BAKED_POSTHOG_HOST;
 
   try {
     // @ts-ignore — posthog-node is an optional peer dep

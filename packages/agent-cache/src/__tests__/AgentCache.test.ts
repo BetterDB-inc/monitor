@@ -69,7 +69,7 @@ describe('AgentCache', () => {
     const { AgentCache: FreshAgentCache } = await import('../AgentCache');
     const cache = new FreshAgentCache({
       client: createMockValkeyClient() as any,
-      analytics: { apiKey: 'phc_test_key' },
+      analytics: {},
     });
 
     await cache.shutdown();
