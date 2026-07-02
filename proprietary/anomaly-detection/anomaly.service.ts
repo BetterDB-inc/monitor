@@ -30,6 +30,7 @@ interface PersistenceChildTrack {
   startedAt: number;
   lastProcessed: number;
   lastAdvanceTs: number;
+  lastElapsedSec: number;
   warnedLong: boolean;
   reportedStall: boolean;
 }
@@ -571,6 +572,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         startedAt: timestamp,
         lastProcessed: signals.processed ?? 0,
         lastAdvanceTs: timestamp,
+        lastElapsedSec: elapsedSec,
         warnedLong: false,
         reportedStall: false,
       };
@@ -578,6 +580,29 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       else state.aof = track;
       return;
     }
+
+    // A running child's elapsed time and processed-key count are both
+    // monotonic within a single episode and reset when a new fork starts.
+    // Episode boundaries are otherwise inferred only from observing an idle
+    // (in_progress = 0) sample, which is missed when a new child begins
+    // between polls (tight save cadence, slow interval, or a failed poll).
+    // Without this guard the prior track would be reused — misreporting the
+    // fresh child as a stalled episode (stale lastAdvanceTs) or suppressing
+    // its alerts (carried-over reportedStall/warnedLong). Detect the restart
+    // via a regression in either signal and re-baseline, mirroring the
+    // first-observation branch above.
+    const elapsedRegressed = elapsedSec < track.lastElapsedSec;
+    const processedRegressed = signals.processed !== null && signals.processed < track.lastProcessed;
+    if (elapsedRegressed || processedRegressed) {
+      track.startedAt = timestamp;
+      track.lastProcessed = signals.processed ?? 0;
+      track.lastAdvanceTs = timestamp;
+      track.lastElapsedSec = elapsedSec;
+      track.warnedLong = false;
+      track.reportedStall = false;
+      return;
+    }
+    track.lastElapsedSec = elapsedSec;
 
     // Advance tracking (RDB only exposes processed-keys progress).
     if (signals.processed !== null && signals.processed > track.lastProcessed) {
