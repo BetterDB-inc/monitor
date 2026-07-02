@@ -16,6 +16,12 @@ import { createMockDecomposer, createOpenAIDecomposer } from './decompose';
 import type { QueryDecomposer } from './decompose';
 import { createMockEntityLinker, createOpenAIEntityLinker } from './graph';
 import type { EntityLinker } from './graph';
+import {
+  createMockPreferenceExtractor,
+  createOpenAIPreferenceExtractor,
+  createOpenAIPreferenceJudge,
+  createPreferenceAwareJudge,
+} from './preference';
 import type { ChunkMode, Embedder, Judge, Reader, Store } from './types';
 
 function envInt(name: string, fallback: number): number {
@@ -75,6 +81,15 @@ async function main(): Promise<void> {
   const graphHops = envInt('LONGMEMEVAL_GRAPH_HOPS', 2);
   const graphMaxFacts = envInt('LONGMEMEVAL_GRAPH_MAX_FACTS', 5);
 
+  let preferenceExtractor: FactExtractor | undefined;
+  if (levers.includes('preference')) {
+    preferenceExtractor =
+      apiKey !== undefined && apiKey !== ''
+        ? createOpenAIPreferenceExtractor(apiKey)
+        : createMockPreferenceExtractor();
+  }
+  const preferencePromoteCap = envInt('LONGMEMEVAL_PREF_PROMOTE', 2);
+
   const cachePath = join(dirname(fileURLToPath(import.meta.url)), '.cache', 'embeddings.json');
 
   // EMBEDDER seam.
@@ -98,6 +113,12 @@ async function main(): Promise<void> {
     if (apiKey !== undefined && apiKey !== '') {
       reader = createOpenAIReader(apiKey);
       judge = createOpenAIJudge(apiKey);
+      // Preference lever: recommendation-shaped questions are graded with the
+      // rubric validated by diag-preference.ts; everything else stays on the
+      // generic judge so other types cannot regress from the rubric.
+      if (levers.includes('preference')) {
+        judge = createPreferenceAwareJudge(createOpenAIPreferenceJudge(apiKey), judge);
+      }
     } else {
       reader = createMockReader();
       judge = createMockJudge();
@@ -166,6 +187,8 @@ async function main(): Promise<void> {
       entityLinker,
       graphHops,
       graphMaxFacts,
+      preferenceExtractor,
+      preferencePromoteCap,
     });
     console.log(formatSummary(summary));
   } finally {
