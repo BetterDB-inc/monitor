@@ -168,7 +168,7 @@ export async function consolidateRecordFacts(
   record: LmeRecord,
   extract: FactExtractor,
   concurrency: number = DEFAULT_FACTS_CONCURRENCY,
-): Promise<{ chunks: UpsertEntry[]; llmCalls: number }> {
+): Promise<{ chunks: UpsertEntry[]; llmCalls: number; facts: Fact[] }> {
   // Per-session extraction is independent, so run it with bounded concurrency —
   // _m averages ~475 sessions per record, far too many to extract serially. Only
   // the reconcile pass below needs session order, so it stays sequential.
@@ -223,5 +223,5 @@ export async function consolidateRecordFacts(
       idx++;
     }
   }
-  return { chunks, llmCalls };
+  return { chunks, llmCalls, facts: curated };
 }
