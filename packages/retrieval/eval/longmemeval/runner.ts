@@ -10,6 +10,8 @@ import { assembleContexts } from './assemble';
 import { resolveTemporal } from './temporal';
 import { consolidateRecordFacts } from './facts';
 import type { FactExtractor } from './facts';
+import { buildEntityGraph, traverseGraph } from './graph';
+import type { EntityGraph, EntityLinker } from './graph';
 import { createCostReport } from './levers';
 import type { CostReport, LeverCostEntry, LeverName } from './levers';
 import type { ChunkMode, Embedder, Judge, LmeRecord, Reader, Store } from './types';
@@ -44,6 +46,15 @@ export interface RunConfig {
   // is split into sub-queries; each (plus the original) is retrieved and the
   // union is merged into the pool.
   decomposer?: QueryDecomposer;
+  // LLM seam for the graph lever. When 'graph' is enabled (requires 'facts'), the
+  // curated facts are linked into an entity graph per record; at question time the
+  // question's entities seed a 1–2 hop traversal whose facts are appended to the
+  // reader contexts. Recall stays measured on the unmodified rerank top-k.
+  entityLinker?: EntityLinker;
+  // Traversal depth for the graph lever (default 2).
+  graphHops?: number;
+  // Max traversed facts appended to the reader contexts per question (default 5).
+  graphMaxFacts?: number;
 }
 
 export interface TypeStats {
@@ -124,6 +135,8 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const temporalOn = levers.includes('temporal');
   const factsOn = levers.includes('facts') && config.factExtractor !== undefined;
   const decomposeOn = levers.includes('decompose') && config.decomposer !== undefined;
+  // The graph is built over curated facts, so the lever is inert without 'facts'.
+  const graphOn = levers.includes('graph') && factsOn && config.entityLinker !== undefined;
   const qaRun = reader !== null && judge !== null;
   const useRerank = rerankPool > k;
   const fetchK = useRerank ? rerankPool : k;
@@ -154,15 +167,22 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
       });
 
       let chunks = chunkRecord(record, chunkMode);
+      let graph: EntityGraph | null = null;
       if (factsOn && config.factExtractor !== undefined) {
         const startedAt = Date.now();
-        const { chunks: factChunks, llmCalls } = await consolidateRecordFacts(
-          record,
-          config.factExtractor,
-          config.factsConcurrency,
-        );
+        const {
+          chunks: factChunks,
+          llmCalls,
+          facts,
+        } = await consolidateRecordFacts(record, config.factExtractor, config.factsConcurrency);
         costReport.record('facts', { llmCalls, latencyMs: Date.now() - startedAt });
         chunks = [...chunks, ...factChunks];
+        if (graphOn && config.entityLinker !== undefined) {
+          const linkStartedAt = Date.now();
+          const entities = await config.entityLinker(facts.map((fact) => fact.statement));
+          costReport.record('graph', { llmCalls: 1, latencyMs: Date.now() - linkStartedAt });
+          graph = buildEntityGraph(facts, entities);
+        }
       }
       totalChunks += chunks.length;
 
@@ -253,6 +273,30 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
             .slice(0, k)
             .map((h) => (h.fields.date ? `[${h.fields.date}] ${h.text}` : h.text));
         }
+
+        // Graph expansion: seed a 1–2 hop traversal with the question's entities
+        // and append the connected facts vector search missed. Facts whose
+        // statement is already in a context are skipped so the reader never sees
+        // the same evidence twice.
+        if (graphOn && graph !== null && config.entityLinker !== undefined) {
+          const startedAt = Date.now();
+          const [seeds] = await config.entityLinker([record.question]);
+          const traversed = traverseGraph(graph, seeds ?? [], config.graphHops ?? 2, {
+            asOf: record.question_date,
+            limit: config.graphMaxFacts ?? 5,
+          });
+          costReport.record('graph', { llmCalls: 1, latencyMs: Date.now() - startedAt });
+          const fresh = traversed.filter((fact) => {
+            return contexts.some((context) => context.includes(fact.statement)) === false;
+          });
+          contexts = [
+            ...contexts,
+            ...fresh.map((fact) =>
+              fact.date ? `[${fact.date}] ${fact.statement}` : fact.statement,
+            ),
+          ];
+        }
+
         const question =
           record.question_date !== undefined && record.question_date !== ''
             ? `${record.question} (question asked on ${record.question_date})`

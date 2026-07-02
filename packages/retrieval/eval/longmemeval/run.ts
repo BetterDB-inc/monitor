@@ -13,6 +13,8 @@ import { createMockCrossEncoderScorer, createOpenAICrossEncoderScorer } from './
 import type { CrossEncoderScorer } from './cross-encoder';
 import { createMockDecomposer, createOpenAIDecomposer } from './decompose';
 import type { QueryDecomposer } from './decompose';
+import { createMockEntityLinker, createOpenAIEntityLinker } from './graph';
+import type { EntityLinker } from './graph';
 import type { ChunkMode, Embedder, Judge, Reader, Store } from './types';
 
 function envInt(name: string, fallback: number): number {
@@ -60,6 +62,16 @@ async function main(): Promise<void> {
         ? createOpenAIDecomposer(apiKey)
         : createMockDecomposer();
   }
+
+  let entityLinker: EntityLinker | undefined;
+  if (levers.includes('graph')) {
+    entityLinker =
+      apiKey !== undefined && apiKey !== ''
+        ? createOpenAIEntityLinker(apiKey)
+        : createMockEntityLinker();
+  }
+  const graphHops = envInt('LONGMEMEVAL_GRAPH_HOPS', 2);
+  const graphMaxFacts = envInt('LONGMEMEVAL_GRAPH_MAX_FACTS', 5);
 
   const cachePath = join(dirname(fileURLToPath(import.meta.url)), '.cache', 'embeddings.json');
 
@@ -132,6 +144,9 @@ async function main(): Promise<void> {
       factsConcurrency,
       crossEncoderScorer,
       decomposer,
+      entityLinker,
+      graphHops,
+      graphMaxFacts,
     });
     console.log(formatSummary(summary));
   } finally {
