@@ -668,7 +668,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
+        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -749,6 +749,367 @@ describe('AnomalyService', () => {
           connectionId: 'conn-1',
         }),
       );
+    });
+  });
+
+  // ─── Persistence-Child Stall Detection (BGSAVE / AOF rewrite) ────────────
+
+  describe('persistence-child stall detection', () => {
+    const IDLE_PERSISTENCE = {
+      rdb_bgsave_in_progress: '0',
+      rdb_current_bgsave_time_sec: '-1',
+      rdb_last_bgsave_status: 'ok',
+      current_save_keys_processed: '0',
+      current_save_keys_total: '0',
+      aof_rewrite_in_progress: '0',
+      aof_current_rewrite_time_sec: '-1',
+      aof_last_bgrewrite_status: 'ok',
+    };
+
+    let now: number;
+
+    beforeEach(() => {
+      now = 1_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    function mockPersistence(persistence: Record<string, string>): void {
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+        persistence: { ...IDLE_PERSISTENCE, ...persistence },
+      });
+    }
+
+    const persistenceEvents = () =>
+      service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.PERSISTENCE_CHILD);
+
+    it('excludes PERSISTENCE_CHILD from the initial buffer loop', async () => {
+      mockPersistence({});
+      await poll();
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      expect(buffers.has(MetricType.PERSISTENCE_CHILD)).toBe(false);
+    });
+
+    it('fires nothing when no persistence child is running', async () => {
+      mockPersistence({});
+      await poll();
+      now += 60_000;
+      await poll();
+      expect(persistenceEvents()).toHaveLength(0);
+    });
+
+    it('does not fire on the first in-progress observation (no baseline)', async () => {
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '5',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+      expect(persistenceEvents()).toHaveLength(0);
+    });
+
+    it('does not fire while a BGSAVE keeps advancing under the warn threshold', async () => {
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '5',
+        current_save_keys_processed: '1000',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      now += 30_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '35',
+        current_save_keys_processed: '20000',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      expect(persistenceEvents()).toHaveLength(0);
+    });
+
+    it('fires CRITICAL when BGSAVE progress freezes past the stall threshold', async () => {
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '5',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      now += 61_000; // exceeds the 60s stall threshold with no key progress
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '66',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      const events = persistenceEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('stuck');
+      expect(events[0].message).toContain('BGSAVE');
+      expect(events[0].message).toContain('1/42657');
+    });
+
+    it('reports a frozen BGSAVE only once per episode', async () => {
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '5',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      now += 61_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '66',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      now += 61_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '127',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      expect(persistenceEvents()).toHaveLength(1);
+    });
+
+    it('fires WARNING for a long-running but still-advancing BGSAVE', async () => {
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '100',
+        current_save_keys_processed: '1000',
+        current_save_keys_total: '999999',
+      });
+      await poll();
+
+      now += 30_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '130', // over the 120s warn threshold
+        current_save_keys_processed: '2000', // still advancing
+        current_save_keys_total: '999999',
+      });
+      await poll();
+
+      const events = persistenceEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('running long');
+    });
+
+    it('fires CRITICAL when the last BGSAVE status transitions ok→err', async () => {
+      mockPersistence({ rdb_last_bgsave_status: 'ok' });
+      await poll(); // baseline status
+
+      mockPersistence({ rdb_last_bgsave_status: 'err' });
+      await poll();
+
+      const events = persistenceEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('reported an error');
+    });
+
+    it('fires CRITICAL when an AOF rewrite exceeds the hard elapsed ceiling', async () => {
+      mockPersistence({
+        aof_rewrite_in_progress: '1',
+        aof_current_rewrite_time_sec: '100',
+      });
+      await poll(); // baseline
+
+      now += 5_000;
+      mockPersistence({
+        aof_rewrite_in_progress: '1',
+        aof_current_rewrite_time_sec: '605', // past the 600s critical ceiling
+      });
+      await poll();
+
+      const events = persistenceEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('AOF rewrite');
+    });
+
+    it('clears tracked state when the persistence child finishes', async () => {
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '5',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+      expect((service as any).lastPersistenceState.get('conn-1').rdb).toBeDefined();
+
+      mockPersistence({});
+      await poll();
+      expect((service as any).lastPersistenceState.get('conn-1').rdb).toBeUndefined();
+    });
+
+    it('cleans up lastPersistenceState on connection removal', async () => {
+      mockPersistence({ rdb_bgsave_in_progress: '1', rdb_current_bgsave_time_sec: '5' });
+      await poll();
+      expect((service as any).lastPersistenceState.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).lastPersistenceState.has('conn-1')).toBe(false);
+    });
+
+    it('re-baselines a new BGSAVE started between polls (no false stall)', async () => {
+      // Episode A advances normally to a high processed-key count.
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '100',
+        current_save_keys_processed: '50000',
+        current_save_keys_total: '999999',
+      });
+      await poll();
+
+      now += 10_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '110',
+        current_save_keys_processed: '60000',
+        current_save_keys_total: '999999',
+      });
+      await poll();
+
+      // A finishes and a fresh child B starts before any idle poll is seen:
+      // both elapsed and processed regress, signalling a new episode.
+      now += 5_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '2',
+        current_save_keys_processed: '100',
+        current_save_keys_total: '999999',
+      });
+      await poll();
+
+      // B keeps advancing but stays below A's high-water processed count. With a
+      // reused track this looks frozen for >60s (stale lastAdvanceTs) and would
+      // fire a false CRITICAL; re-baselining treats B's progress as real.
+      now += 61_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '63',
+        current_save_keys_processed: '5000',
+        current_save_keys_total: '999999',
+      });
+      await poll();
+
+      expect(persistenceEvents()).toHaveLength(0);
+    });
+
+    it('detects a stalled new BGSAVE episode after a prior one already alerted', async () => {
+      // Episode A freezes and fires CRITICAL.
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '5',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      now += 61_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '66',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+      expect(persistenceEvents()).toHaveLength(1);
+
+      // A new child B starts between polls (elapsed regresses) — the carried-over
+      // reportedStall must not suppress B's own stall.
+      now += 5_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '3',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      now += 61_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '64',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      const events = persistenceEvents();
+      expect(events).toHaveLength(2);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[1].severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('re-baselines a restarted AOF rewrite via elapsed regression', async () => {
+      // AOF exposes no per-key progress, so restart detection relies on elapsed.
+      mockPersistence({
+        aof_rewrite_in_progress: '1',
+        aof_current_rewrite_time_sec: '100',
+      });
+      await poll();
+
+      now += 5_000;
+      mockPersistence({
+        aof_rewrite_in_progress: '1',
+        aof_current_rewrite_time_sec: '605', // past the 600s ceiling → CRITICAL
+      });
+      await poll();
+      expect(persistenceEvents()).toHaveLength(1);
+
+      // New rewrite starts between polls (elapsed drops); its own overrun must
+      // still alert rather than being suppressed by the prior reportedStall.
+      now += 5_000;
+      mockPersistence({
+        aof_rewrite_in_progress: '1',
+        aof_current_rewrite_time_sec: '10',
+      });
+      await poll();
+
+      now += 5_000;
+      mockPersistence({
+        aof_rewrite_in_progress: '1',
+        aof_current_rewrite_time_sec: '610',
+      });
+      await poll();
+
+      const events = persistenceEvents();
+      expect(events).toHaveLength(2);
+      expect(events[1].severity).toBe(AnomalySeverity.CRITICAL);
     });
   });
 });
