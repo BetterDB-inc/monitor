@@ -426,9 +426,11 @@ class MemoryStore:
         # activity worth reporting. Safe to call from both close() and atexit.
         if self._session_flushed:
             return
-        self._session_flushed = True
         if not any(self._session_counts.values()):
+            # Nothing worth reporting yet — leave the one-shot armed so a later
+            # close() (after real activity) can still emit the summary.
             return
+        self._session_flushed = True
         self._analytics.capture("memory_session", dict(self._session_counts))
 
     def _session_atexit(self) -> None:
@@ -451,6 +453,9 @@ class MemoryStore:
                 await self._discovery_task
             await self._discovery.stop(delete_heartbeat=True)
         self._capture_session()
+        # Drain the queue before shutdown so the session summary lands even if
+        # shutdown()'s posthog close swallows an error, matching the atexit path.
+        self._analytics.flush()
         try:
             atexit.unregister(self._session_atexit)
         except Exception:
