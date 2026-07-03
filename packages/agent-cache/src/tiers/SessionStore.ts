@@ -11,6 +11,8 @@ export interface SessionStoreConfig {
   tierTtl: number | undefined;
   telemetry: Telemetry;
   statsKey: string;
+  /** Called on request hot paths to let analytics emit due snapshots (serverless). */
+  onActivity?: () => void;
 }
 
 // Simple LRU tracker for active sessions (bounded to prevent memory leaks).
@@ -82,6 +84,7 @@ export class SessionStore {
   private readonly telemetry: Telemetry;
   private readonly statsKey: string;
   private readonly sessionTracker: SessionTracker;
+  private readonly onActivity: (() => void) | undefined;
 
   constructor(config: SessionStoreConfig) {
     this.client = config.client;
@@ -91,6 +94,7 @@ export class SessionStore {
     this.telemetry = config.telemetry;
     this.statsKey = config.statsKey;
     this.sessionTracker = new SessionTracker();
+    this.onActivity = config.onActivity;
   }
 
   private buildKey(threadId: string, field: string): string {
@@ -98,6 +102,7 @@ export class SessionStore {
   }
 
   async get(threadId: string, field: string): Promise<string | null> {
+    this.onActivity?.();
     const startTime = Date.now();
 
     return this.telemetry.tracer.startActiveSpan('agent_cache.session.get', async (span) => {
@@ -152,6 +157,7 @@ export class SessionStore {
   }
 
   async set(threadId: string, field: string, value: string, ttl?: number): Promise<void> {
+    this.onActivity?.();
     const startTime = Date.now();
 
     return this.telemetry.tracer.startActiveSpan('agent_cache.session.set', async (span) => {

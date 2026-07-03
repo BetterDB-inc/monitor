@@ -257,6 +257,7 @@ export class SemanticCache {
     options?: CacheCheckOptions,
   ): Promise<CacheCheckResult> {
     this.assertInitialized('check');
+    this.analytics.onActivity();
 
     return this.traced('check', async (span) => {
       const category = options?.category ?? '';
@@ -585,6 +586,7 @@ export class SemanticCache {
     options?: CacheStoreOptions,
   ): Promise<string> {
     this.assertInitialized('store');
+    this.analytics.onActivity();
 
     return this.traced('store', async (span) => {
       const { text: promptText, binaryRefs } = await this.resolvePrompt(prompt);
@@ -1391,7 +1393,12 @@ export class SemanticCache {
       });
       const intervalMs = this.analyticsOpts?.statsIntervalMs ?? 300_000;
       if (!this.shutdownCalled && intervalMs > 0) {
-        this.statsTimer = setInterval(() => this.captureStatsSnapshot(), intervalMs);
+        // Serverless backstop: emit snapshots from request traffic (onActivity)
+        // when the interval timer below is frozen between invocations. Both the
+        // timer (snapshotTick) and onActivity share one throttle clock in the
+        // analytics layer, so a warm invocation can't double-emit.
+        this.analytics.registerSnapshot(intervalMs, () => this.captureStatsSnapshot());
+        this.statsTimer = setInterval(() => this.analytics.snapshotTick(), intervalMs);
         this.statsTimer.unref();
       }
     } catch {
@@ -1399,8 +1406,8 @@ export class SemanticCache {
     }
   }
 
-  private captureStatsSnapshot(): void {
-    this.stats()
+  private captureStatsSnapshot(): Promise<void> {
+    return this.stats()
       .then((s) => {
         this.analytics.capture('stats_snapshot', {
           hits: s.hits,
