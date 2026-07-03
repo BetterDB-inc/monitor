@@ -92,6 +92,7 @@ hits = await store.recall("hi", thread_id="t1")
 - `await forget(id) -> bool`
 - `await forget_by_scope(*, thread_id=None, agent_id=None, namespace=None, tags=None) -> int`
 - `await consolidate(*, summarize, older_than_seconds=None, max_importance=None, delete_sources=None, summary_importance=None, tags=None, thread_id=None, agent_id=None, namespace=None) -> ConsolidateResult`
+- `await consolidate_facts(*, extract_facts, older_than_seconds=None, max_importance=None, fact_importance=None, tags=None, thread_id=None, agent_id=None, namespace=None) -> ConsolidateFactsResult` - distill the selected memories into atomic, deduplicated facts and write each as its own memory, **keeping the source memories** (additive, so recall is preserved). You supply an `extract_facts(items)` LLM seam returning `list[Fact]` (`subject`, `statement`, optional `date`, optional `tombstone`); facts are reconciled by `subject` (newest `date` wins, tombstones drop a subject) and each fact's date is preserved in its content. Off by default - construct the store with `consolidation=True` (or `ConsolidationConfig(enabled=True, fact_source=..., fact_importance=...)`) to enable it, otherwise it raises. Prior fact memories are excluded from the scan so a re-run never re-distills its own output.
 - `current_config() -> MemoryConfigSnapshot`
 - `await refresh_config()`
 - `await ensure_discovery_ready()`

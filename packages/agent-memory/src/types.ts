@@ -66,6 +66,48 @@ export interface ConsolidateResult {
   deleted: number;
 }
 
+/**
+ * An atomic, durable fact distilled from one or more memories. `subject` is a
+ * short normalized attribute key (e.g. "employer", "home_city") used to
+ * reconcile restatements; `date` (if known) drives newer-wins resolution and is
+ * preserved in the written memory's content. `tombstone: true` marks the subject
+ * as retracted.
+ */
+export interface Fact {
+  subject: string;
+  statement: string;
+  date?: string;
+  tombstone?: boolean;
+}
+
+/**
+ * Caller-provided LLM seam that distills a batch of source memories into atomic
+ * facts. The library never bakes in a model — you supply the extraction (mirrors
+ * the `summarize` seam on {@link ConsolidateOptions}).
+ */
+export type FactExtractor = (items: MemoryItem[]) => Promise<Fact[]>;
+
+export interface ConsolidateFactsOptions extends MemoryScope {
+  /** LLM seam that extracts atomic facts from the selected source memories. */
+  extractFacts: FactExtractor;
+  tags?: string[];
+  /** Only consider source memories older than this many seconds. */
+  olderThanSeconds?: number;
+  /** Only consider source memories at or below this importance. */
+  maxImportance?: number;
+  /** Importance assigned to each written fact memory (overrides the store default). */
+  factImportance?: number;
+}
+
+export interface ConsolidateFactsResult {
+  /** Source memories examined. */
+  candidates: number;
+  /** Curated facts after reconciliation. */
+  facts: number;
+  /** Ids of the written fact memories. */
+  created: string[];
+}
+
 export interface MemoryListOptions extends MemoryScope {
   tags?: string[];
   limit?: number;

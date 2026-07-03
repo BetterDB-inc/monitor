@@ -64,6 +64,48 @@ SummarizeFn = Callable[[list[MemoryItem]], Awaitable[str]]
 
 
 @dataclass
+class Fact:
+    """An atomic, durable fact distilled from one or more memories.
+
+    ``subject`` is a short normalized attribute key (e.g. ``"employer"``,
+    ``"home_city"``) used to reconcile restatements; ``date`` (if known) drives
+    newer-wins resolution and is preserved in the written memory's content.
+    ``tombstone=True`` marks the subject as retracted.
+    """
+
+    subject: str
+    statement: str
+    date: str | None = None
+    tombstone: bool = False
+
+
+# Caller-provided LLM seam that distills a batch of source memories into atomic
+# facts. The library never bakes in a model - you supply the extraction (mirrors
+# the ``summarize`` seam on consolidate()).
+FactExtractor = Callable[[list[MemoryItem]], Awaitable[list[Fact]]]
+
+
+@dataclass
+class ConsolidationConfig:
+    # Enable write-time fact consolidation (consolidate_facts). Off by default.
+    enabled: bool | None = None
+    # Source label written on fact memories and excluded from re-consolidation.
+    fact_source: str | None = None
+    # Default importance assigned to each written fact memory.
+    fact_importance: float | None = None
+
+
+@dataclass
+class ConsolidateFactsResult:
+    # Source memories examined.
+    candidates: int
+    # Curated facts after reconciliation.
+    facts: int
+    # Ids of the written fact memories.
+    created: list[str]
+
+
+@dataclass
 class RecallWeights:
     similarity: float
     recency: float

@@ -33,11 +33,15 @@ from .build_recall_query import (
 from .composite_score import composite_score, similarity_from_distance
 from .discovery import MemoryDiscovery
 from .parse_memory_item import parse_memory_item
+from .reconcile_facts import apply_ops, reconcile
 from .select_evictions import EvictionCandidate, SelectEvictionsOptions, select_evictions
 from .telemetry import MemoryTelemetryOptions, create_memory_telemetry
 from .types import (
+    ConsolidateFactsResult,
     ConsolidateResult,
+    ConsolidationConfig,
     EmbedFn,
+    FactExtractor,
     MemoryConfigRefreshConfig,
     MemoryConfigSnapshot,
     MemoryDiscoveryConfig,
@@ -63,6 +67,8 @@ EVICTION_SCAN_LIMIT = 10000
 CONSOLIDATE_SCAN_LIMIT = 10000
 DEFAULT_SUMMARY_IMPORTANCE = 0.7
 SUMMARY_SOURCE = "summary"
+FACT_SOURCE = "fact"
+DEFAULT_FACT_IMPORTANCE = 0.7
 DEFAULT_IMPORTANCE = 0.5
 DEFAULT_CONFIG_REFRESH_MS = 30000
 MIN_CONFIG_REFRESH_MS = 1000
@@ -77,6 +83,22 @@ def _package_version() -> str:
         return version("betterdb-agent-memory")
     except Exception:
         return "0.0.0"
+
+
+def _resolve_consolidation(
+    config: bool | ConsolidationConfig | None,
+) -> tuple[bool, str, float]:
+    obj = config if isinstance(config, ConsolidationConfig) else None
+    enabled = config is True or (obj is not None and obj.enabled is not False)
+    fact_source = (
+        obj.fact_source if obj is not None and obj.fact_source is not None else FACT_SOURCE
+    )
+    fact_importance = (
+        obj.fact_importance
+        if obj is not None and obj.fact_importance is not None
+        else DEFAULT_FACT_IMPORTANCE
+    )
+    return enabled, fact_source, fact_importance
 
 
 def _copy_weights(weights: RecallWeights) -> RecallWeights:
@@ -130,12 +152,18 @@ class MemoryStore:
         max_items_per_scope: int | None = None,
         discovery: bool | MemoryDiscoveryConfig = False,
         config_refresh: bool | MemoryConfigRefreshConfig | None = None,
+        consolidation: bool | ConsolidationConfig | None = None,
         telemetry: MemoryTelemetryOptions | None = None,
         analytics: bool = True,
     ) -> None:
         self._client = client
         self._name = name
         self._embed_fn = embed_fn
+        (
+            self._consolidation_enabled,
+            self._fact_source,
+            self._default_fact_importance,
+        ) = _resolve_consolidation(consolidation)
         self._analytics_disabled = not analytics
         self._analytics: Analytics = NOOP_ANALYTICS
         self._analytics_started = False
@@ -914,6 +942,128 @@ class MemoryStore:
             span.set_attribute("consolidate.deleted", deleted)
             return ConsolidateResult(
                 consolidated=len(candidates), created=[summary_id], deleted=deleted
+            )
+
+    async def consolidate_facts(
+        self,
+        *,
+        extract_facts: FactExtractor,
+        older_than_seconds: float | None = None,
+        max_importance: float | None = None,
+        fact_importance: float | None = None,
+        tags: list[str] | None = None,
+        thread_id: str | None = None,
+        agent_id: str | None = None,
+        namespace: str | None = None,
+    ) -> ConsolidateFactsResult:
+        if not self._consolidation_enabled:
+            raise RuntimeError(
+                "fact consolidation is disabled; construct MemoryStore with "
+                "consolidation=True (or ConsolidationConfig(enabled=True)) to use "
+                "consolidate_facts"
+            )
+        await self._ensure_analytics_started()
+        with self._span("consolidateFacts") as span:
+            now = self._now_ms()
+            tag_list = tags if tags is not None else []
+            scope = MemoryScope(thread_id=thread_id, agent_id=agent_id, namespace=namespace)
+
+            has_criteria = (
+                thread_id is not None
+                or agent_id is not None
+                or namespace is not None
+                or len(tag_list) > 0
+                or older_than_seconds is not None
+                or max_importance is not None
+            )
+            if not has_criteria:
+                raise ValueError(
+                    "consolidate_facts requires a scope, tags, older_than_seconds, or "
+                    "max_importance to select source memories"
+                )
+
+            # Exclude prior fact memories so a re-run never re-distills its own output.
+            max_created_at = (
+                now - int(older_than_seconds * 1000) if older_than_seconds is not None else None
+            )
+            filter_query = build_consolidate_filter(
+                scope,
+                tag_list,
+                ConsolidateFilterOptions(
+                    max_created_at=max_created_at,
+                    max_importance=max_importance,
+                    exclude_source=self._fact_source,
+                ),
+            )
+            raw = await self._client.execute_command(
+                "FT.SEARCH",
+                f"{self._name}:mem:idx",
+                filter_query,
+                "RETURN",
+                "10",
+                "content",
+                "importance",
+                "tags",
+                "created_at",
+                "last_accessed_at",
+                "access_count",
+                "source",
+                "threadId",
+                "agentId",
+                "namespace",
+                "LIMIT",
+                "0",
+                str(CONSOLIDATE_SCAN_LIMIT),
+                "DIALECT",
+                "2",
+            )
+            candidates = [
+                parse_memory_item(self._name, hit) for hit in parse_ft_search_response(raw)
+            ]
+            span.set_attribute("consolidate_facts.candidates", len(candidates))
+
+            if len(candidates) == 0:
+                span.set_attribute("consolidate_facts.facts", 0)
+                span.set_attribute("consolidate_facts.created", 0)
+                return ConsolidateFactsResult(candidates=0, facts=0, created=[])
+
+            # Extract atomic facts, then reconcile the batch against an empty set so
+            # subject collisions resolve to the newest dated statement and tombstones
+            # drop retracted subjects.
+            extracted = await extract_facts(candidates)
+            curated = apply_ops([], reconcile(extracted, []))
+            span.set_attribute("consolidate_facts.facts", len(curated))
+
+            resolved_importance = (
+                fact_importance if fact_importance is not None else self._default_fact_importance
+            )
+            created: list[str] = []
+            for fact in curated:
+                # Preserve the fact's asserted date in the content (the temporal
+                # signal recall would otherwise lose, since a memory only carries
+                # its write time).
+                content = (
+                    f"[{fact.date}] {fact.statement}"
+                    if fact.date is not None and fact.date != ""
+                    else fact.statement
+                )
+                fact_id = await self._write_memory(
+                    content,
+                    importance=resolved_importance,
+                    tags=tag_list,
+                    source=self._fact_source,
+                    thread_id=thread_id,
+                    agent_id=agent_id,
+                    namespace=namespace,
+                    ttl=None,
+                    now=now,
+                )
+                created.append(fact_id)
+
+            self._telemetry.metrics.consolidations.labels(**self._store_labels).inc()
+            span.set_attribute("consolidate_facts.created", len(created))
+            return ConsolidateFactsResult(
+                candidates=len(candidates), facts=len(curated), created=created
             )
 
     async def _write_record(self, key: str, fields: list[str | bytes], ttl: int | None) -> None:

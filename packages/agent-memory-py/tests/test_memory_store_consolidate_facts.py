@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+import re
+from typing import Any
+
+import pytest
+from betterdb_agent_memory import ConsolidationConfig, Fact, MemoryStore
+
+from .conftest import fake_client, fake_embed, ft_reply, now_ms
+
+NOW = now_ms()
+
+
+def item_hit(id: str, importance: float, age_seconds: int) -> tuple[str, dict[str, str]]:
+    created = NOW - age_seconds * 1000
+    return (
+        f"mem:mem:{id}",
+        {
+            "content": f"c-{id}",
+            "importance": str(importance),
+            "created_at": str(created),
+            "last_accessed_at": str(created),
+            "access_count": "0",
+        },
+    )
+
+
+def facts_client(hits: list[tuple[str, dict[str, str]]]) -> Any:
+    reply = ft_reply(len(hits), hits)
+
+    def handler(command: str, *args: Any) -> Any:
+        if command == "FT.SEARCH":
+            return reply
+        return "OK"
+
+    return fake_client(handler)
+
+
+def field_value(call: list[Any] | None, field: str) -> Any:
+    if call is None or field not in call:
+        return None
+    return call[call.index(field) + 1]
+
+
+def extractor(facts: list[Fact]) -> Any:
+    calls: list[list[Any]] = []
+
+    async def extract(items: list[Any]) -> list[Fact]:
+        calls.append(items)
+        return facts
+
+    extract.calls = calls  # type: ignore[attr-defined]
+    return extract
+
+
+async def test_raises_when_disabled_by_default_without_touching_client() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000)])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
+    extract = extractor([Fact(subject="employer", statement="Acme")])
+
+    with pytest.raises(RuntimeError, match="disabled"):
+        await store.consolidate_facts(namespace="u1", extract_facts=extract)
+    assert len(extract.calls) == 0
+    assert not any(c[0] == "FT.SEARCH" for c in client.calls)
+
+
+async def test_runs_when_enabled_via_consolidation_true() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000)])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor([Fact(subject="employer", statement="Acme")])
+
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    assert len(extract.calls) == 1
+    assert result.candidates == 1
+    assert result.facts == 1
+    assert len(result.created) == 1
+
+
+async def test_enabled_via_config_object_and_disabled_when_enabled_false() -> None:
+    on = MemoryStore(
+        client=facts_client([item_hit("a", 0.2, 100000)]),
+        name="mem",
+        embed_fn=fake_embed(8),
+        consolidation=ConsolidationConfig(enabled=True),
+    )
+    result = await on.consolidate_facts(namespace="u1", extract_facts=extractor([]))
+    assert result is not None
+
+    off = MemoryStore(
+        client=facts_client([]),
+        name="mem",
+        embed_fn=fake_embed(8),
+        consolidation=ConsolidationConfig(enabled=False),
+    )
+    with pytest.raises(RuntimeError, match="disabled"):
+        await off.consolidate_facts(namespace="u1", extract_facts=extractor([]))
+
+
+async def test_writes_fact_memories_additively_without_deleting_sources() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000), item_hit("b", 0.3, 200000)])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor([Fact(subject="employer", statement="Acme")])
+
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    assert result.candidates == 2
+    assert result.facts == 1
+    assert not any(c[0] == "DEL" for c in client.calls)
+    hset = client.find_call("HSET")
+    assert field_value(hset, "content") == "Acme"
+    assert field_value(hset, "source") == "fact"
+
+
+async def test_preserves_a_fact_date_by_prefixing_it_into_content() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000)])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor([Fact(subject="employer", statement="Globex", date="2024-06-01")])
+
+    await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    hset = client.find_call("HSET")
+    assert field_value(hset, "content") == "[2024-06-01] Globex"
+
+
+async def test_excludes_prior_fact_memories_from_candidate_scan() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000)])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+
+    await store.consolidate_facts(namespace="u1", extract_facts=extractor([]))
+
+    search = client.find_call("FT.SEARCH")
+    assert "-@source:{fact}" in search[2]
+
+
+async def test_uses_custom_fact_source_for_write_and_exclusion() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000)])
+    store = MemoryStore(
+        client=client,
+        name="mem",
+        embed_fn=fake_embed(8),
+        consolidation=ConsolidationConfig(fact_source="distilled"),
+    )
+    extract = extractor([Fact(subject="employer", statement="Acme")])
+
+    await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    search = client.find_call("FT.SEARCH")
+    assert "-@source:{distilled}" in search[2]
+    hset = client.find_call("HSET")
+    assert field_value(hset, "source") == "distilled"
+
+
+async def test_default_fact_importance_and_constructor_and_per_call_overrides() -> None:
+    default_client = facts_client([item_hit("a", 0.2, 100000)])
+    default_store = MemoryStore(
+        client=default_client, name="mem", embed_fn=fake_embed(8), consolidation=True
+    )
+    await default_store.consolidate_facts(
+        namespace="u1", extract_facts=extractor([Fact(subject="s", statement="x")])
+    )
+    assert field_value(default_client.find_call("HSET"), "importance") == "0.7"
+
+    configured_client = facts_client([item_hit("a", 0.2, 100000)])
+    configured = MemoryStore(
+        client=configured_client,
+        name="mem",
+        embed_fn=fake_embed(8),
+        consolidation=ConsolidationConfig(fact_importance=0.9),
+    )
+    await configured.consolidate_facts(
+        namespace="u1", extract_facts=extractor([Fact(subject="s", statement="x")])
+    )
+    assert field_value(configured_client.find_call("HSET"), "importance") == "0.9"
+
+    per_call_client = facts_client([item_hit("a", 0.2, 100000)])
+    per_call = MemoryStore(
+        client=per_call_client,
+        name="mem",
+        embed_fn=fake_embed(8),
+        consolidation=ConsolidationConfig(fact_importance=0.9),
+    )
+    await per_call.consolidate_facts(
+        namespace="u1",
+        fact_importance=0.4,
+        extract_facts=extractor([Fact(subject="s", statement="x")]),
+    )
+    assert field_value(per_call_client.find_call("HSET"), "importance") == "0.4"
+
+
+async def test_reconciles_extracted_batch_newer_dated_wins() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000)])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor(
+        [
+            Fact(subject="city", statement="Sofia", date="2024-01-01"),
+            Fact(subject="city", statement="Berlin", date="2024-05-01"),
+        ]
+    )
+
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    assert result.facts == 1
+    hset = client.find_call("HSET")
+    assert field_value(hset, "content") == "[2024-05-01] Berlin"
+
+
+async def test_drops_a_tombstoned_subject_so_no_memory_is_written() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000)])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor([Fact(subject="pet", statement="", tombstone=True)])
+
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    assert result.facts == 0
+    assert not any(c[0] == "HSET" for c in client.calls)
+
+
+async def test_pushes_older_than_seconds_and_max_importance_into_scan() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000)])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+
+    await store.consolidate_facts(
+        older_than_seconds=3600, max_importance=0.5, extract_facts=extractor([])
+    )
+
+    search = client.find_call("FT.SEARCH")
+    assert re.search(r"@created_at:\[-inf \d+\]", search[2])
+    assert "@importance:[-inf 0.5]" in search[2]
+
+
+async def test_returns_zeros_and_does_not_extract_when_nothing_matches() -> None:
+    client = facts_client([])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor([Fact(subject="employer", statement="Acme")])
+
+    result = await store.consolidate_facts(older_than_seconds=3600, extract_facts=extract)
+
+    assert len(extract.calls) == 0
+    assert result.candidates == 0
+    assert result.facts == 0
+    assert result.created == []
+    assert not any(c[0] == "HSET" for c in client.calls)
+
+
+async def test_raises_without_scope_tags_or_criteria() -> None:
+    store = MemoryStore(
+        client=facts_client([]), name="mem", embed_fn=fake_embed(8), consolidation=True
+    )
+    extract = extractor([Fact(subject="employer", statement="Acme")])
+
+    with pytest.raises(ValueError, match="scope|criteria"):
+        await store.consolidate_facts(extract_facts=extract)
+    assert len(extract.calls) == 0
