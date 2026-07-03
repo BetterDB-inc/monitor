@@ -144,7 +144,16 @@ export function parseFacts(raw: string): Fact[] {
     const subject = record.subject;
     const statement = record.statement;
     if (typeof subject === 'string' && typeof statement === 'string') {
-      facts.push({ subject, statement, tombstone: record.tombstone === true });
+      const fact: Fact = { subject, statement, tombstone: record.tombstone === true };
+      // Event time: when the fact became true, distinct from the session date it
+      // was mentioned on. Only a normalized YYYY-MM-DD is kept — supersession
+      // (isNewer) and the temporal as-of filter compare dates lexicographically,
+      // so free-text dates would corrupt both. Absent/dropped dates fall back to
+      // the session date in consolidateRecordFacts.
+      if (typeof record.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(record.date)) {
+        fact.date = record.date;
+      }
+      facts.push(fact);
     }
   }
   return facts;
@@ -153,13 +162,17 @@ export function parseFacts(raw: string): Fact[] {
 export function createOpenAIFactExtractor(apiKey: string): FactExtractor {
   const system =
     'Extract durable, atomic facts about the user from the conversation session. ' +
-    'Return ONLY a JSON array of objects {"subject","statement"} where subject is a ' +
-    'short normalized snake_case attribute key (e.g. "employer", "home_city") and ' +
-    'statement is the fact in a short sentence. Include only salient, durable facts ' +
-    'a personal assistant should remember. If none, return [].';
-  return async (session) => {
-    const user = session.map((turn) => `${turn.role}: ${turn.content}`).join('\n');
-    const reply = await chat(apiKey, EXTRACT_MODEL, system, user);
+    'Return ONLY a JSON array of objects {"subject","statement","date"?} where subject ' +
+    'is a short normalized snake_case attribute key (e.g. "employer", "home_city"), ' +
+    'statement is the fact in a short sentence, and date is included ONLY when the ' +
+    'session states when the fact became true, as YYYY-MM-DD resolved against the ' +
+    'session date given in the first line (omit date if unsure). Include only salient, ' +
+    'durable facts a personal assistant should remember. If none, return [].';
+  return async (session, meta) => {
+    const turns = session.map((turn) => `${turn.role}: ${turn.content}`).join('\n');
+    const header =
+      meta.date !== undefined && meta.date !== '' ? `Session date: ${meta.date}\n` : '';
+    const reply = await chat(apiKey, EXTRACT_MODEL, system, `${header}${turns}`);
     return parseFacts(reply);
   };
 }

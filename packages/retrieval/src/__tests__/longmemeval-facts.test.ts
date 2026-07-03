@@ -196,9 +196,41 @@ describe('parseFacts', () => {
   it('returns [] when prose brackets produce invalid JSON', () => {
     expect(parseFacts('I found [some] facts: [{"subject":"a","statement":"b"}]')).toEqual([]);
   });
+
+  it('keeps a well-formed event date and drops free-text ones', () => {
+    const raw =
+      '[{"subject":"move","statement":"moved to Sofia","date":"2025-12-25"},' +
+      '{"subject":"gym","statement":"joined a gym","date":"last Tuesday"}]';
+    expect(parseFacts(raw)).toEqual([
+      { subject: 'move', statement: 'moved to Sofia', tombstone: false, date: '2025-12-25' },
+      { subject: 'gym', statement: 'joined a gym', tombstone: false },
+    ]);
+  });
 });
 
 describe('consolidateRecordFacts', () => {
+  it('stamps the chunk with the extractor event date over the session date', async () => {
+    const extract: FactExtractor = async () => [
+      { subject: 'move', statement: 'moved to Sofia', date: '2025-12-25' },
+    ];
+    const record: LmeRecord = {
+      question_id: 'q',
+      question_type: 't',
+      question: '?',
+      answer: 'a',
+      haystack_session_ids: ['S1'],
+      haystack_dates: ['2026-01-01'],
+      haystack_sessions: [[{ role: 'user', content: 'we moved to Sofia last Christmas' }]],
+      answer_session_ids: ['S1'],
+    };
+
+    const { chunks } = await consolidateRecordFacts(record, extract, 1);
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].fields.date).toBe('2025-12-25');
+    expect(chunks[0].fields.session_id).toBe('S1');
+  });
+
   it('emits a fact chunk for every source session when a fact is restated', async () => {
     const record: LmeRecord = {
       question_id: 'q',
