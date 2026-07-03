@@ -27,8 +27,10 @@ function isPreferenceHit(hit: QueryHit): boolean {
 }
 
 // Importance boost: stable-promote up to `cap` preference chunks from outside
-// the top-k window into its tail slots. Nothing is dropped — displaced hits
-// shift down — and the relative order of every other hit is preserved.
+// the top-k window into it. Nothing is dropped, the relative order of every
+// other hit is preserved, and only NON-preference window hits (lowest-ranked
+// first) are displaced — evicting an in-window preference chunk to admit
+// another would trade away exactly the evidence the boost exists to keep.
 export function promotePreferenceHits(
   hits: QueryHit[],
   k: number,
@@ -37,14 +39,27 @@ export function promotePreferenceHits(
   if (hits.length <= k) {
     return hits;
   }
-  const promoted = hits.slice(k).filter(isPreferenceHit).slice(0, cap);
+  const window = hits.slice(0, k);
+  const displaceable = window.filter((hit) => {
+    return isPreferenceHit(hit) === false;
+  });
+  const budget = Math.min(cap, displaceable.length);
+  const promoted = hits.slice(k).filter(isPreferenceHit).slice(0, budget);
   if (promoted.length === 0) {
     return hits;
   }
+  const displacedIds = new Set(
+    displaceable.slice(displaceable.length - promoted.length).map((hit) => {
+      return hit.id;
+    }),
+  );
+  const keep = window.filter((hit) => {
+    return displacedIds.has(hit.id) === false;
+  });
+  const displaced = window.filter((hit) => {
+    return displacedIds.has(hit.id);
+  });
   const promotedIds = new Set(promoted.map((hit) => hit.id));
-  const window = hits.slice(0, k);
-  const keep = window.slice(0, Math.max(0, k - promoted.length));
-  const displaced = window.slice(Math.max(0, k - promoted.length));
   const tail = hits.slice(k).filter((hit) => {
     return promotedIds.has(hit.id) === false;
   });

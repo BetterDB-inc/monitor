@@ -58,6 +58,18 @@ describe('promotePreferenceHits', () => {
     const none = [hit('a'), hit('b'), hit('c')];
     expect(promotePreferenceHits(none, 2)).toEqual(none);
   });
+
+  it('never evicts an in-window preference hit to promote another', () => {
+    const hits = [hit('a'), hit('b'), hit('pref_in'), hit('pref_out'), hit('c')];
+    const out = promotePreferenceHits(hits, 3);
+    expect(out.slice(0, 3).map((h) => h.id)).toEqual(['a', 'pref_in', 'pref_out']);
+    expect(out.map((h) => h.id).sort()).toEqual(hits.map((h) => h.id).sort());
+  });
+
+  it('stops promoting once only preference hits remain in the window', () => {
+    const allPrefWindow = [hit('pref_a'), hit('pref_b'), hit('pref_out'), hit('x')];
+    expect(promotePreferenceHits(allPrefWindow, 2)).toEqual(allPrefWindow);
+  });
 });
 
 describe('createMockPreferenceExtractor', () => {
