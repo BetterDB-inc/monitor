@@ -69,6 +69,8 @@ export interface EvalSummary {
   costs: LeverCostEntry[];
 }
 
+const MAX_SUB_QUERIES = 3;
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function pollUntil(predicate: () => Promise<boolean>, attempts = 40): Promise<boolean> {
@@ -217,7 +219,10 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
       // merge the union into the pool.
       let pool: QueryHit[];
       if (decomposeOn && config.decomposer !== undefined) {
-        const subQueries = await config.decomposer(record.question);
+        // The decomposer prompt asks for 1-3 sub-questions, but the cap must be
+        // enforced here: a chatty reply would otherwise fan out into an
+        // unbounded number of parallel embed+query calls per record.
+        const subQueries = (await config.decomposer(record.question)).slice(0, MAX_SUB_QUERIES);
         costReport.record('decompose', { llmCalls: 1, embedCalls: subQueries.length });
         const queries = [record.question, ...subQueries];
         const perQuery = await Promise.all(

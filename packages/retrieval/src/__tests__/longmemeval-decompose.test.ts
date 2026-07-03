@@ -86,4 +86,32 @@ describe('decompose lever integration', () => {
     expect(cost?.llmCalls).toBe(withDecompose.total);
     expect(withDecompose.recallAtK).toBeGreaterThanOrEqual(baseline.recallAtK);
   });
+
+  it('caps the retrieval fan-out at three sub-queries per record', async () => {
+    const decomposer: QueryDecomposer = async (question) => {
+      return Array.from({ length: 6 }, (_, index) => {
+        return `${question} detail ${index}`;
+      });
+    };
+    const costReport = createCostReport();
+    const summary = await runEval({
+      records: await loadFixture(),
+      embedder: createMockEmbedder(),
+      store: createMockStore(),
+      reader: null,
+      judge: null,
+      k: 2,
+      chunkMode: 'session',
+      limit: 20,
+      rerankPool: 2,
+      levers: ['decompose'],
+      costReport,
+      decomposer,
+    });
+
+    const cost = summary.costs.find((c) => c.name === 'decompose');
+    // The prompt asks for 1-3 sub-questions, but nothing used to enforce it: a
+    // chatty decomposer meant an unbounded parallel query fan-out per record.
+    expect(cost?.embedCalls).toBe(summary.total * 3);
+  });
 });
