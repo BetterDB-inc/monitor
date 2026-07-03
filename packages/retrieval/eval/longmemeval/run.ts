@@ -37,12 +37,19 @@ async function main(): Promise<void> {
   const perType = envInt('LONGMEMEVAL_PER_TYPE', 0);
   // LongMemEval has 6 question_types. In stratified mode the total = perType x
   // (number of selected types), so the runner's per-record `limit` cap must be
-  // raised to that total or it would truncate the slice.
+  // raised to that total or it would truncate the slice. Count DISTINCT types
+  // (deduped, mirroring loadRecords' Set-based allow-list) so a repeated type
+  // does not inflate the cap; an empty/whitespace-only filter selects all
+  // types, so fall back to the full count (never zero, which would stop the
+  // run at once while loadRecords still emitted a stratified sample).
   const LME_TYPE_COUNT = 6;
-  const typeCount =
-    questionType !== undefined && questionType !== ''
-      ? questionType.split(',').filter((t) => t.trim() !== '').length
-      : LME_TYPE_COUNT;
+  const selectedTypes = new Set(
+    (questionType ?? '')
+      .split(',')
+      .map((t) => t.trim())
+      .filter((t) => t !== ''),
+  );
+  const typeCount = selectedTypes.size > 0 ? selectedTypes.size : LME_TYPE_COUNT;
   const runLimit = perType > 0 ? perType * typeCount : limit;
 
   const cachePath = join(dirname(fileURLToPath(import.meta.url)), '.cache', 'embeddings.json');
@@ -77,7 +84,11 @@ async function main(): Promise<void> {
   const records = loadRecords(dataPath, limit, questionType, perType);
   const source = sourceLabel(dataPath);
 
-  const tier = qa ? 'Tier 2 (retrieval + QA)' : store.isReal || embedder.dims === 1536 ? 'Tier 1 (real recall)' : 'Tier 0 (offline)';
+  const tier = qa
+    ? 'Tier 2 (retrieval + QA)'
+    : store.isReal || embedder.dims === 1536
+      ? 'Tier 1 (real recall)'
+      : 'Tier 0 (offline)';
 
   console.log('='.repeat(64));
   console.log('LongMemEval retrieval harness — @betterdb/retrieval');
