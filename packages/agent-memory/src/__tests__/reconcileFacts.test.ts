@@ -63,6 +63,14 @@ describe('reconcile', () => {
     expect(older).toEqual([{ type: 'noop', subject: 'employer' }]);
   });
 
+  it('lets a dateless new statement win over an older dated fact', () => {
+    const existing: Fact[] = [{ subject: 'employer', statement: 'Acme', date: '2024-01-01' }];
+    const ops = reconcile([{ subject: 'employer', statement: 'Globex' }], existing);
+    expect(ops).toEqual([
+      { type: 'update', subject: 'employer', fact: { subject: 'employer', statement: 'Globex' } },
+    ]);
+  });
+
   it('deletes on a tombstone but noops on a stale (older-dated) tombstone', () => {
     const existing: Fact[] = [{ subject: 'employer', statement: 'Acme', date: '2024-06-01' }];
     const live = reconcile(

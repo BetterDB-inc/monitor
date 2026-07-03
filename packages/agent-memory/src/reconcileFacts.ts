@@ -11,10 +11,13 @@ export type FactOp =
   | { type: 'delete'; subject: string }
   | { type: 'noop'; subject: string };
 
-// A dateless fact is treated as "at least as new" as any prior so a later
-// assertion wins ties; when both dates are known, the newer (or equal) one wins.
+// A dateless candidate is the latest assertion we have, so it wins ties (and
+// any dated prior). A dated candidate wins when its date is at least the
+// prior's (a dateless prior counts as the epoch, so any dated candidate beats
+// it, and equal dates let the later batch assertion win).
 function isNewer(candidate: Fact, prior: Fact): boolean {
-  return (candidate.date ?? '') >= (prior.date ?? '');
+  if (candidate.date === undefined) return true;
+  return candidate.date >= (prior.date ?? '');
 }
 
 // A tombstone is stale only when both dates are known and it predates the

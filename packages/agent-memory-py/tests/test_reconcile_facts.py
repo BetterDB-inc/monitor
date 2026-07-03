@@ -52,6 +52,12 @@ def test_updates_to_a_newer_dated_statement_and_ignores_an_older_one() -> None:
     assert [op.type for op in older] == ["noop"]
 
 
+def test_dateless_new_statement_wins_over_an_older_dated_fact() -> None:
+    existing = [Fact(subject="employer", statement="Acme", date="2024-01-01")]
+    ops = reconcile([Fact(subject="employer", statement="Globex")], existing)
+    assert ops == [UpdateOp(subject="employer", fact=Fact(subject="employer", statement="Globex"))]
+
+
 def test_deletes_on_a_tombstone_but_noops_on_a_stale_older_dated_tombstone() -> None:
     existing = [Fact(subject="employer", statement="Acme", date="2024-06-01")]
     live = reconcile(

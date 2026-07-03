@@ -40,9 +40,13 @@ FactOp = Union[AddOp, UpdateOp, DeleteOp, NoopOp]
 
 
 def _is_newer(candidate: Fact, prior: Fact) -> bool:
-    # A dateless fact is treated as "at least as new" as any prior so a later
-    # assertion wins ties; when both dates are known, the newer (or equal) one wins.
-    return (candidate.date or "") >= (prior.date or "")
+    # A dateless candidate is the latest assertion we have, so it wins ties (and
+    # any dated prior). A dated candidate wins when its date is at least the
+    # prior's (a dateless prior counts as the epoch, so any dated candidate beats
+    # it, and equal dates let the later batch assertion win).
+    if candidate.date is None:
+        return True
+    return candidate.date >= (prior.date or "")
 
 
 def _is_stale_tombstone(tombstone: Fact, prior: Fact) -> bool:
