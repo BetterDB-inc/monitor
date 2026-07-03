@@ -26,6 +26,24 @@ async function main(): Promise<void> {
   const rerankPool = Math.max(envInt('LONGMEMEVAL_RERANK_POOL', k), k);
   const chunkMode: ChunkMode = process.env.LONGMEMEVAL_CHUNK === 'turn' ? 'turn' : 'session';
   const qa = process.env.LONGMEMEVAL_QA === '1';
+  // Restrict the run to one or more question_types (comma-separated, e.g.
+  // "temporal-reasoning,multi-session") so a subset can be evaluated in
+  // isolation. Unset = all types.
+  const questionType = process.env.LONGMEMEVAL_TYPE;
+  // Stratified slice: keep this many records of EACH question_type (balanced
+  // across all types) instead of the flat limit. Unset/0 = flat limit. Because
+  // _m/_s are grouped by type on disk, this is the only way to get an even
+  // per-type sample for a paired A/B.
+  const perType = envInt('LONGMEMEVAL_PER_TYPE', 0);
+  // LongMemEval has 6 question_types. In stratified mode the total = perType x
+  // (number of selected types), so the runner's per-record `limit` cap must be
+  // raised to that total or it would truncate the slice.
+  const LME_TYPE_COUNT = 6;
+  const typeCount =
+    questionType !== undefined && questionType !== ''
+      ? questionType.split(',').filter((t) => t.trim() !== '').length
+      : LME_TYPE_COUNT;
+  const runLimit = perType > 0 ? perType * typeCount : limit;
 
   const cachePath = join(dirname(fileURLToPath(import.meta.url)), '.cache', 'embeddings.json');
 
@@ -56,7 +74,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const records = loadRecords(dataPath, limit);
+  const records = loadRecords(dataPath, limit, questionType, perType);
   const source = sourceLabel(dataPath);
 
   const tier = qa ? 'Tier 2 (retrieval + QA)' : store.isReal || embedder.dims === 1536 ? 'Tier 1 (real recall)' : 'Tier 0 (offline)';
@@ -69,9 +87,14 @@ async function main(): Promise<void> {
   console.log(`store     : ${store.name}${store.isReal ? '' : '  (Valkey unreachable → mock)'}`);
   console.log(`reader    : ${reader === null ? 'disabled' : reader.name}`);
   console.log(`judge     : ${judge === null ? 'disabled' : judge.name}`);
-  console.log(`dataset   : ${source}  (limit ${limit})`);
+  const limitLabel = perType > 0 ? `${perType}/type x${typeCount}=${runLimit}` : `${limit}`;
+  console.log(
+    `dataset   : ${source}  (limit ${limitLabel}${questionType ? `, type=${questionType}` : ''})`,
+  );
   const rerankLabel = rerankPool > k ? `hybrid pool=${rerankPool}→${k}` : 'off';
-  console.log(`params    : limit=${limit} k=${k} chunk=${chunkMode} qa=${qa} rerank=${rerankLabel}`);
+  console.log(
+    `params    : limit=${limitLabel} k=${k} chunk=${chunkMode} qa=${qa} rerank=${rerankLabel}`,
+  );
   console.log('='.repeat(64));
 
   try {
@@ -83,7 +106,7 @@ async function main(): Promise<void> {
       judge,
       k,
       chunkMode,
-      limit,
+      limit: runLimit,
       rerankPool,
     });
     console.log(formatSummary(summary));
