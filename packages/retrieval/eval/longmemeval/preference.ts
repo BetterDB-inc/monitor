@@ -1,5 +1,5 @@
 import type { QueryHit } from '../../src/index';
-import { chat } from './reader';
+import { chat, DEFAULT_CHAT_MODEL } from './reader';
 import { parseFacts } from './facts';
 import type { FactExtractor } from './facts';
 import { verdictIsCorrect } from './judge';
@@ -7,7 +7,7 @@ import type { Judge } from './types';
 
 export { verdictIsCorrect } from './judge';
 
-const EXTRACT_MODEL = process.env.LONGMEMEVAL_PREFERENCE_MODEL ?? 'gpt-5.4';
+const EXTRACT_MODEL = process.env.LONGMEMEVAL_PREFERENCE_MODEL ?? DEFAULT_CHAT_MODEL;
 const JUDGE_MODEL = process.env.LONGMEMEVAL_JUDGE_MODEL ?? 'gpt-5.5';
 const DEFAULT_PROMOTE_CAP = 2;
 

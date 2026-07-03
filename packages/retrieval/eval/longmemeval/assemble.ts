@@ -142,8 +142,12 @@ function groupBySession(hits: QueryHit[]): Map<string, QueryHit[]> {
 
 function groupChronologically(hits: QueryHit[]): QueryHit[] {
   const sessions = [...groupBySession(hits).values()]
-    .map((group) => [...group].sort(byDate))
-    .sort((a, b) => byDate(a[0], b[0]));
+    .map((group) => {
+      return [...group].sort(byDate);
+    })
+    .sort((a, b) => {
+      return byDate(a[0], b[0]);
+    });
   const ordered: QueryHit[] = [];
   for (const session of sessions) {
     for (const hit of session) {

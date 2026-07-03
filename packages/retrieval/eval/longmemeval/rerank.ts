@@ -1,4 +1,4 @@
-import type { QueryHit } from '../../src/index';
+import type { QueryHit, RerankFn } from '../../src/index';
 
 // Mirrors the semantic-cache hybrid scorer (packages/semantic-cache/src/rerank.ts):
 // blend dense cosine similarity with lexical keyword overlap so exact-term
@@ -35,7 +35,7 @@ function overlap(queryTokens: Set<string>, text: string): number {
  * (lower = closer), so dense similarity is `1 - score`. The caller over-fetches
  * a wider pool, this reorders it, then the runner slices back to k.
  */
-export function createHybridRerank(cosineWeight = COSINE_WEIGHT) {
+export function createHybridRerank(cosineWeight = COSINE_WEIGHT): RerankFn {
   const overlapWeight = 1 - cosineWeight;
   return async (queryText: string, hits: QueryHit[]): Promise<QueryHit[]> => {
     const queryTokens = tokenize(queryText);

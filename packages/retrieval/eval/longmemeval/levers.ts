@@ -63,7 +63,9 @@ export function createCostReport(): CostReport {
   };
 
   const entries = (): LeverCostEntry[] => {
-    return LEVER_ORDER.filter((lever) => totals.has(lever)).map((lever) => {
+    return LEVER_ORDER.filter((lever) => {
+      return totals.has(lever);
+    }).map((lever) => {
       return totals.get(lever) as LeverCostEntry;
     });
   };

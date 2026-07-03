@@ -8,7 +8,11 @@ import { loadRecords, sourceLabel } from './dataset';
 import { runEval, formatSummary } from './runner';
 import { resolveEnabledLevers, createCostReport } from './levers';
 import { resolveAssembleOptions } from './assemble';
-import { createMockFactExtractor, createOpenAIFactExtractor } from './facts';
+import {
+  createMockFactExtractor,
+  createOpenAIFactExtractor,
+  DEFAULT_FACTS_CONCURRENCY,
+} from './facts';
 import type { FactExtractor } from './facts';
 import { createMockCrossEncoderScorer, createOpenAICrossEncoderScorer } from './cross-encoder';
 import type { CrossEncoderScorer } from './cross-encoder';
@@ -42,7 +46,7 @@ async function main(): Promise<void> {
   const rerankPool = Math.max(envInt('LONGMEMEVAL_RERANK_POOL', k), k);
   const chunkMode: ChunkMode = process.env.LONGMEMEVAL_CHUNK === 'turn' ? 'turn' : 'session';
   const qa = process.env.LONGMEMEVAL_QA === '1';
-  const factsConcurrency = envInt('LONGMEMEVAL_FACTS_CONCURRENCY', 8);
+  const factsConcurrency = envInt('LONGMEMEVAL_FACTS_CONCURRENCY', DEFAULT_FACTS_CONCURRENCY);
   const levers = resolveEnabledLevers(process.env);
   const costReport = createCostReport();
   const assembleOptions = resolveAssembleOptions(process.env);

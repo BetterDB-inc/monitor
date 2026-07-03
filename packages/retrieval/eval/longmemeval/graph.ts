@@ -1,7 +1,8 @@
-import { chat } from './reader';
+import { chat, DEFAULT_CHAT_MODEL } from './reader';
+import { extractJsonArray } from './json';
 import type { Fact } from './facts';
 
-const LINK_MODEL = process.env.LONGMEMEVAL_GRAPH_MODEL ?? 'gpt-5.4';
+const LINK_MODEL = process.env.LONGMEMEVAL_GRAPH_MODEL ?? DEFAULT_CHAT_MODEL;
 
 // Maps each text to the entity names it mentions, aligned with the input order.
 // One call per batch so the per-record LLM cost stays bounded.
@@ -116,19 +117,9 @@ export function parseEntityLists(raw: string, expectedLength: number): string[][
   const empty = (): string[][] => {
     return Array.from({ length: expectedLength }, () => []);
   };
-  const start = raw.indexOf('[');
-  const end = raw.lastIndexOf(']');
-  if (start < 0 || end <= start) {
-    return empty();
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw.slice(start, end + 1));
-  } catch {
-    // A malformed reply degrades to no entities rather than aborting the run.
-    return empty();
-  }
-  if (!Array.isArray(parsed)) {
+  // A malformed reply degrades to no entities rather than aborting the run.
+  const parsed = extractJsonArray(raw);
+  if (parsed === null) {
     return empty();
   }
   const lists: string[][] = [];

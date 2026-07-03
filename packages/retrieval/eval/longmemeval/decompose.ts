@@ -1,7 +1,8 @@
 import type { QueryHit } from '../../src/index';
-import { chat } from './reader';
+import { chat, DEFAULT_CHAT_MODEL } from './reader';
+import { extractJsonArray } from './json';
 
-const DECOMPOSE_MODEL = process.env.LONGMEMEVAL_DECOMPOSE_MODEL ?? 'gpt-5.4';
+const DECOMPOSE_MODEL = process.env.LONGMEMEVAL_DECOMPOSE_MODEL ?? DEFAULT_CHAT_MODEL;
 
 // Decomposes a multi-hop question into sub-queries — an LLM seam. The original
 // question is always retrieved too; these are the extra hops.
@@ -12,28 +13,24 @@ export function createMockDecomposer(): QueryDecomposer {
   return async (question) => {
     const parts = question
       .split(/\s+and\s+/i)
-      .map((part) => part.trim())
-      .filter((part) => part.length > 0);
+      .map((part) => {
+        return part.trim();
+      })
+      .filter((part) => {
+        return part.length > 0;
+      });
     return parts.length > 1 ? parts : [];
   };
 }
 
 export function parseSubQueries(raw: string): string[] {
-  const start = raw.indexOf('[');
-  const end = raw.lastIndexOf(']');
-  if (start < 0 || end <= start) {
+  const parsed = extractJsonArray(raw);
+  if (parsed === null) {
     return [];
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw.slice(start, end + 1));
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) {
-    return [];
-  }
-  return parsed.filter((item): item is string => typeof item === 'string');
+  return parsed.filter((item): item is string => {
+    return typeof item === 'string';
+  });
 }
 
 export function createOpenAIDecomposer(apiKey: string): QueryDecomposer {

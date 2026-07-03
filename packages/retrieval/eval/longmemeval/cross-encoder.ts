@@ -1,7 +1,9 @@
 import type { QueryHit, RerankFn } from '../../src/index';
-import { chat } from './reader';
+import { chat, DEFAULT_CHAT_MODEL } from './reader';
+import { extractJsonArray } from './json';
+import { tokenize } from './rerank';
 
-const SCORER_MODEL = process.env.LONGMEMEVAL_RERANK_MODEL ?? 'gpt-5.4';
+const SCORER_MODEL = process.env.LONGMEMEVAL_RERANK_MODEL ?? DEFAULT_CHAT_MODEL;
 // Chunks run up to ~6000 tokens (adapter.ts); scoring a whole 30–50 doc pool in
 // one prompt can blow past the context limit and 400 the entire run. Flatten
 // and cap each passage, and score the pool in bounded batches instead.
@@ -16,23 +18,32 @@ export function createCrossEncoderRerank(score: CrossEncoderScorer): RerankFn {
   return async (queryText: string, hits: QueryHit[]): Promise<QueryHit[]> => {
     const scores = await score(
       queryText,
-      hits.map((hit) => hit.text),
+      hits.map((hit) => {
+        return hit.text;
+      }),
     );
     return hits
-      .map((hit, index) => ({ hit, score: scores[index] ?? -Infinity }))
-      .sort((a, b) => b.score - a.score)
-      .map((entry) => entry.hit);
+      .map((hit, index) => {
+        return { hit, score: scores[index] ?? -Infinity };
+      })
+      .sort((a, b) => {
+        return b.score - a.score;
+      })
+      .map((entry) => {
+        return entry.hit;
+      });
   };
 }
 
 // Offline deterministic scorer: query-token overlap. Enough to exercise the
-// rerank path without a model.
+// rerank path without a model. Uses the shared tokenize so punctuation
+// normalization matches the hybrid reranker ('cat.' counts as 'cat').
 export function createMockCrossEncoderScorer(): CrossEncoderScorer {
   return async (query, documents) => {
-    const queryTokens = new Set(query.toLowerCase().split(/\s+/));
+    const queryTokens = tokenize(query);
     return documents.map((document) => {
       let shared = 0;
-      for (const token of document.toLowerCase().split(/\s+/)) {
+      for (const token of tokenize(document)) {
         if (queryTokens.has(token)) {
           shared++;
         }
@@ -49,18 +60,8 @@ export function createMockCrossEncoderScorer(): CrossEncoderScorer {
 // order for the whole batch.
 export function parseScores(raw: string, count: number): number[] {
   const zeros = new Array(count).fill(0);
-  const start = raw.indexOf('[');
-  const end = raw.lastIndexOf(']');
-  if (start < 0 || end <= start) {
-    return zeros;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw.slice(start, end + 1));
-  } catch {
-    return zeros;
-  }
-  if (!Array.isArray(parsed) || parsed.length !== count) {
+  const parsed = extractJsonArray(raw);
+  if (parsed === null || parsed.length !== count) {
     return zeros;
   }
   const everyNumeric = parsed.every((value) => {

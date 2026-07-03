@@ -1,10 +1,11 @@
 import type { UpsertEntry } from '../../src/index';
-import { chat } from './reader';
+import { chat, DEFAULT_CHAT_MODEL } from './reader';
+import { extractJsonArray } from './json';
 import { mapWithConcurrency } from './concurrency';
 import type { LmeRecord, LmeSession } from './types';
 
-const EXTRACT_MODEL = process.env.LONGMEMEVAL_FACTS_MODEL ?? 'gpt-5.4';
-const DEFAULT_FACTS_CONCURRENCY = 8;
+const EXTRACT_MODEL = process.env.LONGMEMEVAL_FACTS_MODEL ?? DEFAULT_CHAT_MODEL;
+export const DEFAULT_FACTS_CONCURRENCY = 8;
 
 export interface Fact {
   subject: string;
@@ -119,20 +120,10 @@ export function createMockFactExtractor(): FactExtractor {
 }
 
 export function parseFacts(raw: string): Fact[] {
-  const start = raw.indexOf('[');
-  const end = raw.lastIndexOf(']');
-  if (start < 0 || end <= start) {
-    return [];
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw.slice(start, end + 1));
-  } catch {
-    // A malformed reply (or prose with stray brackets) degrades to no facts for
-    // this session rather than aborting the whole eval run.
-    return [];
-  }
-  if (!Array.isArray(parsed)) {
+  // A malformed reply (or prose with stray brackets) degrades to no facts for
+  // this session rather than aborting the whole eval run.
+  const parsed = extractJsonArray(raw);
+  if (parsed === null) {
     return [];
   }
   const facts: Fact[] = [];

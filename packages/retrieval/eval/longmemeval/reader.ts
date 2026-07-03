@@ -1,8 +1,12 @@
 import type { Reader } from './types';
 
-// Reader model. Defaults to gpt-5.4; override with LONGMEMEVAL_READER_MODEL to
-// run a like-for-like comparison config (e.g. gpt-4o) without editing the default.
-const CHAT_MODEL = process.env.LONGMEMEVAL_READER_MODEL ?? 'gpt-5.4';
+// Default model for every chat-based seam in the harness (reader, extractors,
+// scorer, decomposer, entity linker). The judge intentionally differs (gpt-5.5).
+export const DEFAULT_CHAT_MODEL = 'gpt-5.4';
+
+// Reader model. Override with LONGMEMEVAL_READER_MODEL to run a like-for-like
+// comparison config (e.g. gpt-4o) without editing the default.
+const CHAT_MODEL = process.env.LONGMEMEVAL_READER_MODEL ?? DEFAULT_CHAT_MODEL;
 
 /**
  * GPT-5-tier reasoning models reject a non-default `temperature`; callers must
@@ -20,12 +24,7 @@ export function createMockReader(): Reader {
   };
 }
 
-async function chat(
-  apiKey: string,
-  model: string,
-  system: string,
-  user: string,
-): Promise<string> {
+async function chat(apiKey: string, model: string, system: string, user: string): Promise<string> {
   const body: Record<string, unknown> = {
     model,
     messages: [
@@ -65,7 +64,7 @@ export function createOpenAIReader(apiKey: string): Reader {
         'For factual questions, give the answer stated in the excerpts; if the excerpts do not ' +
         'contain it, say "I don\'t know". ' +
         'For questions asking for a recommendation, suggestion, advice, or tips, infer and give a ' +
-        'recommendation grounded in what the excerpts reveal about this user\'s preferences, ' +
+        "recommendation grounded in what the excerpts reveal about this user's preferences, " +
         'context, and history. Base the recommendation only on preferences and signals actually ' +
         'present in the excerpts — do not invent preferences or recommend from general knowledge ' +
         'unsupported by the excerpts. If the excerpts reveal nothing relevant to the request, ' +
