@@ -40,6 +40,27 @@ describe('mapWithConcurrency', () => {
     expect(maxInFlight).toBeGreaterThan(1);
     expect(maxInFlight).toBeLessThanOrEqual(3);
   });
+
+  it('stops dispatching new work once a call fails', async () => {
+    let started = 0;
+    const items = Array.from({ length: 20 }, (_, index) => index);
+    const promise = mapWithConcurrency(items, 2, async (n) => {
+      started++;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (n === 1) {
+        throw new Error('boom');
+      }
+      return n;
+    });
+
+    await expect(promise).rejects.toThrow('boom');
+    // Surviving workers must not drain the queue after the failure — on a real
+    // run every extra dispatch is a paid LLM call.
+    const startedAtRejection = started;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(started).toBe(startedAtRejection);
+    expect(started).toBeLessThan(items.length);
+  });
 });
 
 describe('consolidateRecordFacts bounded concurrency', () => {
