@@ -55,7 +55,16 @@ export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
       continue;
     }
     if (prior.statement === fact.statement) {
-      ops.push({ type: 'noop', subject: fact.subject });
+      // Same claim restated: refresh only when this assertion carries a
+      // strictly newer date, so newest-date-wins still governs the stored
+      // [date] prefix. Equal/older/dateless restatements stay a noop (no
+      // content change to rewrite).
+      if ((fact.date ?? '') > (prior.date ?? '')) {
+        ops.push({ type: 'update', subject: fact.subject, fact });
+        bySubject.set(fact.subject, fact);
+      } else {
+        ops.push({ type: 'noop', subject: fact.subject });
+      }
       continue;
     }
     if (isNewer(fact, prior)) {

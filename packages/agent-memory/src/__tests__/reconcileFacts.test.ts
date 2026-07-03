@@ -14,6 +14,35 @@ describe('reconcile', () => {
     expect(ops).toEqual([{ type: 'noop', subject: 'employer' }]);
   });
 
+  it('refreshes the date when the same statement is restated with a newer date', () => {
+    const existing: Fact[] = [{ subject: 'employer', statement: 'Acme', date: '2024-01-01' }];
+    const ops = reconcile(
+      [{ subject: 'employer', statement: 'Acme', date: '2024-06-01' }],
+      existing,
+    );
+    expect(ops).toEqual([
+      {
+        type: 'update',
+        subject: 'employer',
+        fact: { subject: 'employer', statement: 'Acme', date: '2024-06-01' },
+      },
+    ]);
+  });
+
+  it('noops when the same statement is restated with an equal or older date', () => {
+    const existing: Fact[] = [{ subject: 'employer', statement: 'Acme', date: '2024-06-01' }];
+    const same = reconcile(
+      [{ subject: 'employer', statement: 'Acme', date: '2024-06-01' }],
+      existing,
+    );
+    expect(same).toEqual([{ type: 'noop', subject: 'employer' }]);
+    const older = reconcile(
+      [{ subject: 'employer', statement: 'Acme', date: '2024-01-01' }],
+      existing,
+    );
+    expect(older).toEqual([{ type: 'noop', subject: 'employer' }]);
+  });
+
   it('updates to a newer dated statement and ignores an older one', () => {
     const existing: Fact[] = [{ subject: 'employer', statement: 'Acme', date: '2024-01-01' }];
     const newer = reconcile(

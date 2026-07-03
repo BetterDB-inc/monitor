@@ -20,6 +20,25 @@ def test_noops_when_incoming_restates_the_existing_statement() -> None:
     assert [op.type for op in ops] == ["noop"]
 
 
+def test_refreshes_the_date_when_same_statement_restated_with_a_newer_date() -> None:
+    existing = [Fact(subject="employer", statement="Acme", date="2024-01-01")]
+    ops = reconcile([Fact(subject="employer", statement="Acme", date="2024-06-01")], existing)
+    assert ops == [
+        UpdateOp(
+            subject="employer",
+            fact=Fact(subject="employer", statement="Acme", date="2024-06-01"),
+        )
+    ]
+
+
+def test_noops_when_same_statement_restated_with_equal_or_older_date() -> None:
+    existing = [Fact(subject="employer", statement="Acme", date="2024-06-01")]
+    same = reconcile([Fact(subject="employer", statement="Acme", date="2024-06-01")], existing)
+    assert [op.type for op in same] == ["noop"]
+    older = reconcile([Fact(subject="employer", statement="Acme", date="2024-01-01")], existing)
+    assert [op.type for op in older] == ["noop"]
+
+
 def test_updates_to_a_newer_dated_statement_and_ignores_an_older_one() -> None:
     existing = [Fact(subject="employer", statement="Acme", date="2024-01-01")]
     newer = reconcile([Fact(subject="employer", statement="Globex", date="2024-06-01")], existing)

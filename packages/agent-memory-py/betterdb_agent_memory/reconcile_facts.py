@@ -79,7 +79,15 @@ def reconcile(incoming: list[Fact], existing: list[Fact]) -> list[FactOp]:
             by_subject[fact.subject] = fact
             continue
         if prior.statement == fact.statement:
-            ops.append(NoopOp(subject=fact.subject))
+            # Same claim restated: refresh only when this assertion carries a
+            # strictly newer date, so newest-date-wins still governs the stored
+            # [date] prefix. Equal/older/dateless restatements stay a noop (no
+            # content change to rewrite).
+            if (fact.date or "") > (prior.date or ""):
+                ops.append(UpdateOp(subject=fact.subject, fact=fact))
+                by_subject[fact.subject] = fact
+            else:
+                ops.append(NoopOp(subject=fact.subject))
             continue
         if _is_newer(fact, prior):
             ops.append(UpdateOp(subject=fact.subject, fact=fact))
