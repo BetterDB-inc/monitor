@@ -96,7 +96,17 @@ describe('AnomalyService', () => {
         {
           provide: ConfigService,
           useValue: {
-            get: jest.fn().mockReturnValue('localhost'),
+            // The Zod env schema validates these to numbers before they reach
+            // the service, so the mock returns the schema defaults for them and
+            // falls back to 'localhost' for any other key.
+            get: jest.fn((key: string) => {
+              const numeric: Record<string, number> = {
+                MONITOR_PERSISTENCE_STALL_SEC: 60,
+                MONITOR_PERSISTENCE_WARN_SEC: 120,
+                MONITOR_PERSISTENCE_CRIT_SEC: 600,
+              };
+              return key in numeric ? numeric[key] : 'localhost';
+            }),
           },
         },
         { provide: PrometheusService, useValue: prometheusService },
@@ -938,6 +948,60 @@ describe('AnomalyService', () => {
       expect(events).toHaveLength(1);
       expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
       expect(events[0].message).toContain('reported an error');
+    });
+
+    it('fires on a pre-existing err status at the first poll (no ok baseline)', async () => {
+      // Level-triggered: an err already present when monitoring starts must be
+      // caught on the first observation, not only on an ok->err edge.
+      mockPersistence({ rdb_last_bgsave_status: 'err' });
+      await poll();
+
+      const events = persistenceEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('reported an error');
+    });
+
+    it('reports a persisting err status once, re-arming after an ok sample', async () => {
+      mockPersistence({ rdb_last_bgsave_status: 'err' });
+      await poll();
+      now += 1_000;
+      await poll(); // still err — latch suppresses a duplicate
+      expect(persistenceEvents()).toHaveLength(1);
+
+      now += 1_000;
+      mockPersistence({ rdb_last_bgsave_status: 'ok' });
+      await poll(); // ok re-arms the latch
+
+      now += 1_000;
+      mockPersistence({ rdb_last_bgsave_status: 'err' });
+      await poll(); // a fresh failure fires again
+
+      expect(persistenceEvents()).toHaveLength(2);
+    });
+
+    it('fires CRITICAL with the time-ceiling reason when elapsed crosses the crit ceiling', async () => {
+      // Distinct from a frozen-progress stall: keys may still be advancing, so
+      // the event reports the duration ceiling rather than "no progress".
+      mockPersistence({
+        aof_rewrite_in_progress: '1',
+        aof_current_rewrite_time_sec: '100',
+      });
+      await poll();
+
+      now += 5_000;
+      mockPersistence({
+        aof_rewrite_in_progress: '1',
+        aof_current_rewrite_time_sec: '605',
+      });
+      await poll();
+
+      const events = persistenceEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].threshold).toBe(600);
+      expect(events[0].message).toContain('time ceiling');
+      expect(events[0].message).not.toContain('no progress');
     });
 
     it('fires CRITICAL when an AOF rewrite exceeds the hard elapsed ceiling', async () => {

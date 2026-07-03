@@ -38,8 +38,9 @@ interface PersistenceChildTrack {
 interface ConnectionPersistenceState {
   rdb?: PersistenceChildTrack;
   aof?: PersistenceChildTrack;
-  rdbLastStatus?: string;
-  aofLastStatus?: string;
+  // Latch so a persisting error status fires once, re-armed by a later ok.
+  rdbErrorReported?: boolean;
+  aofErrorReported?: boolean;
 }
 
 @Injectable()
@@ -86,13 +87,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.correlator = new Correlator(this.correlationIntervalMs);
     this.metricExtractors = this.initializeMetricExtractors();
 
-    const positiveNumber = (value: unknown, fallback: number): number => {
-      const n = Number(value);
-      return Number.isFinite(n) && n > 0 ? n : fallback;
-    };
-    this.persistenceStallSec = positiveNumber(this.configService.get('MONITOR_PERSISTENCE_STALL_SEC'), 60);
-    this.persistenceWarnSec = positiveNumber(this.configService.get('MONITOR_PERSISTENCE_WARN_SEC'), 120);
-    this.persistenceCritSec = positiveNumber(this.configService.get('MONITOR_PERSISTENCE_CRIT_SEC'), 600);
+    // Validated and defaulted by the Zod env schema (env.schema.ts), so a typo
+    // fails startup instead of silently falling back here.
+    this.persistenceStallSec = this.configService.get<number>('MONITOR_PERSISTENCE_STALL_SEC', 60);
+    this.persistenceWarnSec = this.configService.get<number>('MONITOR_PERSISTENCE_WARN_SEC', 120);
+    this.persistenceCritSec = this.configService.get<number>('MONITOR_PERSISTENCE_CRIT_SEC', 600);
   }
 
   protected getIntervalMs(): number {
@@ -543,16 +542,25 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     ctx: ConnectionContext,
     timestamp: number,
   ): Promise<void> {
-    // Completed-status transition to error (e.g. failed BGSAVE — the case #2322
-    // users disable stop-writes-on-bgsave-error around).
+    // Completed-status error (e.g. failed BGSAVE — the case #2322 users disable
+    // stop-writes-on-bgsave-error around). Level-triggered, not edge-triggered:
+    // fire whenever the status is err rather than only on an ok->err transition,
+    // so a pre-existing error at monitor/connection start (no prior ok baseline)
+    // is caught on the first poll. A latch keeps a persisting err from re-firing
+    // every poll; a later non-err (ok) sample re-arms it for the next failure.
     const status = signals.lastStatus;
     if (status !== undefined && status !== '') {
-      const prevStatus = kind === 'rdb' ? state.rdbLastStatus : state.aofLastStatus;
-      if (prevStatus !== undefined && prevStatus !== status && status === 'err') {
-        await this.addAnomaly(this.buildPersistenceEvent(kind, 'error', 0, signals, timestamp, ctx), ctx);
+      const errorReported = kind === 'rdb' ? state.rdbErrorReported : state.aofErrorReported;
+      if (status === 'err') {
+        if (!errorReported) {
+          await this.addAnomaly(this.buildPersistenceEvent(kind, 'error', 0, signals, timestamp, ctx), ctx);
+          if (kind === 'rdb') state.rdbErrorReported = true;
+          else state.aofErrorReported = true;
+        }
+      } else if (errorReported) {
+        if (kind === 'rdb') state.rdbErrorReported = false;
+        else state.aofErrorReported = false;
       }
-      if (kind === 'rdb') state.rdbLastStatus = status;
-      else state.aofLastStatus = status;
     }
 
     if (!signals.inProgress) {
@@ -616,7 +624,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     if (!track.reportedStall && (frozenStall || tooLong)) {
       track.reportedStall = true;
-      await this.addAnomaly(this.buildPersistenceEvent(kind, 'stall', elapsedSec, signals, timestamp, ctx), ctx);
+      // Frozen key progress and the elapsed-time ceiling are distinct failures
+      // with different thresholds and messages. Prefer the frozen-progress
+      // reason when both trip (a stuck child is the more actionable signal).
+      const reason = frozenStall ? 'stall' : 'exceeded';
+      await this.addAnomaly(this.buildPersistenceEvent(kind, reason, elapsedSec, signals, timestamp, ctx), ctx);
       return;
     }
 
@@ -628,13 +640,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
   private buildPersistenceEvent(
     kind: 'rdb' | 'aof',
-    reason: 'error' | 'stall' | 'long',
+    reason: 'error' | 'stall' | 'exceeded' | 'long',
     elapsedSec: number,
     signals: { processed: number | null; total: number | null },
     timestamp: number,
     ctx: ConnectionContext,
   ): AnomalyEvent {
     const label = kind === 'rdb' ? { name: 'RDB save', op: 'BGSAVE' } : { name: 'AOF rewrite', op: 'BGREWRITEAOF' };
+    const progress =
+      signals.processed !== null && signals.total !== null
+        ? ` (processed ${signals.processed}/${signals.total} keys)`
+        : '';
     let severity: AnomalySeverity;
     let message: string;
     let threshold: number;
@@ -644,13 +660,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       threshold = 0;
       message = `CRITICAL: last ${label.name} (${label.op}) reported an error — persistence may be failing`;
     } else if (reason === 'stall') {
+      // Key progress frozen for persistenceStallSec while the child keeps running.
       severity = AnomalySeverity.CRITICAL;
       threshold = this.persistenceStallSec;
-      const progress =
-        signals.processed !== null && signals.total !== null
-          ? ` (processed ${signals.processed}/${signals.total} keys)`
-          : '';
       message = `CRITICAL: ${label.name} (${label.op}) appears stuck — running ${elapsedSec}s with no progress${progress}`;
+    } else if (reason === 'exceeded') {
+      // Elapsed time crossed the persistenceCritSec ceiling; keys may still be
+      // advancing, so this is a duration breach, not a frozen-progress stall.
+      severity = AnomalySeverity.CRITICAL;
+      threshold = this.persistenceCritSec;
+      message = `CRITICAL: ${label.name} (${label.op}) exceeded the ${this.persistenceCritSec}s time ceiling — running ${elapsedSec}s${progress}`;
     } else {
       severity = AnomalySeverity.WARNING;
       threshold = this.persistenceWarnSec;
