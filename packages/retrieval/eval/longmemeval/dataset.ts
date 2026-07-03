@@ -26,6 +26,7 @@ export async function* loadRecords(
   limit: number,
   questionType?: string,
   perType?: number,
+  expectedTypeCount?: number,
 ): AsyncGenerator<LmeRecord> {
   // Optional comma-separated question_type allow-list (e.g.
   // "temporal-reasoning,multi-session") so a subset can be evaluated in
@@ -42,8 +43,7 @@ export async function* loadRecords(
   // question_type (a balanced, type-stratified slice) instead of the flat
   // `limit`. Because _m/_s are GROUPED by type on disk, a flat limit takes only
   // the first type's records; stratified sampling gives every type equal
-  // representation for a paired A/B. Early-stops once every allowed type is
-  // full (only possible when the allow-list is given, so the total is known).
+  // representation for a paired A/B.
   const stratify = perType !== undefined && perType > 0;
   const counts = new Map<string, number>();
   const keep = (record: LmeRecord): boolean => {
@@ -54,10 +54,19 @@ export async function* loadRecords(
     counts.set(record.question_type, seen + 1);
     return true;
   };
+  // Number of distinct types the slice must fill before it is complete: the
+  // allow-list size when filtering, else the caller's hint (the full
+  // LongMemEval type count). `counts` only ever holds allowed, kept types, each
+  // capped at `perType`, so "every type seen and full" == the whole slice. This
+  // lets stratified mode early-stop WITHOUT an explicit filter, so a multi-GB
+  // stream (longmemeval_m) is not scanned to EOF after the caps are met. Zero
+  // (no filter and no hint) disables early-stop, falling back to a full read.
+  const expectedTypes = allow.size > 0 ? allow.size : (expectedTypeCount ?? 0);
   const stratifyDone = (): boolean =>
     stratify &&
-    allow.size > 0 &&
-    Array.from(allow).every((t) => (counts.get(t) ?? 0) >= (perType as number));
+    expectedTypes > 0 &&
+    counts.size >= expectedTypes &&
+    Array.from(counts.values()).every((c) => c >= (perType as number));
 
   if (dataPath === undefined || dataPath === '') {
     const records = await loadFixture();

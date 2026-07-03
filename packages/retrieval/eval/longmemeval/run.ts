@@ -81,7 +81,10 @@ async function main(): Promise<void> {
     }
   }
 
-  const records = loadRecords(dataPath, limit, questionType, perType);
+  // Pass typeCount so stratified mode can early-stop after the caps fill even
+  // when no explicit LONGMEMEVAL_TYPE filter is set, instead of scanning a
+  // multi-GB dataset to EOF.
+  const records = loadRecords(dataPath, limit, questionType, perType, typeCount);
   const source = sourceLabel(dataPath);
 
   const tier = qa
