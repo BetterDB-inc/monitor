@@ -25,8 +25,14 @@ export type FactOp =
   | { type: 'delete'; subject: string }
   | { type: 'noop'; subject: string };
 
+// Sessions are reconciled in chronological order, so a dateless candidate is
+// the later assertion and wins — the same default that lets a dateless
+// tombstone delete. A dateless prior likewise loses to any dated candidate.
 function isNewer(candidate: Fact, prior: Fact): boolean {
-  return (candidate.date ?? '') >= (prior.date ?? '');
+  if (candidate.date === undefined || prior.date === undefined) {
+    return true;
+  }
+  return candidate.date >= prior.date;
 }
 
 // A tombstone is stale only when both dates are known and it predates the

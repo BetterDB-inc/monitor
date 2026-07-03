@@ -48,6 +48,18 @@ describe('reconcile', () => {
     ]);
   });
 
+  it('lets a dateless later update supersede a dated prior (sessions arrive chronologically)', () => {
+    const existing = [fact('employer', 'works at Google', '2026-01-01')];
+    const ops = reconcile([{ subject: 'employer', statement: 'works at Meta' }], existing);
+    expect(ops).toEqual([
+      {
+        type: 'update',
+        subject: 'employer',
+        fact: { subject: 'employer', statement: 'works at Meta' },
+      },
+    ]);
+  });
+
   it('does not supersede an existing fact with a stale (older) differing statement', () => {
     const existing = [fact('employer', 'works at Meta', '2026-03-01')];
     const ops = reconcile([fact('employer', 'works at Google', '2026-01-01')], existing);
