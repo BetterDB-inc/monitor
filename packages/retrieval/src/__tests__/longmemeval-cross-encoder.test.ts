@@ -133,6 +133,40 @@ describe('createOpenAICrossEncoderScorer', () => {
 });
 
 describe('rerank-cross misconfiguration', () => {
+  it('rejects a run where the lever is on but no scorer seam is provided', async () => {
+    // Without the guard this silently falls back to the hybrid reranker (or
+    // plain top-k when the pool equals k) while the summary reports the
+    // rerank-cross lever as enabled with zero cost — a false ablation point.
+    await expect(
+      runEval({
+        records: await loadFixture(),
+        embedder: createMockEmbedder(),
+        store: createMockStore(),
+        reader: null,
+        judge: null,
+        k: 2,
+        chunkMode: 'session',
+        limit: 20,
+        rerankPool: 8,
+        levers: ['rerank-cross'],
+      }),
+    ).rejects.toThrow(/rerank-cross/);
+    await expect(
+      runEval({
+        records: await loadFixture(),
+        embedder: createMockEmbedder(),
+        store: createMockStore(),
+        reader: null,
+        judge: null,
+        k: 2,
+        chunkMode: 'session',
+        limit: 20,
+        rerankPool: 2,
+        levers: ['rerank-cross'],
+      }),
+    ).rejects.toThrow(/rerank-cross/);
+  });
+
   it('rejects a run where the lever is on but the pool never exceeds k', async () => {
     await expect(
       runEval({

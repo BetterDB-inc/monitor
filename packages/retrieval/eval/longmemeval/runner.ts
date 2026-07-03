@@ -127,13 +127,21 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const useRerank = rerankPool > k;
   const fetchK = useRerank ? rerankPool : k;
   const crossScorer = levers.includes('rerank-cross') ? config.crossEncoderScorer : undefined;
-  if (crossScorer !== undefined && useRerank === false) {
-    // Without an over-fetch pool the scorer is never invoked, and the run would
-    // report a pure-baseline result labeled as the rerank-cross lever — a false
-    // ablation point. Refuse instead of measuring nothing.
-    throw new Error(
-      `the 'rerank-cross' lever needs an over-fetch pool: set rerankPool (LONGMEMEVAL_RERANK_POOL) above k=${k}`,
-    );
+  // A misconfigured rerank-cross run must refuse rather than measure the wrong
+  // thing: without a scorer seam it silently falls back to the hybrid reranker
+  // (or plain top-k), and without an over-fetch pool the scorer is never
+  // invoked — either way the summary would report a false ablation point.
+  if (levers.includes('rerank-cross')) {
+    if (crossScorer === undefined) {
+      throw new Error(
+        "the 'rerank-cross' lever needs a crossEncoderScorer seam; without one the run falls back to the hybrid reranker while reporting the lever as enabled",
+      );
+    }
+    if (useRerank === false) {
+      throw new Error(
+        `the 'rerank-cross' lever needs an over-fetch pool: set rerankPool (LONGMEMEVAL_RERANK_POOL) above k=${k}`,
+      );
+    }
   }
   const rerankFn = resolveRerankFn(useRerank, crossScorer, costReport);
   const schema = buildSchema(embedder.dims);
