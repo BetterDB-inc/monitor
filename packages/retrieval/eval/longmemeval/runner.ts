@@ -2,7 +2,7 @@ import { Retriever } from '../../src/index';
 import type { RetrievalSchema, RerankFn } from '../../src/index';
 import { chunkRecord, recordIsHit } from './adapter';
 import { createHybridRerank } from './rerank';
-import { createCrossEncoderRerank } from './cross-encoder';
+import { createCrossEncoderRerank, SCORER_BATCH_SIZE } from './cross-encoder';
 import type { CrossEncoderScorer } from './cross-encoder';
 import { assembleContexts } from './assemble';
 import type { AssembleOptions } from './assemble';
@@ -106,7 +106,11 @@ function resolveRerankFn(
   const counted: CrossEncoderScorer = async (query, documents) => {
     const startedAt = Date.now();
     const scores = await crossScorer(query, documents);
-    costReport.record('rerank-cross', { llmCalls: 1, latencyMs: Date.now() - startedAt });
+    // Projected cost, mock or real: the OpenAI scorer spends one chat call per
+    // SCORER_BATCH_SIZE passages (harness convention — mocks report the cost
+    // the real seam would incur).
+    const llmCalls = Math.max(1, Math.ceil(documents.length / SCORER_BATCH_SIZE));
+    costReport.record('rerank-cross', { llmCalls, latencyMs: Date.now() - startedAt });
     return scores;
   };
   return createCrossEncoderRerank(counted);
@@ -123,6 +127,14 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const useRerank = rerankPool > k;
   const fetchK = useRerank ? rerankPool : k;
   const crossScorer = levers.includes('rerank-cross') ? config.crossEncoderScorer : undefined;
+  if (crossScorer !== undefined && useRerank === false) {
+    // Without an over-fetch pool the scorer is never invoked, and the run would
+    // report a pure-baseline result labeled as the rerank-cross lever — a false
+    // ablation point. Refuse instead of measuring nothing.
+    throw new Error(
+      `the 'rerank-cross' lever needs an over-fetch pool: set rerankPool (LONGMEMEVAL_RERANK_POOL) above k=${k}`,
+    );
+  }
   const rerankFn = resolveRerankFn(useRerank, crossScorer, costReport);
   const schema = buildSchema(embedder.dims);
   const byType = new Map<string, TypeStats>();
