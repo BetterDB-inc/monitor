@@ -18,6 +18,14 @@ export interface ValkeyLike {
 export interface Analytics {
   init(client: ValkeyLike, name: string, configProps?: Record<string, unknown>): Promise<void>;
   capture(event: string, properties?: Record<string, unknown>): void;
+  /**
+   * Register a periodic snapshot emitted from request traffic when the interval
+   * timer is frozen (serverless). No-op on long-lived servers, which drive
+   * snapshots from their own setInterval.
+   */
+  registerSnapshot(intervalMs: number, snapshot: () => Promise<void>): void;
+  /** Called from request hot paths; may emit a due snapshot under serverless. */
+  onActivity(): void;
   flush(): Promise<void>;
   shutdown(): Promise<void>;
 }
@@ -38,6 +46,8 @@ const BAKED_POSTHOG_HOST = '__BETTERDB_POSTHOG_HOST__';
 export const NOOP_ANALYTICS: Analytics = {
   async init() {},
   capture() {},
+  registerSnapshot() {},
+  onActivity() {},
   async flush() {},
   async shutdown() {},
 };
@@ -89,6 +99,33 @@ function getInstallId(): string {
   return newId;
 }
 
+/** A serverless request's `waitUntil` — keeps the invocation alive for a promise. */
+type WaitUntil = (promise: Promise<unknown>) => void;
+
+/**
+ * On serverless platforms (Vercel / Next.js) the invocation is frozen the
+ * instant the response is returned, so a fire-and-forget flush is suspended
+ * mid-send and the buffered events are lost. These runtimes expose a per-request
+ * `waitUntil` on a global symbol; handing it the flush promise keeps the
+ * invocation alive until the events are actually delivered. Returns undefined
+ * outside a request (long-lived servers / CLIs), where the flushInterval +
+ * beforeExit backstops apply.
+ */
+function getRequestWaitUntil(): WaitUntil | undefined {
+  for (const key of ['@vercel/request-context', '@next/request-context']) {
+    try {
+      const holder = (globalThis as Record<symbol, unknown>)[Symbol.for(key)] as
+        | { get?: () => { waitUntil?: WaitUntil } | undefined }
+        | undefined;
+      const waitUntil = holder?.get?.()?.waitUntil;
+      if (typeof waitUntil === 'function') return waitUntil;
+    } catch {
+      // ignore a malformed request context
+    }
+  }
+  return undefined;
+}
+
 type PostHogClient = {
   capture: (opts: { distinctId?: string; event: string; properties?: Record<string, unknown> }) => void;
   flush: () => Promise<void>;
@@ -99,6 +136,11 @@ export class PostHogAnalytics implements Analytics {
   private posthog: PostHogClient;
   private distinctId = '';
   private deploymentId = '';
+  // Traffic-driven snapshot state — used to emit periodic snapshots from
+  // request hot paths when the setInterval timer is frozen (serverless).
+  private snapshotIntervalMs = 0;
+  private snapshotFn: (() => Promise<void>) | undefined;
+  private lastSnapshotAt = 0;
   // Library consumers are frequently short-lived scripts that never call
   // shutdown(), so PostHog's buffered events (flushAt=20, flushInterval=10s)
   // would be dropped when the process exits before the queue drains. Flush
@@ -119,10 +161,10 @@ export class PostHogAnalytics implements Analytics {
     this.deploymentId = await this.resolveDeploymentId(client, name);
     const merged: Record<string, unknown> = { ...(configProps ?? {}) };
     if (this.deploymentId) merged.deployment_id = this.deploymentId;
+    // capture() delivers the event in a serverless-aware way (see deliver()):
+    // under a request it hands the flush to waitUntil; otherwise it flushes
+    // inline, so the start event lands even for short-lived processes.
     this.capture('cache_init', merged);
-    // Flush the start event immediately so it lands even for processes that exit
-    // before the flush interval or the beforeExit hook fires.
-    await this.flush();
   }
 
   private async resolveDeploymentId(client: ValkeyLike, name: string): Promise<string> {
@@ -153,6 +195,58 @@ export class PostHogAnalytics implements Analytics {
       });
     } catch {
       // never throw from analytics
+    }
+    this.deliver();
+  }
+
+  /**
+   * Deliver buffered events. Under a serverless request, hand the flush to the
+   * request's `waitUntil` so the invocation stays alive until it completes
+   * (flushing inline would dequeue the events then freeze mid-send, dropping
+   * them). Otherwise flush inline; flushInterval + beforeExit are the backstops.
+   */
+  private deliver(): void {
+    const waitUntil = getRequestWaitUntil();
+    if (waitUntil) {
+      try {
+        waitUntil(this.flush());
+        return;
+      } catch {
+        // fall through to an inline flush
+      }
+    }
+    void this.flush();
+  }
+
+  registerSnapshot(intervalMs: number, snapshot: () => Promise<void>): void {
+    this.snapshotIntervalMs = intervalMs;
+    this.snapshotFn = snapshot;
+    this.lastSnapshotAt = Date.now();
+  }
+
+  onActivity(): void {
+    const snapshot = this.snapshotFn;
+    if (!snapshot || this.snapshotIntervalMs <= 0) return;
+    // Only traffic-drive snapshots under serverless, where the setInterval that
+    // long-lived servers rely on is frozen between invocations.
+    const waitUntil = getRequestWaitUntil();
+    if (!waitUntil) return;
+    const now = Date.now();
+    if (now - this.lastSnapshotAt < this.snapshotIntervalMs) return;
+    this.lastSnapshotAt = now;
+    try {
+      waitUntil(
+        (async () => {
+          try {
+            await snapshot();
+          } catch {
+            // never throw from analytics
+          }
+          await this.flush();
+        })(),
+      );
+    } catch {
+      // ignore waitUntil failures
     }
   }
 

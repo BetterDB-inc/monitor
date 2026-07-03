@@ -135,4 +135,67 @@ describe('analytics', () => {
       await expect(analytics.shutdown()).resolves.toBeUndefined();
     });
   });
+
+  describe('serverless delivery (waitUntil)', () => {
+    const VERCEL_CTX = Symbol.for('@vercel/request-context');
+    let pending: Promise<unknown>[];
+    let waitUntil: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      pending = [];
+      waitUntil = vi.fn((p: Promise<unknown>) => {
+        pending.push(p);
+      });
+      (globalThis as Record<symbol, unknown>)[VERCEL_CTX] = { get: () => ({ waitUntil }) };
+    });
+
+    afterEach(() => {
+      delete (globalThis as Record<symbol, unknown>)[VERCEL_CTX];
+      vi.useRealTimers();
+    });
+
+    it('hands the init flush to the request waitUntil so the invocation stays alive', async () => {
+      const analytics = new PostHogAnalytics(phState);
+      const client = createMockClient();
+
+      await analytics.init(client, 'p');
+
+      expect(waitUntil).toHaveBeenCalledTimes(1);
+      expect(waitUntil.mock.calls[0][0]).toBeInstanceOf(Promise);
+      await Promise.all(pending);
+      expect(phState.flush).toHaveBeenCalled();
+    });
+
+    it('emits a registered snapshot from onActivity once the interval elapses', async () => {
+      vi.useFakeTimers();
+      const analytics = new PostHogAnalytics(phState);
+      const client = createMockClient();
+      await analytics.init(client, 'p');
+      await Promise.all(pending);
+      pending = [];
+      waitUntil.mockClear();
+
+      const snapshot = vi.fn().mockResolvedValue(undefined);
+      analytics.registerSnapshot(1000, snapshot);
+
+      analytics.onActivity();
+      expect(snapshot).not.toHaveBeenCalled();
+      expect(waitUntil).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1001);
+      analytics.onActivity();
+      expect(waitUntil).toHaveBeenCalledTimes(1);
+      await Promise.all(pending);
+      expect(snapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('onActivity is a no-op with no request context (long-lived server path)', () => {
+      delete (globalThis as Record<symbol, unknown>)[VERCEL_CTX];
+      const analytics = new PostHogAnalytics(phState);
+      const snapshot = vi.fn().mockResolvedValue(undefined);
+      analytics.registerSnapshot(1, snapshot);
+      analytics.onActivity();
+      expect(snapshot).not.toHaveBeenCalled();
+    });
+  });
 });
