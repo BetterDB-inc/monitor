@@ -12,6 +12,36 @@ export interface AssembleOptions {
   group?: boolean;
 }
 
+function envUnitFloat(value: string | undefined): number | undefined {
+  if (value === undefined || value === '') {
+    return undefined;
+  }
+  const parsed = parseFloat(value);
+  if (Number.isFinite(parsed) === false || parsed < 0 || parsed > 1) {
+    return undefined;
+  }
+  return parsed;
+}
+
+// Env wiring for the opt-in structure features. Without any of these set, the
+// assemble lever only date-prefixes the rerank-ordered top-k — enabling the
+// flag alone is NOT a meaningful ablation point.
+export function resolveAssembleOptions(env: Record<string, string | undefined>): AssembleOptions {
+  const options: AssembleOptions = {};
+  const dedupThreshold = envUnitFloat(env.LONGMEMEVAL_DEDUP_THRESHOLD);
+  if (dedupThreshold !== undefined) {
+    options.dedupThreshold = dedupThreshold;
+  }
+  const mmrLambda = envUnitFloat(env.LONGMEMEVAL_MMR_LAMBDA);
+  if (mmrLambda !== undefined) {
+    options.mmrLambda = mmrLambda;
+  }
+  if (env.LONGMEMEVAL_GROUP === '1' || env.LONGMEMEVAL_GROUP === 'true') {
+    options.group = true;
+  }
+  return options;
+}
+
 function renderContext(hit: QueryHit): string {
   const date = hit.fields.date;
   return date ? `[${date}] ${hit.text}` : hit.text;
