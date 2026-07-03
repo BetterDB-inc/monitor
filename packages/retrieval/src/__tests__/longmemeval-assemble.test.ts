@@ -188,4 +188,9 @@ describe('resolveAssembleOptions', () => {
       }),
     ).toEqual({});
   });
+
+  it('rejects a zero dedup threshold (containment >= 0 would drop every later hit)', () => {
+    expect(resolveAssembleOptions({ LONGMEMEVAL_DEDUP_THRESHOLD: '0' })).toEqual({});
+    expect(resolveAssembleOptions({ LONGMEMEVAL_MMR_LAMBDA: '0' })).toEqual({ mmrLambda: 0 });
+  });
 });

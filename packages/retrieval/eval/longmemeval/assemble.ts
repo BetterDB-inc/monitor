@@ -12,12 +12,12 @@ export interface AssembleOptions {
   group?: boolean;
 }
 
-function envUnitFloat(value: string | undefined): number | undefined {
+function envUnitFloat(value: string | undefined, min: number): number | undefined {
   if (value === undefined || value === '') {
     return undefined;
   }
   const parsed = parseFloat(value);
-  if (Number.isFinite(parsed) === false || parsed < 0 || parsed > 1) {
+  if (Number.isFinite(parsed) === false || parsed < min || parsed > 1) {
     return undefined;
   }
   return parsed;
@@ -28,11 +28,14 @@ function envUnitFloat(value: string | undefined): number | undefined {
 // flag alone is NOT a meaningful ablation point.
 export function resolveAssembleOptions(env: Record<string, string | undefined>): AssembleOptions {
   const options: AssembleOptions = {};
-  const dedupThreshold = envUnitFloat(env.LONGMEMEVAL_DEDUP_THRESHOLD);
+  // A zero threshold is rejected, not clamped: containment is never negative,
+  // so dedupe at 0 would mark every later hit a duplicate and collapse the
+  // reader to a single context. MMR lambda 0 (pure diversity) stays valid.
+  const dedupThreshold = envUnitFloat(env.LONGMEMEVAL_DEDUP_THRESHOLD, Number.EPSILON);
   if (dedupThreshold !== undefined) {
     options.dedupThreshold = dedupThreshold;
   }
-  const mmrLambda = envUnitFloat(env.LONGMEMEVAL_MMR_LAMBDA);
+  const mmrLambda = envUnitFloat(env.LONGMEMEVAL_MMR_LAMBDA, 0);
   if (mmrLambda !== undefined) {
     options.mmrLambda = mmrLambda;
   }
