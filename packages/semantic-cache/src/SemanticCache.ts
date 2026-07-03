@@ -1394,9 +1394,11 @@ export class SemanticCache {
       const intervalMs = this.analyticsOpts?.statsIntervalMs ?? 300_000;
       if (!this.shutdownCalled && intervalMs > 0) {
         // Serverless backstop: emit snapshots from request traffic (onActivity)
-        // when the interval timer below is frozen between invocations.
+        // when the interval timer below is frozen between invocations. Both the
+        // timer (snapshotTick) and onActivity share one throttle clock in the
+        // analytics layer, so a warm invocation can't double-emit.
         this.analytics.registerSnapshot(intervalMs, () => this.captureStatsSnapshot());
-        this.statsTimer = setInterval(() => this.captureStatsSnapshot(), intervalMs);
+        this.statsTimer = setInterval(() => this.analytics.snapshotTick(), intervalMs);
         this.statsTimer.unref();
       }
     } catch {

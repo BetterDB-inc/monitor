@@ -28,6 +28,8 @@ export interface Analytics {
   registerSnapshot(intervalMs: number, snapshot: () => Promise<void>): void;
   /** Called from request hot paths; may emit a due snapshot under serverless. */
   onActivity(): void;
+  /** Called from the long-lived-server interval timer; may emit a due snapshot. */
+  snapshotTick(): void;
   flush(): Promise<void>;
   shutdown(): Promise<void>;
 }
@@ -48,6 +50,7 @@ export const NOOP_ANALYTICS: Analytics = {
   capture() {},
   registerSnapshot() {},
   onActivity() {},
+  snapshotTick() {},
   async flush() {},
   async shutdown() {},
 };
@@ -230,17 +233,32 @@ export class PostHogAnalytics implements Analytics {
   }
 
   onActivity(): void {
-    const snapshot = this.snapshotFn;
-    if (!snapshot || this.snapshotIntervalMs <= 0) return;
-    // Only traffic-drive snapshots under serverless, where the setInterval that
-    // long-lived servers rely on is frozen between invocations.
+    // Serverless: emit from request traffic, handing the work to the request's
+    // waitUntil so the invocation stays alive until it completes. The setInterval
+    // that long-lived servers rely on is frozen between invocations.
     const waitUntil = getRequestWaitUntil();
     if (!waitUntil) return;
+    this.emitSnapshotIfDue(waitUntil);
+  }
+
+  snapshotTick(): void {
+    // Long-lived-server interval path. Shares lastSnapshotAt with onActivity so a
+    // warm serverless invocation (where the otherwise-frozen timer can also fire)
+    // never emits a duplicate stats_snapshot for the same interval. flushInterval
+    // and beforeExit are the delivery backstops here.
+    this.emitSnapshotIfDue((p) => {
+      void p;
+    });
+  }
+
+  private emitSnapshotIfDue(deliver: WaitUntil): void {
+    const snapshot = this.snapshotFn;
+    if (!snapshot || this.snapshotIntervalMs <= 0) return;
     const now = Date.now();
     if (now - this.lastSnapshotAt < this.snapshotIntervalMs) return;
     this.lastSnapshotAt = now;
     try {
-      waitUntil(
+      deliver(
         (async () => {
           try {
             await snapshot();
@@ -251,7 +269,7 @@ export class PostHogAnalytics implements Analytics {
         })(),
       );
     } catch {
-      // ignore waitUntil failures
+      // ignore delivery failures
     }
   }
 

@@ -228,6 +228,24 @@ describe('analytics', () => {
       await analytics.shutdown();
     });
 
+    it('shares one throttle clock between snapshotTick and onActivity (no double-emit)', () => {
+      vi.useFakeTimers();
+      const ph = createMockPostHog();
+      const analytics = new PostHogAnalytics(ph);
+      const snapshot = vi.fn().mockResolvedValue(undefined);
+      analytics.registerSnapshot(1000, snapshot);
+
+      vi.advanceTimersByTime(1001);
+      // The interval timer fires first and emits inline for this interval...
+      analytics.snapshotTick();
+      // ...so a request in the same warm invocation must not re-emit: onActivity
+      // sees the shared lastSnapshotAt and skips before reaching waitUntil.
+      analytics.onActivity();
+
+      expect(snapshot).toHaveBeenCalledTimes(1);
+      expect(waitUntil).not.toHaveBeenCalled();
+    });
+
     it('onActivity is a no-op with no request context (long-lived server path)', () => {
       delete (globalThis as Record<symbol, unknown>)[VERCEL_CTX];
       const ph = createMockPostHog();
