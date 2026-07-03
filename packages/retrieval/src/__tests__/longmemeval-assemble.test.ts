@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { QueryHit } from '../index';
-import { assembleContexts } from '../../eval/longmemeval/assemble';
+import { assembleContexts, resolveAssembleOptions } from '../../eval/longmemeval/assemble';
 import { createMockEmbedder } from '../../eval/longmemeval/embed';
 import { createMockStore } from '../../eval/longmemeval/store';
 import { createMockJudge } from '../../eval/longmemeval/judge';
@@ -139,5 +139,53 @@ describe('assemble lever integration', () => {
       expect(contexts.length).toBeLessThanOrEqual(2);
     }
     expect(withAssemble.recallAtK).toBeGreaterThanOrEqual(baseline.recallAtK);
+  });
+
+  it('threads assembleOptions through to the reader contexts', async () => {
+    const { reader, calls } = spyReader();
+    await runEval({
+      records: await loadFixture(),
+      embedder: createMockEmbedder(),
+      store: createMockStore(),
+      reader,
+      judge: createMockJudge(),
+      k: 3,
+      chunkMode: 'session',
+      limit: 20,
+      rerankPool: 3,
+      levers: ['assemble'],
+      assembleOptions: { group: true },
+    });
+
+    expect(calls.length).toBeGreaterThan(0);
+    for (const contexts of calls) {
+      const dates = contexts.map((context) => {
+        return (context.match(/^\[([^\]]*)\]/) ?? [])[1] ?? '';
+      });
+      expect([...dates].sort()).toEqual(dates);
+    }
+  });
+});
+
+describe('resolveAssembleOptions', () => {
+  it('parses dedup threshold, MMR lambda, and group flag from the environment', () => {
+    expect(
+      resolveAssembleOptions({
+        LONGMEMEVAL_DEDUP_THRESHOLD: '0.8',
+        LONGMEMEVAL_MMR_LAMBDA: '0.7',
+        LONGMEMEVAL_GROUP: '1',
+      }),
+    ).toEqual({ dedupThreshold: 0.8, mmrLambda: 0.7, group: true });
+  });
+
+  it('returns no options when unset or invalid', () => {
+    expect(resolveAssembleOptions({})).toEqual({});
+    expect(
+      resolveAssembleOptions({
+        LONGMEMEVAL_DEDUP_THRESHOLD: 'nan',
+        LONGMEMEVAL_MMR_LAMBDA: '-1',
+        LONGMEMEVAL_GROUP: '0',
+      }),
+    ).toEqual({});
   });
 });
