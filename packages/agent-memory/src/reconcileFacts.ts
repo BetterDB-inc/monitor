@@ -1,4 +1,29 @@
-import type { Fact } from './types';
+import type { Fact, MemoryItem } from './types';
+
+// A stored fact memory's content is `[date] statement` when the fact carried a
+// date, else the bare statement. This matches that prefix so a stored fact can
+// be recovered for reconciliation.
+const DATED_CONTENT = /^\[([^\]]+)\] ([\s\S]*)$/;
+
+/** Render a fact's content for storage, preserving its asserted date as a prefix. */
+export function factContent(fact: Fact): string {
+  return fact.date !== undefined && fact.date !== ''
+    ? `[${fact.date}] ${fact.statement}`
+    : fact.statement;
+}
+
+/**
+ * Recover a {@link Fact} from a stored fact memory: the reconcile key comes from
+ * the persisted `subject`, the statement and date from the `[date] statement`
+ * content (inverse of {@link factContent}).
+ */
+export function storedFactToFact(item: MemoryItem): Fact {
+  const match = DATED_CONTENT.exec(item.content);
+  if (match) {
+    return { subject: item.subject ?? '', statement: match[2], date: match[1] };
+  }
+  return { subject: item.subject ?? '', statement: item.content };
+}
 
 /**
  * A single reconciliation decision for one incoming fact against the curated

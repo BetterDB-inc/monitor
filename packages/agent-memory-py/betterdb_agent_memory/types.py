@@ -35,6 +35,8 @@ class MemoryItem:
     last_accessed_at: int
     access_count: int
     source: str | None = None
+    # Reconciliation key, present on fact memories written by consolidate_facts.
+    subject: str | None = None
     thread_id: str | None = None
     agent_id: str | None = None
     namespace: str | None = None
@@ -99,10 +101,12 @@ class ConsolidationConfig:
 class ConsolidateFactsResult:
     # Source memories examined.
     candidates: int
-    # Curated facts after reconciliation.
+    # Curated facts after reconciliation (the full set now materialized for the scope).
     facts: int
-    # Ids of the written fact memories.
+    # Ids of the newly written fact memories (added or superseded subjects).
     created: list[str]
+    # Prior fact memories deleted because a run superseded or retracted their subject.
+    deleted: int
 
 
 @dataclass

@@ -36,6 +36,30 @@ def facts_client(hits: list[tuple[str, dict[str, str]]]) -> Any:
     return fake_client(handler)
 
 
+def fact_hit(id: str, subject: str, content: str) -> tuple[str, dict[str, str]]:
+    # A stored fact memory: carries source=fact and a persisted subject so a later
+    # run can reconcile against it.
+    return (f"mem:mem:{id}", {"content": content, "subject": subject, "source": "fact"})
+
+
+def two_phase_client(
+    candidate_hits: list[tuple[str, dict[str, str]]],
+    existing_fact_hits: list[tuple[str, dict[str, str]]],
+) -> Any:
+    # The candidate scan excludes facts (``-@source``), the existing-fact scan
+    # includes them (``@source:{fact}``); route each to its own reply.
+    def handler(command: str, *args: Any) -> Any:
+        if command == "FT.SEARCH":
+            filter_q = str(args[1])
+            hits = candidate_hits if "-@source" in filter_q else existing_fact_hits
+            return ft_reply(len(hits), hits)
+        if command == "DEL":
+            return len(args)
+        return "OK"
+
+    return fake_client(handler)
+
+
 def field_value(call: list[Any] | None, field: str) -> Any:
     if call is None or field not in call:
         return None
@@ -252,3 +276,84 @@ async def test_raises_without_scope_tags_or_criteria() -> None:
     with pytest.raises(ValueError, match="scope|criteria"):
         await store.consolidate_facts(extract_facts=extract)
     assert len(extract.calls) == 0
+
+
+def include_source_search(client: Any) -> list[Any] | None:
+    # The existing-fact scan is the FT.SEARCH whose filter includes a fact source
+    # WITHOUT the leading '-' (which marks the candidate-exclusion scan).
+    for call in client.calls_for("FT.SEARCH"):
+        filter_q = str(call[2])
+        if "@source:{fact}" in filter_q and "-@source:{fact}" not in filter_q:
+            return call
+    return None
+
+
+async def test_loads_stored_fact_memories_with_an_include_filter() -> None:
+    client = two_phase_client(
+        [item_hit("a", 0.2, 100000)],
+        [fact_hit("f1", "city", "[2024-01-01] Sofia")],
+    )
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+
+    await store.consolidate_facts(namespace="u1", extract_facts=extractor([]))
+
+    include = include_source_search(client)
+    assert include is not None
+    assert "RETURN" in include
+    assert include[include.index("RETURN") + 2 : include.index("RETURN") + 5] == [
+        "content",
+        "subject",
+        "source",
+    ]
+
+
+async def test_is_idempotent_rewriting_nothing_for_an_unchanged_fact() -> None:
+    client = two_phase_client(
+        [item_hit("a", 0.2, 100000)],
+        [fact_hit("f1", "city", "Berlin")],
+    )
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor([Fact(subject="city", statement="Berlin")])
+
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    assert result.candidates == 1
+    assert result.facts == 1
+    assert result.created == []
+    assert result.deleted == 0
+    assert not any(c[0] == "HSET" for c in client.calls)
+    assert not any(c[0] == "DEL" for c in client.calls)
+
+
+async def test_supersedes_a_stored_fact_deleting_prior_and_writing_new() -> None:
+    client = two_phase_client(
+        [item_hit("a", 0.2, 100000)],
+        [fact_hit("f1", "city", "[2024-01-01] Sofia")],
+    )
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor([Fact(subject="city", statement="Berlin", date="2024-05-01")])
+
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    assert result.deleted == 1
+    delete = client.find_call("DEL")
+    assert delete is not None and "mem:mem:f1" in delete
+    hset = client.find_call("HSET")
+    assert field_value(hset, "content") == "[2024-05-01] Berlin"
+    assert field_value(hset, "subject") == "city"
+
+
+async def test_retracts_a_stored_fact_across_runs_via_tombstone() -> None:
+    client = two_phase_client(
+        [item_hit("a", 0.2, 100000)],
+        [fact_hit("f1", "city", "[2024-01-01] Sofia")],
+    )
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor([Fact(subject="city", statement="", tombstone=True)])
+
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    assert result.deleted == 1
+    delete = client.find_call("DEL")
+    assert delete is not None and "mem:mem:f1" in delete
+    assert not any(c[0] == "HSET" for c in client.calls)

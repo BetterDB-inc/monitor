@@ -33,7 +33,7 @@ from .build_recall_query import (
 from .composite_score import composite_score, similarity_from_distance
 from .discovery import MemoryDiscovery
 from .parse_memory_item import parse_memory_item
-from .reconcile_facts import apply_ops, reconcile
+from .reconcile_facts import apply_ops, fact_content, reconcile, stored_fact_to_fact
 from .select_evictions import EvictionCandidate, SelectEvictionsOptions, select_evictions
 from .telemetry import MemoryTelemetryOptions, create_memory_telemetry
 from .types import (
@@ -756,6 +756,7 @@ class MemoryStore:
         importance: float | None,
         tags: list[str] | None,
         source: str | None,
+        subject: str | None = None,
         thread_id: str | None,
         agent_id: str | None,
         namespace: str | None,
@@ -772,6 +773,7 @@ class MemoryStore:
             importance=importance,
             tags=tags,
             source=source,
+            subject=subject,
             thread_id=thread_id,
             agent_id=agent_id,
             namespace=namespace,
@@ -1025,33 +1027,50 @@ class MemoryStore:
             if len(candidates) == 0:
                 span.set_attribute("consolidate_facts.facts", 0)
                 span.set_attribute("consolidate_facts.created", 0)
-                return ConsolidateFactsResult(candidates=0, facts=0, created=[])
+                span.set_attribute("consolidate_facts.deleted", 0)
+                return ConsolidateFactsResult(candidates=0, facts=0, created=[], deleted=0)
 
-            # Extract atomic facts, then reconcile the batch against an empty set so
-            # subject collisions resolve to the newest dated statement and tombstones
-            # drop retracted subjects.
+            # Load the fact memories already written for this scope so
+            # reconciliation considers them (not just the current batch): a re-run
+            # over the same sources is idempotent, a newer statement supersedes the
+            # stored fact, and a tombstone retracts it. Only facts that carry a
+            # persisted ``subject`` (the reconcile key) can participate.
+            existing_facts = await self._load_existing_facts(scope, tag_list)
+            existing_by_subject: dict[str, tuple[str, str]] = {}
+            for item in existing_facts:
+                if item.subject is not None:
+                    existing_by_subject[item.subject] = (item.id, item.content)
+            prior_facts = [
+                stored_fact_to_fact(item) for item in existing_facts if item.subject is not None
+            ]
+
+            # Extract atomic facts, then reconcile against the stored facts so
+            # subject collisions (within the batch AND against prior runs) resolve
+            # to the newest dated statement and tombstones drop retracted subjects.
             extracted = await extract_facts(candidates)
-            curated = apply_ops([], reconcile(extracted, []))
+            curated = apply_ops(prior_facts, reconcile(extracted, prior_facts))
+            curated_by_subject = {fact.subject: fact for fact in curated}
             span.set_attribute("consolidate_facts.facts", len(curated))
 
             resolved_importance = (
                 fact_importance if fact_importance is not None else self._default_fact_importance
             )
+            # Diff the curated set against what is stored. Writing before deleting
+            # keeps a crash between the two from losing a fact (recall-safe, at
+            # worst a duplicate), mirroring consolidate()'s write-then-delete order.
             created: list[str] = []
             for fact in curated:
-                # Preserve the fact's asserted date in the content (the temporal
-                # signal recall would otherwise lose, since a memory only carries
-                # its write time).
-                content = (
-                    f"[{fact.date}] {fact.statement}"
-                    if fact.date is not None and fact.date != ""
-                    else fact.statement
-                )
+                content = fact_content(fact)
+                existing = existing_by_subject.get(fact.subject)
+                # Unchanged subject already on disk: skip the write (idempotent).
+                if existing is not None and existing[1] == content:
+                    continue
                 fact_id = await self._write_memory(
                     content,
                     importance=resolved_importance,
                     tags=tag_list,
                     source=self._fact_source,
+                    subject=fact.subject,
                     thread_id=thread_id,
                     agent_id=agent_id,
                     namespace=namespace,
@@ -1060,11 +1079,48 @@ class MemoryStore:
                 )
                 created.append(fact_id)
 
+            # Delete the stored fact for any subject that was superseded (its
+            # content changed) or retracted (no longer in the curated set).
+            to_delete: list[str] = []
+            for subject, (existing_id, existing_content) in existing_by_subject.items():
+                curated_fact = curated_by_subject.get(subject)
+                if curated_fact is None or fact_content(curated_fact) != existing_content:
+                    to_delete.append(f"{self._name}:mem:{existing_id}")
+            deleted = 0
+            if len(to_delete) > 0:
+                deleted = int(await self._client.execute_command("DEL", *to_delete))
+                if deleted > 0:
+                    self._telemetry.metrics.items.labels(**self._store_labels).dec(deleted)
+
             self._telemetry.metrics.consolidations.labels(**self._store_labels).inc()
             span.set_attribute("consolidate_facts.created", len(created))
+            span.set_attribute("consolidate_facts.deleted", deleted)
             return ConsolidateFactsResult(
-                candidates=len(candidates), facts=len(curated), created=created
+                candidates=len(candidates), facts=len(curated), created=created, deleted=deleted
             )
+
+    async def _load_existing_facts(self, scope: MemoryScope, tags: list[str]) -> list[MemoryItem]:
+        # Load the fact memories already written for this scope
+        # (source == fact_source), so consolidate_facts can reconcile against them.
+        filter_query = build_consolidate_filter(
+            scope, tags, ConsolidateFilterOptions(include_source=self._fact_source)
+        )
+        raw = await self._client.execute_command(
+            "FT.SEARCH",
+            f"{self._name}:mem:idx",
+            filter_query,
+            "RETURN",
+            "3",
+            "content",
+            "subject",
+            "source",
+            "LIMIT",
+            "0",
+            str(CONSOLIDATE_SCAN_LIMIT),
+            "DIALECT",
+            "2",
+        )
+        return [parse_memory_item(self._name, hit) for hit in parse_ft_search_response(raw)]
 
     async def _write_record(self, key: str, fields: list[str | bytes], ttl: int | None) -> None:
         if ttl is None or ttl <= 0:

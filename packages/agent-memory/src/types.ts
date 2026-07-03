@@ -16,6 +16,12 @@ export interface RememberOptions extends MemoryScope {
   importance?: number;
   tags?: string[];
   source?: string;
+  /**
+   * Reconciliation key for fact memories (see {@link Fact.subject}). Persisted so
+   * a later {@link ConsolidateFactsOptions} run can supersede or retract the
+   * stored fact for this subject instead of writing a duplicate.
+   */
+  subject?: string;
   ttl?: number;
 }
 
@@ -25,6 +31,8 @@ export interface MemoryItem extends MemoryScope {
   importance: number;
   tags: string[];
   source?: string;
+  /** Reconciliation key, present on fact memories written by consolidateFacts. */
+  subject?: string;
   createdAt: number;
   lastAccessedAt: number;
   accessCount: number;
@@ -102,10 +110,12 @@ export interface ConsolidateFactsOptions extends MemoryScope {
 export interface ConsolidateFactsResult {
   /** Source memories examined. */
   candidates: number;
-  /** Curated facts after reconciliation. */
+  /** Curated facts after reconciliation (the full set now materialized for the scope). */
   facts: number;
-  /** Ids of the written fact memories. */
+  /** Ids of the newly written fact memories (added or superseded subjects). */
   created: string[];
+  /** Prior fact memories deleted because a run superseded or retracted their subject. */
+  deleted: number;
 }
 
 export interface MemoryListOptions extends MemoryScope {

@@ -60,6 +60,9 @@ export function buildMemoryRecord(
   if (options.source !== undefined) {
     fields.push('source', options.source);
   }
+  if (options.subject !== undefined) {
+    fields.push('subject', options.subject);
+  }
 
   return { key: `${name}:mem:${id}`, fields };
 }

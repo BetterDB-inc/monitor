@@ -24,6 +24,8 @@ def parse_memory_item(name: str, hit: FtSearchHit) -> MemoryItem:
 
     if "source" in fields:
         item.source = fields["source"]
+    if "subject" in fields:
+        item.subject = fields["subject"]
     if "threadId" in fields:
         item.thread_id = fields["threadId"]
     if "agentId" in fields:

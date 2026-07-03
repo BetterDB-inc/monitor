@@ -48,6 +48,30 @@ function factsClient(hits: Array<[string, string[]]>) {
   });
 }
 
+// A stored fact memory: carries source=fact and a persisted subject so a later
+// run can reconcile against it.
+function factHit(id: string, subject: string, content: string): [string, string[]] {
+  return [`mem:mem:${id}`, ['content', content, 'subject', subject, 'source', 'fact']];
+}
+
+// Two-phase mock: the candidate scan excludes facts (`-@source`), the existing
+// -fact scan includes them (`@source:{fact}`); route each to its own reply.
+function twoPhaseClient(
+  candidateHits: Array<[string, string[]]>,
+  existingFactHits: Array<[string, string[]]>,
+) {
+  return mockClient((command, ...args) => {
+    if (command === 'FT.SEARCH') {
+      const filter = String(args[1]);
+      return searchReply(filter.includes('-@source') ? candidateHits : existingFactHits);
+    }
+    if (command === 'DEL') {
+      return args.length;
+    }
+    return 'OK';
+  });
+}
+
 function fieldValue(call: unknown[] | undefined, field: string): string | undefined {
   if (!call) {
     return undefined;
@@ -86,7 +110,7 @@ describe('MemoryStore.consolidateFacts', () => {
     const result = await store.consolidateFacts({ namespace: 'u1', extractFacts });
 
     expect(extractFacts).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ candidates: 1, facts: 1, created: result.created });
+    expect(result).toEqual({ candidates: 1, facts: 1, created: result.created, deleted: 0 });
     expect(result.created).toHaveLength(1);
   });
 
@@ -312,7 +336,7 @@ describe('MemoryStore.consolidateFacts', () => {
     const result = await store.consolidateFacts({ olderThanSeconds: 3600, extractFacts });
 
     expect(extractFacts).not.toHaveBeenCalled();
-    expect(result).toEqual({ candidates: 0, facts: 0, created: [] });
+    expect(result).toEqual({ candidates: 0, facts: 0, created: [], deleted: 0 });
     expect(client.call.mock.calls.some((c) => c[0] === 'HSET')).toBe(false);
   });
 
@@ -327,5 +351,103 @@ describe('MemoryStore.consolidateFacts', () => {
 
     await expect(store.consolidateFacts({ extractFacts })).rejects.toThrow(/scope|criteria/i);
     expect(extractFacts).not.toHaveBeenCalled();
+  });
+
+  it('loads the stored fact memories with an @source include filter to reconcile against', async () => {
+    const client = twoPhaseClient(
+      [itemHit('a', { importance: 0.2, ageSeconds: 100000 })],
+      [factHit('f1', 'employer', 'Acme')],
+    );
+    const store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      consolidation: true,
+    });
+
+    await store.consolidateFacts({
+      namespace: 'u1',
+      extractFacts: extractor([{ subject: 'employer', statement: 'Acme' }]),
+    });
+
+    const includeSearch = client.call.mock.calls.find(
+      (c) =>
+        c[0] === 'FT.SEARCH' &&
+        String(c[2]).includes('@source:{fact}') &&
+        !String(c[2]).includes('-@source'),
+    );
+    expect(includeSearch).toBeDefined();
+  });
+
+  it('is idempotent: re-running over the same sources rewrites nothing for an unchanged fact', async () => {
+    const client = twoPhaseClient(
+      [itemHit('a', { importance: 0.2, ageSeconds: 100000 })],
+      [factHit('f1', 'employer', 'Acme')],
+    );
+    const store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      consolidation: true,
+    });
+
+    const result = await store.consolidateFacts({
+      namespace: 'u1',
+      extractFacts: extractor([{ subject: 'employer', statement: 'Acme' }]),
+    });
+
+    expect(result).toEqual({ candidates: 1, facts: 1, created: [], deleted: 0 });
+    expect(client.call.mock.calls.some((c) => c[0] === 'HSET')).toBe(false);
+    expect(client.call.mock.calls.some((c) => c[0] === 'DEL')).toBe(false);
+  });
+
+  it('supersedes a stored fact: a newer dated statement deletes the prior memory and writes the new one', async () => {
+    const client = twoPhaseClient(
+      [itemHit('a', { importance: 0.2, ageSeconds: 100000 })],
+      [factHit('f1', 'city', '[2024-01-01] Sofia')],
+    );
+    const store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      consolidation: true,
+    });
+
+    const result = await store.consolidateFacts({
+      namespace: 'u1',
+      extractFacts: extractor([{ subject: 'city', statement: 'Berlin', date: '2024-05-01' }]),
+    });
+
+    expect(result.deleted).toBe(1);
+    expect(result.created).toHaveLength(1);
+    const del = client.call.mock.calls.find((c) => c[0] === 'DEL');
+    expect(del?.slice(1)).toEqual(['mem:mem:f1']);
+    const hset = client.call.mock.calls.find((c) => c[0] === 'HSET');
+    expect(fieldValue(hset, 'content')).toBe('[2024-05-01] Berlin');
+    expect(fieldValue(hset, 'subject')).toBe('city');
+  });
+
+  it('retracts a stored fact across runs: a tombstone deletes the prior memory and writes nothing', async () => {
+    const client = twoPhaseClient(
+      [itemHit('a', { importance: 0.2, ageSeconds: 100000 })],
+      [factHit('f1', 'pet', 'cat')],
+    );
+    const store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      consolidation: true,
+    });
+
+    const result = await store.consolidateFacts({
+      namespace: 'u1',
+      extractFacts: extractor([{ subject: 'pet', statement: '', tombstone: true }]),
+    });
+
+    expect(result.deleted).toBe(1);
+    expect(result.created).toHaveLength(0);
+    const del = client.call.mock.calls.find((c) => c[0] === 'DEL');
+    expect(del?.slice(1)).toEqual(['mem:mem:f1']);
+    expect(client.call.mock.calls.some((c) => c[0] === 'HSET')).toBe(false);
   });
 });

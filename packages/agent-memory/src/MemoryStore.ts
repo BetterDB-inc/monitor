@@ -16,7 +16,7 @@ import {
   SCORE_FIELD,
 } from './buildRecallQuery';
 import { parseMemoryItem } from './parseMemoryItem';
-import { reconcile, applyOps } from './reconcileFacts';
+import { reconcile, applyOps, factContent, storedFactToFact } from './reconcileFacts';
 import { compositeScore, similarityFromDistance, type RecallWeights } from './compositeScore';
 import { selectEvictions, type EvictionCandidate } from './selectEvictions';
 import { MemoryDiscovery } from './discovery';
@@ -37,6 +37,7 @@ import type {
   ConsolidateOptions,
   ConsolidateResult,
   EmbedFn,
+  Fact,
   MemoryHit,
   MemoryItem,
   MemoryListOptions,
@@ -241,11 +242,7 @@ export class MemoryStore {
     }
     const counts = this.sessionCounts;
     const total =
-      counts.remembered +
-      counts.recalled +
-      counts.forgotten +
-      counts.consolidated +
-      counts.evicted;
+      counts.remembered + counts.recalled + counts.forgotten + counts.consolidated + counts.evicted;
     if (total === 0) {
       // Nothing worth reporting yet — leave the one-shot armed so a later
       // close() (after real activity) can still emit the summary.
@@ -914,30 +911,55 @@ export class MemoryStore {
     if (candidates.length === 0) {
       span.setAttribute('consolidate_facts.facts', 0);
       span.setAttribute('consolidate_facts.created', 0);
-      return { candidates: 0, facts: 0, created: [] };
+      span.setAttribute('consolidate_facts.deleted', 0);
+      return { candidates: 0, facts: 0, created: [], deleted: 0 };
     }
 
-    // Extract atomic facts, then reconcile the batch against an empty set so
-    // subject collisions resolve to the newest dated statement and tombstones
-    // drop retracted subjects.
+    // Load the fact memories already written for this scope so reconciliation
+    // considers them (not just the current batch): a re-run over the same
+    // sources is idempotent, a newer statement supersedes the stored fact, and a
+    // tombstone retracts it. Only facts that carry a persisted `subject` (the
+    // reconcile key) can participate; pre-subject rows are left untouched.
+    const existingFacts = await this.loadExistingFacts(scope, tags);
+    const existingBySubject = new Map<string, { id: string; content: string }>();
+    for (const item of existingFacts) {
+      if (item.subject !== undefined) {
+        existingBySubject.set(item.subject, { id: item.id, content: item.content });
+      }
+    }
+    const priorFacts: Fact[] = existingFacts
+      .filter((item) => item.subject !== undefined)
+      .map((item) => storedFactToFact(item));
+
+    // Extract atomic facts, then reconcile against the stored facts so subject
+    // collisions (within the batch AND against prior runs) resolve to the newest
+    // dated statement and tombstones drop retracted subjects.
     const extracted = await options.extractFacts(candidates);
-    const curated = applyOps([], reconcile(extracted, []));
+    const curated = applyOps(priorFacts, reconcile(extracted, priorFacts));
+    const curatedBySubject = new Map<string, Fact>();
+    for (const fact of curated) {
+      curatedBySubject.set(fact.subject, fact);
+    }
     span.setAttribute('consolidate_facts.facts', curated.length);
 
+    // Diff the curated set against what is stored. Writing before deleting keeps
+    // a crash between the two from losing a fact (recall-safe, at worst a
+    // duplicate), mirroring consolidate()'s write-then-delete ordering.
     const created: string[] = [];
     for (const fact of curated) {
-      // Preserve the fact's asserted date in the content (the temporal signal
-      // recall would otherwise lose, since a memory only carries its write time).
-      const content =
-        fact.date !== undefined && fact.date !== ''
-          ? `[${fact.date}] ${fact.statement}`
-          : fact.statement;
+      const content = factContent(fact);
+      const existing = existingBySubject.get(fact.subject);
+      // Unchanged subject already on disk: skip the write (idempotent re-run).
+      if (existing !== undefined && existing.content === content) {
+        continue;
+      }
       const id = await this.writeMemory(
         content,
         {
           ...scope,
           tags,
           source: this.factSource,
+          subject: fact.subject,
           importance: options.factImportance ?? this.defaultFactImportance,
         },
         now,
@@ -945,9 +967,49 @@ export class MemoryStore {
       created.push(id);
     }
 
+    // Delete the stored fact for any subject that was superseded (its content
+    // changed) or retracted (no longer in the curated set).
+    const toDelete: string[] = [];
+    for (const [subject, existing] of existingBySubject) {
+      const curatedFact = curatedBySubject.get(subject);
+      if (curatedFact === undefined || factContent(curatedFact) !== existing.content) {
+        toDelete.push(`${this.name}:mem:${existing.id}`);
+      }
+    }
+    let deleted = 0;
+    if (toDelete.length > 0) {
+      deleted = Number(await this.client.call('DEL', ...toDelete));
+      if (deleted > 0) {
+        this.telemetry.metrics.items.labels(this.storeLabels).dec(deleted);
+      }
+    }
+
     this.telemetry.metrics.consolidations.labels(this.storeLabels).inc();
     span.setAttribute('consolidate_facts.created', created.length);
-    return { candidates: candidates.length, facts: curated.length, created };
+    span.setAttribute('consolidate_facts.deleted', deleted);
+    return { candidates: candidates.length, facts: curated.length, created, deleted };
+  }
+
+  // Load the fact memories already written for this scope (source == factSource),
+  // so a consolidateFacts run can reconcile against them.
+  private async loadExistingFacts(scope: MemoryScope, tags: string[]): Promise<MemoryItem[]> {
+    const filter = buildConsolidateFilter(scope, tags, { includeSource: this.factSource });
+    const raw = await this.client.call(
+      'FT.SEARCH',
+      `${this.name}:mem:idx`,
+      filter,
+      'RETURN',
+      '3',
+      'content',
+      'subject',
+      'source',
+      'LIMIT',
+      '0',
+      String(CONSOLIDATE_SCAN_LIMIT),
+      'DIALECT',
+      '2',
+    );
+    return parseFtSearchResponse(raw).map((hit) => parseMemoryItem(this.name, hit));
   }
 
   private async writeRecord(key: string, fields: (string | Buffer)[], ttl?: number): Promise<void> {

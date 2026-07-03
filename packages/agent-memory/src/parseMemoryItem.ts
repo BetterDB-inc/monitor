@@ -22,6 +22,9 @@ export function parseMemoryItem(name: string, hit: FtSearchHit): MemoryItem {
   if (fields.source !== undefined) {
     item.source = fields.source;
   }
+  if (fields.subject !== undefined) {
+    item.subject = fields.subject;
+  }
   if (fields.threadId !== undefined) {
     item.threadId = fields.threadId;
   }

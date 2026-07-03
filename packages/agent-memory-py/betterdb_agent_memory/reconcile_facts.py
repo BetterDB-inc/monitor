@@ -2,10 +2,36 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal, Union
 
-from .types import Fact
+from .types import Fact, MemoryItem
+
+# A stored fact memory's content is ``[date] statement`` when the fact carried a
+# date, else the bare statement. This matches that prefix so a stored fact can be
+# recovered for reconciliation.
+_DATED_CONTENT = re.compile(r"^\[([^\]]+)\] (.*)$", re.DOTALL)
+
+
+def fact_content(fact: Fact) -> str:
+    """Render a fact's content for storage, preserving its asserted date as a prefix."""
+    if fact.date is not None and fact.date != "":
+        return f"[{fact.date}] {fact.statement}"
+    return fact.statement
+
+
+def stored_fact_to_fact(item: MemoryItem) -> Fact:
+    """Recover a Fact from a stored fact memory.
+
+    The reconcile key comes from the persisted ``subject``, the statement and date
+    from the ``[date] statement`` content (inverse of ``fact_content``).
+    """
+    match = _DATED_CONTENT.match(item.content)
+    subject = item.subject or ""
+    if match:
+        return Fact(subject=subject, statement=match.group(2), date=match.group(1))
+    return Fact(subject=subject, statement=item.content)
 
 
 @dataclass

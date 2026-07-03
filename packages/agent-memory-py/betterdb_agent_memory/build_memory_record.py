@@ -23,6 +23,7 @@ def build_memory_record(
     importance: float | None = None,
     tags: list[str] | None = None,
     source: str | None = None,
+    subject: str | None = None,
     thread_id: str | None = None,
     agent_id: str | None = None,
     namespace: str | None = None,
@@ -64,5 +65,7 @@ def build_memory_record(
         fields.extend(["namespace", namespace])
     if source is not None:
         fields.extend(["source", source])
+    if subject is not None:
+        fields.extend(["subject", subject])
 
     return MemoryWrite(key=f"{name}:mem:{id}", fields=fields)
