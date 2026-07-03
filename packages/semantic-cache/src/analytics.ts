@@ -162,9 +162,14 @@ export class PostHogAnalytics implements Analytics {
     const merged: Record<string, unknown> = { ...(configProps ?? {}) };
     if (this.deploymentId) merged.deployment_id = this.deploymentId;
     // capture() delivers the event in a serverless-aware way (see deliver()):
-    // under a request it hands the flush to waitUntil; otherwise it flushes
-    // inline, so the start event lands even for short-lived processes.
+    // under a request it hands the flush to waitUntil. Otherwise a short-lived
+    // process (e.g. a CLI that exits right after init) has no backstop yet —
+    // flushInterval hasn't fired and beforeExit does not run on process.exit() —
+    // so await the flush inline to guarantee the start event lands.
     this.capture('cache_init', merged);
+    if (!getRequestWaitUntil()) {
+      await this.flush();
+    }
   }
 
   private async resolveDeploymentId(client: ValkeyLike, name: string): Promise<string> {

@@ -102,6 +102,22 @@ describe('analytics', () => {
       expect(phState.flush).toHaveBeenCalled();
     });
 
+    it('awaits the init flush so a process exiting right after init still delivers', async () => {
+      let flushed = false;
+      phState.flush.mockImplementation(async () => {
+        await Promise.resolve();
+        flushed = true;
+      });
+      const analytics = new PostHogAnalytics(phState);
+      const client = createMockClient();
+
+      await analytics.init(client, 'p');
+
+      // No serverless waitUntil here: init must await the flush inline so the
+      // start event lands even if the caller exits (e.g. process.exit) right after.
+      expect(flushed).toBe(true);
+    });
+
     it('reuses an existing deployment id without a SET write', async () => {
       const analytics = new PostHogAnalytics(phState);
 

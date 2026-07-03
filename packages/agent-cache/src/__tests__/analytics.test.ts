@@ -102,6 +102,25 @@ describe('analytics', () => {
       await analytics.shutdown();
     });
 
+    it('awaits the init flush so a process exiting right after init still delivers', async () => {
+      const ph = createMockPostHog();
+      let flushed = false;
+      ph.flush.mockImplementation(async () => {
+        await Promise.resolve();
+        flushed = true;
+      });
+      const analytics = new PostHogAnalytics(ph);
+      const client = createMockValkeyClient();
+
+      await analytics.init(client, 'p');
+
+      // No serverless waitUntil here: init must await the flush inline so the
+      // start event lands even if the caller exits (e.g. process.exit) right after.
+      expect(flushed).toBe(true);
+
+      await analytics.shutdown();
+    });
+
     it('reuses an existing deployment id without a Valkey SET write', async () => {
       const ph = createMockPostHog();
       const analytics = new PostHogAnalytics(ph);
