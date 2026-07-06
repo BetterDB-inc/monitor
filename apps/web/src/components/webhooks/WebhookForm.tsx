@@ -59,6 +59,7 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'cluster.failover': 'Cluster Failover',
   'failover.started': 'Failover Started',
   'failover.completed': 'Failover Completed',
+  'data.loss.detected': 'Data Loss Detected',
   'latency.spike': 'Latency Spike',
   'connection.spike': 'Connection Spike',
   'audit.policy.violation': 'Audit Policy Violation',

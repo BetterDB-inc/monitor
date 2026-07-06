@@ -51,6 +51,7 @@ describe('AnomalyService', () => {
       dispatchLatencySpike: jest.fn().mockResolvedValue(undefined),
       dispatchConnectionSpike: jest.fn().mockResolvedValue(undefined),
       dispatchMetricForecastLimit: jest.fn().mockResolvedValue(undefined),
+      dispatchDataLossDetected: jest.fn().mockResolvedValue(undefined),
     };
 
     dbClient = {
@@ -668,7 +669,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
+        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -694,6 +695,158 @@ describe('AnomalyService', () => {
       expect((service as any).lastClusterState.has('conn-1')).toBe(false);
       expect((service as any).buffers.has('conn-1')).toBe(false);
       expect((service as any).detectors.has('conn-1')).toBe(false);
+    });
+  });
+
+  // ─── Data-Loss Detection (valkey/valkey#579) ─────────────────────────────
+
+  describe('data-loss detection', () => {
+    function mockReplInfo(opts: {
+      role?: string;
+      replid?: string;
+      offset?: string;
+      uptime?: string;
+      connectedSlaves?: string;
+      db0?: string;
+    } = {}) {
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: opts.role ?? 'master', uptime_in_seconds: opts.uptime ?? '1000' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+        replication: {
+          master_replid: opts.replid ?? 'replid-aaaa',
+          master_repl_offset: opts.offset ?? '5000',
+          connected_slaves: opts.connectedSlaves ?? '1',
+        },
+        keyspace: opts.db0 !== undefined ? { db0: opts.db0 } : {},
+      });
+    }
+
+    function dataLossEvents() {
+      return service.getRecentEvents().filter((e) => e.metricType === MetricType.DATASET_KEYS);
+    }
+
+    it('does not fire on first poll (no previous snapshot)', async () => {
+      mockReplInfo({ db0: 'keys=0,expires=0,avg_ttl=0' });
+      await poll();
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('fires Rule A when primary restarts empty (replid changed, uptime reset)', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' }); // empty keyspace
+      await poll();
+
+      const events = dataLossEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].anomalyType).toBe(AnomalyType.DROP);
+      expect(events[0].baseline).toBe(150);
+      expect(events[0].value).toBe(0);
+      expect(events[0].message).toContain('Primary restarted with an empty dataset');
+
+      expect(webhookEventsProService.dispatchDataLossDetected).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'primary_restarted_empty',
+          previousKeys: 150,
+          currentKeys: 0,
+          previousReplid: 'replid-aaaa',
+          newReplid: 'replid-bbbb',
+          role: 'master',
+          connectionId: 'conn-1',
+        }),
+      );
+    });
+
+    it('fires Rule B when a replica is wiped by a full resync from an empty primary', async () => {
+      mockReplInfo({ role: 'replica', replid: 'replid-aaaa', db0: 'keys=200,expires=0,avg_ttl=0' });
+      await poll();
+
+      mockReplInfo({ role: 'replica', replid: 'replid-cccc' }); // empty after resync
+      await poll();
+
+      const events = dataLossEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('Replica was wiped by a full resync');
+
+      expect(webhookEventsProService.dispatchDataLossDetected).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'replica_wiped',
+          previousKeys: 200,
+          currentKeys: 0,
+          role: 'replica',
+        }),
+      );
+    });
+
+    it('does not fire when primary restarts but reloads its data', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      // Restarted (new replid, uptime reset) but keys intact via RDB/AOF reload
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire when replica replid changes after normal failover with keys preserved', async () => {
+      mockReplInfo({ role: 'replica', replid: 'replid-aaaa', db0: 'keys=200,expires=0,avg_ttl=0' });
+      await poll();
+
+      // Partial/full resync from a healthy new primary — dataset preserved
+      mockReplInfo({ role: 'replica', replid: 'replid-cccc', db0: 'keys=198,expires=0,avg_ttl=0' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire on FLUSHALL (empty dataset but same replid, no restart evidence)', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      // Same replid, uptime and offset still advancing — intentional flush
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1001', offset: '5100' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('fires only once per transition (snapshot updated after firing)', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '6', offset: '0' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(1);
+      expect(webhookEventsProService.dispatchDataLossDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('cleans up prevReplSnapshot on connection removal', async () => {
+      mockReplInfo({ db0: 'keys=10,expires=0,avg_ttl=0' });
+      await poll();
+      expect((service as any).prevReplSnapshot.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).prevReplSnapshot.has('conn-1')).toBe(false);
     });
   });
 

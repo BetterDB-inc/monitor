@@ -12,6 +12,7 @@ import {
   CaptureOnNextModal,
   type CaptureOnNextContext,
 } from './anomalies/capture-on-next-modal';
+import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
 import {
   AlertTriangle,
   AlertCircle,
@@ -52,6 +53,7 @@ interface AnomalyEvent {
   zScore: number;
   message: string;
   correlationId?: string;
+  resolved?: boolean;
 }
 
 interface CorrelatedGroup {
@@ -112,6 +114,7 @@ const METRIC_LABELS: Record<string, string> = {
   keyspace_misses: 'Cache Misses',
   fragmentation_ratio: 'Fragmentation',
   replication_role: 'Replication Role',
+  dataset_keys: 'Dataset Keys',
 };
 
 function formatTime(ts: number): string {
@@ -238,6 +241,8 @@ export function AnomalyDashboard() {
 
   return (
     <div className="space-y-6">
+      <DataLossAlertBanner events={events ?? undefined} />
+
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>

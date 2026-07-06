@@ -13,6 +13,7 @@ export enum MetricType {
   CPU_UTILIZATION = 'cpu_utilization',
   REPLICATION_ROLE = 'replication_role',
   CLUSTER_STATE = 'cluster_state',
+  DATASET_KEYS = 'dataset_keys',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',
 }

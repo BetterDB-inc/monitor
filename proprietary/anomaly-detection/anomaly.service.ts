@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
@@ -41,6 +42,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
+  private prevReplSnapshot = new Map<string, {
+    role: 'master' | 'replica';
+    replid: string;          // master_replid
+    offset: number;          // master_repl_offset
+    totalKeys: number;       // sum of keys across db0..dbN from INFO keyspace
+    uptimeSec: number;       // uptime_in_seconds
+    connectedSlaves: number; // connected_slaves
+  }>();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
 
@@ -190,8 +199,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
-      // REPLICATION_ROLE, CLUSTER_STATE, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
+      // REPLICATION_ROLE, CLUSTER_STATE, DATASET_KEYS, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
+      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.DATASET_KEYS || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -208,6 +217,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
+    this.prevReplSnapshot.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -215,6 +225,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     if (!value) return null;
     const parsed = parseFloat(value);
     return isNaN(parsed) ? null : parsed;
+  }
+
+  /** Sums `keys=` across all `db<N>` entries of the INFO keyspace section. */
+  private sumKeyspaceKeys(info: Record<string, string>): number {
+    let total = 0;
+    for (const [key, value] of Object.entries(info)) {
+      if (!/^db\d+$/.test(key)) continue;
+      const match = /keys=(\d+)/.exec(value);
+      if (match) total += parseInt(match[1], 10);
+    }
+    return total;
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
@@ -384,6 +405,94 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           }
           this.lastReplicationRole.set(ctx.connectionId, currentRole);
         }
+      }
+
+      // Data-loss detection (valkey/valkey#579): a primary that restarts empty
+      // wipes its replicas via full resync. Rule A fires on the primary the
+      // moment it comes back empty; Rule B confirms a replica has been wiped.
+      const replid = info['master_replid'];
+      if (replid && (roleStr === 'master' || roleStr === 'slave' || roleStr === 'replica')) {
+        const snapshot = {
+          role: (roleStr === 'master' ? 'master' : 'replica') as 'master' | 'replica',
+          replid,
+          offset: this.parseNumber(info.master_repl_offset) ?? 0,
+          totalKeys: this.sumKeyspaceKeys(info),
+          uptimeSec: this.parseNumber(info.uptime_in_seconds) ?? 0,
+          connectedSlaves: this.parseNumber(info.connected_slaves) ?? 0,
+        };
+
+        const prev = this.prevReplSnapshot.get(ctx.connectionId);
+        if (prev) {
+          let dataLossKind: 'primary_restarted_empty' | 'replica_wiped' | null = null;
+          let message = '';
+
+          if (prev.role === 'master' && snapshot.role === 'master' && prev.totalKeys > 0 && snapshot.totalKeys === 0) {
+            // Rule A: primary restarted with an empty dataset. Requires restart/identity
+            // evidence — same replid + empty means an intentional FLUSHALL, not a restart.
+            const restartEvidence =
+              snapshot.replid !== prev.replid ||
+              snapshot.uptimeSec < prev.uptimeSec ||
+              snapshot.offset < prev.offset;
+            if (restartEvidence) {
+              dataLossKind = 'primary_restarted_empty';
+              message = snapshot.connectedSlaves > 0
+                ? `CRITICAL: Primary restarted with an empty dataset (replid changed, ${prev.totalKeys} keys → 0). Connected replicas (${snapshot.connectedSlaves}) will full-resync and WIPE their copies. Immediate action: detach replicas that still hold data (REPLICAOF NO ONE) before they resync, then restore.`
+                : `CRITICAL: Primary restarted with an empty dataset (replid changed, ${prev.totalKeys} keys → 0). Data on this node has been lost — restore from backup or a surviving replica before reattaching replicas.`;
+            }
+          } else if (
+            prev.role === 'replica' && snapshot.role === 'replica' &&
+            snapshot.replid !== prev.replid &&
+            prev.totalKeys > 0 &&
+            (snapshot.totalKeys === 0 || snapshot.totalKeys <= prev.totalKeys * 0.1)
+          ) {
+            // Rule B: replica wiped by a full resync from a (near-)empty primary
+            dataLossKind = 'replica_wiped';
+            message = `CRITICAL: Replica was wiped by a full resync from a (near-)empty primary — data loss has propagated (${prev.totalKeys} keys → ${snapshot.totalKeys}). The old dataset may still exist on other replicas or in backups; do not let further nodes resync.`;
+          }
+
+          if (dataLossKind) {
+            const dataLossEvent: AnomalyEvent = {
+              // Storage adapters (postgres) require UUID event ids
+              id: randomUUID(),
+              timestamp,
+              metricType: MetricType.DATASET_KEYS,
+              anomalyType: AnomalyType.DROP,
+              severity: AnomalySeverity.CRITICAL,
+              value: snapshot.totalKeys,
+              baseline: prev.totalKeys,
+              zScore: 0,
+              stdDev: 0,
+              threshold: 0,
+              message,
+              resolved: false,
+              connectionId: ctx.connectionId,
+            };
+            this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${dataLossEvent.message}`);
+            await this.addAnomaly(dataLossEvent, ctx);
+
+            if (this.webhookEventsProService) {
+              this.webhookEventsProService
+                .dispatchDataLossDetected({
+                  kind: dataLossKind,
+                  previousKeys: prev.totalKeys,
+                  currentKeys: snapshot.totalKeys,
+                  previousReplid: prev.replid,
+                  newReplid: snapshot.replid,
+                  connectedSlaves: snapshot.connectedSlaves,
+                  role: snapshot.role,
+                  message,
+                  timestamp: Date.now(),
+                  instance: { host: ctx.host, port: ctx.port },
+                  connectionId: ctx.connectionId,
+                })
+                .catch((err) => {
+                  this.logger.error('Failed to dispatch data.loss.detected webhook', err);
+                });
+            }
+          }
+        }
+
+        this.prevReplSnapshot.set(ctx.connectionId, snapshot);
       }
 
       // Cluster state transition detection

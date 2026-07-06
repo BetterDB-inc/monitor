@@ -364,6 +364,9 @@ export const metricsApi = {
 
   getAnomalyBuffers: () => fetchApi<any[]>('/anomaly/buffers'),
 
+  resolveAnomalyEvent: (id: string) =>
+    fetchApi<{ success: boolean }>(`/anomaly/events/${encodeURIComponent(id)}/resolve`, { method: 'POST' }),
+
   // Vector Search
   getVectorIndexList: (signal?: AbortSignal) =>
     fetchApi<{ indexes: string[] }>('/vector-search/indexes', { signal }),
