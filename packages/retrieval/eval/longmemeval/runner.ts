@@ -2,6 +2,8 @@ import { Retriever } from '../../src/index';
 import type { RetrievalSchema } from '../../src/index';
 import { chunkRecord, recordIsHit } from './adapter';
 import { createHybridRerank } from './rerank';
+import { assembleContexts } from './assemble';
+import type { AssembleOptions } from './assemble';
 import { createCostReport } from './levers';
 import type { CostReport, LeverCostEntry, LeverName } from './levers';
 import type { ChunkMode, Embedder, Judge, LmeRecord, Reader, Store } from './types';
@@ -23,6 +25,9 @@ export interface RunConfig {
   levers?: LeverName[];
   // Accumulator levers report their added embedding/LLM/latency cost into.
   costReport?: CostReport;
+  // Opt-in structure features for the assemble lever (dedup / MMR / grouping).
+  // Without any set, the lever only date-prefixes the rerank-ordered top-k.
+  assembleOptions?: AssembleOptions;
 }
 
 export interface TypeStats {
@@ -79,6 +84,7 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
   const { records, embedder, store, reader, judge, k, chunkMode, limit, rerankPool } = config;
   const levers = config.levers ?? [];
   const costReport = config.costReport ?? createCostReport();
+  const assembleOn = levers.includes('assemble');
   const qaRun = reader !== null && judge !== null;
   const useRerank = rerankPool > k;
   const fetchK = useRerank ? rerankPool : k;
@@ -157,7 +163,19 @@ export async function runEval(config: RunConfig): Promise<EvalSummary> {
         // `date` tag) and the question's asked-on date in the prompt; passing only
         // hit.text strips both and depresses temporal QA. Prefix each excerpt with
         // its date and carry question_date into the question the reader sees.
-        const contexts = hits.map((h) => (h.fields.date ? `[${h.fields.date}] ${h.text}` : h.text));
+        //
+        // When the assemble lever is on, assembleContexts renders the wider rerank
+        // `pool` into the reader's contexts; dedup / MMR / chronological grouping
+        // apply only via the opt-in assembleOptions (env-wired in run.ts). Recall
+        // above is still measured on the unmodified rerank top-k.
+        let contexts: string[];
+        if (assembleOn) {
+          const startedAt = Date.now();
+          contexts = assembleContexts(pool, k, config.assembleOptions ?? {});
+          costReport.record('assemble', { latencyMs: Date.now() - startedAt });
+        } else {
+          contexts = hits.map((h) => (h.fields.date ? `[${h.fields.date}] ${h.text}` : h.text));
+        }
         const question =
           record.question_date !== undefined && record.question_date !== ''
             ? `${record.question} (question asked on ${record.question_date})`
