@@ -338,4 +338,23 @@ describe('RegressionDetector — sustained degradation', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].kind).toBe('upgrade_regression');
   });
+
+  it('does not re-fire via the sustained rule after the upgrade event has fired', () => {
+    const sim = new Sim();
+    seedBaseline(sim); // >=30 baseline samples, so the sustained rule is otherwise armed
+
+    // Upgrade to 9.0.0 at 2.5x: fires ONE upgrade event.
+    let findings: RegressionFinding[] = [];
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) {
+      findings = sim.tick(2500, '9.0.0');
+    }
+    expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('upgrade_regression');
+
+    // The regression persists. Sustained would otherwise satisfy 2x + 5 consecutive within
+    // this window; it must stay suppressed for the rest of the (still-open) upgrade window.
+    for (let i = 0; i < 20; i++) {
+      expect(sim.tick(2500, '9.0.0')).toEqual([]);
+    }
+  });
 });

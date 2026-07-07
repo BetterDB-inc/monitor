@@ -1206,6 +1206,8 @@ export class MemoryAdapter implements StoragePort {
   async getLatencyStatsHistory(
     options: LatencyStatsHistoryQueryOptions,
   ): Promise<StoredLatencyStatsSample[]> {
+    // Keep the most-recent `limit` samples (not the oldest), returned ascending —
+    // the regression guard needs the newest samples for freshness/version/consecutive logic.
     return this.latencyStatsSamples
       .filter(
         (s) =>
@@ -1215,7 +1217,7 @@ export class MemoryAdapter implements StoragePort {
           s.capturedAt <= options.endTime,
       )
       .sort((a, b) => a.capturedAt - b.capturedAt)
-      .slice(0, options.limit ?? 10_000);
+      .slice(-(options.limit ?? 10_000));
   }
 
   async pruneOldLatencyStatsSamples(

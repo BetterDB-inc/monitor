@@ -146,9 +146,12 @@ export class RegressionDetector {
     const upgradeFinding = this.evaluateUpgrade(input, latestByCommand, eligible);
     if (upgradeFinding) findings.push(upgradeFinding);
 
-    // Sustained rule is suppressed while an unfired upgrade window is open —
-    // the upgrade rule owns that regression.
-    if (!(this.upgrade && !this.upgrade.fired)) {
+    // Sustained rule is suppressed for the entire lifetime of an open upgrade window,
+    // whether or not it has fired. The upgrade rule owns regressions during that window and
+    // fires once; letting sustained run after the upgrade event fired would re-report the
+    // same post-upgrade regression as a second anomaly/webhook, defeating the one-shot intent.
+    // Sustained resumes only once the window expires (24h, cleared above).
+    if (!this.upgrade) {
       findings.push(...this.evaluateSustained(input, latestByCommand, eligible, currentVersion));
     }
 

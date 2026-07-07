@@ -3459,12 +3459,17 @@ export class PostgresAdapter implements StoragePort {
     params.push(options.startTime, options.endTime, options.limit ?? 10_000);
     const startIdx = params.length - 2;
 
+    // Take the most-recent `limit` rows (inner DESC + LIMIT), then return them ascending —
+    // an ASC + LIMIT would keep the oldest and drop the newest on busy instances, which the
+    // regression guard relies on for freshness/version/consecutive logic.
     const result = await this.pool.query(
-      `SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at
-       FROM latency_stats_samples
-       WHERE connection_id = $1 ${commandFilter} AND captured_at >= $${startIdx} AND captured_at <= $${startIdx + 1}
-       ORDER BY captured_at ASC
-       LIMIT $${startIdx + 2}`,
+      `SELECT * FROM (
+         SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at
+         FROM latency_stats_samples
+         WHERE connection_id = $1 ${commandFilter} AND captured_at >= $${startIdx} AND captured_at <= $${startIdx + 1}
+         ORDER BY captured_at DESC
+         LIMIT $${startIdx + 2}
+       ) sub ORDER BY captured_at ASC`,
       params,
     );
 

@@ -3164,13 +3164,18 @@ export class SqliteAdapter implements StoragePort {
     if (options.command) params.push(options.command);
     params.push(options.startTime, options.endTime, options.limit ?? 10_000);
 
+    // Take the most-recent `limit` rows (inner DESC + LIMIT), then return them ascending —
+    // an ASC + LIMIT would keep the oldest and drop the newest on busy instances, which the
+    // regression guard relies on for freshness/version/consecutive logic.
     const rows = this.db
       .prepare(
-        `SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at
-         FROM latency_stats_samples
-         WHERE connection_id = ? ${commandFilter} AND captured_at >= ? AND captured_at <= ?
-         ORDER BY captured_at ASC
-         LIMIT ?`,
+        `SELECT * FROM (
+           SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at
+           FROM latency_stats_samples
+           WHERE connection_id = ? ${commandFilter} AND captured_at >= ? AND captured_at <= ?
+           ORDER BY captured_at DESC
+           LIMIT ?
+         ) ORDER BY captured_at ASC`,
       )
       .all(...params) as any[];
 

@@ -114,6 +114,9 @@ describe.each([
       limit: 2,
     });
     expect(limited).toHaveLength(2);
+    // The cap must keep the MOST RECENT samples (not the oldest), returned ascending —
+    // the regression guard depends on the newest samples.
+    expect(limited.map((h) => h.capturedAt)).toEqual([200, 300]);
   });
 
   it('round-trips the server version per sample (upgrade baselines)', async () => {
