@@ -274,6 +274,27 @@ export interface CommandStatsHistoryQueryOptions {
   limit?: number;
 }
 
+// Latency Stats Sample Types (INFO latencystats, per-command p50/p99/p99.9)
+export interface StoredLatencyStatsSample {
+  id: string;
+  connectionId: string;
+  command: string;
+  p50Us: number;
+  p99Us: number;
+  p999Us: number;
+  serverVersion: string;
+  capturedAt: number;
+}
+
+export interface LatencyStatsHistoryQueryOptions {
+  connectionId: string;
+  /** Optional so the regression detector can pull all commands in one query. */
+  command?: string;
+  startTime: number;
+  endTime: number;
+  limit?: number;
+}
+
 // Memory Snapshot Types
 export interface StoredMemorySnapshot {
   id: string; // UUID
@@ -482,6 +503,14 @@ export interface StoragePort {
   ): Promise<number>;
   getCommandStatsHistory(options: CommandStatsHistoryQueryOptions): Promise<StoredCommandStatsSample[]>;
   pruneOldCommandStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Latency Stats Sample Methods (INFO latencystats) - connectionId required for writes
+  saveLatencyStatsSamples(
+    samples: Omit<StoredLatencyStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number>;
+  getLatencyStatsHistory(options: LatencyStatsHistoryQueryOptions): Promise<StoredLatencyStatsSample[]>;
+  pruneOldLatencyStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Vector Index Snapshot Methods
   saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number>;

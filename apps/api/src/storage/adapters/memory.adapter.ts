@@ -35,6 +35,8 @@ import {
   DatabaseConnectionConfig,
   StoredCommandStatsSample,
   CommandStatsHistoryQueryOptions,
+  StoredLatencyStatsSample,
+  LatencyStatsHistoryQueryOptions,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
@@ -1182,6 +1184,55 @@ export class MemoryAdapter implements StoragePort {
       );
     }
     return before - this.commandStatsSamples.length;
+  }
+
+  // Latency Stats Sample Methods (INFO latencystats)
+  private latencyStatsSamples: StoredLatencyStatsSample[] = [];
+
+  async saveLatencyStatsSamples(
+    samples: Omit<StoredLatencyStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    for (const s of samples) {
+      this.latencyStatsSamples.push({
+        id: randomUUID(),
+        connectionId,
+        ...s,
+      });
+    }
+    return samples.length;
+  }
+
+  async getLatencyStatsHistory(
+    options: LatencyStatsHistoryQueryOptions,
+  ): Promise<StoredLatencyStatsSample[]> {
+    return this.latencyStatsSamples
+      .filter(
+        (s) =>
+          s.connectionId === options.connectionId &&
+          (!options.command || s.command === options.command) &&
+          s.capturedAt >= options.startTime &&
+          s.capturedAt <= options.endTime,
+      )
+      .sort((a, b) => a.capturedAt - b.capturedAt)
+      .slice(0, options.limit ?? 10_000);
+  }
+
+  async pruneOldLatencyStatsSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    const before = this.latencyStatsSamples.length;
+    if (connectionId) {
+      this.latencyStatsSamples = this.latencyStatsSamples.filter(
+        (s) => s.capturedAt >= cutoffTimestamp || s.connectionId !== connectionId,
+      );
+    } else {
+      this.latencyStatsSamples = this.latencyStatsSamples.filter(
+        (s) => s.capturedAt >= cutoffTimestamp,
+      );
+    }
+    return before - this.latencyStatsSamples.length;
   }
 
   // Vector Index Snapshot Methods

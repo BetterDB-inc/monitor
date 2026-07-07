@@ -40,6 +40,8 @@ import {
   StoredLatencyHistogram,
   StoredCommandStatsSample,
   CommandStatsHistoryQueryOptions,
+  StoredLatencyStatsSample,
+  LatencyStatsHistoryQueryOptions,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
@@ -1363,6 +1365,22 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
         ON command_stats_samples(connection_id, command, captured_at);
+
+      CREATE TABLE IF NOT EXISTS latency_stats_samples (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        p50_us REAL NOT NULL DEFAULT 0,
+        p99_us REAL NOT NULL DEFAULT 0,
+        p999_us REAL NOT NULL DEFAULT 0,
+        server_version TEXT NOT NULL DEFAULT '',
+        captured_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_latstat_cmd_captured_at
+        ON latency_stats_samples(connection_id, command, captured_at);
+      CREATE INDEX IF NOT EXISTS idx_latstat_captured_at
+        ON latency_stats_samples(connection_id, captured_at);
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -3098,6 +3116,91 @@ export class SqliteAdapter implements StoragePort {
 
     const result = this.db
       .prepare('DELETE FROM command_stats_samples WHERE captured_at < ?')
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  // Latency Stats Sample Methods (INFO latencystats)
+  async saveLatencyStatsSamples(
+    samples: Omit<StoredLatencyStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.db || samples.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO latency_stats_samples
+        (id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    let count = 0;
+    const transaction = this.db.transaction((connId: string) => {
+      for (const s of samples) {
+        const result = stmt.run(
+          randomUUID(),
+          connId,
+          s.command,
+          s.p50Us,
+          s.p99Us,
+          s.p999Us,
+          s.serverVersion,
+          s.capturedAt,
+        );
+        count += result.changes;
+      }
+    });
+    transaction(connectionId);
+
+    return count;
+  }
+
+  async getLatencyStatsHistory(
+    options: LatencyStatsHistoryQueryOptions,
+  ): Promise<StoredLatencyStatsSample[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const commandFilter = options.command ? 'AND command = ?' : '';
+    const params: (string | number)[] = [options.connectionId];
+    if (options.command) params.push(options.command);
+    params.push(options.startTime, options.endTime, options.limit ?? 10_000);
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at
+         FROM latency_stats_samples
+         WHERE connection_id = ? ${commandFilter} AND captured_at >= ? AND captured_at <= ?
+         ORDER BY captured_at ASC
+         LIMIT ?`,
+      )
+      .all(...params) as any[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      command: row.command,
+      p50Us: row.p50_us,
+      p99Us: row.p99_us,
+      p999Us: row.p999_us,
+      serverVersion: row.server_version,
+      capturedAt: row.captured_at,
+    }));
+  }
+
+  async pruneOldLatencyStatsSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db
+        .prepare('DELETE FROM latency_stats_samples WHERE captured_at < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
+
+    const result = this.db
+      .prepare('DELETE FROM latency_stats_samples WHERE captured_at < ?')
       .run(cutoffTimestamp);
     return result.changes;
   }

@@ -14,6 +14,8 @@ export enum MetricType {
   REPLICATION_ROLE = 'replication_role',
   CLUSTER_STATE = 'cluster_state',
   DATASET_KEYS = 'dataset_keys',
+  /** Per-command P99 latency regression (INFO latencystats) — handled by LatencyRegressionService, not z-score buffers */
+  COMMAND_P99 = 'command_p99',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',
 }

@@ -16,6 +16,7 @@ export enum WebhookEventType {
   FAILOVER_STARTED = 'failover.started',
   FAILOVER_COMPLETED = 'failover.completed',
   DATA_LOSS_DETECTED = 'data.loss.detected',
+  LATENCY_REGRESSION_DETECTED = 'latency.regression.detected',
   AUDIT_POLICY_VIOLATION = 'audit.policy.violation',
   COMPLIANCE_ALERT = 'compliance.alert',
   METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
@@ -55,6 +56,7 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.FAILOVER_STARTED,
   WebhookEventType.FAILOVER_COMPLETED,
   WebhookEventType.DATA_LOSS_DETECTED,
+  WebhookEventType.LATENCY_REGRESSION_DETECTED,
   WebhookEventType.INFERENCE_SLA_BREACH,
   WebhookEventType.MONITOR_TRIGGER_CREATED,
 ];
@@ -102,6 +104,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.FAILOVER_STARTED]: Tier.pro,
   [WebhookEventType.FAILOVER_COMPLETED]: Tier.pro,
   [WebhookEventType.DATA_LOSS_DETECTED]: Tier.pro,
+  [WebhookEventType.LATENCY_REGRESSION_DETECTED]: Tier.pro,
   [WebhookEventType.INFERENCE_SLA_BREACH]: Tier.pro,
   [WebhookEventType.MONITOR_TRIGGER_CREATED]: Tier.pro,
 
@@ -278,6 +281,36 @@ export interface WebhookPayload {
 // ============================================================================
 
 /**
+ * Per-command detail included in latency.regression.detected payloads.
+ * All latencies are microseconds (from INFO latencystats t-digests).
+ */
+export interface LatencyRegressionCommand {
+  command: string;
+  baselineP99Us: number;
+  currentP99Us: number;
+  degradationFactor: number;
+  callsPerMin: number;
+}
+
+/**
+ * Payload for latency.regression.detected (see valkey/valkey#3527).
+ */
+export interface LatencyRegressionDetectedData {
+  kind: 'upgrade_regression' | 'sustained_degradation';
+  previousVersion?: string;
+  currentVersion: string;
+  commands: LatencyRegressionCommand[];
+  topologyRefreshCorrelated: boolean;
+  /** Current value of prefetch-batch-max-size on Valkey 9+, null if unreadable. */
+  prefetchBatchMaxSize?: number | null;
+  runbook: string[];
+  message: string;
+  timestamp: number;
+  instance: WebhookInstanceInfo;
+  connectionId?: string;
+}
+
+/**
  * PRO tier webhook events service interface
  * Implemented by proprietary/webhook-pro/webhook-events-pro.service.ts
  */
@@ -339,6 +372,8 @@ export interface IWebhookEventsProService {
     instance: WebhookInstanceInfo;
     connectionId?: string;
   }): Promise<void>;
+
+  dispatchLatencyRegressionDetected(data: LatencyRegressionDetectedData): Promise<void>;
 
   dispatchAnomalyDetected(data: {
     anomalyId: string;

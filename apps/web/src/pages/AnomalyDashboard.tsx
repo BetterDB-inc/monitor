@@ -13,6 +13,7 @@ import {
   type CaptureOnNextContext,
 } from './anomalies/capture-on-next-modal';
 import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
+import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import {
   AlertTriangle,
   AlertCircle,
@@ -115,6 +116,7 @@ const METRIC_LABELS: Record<string, string> = {
   fragmentation_ratio: 'Fragmentation',
   replication_role: 'Replication Role',
   dataset_keys: 'Dataset Keys',
+  command_p99: 'Command P99',
 };
 
 function formatTime(ts: number): string {
@@ -242,6 +244,7 @@ export function AnomalyDashboard() {
   return (
     <div className="space-y-6">
       <DataLossAlertBanner events={events ?? undefined} />
+      <LatencyRegressionBanner events={events ?? undefined} />
 
       {/* Header */}
       <div className="flex justify-between items-center">
