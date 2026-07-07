@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { LanguageModelV3StreamPart } from '@ai-sdk/provider';
+import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from '@ai-sdk/provider';
 import type { AgentCache } from '../../AgentCache';
 import type { LlmCacheParams, LlmCacheResult } from '../../types';
 
@@ -28,10 +28,33 @@ function createMockAgentCache(): AgentCache {
   } as unknown as AgentCache;
 }
 
-function makeMockParams() {
+function makeMockParams(): LanguageModelV3CallOptions {
+  // v5-style params carrying `model` for defaultExtractModel; the adapter reads params
+  // as `unknown`, so this test mock is cast to the middleware's call-options type.
   return {
     model: { modelId: 'gpt-4o', provider: 'openai' },
     prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+  } as unknown as LanguageModelV3CallOptions;
+}
+
+type WrapStreamArg = Parameters<
+  NonNullable<ReturnType<typeof import('../ai').createAgentCacheMiddleware>['wrapStream']>
+>[0];
+
+/**
+ * Build a wrapStream() argument. The AI SDK passes doGenerate/doStream/params/model; these
+ * tests exercise only the streaming path, so doGenerate/model are inert stubs supplied to
+ * satisfy the middleware call signature.
+ */
+function streamCall(args: {
+  doStream: WrapStreamArg['doStream'];
+  params?: LanguageModelV3CallOptions;
+}): WrapStreamArg {
+  return {
+    doGenerate: (() => Promise.resolve({})) as unknown as WrapStreamArg['doGenerate'],
+    doStream: args.doStream,
+    params: args.params ?? makeMockParams(),
+    model: {} as WrapStreamArg['model'],
   };
 }
 
@@ -121,14 +144,14 @@ describe('wrapStream', () => {
       ]),
     );
 
-    const first = await middleware.wrapStream!({ doStream, params });
+    const first = await middleware.wrapStream!(streamCall({ doStream, params }));
     expect(await readStreamText(first.stream)).toBe('hello world');
     expect(doStream).toHaveBeenCalledTimes(1);
 
     await flushPromises();
 
     const doStreamSecond = vi.fn();
-    const second = await middleware.wrapStream!({ doStream: doStreamSecond, params });
+    const second = await middleware.wrapStream!(streamCall({ doStream: doStreamSecond, params }));
     expect(await readStreamText(second.stream)).toBe('hello world');
     expect(doStreamSecond).not.toHaveBeenCalled();
   });
@@ -144,10 +167,7 @@ describe('wrapStream', () => {
     const middleware = createAgentCacheMiddleware({ cache: mockCache });
     const doStream = vi.fn();
 
-    const result = await middleware.wrapStream!({
-      doStream,
-      params: makeMockParams(),
-    });
+    const result = await middleware.wrapStream!(streamCall({ doStream }));
 
     expect(doStream).not.toHaveBeenCalled();
 
@@ -183,10 +203,9 @@ describe('wrapStream', () => {
     ];
 
     const middleware = createAgentCacheMiddleware({ cache: mockCache });
-    const result = await middleware.wrapStream!({
-      doStream: vi.fn().mockResolvedValue(makeMockStream(upstreamParts)),
-      params: makeMockParams(),
-    });
+    const result = await middleware.wrapStream!(
+      streamCall({ doStream: vi.fn().mockResolvedValue(makeMockStream(upstreamParts)) }),
+    );
 
     const received = await readAllStreamParts(result.stream);
     expect(received.map((p) => p.type)).toEqual(upstreamParts.map((p) => p.type));
@@ -216,10 +235,9 @@ describe('wrapStream', () => {
     ];
 
     const middleware = createAgentCacheMiddleware({ cache: mockCache });
-    const result = await middleware.wrapStream!({
-      doStream: vi.fn().mockResolvedValue(makeMockStream(upstreamParts)),
-      params: makeMockParams(),
-    });
+    const result = await middleware.wrapStream!(
+      streamCall({ doStream: vi.fn().mockResolvedValue(makeMockStream(upstreamParts)) }),
+    );
 
     const received = await readAllStreamParts(result.stream);
     expect(received).toHaveLength(3);
@@ -238,17 +256,18 @@ describe('wrapStream', () => {
     (mockCache.llm.store as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('store boom'));
 
     const middleware = createAgentCacheMiddleware({ cache: mockCache });
-    const result = await middleware.wrapStream!({
-      doStream: vi.fn().mockResolvedValue(
-        makeMockStream([
-          { type: 'text-start', id: '0' },
-          { type: 'text-delta', id: '0', delta: 'ok' },
-          { type: 'text-end', id: '0' },
-          finishPart,
-        ]),
-      ),
-      params: makeMockParams(),
-    });
+    const result = await middleware.wrapStream!(
+      streamCall({
+        doStream: vi.fn().mockResolvedValue(
+          makeMockStream([
+            { type: 'text-start', id: '0' },
+            { type: 'text-delta', id: '0', delta: 'ok' },
+            { type: 'text-end', id: '0' },
+            finishPart,
+          ]),
+        ),
+      }),
+    );
 
     const unhandledRejections: unknown[] = [];
     const handler = (err: unknown) => unhandledRejections.push(err);
