@@ -931,25 +931,38 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     };
   }
 
-  resolveAnomaly(anomalyId: string): boolean {
+  async resolveAnomaly(anomalyId: string): Promise<boolean> {
     const anomaly = this.recentAnomalies.find(a => a.id === anomalyId);
     if (anomaly) {
       anomaly.resolved = true;
-      return true;
     }
-    return false;
+
+    // Also persist the resolution so it survives restarts and storage-backed queries
+    let persisted = false;
+    try {
+      persisted = await this.storage.resolveAnomaly(anomalyId, Date.now());
+    } catch (err) {
+      this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
+    }
+
+    return Boolean(anomaly) || persisted;
   }
 
-  resolveGroup(correlationId: string): boolean {
+  async resolveGroup(correlationId: string): Promise<boolean> {
     const group = this.recentGroups.find(g => g.correlationId === correlationId);
-    if (group) {
-      // Mark all anomalies in the group as resolved
-      for (const anomaly of group.anomalies) {
-        anomaly.resolved = true;
+    if (!group) return false;
+
+    // Mark all anomalies in the group as resolved
+    const resolvedAt = Date.now();
+    for (const anomaly of group.anomalies) {
+      anomaly.resolved = true;
+      try {
+        await this.storage.resolveAnomaly(anomaly.id, resolvedAt);
+      } catch (err) {
+        this.logger.error(`Failed to persist resolution for anomaly ${anomaly.id}:`, err);
       }
-      return true;
     }
-    return false;
+    return true;
   }
 
   clearResolved(): number {

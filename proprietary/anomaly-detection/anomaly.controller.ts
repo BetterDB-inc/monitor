@@ -101,8 +101,8 @@ export class AnomalyController {
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @HttpCode(HttpStatus.OK)
-  resolveEvent(@Param('id') id: string): { success: boolean } {
-    const success = this.anomalyService.resolveAnomaly(id);
+  async resolveEvent(@Param('id') id: string): Promise<{ success: boolean }> {
+    const success = await this.anomalyService.resolveAnomaly(id);
     return { success };
   }
 
@@ -110,8 +110,8 @@ export class AnomalyController {
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @HttpCode(HttpStatus.OK)
-  resolveGroup(@Param('correlationId') correlationId: string): { success: boolean } {
-    const success = this.anomalyService.resolveGroup(correlationId);
+  async resolveGroup(@Param('correlationId') correlationId: string): Promise<{ success: boolean }> {
+    const success = await this.anomalyService.resolveGroup(correlationId);
     return { success };
   }
 

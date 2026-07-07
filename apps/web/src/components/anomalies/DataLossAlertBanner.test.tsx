@@ -76,4 +76,28 @@ describe('DataLossAlertBanner', () => {
       expect(screen.queryByText('Data loss detected')).not.toBeInTheDocument();
     });
   });
+
+  it('keeps the banner visible when the API reports success: false', async () => {
+    vi.mocked(metricsApi.resolveAnomalyEvent).mockResolvedValueOnce({ success: false });
+    render(<DataLossAlertBanner events={[dataLossEvent]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /mark resolved/i }));
+
+    await waitFor(() => {
+      expect(metricsApi.resolveAnomalyEvent).toHaveBeenCalledWith(dataLossEvent.id);
+    });
+    expect(screen.getByText('Data loss detected')).toBeInTheDocument();
+  });
+
+  it('keeps the banner visible when the resolve request throws', async () => {
+    vi.mocked(metricsApi.resolveAnomalyEvent).mockRejectedValueOnce(new Error('network error'));
+    render(<DataLossAlertBanner events={[dataLossEvent]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /mark resolved/i }));
+
+    await waitFor(() => {
+      expect(metricsApi.resolveAnomalyEvent).toHaveBeenCalledWith(dataLossEvent.id);
+    });
+    expect(screen.getByText('Data loss detected')).toBeInTheDocument();
+  });
 });

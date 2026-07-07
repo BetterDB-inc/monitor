@@ -29,6 +29,7 @@ describe('AnomalyService', () => {
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
+      resolveAnomaly: jest.fn().mockResolvedValue(true),
       initialize: jest.fn().mockResolvedValue(undefined),
       close: jest.fn().mockResolvedValue(undefined),
       isReady: jest.fn().mockReturnValue(true),
@@ -847,6 +848,48 @@ describe('AnomalyService', () => {
 
       (service as any).onConnectionRemoved('conn-1');
       expect((service as any).prevReplSnapshot.has('conn-1')).toBe(false);
+    });
+
+    it('resolveAnomaly marks the cached event resolved and persists to storage', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' });
+      await poll();
+
+      const [event] = dataLossEvents();
+      const success = await service.resolveAnomaly(event.id);
+
+      expect(success).toBe(true);
+      expect(event.resolved).toBe(true);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(event.id, expect.any(Number));
+    });
+
+    it('resolveAnomaly still succeeds via storage when the event is not in the in-memory cache (e.g. after restart)', async () => {
+      storage.resolveAnomaly.mockResolvedValue(true);
+
+      const success = await service.resolveAnomaly('persisted-but-not-cached');
+
+      expect(success).toBe(true);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('persisted-but-not-cached', expect.any(Number));
+    });
+
+    it('resolveAnomaly returns false when the event exists neither in cache nor storage', async () => {
+      storage.resolveAnomaly.mockResolvedValue(false);
+
+      expect(await service.resolveAnomaly('unknown-id')).toBe(false);
+    });
+
+    it('resolveAnomaly resolves the cached event even if storage persistence fails', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' });
+      await poll();
+
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+
+      const [event] = dataLossEvents();
+      expect(await service.resolveAnomaly(event.id)).toBe(true);
+      expect(event.resolved).toBe(true);
     });
   });
 
