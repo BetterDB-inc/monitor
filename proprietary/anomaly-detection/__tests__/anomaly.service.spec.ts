@@ -751,4 +751,101 @@ describe('AnomalyService', () => {
       );
     });
   });
+
+  // ─── Duplicate-primary (split-brain) detection ─────────────────────────────
+  describe('duplicate primary detection', () => {
+    const clusterInfoResponse = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+    });
+
+    const healthyNodes = [
+      { id: 'a', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 8191]] },
+      { id: 'b', address: '10.0.0.2:6379@16379', flags: ['master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 2, linkState: 'connected', slots: [[8192, 16383]] },
+    ];
+
+    const splitBrainNodes = [
+      { id: 'nodeAAAAAAAA', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 4, linkState: 'connected', slots: [[0, 5460]] },
+      { id: 'nodeCCCCCCCC', address: '10.0.0.3:6379@16379', flags: ['master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 9, linkState: 'connected', slots: [[0, 5460]] },
+    ];
+
+    it('emits a CRITICAL anomaly when two primaries claim the same slots', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      await poll();
+
+      const events = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      // Phantom is the lower-epoch node A; message points it at authoritative node C.
+      expect(events[0].message).toContain('nodeAAAA');
+      expect(events[0].message).toContain('nodeCCCC');
+      expect(events[0].message).toContain('split-brain');
+    });
+
+    it('emits no topology anomaly for a healthy cluster', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(healthyNodes);
+      await poll();
+
+      const events = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      expect(events).toHaveLength(0);
+    });
+
+    it('dedupes a persistent conflict to a single alert across polls', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      await poll();
+      await poll();
+      await poll();
+
+      const events = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      expect(events).toHaveLength(1);
+    });
+
+    it('re-alerts when a conflict resolves and later recurs', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      await poll(); // conflict → 1 alert
+
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(healthyNodes);
+      await poll(); // resolved → clears dedupe
+
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(splitBrainNodes);
+      await poll(); // recurs → new alert
+
+      const events = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      expect(events).toHaveLength(2);
+    });
+
+    it('does not throw when getClusterNodes fails', async () => {
+      dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('CLUSTER NODES failed'));
+      await expect(poll()).resolves.not.toThrow();
+
+      const events = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      expect(events).toHaveLength(0);
+    });
+  });
 });

@@ -11,6 +11,10 @@ import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
 import {
+  detectDuplicatePrimaries,
+  conflictSignature,
+} from './duplicate-primary-detector';
+import {
   MetricType,
   AnomalyEvent,
   CorrelatedAnomalyGroup,
@@ -40,6 +44,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private lastSlowlogId = new Map<string, number>();
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
+  // Per-connection set of active duplicate-primary conflict signatures, so each
+  // distinct conflict is alerted once rather than on every poll tick.
+  private activeTopologyConflicts = new Map<string, Set<string>>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
@@ -207,6 +214,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.lastSlowlogId.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
+    this.activeTopologyConflicts.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
@@ -442,10 +450,72 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         } catch (clusterErr) {
           this.logger.debug(`Failed to get cluster info for ${ctx.connectionName}: ${clusterErr instanceof Error ? clusterErr.message : clusterErr}`);
         }
+
+        // Duplicate-primary (split-brain) detection — two primaries owning the
+        // same slots in one shard (valkey-io/valkey#2261).
+        await this.detectDuplicatePrimaries(ctx, timestamp);
       }
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
+    }
+  }
+
+  /**
+   * Detects two primaries claiming overlapping slots (the topology fault behind
+   * valkey-io/valkey#2261) from this connection's `CLUSTER NODES` view. Emits one
+   * CRITICAL anomaly per distinct conflict and clears the dedupe entry once the
+   * conflict resolves, so recovery re-arms alerting.
+   */
+  private async detectDuplicatePrimaries(ctx: ConnectionContext, timestamp: number): Promise<void> {
+    try {
+      const nodes = await ctx.client.getClusterNodes();
+      const conflicts = detectDuplicatePrimaries(nodes);
+
+      const active = this.activeTopologyConflicts.get(ctx.connectionId) ?? new Set<string>();
+      const currentSignatures = new Set(conflicts.map((c) => conflictSignature(c)));
+
+      for (const conflict of conflicts) {
+        const signature = conflictSignature(conflict);
+        if (active.has(signature)) continue; // already alerted for this conflict
+
+        const [authoritative, phantom] = conflict.masters;
+        const slotLabel =
+          conflict.slotStart === conflict.slotEnd
+            ? `slot ${conflict.slotStart}`
+            : `slots ${conflict.slotStart}-${conflict.slotEnd}`;
+
+        const event: AnomalyEvent = {
+          id: `${ctx.connectionId}-dup-primary-${signature}-${timestamp}`,
+          timestamp,
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.CRITICAL,
+          value: 2,
+          baseline: 1,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 1,
+          message:
+            `CRITICAL: Two primaries claim ${slotLabel} in the same shard — split-brain topology. ` +
+            `${phantom.address} (${phantom.id.substring(0, 8)}, configEpoch ${phantom.configEpoch}) ` +
+            `is the suspected stale primary and should be a replica of ` +
+            `${authoritative.address} (${authoritative.id.substring(0, 8)}, configEpoch ${authoritative.configEpoch}).`,
+          resolved: false,
+          connectionId: ctx.connectionId,
+        };
+
+        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+        await this.addAnomaly(event, ctx);
+      }
+
+      // Keep only signatures still in conflict so a resolved-then-recurring
+      // conflict alerts again.
+      this.activeTopologyConflicts.set(ctx.connectionId, currentSignatures);
+    } catch (topologyErr) {
+      this.logger.debug(
+        `Failed to check cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
+      );
     }
   }
 
