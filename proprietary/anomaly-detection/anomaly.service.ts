@@ -421,8 +421,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           connectedSlaves: this.parseNumber(info.connected_slaves) ?? 0,
         };
 
+        // While the server is still loading its dataset from disk after a
+        // restart (RDB/AOF), the keyspace reports zero until the load finishes.
+        // Skip data-loss detection and keep the prior snapshot so a normal
+        // restart with persistence does not look like an empty-primary wipe.
+        const isLoading = info.loading === '1' || info.async_loading === '1';
+
         const prev = this.prevReplSnapshot.get(ctx.connectionId);
-        if (prev) {
+        if (prev && !isLoading) {
           let dataLossKind: 'primary_restarted_empty' | 'replica_wiped' | null = null;
           let message = '';
 
@@ -492,7 +498,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           }
         }
 
-        this.prevReplSnapshot.set(ctx.connectionId, snapshot);
+        // Don't record the transient empty snapshot taken mid-load; otherwise
+        // the next poll (keys restored) would compare against zero.
+        if (!isLoading) {
+          this.prevReplSnapshot.set(ctx.connectionId, snapshot);
+        }
       }
 
       // Cluster state transition detection

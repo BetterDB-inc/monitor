@@ -187,6 +187,15 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
+  // Data-loss banner must surface active incidents regardless of the chosen
+  // date range, so it uses a dedicated unfiltered feed rather than `events`
+  // (which the date picker narrows and could scroll the incident out of view).
+  const { data: dataLossEvents } = usePolling<AnomalyEvent[]>({
+    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'dataset_keys' }),
+    interval: 5000,
+    refetchKey: currentConnection?.id,
+  });
+
   const { data: groups } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
@@ -241,7 +250,7 @@ export function AnomalyDashboard() {
 
   return (
     <div className="space-y-6">
-      <DataLossAlertBanner events={events ?? undefined} />
+      <DataLossAlertBanner events={dataLossEvents ?? undefined} />
 
       {/* Header */}
       <div className="flex justify-between items-center">

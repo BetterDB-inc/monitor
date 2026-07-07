@@ -709,11 +709,14 @@ describe('AnomalyService', () => {
       uptime?: string;
       connectedSlaves?: string;
       db0?: string;
+      loading?: string;
+      asyncLoading?: string;
     } = {}) {
       dbClient.getInfoParsed = jest.fn().mockResolvedValue({
         server: { role: opts.role ?? 'master', uptime_in_seconds: opts.uptime ?? '1000' },
         clients: { connected_clients: '10', blocked_clients: '0' },
         memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        persistence: { loading: opts.loading ?? '0', async_loading: opts.asyncLoading ?? '0' },
         stats: {
           instantaneous_ops_per_sec: '100',
           instantaneous_input_kbps: '50',
@@ -799,6 +802,38 @@ describe('AnomalyService', () => {
 
       // Restarted (new replid, uptime reset) but keys intact via RDB/AOF reload
       mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire on a restart while the server is still loading its dataset from disk', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      // Restarted with RDB/AOF: new replid and empty keyspace, but INFO reports
+      // loading in progress — keys are not lost, just not loaded yet.
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0', loading: '1' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+
+      // Load finishes and the keyspace is restored — still no false alert
+      // because the transient empty snapshot was never recorded as baseline.
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '10', offset: '0', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire while async_loading (diskless) is in progress', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0', asyncLoading: '1' });
       await poll();
 
       expect(dataLossEvents()).toHaveLength(0);
