@@ -942,20 +942,29 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   }
 
   async resolveAnomaly(anomalyId: string): Promise<boolean> {
-    const anomaly = this.recentAnomalies.find(a => a.id === anomalyId);
-    if (anomaly) {
-      anomaly.resolved = true;
-    }
-
-    // Also persist the resolution so it survives restarts and storage-backed queries
+    // Storage is the source of truth for later (storage-backed) polls, so
+    // persist first and only report success once the resolution is durable.
+    // Reporting success on an in-memory-only flip would let a client dismiss a
+    // banner that subsequent polls still return as unresolved.
     let persisted = false;
     try {
       persisted = await this.storage.resolveAnomaly(anomalyId, Date.now());
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
+      return false;
     }
 
-    return Boolean(anomaly) || persisted;
+    if (!persisted) {
+      return false;
+    }
+
+    // Keep the cached copy in sync with the durable store.
+    const anomaly = this.recentAnomalies.find(a => a.id === anomalyId);
+    if (anomaly) {
+      anomaly.resolved = true;
+    }
+
+    return true;
   }
 
   async resolveGroup(correlationId: string): Promise<boolean> {

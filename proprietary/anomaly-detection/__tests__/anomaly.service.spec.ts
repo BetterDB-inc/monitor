@@ -914,7 +914,7 @@ describe('AnomalyService', () => {
       expect(await service.resolveAnomaly('unknown-id')).toBe(false);
     });
 
-    it('resolveAnomaly resolves the cached event even if storage persistence fails', async () => {
+    it('resolveAnomaly reports failure and leaves the cached event unresolved when persistence fails', async () => {
       mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
       await poll();
       mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' });
@@ -923,8 +923,10 @@ describe('AnomalyService', () => {
       storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
 
       const [event] = dataLossEvents();
-      expect(await service.resolveAnomaly(event.id)).toBe(true);
-      expect(event.resolved).toBe(true);
+      // A non-durable resolution must not report success, otherwise the UI could
+      // dismiss a banner that storage-backed polls still return as unresolved.
+      expect(await service.resolveAnomaly(event.id)).toBe(false);
+      expect(event.resolved).toBe(false);
     });
   });
 
