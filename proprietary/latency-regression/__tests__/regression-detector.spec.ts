@@ -357,4 +357,26 @@ describe('RegressionDetector — sustained degradation', () => {
       expect(sim.tick(2500, '9.0.0')).toEqual([]);
     }
   });
+
+  it('still fires sustained when a version change opens an upgrade window with no baselines', () => {
+    const sim = new Sim();
+    // 40 old-version samples, all OLDER than the 6h upgrade-baseline lookback but within the
+    // 24h sustained window: enough for a sustained baseline, too old for an upgrade baseline.
+    for (let i = 0; i < 40; i++) {
+      sim.addSample(1000, '8.1.0', sim.now - (7 * 60 + i) * MINUTE);
+    }
+    // Establish lastVersion on the old version without opening a window yet.
+    sim.addSample(1000, '8.1.0', sim.now);
+    expect(sim.evaluate()).toEqual([]);
+
+    // Version change opens an upgrade window, but no command has >=5 samples within 6h,
+    // so baselines are empty. Sustained must NOT be suppressed for these commands.
+    let findings: RegressionFinding[] = [];
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) {
+      expect(findings).toEqual([]);
+      findings = sim.tick(2500, '9.0.0'); // 2.5x the sustained baseline
+    }
+    expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('sustained_degradation');
+  });
 });

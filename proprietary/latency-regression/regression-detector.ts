@@ -146,14 +146,13 @@ export class RegressionDetector {
     const upgradeFinding = this.evaluateUpgrade(input, latestByCommand, eligible);
     if (upgradeFinding) findings.push(upgradeFinding);
 
-    // Sustained rule is suppressed for the entire lifetime of an open upgrade window,
-    // whether or not it has fired. The upgrade rule owns regressions during that window and
-    // fires once; letting sustained run after the upgrade event fired would re-report the
-    // same post-upgrade regression as a second anomaly/webhook, defeating the one-shot intent.
-    // Sustained resumes only once the window expires (24h, cleared above).
-    if (!this.upgrade) {
-      findings.push(...this.evaluateSustained(input, latestByCommand, eligible, currentVersion));
-    }
+    // Sustained is suppressed only for the commands an open upgrade window actually owns
+    // (those with an upgrade baseline). The upgrade rule fires once per such command, so
+    // suppressing them for the whole window — fired or not — avoids re-reporting the same
+    // post-upgrade regression via sustained. Commands without an upgrade baseline (e.g. a
+    // version change where nothing had enough pre-change samples) are NOT suppressed, so an
+    // empty upgrade window can't silence sustained detection for up to 24h.
+    findings.push(...this.evaluateSustained(input, latestByCommand, eligible, currentVersion));
 
     return findings;
   }
@@ -313,6 +312,14 @@ export class RegressionDetector {
     for (const command of eligible) {
       const state = this.sustained.get(command) ?? { consecutive: 0, lastFiredAt: 0 };
       this.sustained.set(command, state);
+
+      // Owned by an open upgrade window (the upgrade rule fires once for it) — suppress
+      // sustained for this command for the window's lifetime. Commands the window has no
+      // baseline for fall through and are evaluated normally.
+      if (this.upgrade?.baselines.has(command)) {
+        state.consecutive = 0;
+        continue;
+      }
 
       const baselineValues = byCommand.get(command);
       const latest = latestByCommand.get(command);

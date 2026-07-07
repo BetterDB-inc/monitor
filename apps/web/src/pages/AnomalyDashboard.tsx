@@ -130,6 +130,10 @@ function formatValue(value: number, metric: string): string {
     return `${(value / 1e3).toFixed(0)} KB`;
   }
   if (metric === 'fragmentation_ratio') return value.toFixed(2);
+  if (metric === 'command_p99') {
+    // Stored in microseconds; show ms once past 1ms, else µs.
+    return value >= 1000 ? `${(value / 1000).toFixed(1)} ms` : `${Math.round(value)} µs`;
+  }
   if (value > 1e6) return `${(value / 1e6).toFixed(1)}M`;
   if (value > 1e3) return `${(value / 1e3).toFixed(1)}K`;
   return value.toLocaleString();
