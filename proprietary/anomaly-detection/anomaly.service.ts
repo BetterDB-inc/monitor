@@ -421,8 +421,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           connectedSlaves: this.parseNumber(info.connected_slaves) ?? 0,
         };
 
+        // While the server is still loading its dataset from disk after a
+        // restart (RDB/AOF), the keyspace reports zero until the load finishes.
+        // Skip data-loss detection and keep the prior snapshot so a normal
+        // restart with persistence does not look like an empty-primary wipe.
+        const isLoading = info.loading === '1' || info.async_loading === '1';
+
         const prev = this.prevReplSnapshot.get(ctx.connectionId);
-        if (prev) {
+        if (prev && !isLoading) {
           let dataLossKind: 'primary_restarted_empty' | 'replica_wiped' | null = null;
           let message = '';
 
@@ -492,7 +498,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           }
         }
 
-        this.prevReplSnapshot.set(ctx.connectionId, snapshot);
+        // Don't record the transient empty snapshot taken mid-load; otherwise
+        // the next poll (keys restored) would compare against zero.
+        if (!isLoading) {
+          this.prevReplSnapshot.set(ctx.connectionId, snapshot);
+        }
       }
 
       // Cluster state transition detection
@@ -931,25 +941,47 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     };
   }
 
-  resolveAnomaly(anomalyId: string): boolean {
+  async resolveAnomaly(anomalyId: string): Promise<boolean> {
+    // Storage is the source of truth for later (storage-backed) polls, so
+    // persist first and only report success once the resolution is durable.
+    // Reporting success on an in-memory-only flip would let a client dismiss a
+    // banner that subsequent polls still return as unresolved.
+    let persisted = false;
+    try {
+      persisted = await this.storage.resolveAnomaly(anomalyId, Date.now());
+    } catch (err) {
+      this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
+      return false;
+    }
+
+    if (!persisted) {
+      return false;
+    }
+
+    // Keep the cached copy in sync with the durable store.
     const anomaly = this.recentAnomalies.find(a => a.id === anomalyId);
     if (anomaly) {
       anomaly.resolved = true;
-      return true;
     }
-    return false;
+
+    return true;
   }
 
-  resolveGroup(correlationId: string): boolean {
+  async resolveGroup(correlationId: string): Promise<boolean> {
     const group = this.recentGroups.find(g => g.correlationId === correlationId);
-    if (group) {
-      // Mark all anomalies in the group as resolved
-      for (const anomaly of group.anomalies) {
-        anomaly.resolved = true;
+    if (!group) return false;
+
+    // Mark all anomalies in the group as resolved
+    const resolvedAt = Date.now();
+    for (const anomaly of group.anomalies) {
+      anomaly.resolved = true;
+      try {
+        await this.storage.resolveAnomaly(anomaly.id, resolvedAt);
+      } catch (err) {
+        this.logger.error(`Failed to persist resolution for anomaly ${anomaly.id}:`, err);
       }
-      return true;
     }
-    return false;
+    return true;
   }
 
   clearResolved(): number {

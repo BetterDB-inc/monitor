@@ -38,10 +38,13 @@ export function DataLossAlertBanner({ events }: { events: DataLossEvent[] | unde
   if (active.length === 0) return null;
 
   const dismiss = async (id: string) => {
+    // Only hide the banner once the server has actually resolved the event;
+    // otherwise a critical data-loss alert could be silently dismissed.
     try {
-      await metricsApi.resolveAnomalyEvent(id);
+      const { success } = await metricsApi.resolveAnomalyEvent(id);
+      if (!success) return;
     } catch {
-      // Still hide locally; the event remains in the anomaly feed.
+      return;
     }
     setDismissed((prev) => {
       const next = new Set(prev);

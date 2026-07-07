@@ -29,6 +29,7 @@ describe('AnomalyService', () => {
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
+      resolveAnomaly: jest.fn().mockResolvedValue(true),
       initialize: jest.fn().mockResolvedValue(undefined),
       close: jest.fn().mockResolvedValue(undefined),
       isReady: jest.fn().mockReturnValue(true),
@@ -708,11 +709,14 @@ describe('AnomalyService', () => {
       uptime?: string;
       connectedSlaves?: string;
       db0?: string;
+      loading?: string;
+      asyncLoading?: string;
     } = {}) {
       dbClient.getInfoParsed = jest.fn().mockResolvedValue({
         server: { role: opts.role ?? 'master', uptime_in_seconds: opts.uptime ?? '1000' },
         clients: { connected_clients: '10', blocked_clients: '0' },
         memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        persistence: { loading: opts.loading ?? '0', async_loading: opts.asyncLoading ?? '0' },
         stats: {
           instantaneous_ops_per_sec: '100',
           instantaneous_input_kbps: '50',
@@ -804,6 +808,38 @@ describe('AnomalyService', () => {
       expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
     });
 
+    it('does not fire on a restart while the server is still loading its dataset from disk', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      // Restarted with RDB/AOF: new replid and empty keyspace, but INFO reports
+      // loading in progress — keys are not lost, just not loaded yet.
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0', loading: '1' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+
+      // Load finishes and the keyspace is restored — still no false alert
+      // because the transient empty snapshot was never recorded as baseline.
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '10', offset: '0', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire while async_loading (diskless) is in progress', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0', asyncLoading: '1' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
     it('does not fire when replica replid changes after normal failover with keys preserved', async () => {
       mockReplInfo({ role: 'replica', replid: 'replid-aaaa', db0: 'keys=200,expires=0,avg_ttl=0' });
       await poll();
@@ -847,6 +883,50 @@ describe('AnomalyService', () => {
 
       (service as any).onConnectionRemoved('conn-1');
       expect((service as any).prevReplSnapshot.has('conn-1')).toBe(false);
+    });
+
+    it('resolveAnomaly marks the cached event resolved and persists to storage', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' });
+      await poll();
+
+      const [event] = dataLossEvents();
+      const success = await service.resolveAnomaly(event.id);
+
+      expect(success).toBe(true);
+      expect(event.resolved).toBe(true);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(event.id, expect.any(Number));
+    });
+
+    it('resolveAnomaly still succeeds via storage when the event is not in the in-memory cache (e.g. after restart)', async () => {
+      storage.resolveAnomaly.mockResolvedValue(true);
+
+      const success = await service.resolveAnomaly('persisted-but-not-cached');
+
+      expect(success).toBe(true);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('persisted-but-not-cached', expect.any(Number));
+    });
+
+    it('resolveAnomaly returns false when the event exists neither in cache nor storage', async () => {
+      storage.resolveAnomaly.mockResolvedValue(false);
+
+      expect(await service.resolveAnomaly('unknown-id')).toBe(false);
+    });
+
+    it('resolveAnomaly reports failure and leaves the cached event unresolved when persistence fails', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' });
+      await poll();
+
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+
+      const [event] = dataLossEvents();
+      // A non-durable resolution must not report success, otherwise the UI could
+      // dismiss a banner that storage-backed polls still return as unresolved.
+      expect(await service.resolveAnomaly(event.id)).toBe(false);
+      expect(event.resolved).toBe(false);
     });
   });
 
