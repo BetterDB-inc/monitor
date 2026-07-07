@@ -91,6 +91,9 @@ export class LatencystatsPollerService extends MultiConnectionPoller implements 
           `No latencystats data on ${ctx.connectionName} (requires Valkey/Redis >= 7.0 with latency-tracking yes)`,
         );
       }
+      // Drop any prior snapshot so GET /summary doesn't keep serving stale percentiles
+      // once the section disappears (e.g. latency-tracking turned off after earlier polls).
+      this.snapshots.set(ctx.connectionId, { entries: [], capturedAt: now });
       return;
     }
     this.sectionAbsentLogged.delete(ctx.connectionId);

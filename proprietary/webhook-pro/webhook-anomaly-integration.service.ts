@@ -93,6 +93,13 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
    */
   private async dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void> {
     try {
+      // command_p99 regressions are delivered by LatencyRegressionService via the dedicated
+      // latency.regression.detected event; skip the generic anomaly.detected here so one
+      // regression doesn't produce two Pro webhook deliveries for the same incident.
+      if (anomaly.metricType === 'command_p99') {
+        return;
+      }
+
       const data = {
         anomalyId: anomaly.id,
         metricType: anomaly.metricType,

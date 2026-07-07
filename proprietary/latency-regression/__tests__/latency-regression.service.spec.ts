@@ -97,6 +97,8 @@ describe('LatencyRegressionService', () => {
       baseline: 2000,
       resolved: false,
       connectionId: 'conn-1',
+      sourceHost: 'h',
+      sourcePort: 6379,
     });
     expect(event.message).toContain('hmget');
 

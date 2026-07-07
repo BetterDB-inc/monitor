@@ -153,6 +153,20 @@ describe('LatencystatsPollerService', () => {
     expect(service.getSnapshot('unknown')).toEqual([]);
   });
 
+  it('clears the snapshot when the section disappears after a successful poll', async () => {
+    const withData = clientWith({
+      server: { valkey_version: '9.0.1' },
+      latencystats: { latency_percentiles_usec_hmget: 'p50=1,p99=99,p99.9=999' },
+    });
+    await (service as any).pollConnection(makeCtx(withData));
+    expect(service.getSnapshot('conn-1')).toHaveLength(1);
+
+    // latency-tracking turned off — section gone. Summary must not keep serving the stale value.
+    const withoutData = clientWith({ server: { valkey_version: '9.0.1' } });
+    await (service as any).pollConnection(makeCtx(withoutData));
+    expect(service.getSnapshot('conn-1')).toEqual([]);
+  });
+
   it('swallows getInfo failures without persisting', async () => {
     const client = { getInfo: jest.fn().mockRejectedValue(new Error('boom')) };
 

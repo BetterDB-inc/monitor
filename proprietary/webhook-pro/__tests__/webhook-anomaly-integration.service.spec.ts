@@ -264,6 +264,35 @@ describe('WebhookAnomalyIntegrationService', () => {
     });
   });
 
+  describe('command_p99 (latency regression)', () => {
+    it('does not dispatch the generic anomaly.detected for command_p99 (dedicated event owns it)', async () => {
+      const anomalies: StoredAnomalyEvent[] = [
+        {
+          id: 'lr-1',
+          timestamp: Date.now(),
+          metricType: 'command_p99',
+          anomalyType: 'spike',
+          severity: 'critical',
+          value: 6000,
+          baseline: 2000,
+          stdDev: 0,
+          zScore: 0,
+          threshold: 3.0,
+          message: 'P99 latency regression after upgrade',
+          resolved: false,
+          sourceHost: 'localhost',
+          sourcePort: 6379,
+        },
+      ];
+
+      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
+
+      await (service as any).checkForNewAnomalies();
+
+      expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
+    });
+  });
+
   describe('error handling', () => {
     it('should handle storage errors gracefully', async () => {
       storageClient.getAnomalyEvents.mockRejectedValue(new Error('Storage error'));
