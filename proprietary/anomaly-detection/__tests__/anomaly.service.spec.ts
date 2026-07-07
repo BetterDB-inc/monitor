@@ -847,5 +847,25 @@ describe('AnomalyService', () => {
         .filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
       expect(events).toHaveLength(0);
     });
+
+    it('re-alerts on a recurring conflict after an intervening failed poll (no stale dedupe)', async () => {
+      // Poll 1: conflict observed → alert, signature stored.
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      await poll();
+
+      // Poll 2: poll fails — no observation, dedupe state must be cleared so a
+      // possible missed heal cannot suppress the next alert.
+      (dbClient.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTER NODES failed'));
+      await poll();
+
+      // Poll 3: conflict present again → must re-alert.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(splitBrainNodes);
+      await poll();
+
+      const events = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      expect(events).toHaveLength(2);
+    });
   });
 });

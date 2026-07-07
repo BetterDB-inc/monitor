@@ -513,6 +513,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // conflict alerts again.
       this.activeTopologyConflicts.set(ctx.connectionId, currentSignatures);
     } catch (topologyErr) {
+      // A failed poll yields no observation of the topology, so we cannot know
+      // whether a previously-seen conflict is still present. Clearing the dedupe
+      // state ensures the next successful poll re-alerts on any conflict rather
+      // than suppressing it because the cluster might have healed and re-split in
+      // between (missed heal). Re-alerting on an unresolved CRITICAL split-brain
+      // is preferable to silently dropping it.
+      this.activeTopologyConflicts.delete(ctx.connectionId);
       this.logger.debug(
         `Failed to check cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
       );
