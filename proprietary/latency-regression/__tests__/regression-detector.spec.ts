@@ -509,4 +509,18 @@ describe('RegressionDetector — sustained degradation', () => {
     sim.detector.revert(findings[0]);
     expect(sim.tick(2500, '8.1.0')).toHaveLength(1);
   });
+
+  it('revert() lets a sustained finding retry on the SAME stored sample (no newer row needed)', () => {
+    const sim = new Sim();
+    seedBaseline(sim);
+    let findings: RegressionFinding[] = [];
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) findings = sim.tick(2500, '8.1.0');
+    expect(findings).toHaveLength(1);
+
+    // Re-poll WITHOUT recording a new sample — the latencystats poller has not written a newer
+    // row yet. After a failed persist the finding must still re-emit on the unchanged sample
+    // (matching upgrade retry), not stall on the "count physical samples" guard.
+    sim.detector.revert(findings[0]);
+    expect(sim.repoll()).toHaveLength(1);
+  });
 });

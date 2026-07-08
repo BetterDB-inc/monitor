@@ -178,13 +178,17 @@ export class RegressionDetector {
       }
       return;
     }
-    // Sustained: restore the pre-fire streak (it fires exactly at CONSECUTIVE_REQUIRED) and clear
-    // the cooldown so the next poll can re-emit instead of waiting out SUSTAINED_COOLDOWN_MS.
+    // Sustained: restore the pre-fire streak (it fires exactly at CONSECUTIVE_REQUIRED), clear the
+    // cooldown, AND reset lastCountedAt so the already-counted sample can be re-counted. Without
+    // the last part the "count physical samples, not poll ticks" guard in evaluateSustained skips
+    // this command until a NEWER latencystats row exists, so the retry would stall — unlike the
+    // upgrade rule, whose fire loop is separate from that guard and can retry on the same sample.
     for (const command of finding.commands) {
       const state = this.sustained.get(command.command);
       if (state) {
         state.consecutive = CONSECUTIVE_REQUIRED;
         state.lastFiredAt = 0;
+        state.lastCountedAt = -1;
       }
     }
   }
