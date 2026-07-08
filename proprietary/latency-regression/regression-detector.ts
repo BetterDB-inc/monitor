@@ -195,7 +195,16 @@ export class RegressionDetector {
     // window. A patch/minor/build-metadata flip (7.4.0 -> 7.4.1) or a downgrade must not open a
     // window: doing so would clear every command's sustained cooldown/streak below (re-firing a
     // sustained finding inside its 30-min cooldown) and mislabel the change as upgrade_regression.
-    if (parseMajorVersion(currentVersion) <= parseMajorVersion(fromVersion)) return;
+    if (parseMajorVersion(currentVersion) <= parseMajorVersion(fromVersion)) {
+      // If an upgrade window is open and we have rolled back BELOW its target major, the upgrade
+      // being monitored has been reverted. Close the window so it stops suppressing sustained
+      // detection on the reverted version (evaluateSustained mutes commands the window owns) and
+      // we don't hold an unfireable window open for the rest of the 24h.
+      if (this.upgrade && parseMajorVersion(currentVersion) < parseMajorVersion(this.upgrade.toVersion)) {
+        this.upgrade = undefined;
+      }
+      return;
+    }
 
     // Major upgrade: open (or replace) the upgrade window.
     const baselines = new Map<string, number>();
@@ -249,10 +258,15 @@ export class RegressionDetector {
         continue;
       }
       const latest = latestByCommand.get(command);
+      // Count the sample if it is still on the upgraded major line (or newer), not only the
+      // exact `toVersion` string. A patch/minor bump during the window (9.0.0 -> 9.0.1) must
+      // not reset the streak, or a genuine post-major regression could never reach
+      // CONSECUTIVE_REQUIRED. A rollback below the target major (9 -> 8) fails this check and
+      // resets the streak, which is correct — that is no longer a post-upgrade sample.
       const fresh =
         latest !== undefined &&
         latest.capturedAt >= nowMs - STALE_SAMPLE_MS &&
-        latest.serverVersion === upgrade.toVersion;
+        parseMajorVersion(latest.serverVersion) >= parseMajorVersion(upgrade.toVersion);
       if (!fresh) {
         upgrade.consecutive.set(command, 0);
         continue;

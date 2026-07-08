@@ -278,6 +278,25 @@ describe('RegressionDetector — upgrade regression', () => {
     expect(majorFindings).toHaveLength(1);
     expect(majorFindings[0].kind).toBe('upgrade_regression');
   });
+
+  it('does not reset the post-upgrade streak on a patch bump within the same major', () => {
+    const sim = new Sim();
+    seedOldVersion(sim); // 8.1.0 baseline p99=2000
+
+    // Degrade on the new major, then a patch bump mid-window, then finish the streak.
+    // The old exact-`toVersion` check reset the streak at the patch bump; the major-based
+    // check must keep counting so a genuine post-major regression still reaches 5.
+    const versions = ['9.0.0', '9.0.0', '9.0.1', '9.0.1', '9.0.1']; // patch bump at sample 3
+    let findings: RegressionFinding[] = [];
+    versions.forEach((version, i) => {
+      expect(findings).toEqual([]); // no premature fire, including across the patch bump
+      findings = sim.tick(6000, version); // 3x baseline, +4ms
+      expect(i < CONSECUTIVE_REQUIRED - 1 ? findings.length === 0 : findings.length === 1).toBe(true);
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('upgrade_regression');
+    expect(findings[0].currentVersion).toBe('9.0.0'); // window's target version, unchanged by the patch
+  });
 });
 
 describe('RegressionDetector — sustained degradation', () => {
@@ -419,5 +438,29 @@ describe('RegressionDetector — sustained degradation', () => {
     }
     expect(findings).toHaveLength(1);
     expect(findings[0].kind).toBe('sustained_degradation');
+  });
+
+  it('resumes sustained detection on the reverted version after a rollback closes the upgrade window', () => {
+    const sim = new Sim();
+    seedBaseline(sim); // >=30 baseline samples @1000 on 8.1.0
+
+    // Open a major-upgrade window that OWNS hmget (a baseline exists) but does not fire — the
+    // samples are not degraded. While open, it suppresses sustained detection for hmget.
+    for (let i = 0; i < 3; i++) expect(sim.tick(1000, '9.0.0')).toEqual([]);
+
+    // Roll back below the target major. This must CLOSE the window; otherwise it keeps
+    // suppressing sustained for hmget for the rest of the 24h and the regression below is lost.
+    expect(sim.tick(1000, '8.1.0')).toEqual([]);
+
+    // A real regression now appears on the reverted version. With the window closed, sustained
+    // fires; if the stale window lingered this would be silently suppressed.
+    let findings: RegressionFinding[] = [];
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) {
+      expect(findings).toEqual([]);
+      findings = sim.tick(2500, '8.1.0'); // 2.5x baseline
+    }
+    expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('sustained_degradation');
+    expect(findings[0].currentVersion).toBe('8.1.0');
   });
 });
