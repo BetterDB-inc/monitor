@@ -276,7 +276,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * object (`{ keys, expires, avg_ttl }`), so we handle both shapes: this stays
    * correct whether or not the parser is ever aligned with the type.
    */
-  private sumKeyspaceKeys(infoResponse: any): number {
+  private sumKeyspaceKeys(infoResponse: { keyspace?: Record<string, unknown> } | null): number {
     const keyspace = infoResponse?.keyspace;
     if (keyspace === null || typeof keyspace !== 'object') return 0;
     let total = 0;
@@ -978,6 +978,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const connectionId = ctx?.connectionId || anomaly.connectionId;
       if (connectionId) {
         await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
+        // Mark durable so resolution goes storage-first; a save failure (e.g. a
+        // string id rejected by the Postgres UUID PK) leaves it memory-only.
+        anomaly.persisted = true;
       }
     } catch (err) {
       this.logger.error('Failed to persist anomaly event:', err);
@@ -1332,10 +1335,20 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   }
 
   async resolveAnomaly(anomalyId: string): Promise<boolean> {
-    // Storage is the source of truth for later (storage-backed) polls, so
-    // persist first and only report success once the resolution is durable.
-    // Reporting success on an in-memory-only flip would let a client dismiss a
-    // banner that subsequent polls still return as unresolved.
+    const anomaly = this.recentAnomalies.find(a => a.id === anomalyId);
+
+    // Memory-only event (never durably stored — e.g. a deterministic string id
+    // rejected by the Postgres UUID PK): a storage-backed poll can't resurface a
+    // row that doesn't exist, so flipping the cached copy fully dismisses it.
+    if (anomaly && !anomaly.persisted) {
+      anomaly.resolved = true;
+      return true;
+    }
+
+    // Durable event: storage is the source of truth for later (storage-backed)
+    // polls, so persist first and only report success once the resolution is
+    // durable. Reporting success on an in-memory-only flip would let a client
+    // dismiss a banner that subsequent polls still return as unresolved.
     let persisted = false;
     try {
       persisted = await this.storage.resolveAnomaly(anomalyId, Date.now());
@@ -1349,7 +1362,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     }
 
     // Keep the cached copy in sync with the durable store.
-    const anomaly = this.recentAnomalies.find(a => a.id === anomalyId);
     if (anomaly) {
       anomaly.resolved = true;
     }
@@ -1366,8 +1378,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // event in the group persisted — otherwise a client could dismiss the group while
     // later storage-backed polls still return some members unresolved.
     const resolvedAt = Date.now();
-    let allPersisted = true;
+    let allResolved = true;
     for (const anomaly of group.anomalies) {
+      // Memory-only member: safe to flip the cache (no durable row to resurface).
+      if (!anomaly.persisted) {
+        anomaly.resolved = true;
+        continue;
+      }
       let persisted = false;
       try {
         persisted = await this.storage.resolveAnomaly(anomaly.id, resolvedAt);
@@ -1377,10 +1394,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       if (persisted) {
         anomaly.resolved = true;
       } else {
-        allPersisted = false;
+        allResolved = false;
       }
     }
-    return allPersisted;
+    return allResolved;
   }
 
   clearResolved(): number {

@@ -947,8 +947,8 @@ describe('AnomalyService', () => {
 
     it('resolveGroup persists every member and reports success only when all persist', async () => {
       storage.resolveAnomaly.mockResolvedValue(true);
-      const a1 = { id: 'a1', resolved: false } as any;
-      const a2 = { id: 'a2', resolved: false } as any;
+      const a1 = { id: 'a1', resolved: false, persisted: true } as any;
+      const a2 = { id: 'a2', resolved: false, persisted: true } as any;
       (service as any).recentGroups = [{ correlationId: 'grp-1', anomalies: [a1, a2] }];
 
       expect(await service.resolveGroup('grp-1')).toBe(true);
@@ -963,8 +963,8 @@ describe('AnomalyService', () => {
       storage.resolveAnomaly.mockImplementation((id: string) =>
         id === 'a2' ? Promise.reject(new Error('db down')) : Promise.resolve(true),
       );
-      const a1 = { id: 'a1', resolved: false } as any;
-      const a2 = { id: 'a2', resolved: false } as any;
+      const a1 = { id: 'a1', resolved: false, persisted: true } as any;
+      const a2 = { id: 'a2', resolved: false, persisted: true } as any;
       (service as any).recentGroups = [{ correlationId: 'grp-2', anomalies: [a1, a2] }];
 
       expect(await service.resolveGroup('grp-2')).toBe(false);
@@ -974,11 +974,58 @@ describe('AnomalyService', () => {
 
     it('resolveGroup returns false when storage reports no row updated', async () => {
       storage.resolveAnomaly.mockResolvedValue(false);
-      const a1 = { id: 'a1', resolved: false } as any;
+      const a1 = { id: 'a1', resolved: false, persisted: true } as any;
       (service as any).recentGroups = [{ correlationId: 'grp-3', anomalies: [a1] }];
 
       expect(await service.resolveGroup('grp-3')).toBe(false);
       expect(a1.resolved).toBe(false);
+    });
+
+    // Deterministic string-id events (failover/promotion/cluster/persistence/
+    // dup-primary) can't be stored on Postgres (UUID PK), so saveAnomalyEvent
+    // throws in addAnomaly and they stay memory-only. Resolution must still work
+    // by flipping the cache — a storage-backed poll can never resurface a row
+    // that was never written. Without this they were undismissable on Postgres.
+    it('resolveAnomaly dismisses a memory-only (never-persisted) event without touching storage', async () => {
+      const event = { id: 'conn-failover-123', resolved: false, persisted: false } as any;
+      (service as any).recentAnomalies = [event];
+
+      expect(await service.resolveAnomaly('conn-failover-123')).toBe(true);
+      expect(event.resolved).toBe(true);
+      expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+    });
+
+    it('addAnomaly leaves an event memory-only when the store rejects its id, and it stays dismissable', async () => {
+      // Simulate Postgres rejecting the non-UUID id.
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('invalid input syntax for type uuid'));
+      const event = {
+        id: 'conn-persistence-error',
+        metricType: 'persistence',
+        anomalyType: 'state',
+        severity: 'warning',
+        message: 'x',
+        resolved: false,
+      } as any;
+
+      await (service as any).addAnomaly(event, { connectionId: 'conn' });
+      expect(event.persisted).toBeFalsy();
+
+      // resolveAnomaly falls back to the in-memory flip.
+      storage.resolveAnomaly.mockClear();
+      expect(await service.resolveAnomaly('conn-persistence-error')).toBe(true);
+      expect(event.resolved).toBe(true);
+      expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+    });
+
+    it('resolveGroup dismisses memory-only members via the cache', async () => {
+      const a1 = { id: 'conn-failover-1', resolved: false, persisted: false } as any;
+      const a2 = { id: 'conn-cluster-2', resolved: false, persisted: false } as any;
+      (service as any).recentGroups = [{ correlationId: 'grp-mem', anomalies: [a1, a2] }];
+
+      expect(await service.resolveGroup('grp-mem')).toBe(true);
+      expect(a1.resolved).toBe(true);
+      expect(a2.resolved).toBe(true);
+      expect(storage.resolveAnomaly).not.toHaveBeenCalled();
     });
   });
 
