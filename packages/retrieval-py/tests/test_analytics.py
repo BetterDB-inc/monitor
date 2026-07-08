@@ -15,9 +15,13 @@ class FakePostHog:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
         self.shutdown_called = False
+        self.flush_calls = 0
 
     def capture(self, **kwargs: Any) -> None:
         self.events.append(kwargs)
+
+    def flush(self) -> None:
+        self.flush_calls += 1
 
     def shutdown(self) -> None:
         self.shutdown_called = True
@@ -52,34 +56,85 @@ async def test_create_analytics_no_baked_key_returns_noop() -> None:
     assert await create_analytics() is NOOP_ANALYTICS
 
 
-async def test_posthog_init_persists_instance_id_and_captures() -> None:
+async def test_posthog_init_uses_install_id_with_deployment_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BETTERDB_INSTANCE_ID", "install-123")
     ph = FakePostHog()
     client = FakeClient()
     analytics = _PostHogAnalytics(ph)
 
     await analytics.init(client, "docs", {"fieldCount": 2})
 
-    # A new UUID is generated and persisted via SET.
+    # The Valkey-scoped deployment id is still generated and persisted via SET.
     assert ("SET",) == client.calls[1][:1]
-    persisted = client.store["docs:__instance_id"]
-    assert analytics._distinct_id == persisted
+    deployment = client.store["docs:__instance_id"]
+    # distinct_id identifies the install, not the Valkey store.
+    assert analytics._distinct_id == "install-123"
+    assert analytics._deployment_id == deployment
 
-    # init captures a prefixed retriever_init event.
+    # init captures a prefixed retriever_init event tagged with the deployment.
     assert ph.events[0]["event"] == "retrieval:retriever_init"
-    assert ph.events[0]["distinct_id"] == persisted
-    assert ph.events[0]["properties"] == {"fieldCount": 2}
+    assert ph.events[0]["distinct_id"] == "install-123"
+    assert ph.events[0]["properties"] == {
+        "fieldCount": 2,
+        "deployment_id": deployment,
+    }
+    # The start event is flushed immediately so it lands without an exit hook.
+    assert ph.flush_calls >= 1
 
 
-async def test_posthog_init_reuses_existing_instance_id() -> None:
+async def test_posthog_init_reuses_existing_deployment_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BETTERDB_INSTANCE_ID", "install-123")
     ph = FakePostHog()
     client = FakeClient({"docs:__instance_id": "stable-id"})
     analytics = _PostHogAnalytics(ph)
 
     await analytics.init(client, "docs")
 
-    assert analytics._distinct_id == "stable-id"
+    assert analytics._distinct_id == "install-123"
+    assert analytics._deployment_id == "stable-id"
     # Existing id is reused — no SET write.
     assert all(c[0] != "SET" for c in client.calls)
+
+
+async def test_install_id_persists_to_disk(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from betterdb_retrieval.analytics import _get_install_id
+
+    monkeypatch.delenv("BETTERDB_INSTANCE_ID", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    first = _get_install_id()
+    second = _get_install_id()
+    assert first == second
+    assert (tmp_path / "instance_id").read_text().strip() == first
+
+
+async def test_install_id_stable_when_unpersistable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    from betterdb_retrieval import analytics as analytics_mod
+
+    monkeypatch.delenv("BETTERDB_INSTANCE_ID", raising=False)
+    monkeypatch.setattr(analytics_mod, "_ephemeral_install_id", None)
+
+    def _raise(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("read-only fs")
+
+    # Neither read nor write can succeed — the id can never be persisted.
+    monkeypatch.setattr(Path, "read_text", _raise)
+    monkeypatch.setattr(Path, "write_text", _raise)
+
+    first = analytics_mod._get_install_id()
+    second = analytics_mod._get_install_id()
+    # A single process must report one stable ephemeral id, not a fresh one per call.
+    assert first == second
 
 
 async def test_posthog_capture_never_raises() -> None:

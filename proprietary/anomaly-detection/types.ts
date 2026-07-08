@@ -14,6 +14,7 @@ export enum MetricType {
   REPLICATION_ROLE = 'replication_role',
   CLUSTER_STATE = 'cluster_state',
   PERSISTENCE_CHILD = 'persistence_child',
+  CLUSTER_TOPOLOGY = 'cluster_topology',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',
 }
@@ -39,6 +40,7 @@ export enum AnomalyPattern {
   CACHE_THRASHING = 'cache_thrashing',
   NODE_FAILOVER = 'node_failover',
   PERSISTENCE_STALL = 'persistence_stall',
+  SPLIT_BRAIN = 'split_brain',
   UNKNOWN = 'unknown',
 }
 

@@ -6,6 +6,8 @@ import { createMockReader, createOpenAIReader } from './reader';
 import { createMockJudge, createOpenAIJudge } from './judge';
 import { loadRecords, sourceLabel } from './dataset';
 import { runEval, formatSummary } from './runner';
+import { resolveEnabledLevers, createCostReport } from './levers';
+import { resolveAssembleOptions } from './assemble';
 import type { ChunkMode, Embedder, Judge, Reader, Store } from './types';
 
 function envInt(name: string, fallback: number): number {
@@ -26,6 +28,9 @@ async function main(): Promise<void> {
   const rerankPool = Math.max(envInt('LONGMEMEVAL_RERANK_POOL', k), k);
   const chunkMode: ChunkMode = process.env.LONGMEMEVAL_CHUNK === 'turn' ? 'turn' : 'session';
   const qa = process.env.LONGMEMEVAL_QA === '1';
+  const levers = resolveEnabledLevers(process.env);
+  const costReport = createCostReport();
+  const assembleOptions = resolveAssembleOptions(process.env);
 
   const cachePath = join(dirname(fileURLToPath(import.meta.url)), '.cache', 'embeddings.json');
 
@@ -59,7 +64,11 @@ async function main(): Promise<void> {
   const records = loadRecords(dataPath, limit);
   const source = sourceLabel(dataPath);
 
-  const tier = qa ? 'Tier 2 (retrieval + QA)' : store.isReal || embedder.dims === 1536 ? 'Tier 1 (real recall)' : 'Tier 0 (offline)';
+  const tier = qa
+    ? 'Tier 2 (retrieval + QA)'
+    : store.isReal || embedder.dims === 1536
+      ? 'Tier 1 (real recall)'
+      : 'Tier 0 (offline)';
 
   console.log('='.repeat(64));
   console.log('LongMemEval retrieval harness — @betterdb/retrieval');
@@ -71,7 +80,26 @@ async function main(): Promise<void> {
   console.log(`judge     : ${judge === null ? 'disabled' : judge.name}`);
   console.log(`dataset   : ${source}  (limit ${limit})`);
   const rerankLabel = rerankPool > k ? `hybrid pool=${rerankPool}→${k}` : 'off';
-  console.log(`params    : limit=${limit} k=${k} chunk=${chunkMode} qa=${qa} rerank=${rerankLabel}`);
+  console.log(
+    `params    : limit=${limit} k=${k} chunk=${chunkMode} qa=${qa} rerank=${rerankLabel}`,
+  );
+  console.log(`levers    : ${levers.length > 0 ? levers.join(' → ') : 'none (baseline)'}`);
+  if (levers.includes('assemble')) {
+    // Without any structure option the assemble lever is a render-only pass —
+    // say so in the banner instead of implying a meaningful ablation point.
+    const features = [
+      assembleOptions.dedupThreshold !== undefined
+        ? `dedup=${assembleOptions.dedupThreshold}`
+        : null,
+      assembleOptions.mmrLambda !== undefined ? `mmr=${assembleOptions.mmrLambda}` : null,
+      assembleOptions.group === true ? 'group' : null,
+    ].filter((feature): feature is string => {
+      return feature !== null;
+    });
+    console.log(
+      `assemble  : ${features.length > 0 ? features.join(' ') : 'render-only (set LONGMEMEVAL_DEDUP_THRESHOLD / LONGMEMEVAL_MMR_LAMBDA / LONGMEMEVAL_GROUP)'}`,
+    );
+  }
   console.log('='.repeat(64));
 
   try {
@@ -85,6 +113,9 @@ async function main(): Promise<void> {
       chunkMode,
       limit,
       rerankPool,
+      levers,
+      costReport,
+      assembleOptions,
     });
     console.log(formatSummary(summary));
   } finally {

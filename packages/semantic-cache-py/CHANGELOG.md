@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Telemetry now uses only the build-time baked PostHog key.** The runtime
+  `BETTERDB_POSTHOG_API_KEY` / `BETTERDB_POSTHOG_HOST` env overrides have been
+  removed, standardizing key resolution with the other BetterDB packages.
+  Opt out with `BETTERDB_TELEMETRY=false` or `AnalyticsOptions(disabled=True)`.
+  This supersedes the "Runtime override via `BETTERDB_POSTHOG_API_KEY` env var"
+  note in the 0.1.0 entry below.
+
 ## [0.6.0] - 2026-06-23
 
 ### Changed

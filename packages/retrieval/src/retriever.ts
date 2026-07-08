@@ -139,8 +139,6 @@ export class Retriever {
     this.analyticsStarted = true;
     try {
       const analytics = await createAnalytics({
-        apiKey: this.analyticsOptions?.apiKey,
-        host: this.analyticsOptions?.host,
         disabled: this.analyticsOptions?.disabled,
       });
       this.analytics = analytics;

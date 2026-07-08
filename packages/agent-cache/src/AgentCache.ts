@@ -92,6 +92,10 @@ export class AgentCache {
       ? { ...DEFAULT_COST_TABLE, ...(options.costTable ?? {}) }
       : options.costTable;
 
+    // Late-bound so tiers signal request traffic to whatever analytics instance
+    // is live (NOOP before init resolves, PostHogAnalytics after).
+    const onActivity = (): void => this.analytics.onActivity();
+
     this.llm = new LlmCache({
       client: this.client,
       name: this.name,
@@ -100,6 +104,7 @@ export class AgentCache {
       costTable: effectiveCostTable,
       telemetry,
       statsKey: this.statsKey,
+      onActivity,
     });
 
     this.tool = new ToolCache({
@@ -109,6 +114,7 @@ export class AgentCache {
       tierTtl: options.tierDefaults?.tool?.ttl,
       telemetry,
       statsKey: this.statsKey,
+      onActivity,
     });
 
     this.session = new SessionStore({
@@ -118,6 +124,7 @@ export class AgentCache {
       tierTtl: options.tierDefaults?.session?.ttl,
       telemetry,
       statsKey: this.statsKey,
+      onActivity,
     });
 
     this.startConfigRefresh();
@@ -127,8 +134,6 @@ export class AgentCache {
     // Fire-and-forget: initialize product analytics
     const analyticsOpts = options.analytics;
     createAnalytics({
-      apiKey: analyticsOpts?.apiKey,
-      host: analyticsOpts?.host,
       disabled: analyticsOpts?.disabled,
     })
       .then((a) => {
@@ -152,7 +157,12 @@ export class AgentCache {
         if (this.shutdownCalled) return;
         const intervalMs = analyticsOpts?.statsIntervalMs ?? 300_000;
         if (intervalMs > 0) {
-          this.statsTimer = setInterval(() => this.captureStatsSnapshot(), intervalMs);
+          // Serverless backstop: emit snapshots from request traffic (onActivity)
+          // when the interval timer below is frozen between invocations. Both the
+          // timer (snapshotTick) and onActivity share one throttle clock in the
+          // analytics layer, so a warm invocation can't double-emit.
+          this.analytics.registerSnapshot(intervalMs, () => this.captureStatsSnapshot());
+          this.statsTimer = setInterval(() => this.analytics.snapshotTick(), intervalMs);
           this.statsTimer.unref();
         }
       })
@@ -296,8 +306,8 @@ export class AgentCache {
     return entries;
   }
 
-  private captureStatsSnapshot(): void {
-    this.stats()
+  private captureStatsSnapshot(): Promise<void> {
+    return this.stats()
       .then((s) => {
         this.analytics.capture('stats_snapshot', {
           llm_hits: s.llm.hits,

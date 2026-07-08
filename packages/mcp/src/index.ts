@@ -2,8 +2,12 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { initTelemetry, trackToolCall, stopTelemetry } from './telemetry.js';
+
+const require = createRequire(import.meta.url);
+const packageJson = require('../package.json') as { version: string };
 
 // --- CLI arg parsing ---
 
@@ -180,7 +184,7 @@ async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): P
 
 const server = new McpServer({
   name: 'betterdb',
-  version: '0.1.0',
+  version: packageJson.version,
 });
 
 server.tool(
@@ -346,7 +350,8 @@ server.tool(
   },
   async ({ section, instanceId }) => withTelemetry('get_info', async () => {
     const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/info`) as Record<string, unknown>;
+    const query = section ? `?section=${encodeURIComponent(section)}` : '';
+    const data = await apiFetch(`/mcp/instance/${id}/info${query}`) as Record<string, unknown>;
     if (section && data[section] !== undefined) {
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({ [section]: data[section] }, null, 2) }],

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "betterdb-agent-memory"
-version = "0.2.0"
+version = "0.4.0"
 description = "Long-term memory tier for AI agents backed by Valkey Search: semantic recall with recency/importance ranking, scoped capacity eviction, and consolidation. Pairs with @betterdb/agent-cache."
 keywords = ["valkey", "redis", "agent", "memory", "vector-search", "llm", "opentelemetry", "prometheus"]
 license = { text = "MIT" }
