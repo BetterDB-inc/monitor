@@ -6,7 +6,7 @@ import { createMockEmbedder } from '../../eval/longmemeval/embed';
 import { createMockStore } from '../../eval/longmemeval/store';
 import { createMockReader } from '../../eval/longmemeval/reader';
 import { createMockJudge } from '../../eval/longmemeval/judge';
-import { loadFixture, loadRecords } from '../../eval/longmemeval/dataset';
+import { loadFixture, loadRecords, parseTypeList } from '../../eval/longmemeval/dataset';
 import { runEval } from '../../eval/longmemeval/runner';
 
 // Tier 0: fully offline (mock store + hashed embed), no keys/network/Docker.
@@ -167,5 +167,27 @@ describe('loadRecords stratified early-stop', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// Shared parse used by BOTH the runner (to size its limit cap) and loadRecords
+// (to filter + early-stop). Locking its semantics guards the invariant that the
+// two callers derive identical type sets.
+describe('parseTypeList', () => {
+  it('returns an empty set for undefined / empty / whitespace-only input', () => {
+    expect(parseTypeList(undefined).size).toBe(0);
+    expect(parseTypeList('').size).toBe(0);
+    expect(parseTypeList('   ').size).toBe(0);
+    expect(parseTypeList(' , ,').size).toBe(0);
+  });
+
+  it('trims, drops blanks, and dedupes', () => {
+    expect(parseTypeList(' temporal-reasoning , multi-session ')).toEqual(
+      new Set(['temporal-reasoning', 'multi-session']),
+    );
+    // Repeated type collapses to one entry (so the runner's cap is not inflated).
+    expect(parseTypeList('single-session,single-session').size).toBe(1);
+    // Trailing/empty segments are ignored.
+    expect(parseTypeList('knowledge-update,,').size).toBe(1);
   });
 });

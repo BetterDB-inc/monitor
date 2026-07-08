@@ -4,7 +4,7 @@ import { createMockEmbedder, createOpenAIEmbedder } from './embed';
 import { createMockStore, createRealStore } from './store';
 import { createMockReader, createOpenAIReader } from './reader';
 import { createMockJudge, createOpenAIJudge } from './judge';
-import { loadRecords, sourceLabel } from './dataset';
+import { loadRecords, parseTypeList, sourceLabel } from './dataset';
 import { runEval, formatSummary } from './runner';
 import type { ChunkMode, Embedder, Judge, Reader, Store } from './types';
 
@@ -43,12 +43,9 @@ async function main(): Promise<void> {
   // types, so fall back to the full count (never zero, which would stop the
   // run at once while loadRecords still emitted a stratified sample).
   const LME_TYPE_COUNT = 6;
-  const selectedTypes = new Set(
-    (questionType ?? '')
-      .split(',')
-      .map((t) => t.trim())
-      .filter((t) => t !== ''),
-  );
+  // Same parse as loadRecords' allow-list (via the shared helper) so the cap
+  // here and the early-stop there can never disagree.
+  const selectedTypes = parseTypeList(questionType);
   const typeCount = selectedTypes.size > 0 ? selectedTypes.size : LME_TYPE_COUNT;
   const runLimit = perType > 0 ? perType * typeCount : limit;
 

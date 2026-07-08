@@ -16,6 +16,24 @@ export async function loadFixture(): Promise<LmeRecord[]> {
 }
 
 /**
+ * Parse a comma-separated question_type list (e.g.
+ * "temporal-reasoning,multi-session") into a trimmed, deduped allow-list.
+ * Empty/undefined/whitespace-only → empty set, meaning "all types".
+ *
+ * Shared by the runner (which sizes its per-record `limit` cap from
+ * `set.size`) and `loadRecords` (which filters and early-stops from the same
+ * set) so the two derivations can never drift apart.
+ */
+export function parseTypeList(value?: string): Set<string> {
+  return new Set(
+    (value ?? '')
+      .split(',')
+      .map((t) => t.trim())
+      .filter((t) => t !== ''),
+  );
+}
+
+/**
  * Stream records one at a time from a top-level JSON array, yielding at most
  * `limit`. Avoids reading the file into a single string (V8 caps strings near
  * 0.5 GB) and never holds every record in heap at once — required for
@@ -31,12 +49,7 @@ export async function* loadRecords(
   // Optional comma-separated question_type allow-list (e.g.
   // "temporal-reasoning,multi-session") so a subset can be evaluated in
   // isolation. Empty/undefined = all types. `limit` counts only kept records.
-  const allow = new Set(
-    (questionType ?? '')
-      .split(',')
-      .map((t) => t.trim())
-      .filter((t) => t !== ''),
-  );
+  const allow = parseTypeList(questionType);
   const allowed = (record: LmeRecord): boolean =>
     allow.size === 0 || allow.has(record.question_type);
   // Stratified mode: when perType > 0, keep up to `perType` records of EACH
@@ -45,12 +58,16 @@ export async function* loadRecords(
   // the first type's records; stratified sampling gives every type equal
   // representation for a paired A/B.
   const stratify = perType !== undefined && perType > 0;
+  // Per-type record cap. `stratify` guarantees perType > 0 wherever this is
+  // read, so the `?? 0` only narrows the type (dropping `as number` casts) and
+  // is never the effective value on the stratified path.
+  const cap = perType ?? 0;
   const counts = new Map<string, number>();
   const keep = (record: LmeRecord): boolean => {
     if (!allowed(record)) return false;
     if (!stratify) return true;
     const seen = counts.get(record.question_type) ?? 0;
-    if (seen >= (perType as number)) return false;
+    if (seen >= cap) return false;
     counts.set(record.question_type, seen + 1);
     return true;
   };
@@ -66,7 +83,7 @@ export async function* loadRecords(
     stratify &&
     expectedTypes > 0 &&
     counts.size >= expectedTypes &&
-    Array.from(counts.values()).every((c) => c >= (perType as number));
+    Array.from(counts.values()).every((c) => c >= cap);
 
   if (dataPath === undefined || dataPath === '') {
     const records = await loadFixture();
