@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
@@ -66,6 +67,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // distinct conflict is alerted once rather than on every poll tick.
   private activeTopologyConflicts = new Map<string, Set<string>>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
+  private prevReplSnapshot = new Map<string, {
+    role: 'master' | 'replica';
+    replid: string;          // master_replid
+    offset: number;          // master_repl_offset
+    totalKeys: number;       // sum of keys across db0..dbN from INFO keyspace
+    uptimeSec: number;       // uptime_in_seconds
+    connectedSlaves: number; // connected_slaves
+  }>();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
 
@@ -225,8 +234,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
-      // REPLICATION_ROLE, CLUSTER_STATE, PERSISTENCE_CHILD, CLUSTER_TOPOLOGY, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.PERSISTENCE_CHILD || metricType === MetricType.CLUSTER_TOPOLOGY || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
+      // REPLICATION_ROLE, CLUSTER_STATE, DATASET_KEYS, PERSISTENCE_CHILD, CLUSTER_TOPOLOGY, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
+      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.DATASET_KEYS || metricType === MetricType.PERSISTENCE_CHILD || metricType === MetricType.CLUSTER_TOPOLOGY || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -245,6 +254,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
+    this.prevReplSnapshot.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -252,6 +262,34 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     if (!value) return null;
     const parsed = parseFloat(value);
     return isNaN(parsed) ? null : parsed;
+  }
+
+  /**
+   * Sums the `keys=` count across every `db<N>` entry of the INFO keyspace
+   * section.
+   *
+   * Reads the typed `keyspace` section straight off the parsed INFO response —
+   * NOT the flattened record — because `convertInfoToRecord` stringifies each
+   * value, which would turn an object-shaped db into `"[object Object]"` and
+   * silently zero the count. `InfoParser` today emits each db as a raw string
+   * (`"keys=123,expires=5,avg_ttl=0"`), but the `KeyspaceInfo` type declares an
+   * object (`{ keys, expires, avg_ttl }`), so we handle both shapes: this stays
+   * correct whether or not the parser is ever aligned with the type.
+   */
+  private sumKeyspaceKeys(infoResponse: { keyspace?: Record<string, unknown> } | null): number {
+    const keyspace = infoResponse?.keyspace;
+    if (keyspace === null || typeof keyspace !== 'object') return 0;
+    let total = 0;
+    for (const [key, value] of Object.entries(keyspace)) {
+      if (!/^db\d+$/.test(key)) continue;
+      if (typeof value === 'string') {
+        const match = /keys=(\d+)/.exec(value);
+        if (match) total += parseInt(match[1], 10);
+      } else if (value !== null && typeof value === 'object' && 'keys' in value) {
+        total += Number((value as { keys: unknown }).keys) || 0;
+      }
+    }
+    return total;
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
@@ -420,6 +458,104 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             }
           }
           this.lastReplicationRole.set(ctx.connectionId, currentRole);
+        }
+      }
+
+      // Data-loss detection (valkey/valkey#579): a primary that restarts empty
+      // wipes its replicas via full resync. Rule A fires on the primary the
+      // moment it comes back empty; Rule B confirms a replica has been wiped.
+      const replid = info['master_replid'];
+      if (replid && (roleStr === 'master' || roleStr === 'slave' || roleStr === 'replica')) {
+        const snapshot = {
+          role: (roleStr === 'master' ? 'master' : 'replica') as 'master' | 'replica',
+          replid,
+          offset: this.parseNumber(info.master_repl_offset) ?? 0,
+          totalKeys: this.sumKeyspaceKeys(infoResponse),
+          uptimeSec: this.parseNumber(info.uptime_in_seconds) ?? 0,
+          connectedSlaves: this.parseNumber(info.connected_slaves) ?? 0,
+        };
+
+        // While the server is still loading its dataset from disk after a
+        // restart (RDB/AOF), the keyspace reports zero until the load finishes.
+        // Skip data-loss detection and keep the prior snapshot so a normal
+        // restart with persistence does not look like an empty-primary wipe.
+        const isLoading = info.loading === '1' || info.async_loading === '1';
+
+        const prev = this.prevReplSnapshot.get(ctx.connectionId);
+        if (prev && !isLoading) {
+          let dataLossKind: 'primary_restarted_empty' | 'replica_wiped' | null = null;
+          let message = '';
+
+          if (prev.role === 'master' && snapshot.role === 'master' && prev.totalKeys > 0 && snapshot.totalKeys === 0) {
+            // Rule A: primary restarted with an empty dataset. Requires restart/identity
+            // evidence — same replid + empty means an intentional FLUSHALL, not a restart.
+            const restartEvidence =
+              snapshot.replid !== prev.replid ||
+              snapshot.uptimeSec < prev.uptimeSec ||
+              snapshot.offset < prev.offset;
+            if (restartEvidence) {
+              dataLossKind = 'primary_restarted_empty';
+              message = snapshot.connectedSlaves > 0
+                ? `CRITICAL: Primary restarted with an empty dataset (replid changed, ${prev.totalKeys} keys → 0). Connected replicas (${snapshot.connectedSlaves}) will full-resync and WIPE their copies. Immediate action: detach replicas that still hold data (REPLICAOF NO ONE) before they resync, then restore.`
+                : `CRITICAL: Primary restarted with an empty dataset (replid changed, ${prev.totalKeys} keys → 0). Data on this node has been lost — restore from backup or a surviving replica before reattaching replicas.`;
+            }
+          } else if (
+            prev.role === 'replica' && snapshot.role === 'replica' &&
+            snapshot.replid !== prev.replid &&
+            prev.totalKeys > 0 &&
+            (snapshot.totalKeys === 0 || snapshot.totalKeys <= prev.totalKeys * 0.1)
+          ) {
+            // Rule B: replica wiped by a full resync from a (near-)empty primary
+            dataLossKind = 'replica_wiped';
+            message = `CRITICAL: Replica was wiped by a full resync from a (near-)empty primary — data loss has propagated (${prev.totalKeys} keys → ${snapshot.totalKeys}). The old dataset may still exist on other replicas or in backups; do not let further nodes resync.`;
+          }
+
+          if (dataLossKind) {
+            const dataLossEvent: AnomalyEvent = {
+              // Storage adapters (postgres) require UUID event ids
+              id: randomUUID(),
+              timestamp,
+              metricType: MetricType.DATASET_KEYS,
+              anomalyType: AnomalyType.DROP,
+              severity: AnomalySeverity.CRITICAL,
+              value: snapshot.totalKeys,
+              baseline: prev.totalKeys,
+              zScore: 0,
+              stdDev: 0,
+              threshold: 0,
+              message,
+              resolved: false,
+              connectionId: ctx.connectionId,
+            };
+            this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${dataLossEvent.message}`);
+            await this.addAnomaly(dataLossEvent, ctx);
+
+            if (this.webhookEventsProService) {
+              this.webhookEventsProService
+                .dispatchDataLossDetected({
+                  kind: dataLossKind,
+                  previousKeys: prev.totalKeys,
+                  currentKeys: snapshot.totalKeys,
+                  previousReplid: prev.replid,
+                  newReplid: snapshot.replid,
+                  connectedSlaves: snapshot.connectedSlaves,
+                  role: snapshot.role,
+                  message,
+                  timestamp: Date.now(),
+                  instance: { host: ctx.host, port: ctx.port },
+                  connectionId: ctx.connectionId,
+                })
+                .catch((err) => {
+                  this.logger.error('Failed to dispatch data.loss.detected webhook', err);
+                });
+            }
+          }
+        }
+
+        // Don't record the transient empty snapshot taken mid-load; otherwise
+        // the next poll (keys restored) would compare against zero.
+        if (!isLoading) {
+          this.prevReplSnapshot.set(ctx.connectionId, snapshot);
         }
       }
 
@@ -842,6 +978,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const connectionId = ctx?.connectionId || anomaly.connectionId;
       if (connectionId) {
         await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
+        // Mark durable so resolution goes storage-first; a save failure (e.g. a
+        // string id rejected by the Postgres UUID PK) leaves it memory-only.
+        anomaly.persisted = true;
       }
     } catch (err) {
       this.logger.error('Failed to persist anomaly event:', err);
@@ -941,7 +1080,44 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     metricType?: MetricType,
     limit = 100,
     connectionId?: string,
+    activeOnly = false,
   ): Promise<AnomalyEvent[]> {
+    // Active-incident feed (e.g. the data-loss banner): return every UNRESOLVED
+    // event of any age. Must query durable storage — the in-memory cache is
+    // capped and lost on restart, and a lingering open incident can be older
+    // than any time window — with no startTime floor so old-but-open incidents
+    // are never filtered out.
+    if (activeOnly) {
+      const stored = await this.storage.getAnomalyEvents({
+        endTime,
+        severity: severity as string,
+        metricType: metricType as string,
+        resolved: false,
+        limit,
+        connectionId,
+      });
+      const storedEvents = stored.map(s => this.storedToAnomalyEvent(s));
+
+      // Union with in-memory unresolved events not yet in storage: a persist failure in
+      // addAnomaly() still leaves the incident in the cache (and still fires the Pro
+      // webhook), so the banner must surface it rather than wait for a later poll to make
+      // it durable. Dedupe by id (storage wins), apply the same filters.
+      const seen = new Set(storedEvents.map(e => e.id));
+      const inMemory = this.recentAnomalies.filter(
+        e =>
+          !e.resolved &&
+          !seen.has(e.id) &&
+          (!connectionId || e.connectionId === connectionId) &&
+          (!metricType || e.metricType === metricType) &&
+          (!severity || e.severity === severity) &&
+          (!endTime || e.timestamp <= endTime),
+      );
+
+      return [...storedEvents, ...inMemory]
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, limit);
+    }
+
     const cacheThreshold = Date.now() - this.cacheTtlMs;
 
     if (!startTime || startTime >= cacheThreshold) {
@@ -1158,25 +1334,70 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     };
   }
 
-  resolveAnomaly(anomalyId: string): boolean {
+  async resolveAnomaly(anomalyId: string): Promise<boolean> {
     const anomaly = this.recentAnomalies.find(a => a.id === anomalyId);
-    if (anomaly) {
+
+    // Memory-only event (never durably stored — e.g. a deterministic string id
+    // rejected by the Postgres UUID PK): a storage-backed poll can't resurface a
+    // row that doesn't exist, so flipping the cached copy fully dismisses it.
+    if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
       return true;
     }
-    return false;
+
+    // Durable event: storage is the source of truth for later (storage-backed)
+    // polls, so persist first and only report success once the resolution is
+    // durable. Reporting success on an in-memory-only flip would let a client
+    // dismiss a banner that subsequent polls still return as unresolved.
+    let persisted = false;
+    try {
+      persisted = await this.storage.resolveAnomaly(anomalyId, Date.now());
+    } catch (err) {
+      this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
+      return false;
+    }
+
+    if (!persisted) {
+      return false;
+    }
+
+    // Keep the cached copy in sync with the durable store.
+    if (anomaly) {
+      anomaly.resolved = true;
+    }
+
+    return true;
   }
 
-  resolveGroup(correlationId: string): boolean {
+  async resolveGroup(correlationId: string): Promise<boolean> {
     const group = this.recentGroups.find(g => g.correlationId === correlationId);
-    if (group) {
-      // Mark all anomalies in the group as resolved
-      for (const anomaly of group.anomalies) {
+    if (!group) return false;
+
+    // Storage is the source of truth (same as resolveAnomaly): only flip the cached
+    // copy for events whose resolution is durable, and report success only if EVERY
+    // event in the group persisted — otherwise a client could dismiss the group while
+    // later storage-backed polls still return some members unresolved.
+    const resolvedAt = Date.now();
+    let allResolved = true;
+    for (const anomaly of group.anomalies) {
+      // Memory-only member: safe to flip the cache (no durable row to resurface).
+      if (!anomaly.persisted) {
         anomaly.resolved = true;
+        continue;
       }
-      return true;
+      let persisted = false;
+      try {
+        persisted = await this.storage.resolveAnomaly(anomaly.id, resolvedAt);
+      } catch (err) {
+        this.logger.error(`Failed to persist resolution for anomaly ${anomaly.id}:`, err);
+      }
+      if (persisted) {
+        anomaly.resolved = true;
+      } else {
+        allResolved = false;
+      }
     }
-    return false;
+    return allResolved;
   }
 
   clearResolved(): number {

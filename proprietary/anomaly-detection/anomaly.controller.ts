@@ -26,21 +26,31 @@ export class AnomalyController {
     @Query('metricType') metricType?: MetricType,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
+    @Query('activeOnly') activeOnly?: string,
   ): Promise<AnomalyEvent[]> {
     const parsedLimit = limit ? parseInt(limit, 10) : 100;
     const parsedStartTime = startTime ? parseInt(startTime, 10) : undefined;
     const parsedEndTime = endTime ? parseInt(endTime, 10) : undefined;
+    // Active-incident feed (data-loss banner): return open incidents of any age,
+    // so the 24h default window must NOT apply — an unresolved incident older
+    // than 24h would otherwise be filtered out and the banner would go silent.
+    const wantActiveOnly = activeOnly === 'true';
 
-    // If no time range specified, default to last 24 hours to include persisted data
-    const defaultStartTime = parsedStartTime || (Date.now() - 24 * 60 * 60 * 1000);
+    // Otherwise default to the last 24 hours to include persisted data. Use ??
+    // (not ||) so an explicit startTime of 0 is honored rather than treated as
+    // "unset".
+    const effectiveStartTime = wantActiveOnly
+      ? parsedStartTime
+      : parsedStartTime ?? (Date.now() - 24 * 60 * 60 * 1000);
 
     return this.anomalyService.getRecentAnomalies(
-      defaultStartTime,
+      effectiveStartTime,
       parsedEndTime,
       undefined,
       metricType,
       parsedLimit,
-      connectionId
+      connectionId,
+      wantActiveOnly,
     );
   }
 
@@ -101,8 +111,8 @@ export class AnomalyController {
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @HttpCode(HttpStatus.OK)
-  resolveEvent(@Param('id') id: string): { success: boolean } {
-    const success = this.anomalyService.resolveAnomaly(id);
+  async resolveEvent(@Param('id') id: string): Promise<{ success: boolean }> {
+    const success = await this.anomalyService.resolveAnomaly(id);
     return { success };
   }
 
@@ -110,8 +120,8 @@ export class AnomalyController {
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @HttpCode(HttpStatus.OK)
-  resolveGroup(@Param('correlationId') correlationId: string): { success: boolean } {
-    const success = this.anomalyService.resolveGroup(correlationId);
+  async resolveGroup(@Param('correlationId') correlationId: string): Promise<{ success: boolean }> {
+    const success = await this.anomalyService.resolveGroup(correlationId);
     return { success };
   }
 

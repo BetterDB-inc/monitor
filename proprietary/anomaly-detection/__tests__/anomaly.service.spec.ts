@@ -29,6 +29,7 @@ describe('AnomalyService', () => {
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
+      resolveAnomaly: jest.fn().mockResolvedValue(true),
       initialize: jest.fn().mockResolvedValue(undefined),
       close: jest.fn().mockResolvedValue(undefined),
       isReady: jest.fn().mockReturnValue(true),
@@ -51,6 +52,7 @@ describe('AnomalyService', () => {
       dispatchLatencySpike: jest.fn().mockResolvedValue(undefined),
       dispatchConnectionSpike: jest.fn().mockResolvedValue(undefined),
       dispatchMetricForecastLimit: jest.fn().mockResolvedValue(undefined),
+      dispatchDataLossDetected: jest.fn().mockResolvedValue(undefined),
     };
 
     dbClient = {
@@ -684,7 +686,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
+        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -710,6 +712,426 @@ describe('AnomalyService', () => {
       expect((service as any).lastClusterState.has('conn-1')).toBe(false);
       expect((service as any).buffers.has('conn-1')).toBe(false);
       expect((service as any).detectors.has('conn-1')).toBe(false);
+    });
+  });
+
+  // ─── Data-Loss Detection (valkey/valkey#579) ─────────────────────────────
+
+  describe('data-loss detection', () => {
+    function mockReplInfo(opts: {
+      role?: string;
+      replid?: string;
+      offset?: string;
+      uptime?: string;
+      connectedSlaves?: string;
+      db0?: string;
+      loading?: string;
+      asyncLoading?: string;
+    } = {}) {
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: opts.role ?? 'master', uptime_in_seconds: opts.uptime ?? '1000' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        persistence: { loading: opts.loading ?? '0', async_loading: opts.asyncLoading ?? '0' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+        replication: {
+          master_replid: opts.replid ?? 'replid-aaaa',
+          master_repl_offset: opts.offset ?? '5000',
+          connected_slaves: opts.connectedSlaves ?? '1',
+        },
+        keyspace: opts.db0 !== undefined ? { db0: opts.db0 } : {},
+      });
+    }
+
+    function dataLossEvents() {
+      return service.getRecentEvents().filter((e) => e.metricType === MetricType.DATASET_KEYS);
+    }
+
+    it('does not fire on first poll (no previous snapshot)', async () => {
+      mockReplInfo({ db0: 'keys=0,expires=0,avg_ttl=0' });
+      await poll();
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('fires Rule A when primary restarts empty (replid changed, uptime reset)', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' }); // empty keyspace
+      await poll();
+
+      const events = dataLossEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].anomalyType).toBe(AnomalyType.DROP);
+      expect(events[0].baseline).toBe(150);
+      expect(events[0].value).toBe(0);
+      expect(events[0].message).toContain('Primary restarted with an empty dataset');
+
+      expect(webhookEventsProService.dispatchDataLossDetected).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'primary_restarted_empty',
+          previousKeys: 150,
+          currentKeys: 0,
+          previousReplid: 'replid-aaaa',
+          newReplid: 'replid-bbbb',
+          role: 'master',
+          connectionId: 'conn-1',
+        }),
+      );
+    });
+
+    it('fires Rule B when a replica is wiped by a full resync from an empty primary', async () => {
+      mockReplInfo({ role: 'replica', replid: 'replid-aaaa', db0: 'keys=200,expires=0,avg_ttl=0' });
+      await poll();
+
+      mockReplInfo({ role: 'replica', replid: 'replid-cccc' }); // empty after resync
+      await poll();
+
+      const events = dataLossEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('Replica was wiped by a full resync');
+
+      expect(webhookEventsProService.dispatchDataLossDetected).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'replica_wiped',
+          previousKeys: 200,
+          currentKeys: 0,
+          role: 'replica',
+        }),
+      );
+    });
+
+    it('does not fire when primary restarts but reloads its data', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      // Restarted (new replid, uptime reset) but keys intact via RDB/AOF reload
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire on a restart while the server is still loading its dataset from disk', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      // Restarted with RDB/AOF: new replid and empty keyspace, but INFO reports
+      // loading in progress — keys are not lost, just not loaded yet.
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0', loading: '1' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+
+      // Load finishes and the keyspace is restored — still no false alert
+      // because the transient empty snapshot was never recorded as baseline.
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '10', offset: '0', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire while async_loading (diskless) is in progress', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0', asyncLoading: '1' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire when replica replid changes after normal failover with keys preserved', async () => {
+      mockReplInfo({ role: 'replica', replid: 'replid-aaaa', db0: 'keys=200,expires=0,avg_ttl=0' });
+      await poll();
+
+      // Partial/full resync from a healthy new primary — dataset preserved
+      mockReplInfo({ role: 'replica', replid: 'replid-cccc', db0: 'keys=198,expires=0,avg_ttl=0' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire on FLUSHALL (empty dataset but same replid, no restart evidence)', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+
+      // Same replid, uptime and offset still advancing — intentional flush
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1001', offset: '5100' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(0);
+      expect(webhookEventsProService.dispatchDataLossDetected).not.toHaveBeenCalled();
+    });
+
+    it('fires only once per transition (snapshot updated after firing)', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '6', offset: '0' });
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(1);
+      expect(webhookEventsProService.dispatchDataLossDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('cleans up prevReplSnapshot on connection removal', async () => {
+      mockReplInfo({ db0: 'keys=10,expires=0,avg_ttl=0' });
+      await poll();
+      expect((service as any).prevReplSnapshot.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).prevReplSnapshot.has('conn-1')).toBe(false);
+    });
+
+    it('resolveAnomaly marks the cached event resolved and persists to storage', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' });
+      await poll();
+
+      const [event] = dataLossEvents();
+      const success = await service.resolveAnomaly(event.id);
+
+      expect(success).toBe(true);
+      expect(event.resolved).toBe(true);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(event.id, expect.any(Number));
+    });
+
+    it('resolveAnomaly still succeeds via storage when the event is not in the in-memory cache (e.g. after restart)', async () => {
+      storage.resolveAnomaly.mockResolvedValue(true);
+
+      const success = await service.resolveAnomaly('persisted-but-not-cached');
+
+      expect(success).toBe(true);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('persisted-but-not-cached', expect.any(Number));
+    });
+
+    it('resolveAnomaly returns false when the event exists neither in cache nor storage', async () => {
+      storage.resolveAnomaly.mockResolvedValue(false);
+
+      expect(await service.resolveAnomaly('unknown-id')).toBe(false);
+    });
+
+    it('resolveAnomaly reports failure and leaves the cached event unresolved when persistence fails', async () => {
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' });
+      await poll();
+
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+
+      const [event] = dataLossEvents();
+      // A non-durable resolution must not report success, otherwise the UI could
+      // dismiss a banner that storage-backed polls still return as unresolved.
+      expect(await service.resolveAnomaly(event.id)).toBe(false);
+      expect(event.resolved).toBe(false);
+    });
+
+    it('resolveGroup persists every member and reports success only when all persist', async () => {
+      storage.resolveAnomaly.mockResolvedValue(true);
+      const a1 = { id: 'a1', resolved: false, persisted: true } as any;
+      const a2 = { id: 'a2', resolved: false, persisted: true } as any;
+      (service as any).recentGroups = [{ correlationId: 'grp-1', anomalies: [a1, a2] }];
+
+      expect(await service.resolveGroup('grp-1')).toBe(true);
+      expect(a1.resolved).toBe(true);
+      expect(a2.resolved).toBe(true);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('a1', expect.any(Number));
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('a2', expect.any(Number));
+    });
+
+    it('resolveGroup reports failure and leaves unpersisted members unresolved', async () => {
+      // a1 persists; a2 throws.
+      storage.resolveAnomaly.mockImplementation((id: string) =>
+        id === 'a2' ? Promise.reject(new Error('db down')) : Promise.resolve(true),
+      );
+      const a1 = { id: 'a1', resolved: false, persisted: true } as any;
+      const a2 = { id: 'a2', resolved: false, persisted: true } as any;
+      (service as any).recentGroups = [{ correlationId: 'grp-2', anomalies: [a1, a2] }];
+
+      expect(await service.resolveGroup('grp-2')).toBe(false);
+      expect(a1.resolved).toBe(true); // durable → cache flipped
+      expect(a2.resolved).toBe(false); // failed → left unresolved
+    });
+
+    it('resolveGroup returns false when storage reports no row updated', async () => {
+      storage.resolveAnomaly.mockResolvedValue(false);
+      const a1 = { id: 'a1', resolved: false, persisted: true } as any;
+      (service as any).recentGroups = [{ correlationId: 'grp-3', anomalies: [a1] }];
+
+      expect(await service.resolveGroup('grp-3')).toBe(false);
+      expect(a1.resolved).toBe(false);
+    });
+
+    // Deterministic string-id events (failover/promotion/cluster/persistence/
+    // dup-primary) can't be stored on Postgres (UUID PK), so saveAnomalyEvent
+    // throws in addAnomaly and they stay memory-only. Resolution must still work
+    // by flipping the cache — a storage-backed poll can never resurface a row
+    // that was never written. Without this they were undismissable on Postgres.
+    it('resolveAnomaly dismisses a memory-only (never-persisted) event without touching storage', async () => {
+      const event = { id: 'conn-failover-123', resolved: false, persisted: false } as any;
+      (service as any).recentAnomalies = [event];
+
+      expect(await service.resolveAnomaly('conn-failover-123')).toBe(true);
+      expect(event.resolved).toBe(true);
+      expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+    });
+
+    it('addAnomaly leaves an event memory-only when the store rejects its id, and it stays dismissable', async () => {
+      // Simulate Postgres rejecting the non-UUID id.
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('invalid input syntax for type uuid'));
+      const event = {
+        id: 'conn-persistence-error',
+        metricType: 'persistence',
+        anomalyType: 'state',
+        severity: 'warning',
+        message: 'x',
+        resolved: false,
+      } as any;
+
+      await (service as any).addAnomaly(event, { connectionId: 'conn' });
+      expect(event.persisted).toBeFalsy();
+
+      // resolveAnomaly falls back to the in-memory flip.
+      storage.resolveAnomaly.mockClear();
+      expect(await service.resolveAnomaly('conn-persistence-error')).toBe(true);
+      expect(event.resolved).toBe(true);
+      expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+    });
+
+    it('resolveGroup dismisses memory-only members via the cache', async () => {
+      const a1 = { id: 'conn-failover-1', resolved: false, persisted: false } as any;
+      const a2 = { id: 'conn-cluster-2', resolved: false, persisted: false } as any;
+      (service as any).recentGroups = [{ correlationId: 'grp-mem', anomalies: [a1, a2] }];
+
+      expect(await service.resolveGroup('grp-mem')).toBe(true);
+      expect(a1.resolved).toBe(true);
+      expect(a2.resolved).toBe(true);
+      expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Keyspace key counting (shape robustness) ────────────────────────────
+  // InfoParser emits each keyspace db as a raw string ("keys=123,..."), but the
+  // KeyspaceInfo type declares an object ({ keys, expires, avg_ttl }). The count
+  // must be read off the typed INFO response (not the stringified flat record,
+  // which would collapse an object to "[object Object]") and handle both shapes.
+  describe('sumKeyspaceKeys', () => {
+    const sum = (infoResponse: unknown): number =>
+      (service as any).sumKeyspaceKeys(infoResponse);
+
+    it('sums the string shape emitted by the real parser', () => {
+      expect(
+        sum({ keyspace: { db0: 'keys=150,expires=5,avg_ttl=0', db1: 'keys=42,expires=0,avg_ttl=0' } }),
+      ).toBe(192);
+    });
+
+    it('sums the typed object shape declared by KeyspaceInfo', () => {
+      expect(
+        sum({ keyspace: { db0: { keys: 150, expires: 5, avg_ttl: 0 }, db1: { keys: 42, expires: 0, avg_ttl: 0 } } }),
+      ).toBe(192);
+    });
+
+    it('ignores non-db keys and returns 0 for an empty or missing keyspace', () => {
+      expect(sum({ keyspace: {} })).toBe(0);
+      expect(sum({})).toBe(0);
+      expect(sum({ keyspace: { note: 'keys=999' } })).toBe(0);
+    });
+  });
+
+  // ─── Active-incident feed (data-loss banner) ─────────────────────────────
+  // The banner must surface UNRESOLVED incidents of any age, so activeOnly must
+  // query durable storage with resolved:false and no startTime floor. A 24h
+  // window (the default for the normal feed) would hide an older open incident.
+  describe('getRecentAnomalies activeOnly', () => {
+    const oldOpenEvent = {
+      id: 'evt-old',
+      timestamp: Date.now() - 3 * 24 * 60 * 60 * 1000, // 3 days ago
+      metricType: 'dataset_keys',
+      anomalyType: 'drop',
+      severity: 'critical',
+      value: 0,
+      baseline: 100,
+      stdDev: 0,
+      zScore: 0,
+      threshold: 0,
+      message: 'CRITICAL: Primary restarted with an empty dataset',
+      resolved: false,
+    };
+
+    it('queries storage for unresolved events with no startTime floor', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([oldOpenEvent]);
+
+      const events = await service.getRecentAnomalies(
+        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+      );
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ resolved: false, metricType: 'dataset_keys' }),
+      );
+      const callArg = storage.getAnomalyEvents.mock.calls.at(-1)![0];
+      expect(callArg.startTime).toBeUndefined(); // no 24h floor → old incident survives
+      expect(events).toHaveLength(1);
+      expect(events[0].id).toBe('evt-old');
+      expect(events[0].resolved).toBe(false);
+    });
+
+    it('unions in-memory unresolved events not yet in storage (persist failure still banners)', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([]);
+      // A fresh incident whose saveAnomalyEvent failed lives only in the cache; the banner
+      // must still surface it rather than wait for a later poll to make it durable.
+      (service as any).recentAnomalies = [{ ...oldOpenEvent, id: 'in-mem', timestamp: Date.now() }];
+
+      const events = await service.getRecentAnomalies(
+        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+      );
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalled();
+      expect(events).toHaveLength(1);
+      expect(events[0].id).toBe('in-mem');
+    });
+
+    it('dedupes by id when an event is both cached and persisted', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([oldOpenEvent]);
+      (service as any).recentAnomalies = [{ ...oldOpenEvent, timestamp: Date.now() }];
+
+      const events = await service.getRecentAnomalies(
+        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+      );
+
+      expect(events).toHaveLength(1);
+      expect(events[0].id).toBe('evt-old');
+    });
+
+    it('excludes resolved in-memory events from the active feed', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([]);
+      (service as any).recentAnomalies = [
+        { ...oldOpenEvent, id: 'done', resolved: true, timestamp: Date.now() },
+      ];
+
+      const events = await service.getRecentAnomalies(
+        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+      );
+
+      expect(events).toHaveLength(0);
     });
   });
 

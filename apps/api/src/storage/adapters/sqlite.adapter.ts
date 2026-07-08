@@ -1820,7 +1820,11 @@ export class SqliteAdapter implements StoragePort {
     `);
 
     const result = stmt.run(resolvedAt, resolvedAt, id);
-    return result.changes > 0;
+    if (result.changes > 0) return true;
+    // No row updated — distinguish an already-resolved anomaly (idempotent success)
+    // from a non-existent one, so group resolution isn't failed by an already-closed member.
+    const existing = this.db.prepare('SELECT 1 FROM anomaly_events WHERE id = ?').get(id);
+    return existing !== undefined;
   }
 
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {

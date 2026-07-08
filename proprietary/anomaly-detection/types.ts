@@ -13,6 +13,7 @@ export enum MetricType {
   CPU_UTILIZATION = 'cpu_utilization',
   REPLICATION_ROLE = 'replication_role',
   CLUSTER_STATE = 'cluster_state',
+  DATASET_KEYS = 'dataset_keys',
   PERSISTENCE_CHILD = 'persistence_child',
   CLUSTER_TOPOLOGY = 'cluster_topology',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
@@ -60,6 +61,14 @@ export interface AnomalyEvent {
   relatedMetrics?: MetricType[];
   resolved: boolean;
   connectionId?: string;
+  /**
+   * Transient (not persisted): whether this cached event was durably written to
+   * storage. Deterministic string-id events (failover/promotion/cluster/
+   * persistence/dup-primary) can't be stored on Postgres (UUID PK), so they stay
+   * memory-only and are resolved by flipping the cache — a storage-backed poll
+   * can never resurface a row that was never written.
+   */
+  persisted?: boolean;
 }
 
 export interface CorrelatedAnomalyGroup {

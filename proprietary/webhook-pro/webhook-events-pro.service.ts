@@ -211,6 +211,48 @@ export class WebhookEventsProService implements OnModuleInit {
   }
 
   /**
+   * Dispatch data loss detected event (PRO+)
+   * Called when a primary restarts with an empty dataset (about to wipe
+   * replicas via full resync) or a replica has been wiped by a full resync
+   * from a (near-)empty primary. See valkey/valkey#579.
+   */
+  async dispatchDataLossDetected(data: {
+    kind: 'primary_restarted_empty' | 'replica_wiped';
+    previousKeys: number;
+    currentKeys: number;
+    previousReplid: string;
+    newReplid: string;
+    connectedSlaves: number;
+    role: string;
+    message: string;
+    timestamp: number;
+    instance: { host: string; port: number };
+    connectionId?: string;
+  }): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Data loss detected event skipped - requires PRO license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.DATA_LOSS_DETECTED,
+      {
+        kind: data.kind,
+        previousKeys: data.previousKeys,
+        currentKeys: data.currentKeys,
+        previousReplid: data.previousReplid,
+        newReplid: data.newReplid,
+        connectedSlaves: data.connectedSlaves,
+        role: data.role,
+        message: data.message,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  /**
    * Dispatch anomaly detected event (PRO+)
    * Called by anomaly detection service when anomaly found
    */

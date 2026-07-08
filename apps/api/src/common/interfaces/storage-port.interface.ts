@@ -377,6 +377,11 @@ export interface StoragePort {
     endTime?: number,
     connectionId?: string,
   ): Promise<AnomalyStats>;
+  /**
+   * Mark an anomaly resolved. Idempotent: returns true when the anomaly is
+   * resolved (whether this call changed it or it was already resolved), and
+   * false only when no anomaly with that id exists.
+   */
   resolveAnomaly(id: string, resolvedAt: number): Promise<boolean>;
   pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 

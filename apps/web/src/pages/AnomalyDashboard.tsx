@@ -12,6 +12,7 @@ import {
   CaptureOnNextModal,
   type CaptureOnNextContext,
 } from './anomalies/capture-on-next-modal';
+import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
 import {
   AlertTriangle,
   AlertCircle,
@@ -52,6 +53,7 @@ interface AnomalyEvent {
   zScore: number;
   message: string;
   correlationId?: string;
+  resolved?: boolean;
 }
 
 interface CorrelatedGroup {
@@ -112,6 +114,7 @@ const METRIC_LABELS: Record<string, string> = {
   keyspace_misses: 'Cache Misses',
   fragmentation_ratio: 'Fragmentation',
   replication_role: 'Replication Role',
+  dataset_keys: 'Dataset Keys',
 };
 
 function formatTime(ts: number): string {
@@ -184,6 +187,15 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
+  // Data-loss banner must surface active incidents regardless of the chosen
+  // date range, so it uses a dedicated unfiltered feed rather than `events`
+  // (which the date picker narrows and could scroll the incident out of view).
+  const { data: dataLossEvents } = usePolling<AnomalyEvent[]>({
+    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'dataset_keys', activeOnly: true }),
+    interval: 5000,
+    refetchKey: currentConnection?.id,
+  });
+
   const { data: groups } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
@@ -238,6 +250,8 @@ export function AnomalyDashboard() {
 
   return (
     <div className="space-y-6">
+      <DataLossAlertBanner events={dataLossEvents ?? undefined} />
+
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>

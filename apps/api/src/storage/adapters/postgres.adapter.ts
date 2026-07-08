@@ -2045,7 +2045,11 @@ export class PostgresAdapter implements StoragePort {
       [id, resolvedAt],
     );
 
-    return (result.rowCount ?? 0) > 0;
+    if ((result.rowCount ?? 0) > 0) return true;
+    // No row updated — distinguish an already-resolved anomaly (idempotent success)
+    // from a non-existent one, so group resolution isn't failed by an already-closed member.
+    const existing = await this.pool.query('SELECT 1 FROM anomaly_events WHERE id = $1', [id]);
+    return (existing.rowCount ?? 0) > 0;
   }
 
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {

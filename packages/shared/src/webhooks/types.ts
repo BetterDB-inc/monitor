@@ -15,6 +15,7 @@ export enum WebhookEventType {
   CLUSTER_FAILOVER = 'cluster.failover',
   FAILOVER_STARTED = 'failover.started',
   FAILOVER_COMPLETED = 'failover.completed',
+  DATA_LOSS_DETECTED = 'data.loss.detected',
   AUDIT_POLICY_VIOLATION = 'audit.policy.violation',
   COMPLIANCE_ALERT = 'compliance.alert',
   METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
@@ -53,6 +54,7 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.METRIC_FORECAST_LIMIT,
   WebhookEventType.FAILOVER_STARTED,
   WebhookEventType.FAILOVER_COMPLETED,
+  WebhookEventType.DATA_LOSS_DETECTED,
   WebhookEventType.INFERENCE_SLA_BREACH,
   WebhookEventType.MONITOR_TRIGGER_CREATED,
 ];
@@ -99,6 +101,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.METRIC_FORECAST_LIMIT]: Tier.pro,
   [WebhookEventType.FAILOVER_STARTED]: Tier.pro,
   [WebhookEventType.FAILOVER_COMPLETED]: Tier.pro,
+  [WebhookEventType.DATA_LOSS_DETECTED]: Tier.pro,
   [WebhookEventType.INFERENCE_SLA_BREACH]: Tier.pro,
   [WebhookEventType.MONITOR_TRIGGER_CREATED]: Tier.pro,
 
@@ -318,6 +321,20 @@ export interface IWebhookEventsProService {
   dispatchFailoverCompleted(data: {
     previousRole: string;
     newRole: string;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+    connectionId?: string;
+  }): Promise<void>;
+
+  dispatchDataLossDetected(data: {
+    kind: 'primary_restarted_empty' | 'replica_wiped';
+    previousKeys: number;
+    currentKeys: number;
+    previousReplid: string;
+    newReplid: string;
+    connectedSlaves: number;
+    role: string;
+    message: string;
     timestamp: number;
     instance: WebhookInstanceInfo;
     connectionId?: string;
