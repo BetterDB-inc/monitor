@@ -297,6 +297,36 @@ describe('RegressionDetector — upgrade regression', () => {
     expect(findings[0].kind).toBe('upgrade_regression');
     expect(findings[0].currentVersion).toBe('9.0.0'); // window's target version, unchanged by the patch
   });
+
+  it('builds the baseline from the whole pre-upgrade major line, not just the exact fromVersion', () => {
+    const sim = new Sim();
+    // 6 samples on 8.1.0, then a single patch bump to 8.1.1 so fromVersion becomes the patch label.
+    for (let i = 0; i < 6; i++) expect(sim.tick(2000, '8.1.0')).toEqual([]);
+    expect(sim.tick(2000, '8.1.1')).toEqual([]); // patch bump: no window, lastVersion = 8.1.1
+
+    // Major upgrade to 9.0.0. An exact fromVersion (8.1.1) match would see only 1 baseline row and
+    // never fire; a major-line match keeps all seven 8.1.x samples → baseline median 2000.
+    let findings: RegressionFinding[] = [];
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) findings = sim.tick(6000, '9.0.0');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('upgrade_regression');
+    expect(findings[0].commands[0].baselineP99Us).toBe(2000);
+  });
+
+  it('revert() re-opens the upgrade one-shot so the next poll re-fires (persistence retry)', () => {
+    const sim = new Sim();
+    seedOldVersion(sim);
+    let findings: RegressionFinding[] = [];
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) findings = sim.tick(6000, '9.0.0');
+    expect(findings).toHaveLength(1);
+
+    // One-shot: without a revert the window stays fired and suppresses further events.
+    expect(sim.tick(6000, '9.0.0')).toEqual([]);
+
+    // Simulate a failed persist: revert re-arms, and the next poll re-emits the same regression.
+    sim.detector.revert(findings[0]);
+    expect(sim.tick(6000, '9.0.0')).toHaveLength(1);
+  });
 });
 
 describe('RegressionDetector — sustained degradation', () => {
@@ -462,5 +492,21 @@ describe('RegressionDetector — sustained degradation', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].kind).toBe('sustained_degradation');
     expect(findings[0].currentVersion).toBe('8.1.0');
+  });
+
+  it('revert() re-arms the sustained cooldown so the next poll re-fires (persistence retry)', () => {
+    const sim = new Sim();
+    seedBaseline(sim);
+    let findings: RegressionFinding[] = [];
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) findings = sim.tick(2500, '8.1.0');
+    expect(findings).toHaveLength(1);
+
+    // Cooldown normally suppresses an immediate re-fire.
+    expect(sim.tick(2500, '8.1.0')).toEqual([]);
+
+    // Simulate a failed persist: revert clears the cooldown and restores the streak, so the next
+    // poll re-emits instead of waiting out SUSTAINED_COOLDOWN_MS.
+    sim.detector.revert(findings[0]);
+    expect(sim.tick(2500, '8.1.0')).toHaveLength(1);
   });
 });

@@ -161,6 +161,34 @@ export class RegressionDetector {
     return findings;
   }
 
+  /**
+   * Re-arm the dedup state for a finding whose DURABLE persistence failed, so the next poll
+   * re-emits it. evaluate() latches the one-shot upgrade guard and the per-command sustained
+   * cooldown as soon as it returns a finding; without this, a transient saveAnomalyEvent error
+   * would silently drop a regression that was never recorded. The caller invokes this ONLY on a
+   * persistence failure.
+   */
+  revert(finding: RegressionFinding): void {
+    if (finding.kind === 'upgrade_regression') {
+      // Re-open the one-shot upgrade guard (same window — this runs synchronously in the same
+      // poll that fired it). Per-command `consecutive` counts are untouched by firing, so the
+      // next poll re-detects the same regression.
+      if (this.upgrade && this.upgrade.toVersion === finding.currentVersion) {
+        this.upgrade.fired = false;
+      }
+      return;
+    }
+    // Sustained: restore the pre-fire streak (it fires exactly at CONSECUTIVE_REQUIRED) and clear
+    // the cooldown so the next poll can re-emit instead of waiting out SUSTAINED_COOLDOWN_MS.
+    for (const command of finding.commands) {
+      const state = this.sustained.get(command.command);
+      if (state) {
+        state.consecutive = CONSECUTIVE_REQUIRED;
+        state.lastFiredAt = 0;
+      }
+    }
+  }
+
   /** Latest sample per command (samples are ascending by capturedAt, but don't rely on it). */
   private latestByCommand(samples: CommandP99Point[]): Map<string, CommandP99Point> {
     const latest = new Map<string, CommandP99Point>();
@@ -209,8 +237,14 @@ export class RegressionDetector {
     // Major upgrade: open (or replace) the upgrade window.
     const baselines = new Map<string, number>();
     const byCommand = new Map<string, number[]>();
+    // Baseline from the pre-upgrade MAJOR line (the major we're leaving), not only the exact
+    // fromVersion string. A patch/minor bump shortly before the upgrade (8.1.0 -> 8.1.1) makes
+    // fromVersion the patch label, so an exact match would drop hours of 8.1.0 samples from the
+    // 6h lookback — leaving too few rows or a skewed median, so the upgrade rule can't fire or
+    // compares against the wrong baseline.
+    const fromMajor = parseMajorVersion(fromVersion);
     for (const s of samples) {
-      if (s.serverVersion !== fromVersion) continue;
+      if (parseMajorVersion(s.serverVersion) !== fromMajor) continue;
       if (s.capturedAt < nowMs - UPGRADE_BASELINE_LOOKBACK_MS) continue;
       const arr = byCommand.get(s.command) ?? [];
       arr.push(s.p99Us);

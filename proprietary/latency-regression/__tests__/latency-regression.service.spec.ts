@@ -174,11 +174,27 @@ describe('LatencyRegressionService', () => {
     expect(storage.getCommandStatsHistory).not.toHaveBeenCalled();
   });
 
-  it('survives saveAnomalyEvent failures and still dispatches the webhook', async () => {
+  it('does not dispatch the webhook when persistence fails (no notify without a durable record)', async () => {
     storage.saveAnomalyEvent.mockRejectedValue(new Error('db down'));
     const service = await makeService();
     await driveUpgradeRegression(service);
 
+    expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1); // attempted
+    expect(webhook.dispatchLatencyRegressionDetected).not.toHaveBeenCalled();
+  });
+
+  it('re-emits the regression on the next poll and persists+notifies once storage recovers', async () => {
+    // First (and only) fire during the drive fails to persist; the detector is re-armed.
+    storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('db down'));
+    const service = await makeService();
+    await driveUpgradeRegression(service);
+
+    expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+    expect(webhook.dispatchLatencyRegressionDetected).not.toHaveBeenCalled();
+
+    // Still degraded on the next poll → re-fires; the save now succeeds.
+    await poll(service, 6000, '9.0.0');
+    expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(2);
     expect(webhook.dispatchLatencyRegressionDetected).toHaveBeenCalledTimes(1);
   });
 });

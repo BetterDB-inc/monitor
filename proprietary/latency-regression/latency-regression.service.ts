@@ -119,11 +119,15 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
     const findings = detector.evaluate(input);
 
     for (const finding of findings) {
-      await this.handleFinding(finding, ctx);
+      await this.handleFinding(finding, ctx, detector);
     }
   }
 
-  private async handleFinding(finding: RegressionFinding, ctx: ConnectionContext): Promise<void> {
+  private async handleFinding(
+    finding: RegressionFinding,
+    ctx: ConnectionContext,
+    detector: RegressionDetector,
+  ): Promise<void> {
     this.logger.warn(`Latency regression on ${ctx.connectionName}: ${finding.message}`);
 
     const prefetchBatchMaxSize = await this.getPrefetchBatchMaxSize(ctx, finding.currentVersion);
@@ -157,9 +161,14 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
         ctx.connectionId,
       );
     } catch (err) {
+      // The detector already latched its one-shot/cooldown when it returned this finding. Since
+      // no durable record was written, re-arm it so the regression re-emits on the next poll, and
+      // do NOT dispatch the webhook — otherwise we would notify without any persisted event.
       this.logger.error(
-        `Failed to persist latency regression event: ${err instanceof Error ? err.message : err}`,
+        `Failed to persist latency regression event — re-arming for retry: ${err instanceof Error ? err.message : err}`,
       );
+      detector.revert(finding);
+      return;
     }
 
     if (this.webhookEventsProService) {
