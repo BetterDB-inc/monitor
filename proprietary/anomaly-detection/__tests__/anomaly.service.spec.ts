@@ -1004,6 +1004,59 @@ describe('AnomalyService', () => {
       expect(events[0].message).not.toContain('no progress');
     });
 
+    it('does not fire a frozen stall once all keys are serialized (flush/fsync/rename tail)', async () => {
+      // All keys written (processed === total) but the child stays in_progress through the
+      // RDB flush/fsync/rename tail, so processed is frozen at N/N. This must NOT be reported
+      // as "appears stuck" even past the stall window, as long as it's under the time ceiling.
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '5',
+        current_save_keys_processed: '42657',
+        current_save_keys_total: '42657',
+      });
+      await poll(); // baseline
+
+      now += 61_000; // past the 60s stall window with no key progress...
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '66', // ...but well under the warn/crit ceilings
+        current_save_keys_processed: '42657',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      expect(persistenceEvents()).toHaveLength(0);
+    });
+
+    it('still catches a genuine hang in the serialization tail via the time ceiling', async () => {
+      // processed === total (tail phase), so the frozen-progress path is suppressed — but a
+      // child truly wedged in fsync eventually crosses the crit ceiling and fires 'exceeded'
+      // with the duration message, not the misleading "stuck / no progress" one.
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '100',
+        current_save_keys_processed: '42657',
+        current_save_keys_total: '42657',
+      });
+      await poll(); // baseline
+
+      now += 5_000;
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '605', // past the 600s crit ceiling
+        current_save_keys_processed: '42657',
+        current_save_keys_total: '42657',
+      });
+      await poll();
+
+      const events = persistenceEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].threshold).toBe(600);
+      expect(events[0].message).toContain('time ceiling');
+      expect(events[0].message).not.toContain('stuck');
+    });
+
     it('fires CRITICAL when an AOF rewrite exceeds the hard elapsed ceiling', async () => {
       mockPersistence({
         aof_rewrite_in_progress: '1',

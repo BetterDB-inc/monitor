@@ -619,7 +619,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     }
 
     const stalledForMs = timestamp - track.lastAdvanceTs;
-    const frozenStall = signals.processed !== null && stalledForMs >= this.persistenceStallSec * 1000;
+    // Frozen key progress only means "stuck" while there are still keys left to write.
+    // Once all keys are serialized (processed === total) the child stays in_progress
+    // through the RDB flush/fsync/rename tail, during which processed is frozen at N/N —
+    // on a large save over a slow disk that tail can exceed persistenceStallSec and would
+    // otherwise trip a false "appears stuck (processed N/N keys)". A genuine hang in that
+    // tail is still caught by the elapsed-time ceiling (tooLong). When total is unknown
+    // (older servers without current_save_keys_total) keep the elapsed-only behavior.
+    const progressIncomplete = signals.total === null || signals.processed! < signals.total;
+    const frozenStall =
+      signals.processed !== null &&
+      progressIncomplete &&
+      stalledForMs >= this.persistenceStallSec * 1000;
     const tooLong = elapsedSec >= this.persistenceCritSec;
 
     if (!track.reportedStall && (frozenStall || tooLong)) {
