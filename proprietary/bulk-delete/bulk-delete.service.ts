@@ -37,6 +37,8 @@ interface BulkDeleteJob {
   port: number | null;
   /** Cluster primaries that could not be reached and were not walked. */
   skipped: SkippedNode[];
+  /** In-flight initial "running" audit write, awaited before the final write. */
+  auditWrite?: Promise<void>;
 }
 
 /** Serializable view returned to the API/UI when polling job progress. */
@@ -181,7 +183,9 @@ export class BulkDeleteService implements OnModuleInit {
     this.pruneJobs();
     // Only execute runs are audited; persist a "running" row so a killed
     // process still leaves a trace (reconciled by onModuleInit on next boot).
-    if (mode === 'execute') void this.persistAudit(job);
+    // Keep the promise so runJob can order the final write after it and avoid
+    // a slow initial write clobbering the completed row.
+    if (mode === 'execute') job.auditWrite = this.persistAudit(job);
     // Fire and forget; progress is polled via getJob().
     void this.runJob(job);
 
@@ -214,7 +218,12 @@ export class BulkDeleteService implements OnModuleInit {
       this.logger.error(`Bulk delete job ${job.id} failed: ${job.error}`);
     } finally {
       job.completedAt = Date.now();
-      if (job.mode === 'execute') await this.persistAudit(job);
+      if (job.mode === 'execute') {
+        // Order the final write strictly after the initial "running" write so a
+        // slow initial upsert can't overwrite the completed row afterwards.
+        if (job.auditWrite) await job.auditWrite;
+        await this.persistAudit(job);
+      }
       this.pruneJobs();
     }
   }
@@ -232,8 +241,7 @@ export class BulkDeleteService implements OnModuleInit {
     const db = this.connectionRegistry.get(connectionId);
 
     if (scope === 'cluster') {
-      const nodes = await this.clusterDiscovery.discoverNodes(connectionId);
-      const primaries = nodes.filter((n) => n.role === 'master');
+      const primaries = await this.discoverPrimaries(connectionId);
       if (primaries.length > 0) {
         const targets: ScanTarget[] = [];
         const skipped: SkippedNode[] = [];
@@ -252,11 +260,28 @@ export class BulkDeleteService implements OnModuleInit {
         return { targets, skipped };
       }
       this.logger.warn(
-        `Cluster scope requested for ${connectionId} but no primaries discovered; falling back to single node`,
+        `Cluster scope for ${connectionId}: no reachable primaries; using the connected node`,
       );
     }
 
     return { targets: [createValkeyScanTarget('primary', db.getClient())], skipped: [] };
+  }
+
+  /**
+   * Discover cluster primaries, tolerating a non-cluster connection (CLUSTER
+   * NODES unsupported) or a transient discovery failure by returning none — the
+   * caller then falls back to the single connected node instead of failing.
+   */
+  private async discoverPrimaries(connectionId: string) {
+    try {
+      const nodes = await this.clusterDiscovery.discoverNodes(connectionId);
+      return nodes.filter((n) => n.role === 'master');
+    } catch (err) {
+      this.logger.warn(
+        `Cluster discovery failed for ${connectionId}: ${err instanceof Error ? err.message : err}; falling back to single node`,
+      );
+      return [];
+    }
   }
 
   private async persistAudit(job: BulkDeleteJob): Promise<void> {

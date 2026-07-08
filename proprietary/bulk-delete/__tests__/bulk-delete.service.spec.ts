@@ -220,6 +220,49 @@ describe('BulkDeleteService', () => {
     expect(finalAudit.skippedNodes).toEqual(['10.0.0.1:6379', '10.0.0.2:6379']);
   });
 
+  it('falls back to the connected node when cluster discovery fails (non-cluster connection)', async () => {
+    const { client, set } = makeFakeClient(['a:1', 'a:2', 'b:1']);
+    const service = build(client);
+    cluster.discoverNodes.mockRejectedValue(
+      new Error('ERR This instance has cluster support disabled'),
+    );
+
+    const { jobId } = service.startExecution('conn-1', { match: 'a:*', scope: 'cluster' });
+    const job = await waitForJob(service, jobId, 'conn-1');
+
+    expect(job.status).toBe('completed');
+    expect(job.nodesTotal).toBe(1);
+    expect(job.deleted).toBe(2);
+    expect(set.has('b:1')).toBe(true);
+    expect(cluster.getNodeConnection).not.toHaveBeenCalled();
+  });
+
+  it('orders the final audit write after the initial one (no stale running overwrite)', async () => {
+    const { client } = makeFakeClient(['a:1']);
+    const service = build(client);
+
+    let resolveFirst!: () => void;
+    const firstBlocked = new Promise<void>((r) => (resolveFirst = r));
+    let calls = 0;
+    storage.saveBulkDeleteAudit.mockImplementation(async (r: StoredBulkDeleteAudit) => {
+      calls += 1;
+      if (calls === 1) await firstBlocked; // hold the initial "running" write
+      return r.id;
+    });
+
+    service.startExecution('conn-1', { match: 'a:*' });
+    // Delete finishes, but the final audit write must wait behind the initial one.
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    expect(storage.saveBulkDeleteAudit).toHaveBeenCalledTimes(1);
+    expect(storage.saveBulkDeleteAudit.mock.calls[0][0].status).toBe('running');
+
+    resolveFirst();
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    expect(storage.saveBulkDeleteAudit).toHaveBeenCalledTimes(2);
+    // The completed row is written last, so it can't be clobbered by the initial one.
+    expect(storage.saveBulkDeleteAudit.mock.calls.at(-1)![0].status).toBe('completed');
+  });
+
   it('cancelJob returns null for unknown ids and false for finished jobs', async () => {
     const { client } = makeFakeClient(['a:1']);
     const service = build(client);

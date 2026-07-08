@@ -100,7 +100,10 @@ export class BulkDeleteController {
     @Query('limit') limit?: string,
   ) {
     const parsed = limit ? parseInt(limit, 10) : undefined;
-    const safeLimit = parsed && !isNaN(parsed) ? Math.min(parsed, 500) : undefined;
+    // Clamp to [1, 500]; a negative/zero limit must never reach storage
+    // (LIMIT -1 means "no limit" in SQLite and errors in Postgres).
+    const safeLimit =
+      parsed !== undefined && !isNaN(parsed) ? Math.min(Math.max(parsed, 1), 500) : undefined;
     return this.bulkDelete.listAudits(connectionId, safeLimit);
   }
 
