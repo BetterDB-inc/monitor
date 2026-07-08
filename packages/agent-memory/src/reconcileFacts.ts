@@ -40,22 +40,32 @@ export type FactOp =
   | { type: 'delete'; subject: string }
   | { type: 'noop'; subject: string };
 
+// Datedness is "has a non-empty date". An empty string is treated as dateless,
+// consistent with factContent/storedFactToFact/buildMemoryRecord — so a fact
+// with date: "" behaves identically to one with no date at all.
+function factDate(fact: Fact): string | undefined {
+  return fact.date === undefined || fact.date === '' ? undefined : fact.date;
+}
+
 // A dateless candidate is the latest assertion we have, so it wins ties (and
 // any dated prior). A dated candidate wins when its date is at least the
 // prior's (a dateless prior counts as the epoch, so any dated candidate beats
 // it, and equal dates let the later batch assertion win).
 function isNewer(candidate: Fact, prior: Fact): boolean {
-  if (candidate.date === undefined) {
+  const candidateDate = factDate(candidate);
+  if (candidateDate === undefined) {
     return true;
   }
-  return candidate.date >= (prior.date ?? '');
+  return candidateDate >= (factDate(prior) ?? '');
 }
 
 // A tombstone is stale only when both dates are known and it predates the
 // curated fact; a dateless tombstone still deletes (it carries no temporal
 // claim to lose against).
 function isStaleTombstone(tombstone: Fact, prior: Fact): boolean {
-  return tombstone.date !== undefined && prior.date !== undefined && tombstone.date < prior.date;
+  const tombstoneDate = factDate(tombstone);
+  const priorDate = factDate(prior);
+  return tombstoneDate !== undefined && priorDate !== undefined && tombstoneDate < priorDate;
 }
 
 /**
@@ -93,7 +103,7 @@ export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
       // strictly newer date, so newest-date-wins still governs the stored
       // [date] prefix. Equal/older/dateless restatements stay a noop (no
       // content change to rewrite).
-      if ((fact.date ?? '') > (prior.date ?? '')) {
+      if ((factDate(fact) ?? '') > (factDate(prior) ?? '')) {
         ops.push({ type: 'update', subject: fact.subject, fact });
         bySubject.set(fact.subject, fact);
       } else {

@@ -105,6 +105,29 @@ describe('reconcile', () => {
     ]);
   });
 
+  it('treats an empty-string date as dateless (supersedes a dated prior)', () => {
+    // date: "" is dateless per factContent/storedFactToFact, so it must win over
+    // a dated prior exactly like an undefined date — not sort before it.
+    const existing: Fact[] = [{ subject: 'employer', statement: 'Acme', date: '2024-01-01' }];
+    const ops = reconcile([{ subject: 'employer', statement: 'Globex', date: '' }], existing);
+    expect(ops).toEqual([
+      {
+        type: 'update',
+        subject: 'employer',
+        fact: { subject: 'employer', statement: 'Globex', date: '' },
+      },
+    ]);
+  });
+
+  it('retracts on an empty-string-date tombstone (dateless, still deletes)', () => {
+    const existing: Fact[] = [{ subject: 'employer', statement: 'Acme', date: '2024-06-01' }];
+    const ops = reconcile(
+      [{ subject: 'employer', statement: '', tombstone: true, date: '' }],
+      existing,
+    );
+    expect(ops).toEqual([{ type: 'delete', subject: 'employer' }]);
+  });
+
   it('deletes on a tombstone but noops on a stale (older-dated) tombstone', () => {
     const existing: Fact[] = [{ subject: 'employer', statement: 'Acme', date: '2024-06-01' }];
     const live = reconcile(

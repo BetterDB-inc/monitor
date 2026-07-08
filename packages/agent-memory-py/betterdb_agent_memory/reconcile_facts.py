@@ -65,21 +65,31 @@ class NoopOp:
 FactOp = Union[AddOp, UpdateOp, DeleteOp, NoopOp]
 
 
+def _fact_date(fact: Fact) -> str | None:
+    # Datedness is "has a non-empty date". An empty string is treated as dateless,
+    # consistent with fact_content/stored_fact_to_fact/build_memory_record -- so a
+    # fact with date="" behaves identically to one with no date at all.
+    return None if fact.date is None or fact.date == "" else fact.date
+
+
 def _is_newer(candidate: Fact, prior: Fact) -> bool:
     # A dateless candidate is the latest assertion we have, so it wins ties (and
     # any dated prior). A dated candidate wins when its date is at least the
     # prior's (a dateless prior counts as the epoch, so any dated candidate beats
     # it, and equal dates let the later batch assertion win).
-    if candidate.date is None:
+    candidate_date = _fact_date(candidate)
+    if candidate_date is None:
         return True
-    return candidate.date >= (prior.date or "")
+    return candidate_date >= (_fact_date(prior) or "")
 
 
 def _is_stale_tombstone(tombstone: Fact, prior: Fact) -> bool:
     # A tombstone is stale only when both dates are known and it predates the
     # curated fact; a dateless tombstone still deletes (it carries no temporal
     # claim to lose against).
-    return tombstone.date is not None and prior.date is not None and tombstone.date < prior.date
+    tombstone_date = _fact_date(tombstone)
+    prior_date = _fact_date(prior)
+    return tombstone_date is not None and prior_date is not None and tombstone_date < prior_date
 
 
 def reconcile(incoming: list[Fact], existing: list[Fact]) -> list[FactOp]:
@@ -113,7 +123,7 @@ def reconcile(incoming: list[Fact], existing: list[Fact]) -> list[FactOp]:
             # strictly newer date, so newest-date-wins still governs the stored
             # [date] prefix. Equal/older/dateless restatements stay a noop (no
             # content change to rewrite).
-            if (fact.date or "") > (prior.date or ""):
+            if (_fact_date(fact) or "") > (_fact_date(prior) or ""):
                 ops.append(UpdateOp(subject=fact.subject, fact=fact))
                 by_subject[fact.subject] = fact
             else:
