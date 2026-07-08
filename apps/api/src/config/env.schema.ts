@@ -90,6 +90,9 @@ export const envSchema = z
     MONITOR_RECENT_FAILOVER_WINDOW_MS: z.coerce.number().int().min(0).default(2 * 60 * 1000),
     MONITOR_MEMORY_PCT_THRESHOLD: z.coerce.number().int().min(0).max(100).default(85),
     MONITOR_REPLICATION_LAG_BYTES: z.coerce.number().int().min(0).default(10 * 1024 * 1024),
+    MONITOR_PERSISTENCE_STALL_SEC: z.coerce.number().int().min(1).default(60),
+    MONITOR_PERSISTENCE_WARN_SEC: z.coerce.number().int().min(1).default(120),
+    MONITOR_PERSISTENCE_CRIT_SEC: z.coerce.number().int().min(1).default(600),
 
     // Security
     ENCRYPTION_KEY: z.string().min(16).optional(),

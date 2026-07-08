@@ -9,7 +9,7 @@ const COSINE_WEIGHT = 0.7;
 const OVERLAP_WEIGHT = 1 - COSINE_WEIGHT;
 
 /** Lowercase, split on whitespace, strip surrounding punctuation, dedupe. */
-function tokenize(text: string): Set<string> {
+export function tokenize(text: string): Set<string> {
   const tokens = new Set<string>();
   for (const raw of text.toLowerCase().split(/\s+/)) {
     const token = raw.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
