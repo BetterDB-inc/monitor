@@ -18,6 +18,15 @@ from .composite_score import (
 )
 from .discovery import MEMORY_CACHE_TYPE, MEMORY_CAPABILITIES, MemoryDiscovery
 from .memory_store import MemoryStore
+from .reconcile_facts import (
+    AddOp,
+    DeleteOp,
+    FactOp,
+    NoopOp,
+    UpdateOp,
+    apply_ops,
+    reconcile,
+)
 from .telemetry import (
     DEFAULT_METRICS_PREFIX,
     DEFAULT_TRACER_NAME,
@@ -29,8 +38,12 @@ from .telemetry import (
 from .types import (
     AgentMemoryConfig,
     AgentMemoryRecallConfig,
+    ConsolidateFactsResult,
     ConsolidateResult,
+    ConsolidationConfig,
     EmbedFn,
+    Fact,
+    FactExtractor,
     MemoryConfigRefreshConfig,
     MemoryConfigSnapshot,
     MemoryDiscoveryConfig,
@@ -76,12 +89,24 @@ __all__ = [
     "MemoryListResult",
     "MemoryStats",
     "ConsolidateResult",
+    "ConsolidateFactsResult",
+    "ConsolidationConfig",
+    "Fact",
+    "FactExtractor",
     "SummarizeFn",
     "RecallWeights",
     "MemoryConfigSnapshot",
     "MemoryDiscoveryConfig",
     "MemoryConfigRefreshConfig",
     "MATCH_ALL_MEMORY_QUERY",
+    # Fact reconciliation
+    "reconcile",
+    "apply_ops",
+    "FactOp",
+    "AddOp",
+    "UpdateOp",
+    "DeleteOp",
+    "NoopOp",
 ]
 
 # Surface everything agent-cache exports so consumers need only one import.

@@ -42,6 +42,7 @@ export interface ConsolidateFilterOptions {
   maxCreatedAt?: number;
   maxImportance?: number;
   excludeSource?: string;
+  includeSource?: string;
 }
 
 export function buildConsolidateFilter(
@@ -58,6 +59,9 @@ export function buildConsolidateFilter(
   }
   if (options.excludeSource !== undefined) {
     clauses.push(`-@source:{${escapeTag(options.excludeSource)}}`);
+  }
+  if (options.includeSource !== undefined) {
+    clauses.push(`@source:{${escapeTag(options.includeSource)}}`);
   }
   return joinClauses(clauses);
 }

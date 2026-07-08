@@ -44,6 +44,7 @@ class ConsolidateFilterOptions:
     max_created_at: int | None = None
     max_importance: float | None = None
     exclude_source: str | None = None
+    include_source: str | None = None
 
 
 def build_consolidate_filter(
@@ -58,6 +59,8 @@ def build_consolidate_filter(
         clauses.append(f"@importance:[-inf {options.max_importance}]")
     if options.exclude_source is not None:
         clauses.append(f"-@source:{{{escape_tag(options.exclude_source)}}}")
+    if options.include_source is not None:
+        clauses.append(f"@source:{{{escape_tag(options.include_source)}}}")
     return _join_clauses(clauses)
 
 
