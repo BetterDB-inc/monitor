@@ -928,6 +928,42 @@ describe('AnomalyService', () => {
       expect(await service.resolveAnomaly(event.id)).toBe(false);
       expect(event.resolved).toBe(false);
     });
+
+    it('resolveGroup persists every member and reports success only when all persist', async () => {
+      storage.resolveAnomaly.mockResolvedValue(true);
+      const a1 = { id: 'a1', resolved: false } as any;
+      const a2 = { id: 'a2', resolved: false } as any;
+      (service as any).recentGroups = [{ correlationId: 'grp-1', anomalies: [a1, a2] }];
+
+      expect(await service.resolveGroup('grp-1')).toBe(true);
+      expect(a1.resolved).toBe(true);
+      expect(a2.resolved).toBe(true);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('a1', expect.any(Number));
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('a2', expect.any(Number));
+    });
+
+    it('resolveGroup reports failure and leaves unpersisted members unresolved', async () => {
+      // a1 persists; a2 throws.
+      storage.resolveAnomaly.mockImplementation((id: string) =>
+        id === 'a2' ? Promise.reject(new Error('db down')) : Promise.resolve(true),
+      );
+      const a1 = { id: 'a1', resolved: false } as any;
+      const a2 = { id: 'a2', resolved: false } as any;
+      (service as any).recentGroups = [{ correlationId: 'grp-2', anomalies: [a1, a2] }];
+
+      expect(await service.resolveGroup('grp-2')).toBe(false);
+      expect(a1.resolved).toBe(true); // durable → cache flipped
+      expect(a2.resolved).toBe(false); // failed → left unresolved
+    });
+
+    it('resolveGroup returns false when storage reports no row updated', async () => {
+      storage.resolveAnomaly.mockResolvedValue(false);
+      const a1 = { id: 'a1', resolved: false } as any;
+      (service as any).recentGroups = [{ correlationId: 'grp-3', anomalies: [a1] }];
+
+      expect(await service.resolveGroup('grp-3')).toBe(false);
+      expect(a1.resolved).toBe(false);
+    });
   });
 
   // ─── Keyspace key counting (shape robustness) ────────────────────────────
@@ -995,9 +1031,10 @@ describe('AnomalyService', () => {
       expect(events[0].resolved).toBe(false);
     });
 
-    it('reads from storage even when an in-memory cache entry exists', async () => {
+    it('unions in-memory unresolved events not yet in storage (persist failure still banners)', async () => {
       storage.getAnomalyEvents.mockResolvedValue([]);
-      // A fresh in-memory event would be returned by the normal (non-active) path.
+      // A fresh incident whose saveAnomalyEvent failed lives only in the cache; the banner
+      // must still surface it rather than wait for a later poll to make it durable.
       (service as any).recentAnomalies = [{ ...oldOpenEvent, id: 'in-mem', timestamp: Date.now() }];
 
       const events = await service.getRecentAnomalies(
@@ -1005,7 +1042,33 @@ describe('AnomalyService', () => {
       );
 
       expect(storage.getAnomalyEvents).toHaveBeenCalled();
-      expect(events).toHaveLength(0); // storage is the source of truth for activeOnly
+      expect(events).toHaveLength(1);
+      expect(events[0].id).toBe('in-mem');
+    });
+
+    it('dedupes by id when an event is both cached and persisted', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([oldOpenEvent]);
+      (service as any).recentAnomalies = [{ ...oldOpenEvent, timestamp: Date.now() }];
+
+      const events = await service.getRecentAnomalies(
+        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+      );
+
+      expect(events).toHaveLength(1);
+      expect(events[0].id).toBe('evt-old');
+    });
+
+    it('excludes resolved in-memory events from the active feed', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([]);
+      (service as any).recentAnomalies = [
+        { ...oldOpenEvent, id: 'done', resolved: true, timestamp: Date.now() },
+      ];
+
+      const events = await service.getRecentAnomalies(
+        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+      );
+
+      expect(events).toHaveLength(0);
     });
   });
 

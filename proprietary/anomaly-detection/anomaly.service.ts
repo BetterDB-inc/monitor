@@ -757,7 +757,26 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         limit,
         connectionId,
       });
-      return stored.map(s => this.storedToAnomalyEvent(s));
+      const storedEvents = stored.map(s => this.storedToAnomalyEvent(s));
+
+      // Union with in-memory unresolved events not yet in storage: a persist failure in
+      // addAnomaly() still leaves the incident in the cache (and still fires the Pro
+      // webhook), so the banner must surface it rather than wait for a later poll to make
+      // it durable. Dedupe by id (storage wins), apply the same filters.
+      const seen = new Set(storedEvents.map(e => e.id));
+      const inMemory = this.recentAnomalies.filter(
+        e =>
+          !e.resolved &&
+          !seen.has(e.id) &&
+          (!connectionId || e.connectionId === connectionId) &&
+          (!metricType || e.metricType === metricType) &&
+          (!severity || e.severity === severity) &&
+          (!endTime || e.timestamp <= endTime),
+      );
+
+      return [...storedEvents, ...inMemory]
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, limit);
     }
 
     const cacheThreshold = Date.now() - this.cacheTtlMs;
@@ -1006,17 +1025,26 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const group = this.recentGroups.find(g => g.correlationId === correlationId);
     if (!group) return false;
 
-    // Mark all anomalies in the group as resolved
+    // Storage is the source of truth (same as resolveAnomaly): only flip the cached
+    // copy for events whose resolution is durable, and report success only if EVERY
+    // event in the group persisted — otherwise a client could dismiss the group while
+    // later storage-backed polls still return some members unresolved.
     const resolvedAt = Date.now();
+    let allPersisted = true;
     for (const anomaly of group.anomalies) {
-      anomaly.resolved = true;
+      let persisted = false;
       try {
-        await this.storage.resolveAnomaly(anomaly.id, resolvedAt);
+        persisted = await this.storage.resolveAnomaly(anomaly.id, resolvedAt);
       } catch (err) {
         this.logger.error(`Failed to persist resolution for anomaly ${anomaly.id}:`, err);
       }
+      if (persisted) {
+        anomaly.resolved = true;
+      } else {
+        allPersisted = false;
+      }
     }
-    return true;
+    return allPersisted;
   }
 
   clearResolved(): number {
