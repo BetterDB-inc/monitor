@@ -30,6 +30,23 @@ interface MetricExtractor {
   (info: Record<string, string>): number | null;
 }
 
+interface PersistenceChildTrack {
+  startedAt: number;
+  lastProcessed: number;
+  lastAdvanceTs: number;
+  lastElapsedSec: number;
+  warnedLong: boolean;
+  reportedStall: boolean;
+}
+
+interface ConnectionPersistenceState {
+  rdb?: PersistenceChildTrack;
+  aof?: PersistenceChildTrack;
+  // Latch so a persisting error status fires once, re-armed by a later ok.
+  rdbErrorReported?: boolean;
+  aofErrorReported?: boolean;
+}
+
 @Injectable()
 export class AnomalyService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(AnomalyService.name);
@@ -44,6 +61,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private lastSlowlogId = new Map<string, number>();
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
+  private lastPersistenceState = new Map<string, ConnectionPersistenceState>();
   // Per-connection set of active duplicate-primary conflict signatures, so each
   // distinct conflict is alerted once rather than on every poll tick.
   private activeTopologyConflicts = new Map<string, Set<string>>();
@@ -52,6 +70,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private readonly maxRecentGroups = 100;
 
   private readonly metricExtractors: Map<MetricType, MetricExtractor>;
+  // Persistence-child (BGSAVE / AOF rewrite) stall thresholds, in seconds.
+  private readonly persistenceStallSec: number;
+  private readonly persistenceWarnSec: number;
+  private readonly persistenceCritSec: number;
   private readonly correlationIntervalMs = 5000;
   private correlationInterval: NodeJS.Timeout | null = null;
   private prometheusSummaryInterval: NodeJS.Timeout | null = null;
@@ -71,6 +93,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs);
     this.metricExtractors = this.initializeMetricExtractors();
+
+    // Validated and defaulted by the Zod env schema (env.schema.ts), so a typo
+    // fails startup instead of silently falling back here.
+    this.persistenceStallSec = this.configService.get<number>('MONITOR_PERSISTENCE_STALL_SEC', 60);
+    this.persistenceWarnSec = this.configService.get<number>('MONITOR_PERSISTENCE_WARN_SEC', 120);
+    this.persistenceCritSec = this.configService.get<number>('MONITOR_PERSISTENCE_CRIT_SEC', 600);
   }
 
   protected getIntervalMs(): number {
@@ -197,8 +225,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
-      // REPLICATION_ROLE, CLUSTER_STATE, CLUSTER_TOPOLOGY, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.CLUSTER_TOPOLOGY || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
+      // REPLICATION_ROLE, CLUSTER_STATE, PERSISTENCE_CHILD, CLUSTER_TOPOLOGY, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
+      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.PERSISTENCE_CHILD || metricType === MetricType.CLUSTER_TOPOLOGY || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -214,6 +242,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.lastSlowlogId.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
+    this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
@@ -455,10 +484,240 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // same slots in one shard (valkey-io/valkey#2261).
         await this.detectDuplicatePrimaries(ctx, timestamp);
       }
+
+      // Persistence-child stall detection (stuck BGSAVE / AOF rewrite) — state-based, not z-score
+      await this.detectPersistenceStall(info, ctx, timestamp);
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
     }
+  }
+
+  /**
+   * Detect a stalled or failed persistence fork child (BGSAVE / AOF rewrite).
+   *
+   * This is state-based rather than statistical: a stuck fork shows the in-progress
+   * flag set with its elapsed time climbing while save-key progress stays frozen
+   * (see valkey-io/valkey#2322). Signals come from the INFO persistence section.
+   */
+  private async detectPersistenceStall(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    const state = this.lastPersistenceState.get(ctx.connectionId) ?? {};
+
+    await this.evaluatePersistenceChild(
+      'rdb',
+      {
+        inProgress: info['rdb_bgsave_in_progress'] === '1',
+        elapsedSec: this.parseNumber(info['rdb_current_bgsave_time_sec']),
+        // These two counters are intentionally NOT rdb_-prefixed in INFO persistence.
+        processed: this.parseNumber(info['current_save_keys_processed']),
+        total: this.parseNumber(info['current_save_keys_total']),
+        lastStatus: info['rdb_last_bgsave_status'],
+      },
+      state,
+      ctx,
+      timestamp,
+    );
+
+    await this.evaluatePersistenceChild(
+      'aof',
+      {
+        inProgress: info['aof_rewrite_in_progress'] === '1',
+        elapsedSec: this.parseNumber(info['aof_current_rewrite_time_sec']),
+        // AOF rewrite exposes no per-key progress counter, so frozen-progress
+        // stall detection does not apply; it relies on the elapsed-time ceiling.
+        processed: null,
+        total: null,
+        lastStatus: info['aof_last_bgrewrite_status'],
+      },
+      state,
+      ctx,
+      timestamp,
+    );
+
+    this.lastPersistenceState.set(ctx.connectionId, state);
+  }
+
+  private async evaluatePersistenceChild(
+    kind: 'rdb' | 'aof',
+    signals: {
+      inProgress: boolean;
+      elapsedSec: number | null;
+      processed: number | null;
+      total: number | null;
+      lastStatus: string | undefined;
+    },
+    state: ConnectionPersistenceState,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    // Completed-status error (e.g. failed BGSAVE — the case #2322 users disable
+    // stop-writes-on-bgsave-error around). Level-triggered, not edge-triggered:
+    // fire whenever the status is err rather than only on an ok->err transition,
+    // so a pre-existing error at monitor/connection start (no prior ok baseline)
+    // is caught on the first poll. A latch keeps a persisting err from re-firing
+    // every poll; a later non-err (ok) sample re-arms it for the next failure.
+    const status = signals.lastStatus;
+    if (status !== undefined && status !== '') {
+      const errorReported = kind === 'rdb' ? state.rdbErrorReported : state.aofErrorReported;
+      if (status === 'err') {
+        if (!errorReported) {
+          await this.addAnomaly(this.buildPersistenceEvent(kind, 'error', 0, signals, timestamp, ctx), ctx);
+          if (kind === 'rdb') state.rdbErrorReported = true;
+          else state.aofErrorReported = true;
+        }
+      } else if (errorReported) {
+        if (kind === 'rdb') state.rdbErrorReported = false;
+        else state.aofErrorReported = false;
+      }
+    }
+
+    if (!signals.inProgress) {
+      // Episode ended (or never started) — clear per-episode tracking.
+      if (kind === 'rdb') delete state.rdb;
+      else delete state.aof;
+      return;
+    }
+
+    // INFO reports -1 for elapsed when no child is running; clamp to 0.
+    const elapsedSec = signals.elapsedSec !== null && signals.elapsedSec >= 0 ? signals.elapsedSec : 0;
+
+    let track = kind === 'rdb' ? state.rdb : state.aof;
+    if (!track) {
+      // First observation of this episode — establish a baseline to measure progress against.
+      track = {
+        startedAt: timestamp,
+        lastProcessed: signals.processed ?? 0,
+        lastAdvanceTs: timestamp,
+        lastElapsedSec: elapsedSec,
+        warnedLong: false,
+        reportedStall: false,
+      };
+      if (kind === 'rdb') state.rdb = track;
+      else state.aof = track;
+      return;
+    }
+
+    // A running child's elapsed time and processed-key count are both
+    // monotonic within a single episode and reset when a new fork starts.
+    // Episode boundaries are otherwise inferred only from observing an idle
+    // (in_progress = 0) sample, which is missed when a new child begins
+    // between polls (tight save cadence, slow interval, or a failed poll).
+    // Without this guard the prior track would be reused — misreporting the
+    // fresh child as a stalled episode (stale lastAdvanceTs) or suppressing
+    // its alerts (carried-over reportedStall/warnedLong). Detect the restart
+    // via a regression in either signal and re-baseline, mirroring the
+    // first-observation branch above.
+    const elapsedRegressed = elapsedSec < track.lastElapsedSec;
+    const processedRegressed = signals.processed !== null && signals.processed < track.lastProcessed;
+    if (elapsedRegressed || processedRegressed) {
+      track.startedAt = timestamp;
+      track.lastProcessed = signals.processed ?? 0;
+      track.lastAdvanceTs = timestamp;
+      track.lastElapsedSec = elapsedSec;
+      track.warnedLong = false;
+      track.reportedStall = false;
+      return;
+    }
+    track.lastElapsedSec = elapsedSec;
+
+    // Advance tracking (RDB only exposes processed-keys progress).
+    if (signals.processed !== null && signals.processed > track.lastProcessed) {
+      track.lastProcessed = signals.processed;
+      track.lastAdvanceTs = timestamp;
+    }
+
+    const stalledForMs = timestamp - track.lastAdvanceTs;
+    // Frozen key progress only means "stuck" while there are still keys left to write.
+    // Once all keys are serialized (processed === total) the child stays in_progress
+    // through the RDB flush/fsync/rename tail, during which processed is frozen at N/N —
+    // on a large save over a slow disk that tail can exceed persistenceStallSec and would
+    // otherwise trip a false "appears stuck (processed N/N keys)". A genuine hang in that
+    // tail is still caught by the elapsed-time ceiling (tooLong).
+    //
+    // We can only assert "keys remain" when the total is known. If current_save_keys_total
+    // is absent (processed reported without a total) we can't tell the completion tail from a
+    // real stall, so we skip frozen-progress detection entirely and rely on the elapsed-time
+    // thresholds — consistent with not raising a CRITICAL we can't substantiate.
+    const progressIncomplete = signals.total !== null && signals.processed! < signals.total;
+    const frozenStall =
+      signals.processed !== null &&
+      progressIncomplete &&
+      stalledForMs >= this.persistenceStallSec * 1000;
+    const tooLong = elapsedSec >= this.persistenceCritSec;
+
+    if (!track.reportedStall && (frozenStall || tooLong)) {
+      track.reportedStall = true;
+      // Frozen key progress and the elapsed-time ceiling are distinct failures
+      // with different thresholds and messages. Prefer the frozen-progress
+      // reason when both trip (a stuck child is the more actionable signal).
+      const reason = frozenStall ? 'stall' : 'exceeded';
+      await this.addAnomaly(this.buildPersistenceEvent(kind, reason, elapsedSec, signals, timestamp, ctx), ctx);
+      return;
+    }
+
+    if (!track.reportedStall && !track.warnedLong && elapsedSec >= this.persistenceWarnSec) {
+      track.warnedLong = true;
+      await this.addAnomaly(this.buildPersistenceEvent(kind, 'long', elapsedSec, signals, timestamp, ctx), ctx);
+    }
+  }
+
+  private buildPersistenceEvent(
+    kind: 'rdb' | 'aof',
+    reason: 'error' | 'stall' | 'exceeded' | 'long',
+    elapsedSec: number,
+    signals: { processed: number | null; total: number | null },
+    timestamp: number,
+    ctx: ConnectionContext,
+  ): AnomalyEvent {
+    const label = kind === 'rdb' ? { name: 'RDB save', op: 'BGSAVE' } : { name: 'AOF rewrite', op: 'BGREWRITEAOF' };
+    const progress =
+      signals.processed !== null && signals.total !== null
+        ? ` (processed ${signals.processed}/${signals.total} keys)`
+        : '';
+    let severity: AnomalySeverity;
+    let message: string;
+    let threshold: number;
+
+    if (reason === 'error') {
+      severity = AnomalySeverity.CRITICAL;
+      threshold = 0;
+      message = `CRITICAL: last ${label.name} (${label.op}) reported an error — persistence may be failing`;
+    } else if (reason === 'stall') {
+      // Key progress frozen for persistenceStallSec while the child keeps running.
+      severity = AnomalySeverity.CRITICAL;
+      threshold = this.persistenceStallSec;
+      message = `CRITICAL: ${label.name} (${label.op}) appears stuck — running ${elapsedSec}s with no progress${progress}`;
+    } else if (reason === 'exceeded') {
+      // Elapsed time crossed the persistenceCritSec ceiling; keys may still be
+      // advancing, so this is a duration breach, not a frozen-progress stall.
+      severity = AnomalySeverity.CRITICAL;
+      threshold = this.persistenceCritSec;
+      message = `CRITICAL: ${label.name} (${label.op}) exceeded the ${this.persistenceCritSec}s time ceiling — running ${elapsedSec}s${progress}`;
+    } else {
+      severity = AnomalySeverity.WARNING;
+      threshold = this.persistenceWarnSec;
+      message = `WARNING: ${label.name} (${label.op}) running long — ${elapsedSec}s elapsed`;
+    }
+
+    return {
+      id: `${ctx.connectionId}-persistence-${kind}-${reason}-${timestamp}`,
+      timestamp,
+      metricType: MetricType.PERSISTENCE_CHILD,
+      anomalyType: AnomalyType.SPIKE,
+      severity,
+      value: elapsedSec,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold,
+      message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
   }
 
   /**

@@ -72,6 +72,17 @@ export class Correlator {
         ],
       },
       {
+        pattern: AnomalyPattern.PERSISTENCE_STALL,
+        requiredMetrics: [MetricType.PERSISTENCE_CHILD],
+        diagnosis: 'Persistence fork child not advancing — BGSAVE/AOF-rewrite may be stuck or failing',
+        recommendations: [
+          'Check memory headroom and copy-on-write growth (current_cow_size)',
+          'Inspect the server log for fork or allocator errors',
+          'Consider BGSAVE CANCEL if the save is wedged',
+          'Verify disk space and I/O on the persistence target',
+        ],
+      },
+      {
         pattern: AnomalyPattern.SLOW_QUERIES,
         requiredMetrics: [MetricType.SLOWLOG_LAST_ID],
         diagnosis: 'Slow query rate spike detected — elevated rate of new slow queries per interval',
