@@ -51,16 +51,35 @@ export function firstOverlappingRange(
 }
 
 /**
+ * Transient/unhealthy CLUSTER NODES flags. A node carrying any of these is not a
+ * stable live primary, so it must not count toward a slot-overlap conflict:
+ * during a normal failover the old primary briefly shows as `master,fail` (or
+ * `master,fail?`) while still listing its slots, and the just-promoted replica
+ * lists the same slots as `master`. Counting both as live would fire a false
+ * split-brain CRITICAL on healthy recovery. `handshake`/`noaddr` nodes are not
+ * fully known to the gossip layer yet.
+ */
+const UNHEALTHY_PRIMARY_FLAGS = ['fail', 'fail?', 'handshake', 'noaddr'];
+
+/** A node is a live primary only if it's master-flagged, owns slots, and is not transient/unhealthy. */
+function isLivePrimary(node: ClusterNode): boolean {
+  return (
+    node.flags.includes('master') &&
+    node.slots.length > 0 &&
+    !UNHEALTHY_PRIMARY_FLAGS.some((flag) => node.flags.includes(flag))
+  );
+}
+
+/**
  * Finds every pair of primaries that claim overlapping slots. Replicas (nodes
- * not flagged `master`) and masters that own no slots are ignored, so a healthy
- * primary + its replicas never trips detection.
+ * not flagged `master`), masters that own no slots, and masters in a transient
+ * or unhealthy state (`fail`/`fail?`/`handshake`/`noaddr`) are ignored, so a
+ * healthy primary + its replicas — and a normal failover — never trip detection.
  */
 export function detectDuplicatePrimaries(
   nodes: ClusterNode[],
 ): DuplicatePrimaryConflict[] {
-  const masters = nodes.filter(
-    (n) => n.flags.includes('master') && n.slots.length > 0,
-  );
+  const masters = nodes.filter(isLivePrimary);
 
   const conflicts: DuplicatePrimaryConflict[] = [];
 

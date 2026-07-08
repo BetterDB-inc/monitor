@@ -94,6 +94,32 @@ describe('detectDuplicatePrimaries', () => {
     ];
     expect(detectDuplicatePrimaries(nodes)).toHaveLength(0);
   });
+
+  it('does not flag a normal failover: old primary still lists slots as master,fail', () => {
+    const nodes = [
+      // Old primary: transiently down but its CLUSTER NODES entry still lists the slots.
+      node({ id: 'old', flags: ['master', 'fail'], slots: [[0, 5460]], configEpoch: 4 }),
+      // Just-promoted replica now owns the same slots as a healthy master.
+      node({ id: 'new', flags: ['master'], slots: [[0, 5460]], configEpoch: 5 }),
+    ];
+    expect(detectDuplicatePrimaries(nodes)).toHaveLength(0);
+  });
+
+  it('ignores primaries in fail?/handshake/noaddr transient states', () => {
+    const healthy = node({ id: 'ok', flags: ['master'], slots: [[0, 5460]], configEpoch: 5 });
+    for (const flag of ['fail?', 'handshake', 'noaddr']) {
+      const transient = node({ id: 't', flags: ['master', flag], slots: [[0, 5460]], configEpoch: 4 });
+      expect(detectDuplicatePrimaries([transient, healthy])).toHaveLength(0);
+    }
+  });
+
+  it('still flags a genuine split-brain where both primaries are healthy', () => {
+    const nodes = [
+      node({ id: 'a', flags: ['myself', 'master'], slots: [[0, 5460]], configEpoch: 4 }),
+      node({ id: 'b', flags: ['master'], slots: [[0, 5460]], configEpoch: 9 }),
+    ];
+    expect(detectDuplicatePrimaries(nodes)).toHaveLength(1);
+  });
 });
 
 describe('conflictSignature', () => {
