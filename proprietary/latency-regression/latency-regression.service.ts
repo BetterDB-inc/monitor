@@ -87,7 +87,12 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
       });
       if (history.length === 0) continue;
       const totalCalls = history.reduce((sum, h) => sum + h.callsDelta, 0);
-      callsPerMin.set(command, totalCalls / (VOLUME_WINDOW_MS / 60_000));
+      // Each stored sample is one ~60s commandstats poll, so callsDelta is ≈ that minute's call
+      // count. Average over the samples that ACTUALLY exist, not the fixed VOLUME_WINDOW_MS:
+      // before the buffer fills (e.g. shortly after startup) dividing by the full window
+      // under-reports the rate — 5 samples at 100 calls/min would read as 50 and be wrongly
+      // excluded by the >=MIN_CALLS_PER_MIN gate, so their P99 regression is never evaluated.
+      callsPerMin.set(command, totalCalls / history.length);
     }
 
     // Topology-refresh correlation input (hourly-spike symptom in #3527).

@@ -110,16 +110,22 @@ export class LatencystatsPollerService extends MultiConnectionPoller implements 
         capturedAt: now,
       }));
 
+    if (batch.length === 0) {
+      // No valid samples to persist; reflect that immediately (no storage write to gate on).
+      this.snapshots.set(ctx.connectionId, { entries: [], capturedAt: now });
+      return;
+    }
+
+    // Persist first, then publish the in-memory snapshot. GET /metrics/latencystats/summary
+    // serves this snapshot while history and the regression poller read storage; updating the
+    // snapshot before a durable save means a failed write would leave /summary showing fresh
+    // percentiles that history never received — split behaviour and delayed/missed detection.
+    await this.storage.saveLatencyStatsSamples(batch, ctx.connectionId);
+
     this.snapshots.set(ctx.connectionId, {
       entries: batch,
       capturedAt: now,
     });
-
-    if (batch.length === 0) {
-      return;
-    }
-
-    await this.storage.saveLatencyStatsSamples(batch, ctx.connectionId);
 
     const lastPrune = this.lastPruneByConnection.get(ctx.connectionId) ?? 0;
     if (now - lastPrune > this.PRUNE_INTERVAL_MS) {

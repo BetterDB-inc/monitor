@@ -42,8 +42,11 @@ describe('LatencyRegressionService', () => {
 
     storage = {
       getLatencyStatsHistory: jest.fn().mockImplementation(async () => [...samples]),
+      // A full ~10-min buffer: 10 one-minute samples at 120 calls/min each → 120 calls/min.
       getCommandStatsHistory: jest.fn().mockImplementation(async ({ command }: any) =>
-        command === 'hmget' ? [{ callsDelta: 1200, capturedAt: now }] : [],
+        command === 'hmget'
+          ? Array.from({ length: 10 }, (_, i) => ({ callsDelta: 120, capturedAt: now - i * MINUTE }))
+          : [],
       ),
       saveAnomalyEvent: jest.fn().mockResolvedValue('saved'),
     };
@@ -119,6 +122,24 @@ describe('LatencyRegressionService', () => {
     for (let i = 0; i < 5; i++) await poll(service, 6000, '9.0.0');
     expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
     expect(webhook.dispatchLatencyRegressionDetected).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not under-report call rate from a partly-filled buffer (volume gate)', async () => {
+    // Only 3 samples exist (buffer not yet full), each at 100 calls/min. The rate is 100/min,
+    // above the 60/min gate. Dividing by the fixed 10-min window would read this as 30/min and
+    // wrongly exclude the command, so no regression would ever be evaluated.
+    storage.getCommandStatsHistory = jest.fn().mockImplementation(async ({ command }: any) =>
+      command === 'hmget'
+        ? Array.from({ length: 3 }, (_, i) => ({ callsDelta: 100, capturedAt: now - i * MINUTE }))
+        : [],
+    );
+
+    const service = await makeService();
+    await driveUpgradeRegression(service);
+
+    expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+    const payload = webhook.dispatchLatencyRegressionDetected.mock.calls[0][0];
+    expect(payload.commands[0]).toMatchObject({ command: 'hmget', callsPerMin: 100 });
   });
 
   it('reads prefetch-batch-max-size via CONFIG GET on Valkey 9+', async () => {

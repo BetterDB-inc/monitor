@@ -173,4 +173,26 @@ describe('LatencystatsPollerService', () => {
     await expect((service as any).pollConnection(makeCtx(client))).resolves.toBeUndefined();
     expect(storage.saveLatencyStatsSamples).not.toHaveBeenCalled();
   });
+
+  it('does not publish the snapshot when the storage save fails', async () => {
+    // First poll persists successfully and publishes a snapshot.
+    const first = clientWith({
+      server: { valkey_version: '9.0.1' },
+      latencystats: { latency_percentiles_usec_hmget: 'p50=1,p99=99,p99.9=999' },
+    });
+    await (service as any).pollConnection(makeCtx(first));
+    expect(service.getSnapshot('conn-1')[0].p99Us).toBe(99);
+
+    // Next poll has fresh percentiles but the durable save fails. GET /summary must keep serving
+    // the last persisted values, not diverge from history + the regression poller.
+    storage.saveLatencyStatsSamples.mockRejectedValueOnce(new Error('db down'));
+    const second = clientWith({
+      server: { valkey_version: '9.0.1' },
+      latencystats: { latency_percentiles_usec_hmget: 'p50=2,p99=5000,p99.9=9000' },
+    });
+    await expect((service as any).pollConnection(makeCtx(second))).rejects.toThrow('db down');
+
+    // Snapshot unchanged — the new p99=5000 was never durably stored, so it must not surface.
+    expect(service.getSnapshot('conn-1')[0].p99Us).toBe(99);
+  });
 });
