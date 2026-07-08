@@ -624,9 +624,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // through the RDB flush/fsync/rename tail, during which processed is frozen at N/N —
     // on a large save over a slow disk that tail can exceed persistenceStallSec and would
     // otherwise trip a false "appears stuck (processed N/N keys)". A genuine hang in that
-    // tail is still caught by the elapsed-time ceiling (tooLong). When total is unknown
-    // (older servers without current_save_keys_total) keep the elapsed-only behavior.
-    const progressIncomplete = signals.total === null || signals.processed! < signals.total;
+    // tail is still caught by the elapsed-time ceiling (tooLong).
+    //
+    // We can only assert "keys remain" when the total is known. If current_save_keys_total
+    // is absent (processed reported without a total) we can't tell the completion tail from a
+    // real stall, so we skip frozen-progress detection entirely and rely on the elapsed-time
+    // thresholds — consistent with not raising a CRITICAL we can't substantiate.
+    const progressIncomplete = signals.total !== null && signals.processed! < signals.total;
     const frozenStall =
       signals.processed !== null &&
       progressIncomplete &&

@@ -1057,6 +1057,29 @@ describe('AnomalyService', () => {
       expect(events[0].message).not.toContain('stuck');
     });
 
+    it('does not fire a frozen stall when the total keys count is unavailable', async () => {
+      // Without current_save_keys_total we can't tell the completion tail from a real stall,
+      // so frozen-progress detection is skipped and only the elapsed-time ceilings apply.
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '5',
+        current_save_keys_processed: '1',
+        current_save_keys_total: '', // absent/unparseable -> null
+      });
+      await poll(); // baseline
+
+      now += 61_000; // past the 60s stall window with frozen processed...
+      mockPersistence({
+        rdb_bgsave_in_progress: '1',
+        rdb_current_bgsave_time_sec: '66', // ...but under the warn/crit ceilings
+        current_save_keys_processed: '1',
+        current_save_keys_total: '',
+      });
+      await poll();
+
+      expect(persistenceEvents()).toHaveLength(0);
+    });
+
     it('fires CRITICAL when an AOF rewrite exceeds the hard elapsed ceiling', async () => {
       mockPersistence({
         aof_rewrite_in_progress: '1',
