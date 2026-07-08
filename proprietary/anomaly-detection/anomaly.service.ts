@@ -227,13 +227,30 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     return isNaN(parsed) ? null : parsed;
   }
 
-  /** Sums `keys=` across all `db<N>` entries of the INFO keyspace section. */
-  private sumKeyspaceKeys(info: Record<string, string>): number {
+  /**
+   * Sums the `keys=` count across every `db<N>` entry of the INFO keyspace
+   * section.
+   *
+   * Reads the typed `keyspace` section straight off the parsed INFO response —
+   * NOT the flattened record — because `convertInfoToRecord` stringifies each
+   * value, which would turn an object-shaped db into `"[object Object]"` and
+   * silently zero the count. `InfoParser` today emits each db as a raw string
+   * (`"keys=123,expires=5,avg_ttl=0"`), but the `KeyspaceInfo` type declares an
+   * object (`{ keys, expires, avg_ttl }`), so we handle both shapes: this stays
+   * correct whether or not the parser is ever aligned with the type.
+   */
+  private sumKeyspaceKeys(infoResponse: any): number {
+    const keyspace = infoResponse?.keyspace;
+    if (keyspace === null || typeof keyspace !== 'object') return 0;
     let total = 0;
-    for (const [key, value] of Object.entries(info)) {
+    for (const [key, value] of Object.entries(keyspace)) {
       if (!/^db\d+$/.test(key)) continue;
-      const match = /keys=(\d+)/.exec(value);
-      if (match) total += parseInt(match[1], 10);
+      if (typeof value === 'string') {
+        const match = /keys=(\d+)/.exec(value);
+        if (match) total += parseInt(match[1], 10);
+      } else if (value !== null && typeof value === 'object' && 'keys' in value) {
+        total += Number((value as { keys: unknown }).keys) || 0;
+      }
     }
     return total;
   }
@@ -416,7 +433,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           role: (roleStr === 'master' ? 'master' : 'replica') as 'master' | 'replica',
           replid,
           offset: this.parseNumber(info.master_repl_offset) ?? 0,
-          totalKeys: this.sumKeyspaceKeys(info),
+          totalKeys: this.sumKeyspaceKeys(infoResponse),
           uptimeSec: this.parseNumber(info.uptime_in_seconds) ?? 0,
           connectedSlaves: this.parseNumber(info.connected_slaves) ?? 0,
         };

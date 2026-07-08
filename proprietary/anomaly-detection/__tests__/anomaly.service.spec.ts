@@ -930,6 +930,34 @@ describe('AnomalyService', () => {
     });
   });
 
+  // ─── Keyspace key counting (shape robustness) ────────────────────────────
+  // InfoParser emits each keyspace db as a raw string ("keys=123,..."), but the
+  // KeyspaceInfo type declares an object ({ keys, expires, avg_ttl }). The count
+  // must be read off the typed INFO response (not the stringified flat record,
+  // which would collapse an object to "[object Object]") and handle both shapes.
+  describe('sumKeyspaceKeys', () => {
+    const sum = (infoResponse: unknown): number =>
+      (service as any).sumKeyspaceKeys(infoResponse);
+
+    it('sums the string shape emitted by the real parser', () => {
+      expect(
+        sum({ keyspace: { db0: 'keys=150,expires=5,avg_ttl=0', db1: 'keys=42,expires=0,avg_ttl=0' } }),
+      ).toBe(192);
+    });
+
+    it('sums the typed object shape declared by KeyspaceInfo', () => {
+      expect(
+        sum({ keyspace: { db0: { keys: 150, expires: 5, avg_ttl: 0 }, db1: { keys: 42, expires: 0, avg_ttl: 0 } } }),
+      ).toBe(192);
+    });
+
+    it('ignores non-db keys and returns 0 for an empty or missing keyspace', () => {
+      expect(sum({ keyspace: {} })).toBe(0);
+      expect(sum({})).toBe(0);
+      expect(sum({ keyspace: { note: 'keys=999' } })).toBe(0);
+    });
+  });
+
   // ─── Cluster State Webhook Dispatch ──────────────────────────────────────
 
   describe('cluster state webhook dispatch', () => {
