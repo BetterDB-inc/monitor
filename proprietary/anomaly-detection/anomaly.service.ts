@@ -264,13 +264,30 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     return isNaN(parsed) ? null : parsed;
   }
 
-  /** Sums `keys=` across all `db<N>` entries of the INFO keyspace section. */
-  private sumKeyspaceKeys(info: Record<string, string>): number {
+  /**
+   * Sums the `keys=` count across every `db<N>` entry of the INFO keyspace
+   * section.
+   *
+   * Reads the typed `keyspace` section straight off the parsed INFO response —
+   * NOT the flattened record — because `convertInfoToRecord` stringifies each
+   * value, which would turn an object-shaped db into `"[object Object]"` and
+   * silently zero the count. `InfoParser` today emits each db as a raw string
+   * (`"keys=123,expires=5,avg_ttl=0"`), but the `KeyspaceInfo` type declares an
+   * object (`{ keys, expires, avg_ttl }`), so we handle both shapes: this stays
+   * correct whether or not the parser is ever aligned with the type.
+   */
+  private sumKeyspaceKeys(infoResponse: any): number {
+    const keyspace = infoResponse?.keyspace;
+    if (keyspace === null || typeof keyspace !== 'object') return 0;
     let total = 0;
-    for (const [key, value] of Object.entries(info)) {
+    for (const [key, value] of Object.entries(keyspace)) {
       if (!/^db\d+$/.test(key)) continue;
-      const match = /keys=(\d+)/.exec(value);
-      if (match) total += parseInt(match[1], 10);
+      if (typeof value === 'string') {
+        const match = /keys=(\d+)/.exec(value);
+        if (match) total += parseInt(match[1], 10);
+      } else if (value !== null && typeof value === 'object' && 'keys' in value) {
+        total += Number((value as { keys: unknown }).keys) || 0;
+      }
     }
     return total;
   }
@@ -453,7 +470,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           role: (roleStr === 'master' ? 'master' : 'replica') as 'master' | 'replica',
           replid,
           offset: this.parseNumber(info.master_repl_offset) ?? 0,
-          totalKeys: this.sumKeyspaceKeys(info),
+          totalKeys: this.sumKeyspaceKeys(infoResponse),
           uptimeSec: this.parseNumber(info.uptime_in_seconds) ?? 0,
           connectedSlaves: this.parseNumber(info.connected_slaves) ?? 0,
         };
@@ -1060,7 +1077,44 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     metricType?: MetricType,
     limit = 100,
     connectionId?: string,
+    activeOnly = false,
   ): Promise<AnomalyEvent[]> {
+    // Active-incident feed (e.g. the data-loss banner): return every UNRESOLVED
+    // event of any age. Must query durable storage — the in-memory cache is
+    // capped and lost on restart, and a lingering open incident can be older
+    // than any time window — with no startTime floor so old-but-open incidents
+    // are never filtered out.
+    if (activeOnly) {
+      const stored = await this.storage.getAnomalyEvents({
+        endTime,
+        severity: severity as string,
+        metricType: metricType as string,
+        resolved: false,
+        limit,
+        connectionId,
+      });
+      const storedEvents = stored.map(s => this.storedToAnomalyEvent(s));
+
+      // Union with in-memory unresolved events not yet in storage: a persist failure in
+      // addAnomaly() still leaves the incident in the cache (and still fires the Pro
+      // webhook), so the banner must surface it rather than wait for a later poll to make
+      // it durable. Dedupe by id (storage wins), apply the same filters.
+      const seen = new Set(storedEvents.map(e => e.id));
+      const inMemory = this.recentAnomalies.filter(
+        e =>
+          !e.resolved &&
+          !seen.has(e.id) &&
+          (!connectionId || e.connectionId === connectionId) &&
+          (!metricType || e.metricType === metricType) &&
+          (!severity || e.severity === severity) &&
+          (!endTime || e.timestamp <= endTime),
+      );
+
+      return [...storedEvents, ...inMemory]
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, limit);
+    }
+
     const cacheThreshold = Date.now() - this.cacheTtlMs;
 
     if (!startTime || startTime >= cacheThreshold) {
@@ -1307,17 +1361,26 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const group = this.recentGroups.find(g => g.correlationId === correlationId);
     if (!group) return false;
 
-    // Mark all anomalies in the group as resolved
+    // Storage is the source of truth (same as resolveAnomaly): only flip the cached
+    // copy for events whose resolution is durable, and report success only if EVERY
+    // event in the group persisted — otherwise a client could dismiss the group while
+    // later storage-backed polls still return some members unresolved.
     const resolvedAt = Date.now();
+    let allPersisted = true;
     for (const anomaly of group.anomalies) {
-      anomaly.resolved = true;
+      let persisted = false;
       try {
-        await this.storage.resolveAnomaly(anomaly.id, resolvedAt);
+        persisted = await this.storage.resolveAnomaly(anomaly.id, resolvedAt);
       } catch (err) {
         this.logger.error(`Failed to persist resolution for anomaly ${anomaly.id}:`, err);
       }
+      if (persisted) {
+        anomaly.resolved = true;
+      } else {
+        allPersisted = false;
+      }
     }
-    return true;
+    return allPersisted;
   }
 
   clearResolved(): number {

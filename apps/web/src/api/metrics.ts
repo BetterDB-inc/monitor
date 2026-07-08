@@ -334,12 +334,16 @@ export const metricsApi = {
   },
 
   // Anomaly Detection
-  getAnomalyEvents: (params?: { limit?: number; metricType?: string; startTime?: number; endTime?: number }) => {
+  getAnomalyEvents: (params?: { limit?: number; metricType?: string; startTime?: number; endTime?: number; activeOnly?: boolean }) => {
     const query = new URLSearchParams();
     if (params?.limit) query.append('limit', params.limit.toString());
     if (params?.metricType) query.append('metricType', params.metricType);
     if (params?.startTime) query.append('startTime', params.startTime.toString());
     if (params?.endTime) query.append('endTime', params.endTime.toString());
+    // Request open incidents of any age (bypasses the server's default 24h
+    // window) — used by the data-loss banner so an old unresolved incident is
+    // never hidden.
+    if (params?.activeOnly) query.append('activeOnly', 'true');
     const queryString = query.toString();
     return fetchApi<any[]>(`/anomaly/events${queryString ? `?${queryString}` : ''}`);
   },
