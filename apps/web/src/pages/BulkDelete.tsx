@@ -57,6 +57,22 @@ export function jobCardVisible(
   return job.status === 'running' || !targetChanged;
 }
 
+/**
+ * Signature identifying the target a preview/run applies to, derived from the
+ * request that was actually sent. Only fields that change which keys match are
+ * included — count and batchPauseMs are batching / pacing knobs and don't affect
+ * the result set. Computed from a request snapshotted at click time and compared
+ * to the current form to detect a stale (edited-since) job.
+ */
+export function requestSignature(req: BulkDeleteRequest): string {
+  return JSON.stringify({
+    match: req.match,
+    type: req.type ?? 'any',
+    scope: req.scope ?? 'node',
+    maxKeys: req.maxKeys ?? null,
+  });
+}
+
 function statusVariant(status: BulkDeleteJob['status']) {
   switch (status) {
     case 'completed':
@@ -92,26 +108,18 @@ export function BulkDelete() {
   const [maxKeys, setMaxKeys] = useState('');
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
 
-  // Last completed dry-run job, kept for the confirm dialog's count.
-  const [preview, setPreview] = useState<BulkDeleteJob | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [pollEnabled, setPollEnabled] = useState(false);
-  // Set when the target changes after a job was started; a finished job's card
-  // is then hidden until a fresh job (preview or execute) is run.
-  const [targetChanged, setTargetChanged] = useState(false);
+  // The target the active job was started against, captured at request time.
+  // Comparing it to the current form (not a boolean cleared on success) makes
+  // staleness immune to the form changing between the click and the job id
+  // returning — the finished job is stale unless the form still matches.
+  const [jobSignature, setJobSignature] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
 
   const catchAll = isCatchAll(match);
-
-  // A job's result is only valid for the target it ran against; drop the stored
-  // preview (confirm dialog) and flag the target changed when it does, so
-  // neither a finished card nor the dialog reflects a previous target.
-  useEffect(() => {
-    setPreview(null);
-    setTargetChanged(true);
-  }, [match, type, scope, maxKeys]);
 
   const buildRequest = (): BulkDeleteRequest => ({
     match: match.trim(),
@@ -123,6 +131,11 @@ export function BulkDelete() {
     confirmDeleteAll: catchAll ? confirmDeleteAll : undefined,
   });
 
+  // Stale when the current form no longer matches the target the active job was
+  // started against. Both signatures come from a request object, so the compare
+  // is immune to the form changing between the click and the job id returning.
+  const stale = jobSignature !== requestSignature(buildRequest());
+
   const handleGuarded = (err: unknown): string => {
     if (err instanceof PaymentRequiredError) {
       showUpgradePrompt(err);
@@ -132,21 +145,24 @@ export function BulkDelete() {
   };
 
   const startJob = (jobId: string) => {
-    // A fresh job snapshots the current form, so its card is no longer stale.
-    setTargetChanged(false);
     setActiveJobId(jobId);
     setPollEnabled(true);
     setFormError(null);
   };
 
+  // The request is snapshotted at click time and passed as the mutation
+  // variable, so both the API call and the pinned signature reflect the target
+  // as it was when the user clicked — not whatever the form later becomes.
   const previewMutation = useMutation({
-    mutationFn: () => bulkDeleteApi.preview(buildRequest()),
+    mutationFn: (req: BulkDeleteRequest) => bulkDeleteApi.preview(req),
+    onMutate: (req: BulkDeleteRequest) => setJobSignature(requestSignature(req)),
     onSuccess: ({ jobId }) => startJob(jobId),
     onError: (err) => setFormError(handleGuarded(err)),
   });
 
   const executeMutation = useMutation({
-    mutationFn: () => bulkDeleteApi.execute(buildRequest()),
+    mutationFn: (req: BulkDeleteRequest) => bulkDeleteApi.execute(req),
+    onMutate: (req: BulkDeleteRequest) => setJobSignature(requestSignature(req)),
     onSuccess: ({ jobId }) => {
       startJob(jobId);
       setConfirmOpen(false);
@@ -170,13 +186,10 @@ export function BulkDelete() {
     refetchKey: activeJobId ?? '',
   });
 
-  // Stop polling once the job finishes; capture a finished dry-run as the
-  // preview — but not if the target changed while it ran (then it's stale).
+  // Stop polling once the job finishes.
   useEffect(() => {
-    if (!job || job.status === 'running') return;
-    setPollEnabled(false);
-    if (job.mode === 'dry-run' && !targetChanged) setPreview(job);
-  }, [job, targetChanged]);
+    if (job && job.status !== 'running') setPollEnabled(false);
+  }, [job]);
 
   const jobRunning = job?.status === 'running';
 
@@ -192,9 +205,13 @@ export function BulkDelete() {
 
   // Both cards follow the same rule: visible while running; a finished card is
   // hidden once the target changes (its result lives on in the audit table).
-  const cardVisible = jobCardVisible(job, targetChanged);
+  const cardVisible = jobCardVisible(job, stale);
   const previewCard = cardVisible && job?.mode === 'dry-run' ? job : null;
   const runCard = cardVisible && job?.mode === 'execute' ? job : null;
+  // Show the preview count in the confirm dialog only for a finished dry-run
+  // that still matches the current form.
+  const dialogPreview =
+    job && job.mode === 'dry-run' && job.status !== 'running' && !stale ? job : null;
 
   const cancelButton = jobRunning ? (
     <Button
@@ -344,7 +361,7 @@ export function BulkDelete() {
           <div className="flex flex-wrap gap-2">
             <Button
               variant="outline"
-              onClick={() => previewMutation.mutate()}
+              onClick={() => previewMutation.mutate(buildRequest())}
               disabled={!canSubmit || previewMutation.isPending || jobRunning}
             >
               {previewMutation.isPending ? (
@@ -520,7 +537,7 @@ export function BulkDelete() {
               <span className="font-mono font-semibold">{match.trim()}</span>
               {type !== 'any' ? ` of type ${type}` : ''} across{' '}
               {scope === 'cluster' ? 'all cluster primaries' : 'this node'}.
-              {preview ? ` Preview matched ${matchedLabel(preview)} key(s).` : ''}
+              {dialogPreview ? ` Preview matched ${matchedLabel(dialogPreview)} key(s).` : ''}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -541,7 +558,7 @@ export function BulkDelete() {
             </Button>
             <Button
               variant="destructive"
-              onClick={() => executeMutation.mutate()}
+              onClick={() => executeMutation.mutate(buildRequest())}
               disabled={!confirmValid || executeMutation.isPending}
             >
               {executeMutation.isPending && <Loader2 className="size-4 animate-spin" />}

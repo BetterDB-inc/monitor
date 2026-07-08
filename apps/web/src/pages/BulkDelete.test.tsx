@@ -1,7 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { jobCardVisible } from './BulkDelete';
+import { jobCardVisible, requestSignature } from './BulkDelete';
+import type { BulkDeleteRequest } from '../api/bulkDelete';
 
 const job = (status: 'running' | 'completed') => ({ status }) as any;
+
+describe('requestSignature', () => {
+  const base: BulkDeleteRequest = { match: 'a:*', scope: 'node' };
+
+  it('ignores batching/pacing knobs (count, batchPauseMs, confirmDeleteAll)', () => {
+    const sig = requestSignature(base);
+    expect(requestSignature({ ...base, count: 999 })).toBe(sig);
+    expect(requestSignature({ ...base, batchPauseMs: 500 })).toBe(sig);
+    expect(requestSignature({ ...base, confirmDeleteAll: true })).toBe(sig);
+  });
+
+  it('changes when match, type, scope, or maxKeys change', () => {
+    const sig = requestSignature(base);
+    expect(requestSignature({ ...base, match: 'b:*' })).not.toBe(sig);
+    expect(requestSignature({ ...base, type: 'hash' })).not.toBe(sig);
+    expect(requestSignature({ ...base, scope: 'cluster' })).not.toBe(sig);
+    expect(requestSignature({ ...base, maxKeys: 100 })).not.toBe(sig);
+  });
+});
 
 describe('jobCardVisible', () => {
   it('always shows a running job, even when the target is stale (mid-run edit)', () => {
