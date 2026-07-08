@@ -81,16 +81,21 @@ export function BulkDelete() {
   const [preview, setPreview] = useState<BulkDeleteJob | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [pollEnabled, setPollEnabled] = useState(false);
+  // A dry-run reflects the target it ran against; when the target changes the
+  // shown preview goes stale until a fresh preview is run.
+  const [previewStale, setPreviewStale] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
 
   const catchAll = isCatchAll(match);
 
-  // A preview is only valid for the target it was run against; drop it when the
-  // target changes so the confirm dialog never shows a stale count.
+  // A preview is only valid for the target it was run against; drop the stored
+  // preview (confirm dialog) and mark any shown preview stale when the target
+  // changes, so neither the card nor the dialog reflects a previous target.
   useEffect(() => {
     setPreview(null);
+    setPreviewStale(true);
   }, [match, type, scope, maxKeys]);
 
   const buildRequest = (): BulkDeleteRequest => ({
@@ -119,7 +124,10 @@ export function BulkDelete() {
 
   const previewMutation = useMutation({
     mutationFn: () => bulkDeleteApi.preview(buildRequest()),
-    onSuccess: ({ jobId }) => startJob(jobId),
+    onSuccess: ({ jobId }) => {
+      setPreviewStale(false);
+      startJob(jobId);
+    },
     onError: (err) => setFormError(handleGuarded(err)),
   });
 
@@ -167,7 +175,9 @@ export function BulkDelete() {
   const canSubmit = match.trim().length > 0 && (!catchAll || confirmDeleteAll);
   const confirmValid = confirmText.trim().toUpperCase() === 'DELETE';
 
-  const previewCard = job?.mode === 'dry-run' ? job : null;
+  // Hide the preview card once the target changes so it can't show counts /
+  // sample keys for a previous target next to the edited form.
+  const previewCard = job?.mode === 'dry-run' && !previewStale ? job : null;
   const runCard = job?.mode === 'execute' ? job : null;
 
   const cancelButton = jobRunning ? (
