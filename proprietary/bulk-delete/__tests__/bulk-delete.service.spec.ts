@@ -199,6 +199,27 @@ describe('BulkDeleteService', () => {
     expect(finalAudit.skippedNodes).toEqual(['10.0.0.2:6379']);
   });
 
+  it('fails the run (not completes) when every cluster primary is unreachable', async () => {
+    const service = build(makeFakeClient([]).client);
+
+    cluster.discoverNodes.mockResolvedValue([
+      { id: 'a', address: '10.0.0.1:6379@16379', role: 'master' },
+      { id: 'b', address: '10.0.0.2:6379@16379', role: 'master' },
+    ]);
+    cluster.getNodeConnection.mockRejectedValue(new Error('Connection timeout'));
+
+    const { jobId } = service.startExecution('conn-1', { match: 't:*', scope: 'cluster' });
+    const job = await waitForJob(service, jobId, 'conn-1');
+
+    expect(job.status).toBe('failed');
+    expect(job.deleted).toBe(0);
+    expect(job.skipped.map((s) => s.node)).toEqual(['10.0.0.1:6379', '10.0.0.2:6379']);
+
+    const finalAudit = storage.saveBulkDeleteAudit.mock.calls.at(-1)![0] as StoredBulkDeleteAudit;
+    expect(finalAudit).toMatchObject({ status: 'failed', deleted: 0 });
+    expect(finalAudit.skippedNodes).toEqual(['10.0.0.1:6379', '10.0.0.2:6379']);
+  });
+
   it('cancelJob returns null for unknown ids and false for finished jobs', async () => {
     const { client } = makeFakeClient(['a:1']);
     const service = build(client);

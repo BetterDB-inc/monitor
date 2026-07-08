@@ -193,6 +193,14 @@ export class BulkDeleteService implements OnModuleInit {
       const { targets, skipped } = await this.buildTargets(job.connectionId, job.scope);
       job.skipped = skipped;
       job.progress.nodesTotal = targets.length;
+      // Empty targets only happens when every cluster primary was unreachable
+      // (node scope and the no-primaries fallback always yield one target). Do
+      // not report success for a run that did zero work.
+      if (targets.length === 0) {
+        throw new Error(
+          `No reachable nodes to scan (${skipped.length} primary node(s) unreachable)`,
+        );
+      }
       await runBulkDelete(
         targets,
         job.params,
