@@ -292,6 +292,13 @@ export interface LatencyStatsHistoryQueryOptions {
   command?: string;
   startTime: number;
   endTime: number;
+  /**
+   * Max rows to keep PER COMMAND (most-recent within the window). Without a `command` filter the
+   * cap is applied per command, not across the combined result — otherwise a busy instance with
+   * many tracked commands would keep only a short shared slice per command and the regression
+   * baselines (6h/≥5 upgrade, 24h/≥30 sustained) would be starved despite older rows in storage.
+   * Default 10,000.
+   */
   limit?: number;
 }
 

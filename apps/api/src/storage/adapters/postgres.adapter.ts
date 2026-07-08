@@ -3459,17 +3459,21 @@ export class PostgresAdapter implements StoragePort {
     params.push(options.startTime, options.endTime, options.limit ?? 10_000);
     const startIdx = params.length - 2;
 
-    // Take the most-recent `limit` rows (inner DESC + LIMIT), then return them ascending —
-    // an ASC + LIMIT would keep the oldest and drop the newest on busy instances, which the
-    // regression guard relies on for freshness/version/consecutive logic.
+    // Keep the most-recent `limit` rows PER COMMAND (ROW_NUMBER partitioned by command), then
+    // return them ascending. A single global LIMIT would split its budget across all commands,
+    // starving per-command baselines on busy instances; DESC inside the partition keeps the
+    // newest rows (the guard relies on freshness/version/consecutive logic). With a command
+    // filter the partition is that one command, so behaviour is unchanged.
     const result = await this.pool.query(
-      `SELECT * FROM (
-         SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at
+      `SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at
+       FROM (
+         SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at,
+                ROW_NUMBER() OVER (PARTITION BY command ORDER BY captured_at DESC) AS rn
          FROM latency_stats_samples
          WHERE connection_id = $1 ${commandFilter} AND captured_at >= $${startIdx} AND captured_at <= $${startIdx + 1}
-         ORDER BY captured_at DESC
-         LIMIT $${startIdx + 2}
-       ) sub ORDER BY captured_at ASC`,
+       ) ranked
+       WHERE rn <= $${startIdx + 2}
+       ORDER BY captured_at ASC`,
       params,
     );
 

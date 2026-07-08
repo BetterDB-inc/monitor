@@ -1206,18 +1206,29 @@ export class MemoryAdapter implements StoragePort {
   async getLatencyStatsHistory(
     options: LatencyStatsHistoryQueryOptions,
   ): Promise<StoredLatencyStatsSample[]> {
-    // Keep the most-recent `limit` samples (not the oldest), returned ascending —
+    // Keep the most-recent `limit` samples PER COMMAND (not a single global cap across all
+    // commands, which would starve per-command baselines on busy instances), returned ascending —
     // the regression guard needs the newest samples for freshness/version/consecutive logic.
-    return this.latencyStatsSamples
-      .filter(
-        (s) =>
-          s.connectionId === options.connectionId &&
-          (!options.command || s.command === options.command) &&
-          s.capturedAt >= options.startTime &&
-          s.capturedAt <= options.endTime,
-      )
-      .sort((a, b) => a.capturedAt - b.capturedAt)
-      .slice(-(options.limit ?? 10_000));
+    const limit = options.limit ?? 10_000;
+    const filtered = this.latencyStatsSamples.filter(
+      (s) =>
+        s.connectionId === options.connectionId &&
+        (!options.command || s.command === options.command) &&
+        s.capturedAt >= options.startTime &&
+        s.capturedAt <= options.endTime,
+    );
+    const byCommand = new Map<string, StoredLatencyStatsSample[]>();
+    for (const s of filtered) {
+      const arr = byCommand.get(s.command) ?? [];
+      arr.push(s);
+      byCommand.set(s.command, arr);
+    }
+    const kept: StoredLatencyStatsSample[] = [];
+    for (const arr of byCommand.values()) {
+      arr.sort((a, b) => a.capturedAt - b.capturedAt);
+      kept.push(...arr.slice(-limit));
+    }
+    return kept.sort((a, b) => a.capturedAt - b.capturedAt);
   }
 
   async pruneOldLatencyStatsSamples(

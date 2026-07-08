@@ -3164,18 +3164,22 @@ export class SqliteAdapter implements StoragePort {
     if (options.command) params.push(options.command);
     params.push(options.startTime, options.endTime, options.limit ?? 10_000);
 
-    // Take the most-recent `limit` rows (inner DESC + LIMIT), then return them ascending —
-    // an ASC + LIMIT would keep the oldest and drop the newest on busy instances, which the
-    // regression guard relies on for freshness/version/consecutive logic.
+    // Keep the most-recent `limit` rows PER COMMAND (ROW_NUMBER partitioned by command), then
+    // return them ascending. A single global LIMIT would split its budget across all commands,
+    // starving per-command baselines on busy instances; DESC inside the partition keeps the
+    // newest rows (the guard relies on freshness/version/consecutive logic). With a command
+    // filter the partition is that one command, so behaviour is unchanged.
     const rows = this.db
       .prepare(
-        `SELECT * FROM (
-           SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at
+        `SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at
+         FROM (
+           SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at,
+                  ROW_NUMBER() OVER (PARTITION BY command ORDER BY captured_at DESC) AS rn
            FROM latency_stats_samples
            WHERE connection_id = ? ${commandFilter} AND captured_at >= ? AND captured_at <= ?
-           ORDER BY captured_at DESC
-           LIMIT ?
-         ) ORDER BY captured_at ASC`,
+         )
+         WHERE rn <= ?
+         ORDER BY captured_at ASC`,
       )
       .all(...params) as any[];
 

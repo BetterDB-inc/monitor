@@ -119,6 +119,40 @@ describe.each([
     expect(limited.map((h) => h.capturedAt)).toEqual([200, 300]);
   });
 
+  it('applies the limit per command, not globally, when no command filter is given', async () => {
+    // Two commands with 3 samples each. A single global cap of 2 would keep only the 2 newest
+    // rows overall (both from one command) and starve the other, skewing its baseline. A
+    // per-command cap must keep the 2 most-recent rows of EACH command.
+    await storage.saveLatencyStatsSamples(
+      [
+        sample({ command: 'hmget', capturedAt: 100 }),
+        sample({ command: 'hmget', capturedAt: 200 }),
+        sample({ command: 'hmget', capturedAt: 300 }),
+        sample({ command: 'get', capturedAt: 110 }),
+        sample({ command: 'get', capturedAt: 210 }),
+        sample({ command: 'get', capturedAt: 310 }),
+      ],
+      CONN,
+    );
+
+    const history = await storage.getLatencyStatsHistory({
+      connectionId: CONN,
+      startTime: 0,
+      endTime: 10_000,
+      limit: 2,
+    });
+
+    const byCommand = new Map<string, number[]>();
+    for (const h of history) {
+      const arr = byCommand.get(h.command) ?? [];
+      arr.push(h.capturedAt);
+      byCommand.set(h.command, arr);
+    }
+    expect(history).toHaveLength(4);
+    expect(byCommand.get('hmget')).toEqual([200, 300]);
+    expect(byCommand.get('get')).toEqual([210, 310]);
+  });
+
   it('round-trips the server version per sample (upgrade baselines)', async () => {
     await storage.saveLatencyStatsSamples(
       [
