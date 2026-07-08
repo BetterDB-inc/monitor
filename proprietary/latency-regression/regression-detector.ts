@@ -114,12 +114,16 @@ interface UpgradeWindowState {
   /** Per-command median p99 (us) from old-version samples; commands without enough samples absent. */
   baselines: Map<string, number>;
   consecutive: Map<string, number>;
+  /** capturedAt of the last sample counted toward `consecutive`, per command. */
+  lastCountedAt: Map<string, number>;
   fired: boolean;
 }
 
 interface SustainedState {
   consecutive: number;
   lastFiredAt: number;
+  /** capturedAt of the last sample counted toward `consecutive`. */
+  lastCountedAt: number;
 }
 
 export class RegressionDetector {
@@ -183,8 +187,17 @@ export class RegressionDetector {
     }
     if (currentVersion === this.lastVersion) return;
 
-    // Version changed: open (or replace) the upgrade window.
+    // Always track the latest reported version...
     const fromVersion = this.lastVersion;
+    this.lastVersion = currentVersion;
+
+    // ...but only a major-version *increase* (e.g. 8.x -> 9.0) is an upgrade worth a regression
+    // window. A patch/minor/build-metadata flip (7.4.0 -> 7.4.1) or a downgrade must not open a
+    // window: doing so would clear every command's sustained cooldown/streak below (re-firing a
+    // sustained finding inside its 30-min cooldown) and mislabel the change as upgrade_regression.
+    if (parseMajorVersion(currentVersion) <= parseMajorVersion(fromVersion)) return;
+
+    // Major upgrade: open (or replace) the upgrade window.
     const baselines = new Map<string, number>();
     const byCommand = new Map<string, number[]>();
     for (const s of samples) {
@@ -206,10 +219,10 @@ export class RegressionDetector {
       openedAtMs: nowMs,
       baselines,
       consecutive: new Map(),
+      lastCountedAt: new Map(),
       fired: false,
     };
     this.sustained.clear();
-    this.lastVersion = currentVersion;
   }
 
   /** Commands with enough volume, capped to the top-K by volume. */
@@ -240,7 +253,17 @@ export class RegressionDetector {
         latest !== undefined &&
         latest.capturedAt >= nowMs - STALE_SAMPLE_MS &&
         latest.serverVersion === upgrade.toVersion;
-      const degraded = fresh && isDegraded(latest.p99Us, baseline, UPGRADE_DEGRADATION_FACTOR);
+      if (!fresh) {
+        upgrade.consecutive.set(command, 0);
+        continue;
+      }
+      // Count physical samples, not poll ticks: only advance the streak when a strictly newer
+      // sample arrives. Re-reading the same sample (a skipped poll or a failed storage write
+      // keeps getLatencyStatsHistory returning the prior row) must not inflate the count and
+      // fire before CONSECUTIVE_REQUIRED genuinely-distinct samples.
+      if (latest.capturedAt <= (upgrade.lastCountedAt.get(command) ?? -1)) continue;
+      upgrade.lastCountedAt.set(command, latest.capturedAt);
+      const degraded = isDegraded(latest.p99Us, baseline, UPGRADE_DEGRADATION_FACTOR);
       upgrade.consecutive.set(command, degraded ? (upgrade.consecutive.get(command) ?? 0) + 1 : 0);
     }
 
@@ -310,7 +333,7 @@ export class RegressionDetector {
     }
 
     for (const command of eligible) {
-      const state = this.sustained.get(command) ?? { consecutive: 0, lastFiredAt: 0 };
+      const state = this.sustained.get(command) ?? { consecutive: 0, lastFiredAt: 0, lastCountedAt: -1 };
       this.sustained.set(command, state);
 
       // Owned by an open upgrade window (the upgrade rule fires once for it) — suppress
@@ -330,8 +353,13 @@ export class RegressionDetector {
         continue;
       }
 
+      // Count physical samples, not poll ticks (see evaluateUpgrade): a repeated sample must
+      // not advance the streak. `latest` is non-null here (fresh implies defined).
+      if (latest!.capturedAt <= state.lastCountedAt) continue;
+      state.lastCountedAt = latest!.capturedAt;
+
       const baseline = median(baselineValues);
-      if (!isDegraded(latest.p99Us, baseline, SUSTAINED_DEGRADATION_FACTOR)) {
+      if (!isDegraded(latest!.p99Us, baseline, SUSTAINED_DEGRADATION_FACTOR)) {
         state.consecutive = 0;
         continue;
       }

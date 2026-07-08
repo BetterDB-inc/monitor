@@ -39,6 +39,12 @@ class Sim {
     this.addSample(p99Us, serverVersion);
     return this.evaluate();
   }
+
+  /** Advance one poll interval and re-evaluate WITHOUT a new sample (skipped poll / repeated read). */
+  repoll(): RegressionFinding[] {
+    this.now += MINUTE;
+    return this.evaluate();
+  }
 }
 
 describe('helpers', () => {
@@ -236,6 +242,41 @@ describe('RegressionDetector — upgrade regression', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].topologyRefreshCorrelated).toBe(true);
     expect(findings[0].message).toContain('topology refresh');
+  });
+
+  it('counts distinct samples, not poll ticks — repeated samples do not fire early', () => {
+    const sim = new Sim();
+    seedOldVersion(sim);
+
+    // Four distinct degraded samples, each followed by a repeated read (skipped poll).
+    // The repeats must not advance the streak, so after 4 distinct + 4 repeats (8 polls)
+    // nothing has fired — under the old per-tick counting this would have fired by poll 5.
+    for (let i = 0; i < 4; i++) {
+      expect(sim.tick(6000, '9.0.0')).toEqual([]);
+      expect(sim.repoll()).toEqual([]); // same sample re-read, still fresh
+    }
+
+    // The 5th genuinely-distinct sample fires.
+    const findings = sim.tick(6000, '9.0.0');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('upgrade_regression');
+  });
+
+  it('opens an upgrade window on a major bump but not a patch/minor bump', () => {
+    // Patch bump (same major): no upgrade window, so no upgrade_regression despite degradation.
+    const patch = new Sim();
+    seedOldVersion(patch); // 8.1.0 baseline
+    let patchFindings: RegressionFinding[] = [];
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) patchFindings = patch.tick(6000, '8.1.1');
+    expect(patchFindings).toEqual([]);
+
+    // Major bump on the same inputs fires the upgrade rule.
+    const major = new Sim();
+    seedOldVersion(major);
+    let majorFindings: RegressionFinding[] = [];
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) majorFindings = major.tick(6000, '9.0.0');
+    expect(majorFindings).toHaveLength(1);
+    expect(majorFindings[0].kind).toBe('upgrade_regression');
   });
 });
 
