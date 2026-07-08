@@ -958,6 +958,57 @@ describe('AnomalyService', () => {
     });
   });
 
+  // ─── Active-incident feed (data-loss banner) ─────────────────────────────
+  // The banner must surface UNRESOLVED incidents of any age, so activeOnly must
+  // query durable storage with resolved:false and no startTime floor. A 24h
+  // window (the default for the normal feed) would hide an older open incident.
+  describe('getRecentAnomalies activeOnly', () => {
+    const oldOpenEvent = {
+      id: 'evt-old',
+      timestamp: Date.now() - 3 * 24 * 60 * 60 * 1000, // 3 days ago
+      metricType: 'dataset_keys',
+      anomalyType: 'drop',
+      severity: 'critical',
+      value: 0,
+      baseline: 100,
+      stdDev: 0,
+      zScore: 0,
+      threshold: 0,
+      message: 'CRITICAL: Primary restarted with an empty dataset',
+      resolved: false,
+    };
+
+    it('queries storage for unresolved events with no startTime floor', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([oldOpenEvent]);
+
+      const events = await service.getRecentAnomalies(
+        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+      );
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ resolved: false, metricType: 'dataset_keys' }),
+      );
+      const callArg = storage.getAnomalyEvents.mock.calls.at(-1)![0];
+      expect(callArg.startTime).toBeUndefined(); // no 24h floor → old incident survives
+      expect(events).toHaveLength(1);
+      expect(events[0].id).toBe('evt-old');
+      expect(events[0].resolved).toBe(false);
+    });
+
+    it('reads from storage even when an in-memory cache entry exists', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([]);
+      // A fresh in-memory event would be returned by the normal (non-active) path.
+      (service as any).recentAnomalies = [{ ...oldOpenEvent, id: 'in-mem', timestamp: Date.now() }];
+
+      const events = await service.getRecentAnomalies(
+        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+      );
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalled();
+      expect(events).toHaveLength(0); // storage is the source of truth for activeOnly
+    });
+  });
+
   // ─── Cluster State Webhook Dispatch ──────────────────────────────────────
 
   describe('cluster state webhook dispatch', () => {

@@ -741,7 +741,25 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     metricType?: MetricType,
     limit = 100,
     connectionId?: string,
+    activeOnly = false,
   ): Promise<AnomalyEvent[]> {
+    // Active-incident feed (e.g. the data-loss banner): return every UNRESOLVED
+    // event of any age. Must query durable storage — the in-memory cache is
+    // capped and lost on restart, and a lingering open incident can be older
+    // than any time window — with no startTime floor so old-but-open incidents
+    // are never filtered out.
+    if (activeOnly) {
+      const stored = await this.storage.getAnomalyEvents({
+        endTime,
+        severity: severity as string,
+        metricType: metricType as string,
+        resolved: false,
+        limit,
+        connectionId,
+      });
+      return stored.map(s => this.storedToAnomalyEvent(s));
+    }
+
     const cacheThreshold = Date.now() - this.cacheTtlMs;
 
     if (!startTime || startTime >= cacheThreshold) {

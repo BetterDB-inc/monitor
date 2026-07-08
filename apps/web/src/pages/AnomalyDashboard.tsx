@@ -191,7 +191,7 @@ export function AnomalyDashboard() {
   // date range, so it uses a dedicated unfiltered feed rather than `events`
   // (which the date picker narrows and could scroll the incident out of view).
   const { data: dataLossEvents } = usePolling<AnomalyEvent[]>({
-    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'dataset_keys' }),
+    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'dataset_keys', activeOnly: true }),
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
