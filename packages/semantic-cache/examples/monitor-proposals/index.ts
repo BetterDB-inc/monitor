@@ -48,6 +48,8 @@ const NEW_THRESHOLD = 0.10;
 // Short refresh so the demo completes quickly.
 // Production default is 30 000 ms.
 const REFRESH_INTERVAL_MS = 5_000;
+// Demo TTL adjust: shorten entry lifetime to reclaim memory sooner.
+const NEW_TTL_SECONDS = 300;
 
 const host = process.env.VALKEY_HOST ?? 'localhost';
 const port = parseInt(process.env.VALKEY_PORT ?? '6399', 10);
@@ -304,6 +306,35 @@ async function main() {
   // The borderline query now hits again under the looser geography threshold.
   await checkAndLog(cache, "What is France's capital city?", '  check (no category)');
   await checkAndLog(cache, "What is France's capital city?", '  check (geography)', 'geography');
+
+  // ── 10. TTL adjust ─────────────────────────────────────────────────────────
+  sep('10 · Bonus — TTL adjust (no restart)');
+
+  log(`cache._defaultTtl  before: ${cache._defaultTtl ?? '(unset)'}`);
+  log('Monitor can also propose shortening or extending entry TTL, for example to');
+  log('reclaim memory under load:');
+  console.log();
+  console.log(`  mcp__betterdb__cache_propose_ttl_adjust({`);
+  console.log(`    cache_name:      "${CACHE_NAME}",`);
+  console.log(`    new_ttl_seconds: ${NEW_TTL_SECONDS},`);
+  console.log(`    reasoning:       "Memory pressure — shorten entry lifetime to reclaim`);
+  console.log(`                     space sooner."`);
+  console.log(`  })`);
+  console.log();
+
+  // Exact call CacheApplyDispatcher.applySemanticTtlAdjust() makes:
+  await client.hset(configKey, 'ttl', String(NEW_TTL_SECONDS));
+  log(`HSET ${configKey} ttl ${NEW_TTL_SECONDS}  (simulated dispatch)`);
+
+  await countdown(REFRESH_INTERVAL_MS / 1000);
+  await sleep(200);
+
+  log(`cache._defaultTtl  after:  ${cache._defaultTtl ?? '(unset)'}`);
+  if (cache._defaultTtl === NEW_TTL_SECONDS) {
+    log(`✓  TTL is now ${cache._defaultTtl}s — change is live, same as threshold above.`);
+  } else {
+    log(`✗  TTL not updated (got: ${cache._defaultTtl ?? '(unset)'})`);
+  }
 
   // ── Cleanup ───────────────────────────────────────────────────────────────
   sep();

@@ -70,7 +70,7 @@ export class SemanticCache {
   private readonly missPendingKey: string;
   private readonly configKey: string;
   private defaultThreshold: number;
-  private readonly defaultTtl: number | undefined;
+  private defaultTtl: number | undefined;
   private categoryThresholds: Record<string, number>;
   private readonly uncertaintyBand: number;
   private readonly telemetry: Telemetry;
@@ -81,6 +81,7 @@ export class SemanticCache {
   private readonly discoveryOptions: DiscoveryOptions;
   private readonly _initialDefaultThreshold: number;
   private readonly _initialCategoryThresholds: Record<string, number>;
+  private readonly _initialDefaultTtl: number | undefined;
   private readonly configRefreshOptions: Required<ConfigRefreshOptions>;
   private configRefreshTimer: ReturnType<typeof setInterval> | undefined;
   private discovery: DiscoveryManager | null = null;
@@ -150,6 +151,7 @@ export class SemanticCache {
     // Capture constructor values as fallback when __config fields are absent
     this._initialDefaultThreshold = this.defaultThreshold;
     this._initialCategoryThresholds = { ...this.categoryThresholds };
+    this._initialDefaultTtl = this.defaultTtl;
 
     // Refresh options
     const refresh = options.configRefresh ?? {};
@@ -1202,13 +1204,15 @@ export class SemanticCache {
    *   - "threshold"            -> updates defaultThreshold
    *   - "threshold:{category}" -> updates categoryThresholds[category]
    *   - "threshold:" (empty)   -> ignored
+   *   - "ttl"                  -> updates defaultTtl (positive integer seconds)
    *   - non-numeric values     -> ignored
-   *   - out-of-range values    -> ignored (must be 0 <= x <= 2)
+   *   - out-of-range values    -> ignored (threshold: must be 0 <= x <= 2;
+   *     ttl: must be a positive integer)
    *
    * Categories present in memory but absent from the hash fall back to their
    * constructor values (or are removed if no constructor override existed).
-   * The default threshold likewise falls back to its constructor value if
-   * `threshold` is absent from the hash.
+   * The default threshold and default TTL likewise fall back to their
+   * constructor values if `threshold`/`ttl` are absent from the hash.
    */
   async refreshConfig(): Promise<boolean> {
     let raw: Record<string, string> | null = null;
@@ -1220,9 +1224,18 @@ export class SemanticCache {
 
     let nextDefault = this._initialDefaultThreshold;
     const nextCategory: Record<string, number> = { ...this._initialCategoryThresholds };
+    let nextTtl = this._initialDefaultTtl;
 
     if (raw) {
       for (const [field, value] of Object.entries(raw)) {
+        if (field === 'ttl') {
+          const parsedTtl = Number(value);
+          if (Number.isFinite(parsedTtl) && Number.isInteger(parsedTtl) && parsedTtl > 0) {
+            nextTtl = parsedTtl;
+          }
+          continue;
+        }
+
         const parsed = Number(value);
         if (!Number.isFinite(parsed) || parsed < 0 || parsed > 2) {
           continue;
@@ -1240,6 +1253,7 @@ export class SemanticCache {
 
     this.defaultThreshold = nextDefault;
     this.categoryThresholds = nextCategory;
+    this.defaultTtl = nextTtl;
     return true;
   }
 
@@ -1248,6 +1262,11 @@ export class SemanticCache {
   /** @internal Default similarity threshold. */
   get _defaultThreshold(): number {
     return this.defaultThreshold;
+  }
+
+  /** @internal Default entry TTL in seconds, or undefined if unset. */
+  get _defaultTtl(): number | undefined {
+    return this.defaultTtl;
   }
 
   /** @internal Test-only getter. */

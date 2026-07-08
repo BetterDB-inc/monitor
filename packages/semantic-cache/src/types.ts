@@ -43,7 +43,11 @@ export interface SemanticCacheOptions {
    * Distance 0 = identical, distance 2 = opposite.
    */
   defaultThreshold?: number;
-  /** Default TTL in seconds for stored entries. undefined = no expiry. */
+  /**
+   * Default TTL in seconds for stored entries. undefined = no expiry.
+   * Runtime-refreshable via the `ttl` field of `{name}:__config`; see
+   * {@link SemanticCacheOptions.configRefresh}.
+   */
   defaultTtl?: number;
   /**
    * Per-category threshold overrides (cosine distance, 0–2).
@@ -108,10 +112,11 @@ export interface SemanticCacheOptions {
    */
   discovery?: DiscoveryOptions;
   /**
-   * Periodic refresh of in-memory threshold config from Valkey.
+   * Periodic refresh of in-memory threshold/TTL config from Valkey.
    * When enabled, the cache re-reads `{name}:__config` on the configured
    * interval. Field `threshold` updates `defaultThreshold`; fields named
-   * `threshold:{category}` update `categoryThresholds[category]`.
+   * `threshold:{category}` update `categoryThresholds[category]`; field `ttl`
+   * (positive integer seconds) updates `defaultTtl`.
    * Defaults: enabled=true, intervalMs=30000.
    */
   configRefresh?: ConfigRefreshOptions;

@@ -288,4 +288,87 @@ describe('config refresh', () => {
       vi.useRealTimers();
     }
   });
+
+  it('ttl field updates defaultTtl from constructor value', async () => {
+    const client = makeMockClient({ ttl: '120' });
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'cfg_ttl',
+      defaultTtl: 60,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    expect(cache._defaultTtl).toBe(120);
+  });
+
+  it('falls back to constructor ttl when __config has no ttl field', async () => {
+    const client = makeMockClient({ threshold: '0.10' });
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'cfg_ttl_fallback',
+      defaultThreshold: 0.10,
+      defaultTtl: 60,
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    expect(cache._defaultTtl).toBe(60);
+  });
+
+  it('is undefined when no constructor ttl and no __config ttl field', async () => {
+    const client = makeMockClient({});
+    const cache = new SemanticCache({
+      client: client as unknown as Valkey,
+      embedFn: vi.fn(async () => [0.1, 0.2]),
+      name: 'cfg_ttl_unset',
+      embeddingCache: { enabled: false },
+    });
+    await cache.initialize();
+    await flushMicrotasks(5);
+    expect(cache._defaultTtl).toBeUndefined();
+  });
+
+  it('ignores non-integer and non-positive ttl values, keeping the constructor value', async () => {
+    for (const badValue of ['not a number', '0', '-5', '1.5', 'Infinity']) {
+      const client = makeMockClient({ ttl: badValue });
+      const cache = new SemanticCache({
+        client: client as unknown as Valkey,
+        embedFn: vi.fn(async () => [0.1, 0.2]),
+        name: `cfg_ttl_invalid_${badValue.replace(/[^a-z0-9]/gi, '_')}`,
+        defaultTtl: 60,
+        embeddingCache: { enabled: false },
+      });
+      await cache.initialize();
+      await flushMicrotasks(5);
+      expect(cache._defaultTtl).toBe(60);
+    }
+  });
+
+  it('picks up a live ttl change on the next refresh tick', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeMockClient({ ttl: '60' });
+      const cache = new SemanticCache({
+        client: client as unknown as Valkey,
+        embedFn: vi.fn(async () => [0.1, 0.2]),
+        name: 'cfg_ttl_live',
+        defaultTtl: 60,
+        configRefresh: { intervalMs: 1000 },
+        embeddingCache: { enabled: false },
+      });
+      await cache.initialize();
+      await flushMicrotasks(5);
+      expect(cache._defaultTtl).toBe(60);
+
+      client.setConfigResponse({ ttl: '300' });
+      vi.advanceTimersByTime(1000);
+      await flushMicrotasks(5);
+      expect(cache._defaultTtl).toBe(300);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
