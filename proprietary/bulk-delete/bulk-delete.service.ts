@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { StoragePort, StoredBulkDeleteAudit } from '@app/common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
@@ -160,6 +160,17 @@ export class BulkDeleteService implements OnModuleInit {
     // Confirm the connection exists before we hand back a job id.
     this.connectionRegistry.get(connectionId);
 
+    // One active walk per connection: repeated preview/execute calls must not
+    // fan out overlapping SCAN/UNLINK runs against the same node. Reject (409)
+    // until the in-flight job finishes or is cancelled.
+    const active = this.findActiveJob(connectionId);
+    if (active) {
+      throw new ConflictException(
+        `A bulk-delete job (${active.id}) is already running for connection '${connectionId}'. ` +
+          `Wait for it to finish or cancel it before starting another.`,
+      );
+    }
+
     const scope = input.scope ?? 'node';
     const config = this.connectionRegistry.getConfig(connectionId);
     const job: BulkDeleteJob = {
@@ -190,6 +201,18 @@ export class BulkDeleteService implements OnModuleInit {
     void this.runJob(job);
 
     return { jobId: job.id, status: 'running' };
+  }
+
+  /**
+   * The still-running job for a connection, if any. Used to enforce a single
+   * concurrent walk per connection so repeated API calls can't stack up
+   * overlapping SCAN/UNLINK runs against one node.
+   */
+  private findActiveJob(connectionId: string): BulkDeleteJob | null {
+    for (const job of this.jobs.values()) {
+      if (job.connectionId === connectionId && job.status === 'running') return job;
+    }
+    return null;
   }
 
   private async runJob(job: BulkDeleteJob): Promise<void> {

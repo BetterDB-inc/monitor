@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { ConflictException } from '@nestjs/common';
 import { BulkDeleteService } from '../bulk-delete.service';
 import { BulkDeleteValidationError } from '../bulk-delete-engine';
 import { StoredBulkDeleteAudit } from '@app/common/interfaces/storage-port.interface';
@@ -133,6 +134,29 @@ describe('BulkDeleteService', () => {
 
     expect(() => service.startExecution('conn-1', { match: '' })).toThrow(BulkDeleteValidationError);
     expect(() => service.startPreview('conn-1', { match: '*' })).toThrow(BulkDeleteValidationError);
+  });
+
+  it('rejects a second job while one is already running for the same connection', async () => {
+    const { client } = makeFakeClient(['a:1', 'a:2']);
+    const service = build(client);
+
+    // runJob defers past the synchronous startJob, so the first job is still
+    // 'running' when the next start is attempted in the same tick.
+    const first = service.startExecution('conn-1', { match: 'a:*' });
+
+    // Same connection, before the first finishes → 409 (no overlapping walk).
+    expect(() => service.startExecution('conn-1', { match: 'a:*' })).toThrow(ConflictException);
+    expect(() => service.startPreview('conn-1', { match: 'a:*' })).toThrow(ConflictException);
+
+    // A different connection is not blocked.
+    const other = service.startPreview('conn-2', { match: 'a:*' });
+
+    await waitForJob(service, first.jobId, 'conn-1');
+    await waitForJob(service, other.jobId, 'conn-2');
+
+    // Once the connection's job has finished, a new one can start.
+    const third = service.startExecution('conn-1', { match: 'a:*' });
+    await waitForJob(service, third.jobId, 'conn-1');
   });
 
   it('scopes job access to the owning connection', async () => {
