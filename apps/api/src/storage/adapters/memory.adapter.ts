@@ -629,13 +629,14 @@ export class MemoryAdapter implements StoragePort {
 
   async resolveAnomaly(id: string, resolvedAt: number): Promise<boolean> {
     const event = this.anomalyEvents.find((e) => e.id === id);
-    if (event && !event.resolved) {
+    if (!event) return false; // no such anomaly
+    if (!event.resolved) {
       event.resolved = true;
       event.resolvedAt = resolvedAt;
       event.durationMs = resolvedAt - event.timestamp;
-      return true;
     }
-    return false;
+    // Idempotent: report success whether we just resolved it or it was already resolved.
+    return true;
   }
 
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
