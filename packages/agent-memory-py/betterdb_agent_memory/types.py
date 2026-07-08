@@ -37,6 +37,8 @@ class MemoryItem:
     source: str | None = None
     # Reconciliation key, present on fact memories written by consolidate_facts.
     subject: str | None = None
+    # Asserted fact date, present on dated fact memories (source of truth for datedness).
+    date: str | None = None
     thread_id: str | None = None
     agent_id: str | None = None
     namespace: str | None = None

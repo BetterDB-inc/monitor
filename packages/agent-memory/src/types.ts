@@ -22,6 +22,12 @@ export interface RememberOptions extends MemoryScope {
    * stored fact for this subject instead of writing a duplicate.
    */
   subject?: string;
+  /**
+   * Asserted date of a fact memory (see {@link Fact.date}). Persisted in its own
+   * field as the source of truth for datedness, so a dateless statement that
+   * happens to start with a bracket isn't misread as dated on read-back.
+   */
+  date?: string;
   ttl?: number;
 }
 
@@ -33,6 +39,8 @@ export interface MemoryItem extends MemoryScope {
   source?: string;
   /** Reconciliation key, present on fact memories written by consolidateFacts. */
   subject?: string;
+  /** Asserted fact date, present on dated fact memories (source of truth for datedness). */
+  date?: string;
   createdAt: number;
   lastAccessedAt: number;
   accessCount: number;

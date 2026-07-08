@@ -1,6 +1,40 @@
 import { describe, it, expect } from 'vitest';
-import { reconcile, applyOps } from '../reconcileFacts';
-import type { Fact } from '../types';
+import { reconcile, applyOps, storedFactToFact, factContent } from '../reconcileFacts';
+import type { Fact, MemoryItem } from '../types';
+
+const storedItem = (over: Partial<MemoryItem>): MemoryItem => ({
+  id: 'x',
+  content: '',
+  importance: 0.5,
+  tags: [],
+  createdAt: 0,
+  lastAccessedAt: 0,
+  accessCount: 0,
+  ...over,
+});
+
+describe('storedFactToFact', () => {
+  it('reads datedness from the date field, not a leading bracket in content', () => {
+    // Dateless statement that happens to start with a bracket → stays dateless.
+    expect(
+      storedFactToFact(storedItem({ subject: 'goal', content: '[Q3] revenue target is 5M' })),
+    ).toEqual({ subject: 'goal', statement: '[Q3] revenue target is 5M' });
+
+    // Dated fact: date from the field, statement recovered by stripping the prefix.
+    expect(
+      storedFactToFact(storedItem({ subject: 'employer', content: '[2024-06] Globex', date: '2024-06' })),
+    ).toEqual({ subject: 'employer', statement: 'Globex', date: '2024-06' });
+  });
+
+  it('round-trips factContent for a dateless bracketed statement', () => {
+    const fact: Fact = { subject: 'goal', statement: '[Q3] revenue target is 5M' };
+    // Written content is the bare statement (no date prefix), and with no date
+    // field it recovers unchanged — no spurious date.
+    const content = factContent(fact);
+    expect(content).toBe('[Q3] revenue target is 5M');
+    expect(storedFactToFact(storedItem({ subject: 'goal', content }))).toEqual(fact);
+  });
+});
 
 describe('reconcile', () => {
   it('adds a fact for a subject not yet seen', () => {

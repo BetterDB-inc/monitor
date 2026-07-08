@@ -922,8 +922,18 @@ export class MemoryStore {
     // reconcile key) can participate; pre-subject rows are left untouched.
     const existingFacts = await this.loadExistingFacts(scope, tags);
     const existingBySubject = new Map<string, { id: string; content: string }>();
+    // Self-heal a concurrent-write race: two consolidateFacts runs that each
+    // wrote a fact for the same subject leave a duplicate row. Keep one canonical
+    // per subject and retract the extras on this run, so tracking stays 1:1 and
+    // orphaned duplicates don't accumulate forever.
+    const duplicateFactIds: string[] = [];
     for (const item of existingFacts) {
-      if (item.subject !== undefined) {
+      if (item.subject === undefined) {
+        continue;
+      }
+      if (existingBySubject.has(item.subject)) {
+        duplicateFactIds.push(item.id);
+      } else {
         existingBySubject.set(item.subject, { id: item.id, content: item.content });
       }
     }
@@ -960,6 +970,7 @@ export class MemoryStore {
           tags,
           source: this.factSource,
           subject: fact.subject,
+          date: fact.date,
           importance: options.factImportance ?? this.defaultFactImportance,
         },
         now,
@@ -968,8 +979,9 @@ export class MemoryStore {
     }
 
     // Delete the stored fact for any subject that was superseded (its content
-    // changed) or retracted (no longer in the curated set).
-    const toDelete: string[] = [];
+    // changed) or retracted (no longer in the curated set), plus any duplicate
+    // rows from a prior concurrent-write race.
+    const toDelete: string[] = duplicateFactIds.map((id) => `${this.name}:mem:${id}`);
     for (const [subject, existing] of existingBySubject) {
       const curatedFact = curatedBySubject.get(subject);
       if (curatedFact === undefined || factContent(curatedFact) !== existing.content) {
@@ -999,10 +1011,11 @@ export class MemoryStore {
       `${this.name}:mem:idx`,
       filter,
       'RETURN',
-      '3',
+      '4',
       'content',
       'subject',
       'source',
+      'date',
       'LIMIT',
       '0',
       String(CONSOLIDATE_SCAN_LIMIT),

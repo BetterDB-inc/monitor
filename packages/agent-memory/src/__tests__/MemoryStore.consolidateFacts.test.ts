@@ -49,9 +49,19 @@ function factsClient(hits: Array<[string, string[]]>) {
 }
 
 // A stored fact memory: carries source=fact and a persisted subject so a later
-// run can reconcile against it.
-function factHit(id: string, subject: string, content: string): [string, string[]] {
-  return [`mem:mem:${id}`, ['content', content, 'subject', subject, 'source', 'fact']];
+// run can reconcile against it. Datedness is carried in its own `date` field
+// (the source of truth), matching how consolidateFacts writes dated facts.
+function factHit(
+  id: string,
+  subject: string,
+  content: string,
+  date?: string,
+): [string, string[]] {
+  const fields = ['content', content, 'subject', subject, 'source', 'fact'];
+  if (date !== undefined) {
+    fields.push('date', date);
+  }
+  return [`mem:mem:${id}`, fields];
 }
 
 // Two-phase mock: the candidate scan excludes facts (`-@source`), the existing
@@ -404,7 +414,7 @@ describe('MemoryStore.consolidateFacts', () => {
   it('supersedes a stored fact: a newer dated statement deletes the prior memory and writes the new one', async () => {
     const client = twoPhaseClient(
       [itemHit('a', { importance: 0.2, ageSeconds: 100000 })],
-      [factHit('f1', 'city', '[2024-01-01] Sofia')],
+      [factHit('f1', 'city', '[2024-01-01] Sofia', '2024-01-01')],
     );
     const store = new MemoryStore({
       client,
@@ -425,6 +435,65 @@ describe('MemoryStore.consolidateFacts', () => {
     const hset = client.call.mock.calls.find((c) => c[0] === 'HSET');
     expect(fieldValue(hset, 'content')).toBe('[2024-05-01] Berlin');
     expect(fieldValue(hset, 'subject')).toBe('city');
+  });
+
+  it('does not misread a dateless stored fact whose statement starts with a bracket', async () => {
+    // "[Q3] revenue target is 5M" is a dateless statement, not a fact dated "Q3".
+    // Inferring a date from the leading bracket would make the stored fact look
+    // dated ("Q3"), and a genuinely newer dated restatement ("2024-09") would be
+    // dropped by the string compare ('2' < 'Q'). Datedness must come from the
+    // absent `date` field, so the newer dated fact supersedes it.
+    const client = twoPhaseClient(
+      [itemHit('a', { importance: 0.2, ageSeconds: 100000 })],
+      [factHit('f1', 'goal', '[Q3] revenue target is 5M')],
+    );
+    const store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      consolidation: true,
+    });
+
+    const result = await store.consolidateFacts({
+      namespace: 'u1',
+      extractFacts: extractor([
+        { subject: 'goal', statement: 'revenue target is 10M', date: '2024-09' },
+      ]),
+    });
+
+    expect(result.deleted).toBe(1);
+    expect(result.created).toHaveLength(1);
+    const del = client.call.mock.calls.find((c) => c[0] === 'DEL');
+    expect(del?.slice(1)).toEqual(['mem:mem:f1']);
+    const hset = client.call.mock.calls.find((c) => c[0] === 'HSET');
+    expect(fieldValue(hset, 'content')).toBe('[2024-09] revenue target is 10M');
+    expect(fieldValue(hset, 'date')).toBe('2024-09');
+  });
+
+  it('self-heals a concurrent-write race by retracting duplicate-subject facts', async () => {
+    // Two prior runs each wrote a fact for the same subject (a race). The next
+    // run keeps one canonical row and retracts the extra so it is not orphaned.
+    const client = twoPhaseClient(
+      [itemHit('a', { importance: 0.2, ageSeconds: 100000 })],
+      [factHit('f1', 'employer', 'Acme'), factHit('f2', 'employer', 'Acme')],
+    );
+    const store = new MemoryStore({
+      client,
+      name: 'mem',
+      embedFn: fakeEmbed(8),
+      consolidation: true,
+    });
+
+    const result = await store.consolidateFacts({
+      namespace: 'u1',
+      extractFacts: extractor([{ subject: 'employer', statement: 'Acme' }]),
+    });
+
+    // Canonical row (f1) unchanged → no write; duplicate (f2) retracted.
+    expect(result.created).toHaveLength(0);
+    expect(result.deleted).toBe(1);
+    const del = client.call.mock.calls.find((c) => c[0] === 'DEL');
+    expect(del?.slice(1)).toEqual(['mem:mem:f2']);
   });
 
   it('retracts a stored fact across runs: a tombstone deletes the prior memory and writes nothing', async () => {

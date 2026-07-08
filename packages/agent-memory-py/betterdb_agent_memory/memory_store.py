@@ -757,6 +757,7 @@ class MemoryStore:
         tags: list[str] | None,
         source: str | None,
         subject: str | None = None,
+        date: str | None = None,
         thread_id: str | None,
         agent_id: str | None,
         namespace: str | None,
@@ -774,6 +775,7 @@ class MemoryStore:
             tags=tags,
             source=source,
             subject=subject,
+            date=date,
             thread_id=thread_id,
             agent_id=agent_id,
             namespace=namespace,
@@ -1037,8 +1039,17 @@ class MemoryStore:
             # persisted ``subject`` (the reconcile key) can participate.
             existing_facts = await self._load_existing_facts(scope, tag_list)
             existing_by_subject: dict[str, tuple[str, str]] = {}
+            # Self-heal a concurrent-write race: two consolidate_facts runs that
+            # each wrote a fact for the same subject leave a duplicate row. Keep
+            # one canonical per subject and retract the extras on this run, so
+            # tracking stays 1:1 and orphaned duplicates don't accumulate forever.
+            duplicate_fact_ids: list[str] = []
             for item in existing_facts:
-                if item.subject is not None:
+                if item.subject is None:
+                    continue
+                if item.subject in existing_by_subject:
+                    duplicate_fact_ids.append(item.id)
+                else:
                     existing_by_subject[item.subject] = (item.id, item.content)
             prior_facts = [
                 stored_fact_to_fact(item) for item in existing_facts if item.subject is not None
@@ -1071,6 +1082,7 @@ class MemoryStore:
                     tags=tag_list,
                     source=self._fact_source,
                     subject=fact.subject,
+                    date=fact.date,
                     thread_id=thread_id,
                     agent_id=agent_id,
                     namespace=namespace,
@@ -1080,8 +1092,9 @@ class MemoryStore:
                 created.append(fact_id)
 
             # Delete the stored fact for any subject that was superseded (its
-            # content changed) or retracted (no longer in the curated set).
-            to_delete: list[str] = []
+            # content changed) or retracted (no longer in the curated set), plus
+            # any duplicate rows from a prior concurrent-write race.
+            to_delete: list[str] = [f"{self._name}:mem:{dup_id}" for dup_id in duplicate_fact_ids]
             for subject, (existing_id, existing_content) in existing_by_subject.items():
                 curated_fact = curated_by_subject.get(subject)
                 if curated_fact is None or fact_content(curated_fact) != existing_content:
@@ -1110,10 +1123,11 @@ class MemoryStore:
             f"{self._name}:mem:idx",
             filter_query,
             "RETURN",
-            "3",
+            "4",
             "content",
             "subject",
             "source",
+            "date",
             "LIMIT",
             "0",
             str(CONSOLIDATE_SCAN_LIMIT),

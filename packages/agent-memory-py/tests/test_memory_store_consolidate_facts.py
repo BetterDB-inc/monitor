@@ -36,10 +36,16 @@ def facts_client(hits: list[tuple[str, dict[str, str]]]) -> Any:
     return fake_client(handler)
 
 
-def fact_hit(id: str, subject: str, content: str) -> tuple[str, dict[str, str]]:
+def fact_hit(
+    id: str, subject: str, content: str, date: str | None = None
+) -> tuple[str, dict[str, str]]:
     # A stored fact memory: carries source=fact and a persisted subject so a later
-    # run can reconcile against it.
-    return (f"mem:mem:{id}", {"content": content, "subject": subject, "source": "fact"})
+    # run can reconcile against it. Datedness is carried in its own ``date`` field
+    # (the source of truth), matching how consolidate_facts writes dated facts.
+    fields = {"content": content, "subject": subject, "source": "fact"}
+    if date is not None:
+        fields["date"] = date
+    return (f"mem:mem:{id}", fields)
 
 
 def two_phase_client(
@@ -328,7 +334,7 @@ async def test_is_idempotent_rewriting_nothing_for_an_unchanged_fact() -> None:
 async def test_supersedes_a_stored_fact_deleting_prior_and_writing_new() -> None:
     client = two_phase_client(
         [item_hit("a", 0.2, 100000)],
-        [fact_hit("f1", "city", "[2024-01-01] Sofia")],
+        [fact_hit("f1", "city", "[2024-01-01] Sofia", date="2024-01-01")],
     )
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
     extract = extractor([Fact(subject="city", statement="Berlin", date="2024-05-01")])
@@ -341,6 +347,50 @@ async def test_supersedes_a_stored_fact_deleting_prior_and_writing_new() -> None
     hset = client.find_call("HSET")
     assert field_value(hset, "content") == "[2024-05-01] Berlin"
     assert field_value(hset, "subject") == "city"
+
+
+async def test_does_not_misread_a_dateless_stored_fact_starting_with_a_bracket() -> None:
+    # "[Q3] revenue target is 5M" is a dateless statement, not a fact dated "Q3".
+    # Inferring a date from the leading bracket would make the stored fact look
+    # dated ("Q3"), and a genuinely newer dated restatement ("2024-09") would be
+    # dropped by the string compare ('2' < 'Q'). Datedness must come from the
+    # absent ``date`` field, so the newer dated fact supersedes it.
+    client = two_phase_client(
+        [item_hit("a", 0.2, 100000)],
+        [fact_hit("f1", "goal", "[Q3] revenue target is 5M")],
+    )
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor(
+        [Fact(subject="goal", statement="revenue target is 10M", date="2024-09")]
+    )
+
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    assert result.deleted == 1
+    assert len(result.created) == 1
+    delete = client.find_call("DEL")
+    assert delete is not None and "mem:mem:f1" in delete
+    hset = client.find_call("HSET")
+    assert field_value(hset, "content") == "[2024-09] revenue target is 10M"
+    assert field_value(hset, "date") == "2024-09"
+
+
+async def test_self_heals_a_concurrent_write_race_by_retracting_duplicate_subjects() -> None:
+    # Two prior runs each wrote a fact for the same subject (a race). The next run
+    # keeps one canonical row and retracts the extra so it is not orphaned.
+    client = two_phase_client(
+        [item_hit("a", 0.2, 100000)],
+        [fact_hit("f1", "employer", "Acme"), fact_hit("f2", "employer", "Acme")],
+    )
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), consolidation=True)
+    extract = extractor([Fact(subject="employer", statement="Acme")])
+
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    assert len(result.created) == 0
+    assert result.deleted == 1
+    delete = client.find_call("DEL")
+    assert delete is not None and "mem:mem:f2" in delete
 
 
 async def test_retracts_a_stored_fact_across_runs_via_tombstone() -> None:

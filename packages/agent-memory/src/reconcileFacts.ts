@@ -1,10 +1,5 @@
 import type { Fact, MemoryItem } from './types';
 
-// A stored fact memory's content is `[date] statement` when the fact carried a
-// date, else the bare statement. This matches that prefix so a stored fact can
-// be recovered for reconciliation.
-const DATED_CONTENT = /^\[([^\]]+)\] ([\s\S]*)$/;
-
 /** Render a fact's content for storage, preserving its asserted date as a prefix. */
 export function factContent(fact: Fact): string {
   return fact.date !== undefined && fact.date !== ''
@@ -13,16 +8,25 @@ export function factContent(fact: Fact): string {
 }
 
 /**
- * Recover a {@link Fact} from a stored fact memory: the reconcile key comes from
- * the persisted `subject`, the statement and date from the `[date] statement`
- * content (inverse of {@link factContent}).
+ * Recover a {@link Fact} from a stored fact memory. Datedness is read from the
+ * persisted `date` field (the source of truth), NOT inferred from a leading
+ * bracket in the content — otherwise a dateless statement like
+ * "[Q3] revenue target is 5M" would round-trip into a spurious dated fact and
+ * corrupt newest-wins resolution. When a date is present the content was written
+ * as `[date] statement`, so the known prefix is stripped to recover the
+ * statement (inverse of {@link factContent}).
  */
 export function storedFactToFact(item: MemoryItem): Fact {
-  const match = DATED_CONTENT.exec(item.content);
-  if (match) {
-    return { subject: item.subject ?? '', statement: match[2], date: match[1] };
+  const subject = item.subject ?? '';
+  const date = item.date;
+  if (date === undefined || date === '') {
+    return { subject, statement: item.content };
   }
-  return { subject: item.subject ?? '', statement: item.content };
+  const prefix = `[${date}] `;
+  const statement = item.content.startsWith(prefix)
+    ? item.content.slice(prefix.length)
+    : item.content;
+  return { subject, statement, date };
 }
 
 /**
@@ -41,7 +45,9 @@ export type FactOp =
 // prior's (a dateless prior counts as the epoch, so any dated candidate beats
 // it, and equal dates let the later batch assertion win).
 function isNewer(candidate: Fact, prior: Fact): boolean {
-  if (candidate.date === undefined) return true;
+  if (candidate.date === undefined) {
+    return true;
+  }
   return candidate.date >= (prior.date ?? '');
 }
 

@@ -7,6 +7,40 @@ from betterdb_agent_memory import (
     apply_ops,
     reconcile,
 )
+from betterdb_agent_memory.reconcile_facts import fact_content, stored_fact_to_fact
+from betterdb_agent_memory.types import MemoryItem
+
+
+def _stored(subject: str, content: str, date: str | None = None) -> MemoryItem:
+    return MemoryItem(
+        id="x",
+        content=content,
+        importance=0.5,
+        tags=[],
+        created_at=0,
+        last_accessed_at=0,
+        access_count=0,
+        subject=subject,
+        date=date,
+    )
+
+
+def test_stored_fact_reads_datedness_from_the_date_field_not_a_leading_bracket() -> None:
+    # Dateless statement that happens to start with a bracket -> stays dateless.
+    assert stored_fact_to_fact(_stored("goal", "[Q3] revenue target is 5M")) == Fact(
+        subject="goal", statement="[Q3] revenue target is 5M"
+    )
+    # Dated fact: date from the field, statement recovered by stripping the prefix.
+    assert stored_fact_to_fact(_stored("employer", "[2024-06] Globex", "2024-06")) == Fact(
+        subject="employer", statement="Globex", date="2024-06"
+    )
+
+
+def test_stored_fact_round_trips_a_dateless_bracketed_statement() -> None:
+    fact = Fact(subject="goal", statement="[Q3] revenue target is 5M")
+    content = fact_content(fact)
+    assert content == "[Q3] revenue target is 5M"
+    assert stored_fact_to_fact(_stored("goal", content)) == fact
 
 
 def test_adds_a_fact_for_a_subject_not_yet_seen() -> None:
