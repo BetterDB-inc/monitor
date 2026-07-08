@@ -42,6 +42,19 @@ function isCatchAll(pattern: string): boolean {
   return /^\*+$/.test(pattern.trim());
 }
 
+/**
+ * Whether the dry-run preview card should render. A running preview always
+ * shows (its live progress and Cancel must stay reachable even if the target is
+ * edited mid-run); a finished preview is hidden once the target has changed.
+ */
+export function showPreviewCard(
+  job: Pick<BulkDeleteJob, 'mode' | 'status'> | null | undefined,
+  previewStale: boolean,
+): boolean {
+  if (job?.mode !== 'dry-run') return false;
+  return job.status === 'running' || !previewStale;
+}
+
 function statusVariant(status: BulkDeleteJob['status']) {
   switch (status) {
     case 'completed':
@@ -156,12 +169,13 @@ export function BulkDelete() {
     refetchKey: activeJobId ?? '',
   });
 
-  // Stop polling once the job finishes; capture a finished dry-run as the preview.
+  // Stop polling once the job finishes; capture a finished dry-run as the
+  // preview — but not if the target changed while it ran (then it's stale).
   useEffect(() => {
     if (!job || job.status === 'running') return;
     setPollEnabled(false);
-    if (job.mode === 'dry-run') setPreview(job);
-  }, [job]);
+    if (job.mode === 'dry-run' && !previewStale) setPreview(job);
+  }, [job, previewStale]);
 
   const jobRunning = job?.status === 'running';
 
@@ -175,9 +189,7 @@ export function BulkDelete() {
   const canSubmit = match.trim().length > 0 && (!catchAll || confirmDeleteAll);
   const confirmValid = confirmText.trim().toUpperCase() === 'DELETE';
 
-  // Hide the preview card once the target changes so it can't show counts /
-  // sample keys for a previous target next to the edited form.
-  const previewCard = job?.mode === 'dry-run' && !previewStale ? job : null;
+  const previewCard = job && showPreviewCard(job, previewStale) ? job : null;
   const runCard = job?.mode === 'execute' ? job : null;
 
   const cancelButton = jobRunning ? (
