@@ -1,3 +1,4 @@
+import type { LanguageModelV3StreamPart, LanguageModelV3Usage } from '@ai-sdk/provider';
 import type { LanguageModelMiddleware } from 'ai';
 import type { AgentCache } from '../AgentCache';
 import type { LlmCacheParams } from '../types';
@@ -206,6 +207,108 @@ export function createAgentCacheMiddleware(
       return result;
     },
 
-    // Streaming not supported - accumulate full response before caching
+    // Tee upstream on miss (accumulate + store async); replay cached text on hit.
+    wrapStream: async ({ doStream, params, model: modelRef }) => {
+      const llmParams = extractLlmParams(params, extractModel, modelRef);
+
+      if (llmParams.messages.length > 0) {
+        let cacheResult: { hit: boolean; response?: string };
+        try {
+          cacheResult = await cache.llm.check(llmParams);
+        } catch (err) {
+          console.debug('agent-cache: stream check failed, falling through', err);
+          cacheResult = { hit: false };
+        }
+
+        if (cacheResult.hit && cacheResult.response) {
+          return { stream: synthesizeStreamFromCached(cacheResult.response) };
+        }
+      }
+
+      const upstream = await doStream();
+      const [forCaller, forAccumulator] = upstream.stream.tee();
+
+      if (llmParams.messages.length > 0) {
+        void accumulateAndStore({
+          cache,
+          llmParams,
+          stream: forAccumulator,
+        });
+      }
+
+      return { ...upstream, stream: forCaller };
+    },
   };
+}
+
+function synthesizeStreamFromCached(cachedText: string): ReadableStream<LanguageModelV3StreamPart> {
+  return new ReadableStream<LanguageModelV3StreamPart>({
+    start(controller) {
+      // Single text block, fixed id is fine — there's only ever one delta per cached hit.
+      const id = '0';
+      controller.enqueue({ type: 'text-start', id });
+      controller.enqueue({ type: 'text-delta', id, delta: cachedText });
+      controller.enqueue({ type: 'text-end', id });
+      controller.enqueue({
+        type: 'finish',
+        finishReason: { unified: 'stop', raw: undefined },
+        usage: {
+          inputTokens: { total: 0, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+          outputTokens: { total: 0, text: undefined, reasoning: undefined },
+        },
+        providerMetadata: { agentCache: { hit: true } },
+      });
+      controller.close();
+    },
+  });
+}
+
+async function accumulateAndStore({
+  cache,
+  llmParams,
+  stream,
+}: {
+  cache: AgentCache;
+  llmParams: LlmCacheParams;
+  stream: ReadableStream<LanguageModelV3StreamPart>;
+}): Promise<void> {
+  try {
+    const reader = stream.getReader();
+    let accumulated = '';
+    let toolCallSeen = false;
+    let usage: LanguageModelV3Usage | undefined;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        if (value.type === 'text-delta') {
+          accumulated += value.delta;
+        } else if (value.type === 'tool-call') {
+          toolCallSeen = true;
+        } else if (value.type === 'finish') {
+          usage = value.usage;
+        } else if (value.type === 'error') {
+          return;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (toolCallSeen || accumulated.length === 0) {
+      return;
+    }
+
+    const inputTotal = usage?.inputTokens?.total;
+    const outputTotal = usage?.outputTokens?.total;
+    const tokens = inputTotal !== undefined && outputTotal !== undefined
+      ? { input: inputTotal, output: outputTotal }
+      : undefined;
+
+    await cache.llm.store(llmParams, accumulated, tokens ? { tokens } : undefined);
+  } catch (err) {
+    console.debug('agent-cache: stream accumulate/store failed', err);
+  }
 }

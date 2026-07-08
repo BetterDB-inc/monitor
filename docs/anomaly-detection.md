@@ -302,6 +302,34 @@ Each pattern includes:
 
 ---
 
+### PERSISTENCE_STALL
+
+**Triggers**: A running BGSAVE or AOF-rewrite fork child stops making progress, exceeds a time ceiling, or reports an error
+
+**What it means**: The persistence fork child is stuck or failing, which can silently block writes, exhaust memory through copy-on-write growth, or leave you without a recent backup:
+- Fork child wedged on disk I/O or an allocator error
+- Out-of-memory during the fork causing runaway copy-on-write
+- Full or failing persistence target (disk full, permissions)
+- BGSAVE / BGREWRITEAOF that never completes
+
+**Detection method**: This is a *state-change* detector, not a z-score spike. Per connection, it tracks each persistence child (RDB save and AOF rewrite) across successive polls from the INFO persistence section and emits:
+- **CRITICAL** when RDB key progress freezes for `MONITOR_PERSISTENCE_STALL_SEC` (default 60s) while the save is still in progress
+- **CRITICAL** when a child's elapsed time exceeds `MONITOR_PERSISTENCE_CRIT_SEC` (default 600s)
+- **CRITICAL** on an `ok` to `err` transition of `rdb_last_bgsave_status` / `aof_last_bgrewrite_status`
+- **WARNING** when elapsed time exceeds `MONITOR_PERSISTENCE_WARN_SEC` (default 120s) while the child is still advancing
+
+Each condition fires once per episode and the tracking state clears when the child finishes. AOF rewrite has no per-key progress counter in INFO, so it relies on the time-based ceilings only (no frozen-progress detection).
+
+**Recommended actions**:
+- Check memory headroom and copy-on-write growth (`current_cow_size`)
+- Inspect the server log for fork or allocator errors
+- Consider `BGSAVE CANCEL` if the save is wedged
+- Verify disk space and I/O on the persistence target
+
+**Example scenario**: A BGSAVE begins, processes 1 of 42657 keys, then stops advancing while `rdb_bgsave_in_progress` stays 1. After 60s with no progress, a CRITICAL PERSISTENCE_STALL anomaly fires.
+
+---
+
 ### UNKNOWN
 
 **Triggers**: Anomalies that don't match any defined pattern
@@ -458,6 +486,13 @@ Some metrics have custom thresholds beyond Z-score:
 **Source**: `INFO replication.role`
 **Detection method**: State-diff detector (not z-score based). Emits a CRITICAL anomaly when role transitions from master to replica.
 
+### persistence_child
+**What it measures**: Progress and health of the running BGSAVE / AOF-rewrite fork child
+**Why anomalies matter**: A stuck or failing save can block writes, drive copy-on-write memory growth, or leave you without a recent backup
+**Typical baseline**: Idle (no save in progress) most of the time
+**Source**: `INFO persistence` (`rdb_bgsave_in_progress`, `current_save_keys_processed`/`current_save_keys_total`, `rdb_current_bgsave_time_sec`, `rdb_last_bgsave_status`, `aof_rewrite_in_progress`, `aof_current_rewrite_time_sec`, `aof_last_bgrewrite_status`)
+**Detection method**: State-based detector (not z-score based). Emits CRITICAL on frozen key progress, an elapsed-time ceiling, or an `ok` to `err` status transition, and WARNING on a long-running-but-advancing child. See the [PERSISTENCE_STALL pattern](#persistence_stall) for thresholds.
+
 ## Configuration
 
 ### Environment Variables
@@ -476,6 +511,14 @@ ANOMALY_CACHE_TTL_MS=3600000
 
 # Prometheus metrics update interval (default: 30000 = 30 seconds)
 ANOMALY_PROMETHEUS_INTERVAL_MS=30000
+
+# Persistence-child stall detection thresholds (seconds)
+# Frozen key progress for this long fires CRITICAL (default: 60)
+MONITOR_PERSISTENCE_STALL_SEC=60
+# Elapsed time before a long-running child fires WARNING (default: 120)
+MONITOR_PERSISTENCE_WARN_SEC=120
+# Elapsed time ceiling before a child fires CRITICAL (default: 600)
+MONITOR_PERSISTENCE_CRIT_SEC=600
 ```
 
 ### Runtime Settings
