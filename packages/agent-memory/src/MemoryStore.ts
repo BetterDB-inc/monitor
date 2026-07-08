@@ -16,6 +16,7 @@ import {
   SCORE_FIELD,
 } from './buildRecallQuery';
 import { parseMemoryItem } from './parseMemoryItem';
+import { reconcile, applyOps, factContent, storedFactToFact } from './reconcileFacts';
 import { compositeScore, similarityFromDistance, type RecallWeights } from './compositeScore';
 import { selectEvictions, type EvictionCandidate } from './selectEvictions';
 import { MemoryDiscovery } from './discovery';
@@ -31,9 +32,12 @@ import {
   type AnalyticsOptions,
 } from './analytics';
 import type {
+  ConsolidateFactsOptions,
+  ConsolidateFactsResult,
   ConsolidateOptions,
   ConsolidateResult,
   EmbedFn,
+  Fact,
   MemoryHit,
   MemoryItem,
   MemoryListOptions,
@@ -55,6 +59,8 @@ const EVICTION_SCAN_LIMIT = 10000;
 const CONSOLIDATE_SCAN_LIMIT = 10000;
 const DEFAULT_SUMMARY_IMPORTANCE = 0.7;
 const SUMMARY_SOURCE = 'summary';
+const FACT_SOURCE = 'fact';
+const DEFAULT_FACT_IMPORTANCE = 0.7;
 const DEFAULT_IMPORTANCE = 0.5;
 const DEFAULT_CONFIG_REFRESH_MS = 30000;
 const MIN_CONFIG_REFRESH_MS = 1000;
@@ -75,6 +81,33 @@ export interface MemoryDiscoveryConfig {
 export interface MemoryConfigRefreshConfig {
   enabled?: boolean;
   intervalMs?: number;
+}
+
+/**
+ * Fact consolidation (write-time distillation of source memories into curated,
+ * additive fact memories via {@link MemoryStore.consolidateFacts}). Off unless
+ * explicitly enabled, so callers opt in and can turn it off again.
+ */
+export interface ConsolidationConfig {
+  enabled?: boolean;
+  /** `source` tag written on fact memories (also excluded from re-consolidation). Default 'fact'. */
+  factSource?: string;
+  /** Default importance for written fact memories. Default 0.7. */
+  factImportance?: number;
+}
+
+function resolveConsolidation(config: boolean | ConsolidationConfig | undefined): {
+  enabled: boolean;
+  factSource: string;
+  factImportance: number;
+} {
+  const obj = typeof config === 'object' && config !== null ? config : undefined;
+  const enabled = config === true || (obj !== undefined && obj.enabled !== false);
+  return {
+    enabled,
+    factSource: obj?.factSource ?? FACT_SOURCE,
+    factImportance: obj?.factImportance ?? DEFAULT_FACT_IMPORTANCE,
+  };
 }
 
 export interface MemoryConfigSnapshot {
@@ -102,6 +135,8 @@ export interface MemoryStoreOptions {
   configRefresh?: boolean | MemoryConfigRefreshConfig;
   telemetry?: MemoryTelemetryOptions;
   analytics?: AnalyticsOptions;
+  /** Enable write-time fact consolidation (consolidateFacts). Off by default. */
+  consolidation?: boolean | ConsolidationConfig;
 }
 
 export class MemoryStore {
@@ -138,6 +173,9 @@ export class MemoryStore {
   };
   private sessionFlushed = false;
   private sessionExitHandler: (() => void) | null = null;
+  private readonly consolidationEnabled: boolean;
+  private readonly factSource: string;
+  private readonly defaultFactImportance: number;
 
   constructor(options: MemoryStoreOptions) {
     this.client = options.client;
@@ -157,6 +195,10 @@ export class MemoryStore {
     this.discovery = this.createDiscovery(options.discovery);
     this.startConfigRefresh(options.configRefresh);
     this.analyticsOptions = options.analytics;
+    const consolidation = resolveConsolidation(options.consolidation);
+    this.consolidationEnabled = consolidation.enabled;
+    this.factSource = consolidation.factSource;
+    this.defaultFactImportance = consolidation.factImportance;
   }
 
   // Fire-once: defer analytics startup to the first index-lifecycle call so the
@@ -200,11 +242,7 @@ export class MemoryStore {
     }
     const counts = this.sessionCounts;
     const total =
-      counts.remembered +
-      counts.recalled +
-      counts.forgotten +
-      counts.consolidated +
-      counts.evicted;
+      counts.remembered + counts.recalled + counts.forgotten + counts.consolidated + counts.evicted;
     if (total === 0) {
       // Nothing worth reporting yet — leave the one-shot armed so a later
       // close() (after real activity) can still emit the summary.
@@ -284,7 +322,9 @@ export class MemoryStore {
     await this.ensureAnalyticsStarted();
     const infoRaw = await this.client.call('FT.INFO', memoryIndexName(this.name));
     const { numDocs } = parseFtInfoStats(infoRaw as unknown[]);
-    const statsFields = parseHashReply(await this.client.call('HGETALL', `${this.name}:__mem_stats`));
+    const statsFields = parseHashReply(
+      await this.client.call('HGETALL', `${this.name}:__mem_stats`),
+    );
     const evictions = Number(statsFields.evictions ?? '0');
     return {
       itemCount: numDocs,
@@ -469,7 +509,12 @@ export class MemoryStore {
     return this.traced('recall', (span) => this.runRecall(vector, options, span, Date.now()));
   }
 
-  private async runRecall(vector: number[], options: RecallOptions, span: Span, startedAt: number): Promise<MemoryHit[]> {
+  private async runRecall(
+    vector: number[],
+    options: RecallOptions,
+    span: Span,
+    startedAt: number,
+  ): Promise<MemoryHit[]> {
     const k = options.k ?? DEFAULT_RECALL_K;
     const threshold = options.threshold ?? this.defaultThreshold;
     const weights = options.weights ?? this.weights;
@@ -715,9 +760,7 @@ export class MemoryStore {
     // re-folds its own output into a new summary.
     const filter = buildConsolidateFilter(scope, tags, {
       maxCreatedAt:
-        options.olderThanSeconds !== undefined
-          ? now - options.olderThanSeconds * 1000
-          : undefined,
+        options.olderThanSeconds !== undefined ? now - options.olderThanSeconds * 1000 : undefined,
       maxImportance: options.maxImportance,
       excludeSource: SUMMARY_SOURCE,
     });
@@ -790,6 +833,198 @@ export class MemoryStore {
     return { consolidated: candidates.length, created: [summaryId], deleted };
   }
 
+  /**
+   * Write-time fact consolidation: distill the selected source memories into
+   * atomic, deduplicated fact memories and ADD them (sources are kept, so recall
+   * is never reduced). The caller supplies the LLM extraction via
+   * `extractFacts`; the reconcile pass keys facts by subject, letting a newer
+   * dated statement supersede an older one and tombstones retract a subject.
+   * Disabled unless the store was constructed with `consolidation` enabled.
+   */
+  async consolidateFacts(options: ConsolidateFactsOptions): Promise<ConsolidateFactsResult> {
+    if (!this.consolidationEnabled) {
+      throw new Error(
+        'fact consolidation is disabled; construct MemoryStore with `consolidation: true` (or { enabled: true }) to use consolidateFacts',
+      );
+    }
+    await this.ensureAnalyticsStarted();
+    return this.traced('consolidateFacts', (span) => this.runConsolidateFacts(options, span));
+  }
+
+  private async runConsolidateFacts(
+    options: ConsolidateFactsOptions,
+    span: Span,
+  ): Promise<ConsolidateFactsResult> {
+    const now = Date.now();
+    const tags = options.tags ?? [];
+    const scope: MemoryScope = {
+      threadId: options.threadId,
+      agentId: options.agentId,
+      namespace: options.namespace,
+    };
+
+    const hasCriteria =
+      scope.threadId !== undefined ||
+      scope.agentId !== undefined ||
+      scope.namespace !== undefined ||
+      tags.length > 0 ||
+      options.olderThanSeconds !== undefined ||
+      options.maxImportance !== undefined;
+    if (!hasCriteria) {
+      throw new Error(
+        'consolidateFacts requires a scope, tags, olderThanSeconds, or maxImportance to select source memories',
+      );
+    }
+
+    // Exclude prior fact memories so a re-run never re-distills its own output.
+    const filter = buildConsolidateFilter(scope, tags, {
+      maxCreatedAt:
+        options.olderThanSeconds !== undefined ? now - options.olderThanSeconds * 1000 : undefined,
+      maxImportance: options.maxImportance,
+      excludeSource: this.factSource,
+    });
+    const raw = await this.client.call(
+      'FT.SEARCH',
+      `${this.name}:mem:idx`,
+      filter,
+      'RETURN',
+      '10',
+      'content',
+      'importance',
+      'tags',
+      'created_at',
+      'last_accessed_at',
+      'access_count',
+      'source',
+      'threadId',
+      'agentId',
+      'namespace',
+      'LIMIT',
+      '0',
+      String(CONSOLIDATE_SCAN_LIMIT),
+      'DIALECT',
+      '2',
+    );
+    const candidates = parseFtSearchResponse(raw).map((hit) => parseMemoryItem(this.name, hit));
+    span.setAttribute('consolidate_facts.candidates', candidates.length);
+
+    if (candidates.length === 0) {
+      span.setAttribute('consolidate_facts.facts', 0);
+      span.setAttribute('consolidate_facts.created', 0);
+      span.setAttribute('consolidate_facts.deleted', 0);
+      return { candidates: 0, facts: 0, created: [], deleted: 0 };
+    }
+
+    // Load the fact memories already written for this scope so reconciliation
+    // considers them (not just the current batch): a re-run over the same
+    // sources is idempotent, a newer statement supersedes the stored fact, and a
+    // tombstone retracts it. Only facts that carry a persisted `subject` (the
+    // reconcile key) can participate; pre-subject rows are left untouched.
+    const existingFacts = await this.loadExistingFacts(scope, tags);
+    const existingBySubject = new Map<string, { id: string; content: string }>();
+    // Self-heal a concurrent-write race: two consolidateFacts runs that each
+    // wrote a fact for the same subject leave a duplicate row. Keep one canonical
+    // per subject and retract the extras on this run, so tracking stays 1:1 and
+    // orphaned duplicates don't accumulate forever.
+    const duplicateFactIds: string[] = [];
+    for (const item of existingFacts) {
+      if (item.subject === undefined) {
+        continue;
+      }
+      if (existingBySubject.has(item.subject)) {
+        duplicateFactIds.push(item.id);
+      } else {
+        existingBySubject.set(item.subject, { id: item.id, content: item.content });
+      }
+    }
+    const priorFacts: Fact[] = existingFacts
+      .filter((item) => item.subject !== undefined)
+      .map((item) => storedFactToFact(item));
+
+    // Extract atomic facts, then reconcile against the stored facts so subject
+    // collisions (within the batch AND against prior runs) resolve to the newest
+    // dated statement and tombstones drop retracted subjects.
+    const extracted = await options.extractFacts(candidates);
+    const curated = applyOps(priorFacts, reconcile(extracted, priorFacts));
+    const curatedBySubject = new Map<string, Fact>();
+    for (const fact of curated) {
+      curatedBySubject.set(fact.subject, fact);
+    }
+    span.setAttribute('consolidate_facts.facts', curated.length);
+
+    // Diff the curated set against what is stored. Writing before deleting keeps
+    // a crash between the two from losing a fact (recall-safe, at worst a
+    // duplicate), mirroring consolidate()'s write-then-delete ordering.
+    const created: string[] = [];
+    for (const fact of curated) {
+      const content = factContent(fact);
+      const existing = existingBySubject.get(fact.subject);
+      // Unchanged subject already on disk: skip the write (idempotent re-run).
+      if (existing !== undefined && existing.content === content) {
+        continue;
+      }
+      const id = await this.writeMemory(
+        content,
+        {
+          ...scope,
+          tags,
+          source: this.factSource,
+          subject: fact.subject,
+          date: fact.date,
+          importance: options.factImportance ?? this.defaultFactImportance,
+        },
+        now,
+      );
+      created.push(id);
+    }
+
+    // Delete the stored fact for any subject that was superseded (its content
+    // changed) or retracted (no longer in the curated set), plus any duplicate
+    // rows from a prior concurrent-write race.
+    const toDelete: string[] = duplicateFactIds.map((id) => `${this.name}:mem:${id}`);
+    for (const [subject, existing] of existingBySubject) {
+      const curatedFact = curatedBySubject.get(subject);
+      if (curatedFact === undefined || factContent(curatedFact) !== existing.content) {
+        toDelete.push(`${this.name}:mem:${existing.id}`);
+      }
+    }
+    let deleted = 0;
+    if (toDelete.length > 0) {
+      deleted = Number(await this.client.call('DEL', ...toDelete));
+      if (deleted > 0) {
+        this.telemetry.metrics.items.labels(this.storeLabels).dec(deleted);
+      }
+    }
+
+    this.telemetry.metrics.consolidations.labels(this.storeLabels).inc();
+    span.setAttribute('consolidate_facts.created', created.length);
+    span.setAttribute('consolidate_facts.deleted', deleted);
+    return { candidates: candidates.length, facts: curated.length, created, deleted };
+  }
+
+  // Load the fact memories already written for this scope (source == factSource),
+  // so a consolidateFacts run can reconcile against them.
+  private async loadExistingFacts(scope: MemoryScope, tags: string[]): Promise<MemoryItem[]> {
+    const filter = buildConsolidateFilter(scope, tags, { includeSource: this.factSource });
+    const raw = await this.client.call(
+      'FT.SEARCH',
+      `${this.name}:mem:idx`,
+      filter,
+      'RETURN',
+      '4',
+      'content',
+      'subject',
+      'source',
+      'date',
+      'LIMIT',
+      '0',
+      String(CONSOLIDATE_SCAN_LIMIT),
+      'DIALECT',
+      '2',
+    );
+    return parseFtSearchResponse(raw).map((hit) => parseMemoryItem(this.name, hit));
+  }
+
   private async writeRecord(key: string, fields: (string | Buffer)[], ttl?: number): Promise<void> {
     if (ttl === undefined || ttl <= 0) {
       await this.client.call('HSET', key, ...fields);
@@ -811,7 +1046,10 @@ export class MemoryStore {
     }
   }
 
-  private async enforceCapacity(scope: MemoryScope & { tags?: string[] }, now: number): Promise<void> {
+  private async enforceCapacity(
+    scope: MemoryScope & { tags?: string[] },
+    now: number,
+  ): Promise<void> {
     const max = this.maxItemsPerScope;
     if (max === undefined) {
       return;

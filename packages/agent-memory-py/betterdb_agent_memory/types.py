@@ -35,6 +35,10 @@ class MemoryItem:
     last_accessed_at: int
     access_count: int
     source: str | None = None
+    # Reconciliation key, present on fact memories written by consolidate_facts.
+    subject: str | None = None
+    # Asserted fact date, present on dated fact memories (source of truth for datedness).
+    date: str | None = None
     thread_id: str | None = None
     agent_id: str | None = None
     namespace: str | None = None
@@ -61,6 +65,50 @@ class ConsolidateResult:
 
 # Summarize callback: receives the candidate memories and returns a summary string.
 SummarizeFn = Callable[[list[MemoryItem]], Awaitable[str]]
+
+
+@dataclass
+class Fact:
+    """An atomic, durable fact distilled from one or more memories.
+
+    ``subject`` is a short normalized attribute key (e.g. ``"employer"``,
+    ``"home_city"``) used to reconcile restatements; ``date`` (if known) drives
+    newer-wins resolution and is preserved in the written memory's content.
+    ``tombstone=True`` marks the subject as retracted.
+    """
+
+    subject: str
+    statement: str
+    date: str | None = None
+    tombstone: bool = False
+
+
+# Caller-provided LLM seam that distills a batch of source memories into atomic
+# facts. The library never bakes in a model - you supply the extraction (mirrors
+# the ``summarize`` seam on consolidate()).
+FactExtractor = Callable[[list[MemoryItem]], Awaitable[list[Fact]]]
+
+
+@dataclass
+class ConsolidationConfig:
+    # Enable write-time fact consolidation (consolidate_facts). Off by default.
+    enabled: bool | None = None
+    # Source label written on fact memories and excluded from re-consolidation.
+    fact_source: str | None = None
+    # Default importance assigned to each written fact memory.
+    fact_importance: float | None = None
+
+
+@dataclass
+class ConsolidateFactsResult:
+    # Source memories examined.
+    candidates: int
+    # Curated facts after reconciliation (the full set now materialized for the scope).
+    facts: int
+    # Ids of the newly written fact memories (added or superseded subjects).
+    created: list[str]
+    # Prior fact memories deleted because a run superseded or retracted their subject.
+    deleted: int
 
 
 @dataclass

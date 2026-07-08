@@ -63,6 +63,14 @@ export interface AnomalyEvent {
   relatedMetrics?: MetricType[];
   resolved: boolean;
   connectionId?: string;
+  /**
+   * Transient (not persisted): whether this cached event was durably written to
+   * storage. Deterministic string-id events (failover/promotion/cluster/
+   * persistence/dup-primary) can't be stored on Postgres (UUID PK), so they stay
+   * memory-only and are resolved by flipping the cache — a storage-backed poll
+   * can never resurface a row that was never written.
+   */
+  persisted?: boolean;
 }
 
 export interface CorrelatedAnomalyGroup {
