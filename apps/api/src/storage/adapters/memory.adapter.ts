@@ -1211,6 +1211,9 @@ export class MemoryAdapter implements StoragePort {
     // commands, which would starve per-command baselines on busy instances), returned ascending —
     // the regression guard needs the newest samples for freshness/version/consecutive logic.
     const limit = options.limit ?? 10_000;
+    // A limit of 0 (or negative) means no rows — mirror SQL `LIMIT 0`. Guard here because
+    // `slice(-0)` is `slice(0)`, which would return every row instead of none.
+    if (limit <= 0) return [];
     const filtered = this.latencyStatsSamples.filter(
       (s) =>
         s.connectionId === options.connectionId &&

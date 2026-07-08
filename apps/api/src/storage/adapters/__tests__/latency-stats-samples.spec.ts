@@ -119,6 +119,21 @@ describe.each([
     expect(limited.map((h) => h.capturedAt)).toEqual([200, 300]);
   });
 
+  it('returns no rows for a limit of 0 (matches SQL LIMIT 0)', async () => {
+    await storage.saveLatencyStatsSamples(
+      [sample({ capturedAt: 100 }), sample({ capturedAt: 200 })],
+      CONN,
+    );
+
+    const limited = await storage.getLatencyStatsHistory({
+      connectionId: CONN,
+      startTime: 0,
+      endTime: 10_000,
+      limit: 0,
+    });
+    expect(limited).toEqual([]);
+  });
+
   it('applies the limit per command, not globally, when no command filter is given', async () => {
     // Two commands with 3 samples each. A single global cap of 2 would keep only the 2 newest
     // rows overall (both from one command) and starve the other, skewing its baseline. A

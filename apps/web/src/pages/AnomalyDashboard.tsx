@@ -205,7 +205,7 @@ export function AnomalyDashboard() {
   // Same reasoning for the P99 regression banner: a critical upgrade regression
   // must not be hidden by the date picker, so it gets its own unfiltered feed.
   const { data: latencyRegressionEvents } = usePolling<AnomalyEvent[]>({
-    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'command_p99' }),
+    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'command_p99', activeOnly: true }),
     interval: 5000,
     refetchKey: currentConnection?.id,
   });
