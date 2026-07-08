@@ -9,6 +9,7 @@ export interface DiscoveredNode {
   role: 'master' | 'replica';
   masterId?: string;
   slots: number[][];
+  configEpoch: number;
   healthy: boolean;
 }
 
@@ -91,6 +92,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
           role: isMaster ? 'master' : 'replica',
           masterId: isMaster ? undefined : node.master,
           slots: node.slots,
+          configEpoch: node.configEpoch,
           healthy: isHealthy,
         });
       }

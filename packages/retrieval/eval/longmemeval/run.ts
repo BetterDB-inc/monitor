@@ -6,6 +6,8 @@ import { createMockReader, createOpenAIReader } from './reader';
 import { createMockJudge, createOpenAIJudge } from './judge';
 import { loadRecords, parseTypeList, sourceLabel } from './dataset';
 import { runEval, formatSummary } from './runner';
+import { resolveEnabledLevers, createCostReport } from './levers';
+import { resolveAssembleOptions } from './assemble';
 import type { ChunkMode, Embedder, Judge, Reader, Store } from './types';
 
 function envInt(name: string, fallback: number): number {
@@ -48,6 +50,9 @@ async function main(): Promise<void> {
   const selectedTypes = parseTypeList(questionType);
   const typeCount = selectedTypes.size > 0 ? selectedTypes.size : LME_TYPE_COUNT;
   const runLimit = perType > 0 ? perType * typeCount : limit;
+  const levers = resolveEnabledLevers(process.env);
+  const costReport = createCostReport();
+  const assembleOptions = resolveAssembleOptions(process.env);
 
   const cachePath = join(dirname(fileURLToPath(import.meta.url)), '.cache', 'embeddings.json');
 
@@ -106,6 +111,23 @@ async function main(): Promise<void> {
   console.log(
     `params    : limit=${limitLabel} k=${k} chunk=${chunkMode} qa=${qa} rerank=${rerankLabel}`,
   );
+  console.log(`levers    : ${levers.length > 0 ? levers.join(' → ') : 'none (baseline)'}`);
+  if (levers.includes('assemble')) {
+    // Without any structure option the assemble lever is a render-only pass —
+    // say so in the banner instead of implying a meaningful ablation point.
+    const features = [
+      assembleOptions.dedupThreshold !== undefined
+        ? `dedup=${assembleOptions.dedupThreshold}`
+        : null,
+      assembleOptions.mmrLambda !== undefined ? `mmr=${assembleOptions.mmrLambda}` : null,
+      assembleOptions.group === true ? 'group' : null,
+    ].filter((feature): feature is string => {
+      return feature !== null;
+    });
+    console.log(
+      `assemble  : ${features.length > 0 ? features.join(' ') : 'render-only (set LONGMEMEVAL_DEDUP_THRESHOLD / LONGMEMEVAL_MMR_LAMBDA / LONGMEMEVAL_GROUP)'}`,
+    );
+  }
   console.log('='.repeat(64));
 
   try {
@@ -119,6 +141,9 @@ async function main(): Promise<void> {
       chunkMode,
       limit: runLimit,
       rerankPool,
+      levers,
+      costReport,
+      assembleOptions,
     });
     console.log(formatSummary(summary));
   } finally {

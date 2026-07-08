@@ -13,6 +13,8 @@ export interface LlmCacheConfig {
   costTable: Record<string, ModelCost> | undefined;
   telemetry: Telemetry;
   statsKey: string;
+  /** Called on request hot paths to let analytics emit due snapshots (serverless). */
+  onActivity?: () => void;
 }
 
 interface StoredLlmEntry {
@@ -32,6 +34,7 @@ export class LlmCache {
   private readonly costTable: Record<string, ModelCost> | undefined;
   private readonly telemetry: Telemetry;
   private readonly statsKey: string;
+  private readonly onActivity: (() => void) | undefined;
 
   constructor(config: LlmCacheConfig) {
     this.client = config.client;
@@ -41,6 +44,7 @@ export class LlmCache {
     this.costTable = config.costTable;
     this.telemetry = config.telemetry;
     this.statsKey = config.statsKey;
+    this.onActivity = config.onActivity;
   }
 
   private buildKey(hash: string): string {
@@ -48,6 +52,7 @@ export class LlmCache {
   }
 
   async check(params: LlmCacheParams): Promise<LlmCacheResult> {
+    this.onActivity?.();
     const startTime = Date.now();
 
     return this.telemetry.tracer.startActiveSpan('agent_cache.llm.check', async (span) => {

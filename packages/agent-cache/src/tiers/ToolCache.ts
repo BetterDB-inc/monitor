@@ -24,6 +24,8 @@ export interface ToolCacheConfig {
   tierTtl: number | undefined;
   telemetry: Telemetry;
   statsKey: string;
+  /** Called on request hot paths to let analytics emit due snapshots (serverless). */
+  onActivity?: () => void;
 }
 
 interface StoredToolEntry {
@@ -43,6 +45,7 @@ export class ToolCache {
   private readonly statsKey: string;
   private readonly policies: Map<string, ToolPolicy> = new Map();
   private readonly policiesKey: string;
+  private readonly onActivity: (() => void) | undefined;
 
   constructor(config: ToolCacheConfig) {
     this.client = config.client;
@@ -52,6 +55,7 @@ export class ToolCache {
     this.telemetry = config.telemetry;
     this.statsKey = config.statsKey;
     this.policiesKey = `${this.name}:__tool_policies`;
+    this.onActivity = config.onActivity;
   }
 
   private buildKey(toolName: string, hash: string): string {
@@ -60,6 +64,7 @@ export class ToolCache {
 
   async check(toolName: string, args: unknown): Promise<ToolCacheResult> {
     validateToolName(toolName);
+    this.onActivity?.();
     const startTime = Date.now();
 
     return this.telemetry.tracer.startActiveSpan('agent_cache.tool.check', async (span) => {

@@ -288,7 +288,7 @@ const model = wrapLanguageModel({
 });
 ```
 
-The middleware intercepts non-streaming `doGenerate` calls. On a cache hit, the model is not called and the response includes `providerMetadata: { agentCache: { hit: true } }` so consumers can distinguish cached responses from real zero-token calls. Responses containing tool-call parts are not cached to avoid breaking tool-calling workflows.
+The middleware intercepts both non-streaming `doGenerate` and streaming `doStream` calls. On a cache hit, the model is not called and the response includes `providerMetadata: { agentCache: { hit: true } }` so consumers can distinguish cached responses from real zero-token calls; a cached streaming response is replayed as a single `text-delta` chunk followed by `finish`. On a streaming cache miss, the upstream stream flows to the caller unchanged while the text is accumulated and stored on finish. Responses containing tool-call parts are not cached (in either mode) to avoid breaking tool-calling workflows.
 
 Tool definitions, seed, stop sequences, response format, and tool choice are all included in the cache key automatically. Requests with identical messages but different tools (or different generation parameters) will not collide.
 
@@ -401,7 +401,7 @@ Cluster support works by running SCAN on each master node sequentially and mergi
 
 ### Streaming
 
-Streaming LLM responses are not cached by the Vercel AI SDK adapter. Accumulate the full response before caching. The cached response is always returned as a complete string, not re-streamed token-by-token.
+Streaming LLM responses are cached by the Vercel AI SDK adapter (`wrapStream`, since v0.11.0). A cached streaming response is replayed as a single `text-delta` chunk plus `finish` rather than re-streamed token-by-token, so timing is not reproduced. Tool-call streams are not cached, mirroring the non-streaming behavior. Other adapters (LangChain, LlamaIndex) still cache only complete, non-streaming responses.
 
 ### LangGraph list() memory usage
 
