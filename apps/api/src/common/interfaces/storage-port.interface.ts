@@ -137,6 +137,36 @@ export interface StoredAnomalyEvent {
   connectionId?: string;
 }
 
+// Bulk-Delete Audit Types (one row per execute run; dry-runs are not audited)
+export interface StoredBulkDeleteAudit {
+  id: string;
+  connectionId: string;
+  /** Job start time (ms). */
+  timestamp: number;
+  completedAt: number | null;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  match: string;
+  type: string | null;
+  scope: 'node' | 'cluster';
+  matched: number;
+  deleted: number;
+  batches: number;
+  nodes: number;
+  truncated: boolean;
+  /** Cluster primaries skipped because they were unreachable. */
+  skippedNodes: string[];
+  error: string | null;
+  sourceHost: string | null;
+  sourcePort: number | null;
+}
+
+export interface BulkDeleteAuditQueryOptions {
+  connectionId?: string;
+  startTime?: number;
+  endTime?: number;
+  limit?: number;
+}
+
 export interface StoredCorrelatedGroup {
   correlationId: string;
   timestamp: number;
@@ -442,6 +472,15 @@ export interface StoragePort {
   ): Promise<boolean>;
   getRetriableDeliveries(limit?: number, connectionId?: string): Promise<WebhookDelivery[]>;
   pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Bulk-Delete Audit Methods - one row per execute run
+  saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string>;
+  getBulkDeleteAudits(options?: BulkDeleteAuditQueryOptions): Promise<StoredBulkDeleteAudit[]>;
+  /**
+   * Reconcile rows left 'running' by a crashed/restarted process: set them to
+   * 'failed' with the given error/timestamp. Returns the number updated.
+   */
+  markInterruptedBulkDeleteRuns(error: string, completedAt: number): Promise<number>;
 
   // Slow Log Methods - connectionId required for writes, optional filter for reads
   saveSlowLogEntries(entries: StoredSlowLogEntry[], connectionId: string): Promise<number>;

@@ -25,6 +25,8 @@ import {
   StoragePort,
   StoredAclEntry,
   StoredAnomalyEvent,
+  StoredBulkDeleteAudit,
+  BulkDeleteAuditQueryOptions,
   StoredClientSnapshot,
   StoredCommandLogEntry,
   StoredCommandStatsSample,
@@ -1192,6 +1194,31 @@ export class PostgresAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_unresolved ON anomaly_events(resolved, timestamp DESC) WHERE NOT resolved;
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_connection_id ON anomaly_events(connection_id);
 
+      -- Bulk-Delete Audit Table (one row per execute run of the SCANDEL-style tool)
+      CREATE TABLE IF NOT EXISTS bulk_delete_audits (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        timestamp BIGINT NOT NULL,
+        completed_at BIGINT,
+        status VARCHAR(20) NOT NULL,
+        match_pattern TEXT NOT NULL,
+        type_filter VARCHAR(50),
+        scope VARCHAR(20) NOT NULL,
+        matched BIGINT NOT NULL DEFAULT 0,
+        deleted BIGINT NOT NULL DEFAULT 0,
+        batches INTEGER NOT NULL DEFAULT 0,
+        nodes INTEGER NOT NULL DEFAULT 0,
+        truncated BOOLEAN NOT NULL DEFAULT FALSE,
+        skipped_nodes TEXT[],
+        error TEXT,
+        source_host VARCHAR(255),
+        source_port INTEGER,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_bulk_delete_audits_connection ON bulk_delete_audits(connection_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_bulk_delete_audits_timestamp ON bulk_delete_audits(timestamp DESC);
+
       -- Correlated Anomaly Groups Table
       CREATE TABLE IF NOT EXISTS correlated_anomaly_groups (
         correlation_id UUID PRIMARY KEY,
@@ -1806,6 +1833,110 @@ export class PostgresAdapter implements StoragePort {
       ALTER TABLE scheduled_captures
         ADD COLUMN IF NOT EXISTS cron_expression TEXT;
     `);
+  }
+
+  async saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    await this.pool.query(
+      `INSERT INTO bulk_delete_audits (
+        id, connection_id, timestamp, completed_at, status,
+        match_pattern, type_filter, scope,
+        matched, deleted, batches, nodes, truncated, skipped_nodes,
+        error, source_host, source_port
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      ON CONFLICT (id) DO UPDATE SET
+        completed_at = EXCLUDED.completed_at,
+        status = EXCLUDED.status,
+        matched = EXCLUDED.matched,
+        deleted = EXCLUDED.deleted,
+        batches = EXCLUDED.batches,
+        nodes = EXCLUDED.nodes,
+        truncated = EXCLUDED.truncated,
+        skipped_nodes = EXCLUDED.skipped_nodes,
+        error = EXCLUDED.error`,
+      [
+        record.id,
+        record.connectionId,
+        record.timestamp,
+        record.completedAt ?? null,
+        record.status,
+        record.match,
+        record.type ?? null,
+        record.scope,
+        record.matched,
+        record.deleted,
+        record.batches,
+        record.nodes,
+        record.truncated,
+        record.skippedNodes ?? [],
+        record.error ?? null,
+        record.sourceHost ?? null,
+        record.sourcePort ?? null,
+      ],
+    );
+
+    return record.id;
+  }
+
+  async markInterruptedBulkDeleteRuns(error: string, completedAt: number): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `UPDATE bulk_delete_audits
+       SET status = 'failed', error = $1, completed_at = $2
+       WHERE status = 'running'`,
+      [error, completedAt],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async getBulkDeleteAudits(
+    options: BulkDeleteAuditQueryOptions = {},
+  ): Promise<StoredBulkDeleteAudit[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const conditions: string[] = [];
+    const params: Array<string | number> = [];
+    let idx = 1;
+    if (options.connectionId) {
+      conditions.push(`connection_id = $${idx++}`);
+      params.push(options.connectionId);
+    }
+    if (options.startTime) {
+      conditions.push(`timestamp >= $${idx++}`);
+      params.push(options.startTime);
+    }
+    if (options.endTime) {
+      conditions.push(`timestamp <= $${idx++}`);
+      params.push(options.endTime);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(options.limit ?? 100);
+
+    const result = await this.pool.query(
+      `SELECT * FROM bulk_delete_audits ${where} ORDER BY timestamp DESC LIMIT $${idx}`,
+      params,
+    );
+
+    return result.rows.map((row: Record<string, unknown>) => ({
+      id: row.id as string,
+      connectionId: row.connection_id as string,
+      timestamp: Number(row.timestamp),
+      completedAt: row.completed_at === null ? null : Number(row.completed_at),
+      status: row.status as StoredBulkDeleteAudit['status'],
+      match: row.match_pattern as string,
+      type: (row.type_filter as string | null) ?? null,
+      scope: row.scope as StoredBulkDeleteAudit['scope'],
+      matched: Number(row.matched),
+      deleted: Number(row.deleted),
+      batches: Number(row.batches),
+      nodes: Number(row.nodes),
+      truncated: Boolean(row.truncated),
+      skippedNodes: Array.isArray(row.skipped_nodes) ? (row.skipped_nodes as string[]) : [],
+      error: (row.error as string | null) ?? null,
+      sourceHost: (row.source_host as string | null) ?? null,
+      sourcePort: row.source_port === null ? null : Number(row.source_port),
+    }));
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {

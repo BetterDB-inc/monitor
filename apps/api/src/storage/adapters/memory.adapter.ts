@@ -9,6 +9,8 @@ import {
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
+  StoredBulkDeleteAudit,
+  BulkDeleteAuditQueryOptions,
   StoredCorrelatedGroup,
   AnomalyQueryOptions,
   AnomalyStats,
@@ -102,6 +104,7 @@ export class MemoryAdapter implements StoragePort {
   private aclEntries: StoredAclEntry[] = [];
   private clientSnapshots: StoredClientSnapshot[] = [];
   private anomalyEvents: StoredAnomalyEvent[] = [];
+  private bulkDeleteAudits: StoredBulkDeleteAudit[] = [];
   private correlatedGroups: StoredCorrelatedGroup[] = [];
   private slowLogEntries: StoredSlowLogEntry[] = [];
   private commandLogEntries: StoredCommandLogEntry[] = [];
@@ -574,6 +577,40 @@ export class MemoryAdapter implements StoragePort {
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
     this.anomalyEvents.push({ ...event, connectionId });
     return event.id;
+  }
+
+  async saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string> {
+    // Upsert by id so a running record can be finalized in place.
+    const idx = this.bulkDeleteAudits.findIndex((r) => r.id === record.id);
+    if (idx >= 0) this.bulkDeleteAudits[idx] = { ...record };
+    else this.bulkDeleteAudits.push({ ...record });
+    return record.id;
+  }
+
+  async getBulkDeleteAudits(
+    options: BulkDeleteAuditQueryOptions = {},
+  ): Promise<StoredBulkDeleteAudit[]> {
+    let filtered = [...this.bulkDeleteAudits];
+    if (options.connectionId)
+      filtered = filtered.filter((r) => r.connectionId === options.connectionId);
+    if (options.startTime) filtered = filtered.filter((r) => r.timestamp >= options.startTime!);
+    if (options.endTime) filtered = filtered.filter((r) => r.timestamp <= options.endTime!);
+    return filtered
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, options.limit ?? 100);
+  }
+
+  async markInterruptedBulkDeleteRuns(error: string, completedAt: number): Promise<number> {
+    let updated = 0;
+    for (const record of this.bulkDeleteAudits) {
+      if (record.status === 'running') {
+        record.status = 'failed';
+        record.error = error;
+        record.completedAt = completedAt;
+        updated += 1;
+      }
+    }
+    return updated;
   }
 
   async saveAnomalyEvents(events: StoredAnomalyEvent[], connectionId: string): Promise<number> {

@@ -27,6 +27,7 @@ export function parseTier(value: string, fallback: Tier = Tier.community): Tier 
 export enum Feature {
   // Pro+ features (completely locked for Community)
   KEY_ANALYTICS = 'keyAnalytics',
+  BULK_DELETE = 'bulkDelete',
   ANOMALY_DETECTION = 'anomalyDetection',
   ALERTING = 'alerting',
   WORKSPACES = 'workspaces',
@@ -54,6 +55,7 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
   [Tier.community]: [],
   [Tier.pro]: [
     Feature.KEY_ANALYTICS,
+    Feature.BULK_DELETE,
     Feature.ANOMALY_DETECTION,
     Feature.ALERTING,
     Feature.WORKSPACES,

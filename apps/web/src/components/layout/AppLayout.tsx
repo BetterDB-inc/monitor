@@ -20,6 +20,7 @@ import { ClientAnalyticsDeepDive } from '../../pages/ClientAnalyticsDeepDive';
 import { AiAssistant } from '../../pages/AiAssistant';
 import { AnomalyDashboard } from '../../pages/AnomalyDashboard';
 import { KeyAnalytics } from '../../pages/KeyAnalytics';
+import { BulkDelete } from '../../pages/BulkDelete';
 import { ClusterDashboard } from '../../pages/ClusterDashboard';
 import { Settings } from '../../pages/Settings';
 import { Webhooks } from '../../pages/Webhooks';
@@ -127,6 +128,14 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <KeyAnalytics />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/bulk-delete"
+                element={
+                  <NoConnectionsGuard>
+                    <BulkDelete />
                   </NoConnectionsGuard>
                 }
               />

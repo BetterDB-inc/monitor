@@ -81,6 +81,14 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
           >
             Key Analytics
           </NavItem>
+          <NavItem
+            to="/bulk-delete"
+            active={location.pathname === '/bulk-delete'}
+            requiredFeature={Feature.BULK_DELETE}
+            demoLocked={isDemo}
+          >
+            Bulk Delete
+          </NavItem>
           {hasVectorSearch && (
             <NavItem to="/vector-search" active={location.pathname === '/vector-search'}>
               Vector Search

@@ -14,6 +14,8 @@ import {
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
+  StoredBulkDeleteAudit,
+  BulkDeleteAuditQueryOptions,
   StoredCorrelatedGroup,
   AnomalyQueryOptions,
   AnomalyStats,
@@ -1125,6 +1127,31 @@ export class SqliteAdapter implements StoragePort {
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_unresolved ON anomaly_events(resolved, timestamp DESC) WHERE resolved = 0;
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_connection_id ON anomaly_events(connection_id);
 
+      -- Bulk-Delete Audit Table (one row per execute run of the SCANDEL-style tool)
+      CREATE TABLE IF NOT EXISTS bulk_delete_audits (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        completed_at INTEGER,
+        status TEXT NOT NULL,
+        match_pattern TEXT NOT NULL,
+        type_filter TEXT,
+        scope TEXT NOT NULL,
+        matched INTEGER NOT NULL DEFAULT 0,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        batches INTEGER NOT NULL DEFAULT 0,
+        nodes INTEGER NOT NULL DEFAULT 0,
+        truncated INTEGER NOT NULL DEFAULT 0,
+        skipped_nodes TEXT,
+        error TEXT,
+        source_host TEXT,
+        source_port INTEGER,
+        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_bulk_delete_audits_connection ON bulk_delete_audits(connection_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_bulk_delete_audits_timestamp ON bulk_delete_audits(timestamp DESC);
+
       -- Correlated Anomaly Groups Table
       CREATE TABLE IF NOT EXISTS correlated_anomaly_groups (
         correlation_id TEXT PRIMARY KEY,
@@ -1607,6 +1634,114 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('command_stats_samples', 'rejected_calls', 'INTEGER', '0');
     addColumnIfMissing('command_stats_samples', 'failed_calls', 'INTEGER', '0');
     addCaptureSessionsTargetNodeColumn(this.db!);
+  }
+
+  async saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const stmt = this.db.prepare(`
+      INSERT INTO bulk_delete_audits (
+        id, connection_id, timestamp, completed_at, status,
+        match_pattern, type_filter, scope,
+        matched, deleted, batches, nodes, truncated, skipped_nodes,
+        error, source_host, source_port
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        completed_at = excluded.completed_at,
+        status = excluded.status,
+        matched = excluded.matched,
+        deleted = excluded.deleted,
+        batches = excluded.batches,
+        nodes = excluded.nodes,
+        truncated = excluded.truncated,
+        skipped_nodes = excluded.skipped_nodes,
+        error = excluded.error
+    `);
+
+    stmt.run(
+      record.id,
+      record.connectionId,
+      record.timestamp,
+      record.completedAt ?? null,
+      record.status,
+      record.match,
+      record.type ?? null,
+      record.scope,
+      record.matched,
+      record.deleted,
+      record.batches,
+      record.nodes,
+      record.truncated ? 1 : 0,
+      record.skippedNodes && record.skippedNodes.length
+        ? JSON.stringify(record.skippedNodes)
+        : null,
+      record.error ?? null,
+      record.sourceHost ?? null,
+      record.sourcePort ?? null,
+    );
+
+    return record.id;
+  }
+
+  async markInterruptedBulkDeleteRuns(error: string, completedAt: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare(
+        `UPDATE bulk_delete_audits
+         SET status = 'failed', error = ?, completed_at = ?
+         WHERE status = 'running'`,
+      )
+      .run(error, completedAt);
+    return result.changes;
+  }
+
+  async getBulkDeleteAudits(
+    options: BulkDeleteAuditQueryOptions = {},
+  ): Promise<StoredBulkDeleteAudit[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const conditions: string[] = [];
+    const params: Array<string | number> = [];
+    if (options.connectionId) {
+      conditions.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
+    if (options.startTime) {
+      conditions.push('timestamp >= ?');
+      params.push(options.startTime);
+    }
+    if (options.endTime) {
+      conditions.push('timestamp <= ?');
+      params.push(options.endTime);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM bulk_delete_audits ${where} ORDER BY timestamp DESC LIMIT ?`,
+      )
+      .all(...params, limit) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => ({
+      id: row.id as string,
+      connectionId: row.connection_id as string,
+      timestamp: row.timestamp as number,
+      completedAt: (row.completed_at as number | null) ?? null,
+      status: row.status as StoredBulkDeleteAudit['status'],
+      match: row.match_pattern as string,
+      type: (row.type_filter as string | null) ?? null,
+      scope: row.scope as StoredBulkDeleteAudit['scope'],
+      matched: row.matched as number,
+      deleted: row.deleted as number,
+      batches: row.batches as number,
+      nodes: row.nodes as number,
+      truncated: Boolean(row.truncated),
+      skippedNodes: row.skipped_nodes ? (JSON.parse(row.skipped_nodes as string) as string[]) : [],
+      error: (row.error as string | null) ?? null,
+      sourceHost: (row.source_host as string | null) ?? null,
+      sourcePort: (row.source_port as number | null) ?? null,
+    }));
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {

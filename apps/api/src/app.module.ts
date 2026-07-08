@@ -29,6 +29,7 @@ import { MonitorModule } from './monitor/monitor.module';
 let AiModule: any = null;
 let LicenseModule: any = null;
 let KeyAnalyticsModule: any = null;
+let BulkDeleteModule: any = null;
 let AnomalyModule: any = null;
 let WebhookProModule: any = null;
 let InferenceLatencyProModule: any = null;
@@ -58,6 +59,14 @@ try {
   const keyAnalyticsModule = require('../../../proprietary/key-analytics/key-analytics.module');
   KeyAnalyticsModule = keyAnalyticsModule.KeyAnalyticsModule;
   console.log('[KeyAnalytics] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
+  const bulkDeleteModule = require('../../../proprietary/bulk-delete/bulk-delete.module');
+  BulkDeleteModule = bulkDeleteModule.BulkDeleteModule;
+  console.log('[BulkDelete] Proprietary module loaded');
 } catch {
   // Proprietary module not available
 }
@@ -165,6 +174,7 @@ const baseImports = [
 const proprietaryImports = [
   LicenseModule,
   KeyAnalyticsModule,
+  BulkDeleteModule,
   AnomalyModule,
   WebhookProModule,
   InferenceLatencyProModule,
