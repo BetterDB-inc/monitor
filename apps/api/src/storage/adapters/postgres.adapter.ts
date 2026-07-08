@@ -30,6 +30,8 @@ import {
   StoredClientSnapshot,
   StoredCommandLogEntry,
   StoredCommandStatsSample,
+  StoredLatencyStatsSample,
+  LatencyStatsHistoryQueryOptions,
   StoredCorrelatedGroup,
   StoredLatencyHistogram,
   StoredLatencySnapshot,
@@ -1551,6 +1553,22 @@ export class PostgresAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_cmdstat_captured_at
         ON command_stats_samples(connection_id, command, captured_at);
+
+      CREATE TABLE IF NOT EXISTS latency_stats_samples (
+        id UUID PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        p50_us DOUBLE PRECISION NOT NULL DEFAULT 0,
+        p99_us DOUBLE PRECISION NOT NULL DEFAULT 0,
+        p999_us DOUBLE PRECISION NOT NULL DEFAULT 0,
+        server_version TEXT NOT NULL DEFAULT '',
+        captured_at BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_latstat_cmd_captured_at
+        ON latency_stats_samples(connection_id, command, captured_at);
+      CREATE INDEX IF NOT EXISTS idx_latstat_captured_at
+        ON latency_stats_samples(connection_id, captured_at);
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -3519,6 +3537,109 @@ export class PostgresAdapter implements StoragePort {
 
     const result = await this.pool.query(
       'DELETE FROM command_stats_samples WHERE captured_at < $1',
+      [cutoffTimestamp],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  // Latency Stats Sample Methods (INFO latencystats)
+  async saveLatencyStatsSamples(
+    samples: Omit<StoredLatencyStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.pool || samples.length === 0) return 0;
+
+    const values: any[] = [];
+    const placeholders: string[] = [];
+    let paramIndex = 1;
+
+    for (const s of samples) {
+      const row: string[] = [];
+      for (let i = 0; i < 8; i++) {
+        row.push(`$${paramIndex++}`);
+      }
+      placeholders.push(`(${row.join(', ')})`);
+      values.push(
+        randomUUID(),
+        connectionId,
+        s.command,
+        s.p50Us,
+        s.p99Us,
+        s.p999Us,
+        s.serverVersion,
+        s.capturedAt,
+      );
+    }
+
+    const query = `
+      INSERT INTO latency_stats_samples
+        (id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at)
+      VALUES ${placeholders.join(', ')}
+    `;
+    const result = await this.pool.query(query, values);
+    return result.rowCount ?? 0;
+  }
+
+  async getLatencyStatsHistory(
+    options: LatencyStatsHistoryQueryOptions,
+  ): Promise<StoredLatencyStatsSample[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const params: (string | number)[] = [options.connectionId];
+    let commandFilter = '';
+    if (options.command) {
+      params.push(options.command);
+      commandFilter = `AND command = $${params.length}`;
+    }
+    params.push(options.startTime, options.endTime, options.limit ?? 10_000);
+    const startIdx = params.length - 2;
+
+    // Keep the most-recent `limit` rows PER COMMAND (ROW_NUMBER partitioned by command), then
+    // return them ascending. A single global LIMIT would split its budget across all commands,
+    // starving per-command baselines on busy instances; DESC inside the partition keeps the
+    // newest rows (the guard relies on freshness/version/consecutive logic). With a command
+    // filter the partition is that one command, so behaviour is unchanged.
+    const result = await this.pool.query(
+      `SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at
+       FROM (
+         SELECT id, connection_id, command, p50_us, p99_us, p999_us, server_version, captured_at,
+                ROW_NUMBER() OVER (PARTITION BY command ORDER BY captured_at DESC) AS rn
+         FROM latency_stats_samples
+         WHERE connection_id = $1 ${commandFilter} AND captured_at >= $${startIdx} AND captured_at <= $${startIdx + 1}
+       ) ranked
+       WHERE rn <= $${startIdx + 2}
+       ORDER BY captured_at ASC`,
+      params,
+    );
+
+    return result.rows.map((row: any) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      command: row.command,
+      p50Us: Number(row.p50_us),
+      p99Us: Number(row.p99_us),
+      p999Us: Number(row.p999_us),
+      serverVersion: row.server_version,
+      capturedAt: Number(row.captured_at),
+    }));
+  }
+
+  async pruneOldLatencyStatsSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = await this.pool.query(
+        'DELETE FROM latency_stats_samples WHERE captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
+      return result.rowCount ?? 0;
+    }
+
+    const result = await this.pool.query(
+      'DELETE FROM latency_stats_samples WHERE captured_at < $1',
       [cutoffTimestamp],
     );
     return result.rowCount ?? 0;

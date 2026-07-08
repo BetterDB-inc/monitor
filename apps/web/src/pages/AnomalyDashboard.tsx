@@ -13,6 +13,7 @@ import {
   type CaptureOnNextContext,
 } from './anomalies/capture-on-next-modal';
 import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
+import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import {
   AlertTriangle,
   AlertCircle,
@@ -115,6 +116,7 @@ const METRIC_LABELS: Record<string, string> = {
   fragmentation_ratio: 'Fragmentation',
   replication_role: 'Replication Role',
   dataset_keys: 'Dataset Keys',
+  command_p99: 'Command P99',
 };
 
 function formatTime(ts: number): string {
@@ -128,6 +130,10 @@ function formatValue(value: number, metric: string): string {
     return `${(value / 1e3).toFixed(0)} KB`;
   }
   if (metric === 'fragmentation_ratio') return value.toFixed(2);
+  if (metric === 'command_p99') {
+    // Stored in microseconds; show ms once past 1ms, else µs.
+    return value >= 1000 ? `${(value / 1000).toFixed(1)} ms` : `${Math.round(value)} µs`;
+  }
   if (value > 1e6) return `${(value / 1e6).toFixed(1)}M`;
   if (value > 1e3) return `${(value / 1e3).toFixed(1)}K`;
   return value.toLocaleString();
@@ -196,6 +202,14 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
+  // Same reasoning for the P99 regression banner: a critical upgrade regression
+  // must not be hidden by the date picker, so it gets its own unfiltered feed.
+  const { data: latencyRegressionEvents } = usePolling<AnomalyEvent[]>({
+    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'command_p99', activeOnly: true }),
+    interval: 5000,
+    refetchKey: currentConnection?.id,
+  });
+
   const { data: groups } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
@@ -251,6 +265,7 @@ export function AnomalyDashboard() {
   return (
     <div className="space-y-6">
       <DataLossAlertBanner events={dataLossEvents ?? undefined} />
+      <LatencyRegressionBanner events={latencyRegressionEvents ?? undefined} />
 
       {/* Header */}
       <div className="flex justify-between items-center">

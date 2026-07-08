@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
 import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
 import {
   WebhookEventType,
+  type LatencyRegressionDetectedData,
   type MetricKind,
   type WebhookInstanceInfo,
 } from '@betterdb/shared';
@@ -244,6 +245,36 @@ export class WebhookEventsProService implements OnModuleInit {
         newReplid: data.newReplid,
         connectedSlaves: data.connectedSlaves,
         role: data.role,
+        message: data.message,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  /**
+   * Dispatch latency regression detected event (PRO+)
+   * Called when per-command P99 latency degrades after a server version
+   * change (upgrade regression) or sustains above its rolling baseline
+   * (sustained degradation). See valkey/valkey#3527.
+   */
+  async dispatchLatencyRegressionDetected(data: LatencyRegressionDetectedData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Latency regression event skipped - requires PRO license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.LATENCY_REGRESSION_DETECTED,
+      {
+        kind: data.kind,
+        previousVersion: data.previousVersion,
+        currentVersion: data.currentVersion,
+        commands: data.commands,
+        topologyRefreshCorrelated: data.topologyRefreshCorrelated,
+        prefetchBatchMaxSize: data.prefetchBatchMaxSize ?? null,
+        runbook: data.runbook,
         message: data.message,
         timestamp: data.timestamp,
         instance: data.instance,

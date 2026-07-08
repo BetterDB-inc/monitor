@@ -37,6 +37,8 @@ import {
   DatabaseConnectionConfig,
   StoredCommandStatsSample,
   CommandStatsHistoryQueryOptions,
+  StoredLatencyStatsSample,
+  LatencyStatsHistoryQueryOptions,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
@@ -1220,6 +1222,71 @@ export class MemoryAdapter implements StoragePort {
       );
     }
     return before - this.commandStatsSamples.length;
+  }
+
+  // Latency Stats Sample Methods (INFO latencystats)
+  private latencyStatsSamples: StoredLatencyStatsSample[] = [];
+
+  async saveLatencyStatsSamples(
+    samples: Omit<StoredLatencyStatsSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    for (const s of samples) {
+      this.latencyStatsSamples.push({
+        id: randomUUID(),
+        connectionId,
+        ...s,
+      });
+    }
+    return samples.length;
+  }
+
+  async getLatencyStatsHistory(
+    options: LatencyStatsHistoryQueryOptions,
+  ): Promise<StoredLatencyStatsSample[]> {
+    // Keep the most-recent `limit` samples PER COMMAND (not a single global cap across all
+    // commands, which would starve per-command baselines on busy instances), returned ascending —
+    // the regression guard needs the newest samples for freshness/version/consecutive logic.
+    const limit = options.limit ?? 10_000;
+    // A limit of 0 (or negative) means no rows — mirror SQL `LIMIT 0`. Guard here because
+    // `slice(-0)` is `slice(0)`, which would return every row instead of none.
+    if (limit <= 0) return [];
+    const filtered = this.latencyStatsSamples.filter(
+      (s) =>
+        s.connectionId === options.connectionId &&
+        (!options.command || s.command === options.command) &&
+        s.capturedAt >= options.startTime &&
+        s.capturedAt <= options.endTime,
+    );
+    const byCommand = new Map<string, StoredLatencyStatsSample[]>();
+    for (const s of filtered) {
+      const arr = byCommand.get(s.command) ?? [];
+      arr.push(s);
+      byCommand.set(s.command, arr);
+    }
+    const kept: StoredLatencyStatsSample[] = [];
+    for (const arr of byCommand.values()) {
+      arr.sort((a, b) => a.capturedAt - b.capturedAt);
+      kept.push(...arr.slice(-limit));
+    }
+    return kept.sort((a, b) => a.capturedAt - b.capturedAt);
+  }
+
+  async pruneOldLatencyStatsSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    const before = this.latencyStatsSamples.length;
+    if (connectionId) {
+      this.latencyStatsSamples = this.latencyStatsSamples.filter(
+        (s) => s.capturedAt >= cutoffTimestamp || s.connectionId !== connectionId,
+      );
+    } else {
+      this.latencyStatsSamples = this.latencyStatsSamples.filter(
+        (s) => s.capturedAt >= cutoffTimestamp,
+      );
+    }
+    return before - this.latencyStatsSamples.length;
   }
 
   // Vector Index Snapshot Methods

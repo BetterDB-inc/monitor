@@ -31,6 +31,7 @@ let LicenseModule: any = null;
 let KeyAnalyticsModule: any = null;
 let BulkDeleteModule: any = null;
 let AnomalyModule: any = null;
+let LatencyRegressionModule: any = null;
 let WebhookProModule: any = null;
 let InferenceLatencyProModule: any = null;
 let CacheProposalsModule: any = null;
@@ -75,6 +76,14 @@ try {
   const anomalyModule = require('../../../proprietary/anomaly-detection/anomaly.module');
   AnomalyModule = anomalyModule.AnomalyModule;
   console.log('[AnomalyDetection] Proprietary module loaded');
+} catch {
+  // Proprietary module not available
+}
+
+try {
+  const latencyRegressionModule = require('../../../proprietary/latency-regression/latency-regression.module');
+  LatencyRegressionModule = latencyRegressionModule.LatencyRegressionModule;
+  console.log('[LatencyRegression] Proprietary module loaded');
 } catch {
   // Proprietary module not available
 }
@@ -176,6 +185,7 @@ const proprietaryImports = [
   KeyAnalyticsModule,
   BulkDeleteModule,
   AnomalyModule,
+  LatencyRegressionModule,
   WebhookProModule,
   InferenceLatencyProModule,
   CacheProposalsModule,
