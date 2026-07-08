@@ -44,13 +44,18 @@ export class BulkDeletePreviewDto {
   @IsOptional()
   @IsBoolean()
   confirmDeleteAll?: boolean;
-}
 
-export class BulkDeleteExecuteDto extends BulkDeletePreviewDto {
-  /** Pause between batches to bound latency impact (ms). */
+  /**
+   * Pause between batches to bound latency impact (ms). Accepted on both
+   * preview and execute (the web sends the same body shape for both), and
+   * honoured by the dry-run walk too.
+   */
   @IsOptional()
   @IsInt()
   @Min(0)
   @Max(MAX_BATCH_PAUSE_MS)
   batchPauseMs?: number;
 }
+
+// Execute shares the preview body shape; kept as a distinct type for clarity.
+export class BulkDeleteExecuteDto extends BulkDeletePreviewDto {}

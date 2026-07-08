@@ -43,16 +43,18 @@ function isCatchAll(pattern: string): boolean {
 }
 
 /**
- * Whether the dry-run preview card should render. A running preview always
- * shows (its live progress and Cancel must stay reachable even if the target is
- * edited mid-run); a finished preview is hidden once the target has changed.
+ * Whether the active job's card (preview or run) should render. A running job
+ * always shows — its live progress and Cancel must stay reachable even if the
+ * target is edited mid-run — while a finished job's card is hidden once the
+ * target has changed, so it can't sit next to an edited form showing results
+ * for a previous pattern.
  */
-export function showPreviewCard(
-  job: Pick<BulkDeleteJob, 'mode' | 'status'> | null | undefined,
-  previewStale: boolean,
+export function jobCardVisible(
+  job: Pick<BulkDeleteJob, 'status'> | null | undefined,
+  targetChanged: boolean,
 ): boolean {
-  if (job?.mode !== 'dry-run') return false;
-  return job.status === 'running' || !previewStale;
+  if (!job) return false;
+  return job.status === 'running' || !targetChanged;
 }
 
 function statusVariant(status: BulkDeleteJob['status']) {
@@ -94,21 +96,21 @@ export function BulkDelete() {
   const [preview, setPreview] = useState<BulkDeleteJob | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [pollEnabled, setPollEnabled] = useState(false);
-  // A dry-run reflects the target it ran against; when the target changes the
-  // shown preview goes stale until a fresh preview is run.
-  const [previewStale, setPreviewStale] = useState(false);
+  // Set when the target changes after a job was started; a finished job's card
+  // is then hidden until a fresh job (preview or execute) is run.
+  const [targetChanged, setTargetChanged] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
 
   const catchAll = isCatchAll(match);
 
-  // A preview is only valid for the target it was run against; drop the stored
-  // preview (confirm dialog) and mark any shown preview stale when the target
-  // changes, so neither the card nor the dialog reflects a previous target.
+  // A job's result is only valid for the target it ran against; drop the stored
+  // preview (confirm dialog) and flag the target changed when it does, so
+  // neither a finished card nor the dialog reflects a previous target.
   useEffect(() => {
     setPreview(null);
-    setPreviewStale(true);
+    setTargetChanged(true);
   }, [match, type, scope, maxKeys]);
 
   const buildRequest = (): BulkDeleteRequest => ({
@@ -130,6 +132,8 @@ export function BulkDelete() {
   };
 
   const startJob = (jobId: string) => {
+    // A fresh job snapshots the current form, so its card is no longer stale.
+    setTargetChanged(false);
     setActiveJobId(jobId);
     setPollEnabled(true);
     setFormError(null);
@@ -137,10 +141,7 @@ export function BulkDelete() {
 
   const previewMutation = useMutation({
     mutationFn: () => bulkDeleteApi.preview(buildRequest()),
-    onSuccess: ({ jobId }) => {
-      setPreviewStale(false);
-      startJob(jobId);
-    },
+    onSuccess: ({ jobId }) => startJob(jobId),
     onError: (err) => setFormError(handleGuarded(err)),
   });
 
@@ -174,8 +175,8 @@ export function BulkDelete() {
   useEffect(() => {
     if (!job || job.status === 'running') return;
     setPollEnabled(false);
-    if (job.mode === 'dry-run' && !previewStale) setPreview(job);
-  }, [job, previewStale]);
+    if (job.mode === 'dry-run' && !targetChanged) setPreview(job);
+  }, [job, targetChanged]);
 
   const jobRunning = job?.status === 'running';
 
@@ -189,8 +190,11 @@ export function BulkDelete() {
   const canSubmit = match.trim().length > 0 && (!catchAll || confirmDeleteAll);
   const confirmValid = confirmText.trim().toUpperCase() === 'DELETE';
 
-  const previewCard = job && showPreviewCard(job, previewStale) ? job : null;
-  const runCard = job?.mode === 'execute' ? job : null;
+  // Both cards follow the same rule: visible while running; a finished card is
+  // hidden once the target changes (its result lives on in the audit table).
+  const cardVisible = jobCardVisible(job, targetChanged);
+  const previewCard = cardVisible && job?.mode === 'dry-run' ? job : null;
+  const runCard = cardVisible && job?.mode === 'execute' ? job : null;
 
   const cancelButton = jobRunning ? (
     <Button
