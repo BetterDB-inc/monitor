@@ -20,6 +20,7 @@ Optional extras install the provider SDKs alongside the library:
 
 ```bash
 pip install "betterdb-agent-cache[openai]"
+pip install "betterdb-agent-cache[openai_agents]"
 pip install "betterdb-agent-cache[anthropic]"
 pip install "betterdb-agent-cache[langchain]"
 pip install "betterdb-agent-cache[langgraph]"
@@ -35,7 +36,7 @@ As of 2026, no existing caching solution for AI agents provides all three of the
 | Multi-tier (LLM + Tool + State) | ✅ | ❌ LLM only | ❌ State only | ❌ LLM only |
 | Built-in OTel + Prometheus | ✅ | ❌ | ❌ | ⚠️ Partial |
 | No modules required | ✅ | ✅ | ❌ Requires Redis 8 + modules | ✅ |
-| Framework adapters | ✅ LangChain, LangGraph, LlamaIndex | ❌ LangChain only | ❌ LangGraph only | ❌ LiteLLM proxy only |
+| Framework adapters | ✅ OpenAI, OpenAI Agents SDK, Anthropic, LangChain, LangGraph, LlamaIndex | ❌ LangChain only | ❌ LangGraph only | ❌ LiteLLM proxy only |
 
 ## Design tradeoffs
 
@@ -299,6 +300,33 @@ from betterdb_agent_cache.adapters.openai_responses import prepare_params, OpenA
 opts = OpenAIResponsesPrepareOptions(normalizer=compose_normalizer({"base64": hash_base64}))
 cache_params = await prepare_params(responses_params, opts)
 ```
+
+### OpenAI Agents SDK
+
+Caches at the Agents SDK `Model.get_response()` level, so agent runs that replay the same tool-call sequences (evaluation, testing, multi-agent orchestration) skip the API. Requires `pip install "betterdb-agent-cache[openai_agents]"`.
+
+Wrap the model provider (recommended) so every model an agent run resolves is cache-enabled:
+
+```python
+from agents import Runner, RunConfig
+from betterdb_agent_cache.adapters.openai_agents import CachedModelProvider
+
+cached_provider = CachedModelProvider(provider, cache=cache)
+result = await Runner.run(agent, "Hello", run_config=RunConfig(model_provider=cached_provider))
+```
+
+Or wrap a single model directly:
+
+```python
+from agents import Agent
+from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from betterdb_agent_cache.adapters.openai_agents import CachedModel
+
+base_model = OpenAIChatCompletionsModel(model="gpt-4o", openai_client=client)
+agent = Agent(name="Assistant", model=CachedModel(base_model, cache=cache))
+```
+
+`stream_response()` is delegated uncached (matching the streaming convention), and stores fail open — a Valkey error logs and returns the live response rather than crashing the run.
 
 ### Anthropic
 
