@@ -210,9 +210,6 @@ export class SqliteAdapter implements StoragePort {
       this.createSchema();
       // Run migrations for existing databases
       this.runMigrations();
-      // Force the connection to materialize the schema it just created before it
-      // is used for writes (see materializeSchema for why).
-      this.materializeSchema();
       this.webhookRepo = new WebhookSqliteRepository(this.db, this.mappers);
       this.ready = true;
     } catch (error) {
@@ -220,30 +217,6 @@ export class SqliteAdapter implements StoragePort {
       throw new Error(
         `Failed to initialize SQLite: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
-    }
-  }
-
-  /**
-   * Force this connection to fully materialize the schema it just created.
-   *
-   * On heavily-loaded CI workers the first constraint-bearing INSERT (the
-   * cache_proposals CHECK and partial UNIQUE indexes) was observed running
-   * against a connection whose in-memory schema had not been materialized, so
-   * SQLite silently skipped enforcement — invalid rows and duplicate pending
-   * proposals were accepted (green locally, intermittently red on CI). Reading
-   * each user table once after DDL compiles a statement against it, which loads
-   * that table's columns, CHECK constraints and indexes into the connection's
-   * schema cache, making enforcement deterministic before any write. The read
-   * is zero-row and cheap; it runs once per connection at startup.
-   */
-  private materializeSchema(): void {
-    if (!this.db) return;
-    const tables = this.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-      .all() as { name: string }[];
-    for (const { name } of tables) {
-      // Quote the identifier and run a zero-row read to force the schema parse.
-      this.db.prepare(`SELECT 1 FROM "${name.replace(/"/g, '""')}" LIMIT 0`).all();
     }
   }
 
