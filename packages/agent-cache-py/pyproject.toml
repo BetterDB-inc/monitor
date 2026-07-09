@@ -40,20 +40,28 @@ langgraph = ["langgraph>=0.1.0"]
 llamaindex = ["llama-index-core>=0.10.0"]
 normalizer = ["aiohttp>=3.9.0"]
 <<<<<<< HEAD
+<<<<<<< HEAD
 openai_agents = ["openai-agents>=0.1.0"]
 =======
 pydantic_ai = ["pydantic-ai-slim>=0.0.14"]
 >>>>>>> c5fa266 (feat(agent-cache-py): add Pydantic AI adapter)
+=======
+pydantic_ai = ["pydantic-ai-slim>=2.0.0"]
+>>>>>>> 9175f57 (feat(agent-cache-py): add Pydantic AI adapter with cached model wrapper, message normalization, tests, examples, deterministic cache handling, and lint fixes)
 analytics = ["posthog>=3.0.0"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "fakeredis[aioredis]>=2.20.0",
 <<<<<<< HEAD
+<<<<<<< HEAD
     "openai-agents>=0.1.0",
 =======
     "pydantic-ai-slim>=0.0.14",
 >>>>>>> c5fa266 (feat(agent-cache-py): add Pydantic AI adapter)
+=======
+    "pydantic-ai-slim>=2.0.0",
+>>>>>>> 9175f57 (feat(agent-cache-py): add Pydantic AI adapter with cached model wrapper, message normalization, tests, examples, deterministic cache handling, and lint fixes)
 ]
 all = [
     "openai>=1.0.0",
@@ -61,7 +69,7 @@ all = [
     "langchain-core>=0.1.0",
     "langgraph>=0.1.0",
     "llama-index-core>=0.10.0",
-    "pydantic-ai-slim>=0.0.14",
+    "pydantic-ai-slim>=2.0.0",
     "posthog>=3.0.0",
     "aiohttp>=3.9.0",
     "openai-agents>=0.1.0",

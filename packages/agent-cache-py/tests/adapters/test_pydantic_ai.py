@@ -66,15 +66,12 @@ async def test_prepare_params_maps_request_and_response_parts():
     assert out[4] == {
         "role": "tool",
         "toolCallId": "call_1",
-        "content": [{
-            "type": "tool_result",
-            "toolCallId": "call_1",
-            "content": [{"type": "text", "text": "sunny"}],
-        }],
+        "content": [{"type": "text", "text": "sunny"}],
     }
     assert out[5]["role"] == "tool"
-    assert out[5]["content"][0]["type"] == "tool_result"
-    assert out[5]["content"][0]["isError"] is True
+    assert out[5]["toolCallId"] == "call_2"
+    assert out[5]["isError"] is True
+    assert out[5]["content"] == [{"type": "text", "text": "bad arg"}]
     assert "internal" not in str(params["messages"])
 
 
