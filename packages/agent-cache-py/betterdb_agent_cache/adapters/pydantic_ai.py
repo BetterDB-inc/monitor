@@ -19,9 +19,11 @@ manually rather than through the wrapper.
 
 Limitations
 ~~~~~~~~~~~
-* **Binary / multimodal content** in ``UserPromptPart`` (``ImageUrl``,
-  ``BinaryContent``) is JSON-serialised raw via ``_to_text()``.  A follow-up
-  can add explicit normalizer dispatch matching ``openai.py``.
+* ``ImageUrl`` and ``BinaryContent`` are routed through the configured
+  ``BinaryNormalizer`` to produce a compact ``binary`` block. Other Pydantic AI
+  media types (``AudioUrl``, ``DocumentUrl``, ``VideoUrl``) follow the same
+  URL-based pattern and can be added as usage matures.
+* ``ThinkingPart`` is dropped from cache-key normalization — it's non-deterministic.
 """
 from __future__ import annotations
 
@@ -68,17 +70,18 @@ async def _normalize_user_content(
 ) -> list[ContentBlock]:
     """Reduce a ``UserPromptPart.content`` value to canonical content blocks.
 
-    Plain strings become a single text block.  Lists are walked item-by-item;
-    binary / image items are passed through *normalizer* so the cache key
-    stays compact and stable (matching the pattern in ``openai.py`` and
-    ``anthropic.py``).
-
-    .. note::
-       Pydantic AI's ``ImageUrl`` and ``BinaryContent`` types are not yet
-       handled — they fall through to ``_to_text()`` which JSON-serialises
-       them raw.  A follow-up PR can add explicit dispatch once multimodal
-       Pydantic AI usage is common.
+    Plain strings become a single text block. Lists are walked item-by-item;
+    ``ImageUrl`` and ``BinaryContent`` are dispatched through *normalizer* to
+    produce a compact ``{"type": "binary", "kind": ..., "mediaType": ...,
+    "ref": ...}`` block — matching the peer adapter convention in ``openai.py``
+    and ``anthropic.py``. Everything else falls through to text serialization.
     """
+    # Lazy import so pydantic-ai stays an optional dep.
+    try:
+        from pydantic_ai.messages import BinaryContent, ImageUrl
+    except ImportError:  # pragma: no cover - guarded by adapter usage
+        BinaryContent = ImageUrl = None  # type: ignore[assignment]
+
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
 
@@ -86,10 +89,49 @@ async def _normalize_user_content(
     for item in content:
         if isinstance(item, str):
             blocks.append({"type": "text", "text": item})
-        elif hasattr(item, "content"):
+            continue
+
+        # ImageUrl — URL reference; kind is always image.
+        if ImageUrl is not None and isinstance(item, ImageUrl):
+            ref = await normalizer({
+                "kind": "image",
+                "source": {"type": "url", "url": item.url},
+            })
+            blocks.append({
+                "type": "binary",
+                "kind": "image",
+                "mediaType": getattr(item, "media_type", None) or "image/*",
+                "ref": ref,
+            })
+            continue
+
+        # BinaryContent — raw bytes; kind derived from media_type prefix.
+        if BinaryContent is not None and isinstance(item, BinaryContent):
+            media_type: str = getattr(item, "media_type", "") or "application/octet-stream"
+            if media_type.startswith("image/"):
+                kind = "image"
+            elif media_type.startswith("audio/"):
+                kind = "audio"
+            else:
+                kind = "document"
+            ref = await normalizer({
+                "kind": kind,
+                "source": {"type": "bytes", "data": item.data},
+            })
+            blocks.append({
+                "type": "binary",
+                "kind": kind,
+                "mediaType": media_type,
+                "ref": ref,
+            })
+            continue
+
+        # Fall-through for unknown part shapes.
+        if hasattr(item, "content"):
             blocks.append({"type": "text", "text": _to_text(getattr(item, "content"))})
         else:
             blocks.append({"type": "text", "text": _to_text(item)})
+
     return blocks
 
 
@@ -246,7 +288,10 @@ class CachedModel:
                 parts.append(TextPart(content=cached.response))
             return ModelResponse(
                 parts=parts,
-                usage=RequestUsage(input_tokens=0, output_tokens=0),
+                usage=RequestUsage(
+                    input_tokens=cached.input_tokens,
+                    output_tokens=cached.output_tokens,
+                ),
                 model_name=model_name,
             )
 

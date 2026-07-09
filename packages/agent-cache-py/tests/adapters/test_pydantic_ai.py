@@ -5,7 +5,11 @@ from unittest.mock import patch
 
 import pytest
 
-from betterdb_agent_cache.adapters.pydantic_ai import CachedModel, prepare_params
+from betterdb_agent_cache.adapters.pydantic_ai import (
+    CachedModel,
+    PydanticAIPrepareOptions,
+    prepare_params,
+)
 from betterdb_agent_cache.agent_cache import AgentCache
 from betterdb_agent_cache.types import AgentCacheOptions, TierDefaults
 
@@ -73,6 +77,50 @@ async def test_prepare_params_maps_request_and_response_parts():
     assert out[5]["isError"] is True
     assert out[5]["content"] == [{"type": "text", "text": "bad arg"}]
     assert "internal" not in str(params["messages"])
+
+
+@pytest.mark.asyncio
+async def test_user_content_binary_dispatched_through_normalizer():
+    """ImageUrl / BinaryContent must be routed through the normalizer,
+    not JSON-serialised into the cache key.
+    """
+    from pydantic_ai.messages import BinaryContent, ImageUrl
+
+    calls: list[dict] = []
+
+    async def _spy_normalizer(ref):
+        calls.append(ref)
+        return "sha256:fake"
+
+    msgs = [
+        messages_mod.ModelRequest(parts=[
+            messages_mod.UserPromptPart([
+                "look at this",
+                ImageUrl(url="https://example.com/cat.png"),
+                BinaryContent(data=b"fake-bytes", media_type="image/png"),
+            ]),
+        ]),
+    ]
+    opts = PydanticAIPrepareOptions(normalizer=_spy_normalizer)
+    params = await prepare_params(msgs, "gpt-4o", opts=opts)
+
+    user_content = params["messages"][0]["content"]
+    assert user_content[0] == {"type": "text", "text": "look at this"}
+    assert user_content[1] == {
+        "type": "binary", "kind": "image",
+        "mediaType": "image/*", "ref": "sha256:fake",
+    }
+    assert user_content[2] == {
+        "type": "binary", "kind": "image",
+        "mediaType": "image/png", "ref": "sha256:fake",
+    }
+
+    # Spy asserts the normalizer was actually reached for both binary items.
+    assert len(calls) == 2
+    assert calls[0]["kind"] == "image"
+    assert calls[0]["source"] == {"type": "url", "url": "https://example.com/cat.png"}
+    assert calls[1]["kind"] == "image"
+    assert calls[1]["source"] == {"type": "bytes", "data": b"fake-bytes"}
 
 
 @pytest.mark.asyncio
@@ -163,6 +211,30 @@ async def test_cached_model_hit_skips_underlying_and_synthesizes_response():
     assert out.parts[1].tool_name == "lookup"
     assert out.usage.input_tokens == 0
     assert out.usage.output_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_cached_model_hit_propagates_stored_tokens():
+    """Cache hit returns RequestUsage with the token counts from the original miss."""
+    cache = _make_cache()
+    response = messages_mod.ModelResponse(
+        parts=[messages_mod.TextPart("with tokens")],
+        usage=usage_mod.RequestUsage(input_tokens=11, output_tokens=13),
+        model_name="fake-model",
+    )
+    base = _FakeModel(response)
+    wrapped = CachedModel(base, cache)
+    req_messages = [messages_mod.ModelRequest(parts=[messages_mod.UserPromptPart("q")])]
+
+    # Miss — stores with real token counts (11 / 13 from the fixture usage).
+    await wrapped.request(req_messages, None, None)
+    assert base.calls == 1
+
+    # Hit — should surface those stored counts, not zeros.
+    out = await wrapped.request(req_messages, None, None)
+    assert base.calls == 1                          # underlying model not re-called
+    assert out.usage.input_tokens == 11
+    assert out.usage.output_tokens == 13
 
 
 @pytest.mark.asyncio
