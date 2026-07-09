@@ -16,6 +16,10 @@ import {
   conflictSignature,
 } from './duplicate-primary-detector';
 import {
+  detectStuckReplicas,
+  stuckReplicaSignature,
+} from './stuck-replica-detector';
+import {
   MetricType,
   AnomalyEvent,
   CorrelatedAnomalyGroup,
@@ -66,6 +70,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // Per-connection set of active duplicate-primary conflict signatures, so each
   // distinct conflict is alerted once rather than on every poll tick.
   private activeTopologyConflicts = new Map<string, Set<string>>();
+  // Stuck-replica (valkey#2090) state. `firstSeen` records when a given orphaned
+  // (replica, primary) pair was first observed so we can require it to persist —
+  // a brief orphaned window is normal during a healthy failover. `active` dedupes
+  // the alert once the persistence gate has fired.
+  private stuckReplicaFirstSeen = new Map<string, Map<string, number>>();
+  private activeStuckReplicas = new Map<string, Set<string>>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private prevReplSnapshot = new Map<string, {
     role: 'master' | 'replica';
@@ -253,6 +263,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.lastClusterState.delete(connectionId);
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
+    this.stuckReplicaFirstSeen.delete(connectionId);
+    this.activeStuckReplicas.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
@@ -619,6 +631,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // Duplicate-primary (split-brain) detection — two primaries owning the
         // same slots in one shard (valkey-io/valkey#2261).
         await this.detectDuplicatePrimaries(ctx, timestamp);
+
+        // Stuck-replica detection — a replica orphaned by a lost/replaced
+        // primary that never re-attaches (valkey-io/valkey#2090).
+        await this.detectStuckReplicas(ctx, timestamp);
       }
 
       // Persistence-child stall detection (stuck BGSAVE / AOF rewrite) — state-based, not z-score
@@ -917,6 +933,94 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.activeTopologyConflicts.delete(ctx.connectionId);
       this.logger.debug(
         `Failed to check cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
+      );
+    }
+  }
+
+  /**
+   * How long an orphaned (replica, primary) pair must persist before it is
+   * alerted, to exclude the transient orphaned window of a normal failover. A
+   * healthy failover promotes/re-points the replica well within a few cluster
+   * node timeouts; a stuck replica (valkey#2090) stays orphaned indefinitely.
+   */
+  private static readonly STUCK_REPLICA_MIN_PERSIST_MS = 30_000;
+
+  /**
+   * Detects a replica orphaned by a lost/replaced primary that never re-attaches
+   * (valkey-io/valkey#2090) from this connection's `CLUSTER NODES` view. Emits a
+   * WARNING once the orphaned pair has persisted past the failover grace window,
+   * dedupes per (replica, primary) pair, and clears state on recovery so a
+   * resolved-then-recurring stuck replica alerts again.
+   */
+  private async detectStuckReplicas(ctx: ConnectionContext, timestamp: number): Promise<void> {
+    try {
+      const nodes = await ctx.client.getClusterNodes();
+      const stuck = detectStuckReplicas(nodes);
+
+      const firstSeen = this.stuckReplicaFirstSeen.get(ctx.connectionId) ?? new Map<string, number>();
+      const active = this.activeStuckReplicas.get(ctx.connectionId) ?? new Set<string>();
+      const currentSignatures = new Set(stuck.map((s) => stuckReplicaSignature(s)));
+
+      // Forget pairs that have recovered so their grace window restarts if the
+      // same pair goes stuck again later.
+      for (const sig of [...firstSeen.keys()]) {
+        if (!currentSignatures.has(sig)) firstSeen.delete(sig);
+      }
+
+      for (const s of stuck) {
+        const signature = stuckReplicaSignature(s);
+        const seenAt = firstSeen.get(signature) ?? timestamp;
+        if (!firstSeen.has(signature)) firstSeen.set(signature, timestamp);
+
+        // Persistence gate: ignore until the pair has been orphaned long enough
+        // to rule out a normal failover in progress.
+        if (timestamp - seenAt < AnomalyService.STUCK_REPLICA_MIN_PERSIST_MS) continue;
+        if (active.has(signature)) continue; // already alerted for this pair
+
+        const primaryLabel =
+          s.reason === 'primary_unknown'
+            ? `unknown primary ${s.primaryId.substring(0, 8)} (absent from the cluster view)`
+            : `failed primary ${s.primaryId.substring(0, 8)} at ${s.primaryAddress}`;
+
+        const event: AnomalyEvent = {
+          id: `${ctx.connectionId}-stuck-replica-${signature}-${timestamp}`,
+          timestamp,
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          value: 1,
+          baseline: 0,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 0,
+          message:
+            `WARNING: Replica ${s.replicaAddress} (${s.replicaId.substring(0, 8)}) is stuck replicating a ` +
+            `${primaryLabel} and has not re-attached to a live primary (valkey#2090). ` +
+            `If a replacement node took over this shard, run ` +
+            `\`CLUSTER REPLICATE <new-primary-id>\` on ${s.replicaAddress} to recover.`,
+          resolved: false,
+          connectionId: ctx.connectionId,
+        };
+
+        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+        await this.addAnomaly(event, ctx);
+        active.add(signature);
+      }
+
+      // Keep only pairs still stuck so a recovered pair re-arms alerting.
+      this.stuckReplicaFirstSeen.set(ctx.connectionId, firstSeen);
+      this.activeStuckReplicas.set(
+        ctx.connectionId,
+        new Set([...active].filter((sig) => currentSignatures.has(sig))),
+      );
+    } catch (stuckErr) {
+      // A failed poll gives no topology observation; clear dedupe/grace state so
+      // the next successful poll re-evaluates from scratch rather than
+      // suppressing (or prematurely firing) based on stale data.
+      this.stuckReplicaFirstSeen.delete(ctx.connectionId);
+      this.activeStuckReplicas.delete(ctx.connectionId);
+      this.logger.debug(
+        `Failed to check stuck replicas for ${ctx.connectionName}: ${stuckErr instanceof Error ? stuckErr.message : stuckErr}`,
       );
     }
   }
