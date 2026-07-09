@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.0] - 2026-07-09
+
+### Added
+
+- **Google AI (Gemini) embedding provider** — `create_google_embed()` in `embed/google.py` backs an `EmbedFn` with Google's `embedContent` REST API (default `text-embedding-004`, 768-dim). Configurable `task_type`, optional `title` and `output_dimensionality`, API key via `GOOGLE_API_KEY` or explicit config sent in the `x-goog-api-key` header. Uses `httpx` (via the `httpx` extra) with a `close()` helper to release the connection pool; no Google SDK dependency. Follows the existing Cohere/Voyage provider pattern.
 
 ### Changed
 

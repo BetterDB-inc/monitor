@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-07-09
+
+### Added
+
+- **Google AI (Gemini) embedding provider** — `createGoogleEmbed()` in `embed/google.ts` backs an `EmbedFn` with Google's `embedContent` REST API (default `text-embedding-004`, 768-dim). Configurable `taskType`, optional `title` and `outputDimensionality`, API key via `GOOGLE_API_KEY` or explicit config sent in the `x-goog-api-key` header. Native `fetch`, no SDK dependency; follows the existing Cohere/Voyage provider pattern.
+
 ## [0.6.0] - 2026-06-11
 
 ### Added
