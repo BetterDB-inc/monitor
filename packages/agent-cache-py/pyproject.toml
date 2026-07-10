@@ -17,6 +17,7 @@ keywords = [
     "langchain",
     "langgraph",
     "openai-agents",
+    "pydantic-ai",
 ]
 license = { text = "MIT" }
 readme = "README.md"
@@ -36,12 +37,14 @@ langgraph = ["langgraph>=0.1.0"]
 llamaindex = ["llama-index-core>=0.10.0"]
 normalizer = ["aiohttp>=3.9.0"]
 openai_agents = ["openai-agents>=0.1.0"]
+pydantic_ai = ["pydantic-ai-slim>=2.0.0"]
 analytics = ["posthog>=3.0.0"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "fakeredis[aioredis]>=2.20.0",
     "openai-agents>=0.1.0",
+    "pydantic-ai-slim>=2.0.0",
 ]
 all = [
     "openai>=1.0.0",
@@ -49,6 +52,7 @@ all = [
     "langchain-core>=0.1.0",
     "langgraph>=0.1.0",
     "llama-index-core>=0.10.0",
+    "pydantic-ai-slim>=2.0.0",
     "posthog>=3.0.0",
     "aiohttp>=3.9.0",
     "openai-agents>=0.1.0",
