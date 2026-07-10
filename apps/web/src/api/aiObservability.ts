@@ -1,5 +1,10 @@
 import { fetchApi } from './client';
-import type { AiInstance, StoredAiCacheSample } from '@betterdb/shared';
+import type {
+  AiInstance,
+  StoredAiCacheSample,
+  OtelTraceSummary,
+  StoredOtelSpan,
+} from '@betterdb/shared';
 
 export interface AiInstanceWithSample {
   instance: AiInstance;
@@ -16,4 +21,16 @@ export const aiObservabilityApi = {
     fetchApi<{ samples: StoredAiCacheSample[] }>(
       `/ai/instances/${encodeURIComponent(field)}/history?hours=${hours}`,
     ).then((r) => r.samples),
+
+  /** Recent ingested traces (OTLP) with per-trace summary. */
+  getTraces: (hours = 1, limit = 100) =>
+    fetchApi<{ traces: OtelTraceSummary[] }>(`/ai/traces?hours=${hours}&limit=${limit}`).then(
+      (r) => r.traces,
+    ),
+
+  /** All stored spans for one trace (for the waterfall). */
+  getTraceSpans: (traceId: string) =>
+    fetchApi<{ spans: StoredOtelSpan[] }>(`/ai/traces/${encodeURIComponent(traceId)}`).then(
+      (r) => r.spans,
+    ),
 };
