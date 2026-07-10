@@ -1797,4 +1797,126 @@ describe('AnomalyService', () => {
       expect(events).toHaveLength(2);
     });
   });
+
+  // ─── Stuck-replica detection (valkey-io/valkey#2090) ───────────────────────
+  describe('stuck replica detection', () => {
+    const clusterInfoResponse = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    let now: number;
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const healthyNodes = [
+      { id: 'primA', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
+      { id: 'repB', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'primA', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+    ];
+
+    // valkey#2090: repB still replicates the dead old primary while a fresh
+    // primary (newprim) took over the shard; repB never re-attaches.
+    const orphanedNodes = [
+      { id: 'newprim', address: '10.0.0.1:6379@16379', flags: ['master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 6, linkState: 'connected', slots: [[0, 16383]] },
+      { id: 'repB', address: '10.0.0.2:6380@16380', flags: ['myself', 'slave'], master: 'deadprim', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+      { id: 'deadprim', address: ':0@0', flags: ['master', 'fail', 'noaddr'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'disconnected', slots: [] },
+    ];
+
+    const topoEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+
+    it('does not alert on first observation (within the failover grace window)', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(orphanedNodes);
+      await poll();
+      expect(topoEvents()).toHaveLength(0);
+    });
+
+    it('does not alert on a transient orphaned window that resolves (normal failover)', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(orphanedNodes);
+      await poll(); // t0: orphaned observed, within grace
+      now += 5_000;
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(healthyNodes);
+      await poll(); // t0+5s: recovered before the grace window elapsed
+      expect(topoEvents()).toHaveLength(0);
+    });
+
+    it('emits a WARNING once the orphaned replica persists past the grace window', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(orphanedNodes);
+      await poll(); // t0: within grace, no alert
+      expect(topoEvents()).toHaveLength(0);
+
+      now += 31_000; // exceed STUCK_REPLICA_MIN_PERSIST_MS (30s)
+      await poll();
+
+      const events = topoEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('2090');
+      expect(events[0].message).toContain('CLUSTER REPLICATE');
+      expect(events[0].message).toContain('repB'.substring(0, 8));
+    });
+
+    it('dedupes a persistent stuck replica to a single alert across polls', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(orphanedNodes);
+      await poll();
+      now += 31_000;
+      await poll(); // fires
+      now += 5_000;
+      await poll(); // still stuck, deduped
+      expect(topoEvents()).toHaveLength(1);
+    });
+
+    it('re-alerts when a stuck replica recovers and later goes stuck again', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(orphanedNodes);
+      await poll();
+      now += 31_000;
+      await poll(); // fires (1)
+
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(healthyNodes);
+      now += 5_000;
+      await poll(); // recovered → clears grace + dedupe
+
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(orphanedNodes);
+      now += 5_000;
+      await poll(); // stuck again, within a fresh grace window → no alert yet
+      now += 31_000;
+      await poll(); // persisted again → fires (2)
+
+      expect(topoEvents()).toHaveLength(2);
+    });
+
+    it('does not alert for a healthy shard', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(healthyNodes);
+      await poll();
+      now += 31_000;
+      await poll();
+      expect(topoEvents()).toHaveLength(0);
+    });
+
+    it('does not throw when getClusterNodes fails', async () => {
+      dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('CLUSTER NODES failed'));
+      await expect(poll()).resolves.not.toThrow();
+      expect(topoEvents()).toHaveLength(0);
+    });
+  });
 });
