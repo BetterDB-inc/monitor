@@ -19,6 +19,7 @@ import { ClientAnalytics } from '../../pages/ClientAnalytics';
 import { ClientAnalyticsDeepDive } from '../../pages/ClientAnalyticsDeepDive';
 import { AiAssistant } from '../../pages/AiAssistant';
 import { AnomalyDashboard } from '../../pages/AnomalyDashboard';
+import { AiCacheMemory } from '../../pages/AiCacheMemory';
 import { KeyAnalytics } from '../../pages/KeyAnalytics';
 import { BulkDelete } from '../../pages/BulkDelete';
 import { ClusterDashboard } from '../../pages/ClusterDashboard';
@@ -152,6 +153,14 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <VectorAi />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/ai-cache-memory"
+                element={
+                  <NoConnectionsGuard>
+                    <AiCacheMemory />
                   </NoConnectionsGuard>
                 }
               />
