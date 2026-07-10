@@ -24,3 +24,4 @@ export * from './utils/memory-proposals';
 export * from './utils/discovery-protocol';
 export * from './types/inference-latency';
 export * from './types/monitor';
+export * from './types/ai-observability';
