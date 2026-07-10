@@ -28,6 +28,8 @@ export type {
   DatabaseConnectionConfig,
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
+  StoredAiCacheSample,
+  AiCacheHistoryQueryOptions,
 } from '@betterdb/shared';
 export type { MetricForecastSettings, MetricKind } from '@betterdb/shared';
 export type {
@@ -87,6 +89,8 @@ import type {
   MetricKind,
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
+  StoredAiCacheSample,
+  AiCacheHistoryQueryOptions,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
@@ -562,6 +566,14 @@ export interface StoragePort {
   ): Promise<number>;
   getLatencyStatsHistory(options: LatencyStatsHistoryQueryOptions): Promise<StoredLatencyStatsSample[]>;
   pruneOldLatencyStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // AI Cache/Memory Sample Methods (AI Cache & Memory observability) - connectionId required for writes
+  saveAiCacheSamples(
+    samples: Omit<StoredAiCacheSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number>;
+  getAiCacheHistory(options: AiCacheHistoryQueryOptions): Promise<StoredAiCacheSample[]>;
+  pruneOldAiCacheSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Vector Index Snapshot Methods
   saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number>;

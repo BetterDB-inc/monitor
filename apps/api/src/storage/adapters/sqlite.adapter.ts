@@ -44,6 +44,8 @@ import {
   CommandStatsHistoryQueryOptions,
   StoredLatencyStatsSample,
   LatencyStatsHistoryQueryOptions,
+  StoredAiCacheSample,
+  AiCacheHistoryQueryOptions,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
@@ -1408,6 +1410,29 @@ export class SqliteAdapter implements StoragePort {
         ON latency_stats_samples(connection_id, command, captured_at);
       CREATE INDEX IF NOT EXISTS idx_latstat_captured_at
         ON latency_stats_samples(connection_id, captured_at);
+
+      CREATE TABLE IF NOT EXISTS ai_cache_samples (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        instance_field TEXT NOT NULL,
+        instance_name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        hits INTEGER NOT NULL DEFAULT 0,
+        misses INTEGER NOT NULL DEFAULT 0,
+        hit_rate REAL,
+        cost_saved_micros INTEGER NOT NULL DEFAULT 0,
+        evictions INTEGER NOT NULL DEFAULT 0,
+        items INTEGER,
+        index_bytes INTEGER,
+        threshold REAL,
+        extra TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_aicache_field_ts
+        ON ai_cache_samples(connection_id, instance_field, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_aicache_ts
+        ON ai_cache_samples(connection_id, timestamp);
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -3349,6 +3374,133 @@ export class SqliteAdapter implements StoragePort {
 
     const result = this.db
       .prepare('DELETE FROM latency_stats_samples WHERE captured_at < ?')
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  // AI Cache/Memory Sample Methods
+  async saveAiCacheSamples(
+    samples: Omit<StoredAiCacheSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.db || samples.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO ai_cache_samples
+        (id, connection_id, instance_field, instance_name, kind, timestamp,
+         hits, misses, hit_rate, cost_saved_micros, evictions, items, index_bytes, threshold, extra)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    let count = 0;
+    const transaction = this.db.transaction((connId: string) => {
+      for (const s of samples) {
+        const result = stmt.run(
+          randomUUID(),
+          connId,
+          s.instanceField,
+          s.instanceName,
+          s.kind,
+          s.timestamp,
+          s.hits,
+          s.misses,
+          s.hitRate,
+          s.costSavedMicros,
+          s.evictions,
+          s.items,
+          s.indexBytes,
+          s.threshold,
+          s.extra,
+        );
+        count += result.changes;
+      }
+    });
+    transaction(connectionId);
+
+    return count;
+  }
+
+  async getAiCacheHistory(
+    options: AiCacheHistoryQueryOptions,
+  ): Promise<StoredAiCacheSample[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const filters: string[] = [];
+    const params: (string | number)[] = [];
+    if (options.connectionId) {
+      filters.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
+    if (options.instanceField) {
+      filters.push('instance_field = ?');
+      params.push(options.instanceField);
+    }
+    if (options.kind) {
+      filters.push('kind = ?');
+      params.push(options.kind);
+    }
+    if (options.startTime !== undefined) {
+      filters.push('timestamp >= ?');
+      params.push(options.startTime);
+    }
+    if (options.endTime !== undefined) {
+      filters.push('timestamp <= ?');
+      params.push(options.endTime);
+    }
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    params.push(options.limit ?? 10_000);
+
+    // Keep the most-recent `limit` rows PER INSTANCE (ROW_NUMBER partitioned by instance_field),
+    // then return ascending — same rationale as latency_stats_samples: a global LIMIT would
+    // starve per-instance history on connections with many caches.
+    const rows = this.db
+      .prepare(
+        `SELECT id, connection_id, instance_field, instance_name, kind, timestamp,
+                hits, misses, hit_rate, cost_saved_micros, evictions, items, index_bytes, threshold, extra
+         FROM (
+           SELECT *, ROW_NUMBER() OVER (PARTITION BY instance_field ORDER BY timestamp DESC) AS rn
+           FROM ai_cache_samples
+           ${where}
+         )
+         WHERE rn <= ?
+         ORDER BY timestamp ASC`,
+      )
+      .all(...params) as any[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      instanceField: row.instance_field,
+      instanceName: row.instance_name,
+      kind: row.kind,
+      timestamp: row.timestamp,
+      hits: row.hits,
+      misses: row.misses,
+      hitRate: row.hit_rate,
+      costSavedMicros: row.cost_saved_micros,
+      evictions: row.evictions,
+      items: row.items,
+      indexBytes: row.index_bytes,
+      threshold: row.threshold,
+      extra: row.extra,
+    }));
+  }
+
+  async pruneOldAiCacheSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = this.db
+        .prepare('DELETE FROM ai_cache_samples WHERE timestamp < ? AND connection_id = ?')
+        .run(cutoffTimestamp, connectionId);
+      return result.changes;
+    }
+
+    const result = this.db
+      .prepare('DELETE FROM ai_cache_samples WHERE timestamp < ?')
       .run(cutoffTimestamp);
     return result.changes;
   }

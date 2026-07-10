@@ -39,6 +39,8 @@ import {
   CommandStatsHistoryQueryOptions,
   StoredLatencyStatsSample,
   LatencyStatsHistoryQueryOptions,
+  StoredAiCacheSample,
+  AiCacheHistoryQueryOptions,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
@@ -1287,6 +1289,68 @@ export class MemoryAdapter implements StoragePort {
       );
     }
     return before - this.latencyStatsSamples.length;
+  }
+
+  // AI Cache/Memory Sample Methods
+  private aiCacheSamples: StoredAiCacheSample[] = [];
+
+  async saveAiCacheSamples(
+    samples: Omit<StoredAiCacheSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    for (const s of samples) {
+      this.aiCacheSamples.push({
+        id: randomUUID(),
+        connectionId,
+        ...s,
+      });
+    }
+    return samples.length;
+  }
+
+  async getAiCacheHistory(
+    options: AiCacheHistoryQueryOptions,
+  ): Promise<StoredAiCacheSample[]> {
+    // Keep the most-recent `limit` samples PER INSTANCE (not a single global cap), ascending.
+    const limit = options.limit ?? 10_000;
+    if (limit <= 0) return [];
+    const filtered = this.aiCacheSamples.filter(
+      (s) =>
+        (!options.connectionId || s.connectionId === options.connectionId) &&
+        (!options.instanceField || s.instanceField === options.instanceField) &&
+        (!options.kind || s.kind === options.kind) &&
+        (options.startTime === undefined || s.timestamp >= options.startTime) &&
+        (options.endTime === undefined || s.timestamp <= options.endTime),
+    );
+    const byInstance = new Map<string, StoredAiCacheSample[]>();
+    for (const s of filtered) {
+      const arr = byInstance.get(s.instanceField) ?? [];
+      arr.push(s);
+      byInstance.set(s.instanceField, arr);
+    }
+    const kept: StoredAiCacheSample[] = [];
+    for (const arr of byInstance.values()) {
+      arr.sort((a, b) => a.timestamp - b.timestamp);
+      kept.push(...arr.slice(-limit));
+    }
+    return kept.sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  async pruneOldAiCacheSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    const before = this.aiCacheSamples.length;
+    if (connectionId) {
+      this.aiCacheSamples = this.aiCacheSamples.filter(
+        (s) => s.timestamp >= cutoffTimestamp || s.connectionId !== connectionId,
+      );
+    } else {
+      this.aiCacheSamples = this.aiCacheSamples.filter(
+        (s) => s.timestamp >= cutoffTimestamp,
+      );
+    }
+    return before - this.aiCacheSamples.length;
   }
 
   // Vector Index Snapshot Methods
