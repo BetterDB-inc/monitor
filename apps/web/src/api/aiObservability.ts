@@ -4,6 +4,7 @@ import type {
   StoredAiCacheSample,
   OtelTraceSummary,
   StoredOtelSpan,
+  SpanCorrelation,
 } from '@betterdb/shared';
 
 export interface AiInstanceWithSample {
@@ -33,4 +34,10 @@ export const aiObservabilityApi = {
     fetchApi<{ spans: StoredOtelSpan[] }>(`/ai/traces/${encodeURIComponent(traceId)}`).then(
       (r) => r.spans,
     ),
+
+  /** Correlate a trace's BetterDB spans with live Valkey state. */
+  getTraceCorrelations: (traceId: string) =>
+    fetchApi<{ correlations: SpanCorrelation[] }>(
+      `/ai/traces/${encodeURIComponent(traceId)}/correlate`,
+    ).then((r) => r.correlations),
 };

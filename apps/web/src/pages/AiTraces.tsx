@@ -3,7 +3,7 @@ import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { aiObservabilityApi } from '../api/aiObservability';
-import type { OtelTraceSummary, StoredOtelSpan } from '@betterdb/shared';
+import type { OtelTraceSummary, StoredOtelSpan, SpanCorrelation } from '@betterdb/shared';
 
 const TRACES_POLL_MS = 10_000;
 
@@ -129,7 +129,13 @@ function Waterfall({
   );
 }
 
-function SpanDetail({ span }: { span: StoredOtelSpan }) {
+function SpanDetail({
+  span,
+  correlation,
+}: {
+  span: StoredOtelSpan;
+  correlation: SpanCorrelation | null;
+}) {
   const attrs = useMemo<Record<string, unknown>>(() => {
     try {
       return JSON.parse(span.attributes) as Record<string, unknown>;
@@ -137,8 +143,6 @@ function SpanDetail({ span }: { span: StoredOtelSpan }) {
       return {};
     }
   }, [span.attributes]);
-
-  const cacheMiss = attrs['cache.hit'] === false;
 
   return (
     <div className="space-y-3">
@@ -149,11 +153,20 @@ function SpanDetail({ span }: { span: StoredOtelSpan }) {
         </div>
       </div>
 
-      {cacheMiss && (
-        <div className="text-xs rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5">
-          Cache miss. Correlate with this cache's current threshold / index state on the{' '}
-          <span className="font-medium">AI Cache &amp; Memory</span> tab
-          {typeof attrs['cache.model'] === 'string' ? ` (model ${String(attrs['cache.model'])})` : ''}.
+      {correlation && (
+        <div className="text-xs rounded-md border border-sky-500/40 bg-sky-500/10 px-2 py-1.5 space-y-1">
+          <div className="font-medium text-sky-700 dark:text-sky-300">Live Valkey correlation</div>
+          <div>{correlation.explanation}</div>
+          <div className="text-muted-foreground flex flex-wrap gap-x-3">
+            {correlation.keyExistsNow !== null && (
+              <span>key: {correlation.keyExistsNow ? 'present' : 'absent'}</span>
+            )}
+            {correlation.keyTtlSeconds !== null && correlation.keyTtlSeconds >= 0 && (
+              <span>ttl: {correlation.keyTtlSeconds}s</span>
+            )}
+            {correlation.threshold !== null && <span>threshold: {correlation.threshold}</span>}
+            {correlation.indexState && <span>index: {correlation.indexState}</span>}
+          </div>
         </div>
       )}
 
@@ -198,6 +211,16 @@ export function AiTraces() {
   });
   const spans = spansData ?? [];
   const activeSpan = spans.find((s) => s.spanId === selectedSpan) ?? null;
+
+  const { data: correlationsData } = usePolling<SpanCorrelation[]>({
+    fetcher: () =>
+      activeTrace ? aiObservabilityApi.getTraceCorrelations(activeTrace) : Promise.resolve([]),
+    interval: TRACES_POLL_MS,
+    enabled: !!activeTrace,
+    refetchKey: `corr:${activeTrace ?? ''}`,
+  });
+  const activeCorrelation =
+    (correlationsData ?? []).find((c) => c.spanId === selectedSpan) ?? null;
 
   return (
     <div className="p-6 space-y-4">
@@ -259,7 +282,7 @@ export function AiTraces() {
                   <CardTitle className="text-sm">Span</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <SpanDetail span={activeSpan} />
+                  <SpanDetail span={activeSpan} correlation={activeCorrelation} />
                 </CardContent>
               </Card>
             )}

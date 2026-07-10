@@ -6,11 +6,17 @@ import { AiObservabilityService } from './ai-observability.service';
 import { AiObservabilityController } from './ai-observability.controller';
 import { OtelIngestService } from './otel-ingest.service';
 import { OtelIngestController } from './otel-ingest.controller';
+import { TraceCorrelationService } from './trace-correlation.service';
 
 @Module({
   imports: [ConnectionsModule, StorageModule],
   controllers: [AiObservabilityController, OtelIngestController],
-  providers: [DiscoveryReaderService, AiObservabilityService, OtelIngestService],
+  providers: [
+    DiscoveryReaderService,
+    AiObservabilityService,
+    OtelIngestService,
+    TraceCorrelationService,
+  ],
   exports: [DiscoveryReaderService, AiObservabilityService],
 })
 export class AiObservabilityModule {}

@@ -1,9 +1,16 @@
 import { HttpException } from '@nestjs/common';
 import { AiObservabilityController } from '../ai-observability.controller';
 import type { AiObservabilityService, AiInstanceWithSample } from '../ai-observability.service';
+import type { TraceCorrelationService } from '../trace-correlation.service';
 
-function makeController(svc: Partial<AiObservabilityService>) {
-  return new AiObservabilityController(svc as AiObservabilityService);
+function makeController(
+  svc: Partial<AiObservabilityService>,
+  correlation: Partial<TraceCorrelationService> = {},
+) {
+  return new AiObservabilityController(
+    svc as AiObservabilityService,
+    correlation as TraceCorrelationService,
+  );
 }
 
 describe('AiObservabilityController', () => {

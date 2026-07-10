@@ -52,3 +52,28 @@ export interface OtelTraceQueryOptions {
   service?: string;
   limit?: number;
 }
+
+/**
+ * Correlation of one span with the live Valkey-side state of the cache/memory
+ * instance it touched — the join that explains *why* a hit/miss happened.
+ */
+export interface SpanCorrelation {
+  spanId: string;
+  /** The cache.key / cache.matched_key attribute the span acted on, if any. */
+  cacheKey: string | null;
+  /** Instance name (prefix) parsed from the key, if resolvable. */
+  instanceName: string | null;
+  /** Whether the span reported a cache hit (from cache.hit). */
+  reportedHit: boolean | null;
+  /** Does that key exist in Valkey right now? null = not checked (no key). */
+  keyExistsNow: boolean | null;
+  /** Current TTL of the key in seconds: >0 ttl, -1 no expiry, -2 missing, null = not checked. */
+  keyTtlSeconds: number | null;
+  /** Current similarity/recall threshold of the instance, if applicable. */
+  threshold: number | null;
+  /** FT index indexing state (e.g. "ready"), if the instance has an index. */
+  indexState: string | null;
+  /** Human-readable explanation joining the span outcome with Valkey state. */
+  explanation: string;
+}
+

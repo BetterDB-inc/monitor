@@ -1,13 +1,22 @@
 import { Controller, Get, Param, Query, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
-import type { StoredAiCacheSample, OtelTraceSummary, StoredOtelSpan } from '@betterdb/shared';
+import type {
+  StoredAiCacheSample,
+  OtelTraceSummary,
+  StoredOtelSpan,
+  SpanCorrelation,
+} from '@betterdb/shared';
 import { ConnectionId } from '../common/decorators';
 import { AiObservabilityService, AiInstanceWithSample } from './ai-observability.service';
+import { TraceCorrelationService } from './trace-correlation.service';
 
 @ApiTags('ai-observability')
 @Controller('ai')
 export class AiObservabilityController {
-  constructor(private readonly service: AiObservabilityService) {}
+  constructor(
+    private readonly service: AiObservabilityService,
+    private readonly correlation: TraceCorrelationService,
+  ) {}
 
   @Get('instances')
   @ApiOperation({
@@ -77,6 +86,23 @@ export class AiObservabilityController {
       return { spans };
     } catch (error) {
       throw this.mapError(error, 'Failed to get trace spans');
+    }
+  }
+
+  @Get('traces/:traceId/correlate')
+  @ApiOperation({
+    summary: 'Correlate a trace\'s BetterDB spans with live Valkey state (key TTL, threshold, index)',
+  })
+  @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
+  async correlateTrace(
+    @Param('traceId') traceId: string,
+    @ConnectionId() connectionId?: string,
+  ): Promise<{ correlations: SpanCorrelation[] }> {
+    try {
+      const correlations = await this.correlation.correlateTrace(traceId, connectionId);
+      return { correlations };
+    } catch (error) {
+      throw this.mapError(error, 'Failed to correlate trace');
     }
   }
 
