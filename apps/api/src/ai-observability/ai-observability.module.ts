@@ -4,11 +4,13 @@ import { StorageModule } from '../storage/storage.module';
 import { DiscoveryReaderService } from './discovery-reader.service';
 import { AiObservabilityService } from './ai-observability.service';
 import { AiObservabilityController } from './ai-observability.controller';
+import { OtelIngestService } from './otel-ingest.service';
+import { OtelIngestController } from './otel-ingest.controller';
 
 @Module({
   imports: [ConnectionsModule, StorageModule],
-  controllers: [AiObservabilityController],
-  providers: [DiscoveryReaderService, AiObservabilityService],
+  controllers: [AiObservabilityController, OtelIngestController],
+  providers: [DiscoveryReaderService, AiObservabilityService, OtelIngestService],
   exports: [DiscoveryReaderService, AiObservabilityService],
 })
 export class AiObservabilityModule {}

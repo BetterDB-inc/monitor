@@ -1,5 +1,10 @@
 import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
-import type { AiInstance, StoredAiCacheSample } from '@betterdb/shared';
+import type {
+  AiInstance,
+  StoredAiCacheSample,
+  OtelTraceSummary,
+  StoredOtelSpan,
+} from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import {
   MultiConnectionPoller,
@@ -135,6 +140,22 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
       endTime,
       limit: Math.max(10_000, expectedPoints),
     });
+  }
+
+  // --- OTLP traces (Phase 2) ---
+
+  async getTraces(hours = 1, service?: string, limit = 100): Promise<OtelTraceSummary[]> {
+    const endTime = Date.now();
+    return this.storage.getOtelTraces({
+      startTime: endTime - hours * 60 * 60 * 1000,
+      endTime,
+      service,
+      limit,
+    });
+  }
+
+  async getTraceSpans(traceId: string): Promise<StoredOtelSpan[]> {
+    return this.storage.getOtelTraceSpans(traceId);
   }
 
   // --- per-kind sampling ---

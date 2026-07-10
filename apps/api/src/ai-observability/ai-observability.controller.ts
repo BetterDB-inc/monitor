@@ -1,6 +1,6 @@
 import { Controller, Get, Param, Query, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
-import type { StoredAiCacheSample } from '@betterdb/shared';
+import type { StoredAiCacheSample, OtelTraceSummary, StoredOtelSpan } from '@betterdb/shared';
 import { ConnectionId } from '../common/decorators';
 import { AiObservabilityService, AiInstanceWithSample } from './ai-observability.service';
 
@@ -43,6 +43,40 @@ export class AiObservabilityController {
       return { samples };
     } catch (error) {
       throw this.mapError(error, 'Failed to get AI instance history');
+    }
+  }
+
+  @Get('traces')
+  @ApiOperation({ summary: 'Recent ingested traces (OTLP) with per-trace summary' })
+  async getTraces(
+    @Query('hours') hours?: string,
+    @Query('service') service?: string,
+    @Query('limit') limit?: string,
+  ): Promise<{ traces: OtelTraceSummary[] }> {
+    try {
+      const h = hours ? parseInt(hours, 10) : 1;
+      const l = limit ? parseInt(limit, 10) : 100;
+      const traces = await this.service.getTraces(
+        Number.isFinite(h) && h > 0 ? h : 1,
+        service || undefined,
+        Number.isFinite(l) && l > 0 ? l : 100,
+      );
+      return { traces };
+    } catch (error) {
+      throw this.mapError(error, 'Failed to list traces');
+    }
+  }
+
+  @Get('traces/:traceId')
+  @ApiOperation({ summary: 'All stored spans for one trace (waterfall)' })
+  async getTraceSpans(
+    @Param('traceId') traceId: string,
+  ): Promise<{ spans: StoredOtelSpan[] }> {
+    try {
+      const spans = await this.service.getTraceSpans(traceId);
+      return { spans };
+    } catch (error) {
+      throw this.mapError(error, 'Failed to get trace spans');
     }
   }
 
