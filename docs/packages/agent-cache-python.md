@@ -34,6 +34,7 @@ pip install "betterdb-agent-cache[langchain]"
 pip install "betterdb-agent-cache[langgraph]"
 pip install "betterdb-agent-cache[llamaindex]"
 pip install "betterdb-agent-cache[openai_agents]"
+pip install "betterdb-agent-cache[pydantic_ai]"
 # Everything:
 pip install "betterdb-agent-cache[all]"
 ```
@@ -183,8 +184,9 @@ All adapters are submodule imports under `betterdb_agent_cache.adapters` with op
 | LlamaIndex | `adapters.llamaindex` | `prepare_params` |
 | LangChain | `adapters.langchain` | `BetterDBLlmCache` |
 | LangGraph | `adapters.langgraph` | `BetterDBSaver` |
+| Pydantic AI | `adapters.pydantic_ai` | `CachedModel` |
 
-> **Note on parity:** the Python package ships the **OpenAI Agents SDK** adapter, which has no TypeScript equivalent (the Agents SDK is Python). Conversely, the TypeScript package ships a **Vercel AI SDK** adapter, which is JavaScript-only. Every other adapter exists in both languages.
+> **Note on parity:** the Python package ships the **OpenAI Agents SDK** and **Pydantic AI** adapters, which have no TypeScript equivalents (both frameworks are Python-only). Conversely, the TypeScript package ships a **Vercel AI SDK** adapter, which is JavaScript-only. Every other adapter exists in both languages.
 
 ### OpenAI Chat Completions
 
@@ -234,6 +236,21 @@ agent = Agent(name="Assistant", model=CachedModel(base_model, cache=cache))
 ```
 
 `get_response()` is checked against the cache before calling the model and stored on a miss (fail-open: a store failure logs and returns the live response, never crashing the run). `stream_response()` is delegated uncached, matching the BetterDB streaming convention. Tools, handoffs, `output_schema`, and server-side context references (`previous_response_id`, `conversation_id`) are excluded from the cache key — safe when one `CachedModel` wraps a single agent whose tools don't change between calls. If server-side context affects your responses, use a separate `CachedModel` per conversation thread.
+
+### Pydantic AI
+
+Wraps any Pydantic AI `Model` and intercepts `request()` for cache-before-call semantics, storing on a miss. Requires the `pydantic-ai-slim` peer dependency (`pip install "betterdb-agent-cache[pydantic_ai]"`).
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIModel
+from betterdb_agent_cache.adapters.pydantic_ai import CachedModel
+
+base_model = OpenAIModel("gpt-4o")
+agent = Agent(model=CachedModel(base_model, cache=cache))
+```
+
+The message history is normalized into a stable cache key across all Pydantic AI part types (system/instruction, user prompt, text, tool call, tool return, retry); `ThinkingPart` is dropped as non-deterministic, and `ImageUrl` / `BinaryContent` are routed through the binary normalizer so blobs become compact refs rather than raw base64. On a hit the response is reconstructed (text or tool calls) with the stored token counts and the underlying model is not called; everything the wrapper doesn't intercept is delegated via `__getattr__`. `model_request_parameters` (tool schemas) is excluded from the cache key — safe when one `CachedModel` wraps a single `Agent` whose tools don't change between calls. `prepare_params` is also exposed for manual cache control.
 
 ### Anthropic Messages
 

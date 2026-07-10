@@ -1,3 +1,21 @@
+## [0.11.0] - 2026-07-10
+
+### Added
+
+- **Pydantic AI adapter** (`betterdb_agent_cache.adapters.pydantic_ai`).
+  Exact-match LLM caching for [Pydantic AI](https://ai.pydantic.dev/).
+  - `CachedModel(model, cache)` — wraps any Pydantic AI `Model`; intercepts
+    `request()` for cache-before-call and delegates everything else via
+    `__getattr__`. On a hit the response (text or tool calls) is reconstructed
+    with stored token counts and the underlying model is not called.
+  - `prepare_params()` normalizes Pydantic AI message history to
+    `LlmCacheParams` across all part types; `ThinkingPart` is dropped as
+    non-deterministic, and `ImageUrl` / `BinaryContent` are routed through the
+    binary normalizer so blobs become compact refs instead of raw base64.
+  - `model_request_parameters` (tool schemas) is excluded from the cache key —
+    safe when one `CachedModel` wraps a single `Agent`.
+  - New optional dependency extra: `pydantic_ai` (`pydantic-ai-slim>=2.0.0`).
+
 ## [0.10.0] - 2026-07-09
 
 ### Added
