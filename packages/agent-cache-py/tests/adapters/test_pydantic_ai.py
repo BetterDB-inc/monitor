@@ -75,7 +75,11 @@ async def test_prepare_params_maps_request_and_response_parts():
     assert out[5]["role"] == "tool"
     assert out[5]["toolCallId"] == "call_2"
     assert out[5]["isError"] is True
-    assert out[5]["content"] == [{"type": "text", "text": "bad arg"}]
+    # RetryPromptPart.model_response() prefixes the content and (in newer
+    # pydantic-ai) appends guidance like "Fix the errors and try again." —
+    # assert the stable prefix rather than the full library-version string.
+    assert out[5]["content"][0]["type"] == "text"
+    assert out[5]["content"][0]["text"].startswith("bad arg")
     assert "internal" not in str(params["messages"])
 
 
@@ -106,10 +110,14 @@ async def test_user_content_binary_dispatched_through_normalizer():
 
     user_content = params["messages"][0]["content"]
     assert user_content[0] == {"type": "text", "text": "look at this"}
-    assert user_content[1] == {
-        "type": "binary", "kind": "image",
-        "mediaType": "image/*", "ref": "sha256:fake",
-    }
+    # Newer pydantic-ai derives media_type from the URL extension ("image/png");
+    # older versions leave it unset and the adapter falls back to "image/*".
+    # Accept either — the invariant under test is normalizer dispatch, not the
+    # exact media type.
+    assert user_content[1]["type"] == "binary"
+    assert user_content[1]["kind"] == "image"
+    assert user_content[1]["ref"] == "sha256:fake"
+    assert user_content[1]["mediaType"] in ("image/*", "image/png")
     assert user_content[2] == {
         "type": "binary", "kind": "image",
         "mediaType": "image/png", "ref": "sha256:fake",
