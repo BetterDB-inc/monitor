@@ -30,6 +30,9 @@ export type {
   VectorIndexSnapshotQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
+  StoredOtelSpan,
+  OtelTraceSummary,
+  OtelTraceQueryOptions,
 } from '@betterdb/shared';
 export type { MetricForecastSettings, MetricKind } from '@betterdb/shared';
 export type {
@@ -91,6 +94,9 @@ import type {
   VectorIndexSnapshotQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
+  StoredOtelSpan,
+  OtelTraceSummary,
+  OtelTraceQueryOptions,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
@@ -574,6 +580,12 @@ export interface StoragePort {
   ): Promise<number>;
   getAiCacheHistory(options: AiCacheHistoryQueryOptions): Promise<StoredAiCacheSample[]>;
   pruneOldAiCacheSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // OTLP Trace Methods (AI Cache & Memory observability — Phase 2)
+  saveOtelSpans(spans: StoredOtelSpan[]): Promise<number>;
+  getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]>;
+  getOtelTraceSpans(traceId: string): Promise<StoredOtelSpan[]>;
+  pruneOldOtelSpans(cutoffTimestamp: number): Promise<number>;
 
   // Vector Index Snapshot Methods
   saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number>;

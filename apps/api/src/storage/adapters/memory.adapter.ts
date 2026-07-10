@@ -41,6 +41,9 @@ import {
   LatencyStatsHistoryQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
+  StoredOtelSpan,
+  OtelTraceSummary,
+  OtelTraceQueryOptions,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
@@ -1298,6 +1301,70 @@ export class MemoryAdapter implements StoragePort {
       );
     }
     return before - this.aiCacheSamples.length;
+  }
+
+  // OTLP Trace Methods
+  private otelSpans: StoredOtelSpan[] = [];
+
+  async saveOtelSpans(spans: StoredOtelSpan[]): Promise<number> {
+    for (const s of spans) {
+      const idx = this.otelSpans.findIndex(
+        (e) => e.traceId === s.traceId && e.spanId === s.spanId,
+      );
+      if (idx >= 0) this.otelSpans[idx] = s;
+      else this.otelSpans.push(s);
+    }
+    return spans.length;
+  }
+
+  async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
+    const filtered = this.otelSpans.filter(
+      (s) =>
+        (options.startTime === undefined || s.startTimeMs >= options.startTime) &&
+        (options.endTime === undefined || s.startTimeMs <= options.endTime) &&
+        (!options.service || s.serviceName === options.service),
+    );
+    const byTrace = new Map<string, StoredOtelSpan[]>();
+    for (const s of filtered) {
+      byTrace.set(s.traceId, [...(byTrace.get(s.traceId) ?? []), s]);
+    }
+    const summaries: OtelTraceSummary[] = [];
+    for (const [traceId, spans] of byTrace) {
+      const root = spans.find((s) => s.parentSpanId === null) ?? null;
+      const minStart = Math.min(...spans.map((s) => s.startTimeMs));
+      const durationNs = root
+        ? root.durationNs
+        : (Math.max(...spans.map((s) => s.startTimeMs + s.durationNs / 1_000_000)) - minStart) *
+          1_000_000;
+      summaries.push({
+        traceId,
+        rootName: root?.name ?? null,
+        serviceName: root?.serviceName ?? spans.find((s) => s.serviceName)?.serviceName ?? null,
+        startTimeMs: minStart,
+        durationNs: Math.round(durationNs),
+        spanCount: spans.length,
+        betterdbSpanCount: spans.filter((s) => s.scopeName.startsWith('@betterdb/')).length,
+        hasError: spans.some((s) => s.statusCode === 2),
+      });
+    }
+    summaries.sort((a, b) => b.startTimeMs - a.startTimeMs);
+    return summaries.slice(0, options.limit ?? 100);
+  }
+
+  async getOtelTraceSpans(traceId: string): Promise<StoredOtelSpan[]> {
+    return this.otelSpans
+      .filter((s) => s.traceId === traceId)
+      .sort(
+        (a, b) =>
+          a.startTimeMs - b.startTimeMs ||
+          a.startTimeUnixNano.localeCompare(b.startTimeUnixNano),
+      );
+  }
+
+  async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
+    const before = this.otelSpans.length;
+    this.otelSpans = this.otelSpans.filter((s) => s.startTimeMs >= cutoffTimestamp);
+    return before - this.otelSpans.length;
   }
 
   // Vector Index Snapshot Methods
