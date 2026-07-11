@@ -72,6 +72,7 @@
     "pg": "^8.20.0",
     "posthog-node": "^5.28.11",
     "prom-client": "^15.1.3",
+    "protobufjs": ">=7.5.8 <8",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "semver": "^7.7.4",

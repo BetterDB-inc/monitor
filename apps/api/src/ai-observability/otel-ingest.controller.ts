@@ -9,12 +9,14 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { OtelIngestService, OtlpTraceRequest } from './otel-ingest.service';
+import { decodeOtlpTraceProtobuf } from './otlp-protobuf';
 
 /**
  * OTLP/HTTP trace ingestion. Exporters POST an ExportTraceServiceRequest here.
  * Excluded from the global `api` prefix so the path is the OTLP-standard
- * `/v1/traces` (see main.ts). JSON encoding only for now — set
- * `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` on the exporter.
+ * `/v1/traces` (see main.ts). Accepts both encodings:
+ *   - `application/json`      (set `OTEL_EXPORTER_OTLP_PROTOCOL=http/json`)
+ *   - `application/x-protobuf` (the OTel SDK default `http/protobuf`)
  *
  * Auth: if `OTEL_INGEST_TOKEN` is set, requires `Authorization: Bearer <token>`.
  * In CLOUD_MODE the path is allowlisted past session auth, so the token is
@@ -29,10 +31,11 @@ export class OtelIngestController {
 
   @Post('traces')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'OTLP/HTTP (JSON) trace ingestion endpoint' })
+  @ApiOperation({ summary: 'OTLP/HTTP trace ingestion endpoint (JSON or protobuf)' })
   @ApiExcludeEndpoint()
   async ingestTraces(
-    @Body() body: OtlpTraceRequest,
+    @Body() body: OtlpTraceRequest | Buffer,
+    @Headers('content-type') contentType?: string,
     @Headers('authorization') auth?: string,
   ): Promise<Record<string, never>> {
     if ((process.env.OTEL_INGEST_ENABLED ?? 'true') === 'false') {
@@ -52,8 +55,25 @@ export class OtelIngestController {
       throw new HttpException('Invalid ingestion token', HttpStatus.UNAUTHORIZED);
     }
 
+    let request: OtlpTraceRequest;
+    if ((contentType ?? '').includes('application/x-protobuf')) {
+      if (!Buffer.isBuffer(body)) {
+        throw new HttpException('Expected a protobuf body', HttpStatus.BAD_REQUEST);
+      }
+      try {
+        request = decodeOtlpTraceProtobuf(body);
+      } catch (err) {
+        throw new HttpException(
+          `Failed to decode OTLP protobuf: ${err instanceof Error ? err.message : 'unknown'}`,
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+    } else {
+      request = (body as OtlpTraceRequest) ?? {};
+    }
+
     // Stamp receive time here (Date.now is unavailable inside pure helpers only).
-    await this.ingest.ingest(body ?? {}, Date.now());
+    await this.ingest.ingest(request, Date.now());
     // ExportTraceServiceResponse: empty body signals full success.
     return {};
   }

@@ -136,6 +136,18 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
+  // Accept OTLP/protobuf trace bodies (application/x-protobuf) as raw Buffers so
+  // OtelIngestController can decode them (the OTel SDK default is http/protobuf).
+  app
+    .getHttpAdapter()
+    .getInstance()
+    .addContentTypeParser(
+      'application/x-protobuf',
+      { parseAs: 'buffer' },
+      (_req: unknown, body: Buffer, done: (err: Error | null, body?: Buffer) => void) =>
+        done(null, body),
+    );
+
   if (isProduction && publicPath) {
     // Set global prefix for API routes
     // SPA fallback is registered at Fastify level before NestJS, so no exclusion needed
