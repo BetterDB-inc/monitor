@@ -5,38 +5,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-12
+
+### Added
+
+- **Per-entry hit analytics** — every entry now tracks `hit_count` and
+  `last_accessed_at`, incremented atomically on each cache hit (batched into the
+  existing TTL-refresh pipeline — no extra round trip). New `entryAnalytics()`
+  method reports total / never-hit / cold entry counts and the hottest entries.
+  When the index includes usage fields, counts use server-side `FT.SEARCH` with
+  `LIMIT 0 0` (exact, no materialization); `topEntries` uses
+  `SORTBY hit_count DESC` with `LIMIT 0 topN`. Older indexes fall back to
+  `SCAN` + pipelined `HMGET` (5 fields only) over a sample of up to 10,000
+  entries. New `entry_analytics` capability on the discovery marker.
+  `EntryAnalyticsOptions`, `EntryAnalyticsResult`, and `EntrySummary`
+  exported from the package root.
+
+### Changed
+
+- Cache hits now incur one Valkey round trip for usage tracking even when
+  `defaultTtl` is not configured. Previously a hit was a pure read.
+- Cold-entry counting now uses strict-less-than (`<`) semantics on both the
+  `FT.SEARCH` fast path and the `SCAN` fallback. An entry with
+  `last_accessed_at === coldCutoff` is no longer counted as cold on the fast
+  path (it wasn't on the scan path). Fixes a one-entry-off boundary
+  inconsistency between the two paths.
+- The FT index schema gains `hit_count NUMERIC SORTABLE` and
+  `last_accessed_at NUMERIC SORTABLE`. Existing indexes keep working; run
+  `flush()` + `initialize()` to rebuild the schema and enable the fast
+  analytics path. `HINCRBY` auto-creates the counter, so pre-existing entries
+  begin tracking correctly on their first hit after upgrade with no migration.
+
 ## [0.10.0] - 2026-07-09
 
 ### Added
 
-- **Google AI (Gemini) embedding provider** — `createGoogleEmbed()` in `embed/google.ts` backs an `EmbedFn` with Google's `embedContent` REST API (default `text-embedding-004`, 768-dim). Configurable `taskType`, optional `title` and `outputDimensionality`, API key via `GOOGLE_API_KEY` or explicit config sent in the `x-goog-api-key` header. Native `fetch`, no SDK dependency; follows the existing Cohere/Voyage provider pattern.
+- **Google AI (Gemini) embedding provider** — `createGoogleEmbed()` in
+  `embed/google.ts` backs an `EmbedFn` with Google's `embedContent` REST API
+  (default `text-embedding-004`, 768-dim). Configurable `taskType`, optional
+  `title` and `outputDimensionality`, API key via `GOOGLE_API_KEY` or explicit
+  config sent in the `x-goog-api-key` header. Native `fetch`, no SDK
+  dependency; follows the existing Cohere/Voyage provider pattern.
 
 ## [0.6.0] - 2026-06-11
 
 ### Added
 
-- **Built-in keyword-overlap rerank factory** — `createKeywordOverlapRerank()` returns a rerank function that blends cosine similarity with word overlap. Supports `compare: 'prompt'` (equivalence signal, default) and `compare: 'response'` (relevance signal), with configurable `cosineWeight`.
-- **Stored prompt exposed on rerank candidates** — rerank candidates now include a `prompt` key with the stored prompt text (additive).
-- **`cachedPrompt` in judge context** — the judge context now carries the stored prompt text alongside the response (reserved, inert by default).
-- **Cost instrumentation** — similarity-window entries now record `cost_saved_micros` for hits, and a subsequent `store()` retroactively populates the cost of the preceding miss. Consumed by BetterDB Monitor's cost-weighted threshold recommendations.
+- **Built-in keyword-overlap rerank factory** —
+  `createKeywordOverlapRerank()` returns a rerank function that blends cosine
+  similarity with word overlap. Supports `compare: 'prompt'` (equivalence
+  signal, default) and `compare: 'response'` (relevance signal), with
+  configurable `cosineWeight`.
+- **Stored prompt exposed on rerank candidates** — rerank candidates now
+  include a `prompt` key with the stored prompt text (additive).
+- **`cachedPrompt` in judge context** — the judge context now carries the
+  stored prompt text alongside the response (reserved, inert by default).
+- **Cost instrumentation** — similarity-window entries now record
+  `cost_saved_micros` for hits, and a subsequent `store()` retroactively
+  populates the cost of the preceding miss. Consumed by BetterDB Monitor's
+  cost-weighted threshold recommendations.
 
 ### Fixed
 
-- **Miss-pending zset is pruned and flushed** — entries older than the 5-minute bound are pruned on every record, so miss-only traffic cannot grow the bookkeeping zset unbounded; `flush()` now deletes the miss-pending key alongside stats and window keys.
+- **Miss-pending zset is pruned and flushed** — entries older than the
+  5-minute bound are pruned on every record, so miss-only traffic cannot grow
+  the bookkeeping zset unbounded; `flush()` now deletes the miss-pending key
+  alongside stats and window keys.
 
 ## [0.5.0] - 2026-05-13
 
 ### Added
 
-- **LLM-as-judge for borderline hits** — `CacheCheckOptions.judge` accepts a `judgeFn` that adjudicates hits whose cosine distance lands in the uncertainty band (`threshold - uncertaintyBand < score <= threshold`). The judge promotes accepted hits to `confidence: 'high'` and demotes rejected hits to a miss with `nearestMiss` populated. Configurable `timeoutMs` (default 2000) and `onError` (default `'accept'`, fail-open). Direct response to user feedback that single-threshold matching produced too many uncertain borderline returns on chat.betterdb.com.
-- New Prometheus metrics `{prefix}_judge_decisions_total{decision}` and `{prefix}_judge_duration_seconds{decision}` with decision labels `accept | reject | error_accept | error_reject | timeout_accept | timeout_reject`.
-- New OTel span attributes `cache.judge.invoked`, `cache.judge.decision`, `cache.judge.latency_ms`.
+- **LLM-as-judge for borderline hits** — `CacheCheckOptions.judge` accepts a
+  `judgeFn` that adjudicates hits whose cosine distance lands in the
+  uncertainty band (`threshold - uncertaintyBand < score <= threshold`). The
+  judge promotes accepted hits to `confidence: 'high'` and demotes rejected
+  hits to a miss with `nearestMiss` populated. Configurable `timeoutMs`
+  (default 2000) and `onError` (default `'accept'`, fail-open). Direct
+  response to user feedback that single-threshold matching produced too many
+  uncertain borderline returns on chat.betterdb.com.
+- New Prometheus metrics `{prefix}_judge_decisions_total{decision}` and
+  `{prefix}_judge_duration_seconds{decision}` with decision labels
+  `accept | reject | error_accept | error_reject | timeout_accept | timeout_reject`.
+- New OTel span attributes `cache.judge.invoked`,
+  `cache.judge.decision`, `cache.judge.latency_ms`.
 - `JudgeOptions` type exported from the package root.
 
 ### Changed
 
-- `nearestMiss.deltaToThreshold` may be `<= 0` when a miss originates from a judge rejection (the score did clear the threshold but the judge said no). Existing miss paths still produce `> 0`. Documented on the type.
-- `checkBatch()` throws `SemanticCacheUsageError` when `judge` is supplied, matching the existing handling of `rerank` and `staleAfterModelChange`.
+- `nearestMiss.deltaToThreshold` may be `<= 0` when a miss originates from a
+  judge rejection (the score did clear the threshold but the judge said no).
+  Existing miss paths still produce `> 0`. Documented on the type.
+- `checkBatch()` throws `SemanticCacheUsageError` when `judge` is supplied,
+  matching the existing handling of `rerank` and
+  `staleAfterModelChange`.
 
 ### Breaking changes
 

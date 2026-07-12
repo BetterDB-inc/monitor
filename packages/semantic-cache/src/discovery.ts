@@ -49,7 +49,12 @@ export function buildSemanticMetadata(input: BuildSemanticMetadataInput): Marker
     prefix: input.name,
     version: input.version,
     protocol_version: PROTOCOL_VERSION,
-    capabilities: ['invalidate', 'similarity_distribution', 'threshold_adjust'],
+    capabilities: [
+      'invalidate',
+      'similarity_distribution',
+      'threshold_adjust',
+      'entry_analytics',
+    ],
     index_name: `${input.name}:idx`,
     stats_key: `${input.name}:__stats`,
     config_key: `${input.name}:__config`,

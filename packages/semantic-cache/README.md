@@ -291,6 +291,40 @@ Stops the analytics client, cancels the stats snapshot timer, and disposes the d
 
 Graceful shutdown of the discovery layer for in-process caches without destroying data. Stops the discovery heartbeat and deletes the heartbeat key; does not touch the index or entries.
 
+### `cache.entryAnalytics(options?)`
+
+Per-entry usage analytics: how many stored entries have ever been returned as a hit, which entries are hottest, and how many are cold (never hit, or not accessed within `coldAfterDays`). Use this to find dead-weight entries when sizing TTLs and keeping the HNSW index lean.
+
+```typescript
+const a = await cache.entryAnalytics({ topN: 5, coldAfterDays: 14 });
+console.log(`${a.neverHitCount} of ${a.totalEntries} entries have never been hit`);
+console.log('hottest:', a.topEntries.map((e) => `${e.key} (${e.hitCount})`));
+```
+
+Returns `totalEntries`, `neverHitCount`, `hitAtLeastOnceCount`, `coldEntryCount`,
+`topEntries` (sorted by `hitCount` descending, capped at `topN`), and the
+`coldAfterDays` value applied.
+
+When the FT index was created with the `hit_count` / `last_accessed_at` sortable
+fields, counts use server-side `FT.SEARCH` with `LIMIT 0 0` (exact, no
+materialization) and `topEntries` uses `SORTBY hit_count DESC` with `LIMIT 0 topN`.
+
+Older indexes fall back to `SCAN` + pipelined `HMGET` (fetching only the 5
+analytics fields) over a sample of up to 10,000 entries in implementation-defined
+order (`totalEntries` is the sample size). Run `flush()` + `initialize()` to
+rebuild the index and enable exact counts.
+
+#### Performance & tradeoffs
+
+Each genuine cache hit performs a pipelined write to bump `hit_count` and
+`last_accessed_at` (and refresh TTL if configured) — one round trip, so
+latency is flat, but every read becomes a write. At high QPS on a small hot
+working set, this adds real AOF and replication load on the hottest entries.
+If that becomes an issue, `hit_count` remains the primary signal for
+`entryAnalytics()` accuracy; `last_accessed_at` only powers cold-entry
+detection and could reasonably be sampled (e.g. one write per N hits) in a
+future release. Please open an issue if you hit this in production.
+
 ### `cache.thresholdEffectiveness(options?)`
 
 Analyzes the rolling similarity score window (last 10,000 entries, up to 7 days) and returns:
