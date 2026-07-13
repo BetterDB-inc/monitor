@@ -80,6 +80,19 @@ describe.each([
     expect(spans.map((s) => s.spanId)).toEqual(['a', 'b']);
   });
 
+  it('handles duplicate (traceId, spanId) within a single save batch', async () => {
+    // A single multi-row INSERT ... ON CONFLICT DO UPDATE errors on Postgres if the
+    // same key appears twice in one batch, so saveOtelSpans must dedupe (last wins).
+    const stored = await storage.saveOtelSpans([
+      span({ spanId: 'dup', name: 'first' }),
+      span({ spanId: 'dup', name: 'second' }),
+    ]);
+    expect(stored).toBeGreaterThanOrEqual(1);
+    const spans = await storage.getOtelTraceSpans('t1');
+    expect(spans).toHaveLength(1);
+    expect(spans[0].name).toBe('second');
+  });
+
   it('dedupes on (traceId, spanId)', async () => {
     await storage.saveOtelSpans([span({ spanId: 'x', name: 'first' })]);
     await storage.saveOtelSpans([span({ spanId: 'x', name: 'again' })]);

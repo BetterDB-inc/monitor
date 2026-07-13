@@ -3728,6 +3728,13 @@ export class PostgresAdapter implements StoragePort {
   async saveOtelSpans(spans: StoredOtelSpan[]): Promise<number> {
     if (!this.pool || spans.length === 0) return 0;
 
+    // Dedupe by (trace_id, span_id) — last wins — because a single multi-row
+    // INSERT ... ON CONFLICT DO UPDATE errors ("cannot affect row a second time")
+    // if the same key appears twice in one batch (a malformed/duplicated export).
+    const deduped = new Map<string, StoredOtelSpan>();
+    for (const s of spans) deduped.set(`${s.traceId} ${s.spanId}`, s);
+    spans = [...deduped.values()];
+
     const values: any[] = [];
     const placeholders: string[] = [];
     let p = 1;
