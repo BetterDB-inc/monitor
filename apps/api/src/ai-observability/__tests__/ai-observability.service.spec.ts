@@ -133,6 +133,24 @@ describe('AiObservabilityService.pollConnection', () => {
     expect(s.threshold).toBeCloseTo(0.4);
   });
 
+  it('does not advance the hit-rate baseline when the save fails', async () => {
+    let hits = 100;
+    const { svc, ctx, saved, storage } = makeService({
+      instances: [agentCache],
+      call: (cmd) => (cmd === 'HGETALL' ? ['llm:hits', String(hits), 'llm:misses', '0'] : []),
+    });
+    // First save fails → baseline must NOT move.
+    (storage.saveAiCacheSamples as jest.Mock).mockRejectedValueOnce(new Error('db down'));
+
+    await expect((svc as any).pollConnection(ctx)).rejects.toThrow('db down'); // no baseline stored
+    hits = 120;
+    await (svc as any).pollConnection(ctx); // first *successful* save → still no prior baseline
+
+    // The first persisted sample has a null rate (no baseline existed), proving the
+    // failed tick did not silently advance the baseline.
+    expect(saved[saved.length - 1][0].hitRate).toBeNull();
+  });
+
   it('does nothing when no instances are discovered', async () => {
     const { svc, ctx, storage } = makeService({ instances: [], call: () => [] });
     await (svc as any).pollConnection(ctx);

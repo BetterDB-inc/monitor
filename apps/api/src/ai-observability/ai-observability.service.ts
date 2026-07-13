@@ -78,17 +78,28 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
 
     if (samples.length > 0) {
       await this.storage.saveAiCacheSamples(samples, ctx.connectionId);
+      // Advance hit-rate baselines only after a successful save, so a failed
+      // write doesn't move the in-memory baseline without a persisted sample.
+      for (const s of samples) {
+        this.lastCounters.set(`${ctx.connectionId}|${s.instanceField}`, {
+          hits: s.hits,
+          misses: s.misses,
+        });
+      }
     }
   }
 
   /** Public: discovered instances + latest stored sample, for the controller. */
   async getInstances(connectionId?: string): Promise<AiInstanceWithSample[]> {
-    const client = this.connectionRegistry.get(connectionId);
+    // Resolve the effective connection so storage reads are scoped to the SAME
+    // connection discovery ran against (the poller writes samples per connection).
+    const resolvedId = connectionId ?? this.connectionRegistry.getDefaultId() ?? undefined;
+    const client = this.connectionRegistry.get(resolvedId);
     const instances = await this.discovery.discoverWithClient(client);
     const out: AiInstanceWithSample[] = [];
     for (const instance of instances) {
       const history = await this.storage.getAiCacheHistory({
-        connectionId,
+        connectionId: resolvedId,
         instanceField: instance.field,
         limit: 1,
       });
@@ -102,9 +113,10 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
     instanceField: string,
     hours = 24,
   ): Promise<StoredAiCacheSample[]> {
+    const resolvedId = connectionId ?? this.connectionRegistry.getDefaultId() ?? undefined;
     const endTime = Date.now();
     return this.storage.getAiCacheHistory({
-      connectionId,
+      connectionId: resolvedId,
       instanceField,
       startTime: endTime - hours * 60 * 60 * 1000,
       endTime,
@@ -197,7 +209,7 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
   ): number | null {
     const key = `${connectionId}|${field}`;
     const prev = this.lastCounters.get(key);
-    this.lastCounters.set(key, { hits, misses });
+    // Read-only: the baseline is advanced by pollConnection after a successful save.
     if (!prev) return null;
     const dHits = hits - prev.hits;
     const dMisses = misses - prev.misses;
