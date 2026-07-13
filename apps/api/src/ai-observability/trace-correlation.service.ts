@@ -35,12 +35,18 @@ export class TraceCorrelationService {
         (typeof attrs['cache.matched_key'] === 'string' && (attrs['cache.matched_key'] as string)) ||
         null;
       const reportedHit = typeof attrs['cache.hit'] === 'boolean' ? (attrs['cache.hit'] as boolean) : null;
+      // Instance from the key prefix, else the cache.name attribute — a semantic /
+      // memory MISS has no matched key but still reports cache.name, and that miss
+      // is exactly the case this correlation is most useful for.
+      const instanceName =
+        (cacheKey && cacheKey.includes(':') ? cacheKey.slice(0, cacheKey.indexOf(':')) : null) ??
+        (typeof attrs['cache.name'] === 'string' ? (attrs['cache.name'] as string) : null);
 
-      // Only correlate spans that acted on a concrete key.
-      if (!cacheKey) continue;
+      // Nothing to correlate without at least a key or an instance name.
+      if (!cacheKey && !instanceName) continue;
 
       try {
-        const correlation = await this.correlateSpan(client, span, cacheKey, reportedHit);
+        const correlation = await this.correlateSpan(client, span, cacheKey, instanceName, reportedHit);
         out.push(correlation);
       } catch (err) {
         this.logger.debug(
@@ -54,13 +60,18 @@ export class TraceCorrelationService {
   private async correlateSpan(
     client: DatabasePort,
     span: StoredOtelSpan,
-    cacheKey: string,
+    cacheKey: string | null,
+    instanceName: string | null,
     reportedHit: boolean | null,
   ): Promise<SpanCorrelation> {
-    const instanceName = cacheKey.includes(':') ? cacheKey.slice(0, cacheKey.indexOf(':')) : null;
-
-    const exists = Number(await client.call('EXISTS', [cacheKey])) === 1;
-    const ttl = Number(await client.call('TTL', [cacheKey]));
+    // Only check the key when the span acted on one (hits + exact caches). A
+    // semantic/memory miss has no key, so we still surface instance context.
+    let keyExistsNow: boolean | null = null;
+    let keyTtlSeconds: number | null = null;
+    if (cacheKey) {
+      keyExistsNow = Number(await client.call('EXISTS', [cacheKey])) === 1;
+      keyTtlSeconds = Number(await client.call('TTL', [cacheKey]));
+    }
 
     let threshold: number | null = null;
     let indexState: string | null = null;
@@ -79,35 +90,47 @@ export class TraceCorrelationService {
       cacheKey,
       instanceName,
       reportedHit,
-      keyExistsNow: exists,
-      keyTtlSeconds: ttl,
+      keyExistsNow,
+      keyTtlSeconds,
       threshold,
       indexState,
-      explanation: explain({ reportedHit, exists, ttl, threshold, indexState }),
+      explanation: explain({ reportedHit, keyExistsNow, keyTtlSeconds, threshold, indexState }),
     };
   }
 }
 
 function explain(s: {
   reportedHit: boolean | null;
-  exists: boolean;
-  ttl: number;
+  keyExistsNow: boolean | null;
+  keyTtlSeconds: number | null;
   threshold: number | null;
   indexState: string | null;
 }): string {
+  const ctx: string[] = [];
+  if (s.threshold !== null) ctx.push(`threshold ${s.threshold}`);
+  if (s.indexState) ctx.push(`index ${s.indexState}`);
+  const ctxNote = ctx.length ? ` (${ctx.join(', ')})` : '';
+
+  // Keyless span — typically a semantic/memory miss with no matched entry.
+  if (s.keyExistsNow === null) {
+    return s.reportedHit === false
+      ? `Miss — nothing matched above the recall/similarity threshold${ctxNote}.`
+      : `No cache key on this span${ctxNote}.`;
+  }
+
   const ttlNote =
-    s.ttl === -1 ? 'no expiry' : s.ttl === -2 ? 'absent' : `TTL ${s.ttl}s`;
+    s.keyTtlSeconds === -1 ? 'no expiry' : s.keyTtlSeconds === -2 ? 'absent' : `TTL ${s.keyTtlSeconds}s`;
   let base: string;
-  if (s.reportedHit === false && s.exists) {
+  if (s.reportedHit === false && s.keyExistsNow) {
     base = `Reported a miss, but the key exists now (${ttlNote}) — it was populated after this request (cold miss; later calls hit).`;
-  } else if (s.reportedHit === false && !s.exists) {
+  } else if (s.reportedHit === false && !s.keyExistsNow) {
     base = 'Still uncached — the key is absent now (never stored, or already expired/evicted).';
-  } else if (s.reportedHit === true && !s.exists) {
+  } else if (s.reportedHit === true && !s.keyExistsNow) {
     base = 'Hit at request time, but the key has since expired or been evicted.';
-  } else if (s.reportedHit === true && s.exists) {
+  } else if (s.reportedHit === true && s.keyExistsNow) {
     base = `Hit; key still present (${ttlNote}).`;
   } else {
-    base = s.exists ? `Key present (${ttlNote}).` : 'Key absent now.';
+    base = s.keyExistsNow ? `Key present (${ttlNote}).` : 'Key absent now.';
   }
   if (s.indexState && s.indexState !== 'ready') {
     base += ` Index state is "${s.indexState}" — recall may be degraded.`;

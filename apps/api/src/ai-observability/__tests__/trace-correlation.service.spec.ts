@@ -89,6 +89,31 @@ describe('TraceCorrelationService.correlateTrace', () => {
     expect(c.explanation).toMatch(/Hit; key still present/);
   });
 
+  it('correlates a keyless semantic miss via cache.name', async () => {
+    const svc = makeSvc(
+      [
+        span({
+          spanId: 'scmiss',
+          scopeName: '@betterdb/semantic-cache',
+          name: 'semantic_cache.check',
+          attributes: JSON.stringify({ 'cache.hit': false, 'cache.name': 'sc' }), // miss: no key
+        }),
+      ],
+      (cmd, args) => {
+        if (cmd === 'HGET' && args[0] === 'sc:__config' && args[1] === 'threshold') return '0.12';
+        return null; // EXISTS/TTL should never be called for a keyless span
+      },
+    );
+
+    const [c] = await svc.correlateTrace('t1', 'c1');
+    expect(c.instanceName).toBe('sc');
+    expect(c.cacheKey).toBeNull();
+    expect(c.keyExistsNow).toBeNull();
+    expect(c.threshold).toBeCloseTo(0.12);
+    expect(c.indexState).toBe('ready');
+    expect(c.explanation).toMatch(/nothing matched/i);
+  });
+
   it('skips spans without a cache key and non-betterdb spans', async () => {
     const svc = makeSvc(
       [
