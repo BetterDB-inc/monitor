@@ -201,7 +201,12 @@ export function AiTraces() {
     refetchKey: currentConnection?.id,
   });
   const traces = tracesData ?? [];
-  const activeTrace = selectedTrace ?? traces[0]?.traceId ?? null;
+  // Only honor the selection while it's still in the (windowed) list; otherwise
+  // fall back to the newest trace so the waterfall stays aligned with the sidebar.
+  const activeTrace =
+    (selectedTrace && traces.some((t) => t.traceId === selectedTrace) ? selectedTrace : null) ??
+    traces[0]?.traceId ??
+    null;
 
   const { data: spansData } = usePolling<StoredOtelSpan[]>({
     fetcher: () => (activeTrace ? aiObservabilityApi.getTraceSpans(activeTrace) : Promise.resolve([])),
