@@ -143,6 +143,20 @@ describe('AiObservabilityService.pollConnection', () => {
     if (prev !== undefined) process.env.CLOUD_MODE = prev;
   });
 
+  it('falls back to the default poll interval for an invalid AI_OBS_POLL_INTERVAL_MS', async () => {
+    const prev = process.env.AI_OBS_POLL_INTERVAL_MS;
+    for (const bad of ['', '0', '-5', 'abc']) {
+      process.env.AI_OBS_POLL_INTERVAL_MS = bad;
+      const { svc } = makeService({ instances: [], call: () => [] });
+      expect((svc as any).getIntervalMs()).toBe(15_000); // default, not NaN/0/negative
+    }
+    process.env.AI_OBS_POLL_INTERVAL_MS = '500'; // below the floor
+    const { svc } = makeService({ instances: [], call: () => [] });
+    expect((svc as any).getIntervalMs()).toBe(1_000); // floored
+    if (prev !== undefined) process.env.AI_OBS_POLL_INTERVAL_MS = prev;
+    else delete process.env.AI_OBS_POLL_INTERVAL_MS;
+  });
+
   it('saves nothing when no instances are discovered, but still prunes locally', async () => {
     const prev = process.env.CLOUD_MODE;
     delete process.env.CLOUD_MODE;

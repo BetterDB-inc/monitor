@@ -40,6 +40,9 @@ describe('AiObservabilityController', () => {
 
     await ctrl.getHistory('app', '6', 'c1');
     expect(getHistory).toHaveBeenLastCalledWith('c1', 'app', 6);
+
+    await ctrl.getHistory('app', '100000', 'c1'); // huge → clamped to 168h
+    expect(getHistory).toHaveBeenLastCalledWith('c1', 'app', 168);
   });
 
   it('maps service errors to HttpException', async () => {

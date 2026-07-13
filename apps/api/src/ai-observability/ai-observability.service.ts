@@ -16,6 +16,7 @@ export interface AiInstanceWithSample {
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 15_000;
+const MIN_POLL_INTERVAL_MS = 1_000;
 const SIMILARITY_WINDOW_SAMPLE = 200;
 
 @Injectable()
@@ -37,9 +38,15 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
     private readonly discovery: DiscoveryReaderService,
   ) {
     super(connectionRegistry);
-    this.pollIntervalMs = Number(
-      process.env.AI_OBS_POLL_INTERVAL_MS ?? DEFAULT_POLL_INTERVAL_MS,
-    );
+    // Validate the env override: an empty, zero, negative, or non-numeric value
+    // would otherwise yield NaN and schedule the poller back-to-back (and break
+    // getHistory's window-based limit sizing). Fall back to the default and floor
+    // it so a tiny value can't hammer the connection.
+    const parsed = Number(process.env.AI_OBS_POLL_INTERVAL_MS);
+    this.pollIntervalMs =
+      Number.isFinite(parsed) && parsed > 0
+        ? Math.max(parsed, MIN_POLL_INTERVAL_MS)
+        : DEFAULT_POLL_INTERVAL_MS;
   }
 
   protected getIntervalMs(): number {

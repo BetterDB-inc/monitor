@@ -35,7 +35,10 @@ export class AiObservabilityController {
   ): Promise<{ samples: StoredAiCacheSample[] }> {
     try {
       const parsed = hours ? parseInt(hours, 10) : 24;
-      const windowHours = Number.isFinite(parsed) && parsed > 0 ? parsed : 24;
+      // Clamp to [1, 168h] like vector-search history: an unbounded value would
+      // inflate getHistory's row limit (scaled by window / poll interval).
+      const windowHours =
+        Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 168) : 24;
       const samples = await this.service.getHistory(connectionId, field, windowHours);
       return { samples };
     } catch (error) {
