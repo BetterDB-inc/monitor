@@ -32,6 +32,14 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
   /** key = `${connectionId}|${field}` → last cumulative counters (for hit-rate deltas). */
   private lastCounters = new Map<string, CounterState>();
 
+  // Self-hosted deployments have no cloud retention cron, so the poller trims its
+  // own history locally at the community window. In CLOUD_MODE the tier-based
+  // data-retention sweep owns retention (and keeps longer for pro/enterprise),
+  // so the local prune is skipped there.
+  private readonly PRUNE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+  private readonly LOCAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+  private lastPruneAt = 0;
+
   constructor(
     connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -86,6 +94,22 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
           misses: s.misses,
         });
       }
+    }
+
+    await this.maybePruneLocally(now);
+  }
+
+  /** Local, community-window prune for self-hosted (cloud uses the tier-based sweep). */
+  private async maybePruneLocally(now: number): Promise<void> {
+    if (process.env.CLOUD_MODE === 'true') return;
+    if (now - this.lastPruneAt <= this.PRUNE_INTERVAL_MS) return;
+    this.lastPruneAt = now;
+    try {
+      await this.storage.pruneOldAiCacheSamples(now - this.LOCAL_RETENTION_MS);
+    } catch (err) {
+      this.logger.warn(
+        `Local ai_cache_samples prune failed: ${err instanceof Error ? err.message : err}`,
+      );
     }
   }
 

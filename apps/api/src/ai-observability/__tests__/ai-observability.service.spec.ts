@@ -19,6 +19,7 @@ function makeService(opts: {
       return s.length;
     }),
     getAiCacheHistory: jest.fn(async () => []),
+    pruneOldAiCacheSamples: jest.fn(async () => 0),
   } as unknown as StoragePort;
 
   const client = {
@@ -149,6 +150,24 @@ describe('AiObservabilityService.pollConnection', () => {
     // The first persisted sample has a null rate (no baseline existed), proving the
     // failed tick did not silently advance the baseline.
     expect(saved[saved.length - 1][0].hitRate).toBeNull();
+  });
+
+  it('self-prunes locally when not in cloud mode, but not under CLOUD_MODE', async () => {
+    const { svc, ctx, storage } = makeService({
+      instances: [agentCache],
+      call: (cmd) => (cmd === 'HGETALL' ? ['llm:hits', '1', 'llm:misses', '0'] : []),
+    });
+    const prune = storage.pruneOldAiCacheSamples as jest.Mock;
+
+    const prev = process.env.CLOUD_MODE;
+    process.env.CLOUD_MODE = 'true';
+    await (svc as any).pollConnection(ctx);
+    expect(prune).not.toHaveBeenCalled(); // cloud sweep owns retention
+
+    delete process.env.CLOUD_MODE;
+    await (svc as any).pollConnection(ctx);
+    expect(prune).toHaveBeenCalledTimes(1); // self-hosted trims locally
+    if (prev !== undefined) process.env.CLOUD_MODE = prev;
   });
 
   it('does nothing when no instances are discovered', async () => {
