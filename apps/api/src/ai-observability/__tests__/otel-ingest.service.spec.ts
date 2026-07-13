@@ -100,6 +100,37 @@ describe('OtelIngestService.ingest', () => {
     expect(attrs['cache.model']).toBe('gpt-4o-mini');
   });
 
+  it('treats an all-zero parentSpanId as a root (does not drop it)', async () => {
+    const { svc, saved } = makeService();
+    const req: OtlpTraceRequest = {
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              scope: { name: 'chat-app' }, // non-betterdb: only kept if recognized as root
+              spans: [
+                {
+                  traceId: 't9',
+                  spanId: 'root9',
+                  parentSpanId: '0000000000000000', // all-zero → root
+                  name: 'chat.turn',
+                  startTimeUnixNano: '1700000000000000000',
+                  endTimeUnixNano: '1700000000500000000',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const res = await svc.ingest(req, NOW);
+
+    expect(res.stored).toBe(1);
+    expect(saved[0].spanId).toBe('root9');
+    expect(saved[0].parentSpanId).toBeNull();
+  });
+
   it('stores nothing for an empty request', async () => {
     const { svc, saved } = makeService();
     const res = await svc.ingest({}, NOW);

@@ -62,7 +62,9 @@ export class OtelIngestService {
         const isBetterdb = scopeName.startsWith(BETTERDB_SCOPE_PREFIX);
         for (const span of ss.spans ?? []) {
           received += 1;
-          const parentSpanId = span.parentSpanId ? span.parentSpanId : null;
+          // Many exporters send an all-zero parent id for root spans; treat empty
+          // OR all-zero as root so a non-@betterdb root (e.g. chat.turn) isn't dropped.
+          const parentSpanId = isRootParent(span.parentSpanId) ? null : span.parentSpanId!;
           const isRoot = parentSpanId === null;
           // Keep @betterdb/* spans, plus roots (e.g. chat.turn) for context.
           if (!isBetterdb && !isRoot) continue;
@@ -97,6 +99,11 @@ export class OtelIngestService {
     this.logger.debug(`Ingested ${stored}/${received} spans (kept @betterdb/* + roots)`);
     return { stored, received };
   }
+}
+
+/** A span is a root when its parent id is missing, empty, or all-zero. */
+function isRootParent(parentSpanId: string | undefined | null): boolean {
+  return !parentSpanId || /^0+$/.test(parentSpanId);
 }
 
 function toBig(v: string | number | undefined): bigint {

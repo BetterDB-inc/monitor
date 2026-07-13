@@ -33,6 +33,7 @@ export class CloudAuthGuardImpl implements CanActivate {
       path.startsWith('/api/agent/ws') ||
       path.startsWith('/mcp/') ||
       path.startsWith('/api/mcp/') ||
+      path.startsWith('/v1/traces') ||
       path.startsWith('/assets/') ||
       path.startsWith('/favicon')) {
       return true;
