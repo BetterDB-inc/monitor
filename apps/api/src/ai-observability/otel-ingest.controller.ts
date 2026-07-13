@@ -3,10 +3,12 @@ import {
   Post,
   Body,
   Headers,
+  Res,
   HttpCode,
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
 import { ApiTags, ApiOperation, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { OtelIngestService, OtlpTraceRequest } from './otel-ingest.service';
 import { decodeOtlpTraceProtobuf } from './otlp-protobuf';
@@ -34,10 +36,11 @@ export class OtelIngestController {
   @ApiOperation({ summary: 'OTLP/HTTP trace ingestion endpoint (JSON or protobuf)' })
   @ApiExcludeEndpoint()
   async ingestTraces(
+    @Res({ passthrough: true }) reply: FastifyReply,
     @Body() body: OtlpTraceRequest | Buffer,
     @Headers('content-type') contentType?: string,
     @Headers('authorization') auth?: string,
-  ): Promise<Record<string, never>> {
+  ): Promise<Buffer | Record<string, never>> {
     if ((process.env.OTEL_INGEST_ENABLED ?? 'true') === 'false') {
       throw new HttpException('OTLP ingestion disabled', HttpStatus.NOT_FOUND);
     }
@@ -55,8 +58,9 @@ export class OtelIngestController {
       throw new HttpException('Invalid ingestion token', HttpStatus.UNAUTHORIZED);
     }
 
+    const isProtobuf = (contentType ?? '').includes('application/x-protobuf');
     let request: OtlpTraceRequest;
-    if ((contentType ?? '').includes('application/x-protobuf')) {
+    if (isProtobuf) {
       if (!Buffer.isBuffer(body)) {
         throw new HttpException('Expected a protobuf body', HttpStatus.BAD_REQUEST);
       }
@@ -74,7 +78,14 @@ export class OtelIngestController {
 
     // Stamp receive time here (Date.now is unavailable inside pure helpers only).
     await this.ingest.ingest(request, Date.now());
-    // ExportTraceServiceResponse: empty body signals full success.
+
+    // OTLP/HTTP requires the response to match the request encoding. An empty
+    // ExportTraceServiceResponse signals full success in both: `{}` for JSON,
+    // zero bytes for protobuf.
+    if (isProtobuf) {
+      reply.header('content-type', 'application/x-protobuf');
+      return Buffer.alloc(0);
+    }
     return {};
   }
 }
