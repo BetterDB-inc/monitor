@@ -67,6 +67,7 @@
     "iovalkey": "^0.3.3",
     "jsonwebtoken": "^9.0.3",
     "langchain": "^1.2.36",
+    "long": "^5.3.2",
     "lru-cache": "^11.2.7",
     "ollama": "^0.6.3",
     "pg": "^8.20.0",

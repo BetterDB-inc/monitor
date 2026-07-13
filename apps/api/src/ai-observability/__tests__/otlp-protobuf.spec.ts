@@ -63,6 +63,36 @@ function encode(): Buffer {
 }
 
 describe('decodeOtlpTraceProtobuf', () => {
+  it('preserves fixed64 nanosecond precision (not rounded to a JS number)', () => {
+    // Values NOT representable exactly as a double — a Number round-trip would round.
+    const START = '1700000000123456789';
+    const END = '1700000000987654321';
+    const msg = Req.fromObject({
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              scope: { name: '@betterdb/agent-cache' },
+              spans: [
+                {
+                  traceId: Buffer.from(TRACE_HEX, 'hex'),
+                  spanId: Buffer.from(SPAN_HEX, 'hex'),
+                  name: 'x',
+                  startTimeUnixNano: START,
+                  endTimeUnixNano: END,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const decoded = decodeOtlpTraceProtobuf(Buffer.from(Req.encode(msg).finish()));
+    const span = decoded.resourceSpans![0].scopeSpans![0].spans![0] as any;
+    expect(String(span.startTimeUnixNano)).toBe(START);
+    expect(String(span.endTimeUnixNano)).toBe(END);
+  });
+
   it('decodes protobuf into the OTLP/JSON shape (hex ids, string nanos)', () => {
     const decoded = decodeOtlpTraceProtobuf(encode());
     const span = decoded.resourceSpans![0].scopeSpans![1 - 1].spans![0] as any;

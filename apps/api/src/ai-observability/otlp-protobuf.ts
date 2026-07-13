@@ -1,5 +1,12 @@
 import * as protobuf from 'protobufjs';
+import Long from 'long';
 import type { OtlpTraceRequest } from './otel-ingest.service';
+
+// OTLP timestamps are fixed64 nanoseconds, always above Number.MAX_SAFE_INTEGER.
+// Without a Long backend, protobufjs decodes them to imprecise JS numbers and
+// rounds. Wire up `long` explicitly so `longs: String` yields exact values.
+protobuf.util.Long = Long as unknown as typeof protobuf.util.Long;
+protobuf.configure();
 
 /**
  * Minimal OTLP trace proto (subset of the fields Monitor reads). Field numbers
