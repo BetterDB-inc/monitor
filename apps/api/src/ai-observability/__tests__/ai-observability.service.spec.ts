@@ -170,9 +170,14 @@ describe('AiObservabilityService.pollConnection', () => {
     if (prev !== undefined) process.env.CLOUD_MODE = prev;
   });
 
-  it('does nothing when no instances are discovered', async () => {
+  it('saves nothing when no instances are discovered, but still prunes locally', async () => {
+    const prev = process.env.CLOUD_MODE;
+    delete process.env.CLOUD_MODE;
     const { svc, ctx, storage } = makeService({ instances: [], call: () => [] });
     await (svc as any).pollConnection(ctx);
     expect(storage.saveAiCacheSamples).not.toHaveBeenCalled();
+    // Prune runs before the early return, so removed libraries' samples still age out.
+    expect(storage.pruneOldAiCacheSamples).toHaveBeenCalledTimes(1);
+    if (prev !== undefined) process.env.CLOUD_MODE = prev;
   });
 });

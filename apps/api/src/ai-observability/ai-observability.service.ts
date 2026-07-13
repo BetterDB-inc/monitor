@@ -67,10 +67,14 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    const now = Date.now();
+    // Prune before the early return so removed libraries' samples still age out
+    // on self-hosted even when this connection currently has no AI instances.
+    await this.maybePruneLocally(now);
+
     const instances = await this.discovery.discoverWithClient(ctx.client);
     if (instances.length === 0) return;
 
-    const now = Date.now();
     const samples: Omit<StoredAiCacheSample, 'id' | 'connectionId'>[] = [];
 
     for (const inst of instances) {
@@ -95,8 +99,6 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
         });
       }
     }
-
-    await this.maybePruneLocally(now);
   }
 
   /** Local, community-window prune for self-hosted (cloud uses the tier-based sweep). */
@@ -139,11 +141,15 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
   ): Promise<StoredAiCacheSample[]> {
     const resolvedId = connectionId ?? this.connectionRegistry.getDefaultId() ?? undefined;
     const endTime = Date.now();
+    // Size the cap to the window so long ranges (e.g. 7d at a 15s poll) aren't
+    // silently truncated by the storage default of 10,000 rows per instance.
+    const expectedPoints = Math.ceil((hours * 60 * 60 * 1000) / this.pollIntervalMs) + 100;
     return this.storage.getAiCacheHistory({
       connectionId: resolvedId,
       instanceField,
       startTime: endTime - hours * 60 * 60 * 1000,
       endTime,
+      limit: Math.max(10_000, expectedPoints),
     });
   }
 
