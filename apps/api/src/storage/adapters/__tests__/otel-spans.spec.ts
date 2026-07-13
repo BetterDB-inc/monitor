@@ -99,6 +99,21 @@ describe.each([
     expect(byService.map((t) => t.traceId)).toEqual(['old']);
   });
 
+  it('keeps ALL spans of a boundary trace whose start is in the window', async () => {
+    // Root starts inside the window; a later child starts outside it. The trace
+    // must still summarize with the full span count, not a partial one.
+    await storage.saveOtelSpans([
+      span({ traceId: 'bt', spanId: 'root', parentSpanId: null, startTimeMs: 4000, durationNs: 6_000_000 }),
+      span({ traceId: 'bt', spanId: 'child', parentSpanId: 'root', startTimeMs: 9000, durationNs: 1_000_000 }),
+    ]);
+
+    const [t] = await storage.getOtelTraces({ startTime: 0, endTime: 5000 });
+    expect(t.traceId).toBe('bt');
+    expect(t.spanCount).toBe(2); // child (start 9000, outside window) still included
+    expect(t.rootName).toBe('chat.turn');
+    expect(t.durationNs).toBe(6_000_000); // root duration, not a truncated value
+  });
+
   it('prunes spans older than a cutoff (by start time)', async () => {
     await storage.saveOtelSpans([
       span({ traceId: 'old', spanId: 'r', startTimeMs: 1000 }),

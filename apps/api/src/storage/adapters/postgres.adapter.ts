@@ -3760,7 +3760,20 @@ export class PostgresAdapter implements StoragePort {
          start_time_unix_nano, end_time_unix_nano, start_time_ms, duration_ns,
          status_code, status_message, attributes, ingested_at)
       VALUES ${placeholders.join(', ')}
-      ON CONFLICT (trace_id, span_id) DO NOTHING
+      ON CONFLICT (trace_id, span_id) DO UPDATE SET
+        parent_span_id = EXCLUDED.parent_span_id,
+        name = EXCLUDED.name,
+        scope_name = EXCLUDED.scope_name,
+        service_name = EXCLUDED.service_name,
+        kind = EXCLUDED.kind,
+        start_time_unix_nano = EXCLUDED.start_time_unix_nano,
+        end_time_unix_nano = EXCLUDED.end_time_unix_nano,
+        start_time_ms = EXCLUDED.start_time_ms,
+        duration_ns = EXCLUDED.duration_ns,
+        status_code = EXCLUDED.status_code,
+        status_message = EXCLUDED.status_message,
+        attributes = EXCLUDED.attributes,
+        ingested_at = EXCLUDED.ingested_at
     `;
     const result = await this.pool.query(query, values);
     return result.rowCount ?? 0;
@@ -3769,21 +3782,26 @@ export class PostgresAdapter implements StoragePort {
   async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
-    const filters: string[] = [];
+    // Filter whole traces by their trace-level start / service (subquery on
+    // grouped traces), then aggregate ALL spans of the matching traces, so a
+    // boundary trace still gets a complete summary rather than a partial one.
+    const having: string[] = [];
     const params: (string | number)[] = [];
     if (options.startTime !== undefined) {
       params.push(options.startTime);
-      filters.push(`start_time_ms >= $${params.length}`);
+      having.push(`MIN(start_time_ms) >= $${params.length}`);
     }
     if (options.endTime !== undefined) {
       params.push(options.endTime);
-      filters.push(`start_time_ms <= $${params.length}`);
+      having.push(`MIN(start_time_ms) <= $${params.length}`);
     }
     if (options.service) {
       params.push(options.service);
-      filters.push(`service_name = $${params.length}`);
+      having.push(`SUM(CASE WHEN service_name = $${params.length} THEN 1 ELSE 0 END) > 0`);
     }
-    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const traceFilter = having.length
+      ? `WHERE trace_id IN (SELECT trace_id FROM otel_spans GROUP BY trace_id HAVING ${having.join(' AND ')})`
+      : '';
     params.push(options.limit ?? 100);
 
     const result = await this.pool.query(
@@ -3803,7 +3821,7 @@ export class PostgresAdapter implements StoragePort {
            (MAX(start_time_ms + duration_ns / 1000000) - MIN(start_time_ms)) * 1000000
          ) AS duration_ns
        FROM otel_spans
-       ${where}
+       ${traceFilter}
        GROUP BY trace_id
        ORDER BY start_time_ms DESC
        LIMIT $${params.length}`,

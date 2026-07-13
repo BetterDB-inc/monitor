@@ -1318,20 +1318,21 @@ export class MemoryAdapter implements StoragePort {
   }
 
   async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
-    const filtered = this.otelSpans.filter(
-      (s) =>
-        (options.startTime === undefined || s.startTimeMs >= options.startTime) &&
-        (options.endTime === undefined || s.startTimeMs <= options.endTime) &&
-        (!options.service || s.serviceName === options.service),
-    );
+    // Group ALL spans by trace first, then filter whole traces by their
+    // trace-level start / service — so a boundary trace still gets a complete
+    // summary (span count, root, duration) rather than a partial one.
     const byTrace = new Map<string, StoredOtelSpan[]>();
-    for (const s of filtered) {
+    for (const s of this.otelSpans) {
       byTrace.set(s.traceId, [...(byTrace.get(s.traceId) ?? []), s]);
     }
     const summaries: OtelTraceSummary[] = [];
     for (const [traceId, spans] of byTrace) {
-      const root = spans.find((s) => s.parentSpanId === null) ?? null;
       const minStart = Math.min(...spans.map((s) => s.startTimeMs));
+      if (options.startTime !== undefined && minStart < options.startTime) continue;
+      if (options.endTime !== undefined && minStart > options.endTime) continue;
+      if (options.service && !spans.some((s) => s.serviceName === options.service)) continue;
+
+      const root = spans.find((s) => s.parentSpanId === null) ?? null;
       const durationNs = root
         ? root.durationNs
         : (Math.max(...spans.map((s) => s.startTimeMs + s.durationNs / 1_000_000)) - minStart) *

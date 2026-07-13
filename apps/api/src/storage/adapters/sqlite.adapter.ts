@@ -3481,21 +3481,26 @@ export class SqliteAdapter implements StoragePort {
   async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const filters: string[] = [];
+    // Filter whole traces by their trace-level start / service (via a subquery on
+    // grouped traces), then aggregate ALL spans of the matching traces — so a
+    // boundary trace still gets a complete summary, not a partial one.
+    const having: string[] = [];
     const params: (string | number)[] = [];
     if (options.startTime !== undefined) {
-      filters.push('start_time_ms >= ?');
+      having.push('MIN(start_time_ms) >= ?');
       params.push(options.startTime);
     }
     if (options.endTime !== undefined) {
-      filters.push('start_time_ms <= ?');
+      having.push('MIN(start_time_ms) <= ?');
       params.push(options.endTime);
     }
     if (options.service) {
-      filters.push('service_name = ?');
+      having.push('SUM(CASE WHEN service_name = ? THEN 1 ELSE 0 END) > 0');
       params.push(options.service);
     }
-    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const traceFilter = having.length
+      ? `WHERE trace_id IN (SELECT trace_id FROM otel_spans GROUP BY trace_id HAVING ${having.join(' AND ')})`
+      : '';
     params.push(options.limit ?? 100);
 
     const rows = this.db
@@ -3516,7 +3521,7 @@ export class SqliteAdapter implements StoragePort {
              (MAX(start_time_ms + duration_ns / 1000000) - MIN(start_time_ms)) * 1000000
            ) AS duration_ns
          FROM otel_spans
-         ${where}
+         ${traceFilter}
          GROUP BY trace_id
          ORDER BY start_time_ms DESC
          LIMIT ?`,
