@@ -18,14 +18,22 @@ function isBetterdb(scope: string): boolean {
 }
 
 /** Depth of each span from its root, for waterfall indentation. */
-function computeDepths(spans: StoredOtelSpan[]): Map<string, number> {
+export function computeDepths(spans: StoredOtelSpan[]): Map<string, number> {
   const byId = new Map(spans.map((s) => [s.spanId, s]));
   const depth = new Map<string, number>();
   const of = (s: StoredOtelSpan, guard = 0): number => {
     if (depth.has(s.spanId)) return depth.get(s.spanId)!;
-    if (!s.parentSpanId || !byId.has(s.parentSpanId) || guard > 64) {
+    // True root: no parent at all.
+    if (!s.parentSpanId) {
       depth.set(s.spanId, 0);
       return 0;
+    }
+    // Parent referenced but not stored: ingest keeps only @betterdb spans and
+    // trace roots, so many BetterDB spans point at a parent that was dropped.
+    // Nest them one level under the root instead of aligning them with it.
+    if (!byId.has(s.parentSpanId) || guard > 64) {
+      depth.set(s.spanId, 1);
+      return 1;
     }
     const d = of(byId.get(s.parentSpanId)!, guard + 1) + 1;
     depth.set(s.spanId, d);
