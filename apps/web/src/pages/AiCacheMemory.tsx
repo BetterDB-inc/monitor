@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
-  LineChart,
-  Line,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   Tooltip,
@@ -38,6 +38,11 @@ function fmtPct(rate: number | null): string {
 }
 function fmtNum(n: number | null): string {
   return n === null ? '—' : n.toLocaleString();
+}
+/** Cumulative (lifetime) hit rate from stored counters — stable, unlike the per-tick delta. */
+function cumHitRate(s: { hits: number; misses: number }): number | null {
+  const total = s.hits + s.misses;
+  return total > 0 ? s.hits / total : null;
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -85,7 +90,7 @@ function InstanceCard({
       <CardContent>
         {latest ? (
           <div className="grid grid-cols-2 gap-3">
-            <Stat label="Hit rate" value={fmtPct(latest.hitRate)} />
+            <Stat label="Hit rate" value={fmtPct(cumHitRate(latest))} />
             <Stat label="Saved" value={fmtUsd(latest.costSavedMicros)} />
             <Stat label="Items" value={fmtNum(latest.items)} />
             <Stat label="Evictions" value={fmtNum(latest.evictions)} />
@@ -101,50 +106,134 @@ function InstanceCard({
   );
 }
 
-function HistoryChart({ field, kind }: { field: string; kind: AiInstanceKind }) {
+/** Which time-series metric a card's chart shows — memory/retrieval have no hit rate. */
+function chartMetricFor(kind: AiInstanceKind): { label: string; isPercent: boolean } {
+  return kind === 'agent_cache' || kind === 'semantic_cache'
+    ? { label: 'hit rate', isPercent: true }
+    : { label: 'items', isPercent: false };
+}
+
+function HistoryChart({
+  field,
+  kind,
+  hours,
+}: {
+  field: string;
+  kind: AiInstanceKind;
+  hours: number;
+}) {
   const { currentConnection } = useConnection();
   const { data, loading } = usePolling<StoredAiCacheSample[]>({
-    fetcher: () => aiObservabilityApi.getHistory(field, 24),
+    fetcher: () => aiObservabilityApi.getHistory(field, hours),
     interval: INSTANCES_POLL_MS,
-    refetchKey: `${currentConnection?.id}:${field}`,
+    refetchKey: `${currentConnection?.id}:${field}:${hours}`,
   });
   const samples = data ?? [];
+  const metric = chartMetricFor(kind);
 
   if (loading && samples.length === 0)
-    return <div className="text-sm text-muted-foreground">Loading history…</div>;
-  if (samples.length === 0)
-    return <div className="text-sm text-muted-foreground">No history yet for this instance.</div>;
+    return (
+      <div className="flex h-full min-h-[240px] items-center justify-center text-sm text-muted-foreground">
+        Loading history…
+      </div>
+    );
 
+  const now = Date.now();
+  const startMs = now - hours * 3_600_000;
   const chartData = samples.map((s) => ({
-    t: new Date(s.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    hitRate: s.hitRate === null ? null : Number((s.hitRate * 100).toFixed(1)),
-    savedUsd: Number((s.costSavedMicros / 1_000_000).toFixed(4)),
+    ts: s.timestamp,
+    value: metric.isPercent
+      ? cumHitRate(s) === null
+        ? null
+        : Number((cumHitRate(s)! * 100).toFixed(1))
+      : s.items,
   }));
 
+  const hasValue = chartData.some((d) => d.value !== null && d.value !== undefined);
+  if (!hasValue)
+    return (
+      <div className="flex h-full min-h-[240px] items-center justify-center text-sm text-muted-foreground">
+        No {metric.label} data yet
+        {metric.isPercent ? ' — needs cache traffic (hits or misses).' : '.'}
+      </div>
+    );
+
+  const stroke = KIND_COLOR[kind];
+  const gradId = `aiobs-grad-${field.replace(/[^a-z0-9]/gi, '')}`;
+  const fmtTick = (t: number) =>
+    hours > 24
+      ? new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' })
+      : new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
   return (
-    <ResponsiveContainer width="100%" height={280}>
-      <LineChart data={chartData} margin={{ left: 8, right: 16, top: 16, bottom: 8 }}>
-        <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-        <XAxis dataKey="t" fontSize={11} minTickGap={40} />
-        <YAxis fontSize={11} unit="%" domain={[0, 100]} />
-        <Tooltip />
-        <Line
+    <ResponsiveContainer width="100%" height="100%">
+      <AreaChart data={chartData} margin={{ left: 8, right: 16, top: 16, bottom: 8 }}>
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%" stopColor={stroke} stopOpacity={0.35} />
+            <stop offset="95%" stopColor={stroke} stopOpacity={0.03} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
+        <XAxis
+          dataKey="ts"
+          type="number"
+          scale="time"
+          domain={[startMs, now]}
+          tickFormatter={fmtTick}
+          fontSize={11}
+          minTickGap={50}
+        />
+        <YAxis
+          fontSize={11}
+          unit={metric.isPercent ? '%' : ''}
+          allowDecimals={false}
+          // Baseline at 0 so the area fills the space under the line.
+          domain={[
+            0,
+            (max: number) =>
+              metric.isPercent ? Math.min(100, Math.ceil(max + 10)) : Math.ceil(max + 1),
+          ]}
+        />
+        <Tooltip
+          contentStyle={{
+            background: 'var(--popover)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            color: 'var(--popover-foreground)',
+          }}
+          labelStyle={{ color: 'var(--muted-foreground)' }}
+          itemStyle={{ color: 'var(--popover-foreground)' }}
+          labelFormatter={(t) => new Date(t as number).toLocaleString()}
+          formatter={(v) => [metric.isPercent ? `${v}%` : v, metric.isPercent ? 'Hit rate' : 'Items']}
+        />
+        <Area
           type="monotone"
-          dataKey="hitRate"
-          name="Hit rate (%)"
-          stroke={KIND_COLOR[kind]}
-          dot={false}
+          dataKey="value"
+          stroke={stroke}
+          strokeWidth={2}
+          fill={`url(#${gradId})`}
           connectNulls
           isAnimationActive={false}
+          dot={chartData.filter((d) => d.value != null).length === 1}
         />
-      </LineChart>
+      </AreaChart>
     </ResponsiveContainer>
   );
 }
 
+const RANGES: { label: string; hours: number }[] = [
+  { label: '1h', hours: 1 },
+  { label: '6h', hours: 6 },
+  { label: '24h', hours: 24 },
+  { label: '7d', hours: 168 },
+];
+
 export function AiCacheMemory() {
   const { currentConnection } = useConnection();
   const [selected, setSelected] = useState<string | null>(null);
+  const [rangeHours, setRangeHours] = useState<number>(24);
+  const rangeLabel = RANGES.find((r) => r.hours === rangeHours)?.label ?? '24h';
 
   const { data, loading, error } = usePolling<AiInstanceWithSample[]>({
     fetcher: () => aiObservabilityApi.getInstances(),
@@ -158,7 +247,7 @@ export function AiCacheMemory() {
     instances.find((r) => r.instance.field === selected) ?? instances[0] ?? null;
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 flex flex-1 flex-col gap-6 min-h-0">
       <div>
         <h1 className="text-2xl font-bold">AI Cache &amp; Memory</h1>
         <p className="text-sm text-muted-foreground">
@@ -206,17 +295,38 @@ export function AiCacheMemory() {
           </div>
 
           {selectedRow && (
-            <Card>
-              <CardHeader>
+            <Card className="flex flex-1 flex-col min-h-0">
+              <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
                 <CardTitle className="text-base">
-                  {selectedRow.instance.name} — hit rate (24h)
+                  {selectedRow.instance.name} — {chartMetricFor(selectedRow.instance.kind).label} (
+                  {rangeLabel})
                 </CardTitle>
+                <div className="inline-flex rounded-md border p-0.5">
+                  {RANGES.map((r) => (
+                    <button
+                      key={r.hours}
+                      onClick={() => setRangeHours(r.hours)}
+                      className={`px-2.5 py-1 text-xs rounded ${
+                        rangeHours === r.hours
+                          ? 'bg-primary text-primary-foreground'
+                          : 'text-muted-foreground hover:bg-accent/50'
+                      }`}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
               </CardHeader>
-              <CardContent>
-                <HistoryChart
-                  field={selectedRow.instance.field}
-                  kind={selectedRow.instance.kind}
-                />
+              <CardContent className="relative flex-1 min-h-0">
+                {/* Absolute wrapper gives the chart a definite-sized box so recharts'
+                    height=100% resolves (the flex chain only has min-height). */}
+                <div className="absolute inset-0 px-4 pb-4">
+                  <HistoryChart
+                    field={selectedRow.instance.field}
+                    kind={selectedRow.instance.kind}
+                    hours={rangeHours}
+                  />
+                </div>
               </CardContent>
             </Card>
           )}
