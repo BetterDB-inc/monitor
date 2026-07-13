@@ -95,11 +95,19 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
     if (process.env.CLOUD_MODE === 'true') return;
     if (now - this.lastPruneAt <= this.PRUNE_INTERVAL_MS) return;
     this.lastPruneAt = now;
+    const cutoff = now - this.LOCAL_RETENTION_MS;
     try {
-      await this.storage.pruneOldAiCacheSamples(now - this.LOCAL_RETENTION_MS);
+      await this.storage.pruneOldAiCacheSamples(cutoff);
     } catch (err) {
       this.logger.warn(
         `Local ai_cache_samples prune failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      await this.storage.pruneOldOtelSpans(cutoff);
+    } catch (err) {
+      this.logger.warn(
+        `Local otel_spans prune failed: ${err instanceof Error ? err.message : err}`,
       );
     }
   }

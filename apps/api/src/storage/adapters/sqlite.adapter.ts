@@ -3568,8 +3568,14 @@ export class SqliteAdapter implements StoragePort {
 
   async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
+    // Prune whole traces (by trace-level start), not individual spans, so a long
+    // trace never loses its root/early spans while later ones survive.
     const result = this.db
-      .prepare('DELETE FROM otel_spans WHERE start_time_ms < ?')
+      .prepare(
+        `DELETE FROM otel_spans WHERE trace_id IN (
+           SELECT trace_id FROM otel_spans GROUP BY trace_id HAVING MIN(start_time_ms) < ?
+         )`,
+      )
       .run(cutoffTimestamp);
     return result.changes;
   }

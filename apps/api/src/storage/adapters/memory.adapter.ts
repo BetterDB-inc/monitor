@@ -1363,8 +1363,17 @@ export class MemoryAdapter implements StoragePort {
   }
 
   async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
+    // Prune whole traces (by trace-level start), not individual spans, so a long
+    // trace never loses its root/early spans while later ones survive.
+    const minStartByTrace = new Map<string, number>();
+    for (const s of this.otelSpans) {
+      const cur = minStartByTrace.get(s.traceId);
+      if (cur === undefined || s.startTimeMs < cur) minStartByTrace.set(s.traceId, s.startTimeMs);
+    }
     const before = this.otelSpans.length;
-    this.otelSpans = this.otelSpans.filter((s) => s.startTimeMs >= cutoffTimestamp);
+    this.otelSpans = this.otelSpans.filter(
+      (s) => (minStartByTrace.get(s.traceId) ?? s.startTimeMs) >= cutoffTimestamp,
+    );
     return before - this.otelSpans.length;
   }
 

@@ -114,6 +114,21 @@ describe.each([
     expect(t.durationNs).toBe(6_000_000); // root duration, not a truncated value
   });
 
+  it('prunes WHOLE traces (never splits one) by trace-level start', async () => {
+    // Trace whose root is before the cutoff but a later child is after it —
+    // the whole trace must go, not just the root (which would orphan the child).
+    await storage.saveOtelSpans([
+      span({ traceId: 'split', spanId: 'root', parentSpanId: null, startTimeMs: 1000 }),
+      span({ traceId: 'split', spanId: 'child', parentSpanId: 'root', startTimeMs: 9000 }),
+      span({ traceId: 'keep', spanId: 'r', parentSpanId: null, startTimeMs: 8000 }),
+    ]);
+
+    const removed = await storage.pruneOldOtelSpans(5000);
+    expect(removed).toBe(2); // both spans of 'split'
+    expect(await storage.getOtelTraceSpans('split')).toHaveLength(0);
+    expect(await storage.getOtelTraceSpans('keep')).toHaveLength(1);
+  });
+
   it('prunes spans older than a cutoff (by start time)', async () => {
     await storage.saveOtelSpans([
       span({ traceId: 'old', spanId: 'r', startTimeMs: 1000 }),

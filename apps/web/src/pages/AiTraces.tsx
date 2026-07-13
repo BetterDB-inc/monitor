@@ -217,7 +217,7 @@ export function AiTraces() {
       activeTrace ? aiObservabilityApi.getTraceCorrelations(activeTrace) : Promise.resolve([]),
     interval: TRACES_POLL_MS,
     enabled: !!activeTrace,
-    refetchKey: `corr:${activeTrace ?? ''}`,
+    refetchKey: `corr:${currentConnection?.id ?? ''}:${activeTrace ?? ''}`,
   });
   const activeCorrelation =
     (correlationsData ?? []).find((c) => c.spanId === selectedSpan) ?? null;
