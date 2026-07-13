@@ -9,12 +9,6 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import { DiscoveryReaderService } from './discovery-reader.service';
 
-/** Cumulative counters retained between ticks so we can derive a per-tick hit rate. */
-interface CounterState {
-  hits: number;
-  misses: number;
-}
-
 /** An instance plus its most recent polled sample (for the API). */
 export interface AiInstanceWithSample {
   instance: AiInstance;
@@ -28,9 +22,6 @@ const SIMILARITY_WINDOW_SAMPLE = 200;
 export class AiObservabilityService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(AiObservabilityService.name);
   private readonly pollIntervalMs: number;
-
-  /** key = `${connectionId}|${field}` → last cumulative counters (for hit-rate deltas). */
-  private lastCounters = new Map<string, CounterState>();
 
   // Self-hosted deployments have no cloud retention cron, so the poller trims its
   // own history locally at the community window. In CLOUD_MODE the tier-based
@@ -60,12 +51,6 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
     this.start();
   }
 
-  protected onConnectionRemoved(connectionId: string): void {
-    for (const key of [...this.lastCounters.keys()]) {
-      if (key.startsWith(`${connectionId}|`)) this.lastCounters.delete(key);
-    }
-  }
-
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     const now = Date.now();
     // Prune before the early return so removed libraries' samples still age out
@@ -79,7 +64,7 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
 
     for (const inst of instances) {
       try {
-        const sample = await this.sampleInstance(ctx.client, ctx.connectionId, inst, now);
+        const sample = await this.sampleInstance(ctx.client, inst, now);
         if (sample) samples.push(sample);
       } catch (err) {
         this.logger.debug(
@@ -90,14 +75,6 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
 
     if (samples.length > 0) {
       await this.storage.saveAiCacheSamples(samples, ctx.connectionId);
-      // Advance hit-rate baselines only after a successful save, so a failed
-      // write doesn't move the in-memory baseline without a persisted sample.
-      for (const s of samples) {
-        this.lastCounters.set(`${ctx.connectionId}|${s.instanceField}`, {
-          hits: s.hits,
-          misses: s.misses,
-        });
-      }
     }
   }
 
@@ -157,7 +134,6 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
 
   private async sampleInstance(
     client: DatabasePort,
-    connectionId: string,
     inst: AiInstance,
     now: number,
   ): Promise<Omit<StoredAiCacheSample, 'id' | 'connectionId'> | null> {
@@ -211,7 +187,10 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
       indexBytes = idx.indexBytes;
     }
 
-    const hitRate = this.deriveHitRate(connectionId, inst.field, hits, misses);
+    // Cumulative (lifetime) hit rate — stable regardless of skipped/failed polls,
+    // unlike a per-tick delta which spreads counter growth across missed intervals.
+    const total = hits + misses;
+    const hitRate = total > 0 ? hits / total : null;
 
     return {
       instanceField: inst.field,
@@ -228,25 +207,6 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
       threshold,
       extra: extra ? JSON.stringify(extra) : null,
     };
-  }
-
-  /** Per-tick hit rate from the delta of cumulative counters; null on the first sample. */
-  private deriveHitRate(
-    connectionId: string,
-    field: string,
-    hits: number,
-    misses: number,
-  ): number | null {
-    const key = `${connectionId}|${field}`;
-    const prev = this.lastCounters.get(key);
-    // Read-only: the baseline is advanced by pollConnection after a successful save.
-    if (!prev) return null;
-    const dHits = hits - prev.hits;
-    const dMisses = misses - prev.misses;
-    const total = dHits + dMisses;
-    // Counter reset (restart) or no traffic this tick → no meaningful rate.
-    if (dHits < 0 || dMisses < 0 || total <= 0) return null;
-    return dHits / total;
   }
 
   private async readIndex(

@@ -65,42 +65,33 @@ describe('AiObservabilityService.pollConnection', () => {
     expect(s.hits).toBe(90); // 80 + 10
     expect(s.misses).toBe(25); // 20 + 5
     expect(s.costSavedMicros).toBe(5_000_000);
-    expect(s.hitRate).toBeNull(); // first tick: no prior counters
+    expect(s.hitRate).toBeCloseTo(90 / 115); // cumulative hits / (hits + misses)
     expect(JSON.parse(s.extra as string).session).toEqual({ reads: 0, writes: 0 });
   });
 
-  it('derives a per-tick hit rate from counter deltas on the second poll', async () => {
-    let hits = 80;
-    let misses = 20;
+  it('records the cumulative hit rate (stable across polls, not a per-tick delta)', async () => {
     const { svc, ctx, saved } = makeService({
       instances: [agentCache],
       call: (cmd) =>
         cmd === 'HGETALL'
-          ? ['llm:hits', String(hits), 'llm:misses', String(misses), 'tool:hits', '0', 'tool:misses', '0']
+          ? ['llm:hits', '80', 'llm:misses', '20', 'tool:hits', '0', 'tool:misses', '0']
           : [],
     });
 
-    await (svc as any).pollConnection(ctx); // baseline
-    hits = 100; // +20 hits
-    misses = 30; // +10 misses
     await (svc as any).pollConnection(ctx);
 
-    expect(saved).toHaveLength(2);
-    expect(saved[1][0].hitRate).toBeCloseTo(20 / 30); // dHits / (dHits + dMisses)
+    expect(saved[0][0].hitRate).toBeCloseTo(0.8); // 80 / (80 + 20), regardless of prior polls
   });
 
-  it('returns a null hit rate on a counter reset (restart)', async () => {
-    let hits = 100;
+  it('records a null hit rate when there is no traffic', async () => {
     const { svc, ctx, saved } = makeService({
       instances: [agentCache],
-      call: (cmd) => (cmd === 'HGETALL' ? ['llm:hits', String(hits), 'llm:misses', '0'] : []),
+      call: (cmd) => (cmd === 'HGETALL' ? ['llm:hits', '0', 'llm:misses', '0'] : []),
     });
 
     await (svc as any).pollConnection(ctx);
-    hits = 5; // counter went backwards → restart
-    await (svc as any).pollConnection(ctx);
 
-    expect(saved[1][0].hitRate).toBeNull();
+    expect(saved[0][0].hitRate).toBeNull(); // hits + misses === 0
   });
 
   it('reads FT.INFO for memory item count and index bytes', async () => {
@@ -132,24 +123,6 @@ describe('AiObservabilityService.pollConnection', () => {
     expect(s.items).toBe(4200);
     expect(s.indexBytes).toBe(2 * 1024 * 1024);
     expect(s.threshold).toBeCloseTo(0.4);
-  });
-
-  it('does not advance the hit-rate baseline when the save fails', async () => {
-    let hits = 100;
-    const { svc, ctx, saved, storage } = makeService({
-      instances: [agentCache],
-      call: (cmd) => (cmd === 'HGETALL' ? ['llm:hits', String(hits), 'llm:misses', '0'] : []),
-    });
-    // First save fails → baseline must NOT move.
-    (storage.saveAiCacheSamples as jest.Mock).mockRejectedValueOnce(new Error('db down'));
-
-    await expect((svc as any).pollConnection(ctx)).rejects.toThrow('db down'); // no baseline stored
-    hits = 120;
-    await (svc as any).pollConnection(ctx); // first *successful* save → still no prior baseline
-
-    // The first persisted sample has a null rate (no baseline existed), proving the
-    // failed tick did not silently advance the baseline.
-    expect(saved[saved.length - 1][0].hitRate).toBeNull();
   });
 
   it('self-prunes locally when not in cloud mode, but not under CLOUD_MODE', async () => {
