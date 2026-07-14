@@ -76,6 +76,12 @@ export class SlowLogSqliteRepository {
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
+    // `magnitude` returns the worst offenders first (top-N by duration); uses the
+    // idx_slowlog_duration index. Default `recent` is newest-first.
+    const orderBy =
+      options.sortBy === 'magnitude'
+        ? 'ORDER BY duration DESC, timestamp DESC'
+        : 'ORDER BY timestamp DESC';
 
     const rows = this.db
       .prepare(
@@ -83,7 +89,7 @@ export class SlowLogSqliteRepository {
               client_address, client_name, captured_at, source_host, source_port, connection_id
        FROM slow_log_entries
        ${whereClause}
-       ORDER BY timestamp DESC
+       ${orderBy}
        LIMIT ? OFFSET ?`,
       )
       .all(...params, limit, offset) as any[];

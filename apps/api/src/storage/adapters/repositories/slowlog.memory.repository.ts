@@ -50,8 +50,13 @@ export class SlowLogMemoryRepository {
       filtered = filtered.filter((e) => e.duration >= options.minDuration!);
     }
 
+    const compare =
+      options.sortBy === 'magnitude'
+        ? (a: StoredSlowLogEntry, b: StoredSlowLogEntry) => b.duration - a.duration || b.timestamp - a.timestamp
+        : (a: StoredSlowLogEntry, b: StoredSlowLogEntry) => b.timestamp - a.timestamp;
+
     return filtered
-      .sort((a, b) => b.timestamp - a.timestamp)
+      .sort(compare)
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
   }
 

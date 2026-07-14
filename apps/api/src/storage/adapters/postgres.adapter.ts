@@ -2987,13 +2987,19 @@ export class PostgresAdapter implements StoragePort {
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
+    // `magnitude` returns the worst offenders first (top-N by duration, µs for
+    // slow / bytes for large-*); default `recent` is newest-first.
+    const orderBy =
+      options.sortBy === 'magnitude'
+        ? 'ORDER BY duration DESC, timestamp DESC'
+        : 'ORDER BY timestamp DESC';
     const result = await this.pool.query(
       `SELECT
         commandlog_id, timestamp, duration, command,
         client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
       FROM command_log_entries
       ${whereClause}
-      ORDER BY timestamp DESC
+      ${orderBy}
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     );

@@ -2742,6 +2742,13 @@ export class SqliteAdapter implements StoragePort {
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
+    // `magnitude` returns the worst offenders first (top-N by duration, which is
+    // µs for slow and bytes for large-request/large-reply); uses
+    // idx_commandlog_duration. Default `recent` is newest-first.
+    const orderBy =
+      options.sortBy === 'magnitude'
+        ? 'ORDER BY duration DESC, timestamp DESC'
+        : 'ORDER BY timestamp DESC';
 
     const rows = this.db
       .prepare(
@@ -2749,7 +2756,7 @@ export class SqliteAdapter implements StoragePort {
               client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
        FROM command_log_entries
        ${whereClause}
-       ORDER BY timestamp DESC
+       ${orderBy}
        LIMIT ? OFFSET ?`,
       )
       .all(...params, limit, offset) as any[];

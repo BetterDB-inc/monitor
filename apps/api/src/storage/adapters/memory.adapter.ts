@@ -976,8 +976,13 @@ export class MemoryAdapter implements StoragePort {
       filtered = filtered.filter((e) => e.duration >= options.minDuration!);
     }
 
+    const compare =
+      options.sortBy === 'magnitude'
+        ? (a: StoredCommandLogEntry, b: StoredCommandLogEntry) => b.duration - a.duration || b.timestamp - a.timestamp
+        : (a: StoredCommandLogEntry, b: StoredCommandLogEntry) => b.timestamp - a.timestamp;
+
     return filtered
-      .sort((a, b) => b.timestamp - a.timestamp)
+      .sort(compare)
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
   }
 

@@ -215,6 +215,15 @@ export interface StoredSlowLogEntry {
   connectionId?: string;
 }
 
+/**
+ * Ordering for slow/command-log queries.
+ * - `recent` (default): newest first (`captured_at`/`timestamp` DESC).
+ * - `magnitude`: worst offenders first (`duration` DESC). Note `duration` holds
+ *   microseconds for `slow` entries and bytes for `large-request`/`large-reply`,
+ *   so `magnitude` means "largest value of that log type" in both cases.
+ */
+export type CommandLogSortBy = 'recent' | 'magnitude';
+
 export interface SlowLogQueryOptions {
   startTime?: number; // Unix timestamp in seconds
   endTime?: number;
@@ -224,6 +233,7 @@ export interface SlowLogQueryOptions {
   limit?: number;
   offset?: number;
   connectionId?: string;
+  sortBy?: CommandLogSortBy;
 }
 
 // Command Log Entry Types (Valkey-specific)
@@ -253,6 +263,7 @@ export interface CommandLogQueryOptions {
   limit?: number;
   offset?: number;
   connectionId?: string;
+  sortBy?: CommandLogSortBy;
 }
 
 // Latency Snapshot Types

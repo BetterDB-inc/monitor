@@ -20,6 +20,7 @@ export class CommandLogAnalyticsController {
   @ApiQuery({ name: 'minDuration', required: false, description: 'Minimum duration in microseconds' })
   @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of entries to return' })
   @ApiQuery({ name: 'offset', required: false, description: 'Offset for pagination' })
+  @ApiQuery({ name: 'sortBy', required: false, enum: ['recent', 'magnitude'], description: "Order: 'recent' (newest first, default) or 'magnitude' (worst offenders / top-N by duration or size)" })
   async getStoredCommandLog(
     @ConnectionId() connectionId?: string,
     @Query('startTime') startTime?: string,
@@ -30,6 +31,7 @@ export class CommandLogAnalyticsController {
     @Query('minDuration') minDuration?: string,
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
+    @Query('sortBy') sortBy?: string,
   ): Promise<StoredCommandLogEntry[]> {
     return this.commandLogAnalyticsService.getStoredCommandLog({
       startTime: startTime ? parseInt(startTime, 10) : undefined,
@@ -41,6 +43,7 @@ export class CommandLogAnalyticsController {
       limit: limit ? parseInt(limit, 10) : 100,
       offset: offset ? parseInt(offset, 10) : 0,
       connectionId,
+      sortBy: sortBy === 'magnitude' ? 'magnitude' : 'recent',
     });
   }
 
