@@ -2020,5 +2020,29 @@ describe('AnomalyService', () => {
       await expect(poll()).resolves.not.toThrow();
       expect(satEvents()).toHaveLength(0);
     });
+
+    it('re-alerts on the next poll when the escalation emit fails (level not advanced on failure)', async () => {
+      let failSaturationEmit = true;
+      const addSpy = jest
+        .spyOn(service as any, 'addAnomaly')
+        .mockImplementation(async (event: any) => {
+          if (event.metricType === MetricType.CLIENT_SATURATION && failSaturationEmit) {
+            failSaturationEmit = false;
+            throw new Error('storage down');
+          }
+        });
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      // Poll 1: escalation → emit fails → poll rejects, level must stay 'none'.
+      await expect(poll()).rejects.toThrow('storage down');
+      // Poll 2: still saturated → because the level was NOT advanced, it re-alerts.
+      await poll();
+
+      const saturationEmits = addSpy.mock.calls.filter(
+        ([e]: [any]) => e.metricType === MetricType.CLIENT_SATURATION,
+      );
+      expect(saturationEmits).toHaveLength(2);
+      addSpy.mockRestore();
+    });
   });
 });

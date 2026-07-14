@@ -687,7 +687,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // Client-saturation detection — connected_clients approaching maxclients
       // (valkey-io/valkey#3918): warns before the pool exhausts and operators
       // can no longer connect. State-based with hysteresis, not z-score.
-      this.detectClientSaturation(info, ctx, timestamp);
+      await this.detectClientSaturation(info, ctx, timestamp);
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
@@ -709,11 +709,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * re-arms when it falls back below the warning threshold — so a busy-but-stable
    * server doesn't spam alerts.
    */
-  private detectClientSaturation(
+  private async detectClientSaturation(
     info: Record<string, string>,
     ctx: ConnectionContext,
     timestamp: number,
-  ): void {
+  ): Promise<void> {
     const connected = this.parseNumber(info.connected_clients);
     const maxClients = this.parseNumber(info.maxclients);
     if (connected === null || maxClients === null || maxClients <= 0) return;
@@ -727,36 +727,45 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           : 'none';
 
     const prev = this.clientSaturationLevel.get(ctx.connectionId) ?? 'none';
-    this.clientSaturationLevel.set(ctx.connectionId, level);
+    const escalated =
+      AnomalyService.SATURATION_RANK[level] > AnomalyService.SATURATION_RANK[prev];
 
     // Only alert on escalation; de-escalation / steady state stays quiet.
-    if (AnomalyService.SATURATION_RANK[level] <= AnomalyService.SATURATION_RANK[prev]) return;
+    if (escalated) {
+      const pct = (ratio * 100).toFixed(1);
+      const severity = level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
+      const event: AnomalyEvent = {
+        id: randomUUID(),
+        timestamp,
+        // Dedicated metric type (not CONNECTIONS) so the correlator's CONNECTION_LEAK
+        // rule doesn't misdiagnose steady high saturation as a connection leak.
+        metricType: MetricType.CLIENT_SATURATION,
+        anomalyType: AnomalyType.SPIKE,
+        severity,
+        value: connected,
+        baseline: maxClients,
+        zScore: 0,
+        stdDev: 0,
+        threshold: Math.floor(maxClients * AnomalyService.CLIENT_SATURATION_WARN),
+        message:
+          `${severity === AnomalySeverity.CRITICAL ? 'CRITICAL' : 'WARNING'}: Client connections at ` +
+          `${connected}/${maxClients} (${pct}% of maxclients). When the limit is reached new ` +
+          `connections — including operator and monitoring sessions — are refused. ` +
+          `Investigate for a connection leak/storm, raise maxclients, or connect over a reserved/unix socket.`,
+        resolved: false,
+        connectionId: ctx.connectionId,
+      };
+      this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+      // Await the emit so a failure propagates to the poll error handler. The
+      // stored level is advanced only AFTER a successful emit (below), so a failed
+      // escalation is retried on the next poll rather than being silently swallowed
+      // by the hysteresis.
+      await this.addAnomaly(event, ctx);
+    }
 
-    const pct = (ratio * 100).toFixed(1);
-    const severity = level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
-    const event: AnomalyEvent = {
-      id: randomUUID(),
-      timestamp,
-      // Dedicated metric type (not CONNECTIONS) so the correlator's CONNECTION_LEAK
-      // rule doesn't misdiagnose steady high saturation as a connection leak.
-      metricType: MetricType.CLIENT_SATURATION,
-      anomalyType: AnomalyType.SPIKE,
-      severity,
-      value: connected,
-      baseline: maxClients,
-      zScore: 0,
-      stdDev: 0,
-      threshold: Math.floor(maxClients * AnomalyService.CLIENT_SATURATION_WARN),
-      message:
-        `${severity === AnomalySeverity.CRITICAL ? 'CRITICAL' : 'WARNING'}: Client connections at ` +
-        `${connected}/${maxClients} (${pct}% of maxclients). When the limit is reached new ` +
-        `connections — including operator and monitoring sessions — are refused. ` +
-        `Investigate for a connection leak/storm, raise maxclients, or connect over a reserved/unix socket.`,
-      resolved: false,
-      connectionId: ctx.connectionId,
-    };
-    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    void this.addAnomaly(event, ctx);
+    // Advance the level last: on escalation only after addAnomaly resolved; on
+    // steady/de-escalation immediately (the latter re-arms alerting on recovery).
+    this.clientSaturationLevel.set(ctx.connectionId, level);
   }
 
   /**
