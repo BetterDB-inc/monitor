@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0] - 2026-07-12
+
+### Added
+
+- **TTL refresh from `__config`** — `refresh_config()` now reads a `ttl`
+  hash-field from `{name}:__config` and updates the effective `default_ttl`
+  in-memory, mirroring the existing threshold refresh. Constructor value
+  serves as the fallback when the field is absent; non-integer and
+  out-of-range values (outside `10..86400`) are ignored. Pure library-side
+  read; the corresponding propose→apply flow lands in a follow-up.
+
 ## [0.8.0] - 2026-07-09
 
 ### Added
