@@ -326,7 +326,18 @@ base_model = OpenAIChatCompletionsModel(model="gpt-4o", openai_client=client)
 agent = Agent(name="Assistant", model=CachedModel(base_model, cache=cache))
 ```
 
-`stream_response()` is delegated uncached (matching the streaming convention), and stores fail open — a Valkey error logs and returns the live response rather than crashing the run.
+#### Streaming
+
+`CachedModel.stream_response()` is cache-aware. On a miss the upstream event
+stream passes through unchanged while the terminal response is captured and
+persisted after the stream completes; on a hit the stored response is replayed
+as synthesized Responses events and the underlying model is not called.
+
+Streamed requests share cache entries with their non-streamed twins — a
+`Runner.run_streamed(...)` call hits what a `Runner.run(...)` call stored, and
+vice-versa. Tool-call streams are not stored (mirrors the
+`@betterdb/agent-cache` `wrapStream` convention); non-streaming `get_response()`
+continues to cache tool calls.
 
 ### Anthropic
 
@@ -432,7 +443,7 @@ Connect [BetterDB Monitor](https://github.com/BetterDB-inc/monitor) to the same 
 - **Session `get_all()`:** SCAN-based. Fine for dozens of fields per thread; consider Redis HASH if you have thousands.
 - **LangGraph `list()`:** Loads all checkpoint data for a thread into memory before filtering. Acceptable for hundreds of checkpoints per thread. For millions, use `langgraph-checkpoint-redis` with Redis 8+ instead.
 - **`active_sessions` gauge:** Approximate and does not survive process restarts.
-- **Streaming responses:** Not cached by any adapter. Accumulate the full response before storing.
+- **Streaming responses:** Cache-aware for the Agents SDK adapter via `CachedModel.stream_response()`. Other adapters still follow the accumulate-before-store convention.
 
 ## License
 
