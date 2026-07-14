@@ -31,6 +31,18 @@ def _is_opted_out() -> bool:
     return val.lower() in ("false", "0", "no", "off")
 
 
+def _is_frozen_serverless() -> bool:
+    return any(
+        os.environ.get(var)
+        for var in (
+            "AWS_LAMBDA_FUNCTION_NAME",
+            "K_SERVICE",
+            "FUNCTION_TARGET",
+            "FUNCTIONS_WORKER_RUNTIME",
+        )
+    )
+
+
 _INSTALL_ID_ENV = "BETTERDB_INSTANCE_ID"
 
 # Process-lifetime fallback for when the on-disk id can't be read or written, so
@@ -191,7 +203,7 @@ async def create_analytics(disabled: bool = False) -> Analytics:
         ph = Posthog(
             api_key,
             host=host or "https://app.posthog.com",
-            flush_at=20,
+            flush_at=1 if _is_frozen_serverless() else 20,
             flush_interval=10,
         )
         return _PostHogAnalytics(ph)

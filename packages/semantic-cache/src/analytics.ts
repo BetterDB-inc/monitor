@@ -130,8 +130,22 @@ function getRequestWaitUntil(): WaitUntil | undefined {
   return undefined;
 }
 
+function isFrozenServerless(): boolean {
+  const env = process.env;
+  return Boolean(
+    env.AWS_LAMBDA_FUNCTION_NAME ||
+    env.K_SERVICE ||
+    env.FUNCTION_TARGET ||
+    env.FUNCTIONS_WORKER_RUNTIME,
+  );
+}
+
 type PostHogClient = {
-  capture: (opts: { distinctId?: string; event: string; properties?: Record<string, unknown> }) => void;
+  capture: (opts: {
+    distinctId?: string;
+    event: string;
+    properties?: Record<string, unknown>;
+  }) => void;
   flush: () => Promise<void>;
   shutdown: () => Promise<void>;
 };
@@ -160,7 +174,11 @@ export class PostHogAnalytics implements Analytics {
     process.once('beforeExit', this.flushOnExit);
   }
 
-  async init(client: ValkeyLike, name: string, configProps?: Record<string, unknown>): Promise<void> {
+  async init(
+    client: ValkeyLike,
+    name: string,
+    configProps?: Record<string, unknown>,
+  ): Promise<void> {
     this.distinctId = getInstallId();
     this.deploymentId = await this.resolveDeploymentId(client, name);
     const merged: Record<string, unknown> = { ...(configProps ?? {}) };
@@ -239,10 +257,19 @@ export class PostHogAnalytics implements Analytics {
   onActivity(): void {
     // Serverless: emit from request traffic, handing the work to the request's
     // waitUntil so the invocation stays alive until it completes. The setInterval
-    // that long-lived servers rely on is frozen between invocations.
+    // that long-lived servers rely on is frozen between invocations. On frozen
+    // serverless with no waitUntil (AWS Lambda, Cloud Functions, Azure) deliver
+    // fire-and-forget; the runtime resumes the flush when the container thaws.
     const waitUntil = getRequestWaitUntil();
-    if (!waitUntil) return;
-    this.emitSnapshotIfDue(waitUntil);
+    if (waitUntil) {
+      this.emitSnapshotIfDue(waitUntil);
+      return;
+    }
+    if (isFrozenServerless()) {
+      this.emitSnapshotIfDue((p) => {
+        void p;
+      });
+    }
   }
 
   snapshotTick(): void {
