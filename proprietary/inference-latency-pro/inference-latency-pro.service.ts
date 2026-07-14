@@ -5,9 +5,11 @@ import {
   InferenceLatencyProfile,
   InferenceProfileTickContext,
   WEBHOOK_EVENTS_PRO_SERVICE,
+  WebhookEventType,
 } from '@betterdb/shared';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
+import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
 import { SlaState, evaluateSla } from './sla';
 
 const FT_SEARCH_BUCKET_PREFIX = 'FT.SEARCH:';
@@ -23,6 +25,8 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
     @Optional()
     @Inject(WEBHOOK_EVENTS_PRO_SERVICE)
     private readonly webhookEventsProService?: IWebhookEventsProService,
+    @Optional()
+    private readonly otelEvents?: OtelEventDispatcherService,
   ) {}
 
   async onProfileTick(
@@ -69,21 +73,33 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
       evaluatedIndexes.add(indexName);
       breachByIndex.set(indexName, bucket.p99 > config.p99ThresholdUs);
 
-      if (result.fired && this.webhookEventsProService) {
-        try {
-          await this.webhookEventsProService.dispatchInferenceSlaBreach({
+      if (result.fired) {
+        this.otelEvents?.dispatch(
+          WebhookEventType.INFERENCE_SLA_BREACH,
+          {
             indexName,
             currentP99Us: bucket.p99,
             thresholdUs: config.p99ThresholdUs,
             windowMs: profile.windowMs,
-            timestamp: now,
-            instance: { host: ctx.host, port: ctx.port, connectionId: ctx.connectionId },
-            connectionId: ctx.connectionId,
-          });
-        } catch (error) {
-          this.logger.warn(
-            `dispatchInferenceSlaBreach failed for ${ctx.connectionId}/${indexName}: ${(error as Error).message}`,
-          );
+          },
+          ctx.connectionId,
+        );
+        if (this.webhookEventsProService) {
+          try {
+            await this.webhookEventsProService.dispatchInferenceSlaBreach({
+              indexName,
+              currentP99Us: bucket.p99,
+              thresholdUs: config.p99ThresholdUs,
+              windowMs: profile.windowMs,
+              timestamp: now,
+              instance: { host: ctx.host, port: ctx.port, connectionId: ctx.connectionId },
+              connectionId: ctx.connectionId,
+            });
+          } catch (error) {
+            this.logger.warn(
+              `dispatchInferenceSlaBreach failed for ${ctx.connectionId}/${indexName}: ${(error as Error).message}`,
+            );
+          }
         }
       }
     }

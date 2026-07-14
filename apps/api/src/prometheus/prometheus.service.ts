@@ -24,6 +24,7 @@ import {
 } from '../common/services/multi-connection-poller';
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
 import { ALL_METRIC_KINDS } from '@betterdb/shared';
+import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
@@ -201,6 +202,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
     @Optional()
     private readonly metricForecastingService?: MetricForecastingService,
+    @Optional()
+    private readonly otelEvents?: OtelEventDispatcherService,
   ) {
     super(connectionRegistry);
     this.pollIntervalMs = this.configService.get<number>('PROMETHEUS_POLL_INTERVAL_MS', 5000);
@@ -856,6 +859,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         maxmemoryPolicy === 'noeviction' &&
         this.webhookEventsEnterpriseService
       ) {
+        this.otelEvents?.dispatch(
+          WebhookEventType.COMPLIANCE_ALERT,
+          { memoryUsedPercent: usedPercent, maxmemoryPolicy, severity: 'high' },
+          connectionId,
+        );
         this.webhookEventsEnterpriseService
           .dispatchComplianceAlert({
             complianceType: 'data_retention',
@@ -1055,6 +1063,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         const newSlotFailures = state.previousSlotsFail < slotsFail && slotsFail > 0;
 
         if (stateChanged || newSlotFailures) {
+          this.otelEvents?.dispatch(
+            WebhookEventType.CLUSTER_FAILOVER,
+            {
+              clusterState,
+              slotsFailed: slotsFail,
+              knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
+            },
+            connectionId,
+          );
           try {
             await this.webhookEventsProService.dispatchClusterFailover({
               clusterState,

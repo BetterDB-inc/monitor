@@ -1,24 +1,30 @@
 import { randomUUID } from 'crypto';
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
+import {
+  StoragePort,
+  StoredAnomalyEvent,
+  StoredCorrelatedGroup,
+} from '@app/common/interfaces/storage-port.interface';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
+import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
 import { SettingsService } from '@app/settings/settings.service';
 import { SlowLogAnalyticsService } from '@app/slowlog-analytics/slowlog-analytics.service';
-import { MultiConnectionPoller, ConnectionContext } from '@app/common/services/multi-connection-poller';
-import { WEBHOOK_EVENTS_PRO_SERVICE, IWebhookEventsProService } from '@betterdb/shared';
+import {
+  MultiConnectionPoller,
+  ConnectionContext,
+} from '@app/common/services/multi-connection-poller';
+import {
+  WEBHOOK_EVENTS_PRO_SERVICE,
+  IWebhookEventsProService,
+  WebhookEventType,
+} from '@betterdb/shared';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
-import {
-  detectDuplicatePrimaries,
-  conflictSignature,
-} from './duplicate-primary-detector';
-import {
-  detectStuckReplicas,
-  stuckReplicaSignature,
-} from './stuck-replica-detector';
+import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
+import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-detector';
 import {
   MetricType,
   AnomalyEvent,
@@ -85,14 +91,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // on every poll, and re-arm once it drops back below the warning threshold.
   private clientSaturationLevel = new Map<string, 'none' | 'warning' | 'critical'>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
-  private prevReplSnapshot = new Map<string, {
-    role: 'master' | 'replica';
-    replid: string;          // master_replid
-    offset: number;          // master_repl_offset
-    totalKeys: number;       // sum of keys across db0..dbN from INFO keyspace
-    uptimeSec: number;       // uptime_in_seconds
-    connectedSlaves: number; // connected_slaves
-  }>();
+  private prevReplSnapshot = new Map<
+    string,
+    {
+      role: 'master' | 'replica';
+      replid: string; // master_replid
+      offset: number; // master_repl_offset
+      totalKeys: number; // sum of keys across db0..dbN from INFO keyspace
+      uptimeSec: number; // uptime_in_seconds
+      connectedSlaves: number; // connected_slaves
+    }
+  >();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
 
@@ -116,6 +125,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     @Optional()
     @Inject(WEBHOOK_EVENTS_PRO_SERVICE)
     private readonly webhookEventsProService?: IWebhookEventsProService,
+    @Optional()
+    private readonly otelEvents?: OtelEventDispatcherService,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs);
@@ -148,14 +159,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     // Start correlation loop
     this.correlationInterval = setInterval(() => {
-      this.correlateAnomalies().catch(err => {
+      this.correlateAnomalies().catch((err) => {
         this.logger.error('Failed to correlate anomalies:', err);
       });
     }, this.correlationIntervalMs);
 
     // Start prometheus summary loop
     this.prometheusSummaryInterval = setInterval(() => {
-      this.updatePrometheusSummary().catch(err => {
+      this.updatePrometheusSummary().catch((err) => {
         this.logger.error('Failed to update prometheus summary:', err);
       });
     }, this.prometheusSummaryIntervalMs);
@@ -201,9 +212,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       [MetricType.EVICTED_KEYS, (info) => this.parseNumber(info.evicted_keys)],
       [MetricType.BLOCKED_CLIENTS, (info) => this.parseNumber(info.blocked_clients)],
       [MetricType.KEYSPACE_MISSES, (info) => this.parseNumber(info.keyspace_misses)],
-      [MetricType.FRAGMENTATION_RATIO, (info) => {
-        return this.parseNumber(info['allocator_frag_ratio']) || this.parseNumber(info['mem_fragmentation_ratio']);
-      }],
+      [
+        MetricType.FRAGMENTATION_RATIO,
+        (info) => {
+          return (
+            this.parseNumber(info['allocator_frag_ratio']) ||
+            this.parseNumber(info['mem_fragmentation_ratio'])
+          );
+        },
+      ],
     ]);
   }
 
@@ -370,7 +387,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           }
         }
 
-        this.prevCpuByConnection.set(ctx.connectionId, { sys: cpuSys, user: cpuUser, ts: timestamp });
+        this.prevCpuByConnection.set(ctx.connectionId, {
+          sys: cpuSys,
+          user: cpuUser,
+          ts: timestamp,
+        });
       }
 
       // Slowlog rate-of-change detection (sourced from SlowLogAnalyticsService, not INFO)
@@ -383,12 +404,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // Lazily create buffer/detector on first available data
         if (!buffers.has(MetricType.SLOWLOG_LAST_ID)) {
           buffers.set(MetricType.SLOWLOG_LAST_ID, new MetricBuffer(MetricType.SLOWLOG_LAST_ID));
-          detectors.set(MetricType.SLOWLOG_LAST_ID, new SpikeDetector(MetricType.SLOWLOG_LAST_ID, {
-            warningZScore: 1.5,
-            criticalZScore: 2.5,
-            consecutiveRequired: 1,
-            cooldownMs: 30000,
-          }));
+          detectors.set(
+            MetricType.SLOWLOG_LAST_ID,
+            new SpikeDetector(MetricType.SLOWLOG_LAST_ID, {
+              warningZScore: 1.5,
+              criticalZScore: 2.5,
+              consecutiveRequired: 1,
+              cooldownMs: 30000,
+            }),
+          );
         }
 
         const slowlogBuffer = buffers.get(MetricType.SLOWLOG_LAST_ID)!;
@@ -439,7 +463,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // Replication role state-change detection (not z-score based)
       const roleStr = info['role'];
       if (roleStr) {
-        const currentRole = roleStr === 'master' ? 1 : (roleStr === 'slave' || roleStr === 'replica') ? 0 : -1;
+        const currentRole =
+          roleStr === 'master' ? 1 : roleStr === 'slave' || roleStr === 'replica' ? 0 : -1;
         if (currentRole !== -1) {
           const lastRole = this.lastReplicationRole.get(ctx.connectionId);
           if (lastRole !== undefined && currentRole !== lastRole) {
@@ -456,11 +481,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
                 zScore: 0,
                 stdDev: 0,
                 threshold: 0,
-                message: 'CRITICAL: Node role changed from master to replica — possible failover or split-brain detected',
+                message:
+                  'CRITICAL: Node role changed from master to replica — possible failover or split-brain detected',
                 resolved: false,
                 connectionId: ctx.connectionId,
               };
-              this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${failoverEvent.message}`);
+              this.logger.warn(
+                `Anomaly detected for ${ctx.connectionName}: ${failoverEvent.message}`,
+              );
               await this.addAnomaly(failoverEvent, ctx);
 
               // Dispatch failover.started webhook
@@ -494,7 +522,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
                 resolved: false,
                 connectionId: ctx.connectionId,
               };
-              this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${promotionEvent.message}`);
+              this.logger.warn(
+                `Anomaly detected for ${ctx.connectionName}: ${promotionEvent.message}`,
+              );
               await this.addAnomaly(promotionEvent, ctx);
 
               // Dispatch failover.completed webhook
@@ -542,7 +572,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           let dataLossKind: 'primary_restarted_empty' | 'replica_wiped' | null = null;
           let message = '';
 
-          if (prev.role === 'master' && snapshot.role === 'master' && prev.totalKeys > 0 && snapshot.totalKeys === 0) {
+          if (
+            prev.role === 'master' &&
+            snapshot.role === 'master' &&
+            prev.totalKeys > 0 &&
+            snapshot.totalKeys === 0
+          ) {
             // Rule A: primary restarted with an empty dataset. Requires restart/identity
             // evidence — same replid + empty means an intentional FLUSHALL, not a restart.
             const restartEvidence =
@@ -551,12 +586,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
               snapshot.offset < prev.offset;
             if (restartEvidence) {
               dataLossKind = 'primary_restarted_empty';
-              message = snapshot.connectedSlaves > 0
-                ? `CRITICAL: Primary restarted with an empty dataset (replid changed, ${prev.totalKeys} keys → 0). Connected replicas (${snapshot.connectedSlaves}) will full-resync and WIPE their copies. Immediate action: detach replicas that still hold data (REPLICAOF NO ONE) before they resync, then restore.`
-                : `CRITICAL: Primary restarted with an empty dataset (replid changed, ${prev.totalKeys} keys → 0). Data on this node has been lost — restore from backup or a surviving replica before reattaching replicas.`;
+              message =
+                snapshot.connectedSlaves > 0
+                  ? `CRITICAL: Primary restarted with an empty dataset (replid changed, ${prev.totalKeys} keys → 0). Connected replicas (${snapshot.connectedSlaves}) will full-resync and WIPE their copies. Immediate action: detach replicas that still hold data (REPLICAOF NO ONE) before they resync, then restore.`
+                  : `CRITICAL: Primary restarted with an empty dataset (replid changed, ${prev.totalKeys} keys → 0). Data on this node has been lost — restore from backup or a surviving replica before reattaching replicas.`;
             }
           } else if (
-            prev.role === 'replica' && snapshot.role === 'replica' &&
+            prev.role === 'replica' &&
+            snapshot.role === 'replica' &&
             snapshot.replid !== prev.replid &&
             prev.totalKeys > 0 &&
             (snapshot.totalKeys === 0 || snapshot.totalKeys <= prev.totalKeys * 0.1)
@@ -583,7 +620,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
               resolved: false,
               connectionId: ctx.connectionId,
             };
-            this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${dataLossEvent.message}`);
+            this.logger.warn(
+              `Anomaly detected for ${ctx.connectionName}: ${dataLossEvent.message}`,
+            );
             await this.addAnomaly(dataLossEvent, ctx);
 
             if (this.webhookEventsProService) {
@@ -644,7 +683,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
                   resolved: false,
                   connectionId: ctx.connectionId,
                 };
-                this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${clusterEvent.message}`);
+                this.logger.warn(
+                  `Anomaly detected for ${ctx.connectionName}: ${clusterEvent.message}`,
+                );
                 await this.addAnomaly(clusterEvent, ctx);
 
                 // Dispatch cluster.failover webhook (PRO tier)
@@ -669,7 +710,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             this.lastClusterState.set(ctx.connectionId, clusterState);
           }
         } catch (clusterErr) {
-          this.logger.debug(`Failed to get cluster info for ${ctx.connectionName}: ${clusterErr instanceof Error ? clusterErr.message : clusterErr}`);
+          this.logger.debug(
+            `Failed to get cluster info for ${ctx.connectionName}: ${clusterErr instanceof Error ? clusterErr.message : clusterErr}`,
+          );
         }
 
         // Duplicate-primary (split-brain) detection — two primaries owning the
@@ -840,7 +883,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const errorReported = kind === 'rdb' ? state.rdbErrorReported : state.aofErrorReported;
       if (status === 'err') {
         if (!errorReported) {
-          await this.addAnomaly(this.buildPersistenceEvent(kind, 'error', 0, signals, timestamp, ctx), ctx);
+          await this.addAnomaly(
+            this.buildPersistenceEvent(kind, 'error', 0, signals, timestamp, ctx),
+            ctx,
+          );
           if (kind === 'rdb') state.rdbErrorReported = true;
           else state.aofErrorReported = true;
         }
@@ -858,7 +904,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     }
 
     // INFO reports -1 for elapsed when no child is running; clamp to 0.
-    const elapsedSec = signals.elapsedSec !== null && signals.elapsedSec >= 0 ? signals.elapsedSec : 0;
+    const elapsedSec =
+      signals.elapsedSec !== null && signals.elapsedSec >= 0 ? signals.elapsedSec : 0;
 
     let track = kind === 'rdb' ? state.rdb : state.aof;
     if (!track) {
@@ -887,7 +934,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // via a regression in either signal and re-baseline, mirroring the
     // first-observation branch above.
     const elapsedRegressed = elapsedSec < track.lastElapsedSec;
-    const processedRegressed = signals.processed !== null && signals.processed < track.lastProcessed;
+    const processedRegressed =
+      signals.processed !== null && signals.processed < track.lastProcessed;
     if (elapsedRegressed || processedRegressed) {
       track.startedAt = timestamp;
       track.lastProcessed = signals.processed ?? 0;
@@ -930,13 +978,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // with different thresholds and messages. Prefer the frozen-progress
       // reason when both trip (a stuck child is the more actionable signal).
       const reason = frozenStall ? 'stall' : 'exceeded';
-      await this.addAnomaly(this.buildPersistenceEvent(kind, reason, elapsedSec, signals, timestamp, ctx), ctx);
+      await this.addAnomaly(
+        this.buildPersistenceEvent(kind, reason, elapsedSec, signals, timestamp, ctx),
+        ctx,
+      );
       return;
     }
 
     if (!track.reportedStall && !track.warnedLong && elapsedSec >= this.persistenceWarnSec) {
       track.warnedLong = true;
-      await this.addAnomaly(this.buildPersistenceEvent(kind, 'long', elapsedSec, signals, timestamp, ctx), ctx);
+      await this.addAnomaly(
+        this.buildPersistenceEvent(kind, 'long', elapsedSec, signals, timestamp, ctx),
+        ctx,
+      );
     }
   }
 
@@ -948,7 +1002,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     timestamp: number,
     ctx: ConnectionContext,
   ): AnomalyEvent {
-    const label = kind === 'rdb' ? { name: 'RDB save', op: 'BGSAVE' } : { name: 'AOF rewrite', op: 'BGREWRITEAOF' };
+    const label =
+      kind === 'rdb'
+        ? { name: 'RDB save', op: 'BGSAVE' }
+        : { name: 'AOF rewrite', op: 'BGREWRITEAOF' };
     const progress =
       signals.processed !== null && signals.total !== null
         ? ` (processed ${signals.processed}/${signals.total} keys)`
@@ -1080,7 +1137,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const nodes = await ctx.client.getClusterNodes();
       const stuck = detectStuckReplicas(nodes);
 
-      const firstSeen = this.stuckReplicaFirstSeen.get(ctx.connectionId) ?? new Map<string, number>();
+      const firstSeen =
+        this.stuckReplicaFirstSeen.get(ctx.connectionId) ?? new Map<string, number>();
       const active = this.activeStuckReplicas.get(ctx.connectionId) ?? new Set<string>();
       const currentSignatures = new Set(stuck.map((s) => stuckReplicaSignature(s)));
 
@@ -1199,7 +1257,21 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
 
-    this.prometheusService.incrementAnomalyEvent(anomaly.severity, anomaly.metricType, anomaly.anomalyType, ctx?.connectionId);
+    this.prometheusService.incrementAnomalyEvent(
+      anomaly.severity,
+      anomaly.metricType,
+      anomaly.anomalyType,
+      ctx?.connectionId,
+    );
+    this.otelEvents?.dispatch(
+      WebhookEventType.ANOMALY_DETECTED,
+      {
+        severity: anomaly.severity,
+        metricType: anomaly.metricType,
+        anomalyType: anomaly.anomalyType,
+      },
+      ctx?.connectionId,
+    );
 
     try {
       const connectionId = ctx?.connectionId || anomaly.connectionId;
@@ -1216,22 +1288,28 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
   private async correlateAnomalies(): Promise<void> {
     try {
-      const uncorrelated = this.recentAnomalies.filter(a => !a.correlationId && !a.resolved);
+      const uncorrelated = this.recentAnomalies.filter((a) => !a.correlationId && !a.resolved);
       if (uncorrelated.length === 0) return;
 
       const newGroups = this.correlator.correlate(uncorrelated);
       if (newGroups.length === 0) return;
 
-      this.logger.log(`Correlated ${uncorrelated.length} anomalies into ${newGroups.length} pattern groups`);
+      this.logger.log(
+        `Correlated ${uncorrelated.length} anomalies into ${newGroups.length} pattern groups`,
+      );
 
       for (const group of newGroups) {
         this.logger.warn(
-          `Pattern detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`
+          `Pattern detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
         );
 
         // Get connectionId from first anomaly in group (all should have same connectionId)
         const groupConnectionId = group.anomalies[0]?.connectionId;
-        this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, groupConnectionId);
+        this.prometheusService.incrementCorrelatedGroup(
+          group.pattern,
+          group.severity,
+          groupConnectionId,
+        );
 
         const storedGroup: StoredCorrelatedGroup = {
           correlationId: group.correlationId,
@@ -1241,7 +1319,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           diagnosis: group.diagnosis,
           recommendations: group.recommendations,
           anomalyCount: group.anomalies.length,
-          metricTypes: group.anomalies.map(a => a.metricType),
+          metricTypes: group.anomalies.map((a) => a.metricType),
           sourceHost: this.configService.get('database.host'),
           sourcePort: this.configService.get('database.port'),
         };
@@ -1275,7 +1353,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     let events = [...this.recentAnomalies].reverse();
 
     if (metricType) {
-      events = events.filter(e => e.metricType === metricType);
+      events = events.filter((e) => e.metricType === metricType);
     }
 
     return events.slice(0, limit);
@@ -1323,15 +1401,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         limit,
         connectionId,
       });
-      const storedEvents = stored.map(s => this.storedToAnomalyEvent(s));
+      const storedEvents = stored.map((s) => this.storedToAnomalyEvent(s));
 
       // Union with in-memory unresolved events not yet in storage: a persist failure in
       // addAnomaly() still leaves the incident in the cache (and still fires the Pro
       // webhook), so the banner must surface it rather than wait for a later poll to make
       // it durable. Dedupe by id (storage wins), apply the same filters.
-      const seen = new Set(storedEvents.map(e => e.id));
+      const seen = new Set(storedEvents.map((e) => e.id));
       const inMemory = this.recentAnomalies.filter(
-        e =>
+        (e) =>
           !e.resolved &&
           !seen.has(e.id) &&
           (!connectionId || e.connectionId === connectionId) &&
@@ -1349,10 +1427,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     if (!startTime || startTime >= cacheThreshold) {
       let events = [...this.recentAnomalies];
-      if (connectionId) events = events.filter(e => e.connectionId === connectionId);
-      if (metricType) events = events.filter(e => e.metricType === metricType);
-      if (severity) events = events.filter(e => e.severity === severity);
-      if (endTime) events = events.filter(e => e.timestamp <= endTime);
+      if (connectionId) events = events.filter((e) => e.connectionId === connectionId);
+      if (metricType) events = events.filter((e) => e.metricType === metricType);
+      if (severity) events = events.filter((e) => e.severity === severity);
+      if (endTime) events = events.filter((e) => e.timestamp <= endTime);
       return events.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
     }
 
@@ -1365,14 +1443,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       connectionId,
     });
 
-    return stored.map(s => this.storedToAnomalyEvent(s));
+    return stored.map((s) => this.storedToAnomalyEvent(s));
   }
 
   getRecentGroups(limit = 50, pattern?: AnomalyPattern): CorrelatedAnomalyGroup[] {
     let groups = [...this.recentGroups].reverse();
 
     if (pattern) {
-      groups = groups.filter(g => g.pattern === pattern);
+      groups = groups.filter((g) => g.pattern === pattern);
     }
 
     return groups.slice(0, limit);
@@ -1389,9 +1467,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     if (!startTime || startTime >= cacheThreshold) {
       let groups = [...this.recentGroups];
-      if (connectionId) groups = groups.filter(g => g.anomalies.some(a => a.connectionId === connectionId));
-      if (pattern) groups = groups.filter(g => g.pattern === pattern);
-      if (endTime) groups = groups.filter(g => g.timestamp <= endTime);
+      if (connectionId)
+        groups = groups.filter((g) => g.anomalies.some((a) => a.connectionId === connectionId));
+      if (pattern) groups = groups.filter((g) => g.pattern === pattern);
+      if (endTime) groups = groups.filter((g) => g.timestamp <= endTime);
       return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
     }
 
@@ -1411,8 +1490,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         connectionId,
       });
       const anomalies = storedAnomalies
-        .filter(a => a.correlationId === s.correlationId)
-        .map(a => this.storedToAnomalyEvent(a));
+        .filter((a) => a.correlationId === s.correlationId)
+        .map((a) => this.storedToAnomalyEvent(a));
 
       groups.push({
         correlationId: s.correlationId,
@@ -1453,10 +1532,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     });
   }
 
-  getWarmupStatus(): { isReady: boolean; buffersReady: number; buffersTotal: number; warmupProgress: number } {
+  getWarmupStatus(): {
+    isReady: boolean;
+    buffersReady: number;
+    buffersTotal: number;
+    warmupProgress: number;
+  } {
     const stats = this.getBufferStats();
     const buffersTotal = stats.length;
-    const buffersReady = stats.filter(s => s.isReady).length;
+    const buffersReady = stats.filter((s) => s.isReady).length;
 
     return {
       isReady: buffersReady === buffersTotal,
@@ -1466,7 +1550,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     };
   }
 
-  async getSummary(startTime?: number, endTime?: number, connectionId?: string): Promise<AnomalySummary> {
+  async getSummary(
+    startTime?: number,
+    endTime?: number,
+    connectionId?: string,
+  ): Promise<AnomalySummary> {
     const cacheThreshold = Date.now() - this.cacheTtlMs;
 
     // Use in-memory data if no start time or start time is within cache TTL
@@ -1475,17 +1563,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       let groups = [...this.recentGroups];
 
       if (connectionId) {
-        events = events.filter(e => e.connectionId === connectionId);
-        groups = groups.filter(g => g.anomalies.some(a => a.connectionId === connectionId));
+        events = events.filter((e) => e.connectionId === connectionId);
+        groups = groups.filter((g) => g.anomalies.some((a) => a.connectionId === connectionId));
       }
 
       if (endTime) {
-        events = events.filter(e => e.timestamp <= endTime);
-        groups = groups.filter(g => g.timestamp <= endTime);
+        events = events.filter((e) => e.timestamp <= endTime);
+        groups = groups.filter((g) => g.timestamp <= endTime);
       }
 
-      const activeEvents = events.filter(a => !a.resolved);
-      const resolvedEvents = events.filter(a => a.resolved);
+      const activeEvents = events.filter((a) => !a.resolved);
+      const resolvedEvents = events.filter((a) => a.resolved);
 
       const bySeverity: Record<AnomalySeverity, number> = {
         [AnomalySeverity.INFO]: 0,
@@ -1527,9 +1615,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       endTime,
     });
 
-    const events = storedEvents.map(s => this.storedToAnomalyEvent(s));
-    const activeEvents = events.filter(a => !a.resolved);
-    const resolvedEvents = events.filter(a => a.resolved);
+    const events = storedEvents.map((s) => this.storedToAnomalyEvent(s));
+    const activeEvents = events.filter((a) => !a.resolved);
+    const resolvedEvents = events.filter((a) => a.resolved);
 
     const bySeverity: Record<AnomalySeverity, number> = {
       [AnomalySeverity.INFO]: 0,
@@ -1562,7 +1650,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   }
 
   async resolveAnomaly(anomalyId: string): Promise<boolean> {
-    const anomaly = this.recentAnomalies.find(a => a.id === anomalyId);
+    const anomaly = this.recentAnomalies.find((a) => a.id === anomalyId);
 
     // Memory-only event (never durably stored — e.g. a deterministic string id
     // rejected by the Postgres UUID PK): a storage-backed poll can't resurface a
@@ -1597,7 +1685,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   }
 
   async resolveGroup(correlationId: string): Promise<boolean> {
-    const group = this.recentGroups.find(g => g.correlationId === correlationId);
+    const group = this.recentGroups.find((g) => g.correlationId === correlationId);
     if (!group) return false;
 
     // Storage is the source of truth (same as resolveAnomaly): only flip the cached
@@ -1629,7 +1717,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
   clearResolved(): number {
     const beforeCount = this.recentAnomalies.length;
-    this.recentAnomalies = this.recentAnomalies.filter(a => !a.resolved);
+    this.recentAnomalies = this.recentAnomalies.filter((a) => !a.resolved);
     return beforeCount - this.recentAnomalies.length;
   }
 
@@ -1644,17 +1732,26 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       if (a.timestamp < oneHourAgo) continue;
       bySeverity[a.severity] = (bySeverity[a.severity] ?? 0) + 1;
       byMetric[a.metricType] = (byMetric[a.metricType] ?? 0) + 1;
-      if (!a.resolved) unresolvedBySeverity[a.severity] = (unresolvedBySeverity[a.severity] ?? 0) + 1;
+      if (!a.resolved)
+        unresolvedBySeverity[a.severity] = (unresolvedBySeverity[a.severity] ?? 0) + 1;
     }
 
     for (const g of this.recentGroups) {
       if (g.timestamp >= oneHourAgo) byPattern[g.pattern] = (byPattern[g.pattern] ?? 0) + 1;
     }
 
-    this.prometheusService.updateAnomalySummary({ bySeverity, byMetric, byPattern, unresolvedBySeverity });
+    this.prometheusService.updateAnomalySummary({
+      bySeverity,
+      byMetric,
+      byPattern,
+      unresolvedBySeverity,
+    });
 
-    const bufferStats = this.getBufferStats().map(s => ({
-      metricType: s.metricType, mean: s.mean, stdDev: s.stdDev, ready: s.isReady,
+    const bufferStats = this.getBufferStats().map((s) => ({
+      metricType: s.metricType,
+      mean: s.mean,
+      stdDev: s.stdDev,
+      ready: s.isReady,
     }));
     this.prometheusService.updateAnomalyBufferStats(bufferStats);
   }

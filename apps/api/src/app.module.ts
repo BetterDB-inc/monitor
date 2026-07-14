@@ -13,6 +13,7 @@ import { LatencyAnalyticsModule } from './latency-analytics/latency-analytics.mo
 import { MemoryAnalyticsModule } from './memory-analytics/memory-analytics.module';
 import { PrometheusModule } from './prometheus/prometheus.module';
 import { OtelTelemetryModule } from './otel-telemetry/otel-telemetry.module';
+import { OtelEventsModule } from './otel-telemetry/otel-events.module';
 import { SettingsModule } from './settings/settings.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { TelemetryModule } from './telemetry/telemetry.module';
@@ -170,6 +171,7 @@ const baseImports = [
   MemoryAnalyticsModule,
   PrometheusModule,
   OtelTelemetryModule,
+  OtelEventsModule,
   SettingsModule,
   WebhooksModule,
   McpModule,
