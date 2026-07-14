@@ -140,7 +140,11 @@ async function bootstrap(): Promise<void> {
     // Set global prefix for API routes
     // SPA fallback is registered at Fastify level before NestJS, so no exclusion needed
     app.setGlobalPrefix('api', {
-      exclude: [{ path: 'ingest/*splat', method: RequestMethod.ALL }],
+      exclude: [
+        { path: 'ingest/*splat', method: RequestMethod.ALL },
+        // OTLP-standard trace ingestion path (see OtelIngestController).
+        { path: 'v1/traces', method: RequestMethod.POST },
+      ],
     });
 
     // Serve static files from public directory (publicPath computed above)

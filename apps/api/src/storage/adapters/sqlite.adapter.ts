@@ -46,6 +46,9 @@ import {
   LatencyStatsHistoryQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
+  StoredOtelSpan,
+  OtelTraceSummary,
+  OtelTraceQueryOptions,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
@@ -1436,6 +1439,28 @@ export class SqliteAdapter implements StoragePort {
         ON ai_cache_samples(connection_id, instance_field, timestamp);
       CREATE INDEX IF NOT EXISTS idx_aicache_ts
         ON ai_cache_samples(connection_id, timestamp);
+
+      CREATE TABLE IF NOT EXISTS otel_spans (
+        trace_id TEXT NOT NULL,
+        span_id TEXT NOT NULL,
+        parent_span_id TEXT,
+        name TEXT NOT NULL,
+        scope_name TEXT NOT NULL DEFAULT '',
+        service_name TEXT,
+        kind INTEGER NOT NULL DEFAULT 0,
+        start_time_unix_nano TEXT NOT NULL DEFAULT '0',
+        end_time_unix_nano TEXT NOT NULL DEFAULT '0',
+        start_time_ms INTEGER NOT NULL,
+        duration_ns INTEGER NOT NULL DEFAULT 0,
+        status_code INTEGER NOT NULL DEFAULT 0,
+        status_message TEXT,
+        attributes TEXT NOT NULL DEFAULT '{}',
+        ingested_at INTEGER NOT NULL,
+        PRIMARY KEY (trace_id, span_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_otel_trace ON otel_spans(trace_id);
+      CREATE INDEX IF NOT EXISTS idx_otel_start ON otel_spans(start_time_ms);
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -3410,6 +3435,147 @@ export class SqliteAdapter implements StoragePort {
 
     const result = this.db
       .prepare('DELETE FROM ai_cache_samples WHERE timestamp < ?')
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  // OTLP Trace Methods
+  async saveOtelSpans(spans: StoredOtelSpan[]): Promise<number> {
+    if (!this.db || spans.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO otel_spans
+        (trace_id, span_id, parent_span_id, name, scope_name, service_name, kind,
+         start_time_unix_nano, end_time_unix_nano, start_time_ms, duration_ns,
+         status_code, status_message, attributes, ingested_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    let count = 0;
+    const transaction = this.db.transaction(() => {
+      for (const s of spans) {
+        const result = stmt.run(
+          s.traceId,
+          s.spanId,
+          s.parentSpanId,
+          s.name,
+          s.scopeName,
+          s.serviceName,
+          s.kind,
+          s.startTimeUnixNano,
+          s.endTimeUnixNano,
+          s.startTimeMs,
+          s.durationNs,
+          s.statusCode,
+          s.statusMessage,
+          s.attributes,
+          s.ingestedAt,
+        );
+        count += result.changes;
+      }
+    });
+    transaction();
+    return count;
+  }
+
+  async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Filter whole traces by their trace-level start / service (via a subquery on
+    // grouped traces), then aggregate ALL spans of the matching traces — so a
+    // boundary trace still gets a complete summary, not a partial one.
+    const having: string[] = [];
+    const params: (string | number)[] = [];
+    if (options.startTime !== undefined) {
+      having.push('MIN(start_time_ms) >= ?');
+      params.push(options.startTime);
+    }
+    if (options.endTime !== undefined) {
+      having.push('MIN(start_time_ms) <= ?');
+      params.push(options.endTime);
+    }
+    if (options.service) {
+      having.push('SUM(CASE WHEN service_name = ? THEN 1 ELSE 0 END) > 0');
+      params.push(options.service);
+    }
+    const traceFilter = having.length
+      ? `WHERE trace_id IN (SELECT trace_id FROM otel_spans GROUP BY trace_id HAVING ${having.join(' AND ')})`
+      : '';
+    params.push(options.limit ?? 100);
+
+    const rows = this.db
+      .prepare(
+        `SELECT
+           trace_id,
+           MIN(start_time_ms) AS start_time_ms,
+           COUNT(*) AS span_count,
+           SUM(CASE WHEN scope_name LIKE '@betterdb/%' THEN 1 ELSE 0 END) AS betterdb_span_count,
+           MAX(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS has_error,
+           MAX(CASE WHEN parent_span_id IS NULL THEN name END) AS root_name,
+           COALESCE(
+             MAX(CASE WHEN parent_span_id IS NULL THEN service_name END),
+             MAX(service_name)
+           ) AS service_name,
+           COALESCE(
+             MAX(CASE WHEN parent_span_id IS NULL THEN duration_ns END),
+             (MAX(start_time_ms + duration_ns / 1000000) - MIN(start_time_ms)) * 1000000
+           ) AS duration_ns
+         FROM otel_spans
+         ${traceFilter}
+         GROUP BY trace_id
+         ORDER BY start_time_ms DESC
+         LIMIT ?`,
+      )
+      .all(...params) as any[];
+
+    return rows.map((row) => ({
+      traceId: row.trace_id,
+      rootName: row.root_name ?? null,
+      serviceName: row.service_name ?? null,
+      startTimeMs: row.start_time_ms,
+      durationNs: row.duration_ns ?? 0,
+      spanCount: row.span_count,
+      betterdbSpanCount: row.betterdb_span_count,
+      hasError: row.has_error === 1,
+    }));
+  }
+
+  async getOtelTraceSpans(traceId: string): Promise<StoredOtelSpan[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM otel_spans WHERE trace_id = ? ORDER BY start_time_ms ASC, start_time_unix_nano ASC`,
+      )
+      .all(traceId) as any[];
+    return rows.map((row) => ({
+      traceId: row.trace_id,
+      spanId: row.span_id,
+      parentSpanId: row.parent_span_id ?? null,
+      name: row.name,
+      scopeName: row.scope_name,
+      serviceName: row.service_name ?? null,
+      kind: row.kind,
+      startTimeUnixNano: row.start_time_unix_nano,
+      endTimeUnixNano: row.end_time_unix_nano,
+      startTimeMs: row.start_time_ms,
+      durationNs: row.duration_ns,
+      statusCode: row.status_code,
+      statusMessage: row.status_message ?? null,
+      attributes: row.attributes,
+      ingestedAt: row.ingested_at,
+    }));
+  }
+
+  async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    // Prune whole traces (by trace-level start), not individual spans, so a long
+    // trace never loses its root/early spans while later ones survive.
+    const result = this.db
+      .prepare(
+        `DELETE FROM otel_spans WHERE trace_id IN (
+           SELECT trace_id FROM otel_spans GROUP BY trace_id HAVING MIN(start_time_ms) < ?
+         )`,
+      )
       .run(cutoffTimestamp);
     return result.changes;
   }

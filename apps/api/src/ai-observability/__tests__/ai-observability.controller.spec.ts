@@ -1,9 +1,16 @@
 import { HttpException } from '@nestjs/common';
 import { AiObservabilityController } from '../ai-observability.controller';
 import type { AiObservabilityService, AiInstanceWithSample } from '../ai-observability.service';
+import type { TraceCorrelationService } from '../trace-correlation.service';
 
-function makeController(svc: Partial<AiObservabilityService>) {
-  return new AiObservabilityController(svc as AiObservabilityService);
+function makeController(
+  svc: Partial<AiObservabilityService>,
+  correlation: Partial<TraceCorrelationService> = {},
+) {
+  return new AiObservabilityController(
+    svc as AiObservabilityService,
+    correlation as TraceCorrelationService,
+  );
 }
 
 describe('AiObservabilityController', () => {
@@ -43,6 +50,17 @@ describe('AiObservabilityController', () => {
 
     await ctrl.getHistory('app', '100000', 'c1'); // huge → clamped to 168h
     expect(getHistory).toHaveBeenLastCalledWith('c1', 'app', 168);
+  });
+
+  it('clamps getTraces hours and limit to their upper bounds', async () => {
+    const getTraces = jest.fn(async () => []);
+    const ctrl = makeController({ getTraces });
+
+    await ctrl.getTraces('100000', undefined, '99999'); // huge → clamped
+    expect(getTraces).toHaveBeenLastCalledWith(168, undefined, 1000);
+
+    await ctrl.getTraces(undefined, 'svc', undefined); // defaults
+    expect(getTraces).toHaveBeenLastCalledWith(1, 'svc', 100);
   });
 
   it('maps service errors to HttpException', async () => {

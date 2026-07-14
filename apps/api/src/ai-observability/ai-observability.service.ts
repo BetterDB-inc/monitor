@@ -1,5 +1,10 @@
 import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
-import type { AiInstance, StoredAiCacheSample } from '@betterdb/shared';
+import type {
+  AiInstance,
+  StoredAiCacheSample,
+  OtelTraceSummary,
+  StoredOtelSpan,
+} from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import {
   MultiConnectionPoller,
@@ -90,11 +95,19 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
     if (process.env.CLOUD_MODE === 'true') return;
     if (now - this.lastPruneAt <= this.PRUNE_INTERVAL_MS) return;
     this.lastPruneAt = now;
+    const cutoff = now - this.LOCAL_RETENTION_MS;
     try {
-      await this.storage.pruneOldAiCacheSamples(now - this.LOCAL_RETENTION_MS);
+      await this.storage.pruneOldAiCacheSamples(cutoff);
     } catch (err) {
       this.logger.warn(
         `Local ai_cache_samples prune failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      await this.storage.pruneOldOtelSpans(cutoff);
+    } catch (err) {
+      this.logger.warn(
+        `Local otel_spans prune failed: ${err instanceof Error ? err.message : err}`,
       );
     }
   }
@@ -135,6 +148,22 @@ export class AiObservabilityService extends MultiConnectionPoller implements OnM
       endTime,
       limit: Math.max(10_000, expectedPoints),
     });
+  }
+
+  // --- OTLP traces (Phase 2) ---
+
+  async getTraces(hours = 1, service?: string, limit = 100): Promise<OtelTraceSummary[]> {
+    const endTime = Date.now();
+    return this.storage.getOtelTraces({
+      startTime: endTime - hours * 60 * 60 * 1000,
+      endTime,
+      service,
+      limit,
+    });
+  }
+
+  async getTraceSpans(traceId: string): Promise<StoredOtelSpan[]> {
+    return this.storage.getOtelTraceSpans(traceId);
   }
 
   // --- per-kind sampling ---

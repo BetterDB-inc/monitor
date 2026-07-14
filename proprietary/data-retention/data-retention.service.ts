@@ -62,6 +62,7 @@ export class DataRetentionService {
       { name: 'capture_triggers', fn: () => this.storage.pruneOldCaptureTriggers(cutoff) },
       { name: 'scheduled_captures', fn: () => this.storage.pruneOldScheduledCaptures(cutoff) },
       { name: 'ai_cache_samples', fn: () => this.storage.pruneOldAiCacheSamples(cutoff) },
+      { name: 'otel_spans', fn: () => this.storage.pruneOldOtelSpans(cutoff) },
     ];
 
     for (const op of pruneOps) {

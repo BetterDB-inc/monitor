@@ -25,3 +25,4 @@ export * from './utils/discovery-protocol';
 export * from './types/inference-latency';
 export * from './types/monitor';
 export * from './types/ai-observability';
+export * from './types/otel-traces';

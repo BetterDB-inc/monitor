@@ -219,6 +219,36 @@ describe('envSchema', () => {
     });
   });
 
+  describe('OTLP ingest token in cloud mode', () => {
+    it('requires OTEL_INGEST_TOKEN when CLOUD_MODE is set', () => {
+      const result = envSchema.safeParse({ CLOUD_MODE: 'true' });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some((i) => i.path.includes('OTEL_INGEST_TOKEN'))).toBe(true);
+      }
+    });
+
+    it('accepts CLOUD_MODE when OTEL_INGEST_TOKEN is provided', () => {
+      const result = envSchema.safeParse({ CLOUD_MODE: 'true', OTEL_INGEST_TOKEN: 'secret' });
+      expect(result.success).toBe(true);
+    });
+
+    it('does not require the token when not in cloud mode', () => {
+      const result = envSchema.safeParse({});
+      expect(result.success).toBe(true);
+    });
+
+    it('treats CLOUD_MODE=false as self-hosted (token not required)', () => {
+      const result = envSchema.safeParse({ CLOUD_MODE: 'false' });
+      expect(result.success).toBe(true);
+    });
+
+    it('defaults OTEL_INGEST_ENABLED to true', () => {
+      const result = envSchema.safeParse({});
+      expect(result.success && result.data.OTEL_INGEST_ENABLED).toBe(true);
+    });
+  });
+
   describe('validateEnv function', () => {
     it('should exit with error for invalid config', () => {
       const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
