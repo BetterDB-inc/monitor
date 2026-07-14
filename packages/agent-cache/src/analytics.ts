@@ -37,6 +37,7 @@ export interface AnalyticsOptions {
 }
 
 const EVENT_PREFIX = 'agent_cache:';
+const TELEMETRY_USER_AGENT = 'BetterDB-AgentCache/node';
 
 // Build-time placeholders — replaced by scripts/inject-telemetry-defaults.mjs
 // When the placeholder is NOT replaced, the startsWith('__') guard treats it as unset.
@@ -193,6 +194,9 @@ export class PostHogAnalytics implements Analytics {
       const props: Record<string, unknown> = { ...(properties ?? {}) };
       if (this.deploymentId && props.deployment_id === undefined) {
         props.deployment_id = this.deploymentId;
+      }
+      if (props.$raw_user_agent === undefined) {
+        props.$raw_user_agent = TELEMETRY_USER_AGENT;
       }
       this.posthog.capture({
         distinctId: this.distinctId,

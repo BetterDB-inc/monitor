@@ -33,3 +33,10 @@ if (replaced > 0) {
 } else {
   console.log('No telemetry env vars set — placeholders left as-is (noop fallback).');
 }
+
+if (process.env.REQUIRE_TELEMETRY_KEY && source.includes('__BETTERDB_POSTHOG_API_KEY__')) {
+  console.error(
+    'REQUIRE_TELEMETRY_KEY is set but __BETTERDB_POSTHOG_API_KEY__ was not injected — refusing to ship a telemetry-blind build.',
+  );
+  process.exit(1);
+}

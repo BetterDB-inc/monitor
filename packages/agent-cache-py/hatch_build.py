@@ -19,6 +19,12 @@ class CustomBuildHook(BuildHookInterface):
         api_key = os.environ.get("POSTHOG_API_KEY", "")
         host = os.environ.get("POSTHOG_HOST", "")
 
+        if os.environ.get("REQUIRE_TELEMETRY_KEY") and not api_key:
+            raise RuntimeError(
+                "REQUIRE_TELEMETRY_KEY is set but POSTHOG_API_KEY is not — "
+                "refusing to build a telemetry-blind wheel."
+            )
+
         if not api_key and not host:
             print("No telemetry env vars set — placeholders left as-is (noop fallback).")
             return

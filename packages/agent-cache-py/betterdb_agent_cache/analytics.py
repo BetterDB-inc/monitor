@@ -18,6 +18,7 @@ from typing import Any
 
 
 _EVENT_PREFIX = "agent_cache:"
+_TELEMETRY_USER_AGENT = "BetterDB-AgentCache/python"
 
 # Build-time placeholders — replaced by hatch_build.py during wheel build.
 # When the placeholder is NOT replaced, the startswith('__') guard treats it as unset.
@@ -138,6 +139,7 @@ class _PostHogAnalytics(Analytics):
             props = dict(properties) if properties else {}
             if self._deployment_id:
                 props.setdefault("deployment_id", self._deployment_id)
+            props.setdefault("$raw_user_agent", _TELEMETRY_USER_AGENT)
             self._ph.capture(
                 distinct_id=self._distinct_id,
                 event=f"{_EVENT_PREFIX}{event}",
