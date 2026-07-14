@@ -95,6 +95,16 @@ export const envSchema = z
     MONITOR_PERSISTENCE_WARN_SEC: z.coerce.number().int().min(1).default(120),
     MONITOR_PERSISTENCE_CRIT_SEC: z.coerce.number().int().min(1).default(600),
 
+    // OTLP trace ingestion (AI observability Phase 2)
+    OTEL_INGEST_ENABLED: z
+      .string()
+      .default('true')
+      .transform((v) => v !== 'false'),
+    OTEL_INGEST_TOKEN: z.string().optional(),
+
+    // Cloud mode (set by the hosted deployment; gates per-tenant auth)
+    CLOUD_MODE: z.string().optional(),
+
     // Security
     ENCRYPTION_KEY: z.string().min(16).optional(),
   })
@@ -137,6 +147,17 @@ export const envSchema = z
       console.warn(
         'Warning: AI is enabled in production with default Ollama URL (localhost:11434)',
       );
+    }
+
+    // In cloud mode the OTLP ingest path is allowlisted past session auth, so the
+    // bearer token is the only credential guarding it. Require it rather than
+    // leaving a tenant's span store open to anonymous writes.
+    if (data.CLOUD_MODE && !data.OTEL_INGEST_TOKEN) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'OTEL_INGEST_TOKEN is required when CLOUD_MODE is set (guards OTLP trace ingestion)',
+        path: ['OTEL_INGEST_TOKEN'],
+      });
     }
   });
 
