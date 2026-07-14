@@ -41,6 +41,13 @@ describe('OtelIngestController.ingestTraces', () => {
     expect(ingest.ingest).not.toHaveBeenCalled();
   });
 
+  it('treats CLOUD_MODE=false as self-hosted (no token required)', async () => {
+    process.env.CLOUD_MODE = 'false'; // truthy string, but not the cloud sentinel
+    const { ctrl, ingest } = makeController();
+    await ctrl.ingestTraces({}, undefined);
+    expect(ingest.ingest).toHaveBeenCalledTimes(1);
+  });
+
   it('accepts a valid bearer token in cloud mode', async () => {
     process.env.CLOUD_MODE = 'true';
     process.env.OTEL_INGEST_TOKEN = 'secret';

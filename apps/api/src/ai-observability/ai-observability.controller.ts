@@ -63,12 +63,14 @@ export class AiObservabilityController {
     @Query('limit') limit?: string,
   ): Promise<{ traces: OtelTraceSummary[] }> {
     try {
+      // Clamp both bounds like the history endpoint: an unbounded window or limit
+      // could force heavy aggregation over the whole otel_spans table.
       const h = hours ? parseInt(hours, 10) : 1;
       const l = limit ? parseInt(limit, 10) : 100;
       const traces = await this.service.getTraces(
-        Number.isFinite(h) && h > 0 ? h : 1,
+        Number.isFinite(h) && h > 0 ? Math.min(h, 168) : 1,
         service || undefined,
-        Number.isFinite(l) && l > 0 ? l : 100,
+        Number.isFinite(l) && l > 0 ? Math.min(l, 1000) : 100,
       );
       return { traces };
     } catch (error) {

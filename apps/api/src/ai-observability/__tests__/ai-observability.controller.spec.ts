@@ -52,6 +52,17 @@ describe('AiObservabilityController', () => {
     expect(getHistory).toHaveBeenLastCalledWith('c1', 'app', 168);
   });
 
+  it('clamps getTraces hours and limit to their upper bounds', async () => {
+    const getTraces = jest.fn(async () => []);
+    const ctrl = makeController({ getTraces });
+
+    await ctrl.getTraces('100000', undefined, '99999'); // huge → clamped
+    expect(getTraces).toHaveBeenLastCalledWith(168, undefined, 1000);
+
+    await ctrl.getTraces(undefined, 'svc', undefined); // defaults
+    expect(getTraces).toHaveBeenLastCalledWith(1, 'svc', 100);
+  });
+
   it('maps service errors to HttpException', async () => {
     const ctrl = makeController({
       getInstances: jest.fn(async () => {

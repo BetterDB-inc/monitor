@@ -238,6 +238,11 @@ describe('envSchema', () => {
       expect(result.success).toBe(true);
     });
 
+    it('treats CLOUD_MODE=false as self-hosted (token not required)', () => {
+      const result = envSchema.safeParse({ CLOUD_MODE: 'false' });
+      expect(result.success).toBe(true);
+    });
+
     it('defaults OTEL_INGEST_ENABLED to true', () => {
       const result = envSchema.safeParse({});
       expect(result.success && result.data.OTEL_INGEST_ENABLED).toBe(true);

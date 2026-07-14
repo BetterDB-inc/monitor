@@ -13,8 +13,12 @@ export class CloudAuthMiddleware implements NestMiddleware {
   }
 
   use(req: FastifyRequest['raw'], res: FastifyReply['raw'], next: () => void) {
-    // Skip if not in cloud mode (should never happen since module is only loaded in CLOUD_MODE, but safety check)
-    if (!process.env.CLOUD_MODE) {
+    // Skip if not in cloud mode (should never happen since module is only loaded
+    // in CLOUD_MODE, but safety check). Match the codebase convention
+    // (CLOUD_MODE === 'true') so a value like "false"/"0" is treated as
+    // self-hosted here and everywhere else, keeping the /v1/traces session-auth
+    // bypass in lockstep with the ingest token requirement.
+    if (process.env.CLOUD_MODE !== 'true') {
       return next();
     }
 

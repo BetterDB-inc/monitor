@@ -42,7 +42,7 @@ export class OtelIngestController {
     // In cloud mode /v1/traces bypasses session auth (allowlisted), so a bearer
     // token is the only credential. Fail closed when it isn't configured instead
     // of leaving the tenant's span store open to anyone who can reach the host.
-    if (process.env.CLOUD_MODE && !token) {
+    if (process.env.CLOUD_MODE === 'true' && !token) {
       throw new HttpException(
         'OTLP ingestion requires OTEL_INGEST_TOKEN in cloud mode',
         HttpStatus.UNAUTHORIZED,
