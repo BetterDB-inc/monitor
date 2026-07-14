@@ -60,7 +60,7 @@ export interface StoredAiCacheSample {
   /** Cumulative counters (from the stats hash) at sample time. */
   hits: number;
   misses: number;
-  /** Per-tick derived rate (hits+misses since last sample) — null on first sample. */
+  /** Cumulative lifetime hit rate: hits / (hits + misses). Null only when there is no traffic. */
   hitRate: number | null;
   costSavedMicros: number;
   evictions: number;
