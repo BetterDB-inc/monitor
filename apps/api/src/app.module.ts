@@ -12,6 +12,7 @@ import { CommandLogAnalyticsModule } from './commandlog-analytics/commandlog-ana
 import { LatencyAnalyticsModule } from './latency-analytics/latency-analytics.module';
 import { MemoryAnalyticsModule } from './memory-analytics/memory-analytics.module';
 import { PrometheusModule } from './prometheus/prometheus.module';
+import { OtelTelemetryModule } from './otel-telemetry/otel-telemetry.module';
 import { SettingsModule } from './settings/settings.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { TelemetryModule } from './telemetry/telemetry.module';
@@ -168,6 +169,7 @@ const baseImports = [
   LatencyAnalyticsModule,
   MemoryAnalyticsModule,
   PrometheusModule,
+  OtelTelemetryModule,
   SettingsModule,
   WebhooksModule,
   McpModule,

@@ -1353,6 +1353,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     return this.registry.contentType;
   }
 
+  collectMetricsAsJson(): ReturnType<Registry['getMetricsAsJSON']> {
+    return this.registry.getMetricsAsJSON();
+  }
+
   incrementPollCounter(connectionId?: string): void {
     const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'system';
     this.pollsTotal.labels(connLabel).inc();
