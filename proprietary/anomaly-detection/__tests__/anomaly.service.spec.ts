@@ -686,7 +686,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
+        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.REJECTED_CONNECTIONS && m !== MetricType.CLIENT_SATURATION && m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -1937,13 +1937,17 @@ describe('AnomalyService', () => {
       },
     });
 
-    it('routes rejected_connections to its own metric and keeps ACL_DENIED auth-only', async () => {
+    it('routes rejected_connections to its own delta metric and keeps ACL_DENIED auth-only', async () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('42', '7'));
-      await poll();
+      await poll(); // baseline poll → delta 0
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('50', '7'));
+      await poll(); // 8 new refusals since last poll
 
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
-      expect(buffers.get(MetricType.REJECTED_CONNECTIONS).getLatest()).toBe(42);
-      // ACL_DENIED must NOT include the 42 rejected connections (would be 49 if bundled).
+      // Fed the per-poll DELTA (8), not the lifetime counter (50) — so a flat
+      // elevated counter can't alert forever.
+      expect(buffers.get(MetricType.REJECTED_CONNECTIONS).getLatest()).toBe(8);
+      // ACL_DENIED must NOT include rejected connections (would be 57 if bundled).
       expect(buffers.get(MetricType.ACL_DENIED).getLatest()).toBe(7);
     });
   });
@@ -1968,11 +1972,8 @@ describe('AnomalyService', () => {
       },
     });
 
-    // Isolate saturation events from the CONNECTIONS z-score spike detector.
     const satEvents = () =>
-      service
-        .getRecentEvents()
-        .filter((e) => e.metricType === MetricType.CONNECTIONS && e.message.includes('maxclients'));
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.CLIENT_SATURATION);
 
     it('does not alert below the warning threshold', async () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(70));

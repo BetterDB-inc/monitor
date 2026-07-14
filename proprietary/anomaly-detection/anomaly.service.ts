@@ -64,6 +64,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private recentAnomalies: AnomalyEvent[] = [];
   private recentGroups: CorrelatedAnomalyGroup[] = [];
   private lastSlowlogId = new Map<string, number>();
+  // Previous lifetime rejected_connections counter per connection, so we can feed
+  // the per-poll DELTA (new refusals) to the detector rather than the ever-growing
+  // counter — otherwise a single historical maxclients hit would alert forever.
+  private lastRejectedConnections = new Map<string, number>();
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
   private lastPersistenceState = new Map<string, ConnectionPersistenceState>();
@@ -190,10 +194,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       [MetricType.INPUT_KBPS, (info) => this.parseNumber(info.instantaneous_input_kbps)],
       [MetricType.OUTPUT_KBPS, (info) => this.parseNumber(info.instantaneous_output_kbps)],
       // ACL_DENIED = auth/permission denials only. rejected_connections (the
-      // maxclients-exhaustion signal) is tracked separately so a connection-limit
-      // event is not misread as an auth attack.
+      // maxclients-exhaustion signal) is tracked separately, as a per-poll delta,
+      // so a connection-limit event is not misread as an auth attack. See the
+      // REJECTED_CONNECTIONS rate-of-change block in pollConnection.
       [MetricType.ACL_DENIED, (info) => this.parseNumber(info.acl_access_denied_auth)],
-      [MetricType.REJECTED_CONNECTIONS, (info) => this.parseNumber(info.rejected_connections)],
       [MetricType.EVICTED_KEYS, (info) => this.parseNumber(info.evicted_keys)],
       [MetricType.BLOCKED_CLIENTS, (info) => this.parseNumber(info.blocked_clients)],
       [MetricType.KEYSPACE_MISSES, (info) => this.parseNumber(info.keyspace_misses)],
@@ -211,16 +215,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         criticalZScore: 2.5,
         warningThreshold: 10,
         criticalThreshold: 50,
-        consecutiveRequired: 2,
-        cooldownMs: 30000,
-      },
-      // Rejected connections (maxclients exhaustion) — same sensitivity as
-      // ACL_DENIED; even a small burst of refusals is worth surfacing.
-      [MetricType.REJECTED_CONNECTIONS]: {
-        warningZScore: 1.5,
-        criticalZScore: 2.5,
-        warningThreshold: 5,
-        criticalThreshold: 25,
         consecutiveRequired: 2,
         cooldownMs: 30000,
       },
@@ -258,8 +252,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
-      // REPLICATION_ROLE, CLUSTER_STATE, DATASET_KEYS, COMMAND_P99, PERSISTENCE_CHILD, CLUSTER_TOPOLOGY, SLOWLOG_LAST_ID, and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.DATASET_KEYS || metricType === MetricType.COMMAND_P99 || metricType === MetricType.PERSISTENCE_CHILD || metricType === MetricType.CLUSTER_TOPOLOGY || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.SLOWLOG_COUNT) continue;
+      // REPLICATION_ROLE, CLUSTER_STATE, DATASET_KEYS, COMMAND_P99, PERSISTENCE_CHILD, CLUSTER_TOPOLOGY, SLOWLOG_LAST_ID, REJECTED_CONNECTIONS (delta-fed lazily), CLIENT_SATURATION (state-based), and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
+      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.DATASET_KEYS || metricType === MetricType.COMMAND_P99 || metricType === MetricType.PERSISTENCE_CHILD || metricType === MetricType.CLUSTER_TOPOLOGY || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.REJECTED_CONNECTIONS || metricType === MetricType.CLIENT_SATURATION || metricType === MetricType.SLOWLOG_COUNT) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -273,6 +267,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.buffers.delete(connectionId);
     this.detectors.delete(connectionId);
     this.lastSlowlogId.delete(connectionId);
+    this.lastRejectedConnections.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
     this.lastPersistenceState.delete(connectionId);
@@ -404,6 +399,40 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           anomaly.connectionId = ctx.connectionId;
           this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
           await this.addAnomaly(anomaly, ctx);
+        }
+      }
+
+      // Rejected-connections rate-of-change (maxclients exhaustion). rejected_connections
+      // is a lifetime counter, so we feed the per-poll delta — the count of NEW refusals
+      // since the last poll — not the raw counter, which would keep alerting forever after
+      // a single historical hit. Absolute thresholds apply to that delta.
+      const currentRejected = this.parseNumber(info.rejected_connections);
+      if (currentRejected !== null) {
+        const lastRejected = this.lastRejectedConnections.get(ctx.connectionId);
+        // max(0, …) also absorbs a counter reset (server restart → counter back to 0).
+        const rejectedDelta = Math.max(0, currentRejected - (lastRejected ?? currentRejected));
+        this.lastRejectedConnections.set(ctx.connectionId, currentRejected);
+
+        if (!buffers.has(MetricType.REJECTED_CONNECTIONS)) {
+          buffers.set(MetricType.REJECTED_CONNECTIONS, new MetricBuffer(MetricType.REJECTED_CONNECTIONS));
+          detectors.set(MetricType.REJECTED_CONNECTIONS, new SpikeDetector(MetricType.REJECTED_CONNECTIONS, {
+            warningZScore: 1.5,
+            criticalZScore: 2.5,
+            warningThreshold: 5,
+            criticalThreshold: 25,
+            consecutiveRequired: 1,
+            cooldownMs: 30000,
+          }));
+        }
+
+        const rejectedBuffer = buffers.get(MetricType.REJECTED_CONNECTIONS)!;
+        const rejectedDetector = detectors.get(MetricType.REJECTED_CONNECTIONS)!;
+        rejectedBuffer.addSample(rejectedDelta, timestamp);
+        const rejectedAnomaly = rejectedDetector.detect(rejectedBuffer, rejectedDelta, timestamp);
+        if (rejectedAnomaly) {
+          rejectedAnomaly.connectionId = ctx.connectionId;
+          this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${rejectedAnomaly.message}`);
+          await this.addAnomaly(rejectedAnomaly, ctx);
         }
       }
 
@@ -708,7 +737,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const event: AnomalyEvent = {
       id: randomUUID(),
       timestamp,
-      metricType: MetricType.CONNECTIONS,
+      // Dedicated metric type (not CONNECTIONS) so the correlator's CONNECTION_LEAK
+      // rule doesn't misdiagnose steady high saturation as a connection leak.
+      metricType: MetricType.CLIENT_SATURATION,
       anomalyType: AnomalyType.SPIKE,
       severity,
       value: connected,
