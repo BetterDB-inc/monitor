@@ -165,6 +165,12 @@ describe('envSchema', () => {
       const result = envSchema.safeParse({ AUDIT_POLL_INTERVAL_MS: '500' });
       expect(result.success).toBe(false);
     });
+
+    it('should default AI_OBS_POLL_INTERVAL_MS to 15000 and reject sub-1000ms', () => {
+      const ok = envSchema.safeParse({});
+      expect(ok.success && ok.data.AI_OBS_POLL_INTERVAL_MS).toBe(15000);
+      expect(envSchema.safeParse({ AI_OBS_POLL_INTERVAL_MS: '500' }).success).toBe(false);
+    });
   });
 
   describe('boolean transforms', () => {

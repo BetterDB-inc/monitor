@@ -33,6 +33,7 @@ export const envSchema = z
     // Polling intervals
     AUDIT_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
     CLIENT_ANALYTICS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(60000),
+    AI_OBS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
 
     // AI configuration
     AI_ENABLED: z
