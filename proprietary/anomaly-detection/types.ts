@@ -6,6 +6,8 @@ export enum MetricType {
   OUTPUT_KBPS = 'output_kbps',
   SLOWLOG_LAST_ID = 'slowlog_last_id',
   ACL_DENIED = 'acl_denied',
+  /** Connections refused because maxclients was hit (INFO stats rejected_connections). */
+  REJECTED_CONNECTIONS = 'rejected_connections',
   EVICTED_KEYS = 'evicted_keys',
   BLOCKED_CLIENTS = 'blocked_clients',
   KEYSPACE_MISSES = 'keyspace_misses',

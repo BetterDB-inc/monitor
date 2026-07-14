@@ -1919,4 +1919,105 @@ describe('AnomalyService', () => {
       expect(topoEvents()).toHaveLength(0);
     });
   });
+
+  // ─── Connection limits (valkey-io/valkey#3918) ─────────────────────────────
+  describe('rejected_connections unbundled from ACL_DENIED', () => {
+    const infoWith = (rejected: string, aclDenied: string) => ({
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: rejected,
+        acl_access_denied_auth: aclDenied,
+      },
+    });
+
+    it('routes rejected_connections to its own metric and keeps ACL_DENIED auth-only', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('42', '7'));
+      await poll();
+
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      expect(buffers.get(MetricType.REJECTED_CONNECTIONS).getLatest()).toBe(42);
+      // ACL_DENIED must NOT include the 42 rejected connections (would be 49 if bundled).
+      expect(buffers.get(MetricType.ACL_DENIED).getLatest()).toBe(7);
+    });
+  });
+
+  describe('client saturation detection', () => {
+    const infoWith = (connected: number, maxclients: number | null = 100) => ({
+      server: { role: 'master' },
+      clients: {
+        connected_clients: String(connected),
+        blocked_clients: '0',
+        ...(maxclients === null ? {} : { maxclients: String(maxclients) }),
+      },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+      },
+    });
+
+    // Isolate saturation events from the CONNECTIONS z-score spike detector.
+    const satEvents = () =>
+      service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.CONNECTIONS && e.message.includes('maxclients'));
+
+    it('does not alert below the warning threshold', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(70));
+      await poll();
+      expect(satEvents()).toHaveLength(0);
+    });
+
+    it('emits WARNING between 80% and 95%', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+      const events = satEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('85/100');
+    });
+
+    it('emits CRITICAL at or above 95%', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(96));
+      await poll();
+      expect(satEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('deduplicates while steady, escalates warning→critical, and re-arms after recovery', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+      await poll(); // steady warning → no repeat
+      expect(satEvents()).toHaveLength(1);
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(97));
+      await poll(); // escalate → critical
+      expect(satEvents()).toHaveLength(2);
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(50));
+      await poll(); // drop below warning → clears, no alert
+      expect(satEvents()).toHaveLength(2);
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll(); // re-cross → new warning
+      expect(satEvents()).toHaveLength(3);
+    });
+
+    it('does not divide by zero / alert when maxclients is absent', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(9999, null));
+      await expect(poll()).resolves.not.toThrow();
+      expect(satEvents()).toHaveLength(0);
+    });
+  });
 });
