@@ -20,7 +20,7 @@ export class CommandLogAnalyticsController {
   @ApiQuery({ name: 'minDuration', required: false, description: 'Minimum duration in microseconds' })
   @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of entries to return' })
   @ApiQuery({ name: 'offset', required: false, description: 'Offset for pagination' })
-  @ApiQuery({ name: 'sortBy', required: false, enum: ['recent', 'magnitude'], description: "Order: 'recent' (newest first, default) or 'magnitude' (worst offenders / top-N by duration or size)" })
+  @ApiQuery({ name: 'sortBy', required: false, enum: ['recent', 'magnitude'], description: "Order: 'recent' (newest first, default) or 'magnitude' (worst offenders first). Magnitude ranks by the raw duration/size column, which is microseconds for 'slow' but bytes for 'large-request'/'large-reply' — so combine it with a single 'type' for a meaningful top-N (mixing types compares unlike units)." })
   async getStoredCommandLog(
     @ConnectionId() connectionId?: string,
     @Query('startTime') startTime?: string,
