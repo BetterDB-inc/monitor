@@ -688,6 +688,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
                 );
                 await this.addAnomaly(clusterEvent, ctx);
 
+                this.otelEvents?.dispatch(
+                  WebhookEventType.CLUSTER_FAILOVER,
+                  {
+                    clusterState,
+                    slotsFailed: parseInt(clusterInfo.cluster_slots_fail) || 0,
+                    knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
+                  },
+                  ctx.connectionId,
+                );
                 // Dispatch cluster.failover webhook (PRO tier)
                 if (this.webhookEventsProService) {
                   this.webhookEventsProService

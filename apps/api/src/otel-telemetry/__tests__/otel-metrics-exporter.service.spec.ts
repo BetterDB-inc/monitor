@@ -34,7 +34,7 @@ describe('OtelMetricsExporterService', () => {
     const prom = makePrometheus();
     const service = new OtelMetricsExporterService(
       makeConfig({
-        OTEL_TELEMETRY_ENABLED: false,
+        OTEL_TELEMETRY_ENABLED: 'false',
         OTEL_EXPORTER_OTLP_ENDPOINT: 'http://localhost:4318',
       }),
       prom,

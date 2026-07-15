@@ -24,7 +24,7 @@ export class OtelEventDispatcherService implements OnModuleInit, OnModuleDestroy
   constructor(private readonly configService: ConfigService) {}
 
   onModuleInit(): void {
-    const enabled = this.configService.get<boolean>('OTEL_TELEMETRY_ENABLED', true);
+    const enabled = String(this.configService.get('OTEL_TELEMETRY_ENABLED', 'true')) !== 'false';
     const endpoint = this.configService.get<string>('OTEL_EXPORTER_OTLP_ENDPOINT');
     if (!enabled || !endpoint) {
       this.logger.log('OTel event dispatch disabled (set OTEL_EXPORTER_OTLP_ENDPOINT to enable)');

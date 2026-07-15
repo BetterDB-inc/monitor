@@ -19,7 +19,7 @@ describe('OtelEventDispatcherService', () => {
   it('no-ops when explicitly disabled even with an endpoint', () => {
     const service = new OtelEventDispatcherService(
       makeConfig({
-        OTEL_TELEMETRY_ENABLED: false,
+        OTEL_TELEMETRY_ENABLED: 'false',
         OTEL_EXPORTER_OTLP_ENDPOINT: 'http://localhost:4318',
       }),
     );

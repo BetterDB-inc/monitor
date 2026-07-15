@@ -87,10 +87,22 @@ export const envSchema = z
     WEBHOOK_MAX_RESPONSE_BODY_BYTES: z.coerce.number().int().min(0).optional(),
 
     // Monitor health gate
-    MONITOR_RECENT_OOM_WINDOW_MS: z.coerce.number().int().min(0).default(5 * 60 * 1000),
-    MONITOR_RECENT_FAILOVER_WINDOW_MS: z.coerce.number().int().min(0).default(2 * 60 * 1000),
+    MONITOR_RECENT_OOM_WINDOW_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(5 * 60 * 1000),
+    MONITOR_RECENT_FAILOVER_WINDOW_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(2 * 60 * 1000),
     MONITOR_MEMORY_PCT_THRESHOLD: z.coerce.number().int().min(0).max(100).default(85),
-    MONITOR_REPLICATION_LAG_BYTES: z.coerce.number().int().min(0).default(10 * 1024 * 1024),
+    MONITOR_REPLICATION_LAG_BYTES: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(10 * 1024 * 1024),
     MONITOR_PERSISTENCE_STALL_SEC: z.coerce.number().int().min(1).default(60),
     MONITOR_PERSISTENCE_WARN_SEC: z.coerce.number().int().min(1).default(120),
     MONITOR_PERSISTENCE_CRIT_SEC: z.coerce.number().int().min(1).default(600),
@@ -108,7 +120,7 @@ export const envSchema = z
       .string()
       .default('true')
       .transform((v) => v !== 'false'),
-    OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
+    OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().or(z.literal('')).optional(),
     OTEL_METRICS_EXPORT_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
 
     // Cloud mode (set by the hosted deployment; gates per-tenant auth)
@@ -164,7 +176,8 @@ export const envSchema = z
     if (data.CLOUD_MODE === 'true' && !data.OTEL_INGEST_TOKEN) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'OTEL_INGEST_TOKEN is required when CLOUD_MODE is set (guards OTLP trace ingestion)',
+        message:
+          'OTEL_INGEST_TOKEN is required when CLOUD_MODE is set (guards OTLP trace ingestion)',
         path: ['OTEL_INGEST_TOKEN'],
       });
     }
