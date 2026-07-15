@@ -41,6 +41,12 @@ class CustomBuildHook(BuildHookInterface):
             source = source.replace("__BETTERDB_POSTHOG_HOST__", host)
             replaced += 1
 
+        if os.environ.get("REQUIRE_TELEMETRY_KEY") and "__BETTERDB_POSTHOG_API_KEY__" in source:
+            raise RuntimeError(
+                "REQUIRE_TELEMETRY_KEY is set but __BETTERDB_POSTHOG_API_KEY__ was "
+                "not injected — refusing to build a telemetry-blind wheel."
+            )
+
         if replaced:
             tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
             tmp.write(source)
