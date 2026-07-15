@@ -3,10 +3,12 @@ import {
   Logger,
   NotFoundException,
   ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateValkeyInstanceDto } from './dto/create-valkey-instance.dto';
+import { parseMaxmemoryMi, MAX_VALKEY_MAXMEMORY_MI } from '../provisioning/sizing';
 
 // v1 caps each workspace at a single Valkey instance. The schema allows many
 // (ValkeyInstance has a tenant relation, no unique on tenantId) so this limit
@@ -20,6 +22,17 @@ export class ValkeyInstanceService {
   constructor(private readonly prisma: PrismaService) {}
 
   async createInstance(dto: CreateValkeyInstanceDto) {
+    // The DTO validator enforces this at the HTTP boundary; re-check here so
+    // internal callers can't persist an oversized instance either.
+    if (dto.maxmemory) {
+      const mi = parseMaxmemoryMi(dto.maxmemory);
+      if (mi === null || mi > MAX_VALKEY_MAXMEMORY_MI) {
+        throw new BadRequestException(
+          `maxmemory must be a valid size up to ${MAX_VALKEY_MAXMEMORY_MI / 1024}gb`,
+        );
+      }
+    }
+
     const tenant = await this.prisma.tenant.findUnique({ where: { id: dto.tenantId } });
     if (!tenant) {
       throw new NotFoundException(`Tenant ${dto.tenantId} not found`);
