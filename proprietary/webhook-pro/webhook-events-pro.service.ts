@@ -45,7 +45,7 @@ export class WebhookEventsProService implements OnModuleInit {
   /**
    * Check if PRO events are enabled
    */
-  private isEnabled(): boolean {
+  isEnabled(): boolean {
     const tier = this.licenseService.getLicenseTier();
     return tier === 'pro' || tier === 'enterprise';
   }

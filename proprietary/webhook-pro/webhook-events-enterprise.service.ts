@@ -28,16 +28,20 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
 
   async onModuleInit() {
     if (this.isEnabled()) {
-      this.logger.log('Webhook Enterprise events service initialized - ENTERPRISE tier events enabled');
+      this.logger.log(
+        'Webhook Enterprise events service initialized - ENTERPRISE tier events enabled',
+      );
     } else {
-      this.logger.log('Webhook Enterprise events service initialized - ENTERPRISE tier events disabled (requires Enterprise license)');
+      this.logger.log(
+        'Webhook Enterprise events service initialized - ENTERPRISE tier events disabled (requires Enterprise license)',
+      );
     }
   }
 
   /**
    * Check if ENTERPRISE events are enabled
    */
-  private isEnabled(): boolean {
+  isEnabled(): boolean {
     const tier = this.licenseService.getLicenseTier();
     return tier === 'enterprise';
   }
@@ -76,7 +80,7 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -113,7 +117,7 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -146,7 +150,7 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -177,7 +181,7 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 
@@ -210,7 +214,7 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
         timestamp: data.timestamp,
         instance: data.instance,
       },
-      data.connectionId
+      data.connectionId,
     );
   }
 }

@@ -859,11 +859,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         maxmemoryPolicy === 'noeviction' &&
         this.webhookEventsEnterpriseService
       ) {
-        this.otelEvents?.dispatch(
-          WebhookEventType.COMPLIANCE_ALERT,
-          { memoryUsedPercent: usedPercent, maxmemoryPolicy, severity: 'high' },
-          connectionId,
-        );
+        if (this.webhookEventsEnterpriseService?.isEnabled?.()) {
+          this.otelEvents?.dispatch(
+            WebhookEventType.COMPLIANCE_ALERT,
+            { memoryUsedPercent: usedPercent, maxmemoryPolicy, severity: 'high' },
+            connectionId,
+          );
+        }
         this.webhookEventsEnterpriseService
           .dispatchComplianceAlert({
             complianceType: 'data_retention',
@@ -1063,15 +1065,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         const newSlotFailures = state.previousSlotsFail < slotsFail && slotsFail > 0;
 
         if (stateChanged || newSlotFailures) {
-          this.otelEvents?.dispatch(
-            WebhookEventType.CLUSTER_FAILOVER,
-            {
-              clusterState,
-              slotsFailed: slotsFail,
-              knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
-            },
-            connectionId,
-          );
+          if (this.webhookEventsProService?.isEnabled?.()) {
+            this.otelEvents?.dispatch(
+              WebhookEventType.CLUSTER_FAILOVER,
+              {
+                clusterState,
+                slotsFailed: slotsFail,
+                knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
+              },
+              connectionId,
+            );
+          }
           try {
             await this.webhookEventsProService.dispatchClusterFailover({
               clusterState,

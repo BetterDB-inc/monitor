@@ -74,16 +74,18 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
       breachByIndex.set(indexName, bucket.p99 > config.p99ThresholdUs);
 
       if (result.fired) {
-        this.otelEvents?.dispatch(
-          WebhookEventType.INFERENCE_SLA_BREACH,
-          {
-            indexName,
-            currentP99Us: bucket.p99,
-            thresholdUs: config.p99ThresholdUs,
-            windowMs: profile.windowMs,
-          },
-          ctx.connectionId,
-        );
+        if (this.webhookEventsProService?.isEnabled?.()) {
+          this.otelEvents?.dispatch(
+            WebhookEventType.INFERENCE_SLA_BREACH,
+            {
+              indexName,
+              currentP99Us: bucket.p99,
+              thresholdUs: config.p99ThresholdUs,
+              windowMs: profile.windowMs,
+            },
+            ctx.connectionId,
+          );
+        }
         if (this.webhookEventsProService) {
           try {
             await this.webhookEventsProService.dispatchInferenceSlaBreach({
