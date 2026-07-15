@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useIsDemo } from '../contexts/DemoContext';
 import { useConnection } from '../hooks/useConnection';
 import { fetchApi } from '../api/client';
+import { parseConnectionUrl, looksLikeConnectionUrl } from '../utils/connectionUrl';
 import { agentTokensApi, GeneratedToken, TokenListItem } from '../api/agent-tokens';
 import { databasesApi, Database, DatabaseStatus, DatabaseCredentials } from '../api/databases';
 import { workspaceApi } from '../api/workspace';
@@ -60,22 +61,66 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
   const [showAddDialog, setShowAddDialog] = useState(false);
 
   useEffect(() => {
-    const handler = () => setShowAddDialog(true);
+    const handler = (e: Event) => {
+      const detail = (
+        e as CustomEvent<
+          | { prefill?: Partial<ConnectionFormData>; tab?: AddTab; valkeyMaxmemory?: string }
+          | undefined
+        >
+      ).detail;
+      if (detail?.prefill) {
+        setFormData({
+          ...defaultFormData,
+          ...(isCloudMode ? { host: '' } : {}),
+          ...detail.prefill,
+        });
+        setTestResult(null);
+        setAddTab('direct');
+      } else if (detail?.tab && isCloudMode) {
+        // Non-direct tabs only exist in cloud mode.
+        setAddTab(detail.tab);
+        setValkeyMaxmemory(detail.valkeyMaxmemory ?? null);
+      }
+      setShowAddDialog(true);
+    };
     window.addEventListener('betterdb:open-add-connection', handler);
     return () => window.removeEventListener('betterdb:open-add-connection', handler);
-  }, []);
+  }, [isCloudMode]);
   const [showManageDialog, setShowManageDialog] = useState(false);
   const [formData, setFormData] = useState<ConnectionFormData>(emptyFormData);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [addTab, setAddTab] = useState<AddTab>('direct');
+  const [valkeyMaxmemory, setValkeyMaxmemory] = useState<string | null>(null);
 
   const handleInputChange = (field: keyof ConnectionFormData, value: string | number | boolean) => {
     if (field === 'host' && typeof value === 'string') {
       value = value.replace(/^https?:\/\//, '').replace(/\/$/, '');
     }
     setFormData(prev => ({ ...prev, [field]: value }));
+    setTestResult(null);
+  };
+
+  // Pasting a full connection URL (redis://user:pass@host:6379/0) into Host fills the whole
+  // form. Paste-only on purpose: expanding on change would fire on intermediate keystrokes
+  // while someone types a URL by hand and scatter fragments across the fields.
+  const handleHostPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData('text');
+    if (!looksLikeConnectionUrl(text)) return;
+    const parsed = parseConnectionUrl(text);
+    if (!parsed.ok) return;
+    e.preventDefault();
+    setFormData(prev => ({
+      ...prev,
+      name: prev.name || parsed.value.name,
+      host: parsed.value.host,
+      port: parsed.value.port,
+      username: parsed.value.username || prev.username,
+      password: parsed.value.password || prev.password,
+      dbIndex: parsed.value.dbIndex,
+      tls: parsed.value.tls,
+    }));
     setTestResult(null);
   };
 
@@ -282,6 +327,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         if (!open) {
           setFormData(emptyFormData);
           setTestResult(null);
+          setValkeyMaxmemory(null);
         }
       }}>
         <DialogContent className={isCloudMode ? (addTab === 'valkey' ? 'sm:max-w-3xl' : 'sm:max-w-2xl') : 'sm:max-w-md'}>
@@ -325,11 +371,13 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           {addTab === 'valkey' ? (
             <ValkeyInstancesTab
               connections={connections}
+              initialMaxmemory={valkeyMaxmemory ?? undefined}
               onClose={() => {
                 setShowAddDialog(false);
                 setFormData(emptyFormData);
                 setTestResult(null);
                 setAddTab('direct');
+                setValkeyMaxmemory(null);
               }}
               refreshConnections={refreshConnections}
             />
@@ -354,6 +402,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                       type="text"
                       value={formData.host}
                       onChange={(e) => handleInputChange('host', e.target.value)}
+                      onPaste={handleHostPaste}
                       placeholder={isCloudMode ? 'your-redis-host.example.com' : 'localhost'}
                       className={`w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary ${
                         isCloudMode && isLocalhostHost(formData.host) ? 'border-amber-500 focus:ring-amber-500' : ''
@@ -380,6 +429,11 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                           Run BetterDB locally with Docker →
                         </a>
                       </div>
+                    )}
+                    {!(isCloudMode && isLocalhostHost(formData.host)) && (
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        Tip: paste a full URL like rediss://user:pass@host:6379 to fill every field.
+                      </p>
                     )}
                   </div>
                   <div>
@@ -845,10 +899,12 @@ const VALKEY_ACTIVE_STATUSES: DatabaseStatus[] = ['pending', 'provisioning', 'de
 
 function ValkeyInstancesTab({
   connections,
+  initialMaxmemory,
   onClose,
   refreshConnections,
 }: {
   connections: Connection[];
+  initialMaxmemory?: string;
   onClose: () => void;
   refreshConnections: () => Promise<void>;
 }) {
@@ -856,7 +912,7 @@ function ValkeyInstancesTab({
   const [loading, setLoading] = useState(true);
   const [isAdminOrOwner, setIsAdminOrOwner] = useState(false);
   const [name, setName] = useState('');
-  const [maxmemory, setMaxmemory] = useState('768mb');
+  const [maxmemory, setMaxmemory] = useState(initialMaxmemory ?? '768mb');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -1011,6 +1067,7 @@ function ValkeyInstancesTab({
               >
                 <option value="256mb">256mb</option>
                 <option value="768mb">768mb</option>
+                <option value="1gb">1gb</option>
                 <option value="2gb">2gb</option>
               </select>
             </div>

@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException, BadRequestException } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailService } from '../email/email.service';
+import { computeValkeySizing } from './sizing';
 import { TenantStatus, ValkeyInstanceStatus } from '@prisma/client';
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
@@ -667,6 +668,15 @@ export class ProvisioningService {
     ];
     if (opts.maxmemory) {
       args.push('--set', `valkey.maxmemory=${opts.maxmemory}`);
+      const sizing = computeValkeySizing(opts.maxmemory);
+      if (sizing) {
+        args.push(
+          '--set',
+          `resources.limits.memory=${sizing.memoryLimit}`,
+          '--set',
+          `persistence.size=${sizing.persistenceSize}`,
+        );
+      }
     }
 
     let stdout: string;

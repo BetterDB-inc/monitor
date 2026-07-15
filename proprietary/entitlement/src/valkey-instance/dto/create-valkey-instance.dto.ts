@@ -1,4 +1,29 @@
-import { IsString, IsOptional, Matches, MinLength, MaxLength } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  Matches,
+  MinLength,
+  MaxLength,
+  Validate,
+  ValidatorConstraint,
+  ValidatorConstraintInterface,
+} from 'class-validator';
+import { parseMaxmemoryMi, MAX_VALKEY_MAXMEMORY_MI } from '../../provisioning/sizing';
+
+// Caps the requested maxmemory at 2gb (the largest size offered in the UI) so
+// a hand-crafted API call can't provision an arbitrarily large pod and volume.
+@ValidatorConstraint({ name: 'valkeyMaxmemoryCap' })
+export class ValkeyMaxmemoryCap implements ValidatorConstraintInterface {
+  validate(value: unknown): boolean {
+    if (typeof value !== 'string') return false;
+    const mi = parseMaxmemoryMi(value);
+    return mi !== null && mi <= MAX_VALKEY_MAXMEMORY_MI;
+  }
+
+  defaultMessage(): string {
+    return `maxmemory cannot exceed ${MAX_VALKEY_MAXMEMORY_MI / 1024}gb`;
+  }
+}
 
 export class CreateValkeyInstanceDto {
   @IsString()
@@ -24,5 +49,6 @@ export class CreateValkeyInstanceDto {
   @Matches(/^\d+(kb|mb|gb)$/i, {
     message: 'maxmemory must be a number followed by kb, mb, or gb (e.g. 768mb)',
   })
+  @Validate(ValkeyMaxmemoryCap)
   maxmemory?: string;
 }

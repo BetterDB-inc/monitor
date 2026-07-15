@@ -8,6 +8,26 @@ has_children: true
 
 BetterDB works with any Redis-compatible managed service. This index covers the providers we have first-class guides for, and the two connection methods BetterDB uses to reach them.
 
+## Quick connect with a connection URL
+
+The fastest way to connect: paste a full connection URL into the **Quick connect** box on the connect screen (or into the **Host** field of the Add Connection form - it expands into the individual fields automatically).
+
+```
+rediss://default:your-password@your-host.example.com:6379
+```
+
+Supported forms:
+
+| Form | Meaning |
+|------|---------|
+| `redis://host:6379` | Plain connection, no TLS |
+| `rediss://host:6379` | TLS enabled (note the double `s`) |
+| `valkey://` / `valkeys://` | Same as above, Valkey-flavored |
+| `redis://user:password@host:6379/2` | Credentials and database index `2` |
+| `host:6379` | Bare host and port |
+
+> HTTP REST endpoints (such as Upstash's `UPSTASH_REDIS_REST_URL`) will **not** work - BetterDB speaks the Redis wire protocol over TCP. Use the TCP endpoint and token instead.
+
 ## Connection methods
 
 BetterDB connects to your database in one of two ways. Most providers support both; some only support one.
