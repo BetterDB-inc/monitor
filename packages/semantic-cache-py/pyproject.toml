@@ -4,12 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "betterdb-semantic-cache"
-version = "0.8.0"
+version = "0.9.1"
 description = "Semantic cache for AI workloads backed by Valkey vector search. Embeddings-based similarity matching with OpenTelemetry and Prometheus instrumentation."
 keywords = ["valkey", "redis", "semantic-cache", "vector-search", "embeddings", "llm", "opentelemetry", "prometheus", "langchain", "langgraph"]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "betterdb-valkey-search-kit>=0.1.0",
     "valkey[asyncio]>=6.0.0",

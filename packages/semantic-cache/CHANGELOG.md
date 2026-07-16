@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-12
+
+### Added
+
+- **TTL refresh from `__config`** — `refreshConfig()` now reads a `ttl` hash-field
+  from `{name}:__config` and updates the effective `defaultTtl` in-memory,
+  mirroring the existing `threshold` / `threshold:{category}` refresh. Constructor
+  value serves as the fallback when the field is absent; non-numeric,
+  non-integer, and out-of-range values (outside `10..86400`) are ignored.
+  Pure library-side read; the corresponding propose→apply flow (MCP tool and
+  `ttl_adjust` discovery capability) lands in a follow-up once the
+  Monitor-side dispatcher case is in place.
+
 ## [0.10.0] - 2026-07-09
 
 ### Added

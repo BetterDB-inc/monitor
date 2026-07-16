@@ -1,0 +1,170 @@
+import { AiObservabilityService } from '../ai-observability.service';
+import type { AiInstance } from '@betterdb/shared';
+import type { DiscoveryReaderService } from '../discovery-reader.service';
+import type { ConnectionRegistry } from '../../connections/connection-registry.service';
+import type { StoragePort } from '../../common/interfaces/storage-port.interface';
+
+type Saved = Omit<import('@betterdb/shared').StoredAiCacheSample, 'id' | 'connectionId'>[];
+
+function makeService(opts: {
+  instances: AiInstance[];
+  call: (cmd: string, args: string[]) => unknown;
+  hasVectorSearch?: boolean;
+  indexInfo?: { numDocs: number; memorySizeMb: number };
+}) {
+  const saved: Saved[] = [];
+  const storage = {
+    saveAiCacheSamples: jest.fn(async (s: Saved) => {
+      saved.push(s);
+      return s.length;
+    }),
+    getAiCacheHistory: jest.fn(async () => []),
+    pruneOldAiCacheSamples: jest.fn(async () => 0),
+  } as unknown as StoragePort;
+
+  const client = {
+    call: async (cmd: string, args: string[]) => opts.call(cmd, args),
+    getCapabilities: () => ({ hasVectorSearch: opts.hasVectorSearch ?? false }),
+    getVectorIndexInfo: async () => opts.indexInfo ?? { numDocs: 0, memorySizeMb: 0 },
+  };
+  const registry = { get: jest.fn(() => client) } as unknown as ConnectionRegistry;
+  const discovery = {
+    discoverWithClient: jest.fn(async () => opts.instances),
+  } as unknown as DiscoveryReaderService;
+
+  const svc = new AiObservabilityService(registry, storage, discovery);
+  const ctx = { connectionId: 'c1', connectionName: 'c1', client, host: 'h', port: 6379 } as any;
+  return { svc, ctx, saved, storage };
+}
+
+const agentCache: AiInstance = {
+  field: 'app',
+  kind: 'agent_cache',
+  name: 'app',
+  version: '1',
+  capabilities: [],
+  statsKey: 'app:__stats',
+  alive: true,
+};
+
+describe('AiObservabilityService.pollConnection', () => {
+  it('aggregates agent_cache llm+tool counters and saves a sample', async () => {
+    const { svc, ctx, saved } = makeService({
+      instances: [agentCache],
+      call: (cmd) =>
+        cmd === 'HGETALL'
+          ? ['llm:hits', '80', 'llm:misses', '20', 'tool:hits', '10', 'tool:misses', '5', 'cost_saved_micros', '5000000']
+          : [],
+    });
+
+    await (svc as any).pollConnection(ctx);
+
+    expect(saved).toHaveLength(1);
+    const s = saved[0][0];
+    expect(s.kind).toBe('agent_cache');
+    expect(s.hits).toBe(90); // 80 + 10
+    expect(s.misses).toBe(25); // 20 + 5
+    expect(s.costSavedMicros).toBe(5_000_000);
+    expect(s.hitRate).toBeCloseTo(90 / 115); // cumulative hits / (hits + misses)
+    expect(JSON.parse(s.extra as string).session).toEqual({ reads: 0, writes: 0 });
+  });
+
+  it('records the cumulative hit rate (stable across polls, not a per-tick delta)', async () => {
+    const { svc, ctx, saved } = makeService({
+      instances: [agentCache],
+      call: (cmd) =>
+        cmd === 'HGETALL'
+          ? ['llm:hits', '80', 'llm:misses', '20', 'tool:hits', '0', 'tool:misses', '0']
+          : [],
+    });
+
+    await (svc as any).pollConnection(ctx);
+
+    expect(saved[0][0].hitRate).toBeCloseTo(0.8); // 80 / (80 + 20), regardless of prior polls
+  });
+
+  it('records a null hit rate when there is no traffic', async () => {
+    const { svc, ctx, saved } = makeService({
+      instances: [agentCache],
+      call: (cmd) => (cmd === 'HGETALL' ? ['llm:hits', '0', 'llm:misses', '0'] : []),
+    });
+
+    await (svc as any).pollConnection(ctx);
+
+    expect(saved[0][0].hitRate).toBeNull(); // hits + misses === 0
+  });
+
+  it('reads FT.INFO for memory item count and index bytes', async () => {
+    const memInstance: AiInstance = {
+      field: 'app:mem',
+      kind: 'agent_memory',
+      name: 'app',
+      version: '1',
+      capabilities: [],
+      statsKey: 'app:__mem_stats',
+      indexName: 'app:mem:idx',
+      alive: true,
+    };
+    const { svc, ctx, saved } = makeService({
+      instances: [memInstance],
+      hasVectorSearch: true,
+      indexInfo: { numDocs: 4200, memorySizeMb: 2 },
+      call: (cmd) => {
+        if (cmd === 'HGETALL') return ['evictions', '7', 'recall.threshold', '0.4'];
+        return [];
+      },
+    });
+
+    await (svc as any).pollConnection(ctx);
+
+    const s = saved[0][0];
+    expect(s.kind).toBe('agent_memory');
+    expect(s.evictions).toBe(7);
+    expect(s.items).toBe(4200);
+    expect(s.indexBytes).toBe(2 * 1024 * 1024);
+    expect(s.threshold).toBeCloseTo(0.4);
+  });
+
+  it('self-prunes locally when not in cloud mode, but not under CLOUD_MODE', async () => {
+    const { svc, ctx, storage } = makeService({
+      instances: [agentCache],
+      call: (cmd) => (cmd === 'HGETALL' ? ['llm:hits', '1', 'llm:misses', '0'] : []),
+    });
+    const prune = storage.pruneOldAiCacheSamples as jest.Mock;
+
+    const prev = process.env.CLOUD_MODE;
+    process.env.CLOUD_MODE = 'true';
+    await (svc as any).pollConnection(ctx);
+    expect(prune).not.toHaveBeenCalled(); // cloud sweep owns retention
+
+    delete process.env.CLOUD_MODE;
+    await (svc as any).pollConnection(ctx);
+    expect(prune).toHaveBeenCalledTimes(1); // self-hosted trims locally
+    if (prev !== undefined) process.env.CLOUD_MODE = prev;
+  });
+
+  it('falls back to the default poll interval for an invalid AI_OBS_POLL_INTERVAL_MS', async () => {
+    const prev = process.env.AI_OBS_POLL_INTERVAL_MS;
+    for (const bad of ['', '0', '-5', 'abc']) {
+      process.env.AI_OBS_POLL_INTERVAL_MS = bad;
+      const { svc } = makeService({ instances: [], call: () => [] });
+      expect((svc as any).getIntervalMs()).toBe(15_000); // default, not NaN/0/negative
+    }
+    process.env.AI_OBS_POLL_INTERVAL_MS = '500'; // below the floor
+    const { svc } = makeService({ instances: [], call: () => [] });
+    expect((svc as any).getIntervalMs()).toBe(1_000); // floored
+    if (prev !== undefined) process.env.AI_OBS_POLL_INTERVAL_MS = prev;
+    else delete process.env.AI_OBS_POLL_INTERVAL_MS;
+  });
+
+  it('saves nothing when no instances are discovered, but still prunes locally', async () => {
+    const prev = process.env.CLOUD_MODE;
+    delete process.env.CLOUD_MODE;
+    const { svc, ctx, storage } = makeService({ instances: [], call: () => [] });
+    await (svc as any).pollConnection(ctx);
+    expect(storage.saveAiCacheSamples).not.toHaveBeenCalled();
+    // Prune runs before the early return, so removed libraries' samples still age out.
+    expect(storage.pruneOldAiCacheSamples).toHaveBeenCalledTimes(1);
+    if (prev !== undefined) process.env.CLOUD_MODE = prev;
+  });
+});

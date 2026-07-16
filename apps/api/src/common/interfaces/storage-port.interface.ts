@@ -28,6 +28,11 @@ export type {
   DatabaseConnectionConfig,
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
+  StoredAiCacheSample,
+  AiCacheHistoryQueryOptions,
+  StoredOtelSpan,
+  OtelTraceSummary,
+  OtelTraceQueryOptions,
 } from '@betterdb/shared';
 export type { MetricForecastSettings, MetricKind } from '@betterdb/shared';
 export type {
@@ -87,6 +92,11 @@ import type {
   MetricKind,
   VectorIndexSnapshot,
   VectorIndexSnapshotQueryOptions,
+  StoredAiCacheSample,
+  AiCacheHistoryQueryOptions,
+  StoredOtelSpan,
+  OtelTraceSummary,
+  OtelTraceQueryOptions,
   Webhook,
   WebhookDelivery,
   WebhookEventType,
@@ -215,6 +225,15 @@ export interface StoredSlowLogEntry {
   connectionId?: string;
 }
 
+/**
+ * Ordering for slow/command-log queries.
+ * - `recent` (default): newest first (`captured_at`/`timestamp` DESC).
+ * - `magnitude`: worst offenders first (`duration` DESC). Note `duration` holds
+ *   microseconds for `slow` entries and bytes for `large-request`/`large-reply`,
+ *   so `magnitude` means "largest value of that log type" in both cases.
+ */
+export type CommandLogSortBy = 'recent' | 'magnitude';
+
 export interface SlowLogQueryOptions {
   startTime?: number; // Unix timestamp in seconds
   endTime?: number;
@@ -224,6 +243,7 @@ export interface SlowLogQueryOptions {
   limit?: number;
   offset?: number;
   connectionId?: string;
+  sortBy?: CommandLogSortBy;
 }
 
 // Command Log Entry Types (Valkey-specific)
@@ -253,6 +273,7 @@ export interface CommandLogQueryOptions {
   limit?: number;
   offset?: number;
   connectionId?: string;
+  sortBy?: CommandLogSortBy;
 }
 
 // Latency Snapshot Types
@@ -562,6 +583,20 @@ export interface StoragePort {
   ): Promise<number>;
   getLatencyStatsHistory(options: LatencyStatsHistoryQueryOptions): Promise<StoredLatencyStatsSample[]>;
   pruneOldLatencyStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // AI Cache/Memory Sample Methods (AI Cache & Memory observability) - connectionId required for writes
+  saveAiCacheSamples(
+    samples: Omit<StoredAiCacheSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number>;
+  getAiCacheHistory(options: AiCacheHistoryQueryOptions): Promise<StoredAiCacheSample[]>;
+  pruneOldAiCacheSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // OTLP Trace Methods (AI Cache & Memory observability — Phase 2)
+  saveOtelSpans(spans: StoredOtelSpan[]): Promise<number>;
+  getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]>;
+  getOtelTraceSpans(traceId: string): Promise<StoredOtelSpan[]>;
+  pruneOldOtelSpans(cutoffTimestamp: number): Promise<number>;
 
   // Vector Index Snapshot Methods
   saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number>;

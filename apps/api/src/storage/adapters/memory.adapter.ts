@@ -39,6 +39,11 @@ import {
   CommandStatsHistoryQueryOptions,
   StoredLatencyStatsSample,
   LatencyStatsHistoryQueryOptions,
+  StoredAiCacheSample,
+  AiCacheHistoryQueryOptions,
+  StoredOtelSpan,
+  OtelTraceSummary,
+  OtelTraceQueryOptions,
   StoredCaptureSession,
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
@@ -74,6 +79,7 @@ import {
   MEMORY_PROPOSAL_DEFAULT_EXPIRY_MS,
 } from '@betterdb/shared';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
+import { SlowLogMemoryRepository } from './repositories/slowlog.memory.repository';
 
 const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
 
@@ -108,7 +114,6 @@ export class MemoryAdapter implements StoragePort {
   private anomalyEvents: StoredAnomalyEvent[] = [];
   private bulkDeleteAudits: StoredBulkDeleteAudit[] = [];
   private correlatedGroups: StoredCorrelatedGroup[] = [];
-  private slowLogEntries: StoredSlowLogEntry[] = [];
   private commandLogEntries: StoredCommandLogEntry[] = [];
   private latencySnapshots: StoredLatencySnapshot[] = [];
   private latencyHistograms: StoredLatencyHistogram[] = [];
@@ -118,6 +123,7 @@ export class MemoryAdapter implements StoragePort {
   private settings: AppSettings | null = null;
   private readonly MAX_DELIVERIES_PER_WEBHOOK = 1000;
   private readonly webhookRepo = new WebhookMemoryRepository(this.MAX_DELIVERIES_PER_WEBHOOK);
+  private readonly slowlogRepo = new SlowLogMemoryRepository();
   private idCounter = 1;
   private ready: boolean = false;
 
@@ -911,73 +917,19 @@ export class MemoryAdapter implements StoragePort {
 
   // Slow Log Methods
   async saveSlowLogEntries(entries: StoredSlowLogEntry[], connectionId: string): Promise<number> {
-    let savedCount = 0;
-    for (const entry of entries) {
-      // Check for duplicates based on unique constraint (including connectionId)
-      const exists = this.slowLogEntries.some(
-        (e) =>
-          e.id === entry.id &&
-          e.sourceHost === entry.sourceHost &&
-          e.sourcePort === entry.sourcePort &&
-          e.connectionId === connectionId,
-      );
-      if (!exists) {
-        this.slowLogEntries.push({ ...entry, connectionId });
-        savedCount++;
-      }
-    }
-    return savedCount;
+    return this.slowlogRepo.saveSlowLogEntries(entries, connectionId);
   }
 
   async getSlowLogEntries(options: SlowLogQueryOptions = {}): Promise<StoredSlowLogEntry[]> {
-    let filtered = [...this.slowLogEntries];
-
-    if (options.connectionId) {
-      filtered = filtered.filter((e) => e.connectionId === options.connectionId);
-    }
-    if (options.startTime) {
-      filtered = filtered.filter((e) => e.timestamp >= options.startTime!);
-    }
-    if (options.endTime) {
-      filtered = filtered.filter((e) => e.timestamp <= options.endTime!);
-    }
-    if (options.command) {
-      const cmd = options.command.toLowerCase();
-      // command is an array, check if the first element (command name) matches
-      filtered = filtered.filter((e) => e.command[0]?.toLowerCase().includes(cmd));
-    }
-    if (options.clientName) {
-      const name = options.clientName.toLowerCase();
-      filtered = filtered.filter((e) => e.clientName.toLowerCase().includes(name));
-    }
-    if (options.minDuration) {
-      filtered = filtered.filter((e) => e.duration >= options.minDuration!);
-    }
-
-    return filtered
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
+    return this.slowlogRepo.getSlowLogEntries(options);
   }
 
   async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
-    let entries = this.slowLogEntries;
-    if (connectionId) {
-      entries = entries.filter((e) => e.connectionId === connectionId);
-    }
-    if (entries.length === 0) return null;
-    return Math.max(...entries.map((e) => e.id));
+    return this.slowlogRepo.getLatestSlowLogId(connectionId);
   }
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
-    const before = this.slowLogEntries.length;
-    if (connectionId) {
-      this.slowLogEntries = this.slowLogEntries.filter(
-        (e) => e.capturedAt >= cutoffTimestamp || e.connectionId !== connectionId,
-      );
-    } else {
-      this.slowLogEntries = this.slowLogEntries.filter((e) => e.capturedAt >= cutoffTimestamp);
-    }
-    return before - this.slowLogEntries.length;
+    return this.slowlogRepo.pruneOldSlowLogEntries(cutoffTimestamp, connectionId);
   }
 
   // Command Log Methods
@@ -1032,8 +984,13 @@ export class MemoryAdapter implements StoragePort {
       filtered = filtered.filter((e) => e.duration >= options.minDuration!);
     }
 
+    const compare =
+      options.sortBy === 'magnitude'
+        ? (a: StoredCommandLogEntry, b: StoredCommandLogEntry) => b.duration - a.duration || b.timestamp - a.timestamp
+        : (a: StoredCommandLogEntry, b: StoredCommandLogEntry) => b.timestamp - a.timestamp;
+
     return filtered
-      .sort((a, b) => b.timestamp - a.timestamp)
+      .sort(compare)
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
   }
 
@@ -1290,6 +1247,142 @@ export class MemoryAdapter implements StoragePort {
       );
     }
     return before - this.latencyStatsSamples.length;
+  }
+
+  // AI Cache/Memory Sample Methods
+  private aiCacheSamples: StoredAiCacheSample[] = [];
+
+  async saveAiCacheSamples(
+    samples: Omit<StoredAiCacheSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    for (const s of samples) {
+      this.aiCacheSamples.push({
+        id: randomUUID(),
+        connectionId,
+        ...s,
+      });
+    }
+    return samples.length;
+  }
+
+  async getAiCacheHistory(
+    options: AiCacheHistoryQueryOptions,
+  ): Promise<StoredAiCacheSample[]> {
+    // Keep the most-recent `limit` samples PER INSTANCE (not a single global cap), ascending.
+    const limit = options.limit ?? 10_000;
+    if (limit <= 0) return [];
+    const filtered = this.aiCacheSamples.filter(
+      (s) =>
+        (!options.connectionId || s.connectionId === options.connectionId) &&
+        (!options.instanceField || s.instanceField === options.instanceField) &&
+        (!options.kind || s.kind === options.kind) &&
+        (options.startTime === undefined || s.timestamp >= options.startTime) &&
+        (options.endTime === undefined || s.timestamp <= options.endTime),
+    );
+    const byInstance = new Map<string, StoredAiCacheSample[]>();
+    for (const s of filtered) {
+      const arr = byInstance.get(s.instanceField) ?? [];
+      arr.push(s);
+      byInstance.set(s.instanceField, arr);
+    }
+    const kept: StoredAiCacheSample[] = [];
+    for (const arr of byInstance.values()) {
+      arr.sort((a, b) => a.timestamp - b.timestamp);
+      kept.push(...arr.slice(-limit));
+    }
+    return kept.sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  async pruneOldAiCacheSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    const before = this.aiCacheSamples.length;
+    if (connectionId) {
+      this.aiCacheSamples = this.aiCacheSamples.filter(
+        (s) => s.timestamp >= cutoffTimestamp || s.connectionId !== connectionId,
+      );
+    } else {
+      this.aiCacheSamples = this.aiCacheSamples.filter(
+        (s) => s.timestamp >= cutoffTimestamp,
+      );
+    }
+    return before - this.aiCacheSamples.length;
+  }
+
+  // OTLP Trace Methods
+  private otelSpans: StoredOtelSpan[] = [];
+
+  async saveOtelSpans(spans: StoredOtelSpan[]): Promise<number> {
+    for (const s of spans) {
+      const idx = this.otelSpans.findIndex(
+        (e) => e.traceId === s.traceId && e.spanId === s.spanId,
+      );
+      if (idx >= 0) this.otelSpans[idx] = s;
+      else this.otelSpans.push(s);
+    }
+    return spans.length;
+  }
+
+  async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
+    // Group ALL spans by trace first, then filter whole traces by their
+    // trace-level start / service — so a boundary trace still gets a complete
+    // summary (span count, root, duration) rather than a partial one.
+    const byTrace = new Map<string, StoredOtelSpan[]>();
+    for (const s of this.otelSpans) {
+      byTrace.set(s.traceId, [...(byTrace.get(s.traceId) ?? []), s]);
+    }
+    const summaries: OtelTraceSummary[] = [];
+    for (const [traceId, spans] of byTrace) {
+      const minStart = Math.min(...spans.map((s) => s.startTimeMs));
+      if (options.startTime !== undefined && minStart < options.startTime) continue;
+      if (options.endTime !== undefined && minStart > options.endTime) continue;
+      if (options.service && !spans.some((s) => s.serviceName === options.service)) continue;
+
+      const root = spans.find((s) => s.parentSpanId === null) ?? null;
+      const durationNs = root
+        ? root.durationNs
+        : (Math.max(...spans.map((s) => s.startTimeMs + s.durationNs / 1_000_000)) - minStart) *
+          1_000_000;
+      summaries.push({
+        traceId,
+        rootName: root?.name ?? null,
+        serviceName: root?.serviceName ?? spans.find((s) => s.serviceName)?.serviceName ?? null,
+        startTimeMs: minStart,
+        durationNs: Math.round(durationNs),
+        spanCount: spans.length,
+        betterdbSpanCount: spans.filter((s) => s.scopeName.startsWith('@betterdb/')).length,
+        hasError: spans.some((s) => s.statusCode === 2),
+      });
+    }
+    summaries.sort((a, b) => b.startTimeMs - a.startTimeMs);
+    return summaries.slice(0, options.limit ?? 100);
+  }
+
+  async getOtelTraceSpans(traceId: string): Promise<StoredOtelSpan[]> {
+    return this.otelSpans
+      .filter((s) => s.traceId === traceId)
+      .sort(
+        (a, b) =>
+          a.startTimeMs - b.startTimeMs ||
+          a.startTimeUnixNano.localeCompare(b.startTimeUnixNano),
+      );
+  }
+
+  async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
+    // Prune whole traces (by trace-level start), not individual spans, so a long
+    // trace never loses its root/early spans while later ones survive.
+    const minStartByTrace = new Map<string, number>();
+    for (const s of this.otelSpans) {
+      const cur = minStartByTrace.get(s.traceId);
+      if (cur === undefined || s.startTimeMs < cur) minStartByTrace.set(s.traceId, s.startTimeMs);
+    }
+    const before = this.otelSpans.length;
+    this.otelSpans = this.otelSpans.filter(
+      (s) => (minStartByTrace.get(s.traceId) ?? s.startTimeMs) >= cutoffTimestamp,
+    );
+    return before - this.otelSpans.length;
   }
 
   // Vector Index Snapshot Methods

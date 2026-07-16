@@ -1,6 +1,6 @@
 {
   "name": "@betterdb/agent-memory",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Standalone agent memory: agent-cache short-term tiers plus a semantic long-term MemoryStore over valkey-search",
   "keywords": [
     "valkey",

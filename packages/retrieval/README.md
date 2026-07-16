@@ -1,6 +1,25 @@
 # @betterdb/retrieval
 
+[![npm version](https://img.shields.io/npm/v/@betterdb%2Fretrieval)](https://www.npmjs.com/package/@betterdb/retrieval)
+[![total downloads](https://img.shields.io/npm/dt/@betterdb%2Fretrieval)](https://www.npmjs.com/package/@betterdb/retrieval)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![types](https://img.shields.io/npm/types/@betterdb%2Fretrieval)](https://www.npmjs.com/package/@betterdb/retrieval)
+[![GitHub stars](https://img.shields.io/github/stars/BetterDB-inc/monitor?style=social)](https://github.com/BetterDB-inc/monitor)
+
 Developer-facing retrieval SDK over [Valkey Search](https://valkey.io/topics/search/) (`FT.*`): typed index schema, idempotent index lifecycle, upsert/delete, and vector + filtered + hybrid query. Built on [`@betterdb/valkey-search-kit`](../valkey-search-kit/).
+
+## See it live in BetterDB Monitor
+
+[BetterDB Monitor](https://github.com/BetterDB-inc/monitor) auto-discovers every `@betterdb/retrieval` instance on your Valkey - zero configuration, the library already registers itself - and turns its stats into live dashboards:
+
+- **AI Cache & Memory** - hit rate, cost saved, evictions, and index size across all your caches and memory stores, with history.
+- **AI Traces** - OpenTelemetry waterfalls for each request, correlated with live Valkey state to explain every cache hit and miss.
+
+![AI Cache & Memory tab in BetterDB Monitor](https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.github/assets/ai-cache-memory.png)
+
+![AI Traces waterfall in BetterDB Monitor](https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.github/assets/ai-traces.png)
+
+Run it self-hosted (`docker run -p 3001:3001 betterdb/monitor`), or use [BetterDB Cloud](https://betterdb.com) - which can also **provision a managed, TLS-enabled Valkey instance with the Search module in one click** - exactly what this library needs.
 
 ## Installation
 

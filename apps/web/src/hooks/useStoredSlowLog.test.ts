@@ -29,4 +29,34 @@ describe('useStoredSlowLog', () => {
     await waitFor(() => expect(result.current.data).toEqual(mockData));
     expect(mockGet).toHaveBeenCalledWith({ startTime: 1000, endTime: 2000, limit: 100 });
   });
+
+  it('fetches without a time range when sorting by magnitude', async () => {
+    const mockData = [{ id: 2, command: 'SORT big', duration: 500000 }];
+    mockGet.mockResolvedValue(mockData);
+
+    const { result } = renderHookWithQuery(() =>
+      useStoredSlowLog({ connectionId: 'test', sortBy: 'magnitude' }),
+    );
+
+    await waitFor(() => expect(result.current.data).toEqual(mockData));
+    expect(mockGet).toHaveBeenCalledWith({
+      startTime: undefined,
+      endTime: undefined,
+      limit: 100,
+      sortBy: 'magnitude',
+    });
+  });
+
+  it('does not send sortBy for the default recent order', async () => {
+    mockGet.mockResolvedValue([]);
+
+    renderHookWithQuery(() =>
+      useStoredSlowLog({ connectionId: 'test', startTime: 1000, endTime: 2000, sortBy: 'recent' }),
+    );
+
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    expect(mockGet).toHaveBeenCalledWith(
+      expect.not.objectContaining({ sortBy: expect.anything() }),
+    );
+  });
 });

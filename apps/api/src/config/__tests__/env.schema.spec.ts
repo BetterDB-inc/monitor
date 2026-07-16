@@ -165,6 +165,12 @@ describe('envSchema', () => {
       const result = envSchema.safeParse({ AUDIT_POLL_INTERVAL_MS: '500' });
       expect(result.success).toBe(false);
     });
+
+    it('should default AI_OBS_POLL_INTERVAL_MS to 15000 and reject sub-1000ms', () => {
+      const ok = envSchema.safeParse({});
+      expect(ok.success && ok.data.AI_OBS_POLL_INTERVAL_MS).toBe(15000);
+      expect(envSchema.safeParse({ AI_OBS_POLL_INTERVAL_MS: '500' }).success).toBe(false);
+    });
   });
 
   describe('boolean transforms', () => {
@@ -210,6 +216,36 @@ describe('envSchema', () => {
     it('should reject invalid OLLAMA_BASE_URL', () => {
       const result = envSchema.safeParse({ OLLAMA_BASE_URL: 'not-a-url' });
       expect(result.success).toBe(false);
+    });
+  });
+
+  describe('OTLP ingest token in cloud mode', () => {
+    it('requires OTEL_INGEST_TOKEN when CLOUD_MODE is set', () => {
+      const result = envSchema.safeParse({ CLOUD_MODE: 'true' });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some((i) => i.path.includes('OTEL_INGEST_TOKEN'))).toBe(true);
+      }
+    });
+
+    it('accepts CLOUD_MODE when OTEL_INGEST_TOKEN is provided', () => {
+      const result = envSchema.safeParse({ CLOUD_MODE: 'true', OTEL_INGEST_TOKEN: 'secret' });
+      expect(result.success).toBe(true);
+    });
+
+    it('does not require the token when not in cloud mode', () => {
+      const result = envSchema.safeParse({});
+      expect(result.success).toBe(true);
+    });
+
+    it('treats CLOUD_MODE=false as self-hosted (token not required)', () => {
+      const result = envSchema.safeParse({ CLOUD_MODE: 'false' });
+      expect(result.success).toBe(true);
+    });
+
+    it('defaults OTEL_INGEST_ENABLED to true', () => {
+      const result = envSchema.safeParse({});
+      expect(result.success && result.data.OTEL_INGEST_ENABLED).toBe(true);
     });
   });
 

@@ -5,6 +5,7 @@ import type {
   SlowLogEntry,
   CommandLogEntry,
   CommandLogType,
+  LogSortBy,
   LatencyEvent,
   LatencyHistoryEntry,
   LatencyHistogram,
@@ -73,6 +74,7 @@ export const metricsApi = {
     minDuration?: number;
     limit?: number;
     offset?: number;
+    sortBy?: LogSortBy;
   }) => {
     const params = new URLSearchParams();
     if (options?.startTime) params.set('startTime', options.startTime.toString());
@@ -82,6 +84,7 @@ export const metricsApi = {
     if (options?.minDuration) params.set('minDuration', options.minDuration.toString());
     if (options?.limit) params.set('limit', options.limit.toString());
     if (options?.offset) params.set('offset', options.offset.toString());
+    if (options?.sortBy) params.set('sortBy', options.sortBy);
     const queryString = params.toString();
     return fetchApi<SlowLogEntry[]>(`/slowlog-analytics/entries${queryString ? `?${queryString}` : ''}`);
   },
@@ -95,6 +98,7 @@ export const metricsApi = {
     minDuration?: number;
     limit?: number;
     offset?: number;
+    sortBy?: LogSortBy;
   }) => {
     const params = new URLSearchParams();
     if (options?.startTime) params.set('startTime', options.startTime.toString());
@@ -105,6 +109,7 @@ export const metricsApi = {
     if (options?.minDuration) params.set('minDuration', options.minDuration.toString());
     if (options?.limit) params.set('limit', options.limit.toString());
     if (options?.offset) params.set('offset', options.offset.toString());
+    if (options?.sortBy) params.set('sortBy', options.sortBy);
     const queryString = params.toString();
     return fetchApi<CommandLogEntry[]>(`/commandlog-analytics/entries${queryString ? `?${queryString}` : ''}`);
   },

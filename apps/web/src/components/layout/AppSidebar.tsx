@@ -99,6 +99,15 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
               Vector / AI
             </NavItem>
           )}
+          <NavItem
+            to="/ai-cache-memory"
+            active={location.pathname === '/ai-cache-memory'}
+          >
+            AI Cache &amp; Memory
+          </NavItem>
+          <NavItem to="/ai-traces" active={location.pathname === '/ai-traces'}>
+            AI Traces
+          </NavItem>
           {hasVectorSearch && (
             <NavItem
               to="/inference-latency"

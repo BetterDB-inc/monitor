@@ -27,6 +27,16 @@ Upstash is a serverless Redis/Valkey provider. It uses the standard Redis wire p
 
 > The **Connect** section further down the page shows `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` - these are for the HTTP REST API and **will not work** with BetterDB. Use the **Token** from the top block instead.
 
+## Quick Connect
+
+The fastest way: build a connection URL from your Details tab values and paste it into the **Quick connect** box on the connect screen:
+
+```
+rediss://default:YOUR_TOKEN@your-db.upstash.io:6379
+```
+
+Use `rediss://` (double `s`) - Upstash always requires TLS. `YOUR_TOKEN` is the **Token** from the top connection block, not the REST token.
+
 ## Connecting via BetterDB Cloud
 
 Direct connection works because Upstash exposes its endpoint publicly on port 6379.

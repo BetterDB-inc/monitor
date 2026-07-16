@@ -24,6 +24,16 @@ Redis Cloud is Redis's managed cloud offering. It exposes a public endpoint on a
 
 > The host and port are always shown together in the **Public endpoint** field separated by a colon. Split them when filling in the BetterDB form.
 
+## Quick Connect
+
+The fastest way: combine your public endpoint and password into a connection URL and paste it into the **Quick connect** box on the connect screen:
+
+```
+redis://default:YOUR_PASSWORD@farsighted-zealous-bold-64576.db.redis.io:11577
+```
+
+Use `rediss://` (double `s`) instead if your database has TLS enforced (check the Security section).
+
 ## Connecting via BetterDB Cloud
 
 1. In BetterDB Cloud, open the connection selector and click **+ Add Connection**

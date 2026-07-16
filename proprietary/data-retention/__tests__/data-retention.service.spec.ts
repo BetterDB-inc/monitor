@@ -34,6 +34,7 @@ describe('DataRetentionService', () => {
       pruneOldCaptureTriggers: jest.fn().mockResolvedValue(14),
       pruneOldScheduledCaptures: jest.fn().mockResolvedValue(15),
       pruneOldOtelSpans: jest.fn().mockResolvedValue(16),
+      pruneOldAiCacheSamples: jest.fn().mockResolvedValue(16),
     } as any;
 
     licenseService = {
@@ -78,6 +79,7 @@ describe('DataRetentionService', () => {
     'pruneOldCaptureChunks',
     'pruneOldCaptureTriggers',
     'pruneOldScheduledCaptures',
+    'pruneOldAiCacheSamples',
   ] as const;
 
   it('community tier uses 7-day cutoff and calls all prune methods', async () => {

@@ -4,12 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "betterdb-retrieval"
-version = "0.4.0"
+version = "0.4.1"
 description = "Developer-facing retrieval SDK over Valkey Search: index lifecycle, upsert, and vector + filtered query."
 keywords = ["valkey", "redis", "valkey-search", "vector-search", "retrieval", "rag", "embeddings", "knn"]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "betterdb-valkey-search-kit>=0.1.0",
     "prometheus-client>=0.19.0",

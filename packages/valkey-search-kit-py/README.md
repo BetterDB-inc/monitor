@@ -1,5 +1,11 @@
 # @betterdb/valkey-search-kit (Python)
 
+[![PyPI version](https://img.shields.io/pypi/v/betterdb-valkey-search-kit)](https://pypi.org/project/betterdb-valkey-search-kit/)
+[![total downloads](https://static.pepy.tech/badge/betterdb-valkey-search-kit)](https://pepy.tech/project/betterdb-valkey-search-kit)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![python](https://img.shields.io/pypi/pyversions/betterdb-valkey-search-kit)](https://pypi.org/project/betterdb-valkey-search-kit/)
+[![GitHub stars](https://img.shields.io/github/stars/BetterDB-inc/monitor?style=social)](https://github.com/BetterDB-inc/monitor)
+
 `betterdb-valkey-search-kit` — shared low-level helpers for working with Valkey
 Search (`FT.*`) from Python. This is the Python equivalent of the TypeScript
 `@betterdb/valkey-search-kit` package, and the shared foundation the
@@ -7,6 +13,19 @@ Search (`FT.*`) from Python. This is the Python equivalent of the TypeScript
 
 It has **no runtime dependencies** and exposes only pure functions, so it stays
 trivial to vendor and test.
+
+## See it live in BetterDB Monitor
+
+[BetterDB Monitor](https://github.com/BetterDB-inc/monitor) gives you live dashboards for the AI workloads running on your Valkey:
+
+- **AI Cache & Memory** - hit rate, cost saved, evictions, and index size across all your caches and memory stores, with history.
+- **AI Traces** - OpenTelemetry waterfalls for each request, correlated with live Valkey state to explain every cache hit and miss.
+
+![AI Cache & Memory tab in BetterDB Monitor](https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.github/assets/ai-cache-memory.png)
+
+![AI Traces waterfall in BetterDB Monitor](https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.github/assets/ai-traces.png)
+
+Run it self-hosted (`docker run -p 3001:3001 betterdb/monitor`), or use [BetterDB Cloud](https://betterdb.com) - which can also **provision a managed, TLS-enabled Valkey instance with the Search module in one click** - exactly what this library needs.
 
 ## Install
 

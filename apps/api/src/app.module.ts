@@ -16,6 +16,7 @@ import { SettingsModule } from './settings/settings.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { TelemetryModule } from './telemetry/telemetry.module';
 import { VectorSearchModule } from './vector-search/vector-search.module';
+import { AiObservabilityModule } from './ai-observability/ai-observability.module';
 import { MigrationModule } from './migration/migration.module';
 import { CloudAuthModule } from './auth/cloud-auth.module';
 import { McpModule } from './mcp/mcp.module';
@@ -171,6 +172,7 @@ const baseImports = [
   WebhooksModule,
   McpModule,
   VectorSearchModule,
+  AiObservabilityModule,
   MigrationModule,
   MetricForecastingModule,
   InferenceLatencyModule,

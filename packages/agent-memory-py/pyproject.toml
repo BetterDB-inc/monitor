@@ -4,12 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "betterdb-agent-memory"
-version = "0.5.0"
+version = "0.5.1"
 description = "Long-term memory tier for AI agents backed by Valkey Search: semantic recall with recency/importance ranking, scoped capacity eviction, and consolidation. Pairs with @betterdb/agent-cache."
 keywords = ["valkey", "redis", "agent", "memory", "vector-search", "llm", "opentelemetry", "prometheus"]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "betterdb-valkey-search-kit>=0.1.0",
     "betterdb-agent-cache>=0.7.0",

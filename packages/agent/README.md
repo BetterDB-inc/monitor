@@ -1,8 +1,27 @@
 # @betterdb/agent
 
+[![npm version](https://img.shields.io/npm/v/@betterdb%2Fagent)](https://www.npmjs.com/package/@betterdb/agent)
+[![total downloads](https://img.shields.io/npm/dt/@betterdb%2Fagent)](https://www.npmjs.com/package/@betterdb/agent)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![types](https://img.shields.io/npm/types/@betterdb%2Fagent)](https://www.npmjs.com/package/@betterdb/agent)
+[![GitHub stars](https://img.shields.io/github/stars/BetterDB-inc/monitor?style=social)](https://github.com/BetterDB-inc/monitor)
+
 Lightweight agent that connects your Valkey/Redis instances to [BetterDB Cloud](https://betterdb.com) for monitoring and observability — without exposing your database to the internet.
 
 The agent runs inside your VPC and initiates **all connections outbound** via WebSocket (WSS on port 443). No inbound firewall rules required.
+
+## See it live in BetterDB Monitor
+
+[BetterDB Monitor](https://github.com/BetterDB-inc/monitor) gives you live dashboards for the AI workloads running on your Valkey:
+
+- **AI Cache & Memory** - hit rate, cost saved, evictions, and index size across all your caches and memory stores, with history.
+- **AI Traces** - OpenTelemetry waterfalls for each request, correlated with live Valkey state to explain every cache hit and miss.
+
+![AI Cache & Memory tab in BetterDB Monitor](https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.github/assets/ai-cache-memory.png)
+
+![AI Traces waterfall in BetterDB Monitor](https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.github/assets/ai-traces.png)
+
+Run it self-hosted (`docker run -p 3001:3001 betterdb/monitor`), or use [BetterDB Cloud](https://betterdb.com) - which can also **provision a managed, TLS-enabled Valkey instance (Search module included) in one click**.
 
 ## Quick Start
 

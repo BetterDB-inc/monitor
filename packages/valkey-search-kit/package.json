@@ -1,6 +1,6 @@
 {
   "name": "@betterdb/valkey-search-kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared Valkey Search (FT.*) helpers: vector byte encoding, FT.SEARCH reply parsing, version-skew FT.INFO parsing, and error classification",
   "keywords": [
     "valkey",

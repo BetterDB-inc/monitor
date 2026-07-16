@@ -117,6 +117,10 @@ export interface SlowLogEntry {
 
 export type CommandLogType = 'slow' | 'large-request' | 'large-reply';
 
+// Sort order for stored slow/command log queries. 'magnitude' ranks worst
+// offenders first (µs for slow entries, bytes for large-request/large-reply).
+export type LogSortBy = 'recent' | 'magnitude';
+
 export interface CommandLogEntry {
   id: number;
   timestamp: number;

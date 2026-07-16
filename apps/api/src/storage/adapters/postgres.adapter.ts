@@ -32,6 +32,11 @@ import {
   StoredCommandStatsSample,
   StoredLatencyStatsSample,
   LatencyStatsHistoryQueryOptions,
+  StoredAiCacheSample,
+  AiCacheHistoryQueryOptions,
+  StoredOtelSpan,
+  OtelTraceSummary,
+  OtelTraceQueryOptions,
   StoredCorrelatedGroup,
   StoredLatencyHistogram,
   StoredLatencySnapshot,
@@ -89,9 +94,10 @@ import type {
 } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
+import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
 
-// Domain-specific repositories (webhooks extracted). Remaining domains to extract:
-// ACL, anomaly, slowlog, commandlog, latency, memory, hotkeys, settings,
+// Domain-specific repositories (webhooks, slowlog extracted). Remaining domains to extract:
+// ACL, anomaly, commandlog, latency, memory, hotkeys, settings,
 // agent-tokens, metric-forecasts, client-snapshots, key-patterns, vector-index-snapshots.
 
 export interface PostgresAdapterConfig {
@@ -162,6 +168,7 @@ export class PostgresAdapter implements StoragePort {
   private ready: boolean = false;
   private readonly mappers = new RowMappers(PostgresDialect);
   private webhookRepo!: WebhookPostgresRepository;
+  private slowlogRepo!: SlowLogPostgresRepository;
 
   constructor(private config: PostgresAdapterConfig) {}
 
@@ -303,6 +310,7 @@ export class PostgresAdapter implements StoragePort {
       }
 
       this.webhookRepo = new WebhookPostgresRepository(this.pool, this.mappers);
+      this.slowlogRepo = new SlowLogPostgresRepository(this.pool, this.mappers);
 
       // Test connection (will have correct search_path if schema is set)
       const testClient = await this.pool.connect();
@@ -1570,6 +1578,51 @@ export class PostgresAdapter implements StoragePort {
         ON latency_stats_samples(connection_id, command, captured_at);
       CREATE INDEX IF NOT EXISTS idx_latstat_captured_at
         ON latency_stats_samples(connection_id, captured_at);
+
+      CREATE TABLE IF NOT EXISTS ai_cache_samples (
+        id UUID PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        instance_field TEXT NOT NULL,
+        instance_name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        timestamp BIGINT NOT NULL,
+        hits BIGINT NOT NULL DEFAULT 0,
+        misses BIGINT NOT NULL DEFAULT 0,
+        hit_rate DOUBLE PRECISION,
+        cost_saved_micros BIGINT NOT NULL DEFAULT 0,
+        evictions BIGINT NOT NULL DEFAULT 0,
+        items BIGINT,
+        index_bytes BIGINT,
+        threshold DOUBLE PRECISION,
+        extra TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_aicache_field_ts
+        ON ai_cache_samples(connection_id, instance_field, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_aicache_ts
+        ON ai_cache_samples(connection_id, timestamp);
+
+      CREATE TABLE IF NOT EXISTS otel_spans (
+        trace_id TEXT NOT NULL,
+        span_id TEXT NOT NULL,
+        parent_span_id TEXT,
+        name TEXT NOT NULL,
+        scope_name TEXT NOT NULL DEFAULT '',
+        service_name TEXT,
+        kind INTEGER NOT NULL DEFAULT 0,
+        start_time_unix_nano TEXT NOT NULL DEFAULT '0',
+        end_time_unix_nano TEXT NOT NULL DEFAULT '0',
+        start_time_ms BIGINT NOT NULL,
+        duration_ns BIGINT NOT NULL DEFAULT 0,
+        status_code INTEGER NOT NULL DEFAULT 0,
+        status_message TEXT,
+        attributes TEXT NOT NULL DEFAULT '{}',
+        ingested_at BIGINT NOT NULL,
+        PRIMARY KEY (trace_id, span_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_otel_trace ON otel_spans(trace_id);
+      CREATE INDEX IF NOT EXISTS idx_otel_start ON otel_spans(start_time_ms);
 
       CREATE TABLE IF NOT EXISTS vector_index_snapshots (
         id TEXT PRIMARY KEY,
@@ -2883,127 +2936,22 @@ export class PostgresAdapter implements StoragePort {
   // Slow Log Methods
   async saveSlowLogEntries(entries: StoredSlowLogEntry[], connectionId: string): Promise<number> {
     if (!this.pool || entries.length === 0) return 0;
-
-    const values: any[] = [];
-    const placeholders: string[] = [];
-    let paramIndex = 1;
-
-    for (const entry of entries) {
-      placeholders.push(`(
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
-      )`);
-      values.push(
-        entry.id,
-        entry.timestamp,
-        entry.duration,
-        entry.command, // PostgreSQL will accept string[] for TEXT[]
-        entry.clientAddress || '',
-        entry.clientName || '',
-        entry.capturedAt,
-        entry.sourceHost,
-        entry.sourcePort,
-        connectionId,
-      );
-    }
-
-    const query = `
-      INSERT INTO slow_log_entries (
-        slowlog_id, timestamp, duration, command,
-        client_address, client_name, captured_at, source_host, source_port, connection_id
-      ) VALUES ${placeholders.join(', ')}
-      ON CONFLICT (slowlog_id, source_host, source_port, connection_id) DO NOTHING
-    `;
-
-    const result = await this.pool.query(query, values);
-    return result.rowCount ?? 0;
+    return this.slowlogRepo.saveSlowLogEntries(entries, connectionId);
   }
 
   async getSlowLogEntries(options: SlowLogQueryOptions = {}): Promise<StoredSlowLogEntry[]> {
     if (!this.pool) throw new Error('Database not initialized');
-
-    const conditions: string[] = [];
-    const params: any[] = [];
-    let paramIndex = 1;
-
-    if (options.connectionId) {
-      conditions.push(`connection_id = $${paramIndex++}`);
-      params.push(options.connectionId);
-    }
-    if (options.startTime) {
-      conditions.push(`timestamp >= $${paramIndex++}`);
-      params.push(options.startTime);
-    }
-    if (options.endTime) {
-      conditions.push(`timestamp <= $${paramIndex++}`);
-      params.push(options.endTime);
-    }
-    if (options.command) {
-      // Search in the first element of command array (the command name)
-      conditions.push(`command[1] ILIKE $${paramIndex++}`);
-      params.push(`%${options.command}%`);
-    }
-    if (options.clientName) {
-      conditions.push(`client_name ILIKE $${paramIndex++}`);
-      params.push(`%${options.clientName}%`);
-    }
-    if (options.minDuration) {
-      conditions.push(`duration >= $${paramIndex++}`);
-      params.push(options.minDuration);
-    }
-
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limit = options.limit ?? 100;
-    const offset = options.offset ?? 0;
-
-    const result = await this.pool.query(
-      `SELECT
-        slowlog_id, timestamp, duration, command,
-        client_address, client_name, captured_at, source_host, source_port, connection_id
-      FROM slow_log_entries
-      ${whereClause}
-      ORDER BY timestamp DESC
-      LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
-      [...params, limit, offset],
-    );
-
-    return result.rows.map((row) => this.mappers.mapSlowLogEntryRow(row));
+    return this.slowlogRepo.getSlowLogEntries(options);
   }
 
   async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
     if (!this.pool) throw new Error('Database not initialized');
-
-    if (connectionId) {
-      const result = await this.pool.query(
-        'SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = $1',
-        [connectionId],
-      );
-      const maxId = result.rows[0]?.max_id;
-      return maxId !== null && maxId !== undefined ? Number(maxId) : null;
-    }
-
-    const result = await this.pool.query('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries');
-
-    const maxId = result.rows[0]?.max_id;
-    return maxId !== null && maxId !== undefined ? Number(maxId) : null;
+    return this.slowlogRepo.getLatestSlowLogId(connectionId);
   }
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
-
-    if (connectionId) {
-      const result = await this.pool.query(
-        'DELETE FROM slow_log_entries WHERE captured_at < $1 AND connection_id = $2',
-        [cutoffTimestamp, connectionId],
-      );
-      return result.rowCount ?? 0;
-    }
-
-    const result = await this.pool.query('DELETE FROM slow_log_entries WHERE captured_at < $1', [
-      cutoffTimestamp,
-    ]);
-
-    return result.rowCount ?? 0;
+    return this.slowlogRepo.pruneOldSlowLogEntries(cutoffTimestamp, connectionId);
   }
 
   // Command Log Methods (Valkey-specific)
@@ -3092,13 +3040,19 @@ export class PostgresAdapter implements StoragePort {
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
 
+    // `magnitude` returns the worst offenders first (top-N by duration, µs for
+    // slow / bytes for large-*); default `recent` is newest-first.
+    const orderBy =
+      options.sortBy === 'magnitude'
+        ? 'ORDER BY duration DESC, timestamp DESC'
+        : 'ORDER BY timestamp DESC';
     const result = await this.pool.query(
       `SELECT
         commandlog_id, timestamp, duration, command,
         client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
       FROM command_log_entries
       ${whereClause}
-      ORDER BY timestamp DESC
+      ${orderBy}
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     );
@@ -3643,6 +3597,299 @@ export class PostgresAdapter implements StoragePort {
 
     const result = await this.pool.query(
       'DELETE FROM latency_stats_samples WHERE captured_at < $1',
+      [cutoffTimestamp],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  // AI Cache/Memory Sample Methods
+  async saveAiCacheSamples(
+    samples: Omit<StoredAiCacheSample, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.pool || samples.length === 0) return 0;
+
+    const values: any[] = [];
+    const placeholders: string[] = [];
+    let paramIndex = 1;
+
+    for (const s of samples) {
+      const row: string[] = [];
+      for (let i = 0; i < 15; i++) {
+        row.push(`$${paramIndex++}`);
+      }
+      placeholders.push(`(${row.join(', ')})`);
+      values.push(
+        randomUUID(),
+        connectionId,
+        s.instanceField,
+        s.instanceName,
+        s.kind,
+        s.timestamp,
+        s.hits,
+        s.misses,
+        s.hitRate,
+        s.costSavedMicros,
+        s.evictions,
+        s.items,
+        s.indexBytes,
+        s.threshold,
+        s.extra,
+      );
+    }
+
+    const query = `
+      INSERT INTO ai_cache_samples
+        (id, connection_id, instance_field, instance_name, kind, timestamp,
+         hits, misses, hit_rate, cost_saved_micros, evictions, items, index_bytes, threshold, extra)
+      VALUES ${placeholders.join(', ')}
+    `;
+    const result = await this.pool.query(query, values);
+    return result.rowCount ?? 0;
+  }
+
+  async getAiCacheHistory(
+    options: AiCacheHistoryQueryOptions,
+  ): Promise<StoredAiCacheSample[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const filters: string[] = [];
+    const params: (string | number)[] = [];
+    if (options.connectionId) {
+      params.push(options.connectionId);
+      filters.push(`connection_id = $${params.length}`);
+    }
+    if (options.instanceField) {
+      params.push(options.instanceField);
+      filters.push(`instance_field = $${params.length}`);
+    }
+    if (options.kind) {
+      params.push(options.kind);
+      filters.push(`kind = $${params.length}`);
+    }
+    if (options.startTime !== undefined) {
+      params.push(options.startTime);
+      filters.push(`timestamp >= $${params.length}`);
+    }
+    if (options.endTime !== undefined) {
+      params.push(options.endTime);
+      filters.push(`timestamp <= $${params.length}`);
+    }
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    params.push(options.limit ?? 10_000);
+    const limitIdx = params.length;
+
+    // Most-recent `limit` rows PER INSTANCE, returned ascending (see latency_stats_samples).
+    const result = await this.pool.query(
+      `SELECT id, connection_id, instance_field, instance_name, kind, timestamp,
+              hits, misses, hit_rate, cost_saved_micros, evictions, items, index_bytes, threshold, extra
+       FROM (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY instance_field ORDER BY timestamp DESC) AS rn
+         FROM ai_cache_samples
+         ${where}
+       ) ranked
+       WHERE rn <= $${limitIdx}
+       ORDER BY timestamp ASC`,
+      params,
+    );
+
+    return result.rows.map((row: any) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      instanceField: row.instance_field,
+      instanceName: row.instance_name,
+      kind: row.kind,
+      timestamp: Number(row.timestamp),
+      hits: Number(row.hits),
+      misses: Number(row.misses),
+      hitRate: row.hit_rate === null ? null : Number(row.hit_rate),
+      costSavedMicros: Number(row.cost_saved_micros),
+      evictions: Number(row.evictions),
+      items: row.items === null ? null : Number(row.items),
+      indexBytes: row.index_bytes === null ? null : Number(row.index_bytes),
+      threshold: row.threshold === null ? null : Number(row.threshold),
+      extra: row.extra,
+    }));
+  }
+
+  async pruneOldAiCacheSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      const result = await this.pool.query(
+        'DELETE FROM ai_cache_samples WHERE timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
+      return result.rowCount ?? 0;
+    }
+
+    const result = await this.pool.query(
+      'DELETE FROM ai_cache_samples WHERE timestamp < $1',
+      [cutoffTimestamp],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  // OTLP Trace Methods
+  async saveOtelSpans(spans: StoredOtelSpan[]): Promise<number> {
+    if (!this.pool || spans.length === 0) return 0;
+
+    // Dedupe by (trace_id, span_id) — last wins — because a single multi-row
+    // INSERT ... ON CONFLICT DO UPDATE errors ("cannot affect row a second time")
+    // if the same key appears twice in one batch (a malformed/duplicated export).
+    const deduped = new Map<string, StoredOtelSpan>();
+    for (const s of spans) deduped.set(`${s.traceId} ${s.spanId}`, s);
+    spans = [...deduped.values()];
+
+    const values: any[] = [];
+    const placeholders: string[] = [];
+    let p = 1;
+    for (const s of spans) {
+      const row: string[] = [];
+      for (let i = 0; i < 15; i++) row.push(`$${p++}`);
+      placeholders.push(`(${row.join(', ')})`);
+      values.push(
+        s.traceId,
+        s.spanId,
+        s.parentSpanId,
+        s.name,
+        s.scopeName,
+        s.serviceName,
+        s.kind,
+        s.startTimeUnixNano,
+        s.endTimeUnixNano,
+        s.startTimeMs,
+        s.durationNs,
+        s.statusCode,
+        s.statusMessage,
+        s.attributes,
+        s.ingestedAt,
+      );
+    }
+
+    const query = `
+      INSERT INTO otel_spans
+        (trace_id, span_id, parent_span_id, name, scope_name, service_name, kind,
+         start_time_unix_nano, end_time_unix_nano, start_time_ms, duration_ns,
+         status_code, status_message, attributes, ingested_at)
+      VALUES ${placeholders.join(', ')}
+      ON CONFLICT (trace_id, span_id) DO UPDATE SET
+        parent_span_id = EXCLUDED.parent_span_id,
+        name = EXCLUDED.name,
+        scope_name = EXCLUDED.scope_name,
+        service_name = EXCLUDED.service_name,
+        kind = EXCLUDED.kind,
+        start_time_unix_nano = EXCLUDED.start_time_unix_nano,
+        end_time_unix_nano = EXCLUDED.end_time_unix_nano,
+        start_time_ms = EXCLUDED.start_time_ms,
+        duration_ns = EXCLUDED.duration_ns,
+        status_code = EXCLUDED.status_code,
+        status_message = EXCLUDED.status_message,
+        attributes = EXCLUDED.attributes,
+        ingested_at = EXCLUDED.ingested_at
+    `;
+    const result = await this.pool.query(query, values);
+    return result.rowCount ?? 0;
+  }
+
+  async getOtelTraces(options: OtelTraceQueryOptions): Promise<OtelTraceSummary[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    // Filter whole traces by their trace-level start / service (subquery on
+    // grouped traces), then aggregate ALL spans of the matching traces, so a
+    // boundary trace still gets a complete summary rather than a partial one.
+    const having: string[] = [];
+    const params: (string | number)[] = [];
+    if (options.startTime !== undefined) {
+      params.push(options.startTime);
+      having.push(`MIN(start_time_ms) >= $${params.length}`);
+    }
+    if (options.endTime !== undefined) {
+      params.push(options.endTime);
+      having.push(`MIN(start_time_ms) <= $${params.length}`);
+    }
+    if (options.service) {
+      params.push(options.service);
+      having.push(`SUM(CASE WHEN service_name = $${params.length} THEN 1 ELSE 0 END) > 0`);
+    }
+    const traceFilter = having.length
+      ? `WHERE trace_id IN (SELECT trace_id FROM otel_spans GROUP BY trace_id HAVING ${having.join(' AND ')})`
+      : '';
+    params.push(options.limit ?? 100);
+
+    const result = await this.pool.query(
+      `SELECT
+         trace_id,
+         MIN(start_time_ms) AS start_time_ms,
+         COUNT(*) AS span_count,
+         SUM(CASE WHEN scope_name LIKE '@betterdb/%' THEN 1 ELSE 0 END) AS betterdb_span_count,
+         BOOL_OR(status_code = 2) AS has_error,
+         MAX(CASE WHEN parent_span_id IS NULL THEN name END) AS root_name,
+         COALESCE(
+           MAX(CASE WHEN parent_span_id IS NULL THEN service_name END),
+           MAX(service_name)
+         ) AS service_name,
+         COALESCE(
+           MAX(CASE WHEN parent_span_id IS NULL THEN duration_ns END),
+           (MAX(start_time_ms + duration_ns / 1000000) - MIN(start_time_ms)) * 1000000
+         ) AS duration_ns
+       FROM otel_spans
+       ${traceFilter}
+       GROUP BY trace_id
+       ORDER BY start_time_ms DESC
+       LIMIT $${params.length}`,
+      params,
+    );
+
+    return result.rows.map((row: any) => ({
+      traceId: row.trace_id,
+      rootName: row.root_name ?? null,
+      serviceName: row.service_name ?? null,
+      startTimeMs: Number(row.start_time_ms),
+      durationNs: Number(row.duration_ns ?? 0),
+      spanCount: Number(row.span_count),
+      betterdbSpanCount: Number(row.betterdb_span_count),
+      hasError: row.has_error === true,
+    }));
+  }
+
+  async getOtelTraceSpans(traceId: string): Promise<StoredOtelSpan[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT * FROM otel_spans WHERE trace_id = $1
+       ORDER BY start_time_ms ASC, start_time_unix_nano ASC`,
+      [traceId],
+    );
+    return result.rows.map((row: any) => ({
+      traceId: row.trace_id,
+      spanId: row.span_id,
+      parentSpanId: row.parent_span_id ?? null,
+      name: row.name,
+      scopeName: row.scope_name,
+      serviceName: row.service_name ?? null,
+      kind: Number(row.kind),
+      startTimeUnixNano: row.start_time_unix_nano,
+      endTimeUnixNano: row.end_time_unix_nano,
+      startTimeMs: Number(row.start_time_ms),
+      durationNs: Number(row.duration_ns),
+      statusCode: Number(row.status_code),
+      statusMessage: row.status_message ?? null,
+      attributes: row.attributes,
+      ingestedAt: Number(row.ingested_at),
+    }));
+  }
+
+  async pruneOldOtelSpans(cutoffTimestamp: number): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    // Prune whole traces (by trace-level start), not individual spans, so a long
+    // trace never loses its root/early spans while later ones survive.
+    const result = await this.pool.query(
+      `DELETE FROM otel_spans WHERE trace_id IN (
+         SELECT trace_id FROM otel_spans GROUP BY trace_id HAVING MIN(start_time_ms) < $1
+       )`,
       [cutoffTimestamp],
     );
     return result.rowCount ?? 0;

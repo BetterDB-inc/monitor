@@ -117,6 +117,8 @@ const METRIC_LABELS: Record<string, string> = {
   replication_role: 'Replication Role',
   dataset_keys: 'Dataset Keys',
   command_p99: 'Command P99',
+  rejected_connections: 'Rejected Connections',
+  client_saturation: 'Client Saturation',
 };
 
 function formatTime(ts: number): string {

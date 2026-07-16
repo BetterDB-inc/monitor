@@ -697,7 +697,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.SLOWLOG_COUNT,
+        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.REJECTED_CONNECTIONS && m !== MetricType.CLIENT_SATURATION && m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -1928,6 +1928,132 @@ describe('AnomalyService', () => {
       dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('CLUSTER NODES failed'));
       await expect(poll()).resolves.not.toThrow();
       expect(topoEvents()).toHaveLength(0);
+    });
+  });
+
+  // ─── Connection limits (valkey-io/valkey#3918) ─────────────────────────────
+  describe('rejected_connections unbundled from ACL_DENIED', () => {
+    const infoWith = (rejected: string, aclDenied: string) => ({
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: rejected,
+        acl_access_denied_auth: aclDenied,
+      },
+    });
+
+    it('routes rejected_connections to its own delta metric and keeps ACL_DENIED auth-only', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('42', '7'));
+      await poll(); // baseline poll → delta 0
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('50', '7'));
+      await poll(); // 8 new refusals since last poll
+
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      // Fed the per-poll DELTA (8), not the lifetime counter (50) — so a flat
+      // elevated counter can't alert forever.
+      expect(buffers.get(MetricType.REJECTED_CONNECTIONS).getLatest()).toBe(8);
+      // ACL_DENIED must NOT include rejected connections (would be 57 if bundled).
+      expect(buffers.get(MetricType.ACL_DENIED).getLatest()).toBe(7);
+    });
+  });
+
+  describe('client saturation detection', () => {
+    const infoWith = (connected: number, maxclients: number | null = 100) => ({
+      server: { role: 'master' },
+      clients: {
+        connected_clients: String(connected),
+        blocked_clients: '0',
+        ...(maxclients === null ? {} : { maxclients: String(maxclients) }),
+      },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+      },
+    });
+
+    const satEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.CLIENT_SATURATION);
+
+    it('does not alert below the warning threshold', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(70));
+      await poll();
+      expect(satEvents()).toHaveLength(0);
+    });
+
+    it('emits WARNING between 80% and 95%', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+      const events = satEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('85/100');
+    });
+
+    it('emits CRITICAL at or above 95%', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(96));
+      await poll();
+      expect(satEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('deduplicates while steady, escalates warning→critical, and re-arms after recovery', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+      await poll(); // steady warning → no repeat
+      expect(satEvents()).toHaveLength(1);
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(97));
+      await poll(); // escalate → critical
+      expect(satEvents()).toHaveLength(2);
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(50));
+      await poll(); // drop below warning → clears, no alert
+      expect(satEvents()).toHaveLength(2);
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll(); // re-cross → new warning
+      expect(satEvents()).toHaveLength(3);
+    });
+
+    it('does not divide by zero / alert when maxclients is absent', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(9999, null));
+      await expect(poll()).resolves.not.toThrow();
+      expect(satEvents()).toHaveLength(0);
+    });
+
+    it('re-alerts on the next poll when the escalation emit fails (level not advanced on failure)', async () => {
+      let failSaturationEmit = true;
+      const addSpy = jest
+        .spyOn(service as any, 'addAnomaly')
+        .mockImplementation(async (event: any) => {
+          if (event.metricType === MetricType.CLIENT_SATURATION && failSaturationEmit) {
+            failSaturationEmit = false;
+            throw new Error('storage down');
+          }
+        });
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      // Poll 1: escalation → emit fails → poll rejects, level must stay 'none'.
+      await expect(poll()).rejects.toThrow('storage down');
+      // Poll 2: still saturated → because the level was NOT advanced, it re-alerts.
+      await poll();
+
+      const saturationEmits = addSpy.mock.calls.filter(
+        ([e]: [any]) => e.metricType === MetricType.CLIENT_SATURATION,
+      );
+      expect(saturationEmits).toHaveLength(2);
+      addSpy.mockRestore();
     });
   });
 });

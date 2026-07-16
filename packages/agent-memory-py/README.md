@@ -1,5 +1,11 @@
 # @betterdb/agent-memory (Python)
 
+[![PyPI version](https://img.shields.io/pypi/v/betterdb-agent-memory)](https://pypi.org/project/betterdb-agent-memory/)
+[![total downloads](https://static.pepy.tech/badge/betterdb-agent-memory)](https://pepy.tech/project/betterdb-agent-memory)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![python](https://img.shields.io/pypi/pyversions/betterdb-agent-memory)](https://pypi.org/project/betterdb-agent-memory/)
+[![GitHub stars](https://img.shields.io/github/stars/BetterDB-inc/monitor?style=social)](https://github.com/BetterDB-inc/monitor)
+
 `betterdb-agent-memory` is the long-term memory tier for AI agents, backed by
 [Valkey Search](https://valkey.io/topics/search/). It is the Python port of
 [`@betterdb/agent-memory`](https://www.npmjs.com/package/@betterdb/agent-memory)
@@ -10,6 +16,19 @@ Where the cache tiers are exact-match and ephemeral, the memory tier is
 semantic and durable: it embeds content, stores it in an HNSW vector index, and
 recalls it by meaning with a composite score that blends **similarity**,
 **recency** (half-life decay), and **importance**.
+
+## See it live in BetterDB Monitor
+
+[BetterDB Monitor](https://github.com/BetterDB-inc/monitor) auto-discovers every `betterdb-agent-memory` instance on your Valkey - zero configuration, the library already registers itself - and turns its stats into live dashboards:
+
+- **AI Cache & Memory** - hit rate, cost saved, evictions, and index size across all your caches and memory stores, with history.
+- **AI Traces** - OpenTelemetry waterfalls for each request, correlated with live Valkey state to explain every cache hit and miss.
+
+![AI Cache & Memory tab in BetterDB Monitor](https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.github/assets/ai-cache-memory.png)
+
+![AI Traces waterfall in BetterDB Monitor](https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.github/assets/ai-traces.png)
+
+Run it self-hosted (`docker run -p 3001:3001 betterdb/monitor`), or use [BetterDB Cloud](https://betterdb.com) - which can also **provision a managed, TLS-enabled Valkey instance with the Search module in one click** - exactly what this library needs.
 
 ## Features
 

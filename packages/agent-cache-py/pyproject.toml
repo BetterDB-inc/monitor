@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "betterdb-agent-cache"
-version = "0.11.0"
+version = "0.11.1"
 description = "Multi-tier exact-match cache for AI agent workloads backed by Valkey. LLM responses, tool results, and session state with built-in OpenTelemetry and Prometheus instrumentation."
 keywords = [
     "valkey",
@@ -22,6 +22,12 @@ keywords = [
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "valkey>=6.0.0",
     "opentelemetry-api>=1.20.0",

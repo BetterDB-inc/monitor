@@ -13,7 +13,7 @@ import { CommandLogTable } from '../components/metrics/CommandLogTable';
 import { SlowLogPatternAnalysisView } from '../components/metrics/SlowLogPatternAnalysis';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { CapabilityStatusBanner } from '../components/CapabilityStatusBanner';
-import type { CommandLogType } from '../types/metrics';
+import type { CommandLogType, LogSortBy } from '../types/metrics';
 
 function getTabFromParams(params: URLSearchParams): CommandLogType {
   const tab = params.get('tab');
@@ -51,6 +51,7 @@ export function SlowLog() {
   const activeTab = getTabFromParams(searchParams);
   const clientFilter = searchParams.get('client');
   const [viewMode, setViewMode] = useState<'table' | 'patterns'>('table');
+  const [sortBy, setSortBy] = useState<LogSortBy>('recent');
 
   // Pagination state (only for stored/filtered data)
   const PAGE_SIZE = COMMAND_LOG_PAGE_SIZE;
@@ -94,13 +95,21 @@ export function SlowLog() {
   // When time range is set, use stored log from persistence layer
   // When no time range, use live polling from Valkey
   const isTimeFiltered = startTime !== undefined && endTime !== undefined;
+  // Magnitude sort ranks the durable store (worst offenders can be older than
+  // Valkey's small in-memory buffer), so it always reads stored data.
+  const useStoredData = isTimeFiltered || sortBy === 'magnitude';
+
+  const handleSortChange = (next: LogSortBy) => {
+    setSortBy(next);
+    setPage(0);
+  };
 
   // === SLOW LOG (non-Valkey or Redis) ===
   // Live polling (no time filter)
   const { data: liveSlowLog } = usePolling({
     fetcher: () => metricsApi.getSlowLog(100, true),
     interval: 10000,
-    enabled: !hasCommandLog && !isTimeFiltered,
+    enabled: !hasCommandLog && !useStoredData,
     refetchKey: currentConnection?.id,
   });
 
@@ -109,32 +118,33 @@ export function SlowLog() {
     connectionId: currentConnection?.id,
     startTime,
     endTime,
-    enabled: isTimeFiltered && !hasCommandLog,
+    sortBy,
+    enabled: useStoredData && !hasCommandLog,
   });
 
-  // Use stored data when filtered, live data otherwise
-  const slowLog = isTimeFiltered ? storedSlowLog : liveSlowLog;
+  // Use stored data when filtered or magnitude-sorted, live data otherwise
+  const slowLog = useStoredData ? storedSlowLog : liveSlowLog;
 
   // === COMMAND LOG (Valkey-specific) ===
   // Live polling (no time filter)
   const { data: liveCommandLogSlow } = usePolling({
     fetcher: () => metricsApi.getCommandLog(100, 'slow'),
     interval: 10000,
-    enabled: hasCommandLog && activeTab === 'slow' && !isTimeFiltered,
+    enabled: hasCommandLog && activeTab === 'slow' && !useStoredData,
     refetchKey: currentConnection?.id,
   });
 
   const { data: liveCommandLogLargeRequest } = usePolling({
     fetcher: () => metricsApi.getCommandLog(100, 'large-request'),
     interval: 10000,
-    enabled: hasCommandLog && activeTab === 'large-request' && !isTimeFiltered,
+    enabled: hasCommandLog && activeTab === 'large-request' && !useStoredData,
     refetchKey: currentConnection?.id,
   });
 
   const { data: liveCommandLogLargeReply } = usePolling({
     fetcher: () => metricsApi.getCommandLog(100, 'large-reply'),
     interval: 10000,
-    enabled: hasCommandLog && activeTab === 'large-reply' && !isTimeFiltered,
+    enabled: hasCommandLog && activeTab === 'large-reply' && !useStoredData,
     refetchKey: currentConnection?.id,
   });
 
@@ -145,15 +155,16 @@ export function SlowLog() {
     endTime,
     activeTab,
     page,
-    enabled: isTimeFiltered && hasCommandLog,
+    sortBy,
+    enabled: useStoredData && hasCommandLog,
   });
   const storedCommandLogEntries = storedCommandLogResult?.entries ?? null;
   const hasMoreEntries = storedCommandLogResult?.hasMore ?? false;
 
-  // Use stored data when filtered, live data otherwise
-  const commandLogSlow = isTimeFiltered ? (activeTab === 'slow' ? storedCommandLogEntries : null) : liveCommandLogSlow;
-  const commandLogLargeRequest = isTimeFiltered ? (activeTab === 'large-request' ? storedCommandLogEntries : null) : liveCommandLogLargeRequest;
-  const commandLogLargeReply = isTimeFiltered ? (activeTab === 'large-reply' ? storedCommandLogEntries : null) : liveCommandLogLargeReply;
+  // Use stored data when filtered or magnitude-sorted, live data otherwise
+  const commandLogSlow = useStoredData ? (activeTab === 'slow' ? storedCommandLogEntries : null) : liveCommandLogSlow;
+  const commandLogLargeRequest = useStoredData ? (activeTab === 'large-request' ? storedCommandLogEntries : null) : liveCommandLogLargeRequest;
+  const commandLogLargeReply = useStoredData ? (activeTab === 'large-reply' ? storedCommandLogEntries : null) : liveCommandLogLargeReply;
 
   // Pattern analysis (less frequent polling since it's analytical)
   // Live pattern analysis (no time filter)
@@ -250,6 +261,11 @@ export function SlowLog() {
             Showing stored entries from {dateRange.from.toLocaleDateString()} to {dateRange.to.toLocaleDateString()}
           </span>
         )}
+        {!dateRange && sortBy === 'magnitude' && (
+          <span className="text-sm text-muted-foreground">
+            Showing worst offenders from the full stored history
+          </span>
+        )}
       </div>
 
       {showSlowLogBanner && (
@@ -276,6 +292,32 @@ export function SlowLog() {
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
             <CardTitle>Command Log (Valkey)</CardTitle>
             <div className="flex gap-2">
+              {viewMode === 'table' && (
+                <>
+                  <button
+                    onClick={() => handleSortChange('recent')}
+                    className={`px-3 py-1 text-sm rounded transition-colors ${
+                      sortBy === 'recent'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted hover:bg-muted/80'
+                    }`}
+                  >
+                    Recent
+                  </button>
+                  <button
+                    onClick={() => handleSortChange('magnitude')}
+                    title="Rank by duration from the full stored history - worst offenders first"
+                    className={`px-3 py-1 text-sm rounded transition-colors ${
+                      sortBy === 'magnitude'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted hover:bg-muted/80'
+                    }`}
+                  >
+                    Worst offenders
+                  </button>
+                  <span className="w-px self-stretch bg-border mx-1" aria-hidden="true" />
+                </>
+              )}
               <button
                 onClick={() => setViewMode('table')}
                 className={`px-3 py-1 text-sm rounded transition-colors ${
@@ -312,7 +354,7 @@ export function SlowLog() {
                 }}
                 activeTab={activeTab}
                 onTabChange={handleTabChange}
-                pagination={isTimeFiltered ? {
+                pagination={useStoredData ? {
                   page,
                   pageSize: PAGE_SIZE,
                   hasMore: hasMoreEntries,
@@ -329,6 +371,32 @@ export function SlowLog() {
               Slow Log ({capabilities?.dbType === 'valkey' ? 'Valkey' : 'Redis'})
             </CardTitle>
             <div className="flex gap-2">
+              {viewMode === 'table' && (
+                <>
+                  <button
+                    onClick={() => handleSortChange('recent')}
+                    className={`px-3 py-1 text-sm rounded transition-colors ${
+                      sortBy === 'recent'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted hover:bg-muted/80'
+                    }`}
+                  >
+                    Recent
+                  </button>
+                  <button
+                    onClick={() => handleSortChange('magnitude')}
+                    title="Rank by duration from the full stored history - worst offenders first"
+                    className={`px-3 py-1 text-sm rounded transition-colors ${
+                      sortBy === 'magnitude'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted hover:bg-muted/80'
+                    }`}
+                  >
+                    Worst offenders
+                  </button>
+                  <span className="w-px self-stretch bg-border mx-1" aria-hidden="true" />
+                </>
+              )}
               <button
                 onClick={() => setViewMode('table')}
                 className={`px-3 py-1 text-sm rounded transition-colors ${
