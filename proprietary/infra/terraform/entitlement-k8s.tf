@@ -64,8 +64,13 @@ resource "kubernetes_secret" "entitlement_config" {
     RDS_PASSWORD             = var.db_password
     RDS_DATABASE             = "betterdb"
     # Auth keys for workspace token signing/verification
-    AUTH_PRIVATE_KEY         = var.auth_private_key
-    AUTH_PUBLIC_KEY          = var.auth_public_key
-    RESEND_API_KEY           = var.resend_api_key
+    AUTH_PRIVATE_KEY = var.auth_private_key
+    AUTH_PUBLIC_KEY  = var.auth_public_key
+    RESEND_API_KEY   = var.resend_api_key
+    # License token signing (RS256, dedicated keypair). Managed here so
+    # `terraform apply` never strips it back out of the secret — the
+    # entitlement service fail-fast-boots in production without it.
+    LICENSE_SIGNING_PRIVATE_KEY = var.license_signing_private_key
+    LICENSE_SIGNING_KID         = var.license_signing_kid
   }
 }

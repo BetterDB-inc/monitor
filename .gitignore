@@ -90,3 +90,6 @@ data/license.key
 packages/retrieval/eval/longmemeval/.cache/
 packages/retrieval/eval/longmemeval/longmemeval_*.json
 packages/retrieval/eval/longmemeval/*_oracle.json
+
+# Terraform-generated Lambda build artifacts
+proprietary/infra/terraform/builds/

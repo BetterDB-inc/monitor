@@ -85,10 +85,47 @@ export interface EntitlementResponse {
     email: string;
   };
   error?: string;
-  
+
+  // Signed entitlement JWT (RS256) — verifiable offline with the monitor's
+  // embedded public keys. Absent from legacy servers and community tier.
+  token?: string;
+  instanceLimit?: number;
+
   // Version info (optional, for update notifications)
   latestVersion?: string;
   releaseUrl?: string;
+}
+
+// Issuer expected in every signed license token
+export const LICENSE_JWT_ISSUER = 'betterdb-entitlement';
+
+// Where the currently active entitlement came from
+export type LicenseSource =
+  | 'online'
+  | 'cached'
+  | 'persisted-jwt'
+  | 'offline-token'
+  | 'community';
+
+/**
+ * Claims carried by both online entitlement tokens and offline license
+ * tokens. `sub` is the license id — the raw license key is never embedded.
+ */
+export interface LicenseTokenClaims {
+  iss: string;
+  sub: string;
+  jti: string;
+  tier: Tier;
+  features?: Feature[];
+  customer?: {
+    id?: string;
+    name: string | null;
+    email: string;
+  };
+  instanceLimit: number;
+  mode: 'online' | 'offline';
+  iat: number;
+  exp: number;
 }
 
 export interface EntitlementRequest {

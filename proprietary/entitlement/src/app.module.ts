@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
+import { EmailThrottlerGuard } from './common/email-throttler.guard';
 import { PrismaModule } from './prisma/prisma.module';
 import { EntitlementModule } from './entitlement/entitlement.module';
 import { StripeModule } from './stripe/stripe.module';
@@ -43,7 +44,9 @@ import { EmailModule } from './email/email.module';
   providers: [
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      // Keys the public registration route on the target email (the peer IP is
+      // a single shared proxy address here); all other routes keep IP tracking.
+      useClass: EmailThrottlerGuard,
     },
   ],
 })

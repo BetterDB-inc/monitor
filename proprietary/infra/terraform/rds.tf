@@ -20,7 +20,7 @@ resource "aws_security_group" "rds" {
 
 # Subnet group — places RDS in private subnets
 resource "aws_db_subnet_group" "this" {
-  name       = "${var.project_name}-db"
+  name = "${var.project_name}-db"
   subnet_ids = concat(
     module.vpc.private_subnets,
     [
@@ -41,7 +41,9 @@ resource "aws_db_instance" "this" {
 
   engine         = "postgres"
   engine_version = "16"
-  instance_class = "db.t3.medium"
+  # Matches the live instance (manually upsized for capacity); keep config in
+  # sync so a future apply doesn't downsize prod.
+  instance_class = "db.t3.large"
 
   allocated_storage     = 20
   max_allocated_storage = 100

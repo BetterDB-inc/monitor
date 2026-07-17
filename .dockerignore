@@ -50,3 +50,6 @@ docker-compose*.yml
 # SQLite adapter and its tests (local development only, excluded from production builds)
 apps/api/src/storage/adapters/sqlite.adapter.ts
 apps/api/src/storage/adapters/__tests__
+
+# Never ship key material into images
+**/*.pem

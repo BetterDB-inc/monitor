@@ -60,6 +60,14 @@ export const envSchema = z
 
     // License configuration (optional)
     BETTERDB_LICENSE_KEY: z.string().optional(),
+    // Offline (air-gapped) license: the signed token itself, or a path to it
+    BETTERDB_OFFLINE_LICENSE: z.string().optional(),
+    BETTERDB_OFFLINE_LICENSE_FILE: z.string().optional(),
+    // Accept unsigned entitlement responses from legacy servers (insecure)
+    LICENSE_ALLOW_UNSIGNED: z.string().optional(),
+    // Directory for persisted licensing state — mount a volume here in
+    // containers so the offline license / signed-token grace survive restarts
+    BETTERDB_DATA_DIR: z.string().optional(),
     ENTITLEMENT_URL: z.string().url().optional(),
     LICENSE_CACHE_TTL_MS: z.coerce.number().int().min(60000).optional(),
     LICENSE_MAX_STALE_MS: z.coerce.number().int().min(60000).optional(),

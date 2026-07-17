@@ -38,6 +38,30 @@ describe('useLicenseStatus', () => {
     expect(result.current.error).toBeNull();
   });
 
+  it('exposes offline-license fields from the status endpoint', async () => {
+    const mockLicense = {
+      tier: 'enterprise',
+      features: [],
+      valid: true,
+      source: 'offline-token',
+      mode: 'offline',
+      instanceLimit: 10,
+      offlineExpiresAt: '2027-01-01T00:00:00.000Z',
+      clockRollbackSuspected: false,
+    };
+    mockGetStatus.mockResolvedValue(mockLicense);
+
+    const { result } = renderHookWithQuery(() => useLicenseStatus());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.license?.source).toBe('offline-token');
+    expect(result.current.license?.instanceLimit).toBe(10);
+    expect(result.current.license?.offlineExpiresAt).toBe('2027-01-01T00:00:00.000Z');
+  });
+
   it('returns error on failure', async () => {
     mockGetStatus.mockRejectedValue(new Error('Network error'));
 

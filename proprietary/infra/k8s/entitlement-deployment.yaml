@@ -22,7 +22,7 @@ spec:
       serviceAccountName: entitlement
       containers:
         - name: entitlement
-          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v1.6.1
+          image: 811740411689.dkr.ecr.us-east-1.amazonaws.com/betterdb-entitlement:v1.11.0
           imagePullPolicy: Always
           ports:
             - containerPort: 3002
@@ -101,6 +101,19 @@ spec:
                 secretKeyRef:
                   name: entitlement-config
                   key: AUTH_PUBLIC_KEY
+            # License token signing (dedicated keypair — kid must match a key
+            # in the monitor's LICENSE_SIGNING_PUBLIC_KEYS map). Both live in
+            # the secret so key + kid rotate atomically.
+            - name: LICENSE_SIGNING_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: LICENSE_SIGNING_PRIVATE_KEY
+            - name: LICENSE_SIGNING_KID
+              valueFrom:
+                secretKeyRef:
+                  name: entitlement-config
+                  key: LICENSE_SIGNING_KID
           resources:
             requests:
               cpu: "250m"

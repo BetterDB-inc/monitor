@@ -9,7 +9,11 @@ export class RegistrationController {
   constructor(private readonly registration: RegistrationService) { }
 
   @Post()
-  // @Throttle({ default: { ttl: 3600000, limit: 3 } })
+  // Per-TARGET-EMAIL cap (see EmailThrottlerGuard): each call emails the given
+  // address, so an open endpoint is an email-bombing vector. Keyed on the email
+  // rather than the peer IP, which is a single shared proxy address here — an
+  // IP limit would throttle all signups globally instead of per victim.
+  @Throttle({ default: { ttl: 3600000, limit: 3 } })
   async register(
     @Body() body: { email: string },
   ): Promise<{ message: string }> {

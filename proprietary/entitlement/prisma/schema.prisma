@@ -25,6 +25,9 @@ enum SubscriptionStatus {
 
 model Customer {
   id             String   @id @default(cuid())
+  // NB: also covered by a raw UNIQUE INDEX ON (LOWER(email)) — see the
+  // email_case_uniqueness migration — because lookups are case-insensitive
+  // and case-variant duplicates would conflate accounts.
   email          String   @unique
   name           String?
   stripeId       String?  @unique @map("stripe_id")
@@ -124,11 +127,50 @@ model License {
 
   customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
   validations    LicenseValidation[]
+  offlineIssuances OfflineLicenseIssuance[]
+  keyReveals     LicenseKeyReveal[]
 
   @@index([customerId])
   @@index([key])
   @@index([active])
   @@map("licenses")
+}
+
+// Audit of full-key reveals from the account page. The raw key is perpetual
+// and reusable, so every reveal is recorded.
+model LicenseKeyReveal {
+  id              String    @id @default(cuid())
+  // SetNull (not Cascade): the audit row must OUTLIVE the license/customer it
+  // references — deleting a license must not erase the record of who revealed
+  // its key. licenseId is nulled on delete; the who/when/jti survive.
+  licenseId       String?   @map("license_id")
+  revealedToEmail String    @map("revealed_to_email")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  license         License?  @relation(fields: [licenseId], references: [id], onDelete: SetNull)
+
+  @@index([licenseId])
+  @@map("license_key_reveals")
+}
+
+// Audit of issued offline (air-gapped) license tokens. Offline tokens are
+// irrevocable until their exp, so every issuance is recorded for visibility.
+model OfflineLicenseIssuance {
+  id            String    @id @default(cuid())
+  // SetNull (not Cascade): audit outlives the license — an offline token is
+  // irrevocable for up to 366 days, so the record of who was issued one must
+  // survive a license/customer delete.
+  licenseId     String?   @map("license_id")
+  jti           String    @unique
+  kid           String
+  issuedToEmail String    @map("issued_to_email")
+  expiresAt     DateTime  @map("expires_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  license       License?  @relation(fields: [licenseId], references: [id], onDelete: SetNull)
+
+  @@index([licenseId])
+  @@map("offline_license_issuances")
 }
 
 model Subscription {
