@@ -31,8 +31,22 @@ class CustomBuildHook(BuildHookInterface):
 
         analytics_src = os.path.join(self.root, "betterdb_agent_memory", "analytics.py")
         with open(analytics_src) as f:
-            source = f.read()
+            original_source = f.read()
 
+        # An absent placeholder is not proof of success: the token may have been
+        # renamed in the source, in which case nothing is injected and every
+        # check below passes while the wheel ships telemetry-blind.
+        if (
+            os.environ.get("REQUIRE_TELEMETRY_KEY")
+            and "__BETTERDB_POSTHOG_API_KEY__" not in original_source
+        ):
+            raise RuntimeError(
+                "REQUIRE_TELEMETRY_KEY is set but __BETTERDB_POSTHOG_API_KEY__ was not "
+                "found in analytics.py — the token was renamed. Refusing to build a "
+                "wheel whose telemetry key cannot be verified."
+            )
+
+        source = original_source
         replaced = 0
         if api_key and "__BETTERDB_POSTHOG_API_KEY__" in source:
             source = source.replace("__BETTERDB_POSTHOG_API_KEY__", api_key)

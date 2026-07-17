@@ -45,6 +45,7 @@ dev = [
     "fakeredis[aioredis]>=2.20.0",
     "openai-agents>=0.1.0",
     "pydantic-ai-slim>=2.0.0",
+    "hatchling>=1.21.0",
 ]
 all = [
     "openai>=1.0.0",
