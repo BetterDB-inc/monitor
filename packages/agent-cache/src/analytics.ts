@@ -256,8 +256,11 @@ export class PostHogAnalytics implements Analytics {
     // Serverless: emit from request traffic, handing the work to the request's
     // waitUntil so the invocation stays alive until it completes. The setInterval
     // that long-lived servers rely on is frozen between invocations. On frozen
-    // serverless with no waitUntil (AWS Lambda, Cloud Functions, Azure) deliver
-    // fire-and-forget; the runtime resumes the flush when the container thaws.
+    // serverless with no waitUntil (AWS Lambda, Cloud Functions, Azure) delivery
+    // is best-effort: the flush is fire-and-forget and the container freezes on
+    // return, so it only completes if a later invocation thaws this container.
+    // Events are lost if it is reaped while idle. No delivery guarantee exists
+    // on these runtimes without a waitUntil equivalent.
     const waitUntil = getRequestWaitUntil();
     if (waitUntil) {
       this.emitSnapshotIfDue(waitUntil);
