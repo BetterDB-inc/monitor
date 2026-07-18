@@ -165,8 +165,16 @@ async def test_throws_without_scope_tags_or_criteria() -> None:
     store = MemoryStore(client=fake_client(), name="mem", embed_fn=fake_embed(8))
 
     with pytest.raises(ValueError, match="scope|criteria"):
-        await store.consolidate(mode="summary",summarize=summarize)
+        await store.consolidate(mode="summary", summarize=summarize)
     assert len(summarize.calls) == 0
+
+
+async def test_raises_on_an_unknown_consolidate_mode() -> None:
+    summarize = make_summarize()
+    store = MemoryStore(client=fake_client(), name="mem", embed_fn=fake_embed(8))
+
+    with pytest.raises(ValueError, match="unknown mode"):
+        await store.consolidate(mode="fact", namespace="u1", summarize=summarize)  # type: ignore[arg-type]
 
 
 async def test_defaults_summary_importance_to_point_seven_and_deletes_by_default() -> None:

@@ -197,6 +197,17 @@ describe('MemoryStore.consolidate', () => {
     expect(summarize).not.toHaveBeenCalled();
   });
 
+  it('throws on an unknown mode (runtime guard for untyped callers)', async () => {
+    const summarize = vi.fn(async () => 'summary');
+    const store = new MemoryStore({ client: mockClient(), name: 'mem', embedFn: fakeEmbed(8) });
+
+    await expect(
+      // @ts-expect-error - invalid mode; the guard must reject it at runtime
+      store.consolidate({ mode: 'fact', namespace: 'u1', summarize }),
+    ).rejects.toThrow(/unknown mode/i);
+    expect(summarize).not.toHaveBeenCalled();
+  });
+
   it('defaults summaryImportance to 0.7 and deletes sources by default', async () => {
     const summarize = vi.fn(async () => 'summary');
     const client = consolidatingClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);

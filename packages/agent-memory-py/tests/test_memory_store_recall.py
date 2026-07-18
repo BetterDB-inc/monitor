@@ -116,6 +116,24 @@ async def test_does_not_flag_a_near_miss_when_nearest_is_far_past_threshold(recw
     assert not any("nearest candidate" in str(w.message) for w in recwarn.list)
 
 
+async def test_no_near_miss_when_nearest_is_within_threshold_but_score_filtered(
+    recwarn: Any,
+) -> None:
+    # 0.1 is within the default 0.33 gate, but a non-numeric importance makes the
+    # composite score non-finite so the candidate is dropped -> 0 hits. That is
+    # score-filtering, not a too-tight threshold, so no near-miss should fire.
+    reply = search_reply(
+        [("mem:mem:a", base_fields({"__score": "0.1", "importance": "not-a-number"}))]
+    )
+    client = fake_client(lambda command, *args: reply if command == "FT.SEARCH" else "OK")
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
+
+    hits = await store.recall("q", k=5)
+
+    assert hits == []
+    assert not any("nearest candidate" in str(w.message) for w in recwarn.list)
+
+
 async def test_drops_candidates_with_missing_or_non_numeric_distance() -> None:
     reply = search_reply(
         [

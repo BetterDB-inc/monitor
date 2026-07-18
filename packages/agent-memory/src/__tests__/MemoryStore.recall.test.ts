@@ -119,6 +119,23 @@ describe('MemoryStore.recall', () => {
     warn.mockRestore();
   });
 
+  it('does not flag a near-miss when the nearest candidate is within the threshold (score-filtered)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // 0.1 is within the default 0.33 gate, but a NaN composite score (malformed
+    // importance) drops it -> 0 hits. That is score-filtering, not a tight threshold.
+    const reply = searchReply([
+      { key: 'mem:mem:a', fields: baseFields({ __score: '0.1', importance: 'not-a-number' }) },
+    ]);
+    const client = mockClient((command) => (command === 'FT.SEARCH' ? reply : 'OK'));
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    const hits = await store.recall('q', { k: 5 });
+
+    expect(hits).toHaveLength(0);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('drops candidates whose distance score is missing or non-numeric', async () => {
     const reply = searchReply([
       { key: 'mem:mem:a', fields: baseFields({ __score: '0.1' }) },

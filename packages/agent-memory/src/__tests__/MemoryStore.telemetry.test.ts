@@ -155,7 +155,7 @@ describe('MemoryStore metrics', () => {
       telemetry: { registry },
     });
 
-    await store.consolidate({ namespace: 'u1', summarize: vi.fn(async () => 'summary') });
+    await store.consolidate({ mode: 'summary', namespace: 'u1', summarize: vi.fn(async () => 'summary') });
 
     const text = await registry.metrics();
     expect(text).toMatch(/agent_memory_consolidations_total\{store_name="mem"\} 1/);

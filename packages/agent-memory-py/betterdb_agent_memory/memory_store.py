@@ -674,7 +674,10 @@ class MemoryStore:
         if (
             len(result) == 0
             and math.isfinite(nearest_distance)
-            and nearest_distance <= threshold_value * RECALL_NEAR_MISS_FACTOR
+            # Strictly OUTSIDE the threshold: a candidate at or within the threshold
+            # was admitted by the vector gate, so an empty result there is
+            # score-filtering, not a too-tight threshold -- don't advise raising it.
+            and threshold_value < nearest_distance <= threshold_value * RECALL_NEAR_MISS_FACTOR
         ):
             span.set_attribute("recall.zero_hits_near_threshold", True)
             span.set_attribute("recall.nearest_distance", nearest_distance)

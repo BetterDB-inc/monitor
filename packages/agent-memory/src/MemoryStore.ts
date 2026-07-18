@@ -599,6 +599,10 @@ export class MemoryStore {
     if (
       result.length === 0 &&
       Number.isFinite(nearestDistance) &&
+      // Strictly OUTSIDE the threshold: a candidate at or within the threshold was
+      // admitted by the vector gate, so an empty result there is score-filtering,
+      // not a too-tight threshold — don't advise raising it.
+      nearestDistance > threshold &&
       nearestDistance <= threshold * RECALL_NEAR_MISS_FACTOR
     ) {
       span.setAttribute('recall.zero_hits_near_threshold', true);
@@ -785,7 +789,15 @@ export class MemoryStore {
     if (options.mode === 'facts') {
       return this.traced('consolidateFacts', (span) => this.runConsolidateFacts(options, span));
     }
-    return this.traced('consolidate', (span) => this.runConsolidate(options, span));
+    if (options.mode === 'summary') {
+      return this.traced('consolidate', (span) => this.runConsolidate(options, span));
+    }
+    // Guard runtime (untyped) callers: an unknown mode must fail, not silently run
+    // the summary path (mirrors the Python implementation).
+    throw new Error(
+      `consolidate: unknown mode ${JSON.stringify((options as { mode: unknown }).mode)} ` +
+        `(expected 'summary' or 'facts')`,
+    );
   }
 
   private async runConsolidate(
