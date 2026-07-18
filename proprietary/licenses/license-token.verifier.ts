@@ -24,7 +24,12 @@ export function verifyLicenseToken(
   }
 
   const kid = decoded.header.kid;
-  if (!kid || !keys[kid]) {
+  // Own-property check: a bracket lookup would resolve inherited keys like
+  // "__proto__"/"constructor" to truthy Object.prototype members, turning the
+  // clean "unknown key — upgrade" message into a confusing internal error.
+  const publicKey =
+    kid && Object.prototype.hasOwnProperty.call(keys, kid) ? keys[kid] : undefined;
+  if (!publicKey) {
     throw new LicenseTokenError(
       `License token was signed with an unknown key (${kid ?? 'no kid'}) — upgrade BetterDB Monitor to a release that includes it`,
     );
@@ -32,7 +37,7 @@ export function verifyLicenseToken(
 
   let payload: jwt.JwtPayload;
   try {
-    payload = jwt.verify(token, keys[kid], {
+    payload = jwt.verify(token, publicKey, {
       algorithms: ['RS256'],
       issuer: LICENSE_JWT_ISSUER,
     }) as jwt.JwtPayload;

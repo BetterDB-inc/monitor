@@ -68,6 +68,14 @@ describe('license-token.verifier', () => {
     expect(() => verifyLicenseToken(token, keys)).toThrow(/unknown key/);
   });
 
+  it('treats prototype-chain kids (__proto__, constructor) as unknown, not internal errors', () => {
+    for (const kid of ['__proto__', 'constructor', 'toString']) {
+      const token = signToken({}, { keyid: kid });
+      // must hit the friendly "unknown key" branch, not resolve an inherited member
+      expect(() => verifyLicenseToken(token, keys)).toThrow(/unknown key/);
+    }
+  });
+
   it('rejects tokens signed with the wrong private key', () => {
     const token = signToken({}, {}, otherPrivateKey);
     expect(() => verifyLicenseToken(token, keys)).toThrow(/verification failed/);
