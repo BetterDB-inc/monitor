@@ -9,12 +9,22 @@ import {
   UseGuards,
   ValidationPipe,
 } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { InvitationService } from './invitation.service';
 import { AdminGuard } from '../admin/admin.guard';
 import { CreateInvitationDto, AcceptInvitationDto } from './dto';
 
+/**
+ * SkipThrottle: these are AdminGuard-bearer-authed internal endpoints (only the
+ * website server calls them) reached via a single shared proxy/gateway IP, so
+ * the global IP-keyed throttle would just make concurrent customers 429 each
+ * other during signup/onboarding without adding protection. Per-user rate
+ * limiting, if wanted, belongs at the website edge where the real client is
+ * known. Mirrors OfflineLicenseController.
+ */
 @Controller('invitations')
 @UseGuards(AdminGuard)
+@SkipThrottle()
 export class InvitationController {
   constructor(private readonly invitationService: InvitationService) {}
 
