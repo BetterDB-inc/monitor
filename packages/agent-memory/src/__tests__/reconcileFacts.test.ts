@@ -142,6 +142,28 @@ describe('reconcile', () => {
     expect(stale).toEqual([{ type: 'noop', subject: 'employer' }]);
   });
 
+  it('surfaces an unmatched tombstone (no prior fact) instead of a silent noop', () => {
+    const ops = reconcile([{ subject: 'employer', statement: '', tombstone: true }], []);
+    expect(ops).toEqual([{ type: 'unmatched-tombstone', subject: 'employer' }]);
+    // It stores nothing, like a noop, but is distinguishable by the caller.
+    expect(applyOps([], ops)).toEqual([]);
+  });
+
+  it('matches subjects case- and whitespace-insensitively', () => {
+    const existing: Fact[] = [{ subject: 'Employer', statement: 'Acme', date: '2024-01' }];
+    const ops = reconcile(
+      [{ subject: ' employer ', statement: 'Globex', date: '2024-06' }],
+      existing,
+    );
+    expect(ops).toEqual([
+      {
+        type: 'update',
+        subject: ' employer ',
+        fact: { subject: ' employer ', statement: 'Globex', date: '2024-06' },
+      },
+    ]);
+  });
+
   it('folds earlier ops so a later fact in the same batch sees them', () => {
     const ops = reconcile(
       [

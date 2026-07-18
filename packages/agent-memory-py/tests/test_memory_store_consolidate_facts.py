@@ -83,15 +83,27 @@ def extractor(facts: list[Fact]) -> Any:
     return extract
 
 
-async def test_raises_when_disabled_by_default_without_touching_client() -> None:
+async def test_runs_without_requiring_consolidation_to_be_enabled() -> None:
     client = facts_client([item_hit("a", 0.2, 100000)])
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
     extract = extractor([Fact(subject="employer", statement="Acme")])
 
-    with pytest.raises(RuntimeError, match="disabled"):
-        await store.consolidate_facts(namespace="u1", extract_facts=extract)
-    assert len(extract.calls) == 0
-    assert not any(c[0] == "FT.SEARCH" for c in client.calls)
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extract)
+
+    assert len(extract.calls) == 1
+    assert result.facts == 1
+
+
+async def test_reachable_via_merged_consolidate_mode_facts() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000)])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
+    extract = extractor([Fact(subject="employer", statement="Acme")])
+
+    result = await store.consolidate(mode="facts", namespace="u1", extract_facts=extract)
+
+    assert len(extract.calls) == 1
+    assert result.facts == 1
+    assert result.unmatched_tombstones == []
 
 
 async def test_runs_when_enabled_via_consolidation_true() -> None:
@@ -107,7 +119,7 @@ async def test_runs_when_enabled_via_consolidation_true() -> None:
     assert len(result.created) == 1
 
 
-async def test_enabled_via_config_object_and_disabled_when_enabled_false() -> None:
+async def test_runs_regardless_of_now_ignored_enabled_flag() -> None:
     on = MemoryStore(
         client=facts_client([item_hit("a", 0.2, 100000)]),
         name="mem",
@@ -123,8 +135,8 @@ async def test_enabled_via_config_object_and_disabled_when_enabled_false() -> No
         embed_fn=fake_embed(8),
         consolidation=ConsolidationConfig(enabled=False),
     )
-    with pytest.raises(RuntimeError, match="disabled"):
-        await off.consolidate_facts(namespace="u1", extract_facts=extractor([]))
+    off_result = await off.consolidate_facts(namespace="u1", extract_facts=extractor([]))
+    assert off_result is not None
 
 
 async def test_writes_fact_memories_additively_without_deleting_sources() -> None:
@@ -161,6 +173,23 @@ async def test_excludes_prior_fact_memories_from_candidate_scan() -> None:
 
     search = client.find_call("FT.SEARCH")
     assert "-@source:{fact}" in search[2]
+
+
+async def test_scans_candidates_sorted_by_created_at_asc() -> None:
+    client = facts_client([item_hit("a", 0.2, 100000)])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
+
+    await store.consolidate(
+        mode="facts",
+        namespace="u1",
+        extract_facts=extractor([Fact(subject="x", statement="y")]),
+    )
+
+    # Candidate fetch is the first FT.SEARCH (excludes prior facts).
+    search = client.find_call("FT.SEARCH")
+    args = [str(a) for a in search]
+    i = args.index("SORTBY")
+    assert args[i + 1 : i + 3] == ["created_at", "ASC"]
 
 
 async def test_uses_custom_fact_source_for_write_and_exclusion() -> None:

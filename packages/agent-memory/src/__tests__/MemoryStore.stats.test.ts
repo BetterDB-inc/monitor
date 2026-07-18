@@ -19,7 +19,7 @@ describe('MemoryStore.stats', () => {
 
     expect(stats.itemCount).toBe(5);
     expect(stats.evictions).toBe(3);
-    expect(stats.config.threshold).toBeCloseTo(0.25);
+    expect(stats.config.threshold).toBeCloseTo(0.33);
     expect(client.call).toHaveBeenCalledWith('FT.INFO', 'mem:mem:idx');
     expect(client.call).toHaveBeenCalledWith('HGETALL', 'mem:__mem_stats');
   });

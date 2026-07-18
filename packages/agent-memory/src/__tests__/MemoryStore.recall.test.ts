@@ -78,6 +78,47 @@ describe('MemoryStore.recall', () => {
     expect(hits.map((h) => h.item.id)).toEqual(['a']);
   });
 
+  it('returns a candidate at cosine distance ~0.27 with the default threshold (0.33)', async () => {
+    const reply = searchReply([{ key: 'mem:mem:a', fields: baseFields({ __score: '0.27' }) }]);
+    const client = mockClient((command) => (command === 'FT.SEARCH' ? reply : 'OK'));
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    // No explicit threshold: the default (0.33) must admit a ~0.27 match, which
+    // the old 0.25 default silently dropped for mainstream embedding models.
+    const hits = await store.recall('q', { k: 5 });
+
+    expect(hits.map((h) => h.item.id)).toEqual(['a']);
+  });
+
+  it('flags a near-miss (0 hits, nearest just past threshold) and warns once per store', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const reply = searchReply([{ key: 'mem:mem:a', fields: baseFields({ __score: '0.4' }) }]);
+    const client = mockClient((command) => (command === 'FT.SEARCH' ? reply : 'OK'));
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    const first = await store.recall('q', { k: 5 }); // 0.4 > 0.33 default, but <= 2x
+    const second = await store.recall('q', { k: 5 });
+
+    expect(first).toHaveLength(0);
+    expect(second).toHaveLength(0);
+    expect(warn).toHaveBeenCalledTimes(1); // deduped per store
+    expect(String(warn.mock.calls[0][0])).toContain('nearest candidate');
+    warn.mockRestore();
+  });
+
+  it('does not flag a near-miss when the nearest candidate is far past the threshold', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const reply = searchReply([{ key: 'mem:mem:a', fields: baseFields({ __score: '0.9' }) }]);
+    const client = mockClient((command) => (command === 'FT.SEARCH' ? reply : 'OK'));
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    const hits = await store.recall('q', { k: 5 }); // 0.9 > 2x * 0.33
+
+    expect(hits).toHaveLength(0);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('drops candidates whose distance score is missing or non-numeric', async () => {
     const reply = searchReply([
       { key: 'mem:mem:a', fields: baseFields({ __score: '0.1' }) },

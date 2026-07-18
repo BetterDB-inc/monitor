@@ -8,7 +8,7 @@ import uuid
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Literal
 
 from betterdb_valkey_search_kit import (
     encode_float32,
@@ -33,7 +33,14 @@ from .build_recall_query import (
 from .composite_score import composite_score, similarity_from_distance
 from .discovery import MemoryDiscovery
 from .parse_memory_item import parse_memory_item
-from .reconcile_facts import apply_ops, fact_content, reconcile, stored_fact_to_fact
+from .reconcile_facts import (
+    UnmatchedTombstoneOp,
+    apply_ops,
+    fact_content,
+    reconcile,
+    stored_fact_to_fact,
+    subject_key,
+)
 from .select_evictions import EvictionCandidate, SelectEvictionsOptions, select_evictions
 from .telemetry import MemoryTelemetryOptions, create_memory_telemetry
 from .types import (
@@ -56,7 +63,14 @@ from .types import (
     SummarizeFn,
 )
 
-DEFAULT_THRESHOLD = 0.25
+# Cosine-distance ceiling for recall (lower = closer). Sized so mainstream
+# embedding models -- whose correct matches can land near ~0.3 -- aren't silently
+# filtered out; a tighter gate is available per call or via config.
+DEFAULT_THRESHOLD = 0.33
+# When recall returns nothing but the nearest candidate's distance was within this
+# multiple of the threshold, it's flagged as a near-miss (the threshold, not the
+# data, likely dropped a good hit).
+RECALL_NEAR_MISS_FACTOR = 2
 DEFAULT_WEIGHTS = RecallWeights(similarity=0.6, recency=0.25, importance=0.15)
 DEFAULT_HALF_LIFE_SECONDS = 604800  # 7 days
 DEFAULT_RECALL_K = 8
@@ -87,9 +101,10 @@ def _package_version() -> str:
 
 def _resolve_consolidation(
     config: bool | ConsolidationConfig | None,
-) -> tuple[bool, str, float]:
+) -> tuple[str, float]:
+    # Fact consolidation is always available (the old enable-gate was dropped); this
+    # only resolves the customizable fact source tag and default fact importance.
     obj = config if isinstance(config, ConsolidationConfig) else None
-    enabled = config is True or (obj is not None and obj.enabled is not False)
     fact_source = (
         obj.fact_source if obj is not None and obj.fact_source is not None else FACT_SOURCE
     )
@@ -98,7 +113,7 @@ def _resolve_consolidation(
         if obj is not None and obj.fact_importance is not None
         else DEFAULT_FACT_IMPORTANCE
     )
-    return enabled, fact_source, fact_importance
+    return fact_source, fact_importance
 
 
 def _copy_weights(weights: RecallWeights) -> RecallWeights:
@@ -160,10 +175,11 @@ class MemoryStore:
         self._name = name
         self._embed_fn = embed_fn
         (
-            self._consolidation_enabled,
             self._fact_source,
             self._default_fact_importance,
         ) = _resolve_consolidation(consolidation)
+        # Fire the recall near-miss warning at most once per store instance.
+        self._near_miss_warned = False
         self._analytics_disabled = not analytics
         self._analytics: Analytics = NOOP_ANALYTICS
         self._analytics_started = False
@@ -615,12 +631,19 @@ class MemoryStore:
 
         now = self._now_ms()
         hits: list[MemoryHit] = []
+        # Track the closest candidate seen regardless of the threshold, so a recall
+        # that returns nothing can tell whether a good hit was dropped just outside.
+        nearest_distance = math.inf
         for hit in parse_ft_search_response(raw):
             raw_score = hit["fields"].get(SCORE_FIELD)
             if raw_score is None or raw_score.strip() == "":
                 continue
             distance = js_number(raw_score)
-            if not math.isfinite(distance) or distance > threshold_value:
+            if not math.isfinite(distance):
+                continue
+            if distance < nearest_distance:
+                nearest_distance = distance
+            if distance > threshold_value:
                 continue
             item = parse_memory_item(self._name, hit)
             # Recency decays from the last access, not creation, so
@@ -643,6 +666,30 @@ class MemoryStore:
         result = hits[:k_value]
         span.set_attribute("recall.candidate_count", len(hits))
         span.set_attribute("recall.result_count", len(result))
+
+        # Near-miss diagnostic: zero hits, but the closest candidate sat just past
+        # the threshold -- the gate, not the corpus, likely dropped a relevant
+        # memory. Surface it (span + metric + a one-time warn) instead of failing
+        # silently.
+        if (
+            len(result) == 0
+            and math.isfinite(nearest_distance)
+            and nearest_distance <= threshold_value * RECALL_NEAR_MISS_FACTOR
+        ):
+            span.set_attribute("recall.zero_hits_near_threshold", True)
+            span.set_attribute("recall.nearest_distance", nearest_distance)
+            self._telemetry.metrics.recall_near_miss.labels(**self._store_labels).inc()
+            if not self._near_miss_warned:
+                self._near_miss_warned = True
+                warnings.warn(
+                    f"recall on '{self._name}' returned 0 hits, but the nearest candidate was "
+                    f"at cosine distance {nearest_distance:.3f} -- just past the threshold "
+                    f"{threshold_value}. If your embedding model returns correct matches at "
+                    f"this range, raise it via recall(threshold=...) or the store's "
+                    f"default_threshold. (Warns once per store.)",
+                    stacklevel=2,
+                )
+
         self._record_recall(len(result), time.monotonic() - started_at)
         self._session_counts["recalled"] += 1
         if len(result) > 0:
@@ -830,6 +877,90 @@ class MemoryStore:
     async def consolidate(
         self,
         *,
+        mode: Literal["summary", "facts"],
+        summarize: SummarizeFn | None = None,
+        extract_facts: FactExtractor | None = None,
+        older_than_seconds: float | None = None,
+        max_importance: float | None = None,
+        delete_sources: bool | None = None,
+        summary_importance: float | None = None,
+        fact_importance: float | None = None,
+        tags: list[str] | None = None,
+        thread_id: str | None = None,
+        agent_id: str | None = None,
+        namespace: str | None = None,
+    ) -> ConsolidateResult | ConsolidateFactsResult:
+        """Consolidate a scoped set of memories. The mode is explicit:
+
+        - ``mode="summary"`` -- accumulation: ``summarize(items)`` folds the
+          candidates into ONE new digest memory, optionally deleting the sources.
+          Lossy; items arrive oldest->newest with their dates so the summarizer can
+          respect recency.
+        - ``mode="facts"`` -- updates: ``extract_facts(items)`` returns structured
+          facts reconciled by subject (newest ``date`` wins, tombstones retract) and
+          written additively (sources kept). Use it for an updating corpus so later
+          statements supersede earlier ones instead of being conflated.
+        """
+        if mode == "facts":
+            if extract_facts is None:
+                raise ValueError("consolidate(mode='facts') requires extract_facts")
+            return await self._consolidate_facts_impl(
+                extract_facts=extract_facts,
+                older_than_seconds=older_than_seconds,
+                max_importance=max_importance,
+                fact_importance=fact_importance,
+                tags=tags,
+                thread_id=thread_id,
+                agent_id=agent_id,
+                namespace=namespace,
+            )
+        if mode == "summary":
+            if summarize is None:
+                raise ValueError("consolidate(mode='summary') requires summarize")
+            return await self._consolidate_summary(
+                summarize=summarize,
+                older_than_seconds=older_than_seconds,
+                max_importance=max_importance,
+                delete_sources=delete_sources,
+                summary_importance=summary_importance,
+                tags=tags,
+                thread_id=thread_id,
+                agent_id=agent_id,
+                namespace=namespace,
+            )
+        raise ValueError(f"consolidate: unknown mode {mode!r} (expected 'summary' or 'facts')")
+
+    async def consolidate_facts(
+        self,
+        *,
+        extract_facts: FactExtractor,
+        older_than_seconds: float | None = None,
+        max_importance: float | None = None,
+        fact_importance: float | None = None,
+        tags: list[str] | None = None,
+        thread_id: str | None = None,
+        agent_id: str | None = None,
+        namespace: str | None = None,
+    ) -> ConsolidateFactsResult:
+        """Deprecated: use ``consolidate(mode="facts", ...)``. Kept as a thin alias.
+
+        .. deprecated::
+            Prefer the merged ``consolidate(mode="facts", ...)``.
+        """
+        return await self._consolidate_facts_impl(
+            extract_facts=extract_facts,
+            older_than_seconds=older_than_seconds,
+            max_importance=max_importance,
+            fact_importance=fact_importance,
+            tags=tags,
+            thread_id=thread_id,
+            agent_id=agent_id,
+            namespace=namespace,
+        )
+
+    async def _consolidate_summary(
+        self,
+        *,
         summarize: SummarizeFn,
         older_than_seconds: float | None = None,
         max_importance: float | None = None,
@@ -880,7 +1011,7 @@ class MemoryStore:
                 f"{self._name}:mem:idx",
                 filter_query,
                 "RETURN",
-                "10",
+                "11",
                 "content",
                 "importance",
                 "tags",
@@ -891,6 +1022,10 @@ class MemoryStore:
                 "threadId",
                 "agentId",
                 "namespace",
+                # Give the summarizer each item's asserted date alongside the
+                # recency order below, so a summary can't silently ignore which
+                # statement is newer.
+                "date",
                 "LIMIT",
                 "0",
                 str(CONSOLIDATE_SCAN_LIMIT),
@@ -900,6 +1035,9 @@ class MemoryStore:
             candidates = [
                 parse_memory_item(self._name, hit) for hit in parse_ft_search_response(raw)
             ]
+            # Order oldest->newest so the summarizer sees the evolution of state and
+            # can respect recency; FT.SEARCH itself returns candidates unordered.
+            candidates.sort(key=lambda item: item.created_at)
             span.set_attribute("consolidate.candidates", len(candidates))
 
             if len(candidates) == 0:
@@ -948,7 +1086,7 @@ class MemoryStore:
                 consolidated=len(candidates), created=[summary_id], deleted=deleted
             )
 
-    async def consolidate_facts(
+    async def _consolidate_facts_impl(
         self,
         *,
         extract_facts: FactExtractor,
@@ -960,12 +1098,6 @@ class MemoryStore:
         agent_id: str | None = None,
         namespace: str | None = None,
     ) -> ConsolidateFactsResult:
-        if not self._consolidation_enabled:
-            raise RuntimeError(
-                "fact consolidation is disabled; construct MemoryStore with "
-                "consolidation=True (or ConsolidationConfig(enabled=True)) to use "
-                "consolidate_facts"
-            )
         await self._ensure_analytics_started()
         with self._span("consolidateFacts") as span:
             now = self._now_ms()
@@ -1004,7 +1136,7 @@ class MemoryStore:
                 f"{self._name}:mem:idx",
                 filter_query,
                 "RETURN",
-                "10",
+                "12",
                 "content",
                 "importance",
                 "tags",
@@ -1015,6 +1147,16 @@ class MemoryStore:
                 "threadId",
                 "agentId",
                 "namespace",
+                # Surface the reconcile keys to the extractor callback: ``date``
+                # drives newest-wins and ``subject`` is the reconcile key.
+                "subject",
+                "date",
+                # Deterministic oldest->newest ordering (created_at is NUMERIC
+                # SORTABLE) so the extractor's rendered input is stable run-to-run;
+                # FT.SEARCH is otherwise unordered.
+                "SORTBY",
+                "created_at",
+                "ASC",
                 "LIMIT",
                 "0",
                 str(CONSOLIDATE_SCAN_LIMIT),
@@ -1030,7 +1172,9 @@ class MemoryStore:
                 span.set_attribute("consolidate_facts.facts", 0)
                 span.set_attribute("consolidate_facts.created", 0)
                 span.set_attribute("consolidate_facts.deleted", 0)
-                return ConsolidateFactsResult(candidates=0, facts=0, created=[], deleted=0)
+                return ConsolidateFactsResult(
+                    candidates=0, facts=0, created=[], deleted=0, unmatched_tombstones=[]
+                )
 
             # Load the fact memories already written for this scope so
             # reconciliation considers them (not just the current batch): a re-run
@@ -1047,10 +1191,11 @@ class MemoryStore:
             for item in existing_facts:
                 if item.subject is None:
                     continue
-                if item.subject in existing_by_subject:
+                key = subject_key(item.subject)
+                if key in existing_by_subject:
                     duplicate_fact_ids.append(item.id)
                 else:
-                    existing_by_subject[item.subject] = (item.id, item.content)
+                    existing_by_subject[key] = (item.id, item.content)
             prior_facts = [
                 stored_fact_to_fact(item) for item in existing_facts if item.subject is not None
             ]
@@ -1059,9 +1204,21 @@ class MemoryStore:
             # subject collisions (within the batch AND against prior runs) resolve
             # to the newest dated statement and tombstones drop retracted subjects.
             extracted = await extract_facts(candidates)
-            curated = apply_ops(prior_facts, reconcile(extracted, prior_facts))
-            curated_by_subject = {fact.subject: fact for fact in curated}
+            ops = reconcile(extracted, prior_facts)
+            curated = apply_ops(prior_facts, ops)
+            # A tombstone that matched no live fact is surfaced, not silently dropped.
+            unmatched_tombstones = [
+                op.subject for op in ops if isinstance(op, UnmatchedTombstoneOp)
+            ]
+            if len(unmatched_tombstones) > 0:
+                self._telemetry.metrics.fact_tombstone_unmatched.labels(
+                    **self._store_labels
+                ).inc(len(unmatched_tombstones))
+            curated_by_subject = {subject_key(fact.subject): fact for fact in curated}
             span.set_attribute("consolidate_facts.facts", len(curated))
+            span.set_attribute(
+                "consolidate_facts.unmatched_tombstones", len(unmatched_tombstones)
+            )
 
             resolved_importance = (
                 fact_importance if fact_importance is not None else self._default_fact_importance
@@ -1072,7 +1229,7 @@ class MemoryStore:
             created: list[str] = []
             for fact in curated:
                 content = fact_content(fact)
-                existing = existing_by_subject.get(fact.subject)
+                existing = existing_by_subject.get(subject_key(fact.subject))
                 # Unchanged subject already on disk: skip the write (idempotent).
                 if existing is not None and existing[1] == content:
                     continue
@@ -1109,7 +1266,11 @@ class MemoryStore:
             span.set_attribute("consolidate_facts.created", len(created))
             span.set_attribute("consolidate_facts.deleted", deleted)
             return ConsolidateFactsResult(
-                candidates=len(candidates), facts=len(curated), created=created, deleted=deleted
+                candidates=len(candidates),
+                facts=len(curated),
+                created=created,
+                deleted=deleted,
+                unmatched_tombstones=unmatched_tombstones,
             )
 
     async def _load_existing_facts(self, scope: MemoryScope, tags: list[str]) -> list[MemoryItem]:

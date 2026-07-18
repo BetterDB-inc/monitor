@@ -22,7 +22,7 @@ async def test_returns_item_count_evictions_and_config() -> None:
 
     assert stats.item_count == 5
     assert stats.evictions == 3
-    assert abs(stats.config.threshold - 0.25) < 1e-9
+    assert abs(stats.config.threshold - 0.33) < 1e-9
     assert client.find_call("FT.INFO") == ["FT.INFO", "mem:mem:idx"]
     assert client.find_call("HGETALL") == ["HGETALL", "mem:__mem_stats"]
 

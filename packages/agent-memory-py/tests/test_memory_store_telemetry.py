@@ -151,7 +151,7 @@ async def test_counts_consolidations() -> None:
         telemetry=MemoryTelemetryOptions(registry=registry),
     )
 
-    await store.consolidate(namespace="u1", summarize=make_summary)
+    await store.consolidate(mode="summary", namespace="u1", summarize=make_summary)
 
     text = metrics_text(registry)
     assert re.search(r'agent_memory_consolidations_total\{store_name="mem"\} 1', text)

@@ -79,6 +79,43 @@ async def test_drops_candidates_beyond_distance_threshold() -> None:
     assert [h.item.id for h in hits] == ["a"]
 
 
+async def test_returns_a_candidate_at_distance_0_27_with_the_default_threshold() -> None:
+    reply = search_reply([("mem:mem:a", base_fields({"__score": "0.27"}))])
+    client = fake_client(lambda command, *args: reply if command == "FT.SEARCH" else "OK")
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
+
+    # No explicit threshold: the default (0.33) must admit a ~0.27 match, which the
+    # old 0.25 default silently dropped for mainstream embedding models.
+    hits = await store.recall("q", k=5)
+
+    assert [h.item.id for h in hits] == ["a"]
+
+
+async def test_flags_a_near_miss_and_warns_once_per_store(recwarn: Any) -> None:
+    reply = search_reply([("mem:mem:a", base_fields({"__score": "0.4"}))])
+    client = fake_client(lambda command, *args: reply if command == "FT.SEARCH" else "OK")
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
+
+    first = await store.recall("q", k=5)  # 0.4 > 0.33 default, but <= 2x
+    second = await store.recall("q", k=5)
+
+    assert first == []
+    assert second == []
+    near_miss = [w for w in recwarn.list if "nearest candidate" in str(w.message)]
+    assert len(near_miss) == 1  # deduped per store
+
+
+async def test_does_not_flag_a_near_miss_when_nearest_is_far_past_threshold(recwarn: Any) -> None:
+    reply = search_reply([("mem:mem:a", base_fields({"__score": "0.9"}))])
+    client = fake_client(lambda command, *args: reply if command == "FT.SEARCH" else "OK")
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
+
+    hits = await store.recall("q", k=5)  # 0.9 > 2x * 0.33
+
+    assert hits == []
+    assert not any("nearest candidate" in str(w.message) for w in recwarn.list)
+
+
 async def test_drops_candidates_with_missing_or_non_numeric_distance() -> None:
     reply = search_reply(
         [

@@ -43,7 +43,7 @@ describe('MemoryStore.currentConfig', () => {
   it('reflects the constructor defaults before any refresh', () => {
     const store = new MemoryStore({ client: mockClient(), name: 'mem', embedFn: fakeEmbed(8) });
     expect(store.currentConfig()).toEqual({
-      threshold: 0.25,
+      threshold: 0.33,
       weights: DEFAULT_WEIGHTS,
       halfLifeSeconds: 604800,
       maxItemsPerScope: undefined,
@@ -122,7 +122,7 @@ describe('MemoryStore config refresh', () => {
 
     present = false;
     await store.refreshConfig();
-    expect(store.currentConfig().threshold).toBe(0.25);
+    expect(store.currentConfig().threshold).toBe(0.33);
   });
 
   it('ignores invalid values and keeps the constructor defaults', async () => {
@@ -138,7 +138,7 @@ describe('MemoryStore config refresh', () => {
     });
     await store.refreshConfig();
     expect(store.currentConfig()).toEqual({
-      threshold: 0.25,
+      threshold: 0.33,
       weights: DEFAULT_WEIGHTS,
       halfLifeSeconds: 604800,
       maxItemsPerScope: undefined,
@@ -239,6 +239,6 @@ describe('MemoryStore config refresh', () => {
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
     await expect(store.refreshConfig()).resolves.toBeUndefined();
-    expect(store.currentConfig().threshold).toBe(0.25);
+    expect(store.currentConfig().threshold).toBe(0.33);
   });
 });

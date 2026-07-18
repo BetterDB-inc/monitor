@@ -61,12 +61,13 @@ async def test_summarizes_writes_summary_deletes_sources_returns_counts() -> Non
     client = consolidating_client([item_hit("a", 0.2, 100000), item_hit("b", 0.3, 200000)])
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
 
-    result = await store.consolidate(
+    result = await store.consolidate(mode="summary",
         namespace="u1", older_than_seconds=3600, max_importance=0.5, summarize=summarize
     )
 
     assert len(summarize.calls) == 1
-    assert [i.id for i in summarize.calls[0]] == ["a", "b"]
+    # Ordered oldest->newest: 'b' (age 200000s) precedes 'a' (age 100000s).
+    assert [i.id for i in summarize.calls[0]] == ["b", "a"]
     assert result.consolidated == 2
     assert len(result.created) == 1
     assert result.deleted == 2
@@ -85,7 +86,7 @@ async def test_pushes_older_than_seconds_as_created_at_upper_bound() -> None:
     client = consolidating_client([item_hit("a", 0.2, 100000)])
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
 
-    await store.consolidate(older_than_seconds=3600, summarize=summarize)
+    await store.consolidate(mode="summary",older_than_seconds=3600, summarize=summarize)
 
     search = client.find_call("FT.SEARCH")
     assert search is not None
@@ -99,7 +100,7 @@ async def test_pushes_max_importance_as_importance_upper_bound() -> None:
     client = consolidating_client([item_hit("a", 0.2, 100000)])
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
 
-    await store.consolidate(max_importance=0.5, summarize=summarize)
+    await store.consolidate(mode="summary",max_importance=0.5, summarize=summarize)
 
     search = client.find_call("FT.SEARCH")
     assert "@importance:[-inf 0.5]" in search[2]
@@ -110,7 +111,7 @@ async def test_excludes_prior_summaries_from_candidate_scan() -> None:
     client = consolidating_client([item_hit("a", 0.2, 100000)])
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
 
-    await store.consolidate(namespace="u1", summarize=summarize)
+    await store.consolidate(mode="summary",namespace="u1", summarize=summarize)
 
     search = client.find_call("FT.SEARCH")
     assert "-@source:{summary}" in search[2]
@@ -121,7 +122,7 @@ async def test_writes_summary_scoped_to_request_at_summary_importance() -> None:
     client = consolidating_client([item_hit("a", 0.1, 100000)])
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
 
-    await store.consolidate(namespace="u1", summarize=summarize, summary_importance=0.9)
+    await store.consolidate(mode="summary",namespace="u1", summarize=summarize, summary_importance=0.9)
 
     hset = client.find_call("HSET")
     assert field_value(hset, "importance") == "0.9"
@@ -134,7 +135,7 @@ async def test_keeps_sources_when_delete_sources_false() -> None:
     client = consolidating_client([item_hit("a", 0.2, 100000), item_hit("b", 0.2, 100000)])
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
 
-    result = await store.consolidate(
+    result = await store.consolidate(mode="summary",
         summarize=summarize, delete_sources=False, older_than_seconds=3600
     )
 
@@ -149,7 +150,7 @@ async def test_returns_zeros_and_does_not_summarize_when_nothing_matches() -> No
     client = consolidating_client([])
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
 
-    result = await store.consolidate(older_than_seconds=3600, summarize=summarize)
+    result = await store.consolidate(mode="summary",older_than_seconds=3600, summarize=summarize)
 
     assert len(summarize.calls) == 0
     assert result.consolidated == 0
@@ -164,7 +165,7 @@ async def test_throws_without_scope_tags_or_criteria() -> None:
     store = MemoryStore(client=fake_client(), name="mem", embed_fn=fake_embed(8))
 
     with pytest.raises(ValueError, match="scope|criteria"):
-        await store.consolidate(summarize=summarize)
+        await store.consolidate(mode="summary",summarize=summarize)
     assert len(summarize.calls) == 0
 
 
@@ -173,7 +174,7 @@ async def test_defaults_summary_importance_to_point_seven_and_deletes_by_default
     client = consolidating_client([item_hit("a", 0.2, 100000)])
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
 
-    result = await store.consolidate(summarize=summarize, older_than_seconds=3600)
+    result = await store.consolidate(mode="summary",summarize=summarize, older_than_seconds=3600)
 
     hset = client.find_call("HSET")
     assert field_value(hset, "importance") == "0.7"
@@ -185,7 +186,7 @@ async def test_writes_summary_without_capacity_pass() -> None:
     client = consolidating_client([item_hit("a", 0.2, 100000), item_hit("b", 0.2, 100000)])
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8), max_items_per_scope=1)
 
-    result = await store.consolidate(namespace="u1", summarize=summarize)
+    result = await store.consolidate(mode="summary",namespace="u1", summarize=summarize)
 
     assert len(result.created) == 1
     assert any(c[0] == "HSET" for c in client.calls)

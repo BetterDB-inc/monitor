@@ -68,6 +68,7 @@ describe('MemoryStore.consolidate', () => {
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
     const result = await store.consolidate({
+      mode: 'summary',
       namespace: 'u1',
       olderThanSeconds: 3600,
       maxImportance: 0.5,
@@ -75,7 +76,8 @@ describe('MemoryStore.consolidate', () => {
     });
 
     expect(summarize).toHaveBeenCalledTimes(1);
-    expect(summarize.mock.calls[0][0].map((i: { id: string }) => i.id)).toEqual(['a', 'b']);
+    // Ordered oldest→newest: 'b' (age 200000s) precedes 'a' (age 100000s).
+    expect(summarize.mock.calls[0][0].map((i: { id: string }) => i.id)).toEqual(['b', 'a']);
     expect(result.consolidated).toBe(2);
     expect(result.created).toHaveLength(1);
     expect(result.deleted).toBe(2);
@@ -89,12 +91,27 @@ describe('MemoryStore.consolidate', () => {
     expect(del?.slice(1).sort()).toEqual(['mem:mem:a', 'mem:mem:b']);
   });
 
+  it('passes summary candidates oldest→newest, not in FT.SEARCH order', async () => {
+    const summarize = vi.fn(async () => 'summary');
+    // Reply lists the newest item first; consolidate must reorder to oldest→newest
+    // so the summarizer can respect recency.
+    const client = consolidatingClient([
+      itemHit('new', { importance: 0.2, ageSeconds: 10 }),
+      itemHit('old', { importance: 0.2, ageSeconds: 99999 }),
+    ]);
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    await store.consolidate({ mode: 'summary', namespace: 'u1', summarize });
+
+    expect(summarize.mock.calls[0][0].map((i: { id: string }) => i.id)).toEqual(['old', 'new']);
+  });
+
   it('pushes olderThanSeconds into the query as a created_at upper bound', async () => {
     const summarize = vi.fn(async () => 'summary');
     const client = consolidatingClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
-    await store.consolidate({ olderThanSeconds: 3600, summarize });
+    await store.consolidate({ mode: 'summary',olderThanSeconds: 3600, summarize });
 
     const search = client.call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
     const filter = search?.[2] as string;
@@ -108,7 +125,7 @@ describe('MemoryStore.consolidate', () => {
     const client = consolidatingClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
-    await store.consolidate({ maxImportance: 0.5, summarize });
+    await store.consolidate({ mode: 'summary',maxImportance: 0.5, summarize });
 
     const search = client.call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
     expect(search?.[2] as string).toContain('@importance:[-inf 0.5]');
@@ -119,7 +136,7 @@ describe('MemoryStore.consolidate', () => {
     const client = consolidatingClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
-    await store.consolidate({ namespace: 'u1', summarize });
+    await store.consolidate({ mode: 'summary',namespace: 'u1', summarize });
 
     const search = client.call.mock.calls.find((c) => c[0] === 'FT.SEARCH');
     expect(search?.[2] as string).toContain('-@source:{summary}');
@@ -130,7 +147,7 @@ describe('MemoryStore.consolidate', () => {
     const client = consolidatingClient([itemHit('a', { importance: 0.1, ageSeconds: 100000 })]);
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
-    await store.consolidate({ namespace: 'u1', summarize, summaryImportance: 0.9 });
+    await store.consolidate({ mode: 'summary',namespace: 'u1', summarize, summaryImportance: 0.9 });
 
     const hset = client.call.mock.calls.find((c) => c[0] === 'HSET');
     expect(fieldValue(hset, 'importance')).toBe('0.9');
@@ -147,6 +164,7 @@ describe('MemoryStore.consolidate', () => {
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
     const result = await store.consolidate({
+      mode: 'summary',
       summarize,
       deleteSources: false,
       olderThanSeconds: 3600,
@@ -163,7 +181,7 @@ describe('MemoryStore.consolidate', () => {
     const client = consolidatingClient([]);
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
-    const result = await store.consolidate({ olderThanSeconds: 3600, summarize });
+    const result = await store.consolidate({ mode: 'summary',olderThanSeconds: 3600, summarize });
 
     expect(summarize).not.toHaveBeenCalled();
     expect(result).toEqual({ consolidated: 0, created: [], deleted: 0 });
@@ -175,7 +193,7 @@ describe('MemoryStore.consolidate', () => {
     const summarize = vi.fn(async () => 'summary');
     const store = new MemoryStore({ client: mockClient(), name: 'mem', embedFn: fakeEmbed(8) });
 
-    await expect(store.consolidate({ summarize })).rejects.toThrow(/scope|criteria/i);
+    await expect(store.consolidate({ mode: 'summary',summarize })).rejects.toThrow(/scope|criteria/i);
     expect(summarize).not.toHaveBeenCalled();
   });
 
@@ -184,7 +202,7 @@ describe('MemoryStore.consolidate', () => {
     const client = consolidatingClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
-    const result = await store.consolidate({ summarize, olderThanSeconds: 3600 });
+    const result = await store.consolidate({ mode: 'summary',summarize, olderThanSeconds: 3600 });
 
     const hset = client.call.mock.calls.find((c) => c[0] === 'HSET');
     expect(fieldValue(hset, 'importance')).toBe('0.7');
@@ -204,7 +222,7 @@ describe('MemoryStore.consolidate', () => {
       maxItemsPerScope: 1,
     });
 
-    const result = await store.consolidate({ namespace: 'u1', summarize });
+    const result = await store.consolidate({ mode: 'summary',namespace: 'u1', summarize });
 
     expect(result.created).toHaveLength(1);
     expect(client.call.mock.calls.some((c) => c[0] === 'HSET')).toBe(true);

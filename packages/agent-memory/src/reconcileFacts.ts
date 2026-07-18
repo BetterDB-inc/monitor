@@ -38,7 +38,20 @@ export type FactOp =
   | { type: 'add'; fact: Fact }
   | { type: 'update'; subject: string; fact: Fact }
   | { type: 'delete'; subject: string }
-  | { type: 'noop'; subject: string };
+  | { type: 'noop'; subject: string }
+  // A tombstone whose subject matched no prior fact. It stores nothing (like a
+  // noop) but is surfaced separately so the caller can log it instead of losing
+  // it silently — a model that mislabels a live fact as a tombstone shows up here.
+  | { type: 'unmatched-tombstone'; subject: string };
+
+/**
+ * Match key for a subject: case- and whitespace-insensitive, so "Dashboard theme"
+ * and "dashboard theme" reconcile to the same fact. Only the match key is folded;
+ * the stored fact keeps its original subject casing.
+ */
+export function subjectKey(subject: string): string {
+  return subject.trim().toLowerCase();
+}
 
 // Datedness is "has a non-empty date". An empty string is treated as dateless,
 // consistent with factContent/storedFactToFact/buildMemoryRecord — so a fact
@@ -78,24 +91,28 @@ function isStaleTombstone(tombstone: Fact, prior: Fact): boolean {
 export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
   const bySubject = new Map<string, Fact>();
   for (const fact of existing) {
-    bySubject.set(fact.subject, fact);
+    bySubject.set(subjectKey(fact.subject), fact);
   }
 
   const ops: FactOp[] = [];
   for (const fact of incoming) {
-    const prior = bySubject.get(fact.subject);
+    const key = subjectKey(fact.subject);
+    const prior = bySubject.get(key);
     if (fact.tombstone === true) {
-      if (prior === undefined || isStaleTombstone(fact, prior)) {
+      if (prior === undefined) {
+        // No live fact to retract: surface it rather than silently swallow it.
+        ops.push({ type: 'unmatched-tombstone', subject: fact.subject });
+      } else if (isStaleTombstone(fact, prior)) {
         ops.push({ type: 'noop', subject: fact.subject });
       } else {
         ops.push({ type: 'delete', subject: fact.subject });
-        bySubject.delete(fact.subject);
+        bySubject.delete(key);
       }
       continue;
     }
     if (prior === undefined) {
       ops.push({ type: 'add', fact });
-      bySubject.set(fact.subject, fact);
+      bySubject.set(key, fact);
       continue;
     }
     if (prior.statement === fact.statement) {
@@ -105,7 +122,7 @@ export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
       // content change to rewrite).
       if ((factDate(fact) ?? '') > (factDate(prior) ?? '')) {
         ops.push({ type: 'update', subject: fact.subject, fact });
-        bySubject.set(fact.subject, fact);
+        bySubject.set(key, fact);
       } else {
         ops.push({ type: 'noop', subject: fact.subject });
       }
@@ -113,7 +130,7 @@ export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
     }
     if (isNewer(fact, prior)) {
       ops.push({ type: 'update', subject: fact.subject, fact });
-      bySubject.set(fact.subject, fact);
+      bySubject.set(key, fact);
       continue;
     }
     ops.push({ type: 'noop', subject: fact.subject });
@@ -125,16 +142,17 @@ export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
 export function applyOps(existing: Fact[], ops: FactOp[]): Fact[] {
   const bySubject = new Map<string, Fact>();
   for (const fact of existing) {
-    bySubject.set(fact.subject, fact);
+    bySubject.set(subjectKey(fact.subject), fact);
   }
   for (const op of ops) {
     if (op.type === 'add') {
-      bySubject.set(op.fact.subject, op.fact);
+      bySubject.set(subjectKey(op.fact.subject), op.fact);
     } else if (op.type === 'update') {
-      bySubject.set(op.subject, op.fact);
+      bySubject.set(subjectKey(op.subject), op.fact);
     } else if (op.type === 'delete') {
-      bySubject.delete(op.subject);
+      bySubject.delete(subjectKey(op.subject));
     }
+    // 'noop' and 'unmatched-tombstone' change nothing in the curated set.
   }
   return [...bySubject.values()];
 }

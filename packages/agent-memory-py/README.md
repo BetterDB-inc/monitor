@@ -110,8 +110,10 @@ hits = await store.recall("hi", thread_id="t1")
 - `await recall(query, *, k=None, threshold=None, tags=None, weights=None, reinforce=None, thread_id=None, agent_id=None, namespace=None) -> list[MemoryHit]`
 - `await forget(id) -> bool`
 - `await forget_by_scope(*, thread_id=None, agent_id=None, namespace=None, tags=None) -> int`
-- `await consolidate(*, summarize, older_than_seconds=None, max_importance=None, delete_sources=None, summary_importance=None, tags=None, thread_id=None, agent_id=None, namespace=None) -> ConsolidateResult`
-- `await consolidate_facts(*, extract_facts, older_than_seconds=None, max_importance=None, fact_importance=None, tags=None, thread_id=None, agent_id=None, namespace=None) -> ConsolidateFactsResult` - distill the selected memories into atomic, deduplicated facts and write each as its own memory, **keeping the source memories** (additive, so recall is preserved). You supply an `extract_facts(items)` LLM seam returning `list[Fact]` (`subject`, `statement`, optional `date`, optional `tombstone`); facts are reconciled by `subject` (newest `date` wins, tombstones drop a subject) and each fact's date is preserved in its content. Reconciliation is **stateful across runs**: each fact memory persists its `subject`, so a later run loads the stored facts and reconciles against them - a re-run over unchanged sources rewrites nothing (idempotent), a newer statement supersedes (deletes) the prior fact memory, and a tombstone retracts it. The result reports `created` (ids written) and `deleted` (prior fact memories superseded or retracted). Off by default - construct the store with `consolidation=True` (or `ConsolidationConfig(enabled=True, fact_source=..., fact_importance=...)`) to enable it, otherwise it raises. Select sources by scope, tags, `older_than_seconds`, or `max_importance`; prior fact memories are excluded from the source scan so a run never re-distills its own output.
+- `await consolidate(*, mode, summarize=None, extract_facts=None, older_than_seconds=None, max_importance=None, delete_sources=None, summary_importance=None, fact_importance=None, tags=None, thread_id=None, agent_id=None, namespace=None) -> ConsolidateResult | ConsolidateFactsResult` - one method, two explicit modes; select candidates by scope, tags, `older_than_seconds`, or `max_importance`:
+  - **`mode="summary"`** - *accumulation.* `summarize(items)` folds the candidates into **one** new digest memory, optionally deleting the sources. Lossy - use it to compress volume. Items are passed **oldest→newest with their dates**, so the summarizer can respect recency. It does **not** resolve updates; for a corpus where later statements supersede earlier ones, use `mode="facts"` or you may get conflated/stale summaries.
+  - **`mode="facts"`** - *updates/supersession.* An `extract_facts(items)` LLM seam returns `list[Fact]` (`subject`, `statement`, optional `date`, optional `tombstone`); facts are reconciled by `subject` (newest `date` wins, tombstones drop a subject), written **additively keeping the source memories** (recall preserved), and each fact's date is preserved in its content. Reconciliation is **stateful across runs**: a re-run over unchanged sources rewrites nothing (idempotent), a newer statement supersedes (deletes) the prior fact memory, and a tombstone retracts it. A tombstone that matches no live fact is surfaced in `unmatched_tombstones` (and a metric) rather than silently dropped. The result reports `created`, `deleted`, `facts`, and `unmatched_tombstones`; prior fact memories are excluded from the source scan so a run never re-distills its own output. Customize the fact `source` tag / default importance via the store's `consolidation` option (`ConsolidationConfig(fact_source=..., fact_importance=...)`).
+- `await consolidate_facts(*, extract_facts, ...) -> ConsolidateFactsResult` - **deprecated** thin alias for `consolidate(mode="facts", ...)`; prefer the merged method.
 - `current_config() -> MemoryConfigSnapshot`
 - `await refresh_config()`
 - `await ensure_discovery_ready()`
@@ -130,7 +132,12 @@ readies discovery for both tiers; `close()` tears both down.
 where `similarity = 1 - distance / 2` (cosine distance → 0..1) and `recency`
 decays with a true half-life (`0.5` at one `half_life_seconds`). Default weights
 are `{similarity: 0.6, recency: 0.25, importance: 0.15}`, default threshold
-`0.25`, default half-life 7 days.
+`0.33` (similarity ≥ ~0.835 — loose enough to admit mainstream embedding models,
+whose correct matches can land near ~0.3), default half-life 7 days. When a recall
+returns **zero** hits but the nearest candidate sat just past the threshold
+(within 2×), the store flags a near-miss (a one-time warning + the
+`..._recall_near_miss_total` metric) so a mis-set threshold surfaces instead of
+silently yielding nothing.
 
 ## License
 
