@@ -115,6 +115,21 @@ describe('license-token.verifier', () => {
     expect(response.expiresAt).toBe(new Date(claims.exp * 1000).toISOString());
   });
 
+  it('reports the license expiry from licenseExpiresAt, not the short token exp', () => {
+    const licenseExpiresAt = '2027-03-01T00:00:00.000Z';
+    const claims = verifyLicenseToken(signToken({ licenseExpiresAt }), keys);
+    const response = claimsToEntitlement(claims);
+    // token exp is ~1h out; the response must reflect the real license expiry
+    expect(response.expiresAt).toBe(licenseExpiresAt);
+    expect(response.expiresAt).not.toBe(new Date(claims.exp * 1000).toISOString());
+  });
+
+  it('preserves a perpetual (null) license expiry rather than inventing the token exp', () => {
+    const claims = verifyLicenseToken(signToken({ licenseExpiresAt: null }), keys);
+    const response = claimsToEntitlement(claims);
+    expect(response.expiresAt).toBeNull();
+  });
+
   it('uses the real customer id from the claim when present (not the license id)', () => {
     const claims = verifyLicenseToken(
       signToken({ customer: { id: 'cust-42', name: 'Acme', email: 'ops@acme.test' } }),

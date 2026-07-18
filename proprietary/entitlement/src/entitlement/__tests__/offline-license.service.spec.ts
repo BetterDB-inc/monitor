@@ -111,7 +111,7 @@ describe('OfflineLicenseService', () => {
       await service.revealLicenseKey('license-1', 'OPS@acme.test');
 
       expect(prisma.licenseKeyReveal.create).toHaveBeenCalledWith({
-        data: { licenseId: 'license-1', revealedToEmail: 'ops@acme.test' },
+        data: { licenseId: 'license-1', licenseKeyLast4: 'cdef', revealedToEmail: 'ops@acme.test' },
       });
     });
 
@@ -201,12 +201,16 @@ describe('OfflineLicenseService', () => {
         tier: Tier.pro,
         instanceLimit: 3,
         mode: 'offline',
+        // the license's real expiry rides as its own claim, not the token exp
+        licenseExpiresAt: baseLicense.expiresAt,
       });
       expect((expiresAt as Date).getTime()).toBe(baseLicense.expiresAt.getTime());
 
       expect(prisma.offlineLicenseIssuance.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           licenseId: 'license-1',
+          // durable identifier that survives a license delete (nulls licenseId)
+          licenseKeyLast4: 'cdef',
           jti: 'jti-1',
           kid: 'lic-test',
           issuedToEmail: 'ops@acme.test',

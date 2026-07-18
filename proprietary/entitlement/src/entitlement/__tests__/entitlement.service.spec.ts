@@ -290,7 +290,13 @@ describe('EntitlementService', () => {
       expect(result.token).toBe('signed.jwt.token');
       expect(result.instanceLimit).toBe(5);
       expect(signing.signLicenseToken).toHaveBeenCalledWith(
-        expect.objectContaining({ licenseId: 'license-id', tier: Tier.pro, mode: 'online' }),
+        expect.objectContaining({
+          licenseId: 'license-id',
+          tier: Tier.pro,
+          mode: 'online',
+          // the license's real expiry rides as its own claim, not the token exp
+          licenseExpiresAt: expiresAt,
+        }),
         expect.any(Date),
       );
     });

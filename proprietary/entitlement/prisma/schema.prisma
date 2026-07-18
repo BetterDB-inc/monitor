@@ -142,8 +142,14 @@ model LicenseKeyReveal {
   id              String    @id @default(cuid())
   // SetNull (not Cascade): the audit row must OUTLIVE the license/customer it
   // references — deleting a license must not erase the record of who revealed
-  // its key. licenseId is nulled on delete; the who/when/jti survive.
+  // its key. licenseId is nulled on delete, so we ALSO snapshot a durable,
+  // non-FK identifier (licenseKeyLast4) captured at reveal time — otherwise a
+  // deleted license leaves only email+timestamp with no way to tell WHICH
+  // license's key was revealed. who/when + the snapshot survive the delete.
   licenseId       String?   @map("license_id")
+  // Last 4 chars of the revealed key — enough to identify the license in the
+  // audit trail without storing the secret; survives license deletion.
+  licenseKeyLast4 String?   @map("license_key_last4")
   revealedToEmail String    @map("revealed_to_email")
   createdAt       DateTime  @default(now()) @map("created_at")
 
@@ -159,8 +165,12 @@ model OfflineLicenseIssuance {
   id            String    @id @default(cuid())
   // SetNull (not Cascade): audit outlives the license — an offline token is
   // irrevocable for up to 366 days, so the record of who was issued one must
-  // survive a license/customer delete.
+  // survive a license/customer delete. licenseId is nulled then; jti/kid still
+  // identify the issued TOKEN, and licenseKeyLast4 snapshots WHICH license.
   licenseId     String?   @map("license_id")
+  // Last 4 chars of the license key at issuance — identifies the license in the
+  // audit trail after a delete nulls licenseId; not the secret itself.
+  licenseKeyLast4 String? @map("license_key_last4")
   jti           String    @unique
   kid           String
   issuedToEmail String    @map("issued_to_email")

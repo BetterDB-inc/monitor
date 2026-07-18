@@ -38,20 +38,29 @@ export const handler = async (event) => {
         return { isAuthorized: false };
     }
 
-    if (!cachedKey || Date.now() - lastAttempt > CACHE_TTL_MS) {
+    // Gate EVERY fetch on the TTL — including the cold-start fetch (lastAttempt
+    // starts at 0, so the first request always fetches). A prior `!cachedKey ||`
+    // clause meant a cold start with SSM unreachable re-hit GetParameter on every
+    // single request (cachedKey never populates), storming SSM exactly when it is
+    // already unhealthy. Bounding cold-start attempts to ~1 per TTL is the whole
+    // point of tracking lastAttempt.
+    if (Date.now() - lastAttempt > CACHE_TTL_MS) {
         try {
             await fetchKey();
         } catch (err) {
-            // A transient SSM error must not take down the whole gateway when
-            // we already hold a valid key — keep serving the last-known-good
-            // value; the next attempt is a full TTL away (lastAttempt advanced
-            // in fetchKey). Fail closed only on cold start, when there is no
-            // cached key to fall back on.
-            if (!cachedKey) {
-                throw err;
-            }
-            console.error("SSM refresh failed; serving cached key", err);
+            // Transient SSM error: keep serving the last-known-good key if we
+            // hold one; the next attempt is a full TTL away (lastAttempt advanced
+            // in fetchKey). If we have no cached key (cold start), fall through to
+            // the deny below rather than re-throwing every request.
+            console.error("SSM refresh failed", err);
         }
+    }
+
+    if (!cachedKey) {
+        // No key available (cold start with SSM unreachable). Fail CLOSED —
+        // denying is safe and cheap, and it does not storm SSM: the next fetch
+        // is a TTL away regardless of request volume.
+        return { isAuthorized: false };
     }
 
     return { isAuthorized: apiKey === cachedKey };

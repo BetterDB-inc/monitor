@@ -62,6 +62,7 @@ export function verifyLicenseToken(
     customer: payload.customer,
     instanceLimit: typeof payload.instanceLimit === 'number' ? payload.instanceLimit : 1,
     mode: payload.mode,
+    licenseExpiresAt: payload.licenseExpiresAt as string | null | undefined,
     iat: payload.iat as number,
     exp: payload.exp,
   };
@@ -72,7 +73,13 @@ export function claimsToEntitlement(claims: LicenseTokenClaims): EntitlementResp
     valid: true,
     tier: claims.tier,
     features: claims.features ?? TIER_FEATURES[claims.tier],
-    expiresAt: new Date(claims.exp * 1000).toISOString(),
+    // Prefer the license's real expiry so a perpetual (null) or far-future
+    // license isn't misreported as expiring at the token's short `exp`. Older
+    // tokens omit the claim (undefined) — fall back to `exp` for them.
+    expiresAt:
+      claims.licenseExpiresAt !== undefined
+        ? claims.licenseExpiresAt
+        : new Date(claims.exp * 1000).toISOString(),
     customer: claims.customer
       ? {
           // Real customer id from the signed claim; older tokens without it

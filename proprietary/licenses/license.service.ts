@@ -347,7 +347,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async validateLicense(): Promise<EntitlementResponse> {
+  async validateLicense(forceOnline = false): Promise<EntitlementResponse> {
     this.enforceOfflineExpiry();
 
     // Offline token with no license key: the token is the sole authority —
@@ -365,7 +365,10 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       return this.getLicenseInfo();
     }
 
-    if (this.cache && Date.now() - this.cache.cachedAt < this.cacheTtlMs) {
+    // forceOnline bypasses the cache TTL (used by activateOfflineLicense) — but
+    // the existing cache is left INTACT so read-path getters keep serving the
+    // active tier during the network round-trip instead of falling to community.
+    if (!forceOnline && this.cache && Date.now() - this.cache.cachedAt < this.cacheTtlMs) {
       this.logger.debug('Using cached entitlement');
       return this.cache.response;
     }
@@ -872,8 +875,11 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     // here also means we never bump the epoch to discard a concurrent in-flight
     // check that would grant a paid tier. validateLicense applies the offline
     // token iff online genuinely resolves to community (its own fallback logic).
-    this.cache = null;
-    const active = await this.validateLicense();
+    // forceOnline bypasses the cache TTL WITHOUT nulling the cache first, so the
+    // active paid tier keeps serving read-path getters during the round-trip
+    // (nulling it flashed community — and denied paid routes — for up to the
+    // network timeout while this validation was in flight).
+    const active = await this.validateLicense(true);
     const fallbackOnly = this.source !== 'offline-token';
     this.logger.log(
       fallbackOnly

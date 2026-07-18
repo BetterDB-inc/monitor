@@ -97,6 +97,8 @@ export class OfflineLicenseService {
     await this.prisma.licenseKeyReveal.create({
       data: {
         licenseId: license.id,
+        // Durable identifier that survives a license delete (which nulls licenseId)
+        licenseKeyLast4: license.key.slice(-4),
         revealedToEmail: requestedByEmail.toLowerCase(),
       },
     });
@@ -146,6 +148,7 @@ export class OfflineLicenseService {
         },
         instanceLimit: license.instanceLimit,
         mode: 'offline',
+        licenseExpiresAt: license.expiresAt ?? null,
       },
       expiresAt,
     );
@@ -155,6 +158,8 @@ export class OfflineLicenseService {
     await this.prisma.offlineLicenseIssuance.create({
       data: {
         licenseId: license.id,
+        // Durable identifier that survives a license delete (which nulls licenseId)
+        licenseKeyLast4: license.key.slice(-4),
         jti: signed.jti,
         kid: signed.kid,
         // Normalized like the reveal audit so audit queries stay case-consistent

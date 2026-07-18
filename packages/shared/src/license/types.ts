@@ -124,6 +124,10 @@ export interface LicenseTokenClaims {
   };
   instanceLimit: number;
   mode: 'online' | 'offline';
+  // The LICENSE's real expiry (ISO), independent of this token's `exp` (which is
+  // just the token's short lifetime). null = perpetual license. Absent on tokens
+  // minted before this claim existed — consumers fall back to `exp` then.
+  licenseExpiresAt?: string | null;
   iat: number;
   exp: number;
 }

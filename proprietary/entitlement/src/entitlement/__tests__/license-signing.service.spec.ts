@@ -80,7 +80,7 @@ describe('LicenseSigningService', () => {
     expect(service.isConfigured).toBe(false);
     expect(() =>
       service.signLicenseToken(
-        { licenseId: 'l1', tier: Tier.pro, instanceLimit: 1, mode: 'online' },
+        { licenseId: 'l1', tier: Tier.pro, instanceLimit: 1, mode: 'online', licenseExpiresAt: null },
         new Date(),
       ),
     ).toThrow('not configured');
@@ -89,6 +89,7 @@ describe('LicenseSigningService', () => {
   it('signs a verifiable RS256 token with the expected claims', () => {
     const service = configuredService();
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+    const licenseExpiresAt = new Date('2027-01-01T00:00:00.000Z');
 
     const signed = service.signLicenseToken(
       {
@@ -97,6 +98,7 @@ describe('LicenseSigningService', () => {
         customer: { id: 'cust-1', name: 'Acme', email: 'ops@acme.test' },
         instanceLimit: 10,
         mode: 'offline',
+        licenseExpiresAt,
       },
       expiresAt,
     );
@@ -116,6 +118,8 @@ describe('LicenseSigningService', () => {
     expect(decoded.customer).toEqual({ id: 'cust-1', name: 'Acme', email: 'ops@acme.test' });
     expect(decoded.instanceLimit).toBe(10);
     expect(decoded.mode).toBe('offline');
+    // The license's real expiry rides as its own claim, distinct from the token exp
+    expect(decoded.licenseExpiresAt).toBe(licenseExpiresAt.toISOString());
     expect(decoded.exp).toBe(Math.floor(expiresAt.getTime() / 1000));
 
     const header = jwt.decode(signed.token, { complete: true })!.header;
@@ -129,7 +133,7 @@ describe('LicenseSigningService', () => {
     const service = new LicenseSigningService();
 
     const signed = service.signLicenseToken(
-      { licenseId: 'l1', tier: Tier.pro, instanceLimit: 1, mode: 'online' },
+      { licenseId: 'l1', tier: Tier.pro, instanceLimit: 1, mode: 'online', licenseExpiresAt: null },
       new Date(Date.now() + 1000 * 60),
     );
 

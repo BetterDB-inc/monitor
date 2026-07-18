@@ -35,6 +35,11 @@ export interface LicenseTokenInput {
   };
   instanceLimit: number;
   mode: 'online' | 'offline';
+  // The LICENSE's real expiry (null = perpetual), carried as its own claim so
+  // the monitor's offline/outage fallback reports the true license expiry rather
+  // than this token's short `exp`. Distinct from the `expiresAt` arg below, which
+  // is the TOKEN's lifetime.
+  licenseExpiresAt: Date | null;
 }
 
 export interface SignedLicenseToken {
@@ -127,6 +132,7 @@ export class LicenseSigningService {
         customer: input.customer,
         instanceLimit: input.instanceLimit,
         mode: input.mode,
+        licenseExpiresAt: input.licenseExpiresAt ? input.licenseExpiresAt.toISOString() : null,
         exp: Math.floor(expiresAt.getTime() / 1000),
       },
       this.privateKey,

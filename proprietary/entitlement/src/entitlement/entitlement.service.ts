@@ -84,6 +84,7 @@ export class EntitlementService {
             tier: Tier.enterprise,
             instanceLimit: 999999,
             mode: 'online',
+            licenseExpiresAt: null, // cloud enterprise grants are perpetual
           },
           new Date(Date.now() + ONLINE_TOKEN_TTL_MS),
         );
@@ -185,6 +186,7 @@ export class EntitlementService {
             },
             instanceLimit: license.instanceLimit,
             mode: 'online',
+            licenseExpiresAt: license.expiresAt ?? null,
           },
           new Date(Math.min(...expiryCandidates)),
         );
