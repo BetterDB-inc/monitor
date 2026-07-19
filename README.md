@@ -289,6 +289,67 @@ docker rm -f betterdb-monitor 2>/dev/null; docker run -d \
 | `NODE_ENV` | No | `production` | Node environment |
 | `ANOMALY_DETECTION_ENABLED` | No | `true` | Enable anomaly detection |
 | `ANOMALY_PROMETHEUS_INTERVAL_MS` | No | `30000` | Prometheus summary update interval (ms) |
+| `BETTERDB_LICENSE_KEY` | No | - | Online license key (Pro/Enterprise), validated over the network |
+| `BETTERDB_OFFLINE_LICENSE_FILE` | No | - | Path to a signed offline license `.jwt` for **air-gapped** hosts (see below) |
+| `BETTERDB_OFFLINE_LICENSE` | No | - | Offline license token as an inline JWT string |
+| `BETTERDB_DATA_DIR` | No | `/app/data` | Directory for persisted license state (mount a writable volume) |
+
+### Licensing & Air-Gapped Support
+
+BetterDB Monitor unlocks Pro/Enterprise features in one of two ways, depending on
+whether the host has internet access:
+
+- **Online license key** — set `BETTERDB_LICENSE_KEY`. The monitor validates it
+  against `betterdb.com` and caches a locally-verified **signed token**, so your
+  tier keeps working through short outages and restarts.
+- **Offline / air-gapped license token** — for hosts with **no internet access at
+  all** (see below).
+
+#### How air-gapped licensing works
+
+Every entitlement is a **signed RS256 JWT**. The monitor verifies it **locally**
+against public keys embedded in the image — it never has to reach a license server
+to trust a token. So an air-gapped host can run paid tiers with zero connectivity:
+
+1. On an internet-connected machine, sign in at
+   [betterdb.com/account/licenses](https://www.betterdb.com/account/licenses) and
+   **download your offline license token** (`.jwt`, Pro/Enterprise). It contains no
+   secrets and can't be tampered with — any edit breaks the signature.
+2. Transfer it to the air-gapped host however you like (USB, config management, a
+   Docker/Kubernetes secret mount).
+3. Provide it via `BETTERDB_OFFLINE_LICENSE_FILE` (path), `BETTERDB_OFFLINE_LICENSE`
+   (inline string), or paste it in the UI under **Settings → License → “Air-gapped
+   environment? Activate an offline license.”**
+
+When an offline token is configured and **no** `BETTERDB_LICENSE_KEY` is set, the
+monitor makes **zero outbound requests** — license checks, telemetry, and update
+pings are all disabled. It runs the granted tier until the token expires (perpetual
+licenses re-download yearly), then reverts to Community.
+
+```bash
+# fully offline — no network required
+docker volume create betterdb-data
+docker run --rm -v betterdb-data:/d alpine chown 1001:1001 /d   # volume writable by UID 1001 (one-time)
+
+docker run -d --name betterdb-monitor -p 3001:3001 \
+  -e DB_HOST=your-valkey-host -e DB_PORT=6379 -e DB_PASSWORD=your-password \
+  -v /path/to/betterdb-license.jwt:/run/secrets/betterdb-license.jwt:ro \
+  -e BETTERDB_OFFLINE_LICENSE_FILE=/run/secrets/betterdb-license.jwt \
+  -v betterdb-data:/app/data \
+  betterdb/monitor
+```
+
+Verify with `GET /api/license/status` → `source: offline-token`, `mode: offline`,
+`airGapped: true`.
+
+> **Persistence:** mount a writable volume at `/app/data` so the offline license and
+> the online outage-grace token survive restarts. The container runs as **UID 1001**,
+> so a freshly-created volume must be `chown`ed to it (shown above) — otherwise
+> persistence fails with `EACCES … license.jwt`.
+
+For the full flow, verification precedence, and key-rotation runbook see
+**[Offline & Air-Gapped Licenses](docs/offline-licenses.md)** and the
+**[Configuration reference](docs/configuration.md#license-configuration)**.
 
 ### Accessing the Application
 
