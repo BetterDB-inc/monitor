@@ -329,9 +329,9 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async validateLicenseBackground(): Promise<EntitlementResponse> {
+  private async validateLicenseBackground(forceOnline = false): Promise<EntitlementResponse> {
     try {
-      const result = await this.validateLicense();
+      const result = await this.validateLicense(forceOnline);
       this.isValidated = true;
       this.logger.log('License validation complete, isValidated=true');
 
@@ -1014,9 +1014,12 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       return response;
     }
 
-    this.cache = null;
-    this.isValidated = false;
-    this.validationPromise = this.validateLicenseBackground();
+    // Force a fresh online check WITHOUT nulling the cache: read-path getters
+    // (hasFeature/getLicenseTier) keep serving the currently-active tier during
+    // the round-trip instead of flashing community for the whole request.
+    // validateLicense updates the cache with the authoritative result — a real
+    // downgrade (expired/revoked) still lands, just after the round-trip.
+    this.validationPromise = this.validateLicenseBackground(true);
     return this.validationPromise;
   }
 
