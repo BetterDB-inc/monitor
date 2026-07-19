@@ -65,13 +65,21 @@ resource "aws_apigatewayv2_stage" "default" {
   name        = "$default"
   auto_deploy = true
 
-  # No per-route throttle: the entire self-hosted + cloud fleet re-validates
-  # licenses through this stage, and a coordinated fleet restart/upgrade (400+
-  # monitors) would all hit at once — a 5 rps cap would cascade-fail exactly
-  # then. Abuse is already bounded by the x-api-key authorizer (the routes are
-  # only reachable via the betterdb.com proxy) and the entitlement service's
-  # own per-endpoint throttles (e.g. registration). Falls back to the
-  # account-level default limit.
+  # Effectively-unlimited throttle. The whole self-hosted + cloud fleet
+  # re-validates licenses through this stage, and a coordinated fleet
+  # restart/upgrade (400+ monitors) hits at once — a low cap would cascade-fail
+  # exactly then. Abuse is already bounded by the x-api-key authorizer (routes
+  # are only reachable via the betterdb.com proxy) and the entitlement
+  # service's own per-endpoint throttle (registration).
+  #
+  # These MUST be set explicitly to high values. OMITTING default_route_settings
+  # (or setting 0) does NOT mean "unlimited" — API Gateway writes rate/burst = 0,
+  # which throttles EVERY request to 429 and takes the whole control plane down.
+  # (That is exactly what happened: 0/0 here 429'd all login/signup/validation.)
+  default_route_settings {
+    throttling_rate_limit  = 10000
+    throttling_burst_limit = 5000
+  }
 
   tags = {
     Project   = var.project_name
