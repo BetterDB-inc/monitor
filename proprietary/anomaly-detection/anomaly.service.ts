@@ -688,18 +688,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
                 );
                 await this.addAnomaly(clusterEvent, ctx);
 
-                if (this.webhookEventsProService?.isEnabled?.()) {
-                  this.otelEvents?.dispatch(
-                    WebhookEventType.CLUSTER_FAILOVER,
-                    {
-                      clusterState,
-                      slotsFailed: parseInt(clusterInfo.cluster_slots_fail) || 0,
-                      knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
-                    },
-                    ctx.connectionId,
-                  );
-                }
-                // Dispatch cluster.failover webhook (PRO tier)
+                // cluster.failover is mirrored to OTLP once from
+                // PrometheusService, the always-loaded core detector, so a
+                // single failover yields one OTLP record. Emitting here too
+                // would double-count it (and also on recovery, which is not a
+                // failover). The webhook below is unchanged.
                 if (this.webhookEventsProService) {
                   this.webhookEventsProService
                     .dispatchClusterFailover({
