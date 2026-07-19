@@ -11,8 +11,8 @@ can download an **offline license token** and never phone home.
 
 ## Customer flow (air-gapped)
 
-1. Sign in at [betterdb.com/account/licenses](https://www.betterdb.com/account/licenses)
-   with the email your license is registered to.
+1. Register at [betterdb.com](https://www.betterdb.com), then navigate to
+   [betterdb.com/account/licenses](https://www.betterdb.com/account/licenses).
 2. Click **Download .jwt** (or **Copy token**) on your license. The token is valid
    until your license expires (perpetual licenses: 366 days, then re-download).
 3. Transfer it to the air-gapped host however you like — it contains no secrets
