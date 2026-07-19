@@ -28,7 +28,10 @@ can download an **offline license token** and never phone home.
 > **Persistence:** in containers, mount a volume at the persisted-state dir —
 > `/app/data` by default (the container's `<workdir>/data`), or wherever you
 > point `BETTERDB_DATA_DIR`. Otherwise the UI-activated offline license and the
-> signed-token outage grace are lost on every restart/upgrade.
+> signed-token outage grace are lost on every restart/upgrade. **The container runs
+> as UID 1001** — a freshly-mounted volume is root-owned, so persistence fails with
+> `EACCES … license.jwt`. Make it writable once:
+> `docker run --rm -v betterdb-data:/d alpine chown 1001:1001 /d`.
 
 When an offline license is present and no `BETTERDB_LICENSE_KEY` is configured,
 the monitor **never makes an outbound request**: license checks, telemetry, and

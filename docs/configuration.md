@@ -208,14 +208,65 @@ Self-hosted BetterDB has **no artificial data retention limits**. Your data rete
 
 ### License Configuration
 
+Pro/Enterprise features are unlocked with a license, and there are **two ways** to
+provide one. Pick based on whether the monitor can reach the internet:
+
+#### Option 1 — Online license key (default)
+
+For monitors that can reach `betterdb.com`. Set your key; the monitor validates it
+online and caches a **locally-verified signed token**, so your tier keeps working
+through short outages (up to 7 days) and restarts.
+
+```bash
+-e BETTERDB_LICENSE_KEY=btdb_xxxxxxxxxxxxxxxx
+```
+
+#### Option 2 — Offline / air-gapped license token
+
+For monitors with **no internet access**. Download a signed offline license token
+from [betterdb.com/account/licenses](https://www.betterdb.com/account/licenses)
+(Pro/Enterprise), and provide it as a mounted file or an inline string. The monitor
+verifies it locally against embedded public keys and **never phones home** —
+telemetry and update checks are automatically disabled.
+
+```bash
+# as a mounted file (recommended — pairs with a Docker/K8s secret mount)
+-e BETTERDB_OFFLINE_LICENSE_FILE=/run/secrets/betterdb-license.jwt
+# …or inline as a JWT string
+-e BETTERDB_OFFLINE_LICENSE=eyJhbGciOiJSUzI1NiIs...
+```
+
+You can also paste/upload it at runtime: **Settings → License → “Air-gapped
+environment? Activate an offline license.”** See
+**[Offline & Air-Gapped Licenses](./offline-licenses.md)** for the full flow,
+verification precedence, and key-rotation runbook.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `BETTERDB_LICENSE_KEY` | No | - | BetterDB Pro license key for premium features |
-| `BETTERDB_TELEMETRY` | No | `true` | Enable anonymous telemetry (set to `false` to disable) |
-| `ENTITLEMENT_URL` | No | `https://www.betterdb.com/api/v1/entitlements` | Entitlement validation endpoint |
+| `BETTERDB_LICENSE_KEY` | No | - | Online license key (Option 1); validated against `ENTITLEMENT_URL`. |
+| `BETTERDB_OFFLINE_LICENSE` | No | - | Offline license token as a JWT string (Option 2). |
+| `BETTERDB_OFFLINE_LICENSE_FILE` | No | - | Path to an offline license `.jwt` (Option 2); falls back to `<data-dir>/license-offline.jwt`. |
+| `BETTERDB_DATA_DIR` | No | `/app/data` (Docker) / `./data` (local) | Directory for persisted license state (`license.jwt`, `license-offline.jwt`, `license-clock.json`), written mode `0600`. |
+| `BETTERDB_TELEMETRY` | No | `true` | Enable anonymous telemetry (set `false` to disable; force-disabled in air-gapped mode). |
+| `ENTITLEMENT_URL` | No | `https://www.betterdb.com/api/v1/entitlements` | Entitlement validation endpoint (Option 1). |
+| `LICENSE_ALLOW_UNSIGNED` | No | `false` | Accept unsigned entitlement responses from a legacy server. Use only during migration — an unsigned paid grant is otherwise refused. |
 | `LICENSE_CACHE_TTL_MS` | No | `3600000` | License cache TTL (milliseconds) |
 | `LICENSE_MAX_STALE_MS` | No | `604800000` | Maximum stale license age (milliseconds) |
 | `LICENSE_TIMEOUT_MS` | No | `10000` | License validation timeout (milliseconds) |
+
+> **Persisting license state (Docker/Kubernetes):** the signed-token outage grace
+> (Option 1) and UI/runtime-activated offline licenses (Option 2) are written to the
+> data directory — `/app/data` in the image. If you don't mount a volume there, that
+> state is re-fetched online, or lost for air-gapped hosts, on every restart/upgrade.
+> **The container runs as UID 1001** — a freshly-created volume mounts root-owned, so
+> the monitor logs `EACCES … open '/app/data/license.jwt'` and can't persist. Make the
+> volume writable by UID 1001 once:
+>
+> ```bash
+> docker volume create betterdb-data
+> docker run --rm -v betterdb-data:/d alpine chown 1001:1001 /d   # one-time
+> docker run -d -v betterdb-data:/app/data -e BETTERDB_OFFLINE_LICENSE_FILE=... betterdb/monitor
+> ```
 
 **Telemetry**: BetterDB Monitor collects anonymous usage telemetry to help improve the product. No personally identifiable information is collected. The telemetry includes:
 - Instance ID (deterministic hash derived from DB_HOST, DB_PORT, STORAGE_URL, and license key)
@@ -345,6 +396,33 @@ docker run -d \
 ```
 
 **Note**: With `--network host`, no `-p` flag is needed. The application uses the `PORT` environment variable directly (default: 3001).
+
+#### Air-Gapped / Offline License
+
+For hosts with no internet access, mount the offline license token and a writable
+data volume (see [License Configuration](#license-configuration) for the details):
+
+```bash
+# one-time: make the data volume writable by the container's UID (1001)
+docker volume create betterdb-data
+docker run --rm -v betterdb-data:/d alpine chown 1001:1001 /d
+
+docker run -d \
+  --name betterdb-monitor \
+  -p 3001:3001 \
+  -e DB_HOST=your-valkey-host \
+  -e DB_PORT=6379 \
+  -e DB_PASSWORD=your-password \
+  -v /path/to/betterdb-license.jwt:/run/secrets/betterdb-license.jwt:ro \
+  -e BETTERDB_OFFLINE_LICENSE_FILE=/run/secrets/betterdb-license.jwt \
+  -v betterdb-data:/app/data \
+  -e STORAGE_TYPE=memory \
+  betterdb/monitor
+```
+
+No `BETTERDB_LICENSE_KEY` is set, so the monitor runs **fully offline** — no
+outbound requests, telemetry disabled. Verify with `GET /api/license/status`
+(`source: offline-token`, `mode: offline`, `airGapped: true`).
 
 ### Accessing the Application
 
