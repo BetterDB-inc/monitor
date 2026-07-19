@@ -3,6 +3,16 @@ import { PrismaService } from '../prisma/prisma.service';
 import { randomBytes } from 'crypto';
 import { isValidTier, Tier } from '@betterdb/shared';
 
+// Clamp caller-supplied pagination so a negative skip/take (Prisma 500) or a
+// huge take (unbounded scan) can't get through.
+function clampSkip(skip?: number): number {
+  return Number.isFinite(skip) && (skip as number) > 0 ? Math.floor(skip as number) : 0;
+}
+function clampTake(take?: number): number {
+  if (!Number.isFinite(take) || (take as number) <= 0) return 50;
+  return Math.min(Math.floor(take as number), 200);
+}
+
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
@@ -12,7 +22,9 @@ export class AdminService {
   async createCustomer(data: { email: string; name?: string }) {
     const customer = await this.prisma.customer.create({
       data: {
-        email: data.email,
+        // Normalized on write — lookups are case-insensitive and a unique
+        // index on LOWER(email) forbids case-variant duplicates.
+        email: data.email.trim().toLowerCase(),
         name: data.name,
       },
     });
@@ -23,8 +35,8 @@ export class AdminService {
 
   async listCustomers(params?: { skip?: number; take?: number }) {
     return this.prisma.customer.findMany({
-      skip: params?.skip || 0,
-      take: params?.take || 50,
+      skip: clampSkip(params?.skip),
+      take: clampTake(params?.take),
       include: {
         licenses: true,
         subscriptions: true,
@@ -79,8 +91,8 @@ export class AdminService {
   async listLicenses(params?: { customerId?: string; skip?: number; take?: number }) {
     return this.prisma.license.findMany({
       where: params?.customerId ? { customerId: params.customerId } : undefined,
-      skip: params?.skip || 0,
-      take: params?.take || 50,
+      skip: clampSkip(params?.skip),
+      take: clampTake(params?.take),
       include: {
         customer: true,
       },

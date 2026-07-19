@@ -9,6 +9,8 @@ describe('LicenseService', () => {
   beforeEach(async () => {
     // Reset environment
     process.env = { ...originalEnv };
+    // These specs predate signed entitlement tokens and mock unsigned responses
+    process.env.LICENSE_ALLOW_UNSIGNED = 'true';
     process.env.APP_VERSION = '0.1.0';
     // Disable actual HTTP calls
     delete process.env.BETTERDB_LICENSE_KEY;
@@ -96,7 +98,7 @@ describe('LicenseService', () => {
 
     describe('getVersionInfo', () => {
       it('should return complete version info object when update available', () => {
-        (service as any).setLatestVersion('0.2.0', 'https://example.com/release');
+        (service as any).setLatestVersion('0.2.0', 'https://github.com/betterdb-inc/monitor/releases/tag/v0.2.0');
 
         const info = service.getVersionInfo();
 
@@ -104,7 +106,7 @@ describe('LicenseService', () => {
           current: '0.1.0',
           latest: '0.2.0',
           updateAvailable: true,
-          releaseUrl: 'https://example.com/release',
+          releaseUrl: 'https://github.com/betterdb-inc/monitor/releases/tag/v0.2.0',
           checkedAt: expect.any(Number),
           versionCheckIntervalMs: 3600000,
         });
@@ -144,11 +146,18 @@ describe('LicenseService', () => {
     });
 
     describe('setLatestVersion', () => {
-      it('should set release URL from parameter', () => {
-        (service as any).setLatestVersion('0.2.0', 'https://custom-url.com/release');
+      it('should keep a trusted release URL from parameter', () => {
+        (service as any).setLatestVersion('0.2.0', 'https://www.betterdb.com/releases/0.2.0');
 
         const info = service.getVersionInfo();
-        expect(info.releaseUrl).toBe('https://custom-url.com/release');
+        expect(info.releaseUrl).toBe('https://www.betterdb.com/releases/0.2.0');
+      });
+
+      it('should reject an untrusted release URL and derive the canonical one', () => {
+        (service as any).setLatestVersion('0.2.0', 'https://evil.example/phish');
+
+        const info = service.getVersionInfo();
+        expect(info.releaseUrl).toBe('https://github.com/betterdb-inc/monitor/releases/tag/v0.2.0');
       });
 
       it('should strip v prefix from version', () => {

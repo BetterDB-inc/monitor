@@ -65,9 +65,20 @@ resource "aws_apigatewayv2_stage" "default" {
   name        = "$default"
   auto_deploy = true
 
+  # Effectively-unlimited throttle. The whole self-hosted + cloud fleet
+  # re-validates licenses through this stage, and a coordinated fleet
+  # restart/upgrade (400+ monitors) hits at once — a low cap would cascade-fail
+  # exactly then. Abuse is already bounded by the x-api-key authorizer (routes
+  # are only reachable via the betterdb.com proxy) and the entitlement
+  # service's own per-endpoint throttle (registration).
+  #
+  # These MUST be set explicitly to high values. OMITTING default_route_settings
+  # (or setting 0) does NOT mean "unlimited" — API Gateway writes rate/burst = 0,
+  # which throttles EVERY request to 429 and takes the whole control plane down.
+  # (That is exactly what happened: 0/0 here 429'd all login/signup/validation.)
   default_route_settings {
-    throttling_burst_limit = 10
-    throttling_rate_limit  = 5
+    throttling_rate_limit  = 10000
+    throttling_burst_limit = 5000
   }
 
   tags = {
@@ -280,6 +291,50 @@ resource "aws_apigatewayv2_route" "register" {
 resource "aws_apigatewayv2_route" "entitlements" {
   api_id             = aws_apigatewayv2_api.entitlement.id
   route_key          = "POST /v1/entitlements"
+  target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
+}
+
+# Invitations — reached by the betterdb.com signup flow via lib/entitlement.ts.
+resource "aws_apigatewayv2_route" "check_invitation" {
+  api_id             = aws_apigatewayv2_api.entitlement.id
+  route_key          = "GET /invitations/check"
+  target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
+}
+
+resource "aws_apigatewayv2_route" "accept_invitation" {
+  api_id             = aws_apigatewayv2_api.entitlement.id
+  route_key          = "POST /invitations/{id}/accept"
+  target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
+}
+
+# Account / licenses page (betterdb.com/account/licenses) — the website server
+# forwards the verified session email; the entitlement service re-checks
+# ownership. Behind the same x-api-key authorizer as every other admin route.
+resource "aws_apigatewayv2_route" "list_customer_licenses" {
+  api_id             = aws_apigatewayv2_api.entitlement.id
+  route_key          = "GET /admin/customers/by-email/{email}/licenses"
+  target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
+}
+
+resource "aws_apigatewayv2_route" "issue_offline_license" {
+  api_id             = aws_apigatewayv2_api.entitlement.id
+  route_key          = "POST /admin/licenses/{id}/offline-file"
+  target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.api_key.id
+}
+
+resource "aws_apigatewayv2_route" "reveal_license_key" {
+  api_id             = aws_apigatewayv2_api.entitlement.id
+  route_key          = "POST /admin/licenses/{id}/key"
   target             = "integrations/${aws_apigatewayv2_integration.entitlement.id}"
   authorization_type = "CUSTOM"
   authorizer_id      = aws_apigatewayv2_authorizer.api_key.id

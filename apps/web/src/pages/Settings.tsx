@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { settingsApi } from '../api/settings';
 import { agentTokensApi, GeneratedToken } from '../api/agent-tokens';
-import { registrationApi } from '../api/registration';
 import { licenseApi } from '../api/license';
 import { useMcpTokens } from '../hooks/useMcpTokens';
 import { useConnection } from '../hooks/useConnection';
@@ -25,15 +24,18 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
   const [formData, setFormData] = useState<Partial<AppSettings>>({});
   const [hasChanges, setHasChanges] = useState(false);
 
-  // Registration/license state
-  const [regEmail, setRegEmail] = useState('');
-  const [regSubmitting, setRegSubmitting] = useState(false);
-  const [regSuccess, setRegSuccess] = useState(false);
-  const [regError, setRegError] = useState<string | null>(null);
+  // License state
   const [activateKey, setActivateKey] = useState('');
   const [activating, setActivating] = useState(false);
   const [activateError, setActivateError] = useState<string | null>(null);
   const [showChangeKey, setShowChangeKey] = useState(false);
+
+  // Offline (air-gapped) license state
+  const [offlineToken, setOfflineToken] = useState('');
+  const [offlineActivating, setOfflineActivating] = useState(false);
+  const [offlineError, setOfflineError] = useState<string | null>(null);
+  const [offlineNotice, setOfflineNotice] = useState<string | null>(null);
+  const [showOffline, setShowOffline] = useState(false);
 
   // MCP Tokens state (must be before any early returns)
   const { tokens: mcpTokens, invalidate: invalidateMcpTokens } = useMcpTokens(
@@ -165,21 +167,6 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
     setTimeout(() => setMcpCopied(false), 2000);
   };
 
-  const handleRegister = async () => {
-    if (!regEmail.trim()) return;
-    setRegSubmitting(true);
-    setRegError(null);
-    try {
-      await registrationApi.register(regEmail.trim());
-      setRegSuccess(true);
-      setRegEmail('');
-    } catch (err) {
-      setRegError(err instanceof Error ? err.message : 'Registration failed');
-    } finally {
-      setRegSubmitting(false);
-    }
-  };
-
   const handleActivate = async () => {
     if (!activateKey.trim()) return;
     setActivating(true);
@@ -196,6 +183,94 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
       setActivating(false);
     }
   };
+
+  const handleActivateOffline = async () => {
+    if (!offlineToken.trim()) return;
+    setOfflineActivating(true);
+    setOfflineError(null);
+    setOfflineNotice(null);
+    try {
+      const result = await licenseApi.activateOffline(offlineToken.trim());
+      setOfflineToken('');
+      setShowOffline(false);
+      if (result.fallbackOnly && result.message) {
+        setOfflineNotice(result.message);
+      }
+      queryClient.invalidateQueries({ queryKey: ['license-status'] });
+    } catch (err) {
+      setOfflineError(err instanceof Error ? err.message : 'Offline activation failed');
+    } finally {
+      setOfflineActivating(false);
+    }
+  };
+
+  const handleOfflineFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setOfflineToken(String(reader.result || '').trim());
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const isOfflineLicense = license?.source === 'offline-token';
+  const offlineDaysLeft = license?.offlineExpiresAt
+    ? Math.ceil((new Date(license.offlineExpiresAt).getTime() - Date.now()) / 86400000)
+    : null;
+
+  const offlineActivationForm = (
+    <div className="border-t pt-4">
+      {!showOffline ? (
+        <>
+          <button
+            onClick={() => setShowOffline(true)}
+            className="text-sm text-primary hover:underline cursor-pointer"
+            type="button"
+          >
+            {isOfflineLicense ? 'Replace offline license' : 'Air-gapped environment? Activate an offline license'}
+          </button>
+          {offlineNotice && (
+            <p className="text-sm text-muted-foreground mt-2">{offlineNotice}</p>
+          )}
+        </>
+      ) : (
+        <>
+          <label className="block text-sm font-medium mb-1">Offline license token</label>
+          <p className="text-xs text-muted-foreground mb-2">
+            Download it from betterdb.com &rarr; Account &rarr; Licenses, then paste it here or upload the
+            .jwt file. Verified locally &mdash; works with zero network access.
+          </p>
+          <textarea
+            value={offlineToken}
+            onChange={(e) => setOfflineToken(e.target.value)}
+            placeholder="eyJhbGciOiJSUzI1NiIs..."
+            rows={3}
+            className="w-full px-3 py-2 border rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+          <div className="flex gap-2 mt-2">
+            <button
+              onClick={handleActivateOffline}
+              disabled={offlineActivating || !offlineToken.trim()}
+              className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed"
+            >
+              {offlineActivating ? 'Activating...' : 'Activate offline license'}
+            </button>
+            <label className="px-3 py-2 text-sm border rounded-md hover:bg-muted cursor-pointer">
+              Upload file
+              <input type="file" accept=".jwt,.txt,text/plain" className="hidden" onChange={handleOfflineFile} />
+            </label>
+            <button
+              onClick={() => { setShowOffline(false); setOfflineToken(''); setOfflineError(null); }}
+              className="px-3 py-2 text-sm border rounded-md hover:bg-muted"
+            >
+              Cancel
+            </button>
+          </div>
+          {offlineError && <p className="text-sm text-destructive mt-1">{offlineError}</p>}
+        </>
+      )}
+    </div>
+  );
 
   const categories: { id: SettingsCategory; label: string }[] = [
     { id: 'license', label: 'License' },
@@ -257,38 +332,21 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       </div>
                     ) : (
                       <>
-                        {regSuccess ? (
-                          <div className="bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 rounded-md p-4">
-                            <p className="text-sm font-medium text-green-800 dark:text-green-200">Check your email for your license key</p>
-                            <p className="text-xs text-green-600 dark:text-green-400 mt-1">
-                              Paste it below to activate.
-                            </p>
-                          </div>
-                        ) : (
-                          <div>
-                            <label className="block text-sm font-medium mb-1">Email address</label>
-                            <div className="flex gap-2">
-                              <input
-                                type="email"
-                                value={regEmail}
-                                onChange={(e) => setRegEmail(e.target.value)}
-                                placeholder="you@company.com"
-                                className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                                onKeyDown={(e) => e.key === 'Enter' && handleRegister()}
-                              />
-                              <button
-                                onClick={handleRegister}
-                                disabled={regSubmitting || !regEmail.trim()}
-                                className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed whitespace-nowrap"
-                              >
-                                {regSubmitting ? 'Sending...' : 'Get my free license key'}
-                              </button>
-                            </div>
-                            {regError && (
-                              <p className="text-sm text-destructive mt-1">{regError}</p>
-                            )}
-                          </div>
-                        )}
+                        <div className="bg-muted/50 border rounded-md p-4">
+                          <p className="text-sm">
+                            Licenses are managed at{' '}
+                            <a
+                              href="https://www.betterdb.com/account/licenses"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-primary font-medium hover:underline"
+                            >
+                              betterdb.com/account/licenses
+                            </a>
+                            . Sign in there to get your free license key, then paste it below —
+                            or download an offline license for air-gapped environments.
+                          </p>
+                        </div>
 
                         <div className="border-t pt-4">
                           <label className="block text-sm font-medium mb-1">Already have a license key?</label>
@@ -313,6 +371,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                             <p className="text-sm text-destructive mt-1">{activateError}</p>
                           )}
                         </div>
+
+                        {offlineActivationForm}
                       </>
                     )}
                   </>
@@ -331,9 +391,49 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       </div>
                     )}
 
-                    <div className="bg-muted/50 border rounded-md p-4 text-sm">
-                      Early access — all features free. You'll get advance notice before anything changes.
-                    </div>
+                    {isOfflineLicense ? (
+                      <div className="bg-muted/50 border rounded-md p-4 text-sm space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded-full font-medium">
+                            Offline license
+                          </span>
+                          {license?.instanceLimit != null && (
+                            <span className="text-xs text-muted-foreground">
+                              Floating &mdash; up to {license.instanceLimit} instances
+                            </span>
+                          )}
+                        </div>
+                        {license?.offlineExpiresAt && offlineDaysLeft != null && (
+                          <p
+                            className={
+                              offlineDaysLeft <= 7
+                                ? 'text-destructive font-medium'
+                                : offlineDaysLeft <= 30
+                                  ? 'text-amber-600 dark:text-amber-400'
+                                  : 'text-muted-foreground'
+                            }
+                          >
+                            Expires {new Date(license.offlineExpiresAt).toLocaleDateString()} ({offlineDaysLeft} days left)
+                            {offlineDaysLeft <= 30 && ' — download a fresh token from your account page'}
+                          </p>
+                        )}
+                        <p className="text-xs text-muted-foreground">
+                          {license?.airGapped
+                            ? 'Telemetry and phone-home are disabled while running from an offline license.'
+                            : 'Offline license in use as fallback — a license key is configured, so online validation and telemetry remain active.'}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="bg-muted/50 border rounded-md p-4 text-sm">
+                        Early access — all features free. You'll get advance notice before anything changes.
+                      </div>
+                    )}
+
+                    {license?.clockRollbackSuspected && (
+                      <div className="bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-md p-3 text-sm text-amber-800 dark:text-amber-200">
+                        The system clock appears to have moved backwards — license expiry checks may be unreliable.
+                      </div>
+                    )}
 
                     {!isCloudMode && (
                     <div className="border-t pt-4">
@@ -378,6 +478,8 @@ export function Settings({ isCloudMode = false }: { isCloudMode?: boolean }) {
                       )}
                     </div>
                     )}
+
+                    {!isCloudMode && offlineActivationForm}
                   </>
                 )}
               </div>

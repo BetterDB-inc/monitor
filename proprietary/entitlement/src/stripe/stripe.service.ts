@@ -48,19 +48,30 @@ export class StripeService {
       return;
     }
 
+    const email = stripeCustomer.email!.trim().toLowerCase();
+
     let customer = await this.prisma.customer.findUnique({
       where: { stripeId: customerId },
     });
 
     if (!customer) {
-      customer = await this.prisma.customer.create({
-        data: {
-          email: stripeCustomer.email!,
-          name: stripeCustomer.name,
-          stripeId: customerId,
-        },
-      });
-      this.logger.log(`Created customer: ${customer.id}`);
+      // A self-serve registrant already has a customer row (by email, no
+      // stripeId). With the LOWER(email) unique index, blindly creating a new
+      // row here would hit a constraint violation and fail the webhook — so
+      // adopt the existing customer and attach the Stripe id instead.
+      const existingByEmail = await this.prisma.customer.findFirst({ where: { email } });
+      if (existingByEmail) {
+        customer = await this.prisma.customer.update({
+          where: { id: existingByEmail.id },
+          data: { stripeId: customerId, name: stripeCustomer.name ?? existingByEmail.name },
+        });
+        this.logger.log(`Linked Stripe id to existing customer: ${customer.id}`);
+      } else {
+        customer = await this.prisma.customer.create({
+          data: { email, name: stripeCustomer.name, stripeId: customerId },
+        });
+        this.logger.log(`Created customer: ${customer.id}`);
+      }
     }
 
     const subscription = await this.stripe.subscriptions.retrieve(subscriptionId);

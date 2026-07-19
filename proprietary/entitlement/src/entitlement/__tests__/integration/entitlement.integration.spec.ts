@@ -113,7 +113,7 @@ describe('Entitlement (integration)', () => {
       expect(body.customer!.email).toBe('integration-test@example.com');
     });
 
-    it('rejects an invalid license key with 401', async () => {
+    it('returns 200 valid:false for an invalid license key (not a transport 401)', async () => {
       const res = await app.inject({
         method: 'POST',
         url: '/v1/entitlements',
@@ -124,7 +124,11 @@ describe('Entitlement (integration)', () => {
         },
       });
 
-      expect(res.statusCode).toBe(401);
+      // A bad key is a body-level rejection, not a transport failure — the
+      // proxy/monitor rely on non-2xx meaning "unreachable", so unknown keys
+      // must answer 2xx with valid:false (Nest returns 201 for this POST).
+      expect(res.statusCode).toBeLessThan(300);
+      expect(res.json()).toMatchObject({ valid: false, tier: 'community' });
     });
 
     it('returns expired error for expired license', async () => {

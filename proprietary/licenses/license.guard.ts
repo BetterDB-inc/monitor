@@ -13,7 +13,13 @@ export class LicenseGuard implements CanActivate {
   ) { }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const requiredFeature = this.reflector.get<Feature | string>('requiredFeature', context.getHandler());
+    // Read both method- and class-level @RequiresFeature — controllers that
+    // gate an entire controller declare it at the class level, and getHandler()
+    // alone would miss that and silently allow (paid feature served for free).
+    const requiredFeature = this.reflector.getAllAndOverride<Feature | string>('requiredFeature', [
+      context.getHandler(),
+      context.getClass(),
+    ]);
     if (!requiredFeature) return true;
 
     // For paid tier features, ensure license validation has completed

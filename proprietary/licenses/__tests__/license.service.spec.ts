@@ -36,6 +36,8 @@ describe('LicenseService', () => {
   beforeEach(async () => {
     jest.resetModules();
     process.env = { ...originalEnv };
+    // These specs predate signed entitlement tokens and mock unsigned responses
+    process.env.LICENSE_ALLOW_UNSIGNED = 'true';
     mockTelemetryClient = createMockTelemetryClient();
 
     const module: TestingModule = await Test.createTestingModule({
@@ -293,7 +295,9 @@ describe('LicenseService', () => {
 
       const info = service.getVersionInfo();
       expect(info.latest).toBe('0.5.0');
-      expect(info.releaseUrl).toBe('https://example.com/v0.5.0');
+      // Untrusted host → derives the canonical GitHub URL rather than storing
+      // the server-supplied one (phishing guard)
+      expect(info.releaseUrl).toBe('https://github.com/betterdb-inc/monitor/releases/tag/v0.5.0');
     });
 
     it('should not throw when entitlement fetch fails', async () => {

@@ -89,4 +89,41 @@ describe('Telemetry Integration', () => {
 
     await module.close();
   });
+
+  it('makes no outbound telemetry when air-gapped (isTelemetryEnabled=false)', async () => {
+    const mockLicenseService = {
+      validationPromise: Promise.resolve(),
+      getInstanceId: jest.fn().mockReturnValue('airgap-instance'),
+      getLicenseTier: jest.fn().mockReturnValue('enterprise'),
+      getTruncatedLicenseKey: jest.fn().mockReturnValue(undefined),
+      isTelemetryEnabled: false, // enterAirGappedMode force-disables telemetry
+    };
+
+    const module: TestingModule = await Test.createTestingModule({
+      imports: [await ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true })],
+      providers: [
+        { provide: 'TELEMETRY_CLIENT', useValue: mockAdapter },
+        {
+          provide: UsageTelemetryService,
+          useFactory: (configService: ConfigService) =>
+            new UsageTelemetryService(mockAdapter, configService, mockLicenseService as never),
+          inject: [ConfigService],
+        },
+      ],
+    }).compile();
+
+    await module.init();
+    const service = module.get(UsageTelemetryService);
+
+    // No identify / app_start on boot
+    expect(mockAdapter.identify).not.toHaveBeenCalled();
+    expect(mockAdapter.capture).not.toHaveBeenCalled();
+
+    // No runtime events either
+    await service.trackPageView('/dashboard');
+    await service.trackDbSwitch(1, 'valkey', '8.0');
+    expect(mockAdapter.capture).not.toHaveBeenCalled();
+
+    await module.close();
+  });
 });

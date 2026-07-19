@@ -39,6 +39,10 @@ export class UsageTelemetryService implements OnModuleInit {
     this.instanceId = this.licenseService.getInstanceId();
     this.tier = this.licenseService.getLicenseTier();
 
+    // Air-gapped (or telemetry-disabled) instances must make no outbound
+    // calls — not even the identify/app_start on boot.
+    if (!this.telemetryAllowed) return;
+
     const licenseKey = this.getLicenseKeySafely();
     try {
       this.telemetryClient.identify(this.instanceId, {
@@ -55,8 +59,18 @@ export class UsageTelemetryService implements OnModuleInit {
     await this.trackAppStart();
   }
 
+  /**
+   * Whether product telemetry may leave this host. False when running from an
+   * offline license (air-gapped) or when telemetry is disabled — the
+   * LicenseService flag is the single source of truth (it folds in
+   * BETTERDB_TELEMETRY and the air-gapped force-off).
+   */
+  private get telemetryAllowed(): boolean {
+    return this.licenseService?.isTelemetryEnabled ?? true;
+  }
+
   private sendEvent(eventType: string, payload?: Record<string, unknown>): void {
-    if (!this.instanceId) return;
+    if (!this.instanceId || !this.telemetryAllowed) return;
     const licenseKey = this.getLicenseKeySafely();
     try {
       this.telemetryClient.capture({

@@ -77,8 +77,23 @@ export class AdminController {
   @Put('licenses/:id')
   updateLicense(
     @Param('id') id: string,
-    @Body() body: { active?: boolean; expiresAt?: string; instanceLimit?: number },
+    @Body() body: { active?: boolean; expiresAt?: string | null; instanceLimit?: number },
   ) {
+    if (body.active !== undefined && typeof body.active !== 'boolean') {
+      throw new BadRequestException('active must be a boolean');
+    }
+    if (body.instanceLimit !== undefined && (typeof body.instanceLimit !== 'number' || body.instanceLimit < 1)) {
+      throw new BadRequestException('instanceLimit must be a positive number');
+    }
+    // Reject null explicitly: perpetual licenses aren't supported here, and
+    // without this `Date.parse(null)` is NaN so a clear attempt would surface a
+    // confusing "must be a valid date" instead of an intentional message.
+    if (body.expiresAt === null) {
+      throw new BadRequestException('expiresAt cannot be null — perpetual licenses are not supported via this endpoint');
+    }
+    if (body.expiresAt !== undefined && isNaN(Date.parse(body.expiresAt))) {
+      throw new BadRequestException('expiresAt must be a valid date');
+    }
     return this.admin.updateLicense(id, {
       ...body,
       expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,

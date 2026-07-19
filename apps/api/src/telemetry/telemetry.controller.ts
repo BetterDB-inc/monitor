@@ -23,7 +23,11 @@ export class TelemetryController {
   getConfig(): TelemetryConfig {
     const provider = this.configService.get<string>('TELEMETRY_PROVIDER', 'posthog');
     const rawTelemetryConfig = this.configService.get('BETTERDB_TELEMETRY');
-    const telemetryEnabled = rawTelemetryConfig !== false && rawTelemetryConfig !== 'false';
+    const envEnabled = rawTelemetryConfig !== false && rawTelemetryConfig !== 'false';
+    // The frontend gates page-view/idle telemetry on this flag — it must also
+    // be false when running from an offline license (air-gapped), where the
+    // LicenseService has force-disabled telemetry.
+    const telemetryEnabled = envEnabled && (this.licenseService?.isTelemetryEnabled ?? true);
     const instanceId = this.licenseService?.getInstanceId() ?? '';
 
     const config: TelemetryConfig = {

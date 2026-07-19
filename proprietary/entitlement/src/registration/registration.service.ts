@@ -6,6 +6,17 @@ import { EmailService } from '../email/email.service';
 
 type CustomerWithLicenses = Customer & { licenses: License[] };
 
+// Self-serve licenses expire after 3 months. Re-registering renews the
+// existing license for another 3 months from now — expiry keeps users in
+// touch without ever locking them out permanently.
+const LICENSE_VALIDITY_MONTHS = 3;
+
+function licenseExpiry(): Date {
+  const expiry = new Date();
+  expiry.setMonth(expiry.getMonth() + LICENSE_VALIDITY_MONTHS);
+  return expiry;
+}
+
 @Injectable()
 export class RegistrationService {
   private readonly logger = new Logger(RegistrationService.name);
@@ -16,7 +27,8 @@ export class RegistrationService {
     private readonly email: EmailService,
   ) {}
 
-  async register(emailAddress: string): Promise<{ message: string }> {
+  async register(rawEmailAddress: string): Promise<{ message: string }> {
+    const emailAddress = rawEmailAddress.trim().toLowerCase();
     let customer: CustomerWithLicenses;
     let isNew = false;
 
@@ -49,10 +61,11 @@ export class RegistrationService {
     }
 
     if (isNew) {
-      // Create enterprise license — no expiry, unlimited instances
+      // Create enterprise license — 3-month validity, unlimited instances
       const license = await this.admin.createLicense({
         customerId: customer.id,
         tier: 'enterprise',
+        expiresAt: licenseExpiry(),
       });
 
       this.logger.log(`New registration: ${customer.id} (${emailAddress}) — license ${license.id}`);
@@ -69,7 +82,15 @@ export class RegistrationService {
     );
 
     if (license) {
-      // Resend the email with their existing key
+      // Renew self-serve licenses for another validity window (also un-expires
+      // lapsed ones — re-registering is the self-serve renewal path). Only ever
+      // EXTEND: perpetual licenses (expiresAt null, e.g. paid/manually issued)
+      // are never given an expiry, and a longer paid expiry is never shortened.
+      const renewal = licenseExpiry();
+      if (license.expiresAt && license.expiresAt < renewal) {
+        await this.admin.updateLicense(license.id, { expiresAt: renewal });
+        this.logger.log(`Renewed license ${license.id} for ${emailAddress}`);
+      }
       await this.email.sendRegistrationEmail(emailAddress, license.key);
       return { message: 'Check your email for your license key' };
     }
@@ -78,6 +99,7 @@ export class RegistrationService {
     const newLicense = await this.admin.createLicense({
       customerId: customer.id,
       tier: 'enterprise',
+      expiresAt: licenseExpiry(),
     });
 
     this.logger.log(`Re-registration created new license: ${customer.id} (${emailAddress}) — license ${newLicense.id}`);

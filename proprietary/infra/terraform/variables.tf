@@ -36,6 +36,16 @@ variable "resend_api_key" {
   sensitive   = true
 }
 
+variable "license_signing_private_key" {
+  description = "RS256 private key (PEM) for signing entitlement/offline license tokens"
+  sensitive   = true
+}
+
+variable "license_signing_kid" {
+  description = "Key id for the license signing key; must match a public key embedded in the monitor (e.g. lic-2026-01)"
+  type        = string
+}
+
 variable "nlb_ip_address" {
   description = "Internal NLB hostname for the entitlement service"
   sensitive   = true

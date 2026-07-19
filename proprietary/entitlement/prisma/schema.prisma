@@ -25,6 +25,9 @@ enum SubscriptionStatus {
 
 model Customer {
   id             String   @id @default(cuid())
+  // NB: also covered by a raw UNIQUE INDEX ON (LOWER(email)) — see the
+  // email_case_uniqueness migration — because lookups are case-insensitive
+  // and case-variant duplicates would conflate accounts.
   email          String   @unique
   name           String?
   stripeId       String?  @unique @map("stripe_id")
@@ -124,11 +127,60 @@ model License {
 
   customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
   validations    LicenseValidation[]
+  offlineIssuances OfflineLicenseIssuance[]
+  keyReveals     LicenseKeyReveal[]
 
   @@index([customerId])
   @@index([key])
   @@index([active])
   @@map("licenses")
+}
+
+// Audit of full-key reveals from the account page. The raw key is perpetual
+// and reusable, so every reveal is recorded.
+model LicenseKeyReveal {
+  id              String    @id @default(cuid())
+  // SetNull (not Cascade): the audit row must OUTLIVE the license/customer it
+  // references — deleting a license must not erase the record of who revealed
+  // its key. licenseId is nulled on delete, so we ALSO snapshot a durable,
+  // non-FK identifier (licenseKeyLast4) captured at reveal time — otherwise a
+  // deleted license leaves only email+timestamp with no way to tell WHICH
+  // license's key was revealed. who/when + the snapshot survive the delete.
+  licenseId       String?   @map("license_id")
+  // Last 4 chars of the revealed key — enough to identify the license in the
+  // audit trail without storing the secret; survives license deletion.
+  licenseKeyLast4 String?   @map("license_key_last4")
+  revealedToEmail String    @map("revealed_to_email")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  license         License?  @relation(fields: [licenseId], references: [id], onDelete: SetNull)
+
+  @@index([licenseId])
+  @@map("license_key_reveals")
+}
+
+// Audit of issued offline (air-gapped) license tokens. Offline tokens are
+// irrevocable until their exp, so every issuance is recorded for visibility.
+model OfflineLicenseIssuance {
+  id            String    @id @default(cuid())
+  // SetNull (not Cascade): audit outlives the license — an offline token is
+  // irrevocable for up to 366 days, so the record of who was issued one must
+  // survive a license/customer delete. licenseId is nulled then; jti/kid still
+  // identify the issued TOKEN, and licenseKeyLast4 snapshots WHICH license.
+  licenseId     String?   @map("license_id")
+  // Last 4 chars of the license key at issuance — identifies the license in the
+  // audit trail after a delete nulls licenseId; not the secret itself.
+  licenseKeyLast4 String? @map("license_key_last4")
+  jti           String    @unique
+  kid           String
+  issuedToEmail String    @map("issued_to_email")
+  expiresAt     DateTime  @map("expires_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  license       License?  @relation(fields: [licenseId], references: [id], onDelete: SetNull)
+
+  @@index([licenseId])
+  @@map("offline_license_issuances")
 }
 
 model Subscription {

@@ -31,12 +31,19 @@ export class LicenseController {
   getStatus() {
     const info = this.license.getLicenseInfo();
     const features = TIER_FEATURES[info.tier];
+    const claims = this.license.getVerifiedClaims();
     return {
       tier: info.tier,
       valid: info.valid,
       features,
       expiresAt: info.expiresAt,
       customer: info.customer,
+      source: this.license.getLicenseSource(),
+      mode: claims?.mode,
+      instanceLimit: info.instanceLimit ?? claims?.instanceLimit,
+      offlineExpiresAt: this.license.getOfflineExpiresAt(),
+      airGapped: this.license.isAirGapped(),
+      clockRollbackSuspected: this.license.isClockRollbackSuspected(),
     };
   }
 
@@ -107,6 +114,50 @@ export class LicenseController {
       expiresAt: info.expiresAt,
       customer: info.customer,
       error: info.error,
+      activatedAt: new Date().toISOString(),
+    };
+  }
+
+  @Post('license/activate-offline')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @ApiTags('license')
+  @ApiOperation({ summary: 'Activate an offline (air-gapped) license token' })
+  @HttpCode(200)
+  async activateOffline(@Body() body: { token: string }) {
+    const token = typeof body.token === 'string' ? body.token.trim() : '';
+    // A JWT is three dot-separated base64url segments
+    if (!token || token.split('.').length !== 3) {
+      throw new BadRequestException('A valid offline license token is required');
+    }
+
+    const { entitlement, fallbackOnly } = await this.license.activateOfflineLicense(token);
+    const features = TIER_FEATURES[entitlement.tier];
+
+    if (!entitlement.valid && !fallbackOnly) {
+      throw new BadRequestException({
+        tier: entitlement.tier,
+        valid: entitlement.valid,
+        features,
+        expiresAt: entitlement.expiresAt,
+        customer: entitlement.customer,
+        error: entitlement.error || 'Offline license activation failed',
+      });
+    }
+
+    // `entitlement` reflects what is ACTIVE after the call — with a license
+    // key configured that's still the online entitlement, and the token was
+    // only stored as fallback.
+    return {
+      tier: entitlement.tier,
+      valid: entitlement.valid,
+      features,
+      expiresAt: entitlement.expiresAt,
+      customer: entitlement.customer,
+      instanceLimit: entitlement.instanceLimit,
+      fallbackOnly,
+      ...(fallbackOnly
+        ? { message: 'Offline license stored as fallback — your online license key remains active' }
+        : {}),
       activatedAt: new Date().toISOString(),
     };
   }
