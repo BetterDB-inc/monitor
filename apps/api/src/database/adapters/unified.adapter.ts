@@ -134,10 +134,21 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   async getInfo(sections?: string[]): Promise<Record<string, unknown>> {
-    const infoString =
-      sections && sections.length > 0
-        ? await this.client.info(...sections)
-        : await this.client.info();
+    let infoString: string;
+    if (sections && sections.length > 1) {
+      // Passing MULTIPLE sections to a single INFO call is a Redis 7.0+/Valkey
+      // feature — Redis <7 and forks like KeyDB reject it with "ERR syntax
+      // error" (breaks e.g. KeyDB→Valkey migration analysis). Fetch each section
+      // separately (single-section INFO is universal) and concatenate.
+      const parts = await Promise.all(
+        sections.map((section) => this.client.info(section)),
+      );
+      infoString = parts.join('\n');
+    } else if (sections && sections.length === 1) {
+      infoString = await this.client.info(sections[0]);
+    } else {
+      infoString = await this.client.info();
+    }
     return InfoParser.parse(infoString);
   }
 
