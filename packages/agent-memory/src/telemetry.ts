@@ -26,10 +26,12 @@ export interface MemoryMetrics {
   recallTotal: Counter<string>;
   recallHits: Counter<string>;
   recallEmpty: Counter<string>;
+  recallNearMiss: Counter<string>;
   recallLatency: Histogram<string>;
   embeddingCalls: Counter<string>;
   evictions: Counter<string>;
   consolidations: Counter<string>;
+  factTombstoneUnmatched: Counter<string>;
 }
 
 export interface MemoryTelemetry {
@@ -91,6 +93,11 @@ export function createMemoryTelemetry(options: MemoryTelemetryOptions = {}): Mem
         help: 'Recall queries that returned no memories',
         labelNames,
       }),
+      recallNearMiss: getOrCreateCounter(registry, {
+        name: `${prefix}_recall_near_miss_total`,
+        help: 'Recall queries that returned nothing while the nearest candidate sat just past the threshold',
+        labelNames,
+      }),
       recallLatency: getOrCreateHistogram(registry, {
         name: `${prefix}_recall_latency_seconds`,
         help: 'Recall query latency in seconds',
@@ -110,6 +117,11 @@ export function createMemoryTelemetry(options: MemoryTelemetryOptions = {}): Mem
       consolidations: getOrCreateCounter(registry, {
         name: `${prefix}_consolidations_total`,
         help: 'Total consolidation summaries created',
+        labelNames,
+      }),
+      factTombstoneUnmatched: getOrCreateCounter(registry, {
+        name: `${prefix}_fact_tombstone_unmatched_total`,
+        help: 'Fact tombstones that matched no live fact (surfaced, not silently dropped)',
         labelNames,
       }),
     },

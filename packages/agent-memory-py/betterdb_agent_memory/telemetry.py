@@ -88,10 +88,12 @@ class MemoryMetrics:
     recall_total: Counter
     recall_hits: Counter
     recall_empty: Counter
+    recall_near_miss: Counter
     recall_latency: Histogram
     embedding_calls: Counter
     evictions: Counter
     consolidations: Counter
+    fact_tombstone_unmatched: Counter
 
 
 @dataclass
@@ -134,6 +136,12 @@ def create_memory_telemetry(
             "Recall queries that returned no memories",
             labelnames,
         ),
+        recall_near_miss=_get_or_create_counter(
+            registry,
+            f"{prefix}_recall_near_miss_total",
+            "Recall queries that returned nothing while the nearest candidate sat just past the threshold",
+            labelnames,
+        ),
         recall_latency=_get_or_create_histogram(
             registry,
             f"{prefix}_recall_latency_seconds",
@@ -157,6 +165,12 @@ def create_memory_telemetry(
             registry,
             f"{prefix}_consolidations_total",
             "Total consolidation summaries created",
+            labelnames,
+        ),
+        fact_tombstone_unmatched=_get_or_create_counter(
+            registry,
+            f"{prefix}_fact_tombstone_unmatched_total",
+            "Fact tombstones that matched no live fact (surfaced, not silently dropped)",
             labelnames,
         ),
     )

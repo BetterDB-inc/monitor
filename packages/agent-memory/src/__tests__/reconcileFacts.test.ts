@@ -142,6 +142,42 @@ describe('reconcile', () => {
     expect(stale).toEqual([{ type: 'noop', subject: 'employer' }]);
   });
 
+  it('surfaces an unmatched tombstone (no prior fact) instead of a silent noop', () => {
+    const ops = reconcile([{ subject: 'employer', statement: '', tombstone: true }], []);
+    expect(ops).toEqual([{ type: 'unmatched-tombstone', subject: 'employer' }]);
+    // It stores nothing, like a noop, but is distinguishable by the caller.
+    expect(applyOps([], ops)).toEqual([]);
+  });
+
+  it('matches subjects case- and whitespace-insensitively', () => {
+    const existing: Fact[] = [{ subject: 'Employer', statement: 'Acme', date: '2024-01' }];
+    const ops = reconcile(
+      [{ subject: ' employer ', statement: 'Globex', date: '2024-06' }],
+      existing,
+    );
+    expect(ops).toEqual([
+      {
+        type: 'update',
+        subject: ' employer ',
+        fact: { subject: ' employer ', statement: 'Globex', date: '2024-06' },
+      },
+    ]);
+  });
+
+  it('picks the first case-variant as canonical on folded subject collisions in existing', () => {
+    // Pre-case-folding data can hold "Employer" and "employer" as distinct rows
+    // with different content. Both reconcile() and applyOps() must pick the
+    // SAME (first) variant as canonical — if one were last-wins the caller's
+    // first-wins diff would see a phantom change and delete both rows.
+    const existing: Fact[] = [
+      { subject: 'Employer', statement: 'Acme' },
+      { subject: 'employer', statement: 'Globex' },
+    ];
+    const ops = reconcile([{ subject: 'employer', statement: 'Acme' }], existing);
+    expect(ops).toEqual([{ type: 'noop', subject: 'employer' }]);
+    expect(applyOps(existing, [])).toEqual([{ subject: 'Employer', statement: 'Acme' }]);
+  });
+
   it('folds earlier ops so a later fact in the same batch sees them', () => {
     const ops = reconcile(
       [

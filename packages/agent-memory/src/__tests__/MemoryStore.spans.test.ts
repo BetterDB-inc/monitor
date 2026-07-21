@@ -110,7 +110,7 @@ describe('MemoryStore spans', () => {
     });
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
 
-    await store.consolidate({ namespace: 'u1', summarize: vi.fn(async () => 'summary') });
+    await store.consolidate({ mode: 'summary', namespace: 'u1', summarize: vi.fn(async () => 'summary') });
 
     const span = spanNamed('agent_memory.consolidate');
     expect(span).toBeDefined();

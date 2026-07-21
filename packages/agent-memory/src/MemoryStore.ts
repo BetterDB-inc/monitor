@@ -16,7 +16,7 @@ import {
   SCORE_FIELD,
 } from './buildRecallQuery';
 import { parseMemoryItem } from './parseMemoryItem';
-import { reconcile, applyOps, factContent, storedFactToFact } from './reconcileFacts';
+import { reconcile, applyOps, factContent, storedFactToFact, subjectKey } from './reconcileFacts';
 import { compositeScore, similarityFromDistance, type RecallWeights } from './compositeScore';
 import { selectEvictions, type EvictionCandidate } from './selectEvictions';
 import { MemoryDiscovery } from './discovery';
@@ -48,7 +48,14 @@ import type {
   RememberOptions,
 } from './types';
 
-const DEFAULT_THRESHOLD = 0.25;
+// Cosine-distance ceiling for recall (lower = closer). Sized so mainstream
+// embedding models — whose correct matches can land near ~0.3 — aren't silently
+// filtered out; a tighter gate is available per call or via config.
+const DEFAULT_THRESHOLD = 0.33;
+// When recall returns nothing but the nearest candidate's distance was within
+// this multiple of the threshold, it's flagged as a near-miss (the threshold,
+// not the data, likely dropped a good hit).
+const RECALL_NEAR_MISS_FACTOR = 2;
 const DEFAULT_WEIGHTS: RecallWeights = { similarity: 0.6, recency: 0.25, importance: 0.15 };
 const DEFAULT_HALF_LIFE_SECONDS = 604800; // 7 days
 const DEFAULT_RECALL_K = 8;
@@ -85,10 +92,12 @@ export interface MemoryConfigRefreshConfig {
 
 /**
  * Fact consolidation (write-time distillation of source memories into curated,
- * additive fact memories via {@link MemoryStore.consolidateFacts}). Off unless
- * explicitly enabled, so callers opt in and can turn it off again.
+ * additive fact memories via {@link MemoryStore.consolidateFacts}). Always
+ * available; this config only customizes the fact source tag and default
+ * importance.
  */
 export interface ConsolidationConfig {
+  /** @deprecated Ignored — fact consolidation is always available; the enable-gate was removed. */
   enabled?: boolean;
   /** `source` tag written on fact memories (also excluded from re-consolidation). Default 'fact'. */
   factSource?: string;
@@ -96,15 +105,14 @@ export interface ConsolidationConfig {
   factImportance?: number;
 }
 
+// Fact consolidation is always available (the old enable-gate was dropped); this
+// only resolves the customizable fact source tag and default fact importance.
 function resolveConsolidation(config: boolean | ConsolidationConfig | undefined): {
-  enabled: boolean;
   factSource: string;
   factImportance: number;
 } {
   const obj = typeof config === 'object' && config !== null ? config : undefined;
-  const enabled = config === true || (obj !== undefined && obj.enabled !== false);
   return {
-    enabled,
     factSource: obj?.factSource ?? FACT_SOURCE,
     factImportance: obj?.factImportance ?? DEFAULT_FACT_IMPORTANCE,
   };
@@ -135,7 +143,11 @@ export interface MemoryStoreOptions {
   configRefresh?: boolean | MemoryConfigRefreshConfig;
   telemetry?: MemoryTelemetryOptions;
   analytics?: AnalyticsOptions;
-  /** Enable write-time fact consolidation (consolidateFacts). Off by default. */
+  /**
+   * Customize write-time fact consolidation (consolidateFacts): fact source tag
+   * and default importance. Consolidation itself is always available — passing
+   * `false` (or nothing) no longer disables it.
+   */
   consolidation?: boolean | ConsolidationConfig;
 }
 
@@ -173,7 +185,9 @@ export class MemoryStore {
   };
   private sessionFlushed = false;
   private sessionExitHandler: (() => void) | null = null;
-  private readonly consolidationEnabled: boolean;
+  // Fire the recall near-miss console warning at most once per store instance,
+  // so a mis-set threshold surfaces without spamming every recall call.
+  private nearMissWarned = false;
   private readonly factSource: string;
   private readonly defaultFactImportance: number;
 
@@ -196,7 +210,6 @@ export class MemoryStore {
     this.startConfigRefresh(options.configRefresh);
     this.analyticsOptions = options.analytics;
     const consolidation = resolveConsolidation(options.consolidation);
-    this.consolidationEnabled = consolidation.enabled;
     this.factSource = consolidation.factSource;
     this.defaultFactImportance = consolidation.factImportance;
   }
@@ -546,13 +559,22 @@ export class MemoryStore {
 
     const now = Date.now();
     const hits: MemoryHit[] = [];
+    // Track the closest candidate seen regardless of the threshold, so a recall
+    // that returns nothing can tell whether a good hit was dropped just outside.
+    let nearestDistance = Infinity;
     for (const hit of parseFtSearchResponse(raw)) {
       const rawScore = hit.fields[SCORE_FIELD];
       if (rawScore === undefined || rawScore.trim() === '') {
         continue;
       }
       const distance = Number(rawScore);
-      if (!Number.isFinite(distance) || distance > threshold) {
+      if (!Number.isFinite(distance)) {
+        continue;
+      }
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+      }
+      if (distance > threshold) {
         continue;
       }
       const item = parseMemoryItem(this.name, hit);
@@ -575,6 +597,33 @@ export class MemoryStore {
     const result = hits.slice(0, k);
     span.setAttribute('recall.candidate_count', hits.length);
     span.setAttribute('recall.result_count', result.length);
+
+    // Near-miss diagnostic: zero hits, but the closest candidate sat just past
+    // the threshold — the gate, not the corpus, likely dropped a relevant memory.
+    // Surface it (span + metric + a one-time warn) instead of failing silently.
+    if (
+      result.length === 0 &&
+      Number.isFinite(nearestDistance) &&
+      // Strictly OUTSIDE the threshold: a candidate at or within the threshold was
+      // admitted by the vector gate, so an empty result there is score-filtering,
+      // not a too-tight threshold — don't advise raising it.
+      nearestDistance > threshold &&
+      nearestDistance <= threshold * RECALL_NEAR_MISS_FACTOR
+    ) {
+      span.setAttribute('recall.zero_hits_near_threshold', true);
+      span.setAttribute('recall.nearest_distance', nearestDistance);
+      this.telemetry.metrics.recallNearMiss.labels(this.storeLabels).inc();
+      if (!this.nearMissWarned) {
+        this.nearMissWarned = true;
+        console.warn(
+          `recall on '${this.name}' returned 0 hits, but the nearest candidate was at cosine ` +
+            `distance ${nearestDistance.toFixed(3)} — just past the threshold ${threshold}. If your ` +
+            `embedding model returns correct matches at this range, raise it via ` +
+            `recall(query, { threshold }) or the store's defaultThreshold. (Warns once per store.)`,
+        );
+      }
+    }
+
     this.recordRecall(result.length, (Date.now() - startedAt) / 1000);
     this.sessionCounts.recalled += 1;
     if (result.length > 0) {
@@ -723,9 +772,37 @@ export class MemoryStore {
     });
   }
 
-  async consolidate(options: ConsolidateOptions): Promise<ConsolidateResult> {
+  /**
+   * Consolidate a scoped set of memories. The mode is explicit:
+   *  - `mode: 'summary'` — accumulation: `summarize(items)` folds the candidates
+   *    into ONE new digest memory, optionally deleting the sources. Lossy; use it
+   *    to compress volume. Items arrive oldest→newest with their dates, so the
+   *    summarizer can respect recency.
+   *  - `mode: 'facts'` — updates: `extractFacts(items)` returns structured facts
+   *    reconciled by subject (newest `date` wins, tombstones retract) and written
+   *    additively (sources kept). Use it for an updating corpus so later
+   *    statements supersede earlier ones instead of being conflated.
+   */
+  async consolidate(options: ConsolidateOptions): Promise<ConsolidateResult>;
+  async consolidate(
+    options: ConsolidateFactsOptions & { mode: 'facts' },
+  ): Promise<ConsolidateFactsResult>;
+  async consolidate(
+    options: ConsolidateOptions | (ConsolidateFactsOptions & { mode: 'facts' }),
+  ): Promise<ConsolidateResult | ConsolidateFactsResult> {
     await this.ensureAnalyticsStarted();
-    return this.traced('consolidate', (span) => this.runConsolidate(options, span));
+    if (options.mode === 'facts') {
+      return this.traced('consolidateFacts', (span) => this.runConsolidateFacts(options, span));
+    }
+    if (options.mode === 'summary') {
+      return this.traced('consolidate', (span) => this.runConsolidate(options, span));
+    }
+    // Guard runtime (untyped) callers: an unknown mode must fail, not silently run
+    // the summary path (mirrors the Python implementation).
+    throw new Error(
+      `consolidate: unknown mode ${JSON.stringify((options as { mode: unknown }).mode)} ` +
+        `(expected 'summary' or 'facts')`,
+    );
   }
 
   private async runConsolidate(
@@ -769,7 +846,7 @@ export class MemoryStore {
       `${this.name}:mem:idx`,
       filter,
       'RETURN',
-      '10',
+      '11',
       'content',
       'importance',
       'tags',
@@ -780,6 +857,9 @@ export class MemoryStore {
       'threadId',
       'agentId',
       'namespace',
+      // Give the summarizer each item's asserted date alongside the recency order
+      // below, so a summary can't silently ignore which statement is newer.
+      'date',
       'LIMIT',
       '0',
       String(CONSOLIDATE_SCAN_LIMIT),
@@ -787,6 +867,9 @@ export class MemoryStore {
       '2',
     );
     const candidates = parseFtSearchResponse(raw).map((hit) => parseMemoryItem(this.name, hit));
+    // Order oldest→newest so the summarizer sees the evolution of state and can
+    // respect recency; FT.SEARCH itself returns candidates unordered.
+    candidates.sort((a, b) => a.createdAt - b.createdAt);
     span.setAttribute('consolidate.candidates', candidates.length);
 
     if (candidates.length === 0) {
@@ -836,19 +919,13 @@ export class MemoryStore {
   /**
    * Write-time fact consolidation: distill the selected source memories into
    * atomic, deduplicated fact memories and ADD them (sources are kept, so recall
-   * is never reduced). The caller supplies the LLM extraction via
-   * `extractFacts`; the reconcile pass keys facts by subject, letting a newer
+   * is never reduced). The reconcile pass keys facts by subject, letting a newer
    * dated statement supersede an older one and tombstones retract a subject.
-   * Disabled unless the store was constructed with `consolidation` enabled.
+   *
+   * @deprecated Use `consolidate({ mode: 'facts', ... })`. Kept as a thin alias.
    */
   async consolidateFacts(options: ConsolidateFactsOptions): Promise<ConsolidateFactsResult> {
-    if (!this.consolidationEnabled) {
-      throw new Error(
-        'fact consolidation is disabled; construct MemoryStore with `consolidation: true` (or { enabled: true }) to use consolidateFacts',
-      );
-    }
-    await this.ensureAnalyticsStarted();
-    return this.traced('consolidateFacts', (span) => this.runConsolidateFacts(options, span));
+    return this.consolidate({ ...options, mode: 'facts' });
   }
 
   private async runConsolidateFacts(
@@ -888,7 +965,7 @@ export class MemoryStore {
       `${this.name}:mem:idx`,
       filter,
       'RETURN',
-      '10',
+      '12',
       'content',
       'importance',
       'tags',
@@ -899,6 +976,17 @@ export class MemoryStore {
       'threadId',
       'agentId',
       'namespace',
+      // Surface the reconcile keys to the extractor callback: `date` drives
+      // newest-wins and `subject` is the reconcile key, so an extractFacts seam
+      // can read them off each MemoryItem instead of the caller re-deriving them.
+      'subject',
+      'date',
+      // Deterministic oldest→newest ordering (created_at is NUMERIC SORTABLE) so
+      // the extractor's rendered input is stable run-to-run — FT.SEARCH is
+      // otherwise unordered, which left the same candidates in a shifting order.
+      'SORTBY',
+      'created_at',
+      'ASC',
       'LIMIT',
       '0',
       String(CONSOLIDATE_SCAN_LIMIT),
@@ -912,7 +1000,7 @@ export class MemoryStore {
       span.setAttribute('consolidate_facts.facts', 0);
       span.setAttribute('consolidate_facts.created', 0);
       span.setAttribute('consolidate_facts.deleted', 0);
-      return { candidates: 0, facts: 0, created: [], deleted: 0 };
+      return { candidates: 0, facts: 0, created: [], deleted: 0, unmatchedTombstones: [] };
     }
 
     // Load the fact memories already written for this scope so reconciliation
@@ -931,10 +1019,10 @@ export class MemoryStore {
       if (item.subject === undefined) {
         continue;
       }
-      if (existingBySubject.has(item.subject)) {
+      if (existingBySubject.has(subjectKey(item.subject))) {
         duplicateFactIds.push(item.id);
       } else {
-        existingBySubject.set(item.subject, { id: item.id, content: item.content });
+        existingBySubject.set(subjectKey(item.subject), { id: item.id, content: item.content });
       }
     }
     const priorFacts: Fact[] = existingFacts
@@ -945,12 +1033,23 @@ export class MemoryStore {
     // collisions (within the batch AND against prior runs) resolve to the newest
     // dated statement and tombstones drop retracted subjects.
     const extracted = await options.extractFacts(candidates);
-    const curated = applyOps(priorFacts, reconcile(extracted, priorFacts));
+    const ops = reconcile(extracted, priorFacts);
+    const curated = applyOps(priorFacts, ops);
+    // A tombstone that matched no live fact is surfaced, not silently dropped.
+    const unmatchedTombstones = ops.flatMap((op) =>
+      op.type === 'unmatched-tombstone' ? [op.subject] : [],
+    );
+    if (unmatchedTombstones.length > 0) {
+      this.telemetry.metrics.factTombstoneUnmatched
+        .labels(this.storeLabels)
+        .inc(unmatchedTombstones.length);
+    }
     const curatedBySubject = new Map<string, Fact>();
     for (const fact of curated) {
-      curatedBySubject.set(fact.subject, fact);
+      curatedBySubject.set(subjectKey(fact.subject), fact);
     }
     span.setAttribute('consolidate_facts.facts', curated.length);
+    span.setAttribute('consolidate_facts.unmatched_tombstones', unmatchedTombstones.length);
 
     // Diff the curated set against what is stored. Writing before deleting keeps
     // a crash between the two from losing a fact (recall-safe, at worst a
@@ -958,7 +1057,7 @@ export class MemoryStore {
     const created: string[] = [];
     for (const fact of curated) {
       const content = factContent(fact);
-      const existing = existingBySubject.get(fact.subject);
+      const existing = existingBySubject.get(subjectKey(fact.subject));
       // Unchanged subject already on disk: skip the write (idempotent re-run).
       if (existing !== undefined && existing.content === content) {
         continue;
@@ -999,7 +1098,7 @@ export class MemoryStore {
     this.telemetry.metrics.consolidations.labels(this.storeLabels).inc();
     span.setAttribute('consolidate_facts.created', created.length);
     span.setAttribute('consolidate_facts.deleted', deleted);
-    return { candidates: candidates.length, facts: curated.length, created, deleted };
+    return { candidates: candidates.length, facts: curated.length, created, deleted, unmatchedTombstones };
   }
 
   // Load the fact memories already written for this scope (source == factSource),
@@ -1016,6 +1115,12 @@ export class MemoryStore {
       'subject',
       'source',
       'date',
+      // Deterministic oldest→newest ordering: subject collisions (e.g.
+      // case-variant duplicates) resolve first-wins downstream, so which row is
+      // "first" must be stable across runs; FT.SEARCH is otherwise unordered.
+      'SORTBY',
+      'created_at',
+      'ASC',
       'LIMIT',
       '0',
       String(CONSOLIDATE_SCAN_LIMIT),

@@ -8,7 +8,7 @@ export type {
   MemoryConfigSnapshot,
   MemoryStats,
 } from './MemoryStore';
-export { reconcile, applyOps } from './reconcileFacts';
+export { reconcile, applyOps, subjectKey } from './reconcileFacts';
 export type { FactOp } from './reconcileFacts';
 export { MemoryDiscovery, MEMORY_CACHE_TYPE, MEMORY_CAPABILITIES } from './discovery';
 export type { MemoryDiscoveryDeps, MemoryMarker } from './discovery';

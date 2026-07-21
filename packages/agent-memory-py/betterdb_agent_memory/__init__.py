@@ -23,9 +23,11 @@ from .reconcile_facts import (
     DeleteOp,
     FactOp,
     NoopOp,
+    UnmatchedTombstoneOp,
     UpdateOp,
     apply_ops,
     reconcile,
+    subject_key,
 )
 from .telemetry import (
     DEFAULT_METRICS_PREFIX,
@@ -102,11 +104,13 @@ __all__ = [
     # Fact reconciliation
     "reconcile",
     "apply_ops",
+    "subject_key",
     "FactOp",
     "AddOp",
     "UpdateOp",
     "DeleteOp",
     "NoopOp",
+    "UnmatchedTombstoneOp",
 ]
 
 # Surface everything agent-cache exports so consumers need only one import.

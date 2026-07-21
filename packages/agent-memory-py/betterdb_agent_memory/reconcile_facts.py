@@ -59,10 +59,27 @@ class NoopOp:
     type: Literal["noop"] = "noop"
 
 
+@dataclass
+class UnmatchedTombstoneOp:
+    # A tombstone whose subject matched no prior fact. It stores nothing (like a
+    # noop) but is surfaced separately so the caller can log it instead of losing
+    # it silently -- a model that mislabels a live fact as a tombstone shows here.
+    subject: str
+    type: Literal["unmatched-tombstone"] = "unmatched-tombstone"
+
+
 # A single reconciliation decision for one incoming fact against the curated
 # set: add a new subject, update it to a newer statement, delete it (tombstone),
-# or leave it unchanged.
-FactOp = Union[AddOp, UpdateOp, DeleteOp, NoopOp]
+# leave it unchanged, or surface an unmatched tombstone.
+FactOp = Union[AddOp, UpdateOp, DeleteOp, NoopOp, UnmatchedTombstoneOp]
+
+
+def subject_key(subject: str) -> str:
+    """Match key for a subject: case- and whitespace-insensitive, so "Dashboard theme"
+    and "dashboard theme" reconcile to the same fact. Only the match key is folded;
+    the stored fact keeps its original subject casing.
+    """
+    return subject.strip().lower()
 
 
 def _fact_date(fact: Fact) -> str | None:
@@ -100,23 +117,30 @@ def reconcile(incoming: list[Fact], existing: list[Fact]) -> list[FactOp]:
     deletes (unless stale). Ops fold into the working set as they are produced so
     later facts in the same batch see earlier decisions.
     """
+    # First-wins on case-variant subject collisions in ``existing``, matching the
+    # canonical-row choice in _consolidate_facts_impl's self-heal pass -- a
+    # mismatch there would delete both variants and lose one's content.
     by_subject: dict[str, Fact] = {}
     for fact in existing:
-        by_subject[fact.subject] = fact
+        by_subject.setdefault(subject_key(fact.subject), fact)
 
     ops: list[FactOp] = []
     for fact in incoming:
-        prior = by_subject.get(fact.subject)
+        key = subject_key(fact.subject)
+        prior = by_subject.get(key)
         if fact.tombstone:
-            if prior is None or _is_stale_tombstone(fact, prior):
+            if prior is None:
+                # No live fact to retract: surface it rather than silently swallow it.
+                ops.append(UnmatchedTombstoneOp(subject=fact.subject))
+            elif _is_stale_tombstone(fact, prior):
                 ops.append(NoopOp(subject=fact.subject))
             else:
                 ops.append(DeleteOp(subject=fact.subject))
-                del by_subject[fact.subject]
+                del by_subject[key]
             continue
         if prior is None:
             ops.append(AddOp(fact=fact))
-            by_subject[fact.subject] = fact
+            by_subject[key] = fact
             continue
         if prior.statement == fact.statement:
             # Same claim restated: refresh only when this assertion carries a
@@ -125,13 +149,13 @@ def reconcile(incoming: list[Fact], existing: list[Fact]) -> list[FactOp]:
             # content change to rewrite).
             if (_fact_date(fact) or "") > (_fact_date(prior) or ""):
                 ops.append(UpdateOp(subject=fact.subject, fact=fact))
-                by_subject[fact.subject] = fact
+                by_subject[key] = fact
             else:
                 ops.append(NoopOp(subject=fact.subject))
             continue
         if _is_newer(fact, prior):
             ops.append(UpdateOp(subject=fact.subject, fact=fact))
-            by_subject[fact.subject] = fact
+            by_subject[key] = fact
             continue
         ops.append(NoopOp(subject=fact.subject))
     return ops
@@ -139,14 +163,17 @@ def reconcile(incoming: list[Fact], existing: list[Fact]) -> list[FactOp]:
 
 def apply_ops(existing: list[Fact], ops: list[FactOp]) -> list[Fact]:
     """Apply reconciliation ops to the ``existing`` set, returning the curated facts."""
+    # First-wins on collisions, same as reconcile() -- both must pick the same
+    # canonical fact per subject.
     by_subject: dict[str, Fact] = {}
     for fact in existing:
-        by_subject[fact.subject] = fact
+        by_subject.setdefault(subject_key(fact.subject), fact)
     for op in ops:
         if isinstance(op, AddOp):
-            by_subject[op.fact.subject] = op.fact
+            by_subject[subject_key(op.fact.subject)] = op.fact
         elif isinstance(op, UpdateOp):
-            by_subject[op.subject] = op.fact
+            by_subject[subject_key(op.subject)] = op.fact
         elif isinstance(op, DeleteOp):
-            by_subject.pop(op.subject, None)
+            by_subject.pop(subject_key(op.subject), None)
+        # NoopOp and UnmatchedTombstoneOp change nothing in the curated set.
     return list(by_subject.values())

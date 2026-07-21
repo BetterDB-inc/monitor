@@ -95,16 +95,49 @@ function extractor(facts: Fact[]) {
 }
 
 describe('MemoryStore.consolidateFacts', () => {
-  it('throws when consolidation is disabled (the default) without touching the client', async () => {
+  it('runs without requiring consolidation to be enabled (gate removed)', async () => {
     const client = factsClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);
     const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
     const extractFacts = extractor([{ subject: 'employer', statement: 'Acme' }]);
 
-    await expect(store.consolidateFacts({ namespace: 'u1', extractFacts })).rejects.toThrow(
-      /disabled/i,
+    const result = await store.consolidateFacts({ namespace: 'u1', extractFacts });
+
+    expect(extractFacts).toHaveBeenCalledTimes(1);
+    expect(result.facts).toBe(1);
+  });
+
+  it('is reachable via the merged consolidate({ mode: "facts" })', async () => {
+    const client = factsClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+    const extractFacts = extractor([{ subject: 'employer', statement: 'Acme' }]);
+
+    const result = await store.consolidate({ mode: 'facts', namespace: 'u1', extractFacts });
+
+    expect(extractFacts).toHaveBeenCalledTimes(1);
+    expect(result.facts).toBe(1);
+    expect(result.unmatchedTombstones).toEqual([]);
+  });
+
+  it('scans candidates sorted by created_at ASC (deterministic extractor input order)', async () => {
+    const client = factsClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]);
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    await store.consolidate({
+      mode: 'facts',
+      namespace: 'u1',
+      extractFacts: extractor([{ subject: 'x', statement: 'y' }]),
+    });
+
+    // The candidate fetch is the FT.SEARCH that excludes prior facts (-@source:{fact}).
+    const search = client.call.mock.calls.find(
+      (c) => c[0] === 'FT.SEARCH' && String(c[2]).includes('-@source:{fact}'),
     );
-    expect(extractFacts).not.toHaveBeenCalled();
-    expect(client.call.mock.calls.some((c) => c[0] === 'FT.SEARCH')).toBe(false);
+    expect(search).toBeDefined();
+    const args = (search ?? []).map(String);
+    const sortIdx = args.indexOf('SORTBY');
+    expect(sortIdx).toBeGreaterThan(-1);
+    expect(args[sortIdx + 1]).toBe('created_at');
+    expect(args[sortIdx + 2]).toBe('ASC');
   });
 
   it('runs when enabled via consolidation: true', async () => {
@@ -120,11 +153,17 @@ describe('MemoryStore.consolidateFacts', () => {
     const result = await store.consolidateFacts({ namespace: 'u1', extractFacts });
 
     expect(extractFacts).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ candidates: 1, facts: 1, created: result.created, deleted: 0 });
+    expect(result).toEqual({
+      candidates: 1,
+      facts: 1,
+      created: result.created,
+      deleted: 0,
+      unmatchedTombstones: [],
+    });
     expect(result.created).toHaveLength(1);
   });
 
-  it('runs when enabled via { enabled: true } but throws when { enabled: false }', async () => {
+  it('runs regardless of the now-ignored consolidation.enabled flag', async () => {
     const on = new MemoryStore({
       client: factsClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })]),
       name: 'mem',
@@ -143,7 +182,7 @@ describe('MemoryStore.consolidateFacts', () => {
     });
     await expect(
       off.consolidateFacts({ namespace: 'u1', extractFacts: extractor([]) }),
-    ).rejects.toThrow(/disabled/i);
+    ).resolves.toBeDefined();
   });
 
   it('writes fact memories additively without deleting the source memories', async () => {
@@ -346,7 +385,13 @@ describe('MemoryStore.consolidateFacts', () => {
     const result = await store.consolidateFacts({ olderThanSeconds: 3600, extractFacts });
 
     expect(extractFacts).not.toHaveBeenCalled();
-    expect(result).toEqual({ candidates: 0, facts: 0, created: [], deleted: 0 });
+    expect(result).toEqual({
+      candidates: 0,
+      facts: 0,
+      created: [],
+      deleted: 0,
+      unmatchedTombstones: [],
+    });
     expect(client.call.mock.calls.some((c) => c[0] === 'HSET')).toBe(false);
   });
 
@@ -406,7 +451,13 @@ describe('MemoryStore.consolidateFacts', () => {
       extractFacts: extractor([{ subject: 'employer', statement: 'Acme' }]),
     });
 
-    expect(result).toEqual({ candidates: 1, facts: 1, created: [], deleted: 0 });
+    expect(result).toEqual({
+      candidates: 1,
+      facts: 1,
+      created: [],
+      deleted: 0,
+      unmatchedTombstones: [],
+    });
     expect(client.call.mock.calls.some((c) => c[0] === 'HSET')).toBe(false);
     expect(client.call.mock.calls.some((c) => c[0] === 'DEL')).toBe(false);
   });
@@ -494,6 +545,49 @@ describe('MemoryStore.consolidateFacts', () => {
     expect(result.deleted).toBe(1);
     const del = client.call.mock.calls.find((c) => c[0] === 'DEL');
     expect(del?.slice(1)).toEqual(['mem:mem:f2']);
+  });
+
+  it('self-heals case-variant duplicate subjects with different content, keeping the first row', async () => {
+    // Pre-case-folding runs could store "Employer" and "employer" as distinct
+    // subjects with different content. The first row (oldest, per the scan's
+    // created_at ASC ordering) is canonical in every pass, so the run keeps it
+    // in place and retracts only the later variant — deleting both would lose
+    // the canonical content.
+    const client = twoPhaseClient(
+      [itemHit('a', { importance: 0.2, ageSeconds: 100000 })],
+      [factHit('f1', 'Employer', 'Acme'), factHit('f2', 'employer', 'Globex')],
+    );
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    const result = await store.consolidateFacts({ namespace: 'u1', extractFacts: extractor([]) });
+
+    expect(result.created).toHaveLength(0);
+    expect(result.deleted).toBe(1);
+    const del = client.call.mock.calls.find((c) => c[0] === 'DEL');
+    expect(del?.slice(1)).toEqual(['mem:mem:f2']);
+    expect(client.call.mock.calls.some((c) => c[0] === 'HSET')).toBe(false);
+  });
+
+  it('loads existing facts sorted by created_at ASC (first-wins dedup needs a stable "first")', async () => {
+    const client = twoPhaseClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })], []);
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    await store.consolidateFacts({ namespace: 'u1', extractFacts: extractor([]) });
+
+    // The existing-fact scan is the FT.SEARCH that includes the fact source
+    // (without the leading '-' of the candidate-exclusion scan).
+    const search = client.call.mock.calls.find(
+      (c) =>
+        c[0] === 'FT.SEARCH' &&
+        String(c[2]).includes('@source:{fact}') &&
+        !String(c[2]).includes('-@source:{fact}'),
+    );
+    expect(search).toBeDefined();
+    const args = (search ?? []).map(String);
+    const sortIdx = args.indexOf('SORTBY');
+    expect(sortIdx).toBeGreaterThan(-1);
+    expect(args[sortIdx + 1]).toBe('created_at');
+    expect(args[sortIdx + 2]).toBe('ASC');
   });
 
   it('retracts a stored fact across runs: a tombstone deletes the prior memory and writes nothing', async () => {

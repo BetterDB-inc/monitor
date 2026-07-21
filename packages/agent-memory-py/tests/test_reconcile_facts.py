@@ -3,6 +3,7 @@ from __future__ import annotations
 from betterdb_agent_memory import (
     AddOp,
     Fact,
+    UnmatchedTombstoneOp,
     UpdateOp,
     apply_ops,
     reconcile,
@@ -118,6 +119,38 @@ def test_deletes_on_a_tombstone_but_noops_on_a_stale_older_dated_tombstone() -> 
         [Fact(subject="employer", statement="", tombstone=True, date="2024-01-01")], existing
     )
     assert [op.type for op in stale] == ["noop"]
+
+
+def test_surfaces_an_unmatched_tombstone_no_prior_instead_of_a_silent_noop() -> None:
+    ops = reconcile([Fact(subject="employer", statement="", tombstone=True)], [])
+    assert ops == [UnmatchedTombstoneOp(subject="employer")]
+    # It stores nothing, like a noop, but is distinguishable by the caller.
+    assert apply_ops([], ops) == []
+
+
+def test_matches_subjects_case_and_whitespace_insensitively() -> None:
+    existing = [Fact(subject="Employer", statement="Acme", date="2024-01")]
+    ops = reconcile([Fact(subject=" employer ", statement="Globex", date="2024-06")], existing)
+    assert ops == [
+        UpdateOp(
+            subject=" employer ",
+            fact=Fact(subject=" employer ", statement="Globex", date="2024-06"),
+        )
+    ]
+
+
+def test_first_case_variant_wins_on_folded_subject_collisions_in_existing() -> None:
+    # Pre-case-folding data can hold "Employer" and "employer" as distinct rows
+    # with different content. Both reconcile() and apply_ops() must pick the
+    # SAME (first) variant as canonical -- if one were last-wins the caller's
+    # first-wins diff would see a phantom change and delete both rows.
+    existing = [
+        Fact(subject="Employer", statement="Acme"),
+        Fact(subject="employer", statement="Globex"),
+    ]
+    ops = reconcile([Fact(subject="employer", statement="Acme")], existing)
+    assert [op.type for op in ops] == ["noop"]
+    assert apply_ops(existing, []) == [Fact(subject="Employer", statement="Acme")]
 
 
 def test_folds_earlier_ops_so_a_later_fact_in_the_same_batch_sees_them() -> None:

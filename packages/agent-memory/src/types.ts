@@ -67,7 +67,16 @@ export interface MemoryHit {
   score: number;
 }
 
+/**
+ * Accumulation mode for {@link MemoryStore.consolidate} (`mode: 'summary'`):
+ * fold a scoped set of memories into ONE new digest memory via `summarize`,
+ * optionally deleting the sources. Lossy — use it to compress volume, not to
+ * resolve updates (for an updating corpus use `mode: 'facts'`). The `summarize`
+ * callback receives its items oldest→newest with their dates so it can respect
+ * recency.
+ */
 export interface ConsolidateOptions extends MemoryScope {
+  mode: 'summary';
   olderThanSeconds?: number;
   maxImportance?: number;
   summarize: (items: MemoryItem[]) => Promise<string>;
@@ -124,6 +133,13 @@ export interface ConsolidateFactsResult {
   created: string[];
   /** Prior fact memories deleted because a run superseded or retracted their subject. */
   deleted: number;
+  /**
+   * Subjects the extractor tombstoned but that matched no live fact, so nothing
+   * was retracted. Surfaced instead of silently dropped: a model that mislabels a
+   * current fact as a tombstone (a known failure mode) shows up here rather than
+   * quietly losing that fact.
+   */
+  unmatchedTombstones: string[];
 }
 
 export interface MemoryListOptions extends MemoryScope {

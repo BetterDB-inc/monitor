@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
 
@@ -91,7 +91,8 @@ FactExtractor = Callable[[list[MemoryItem]], Awaitable[list[Fact]]]
 
 @dataclass
 class ConsolidationConfig:
-    # Enable write-time fact consolidation (consolidate_facts). Off by default.
+    # Deprecated/ignored: fact consolidation is always available; the enable-gate
+    # was removed. Kept for backward compatibility.
     enabled: bool | None = None
     # Source label written on fact memories and excluded from re-consolidation.
     fact_source: str | None = None
@@ -109,6 +110,10 @@ class ConsolidateFactsResult:
     created: list[str]
     # Prior fact memories deleted because a run superseded or retracted their subject.
     deleted: int
+    # Subjects the extractor tombstoned but that matched no live fact, so nothing was
+    # retracted. Surfaced instead of silently dropped: a model that mislabels a
+    # current fact as a tombstone (a known failure mode) shows up here.
+    unmatched_tombstones: list[str] = field(default_factory=list)
 
 
 @dataclass

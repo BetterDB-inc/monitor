@@ -77,7 +77,7 @@ async def test_emits_consolidate_span_with_counts(span_exporter: Any) -> None:
     client = fake_client(handler)
     store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
 
-    await store.consolidate(namespace="u1", summarize=make_summary)
+    await store.consolidate(mode="summary", namespace="u1", summarize=make_summary)
 
     span = span_named(span_exporter, "agent_memory.consolidate")
     assert span is not None
