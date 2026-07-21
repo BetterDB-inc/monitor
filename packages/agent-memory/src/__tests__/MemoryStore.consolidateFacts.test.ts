@@ -547,6 +547,49 @@ describe('MemoryStore.consolidateFacts', () => {
     expect(del?.slice(1)).toEqual(['mem:mem:f2']);
   });
 
+  it('self-heals case-variant duplicate subjects with different content, keeping the first row', async () => {
+    // Pre-case-folding runs could store "Employer" and "employer" as distinct
+    // subjects with different content. The first row (oldest, per the scan's
+    // created_at ASC ordering) is canonical in every pass, so the run keeps it
+    // in place and retracts only the later variant — deleting both would lose
+    // the canonical content.
+    const client = twoPhaseClient(
+      [itemHit('a', { importance: 0.2, ageSeconds: 100000 })],
+      [factHit('f1', 'Employer', 'Acme'), factHit('f2', 'employer', 'Globex')],
+    );
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    const result = await store.consolidateFacts({ namespace: 'u1', extractFacts: extractor([]) });
+
+    expect(result.created).toHaveLength(0);
+    expect(result.deleted).toBe(1);
+    const del = client.call.mock.calls.find((c) => c[0] === 'DEL');
+    expect(del?.slice(1)).toEqual(['mem:mem:f2']);
+    expect(client.call.mock.calls.some((c) => c[0] === 'HSET')).toBe(false);
+  });
+
+  it('loads existing facts sorted by created_at ASC (first-wins dedup needs a stable "first")', async () => {
+    const client = twoPhaseClient([itemHit('a', { importance: 0.2, ageSeconds: 100000 })], []);
+    const store = new MemoryStore({ client, name: 'mem', embedFn: fakeEmbed(8) });
+
+    await store.consolidateFacts({ namespace: 'u1', extractFacts: extractor([]) });
+
+    // The existing-fact scan is the FT.SEARCH that includes the fact source
+    // (without the leading '-' of the candidate-exclusion scan).
+    const search = client.call.mock.calls.find(
+      (c) =>
+        c[0] === 'FT.SEARCH' &&
+        String(c[2]).includes('@source:{fact}') &&
+        !String(c[2]).includes('-@source:{fact}'),
+    );
+    expect(search).toBeDefined();
+    const args = (search ?? []).map(String);
+    const sortIdx = args.indexOf('SORTBY');
+    expect(sortIdx).toBeGreaterThan(-1);
+    expect(args[sortIdx + 1]).toBe('created_at');
+    expect(args[sortIdx + 2]).toBe('ASC');
+  });
+
   it('retracts a stored fact across runs: a tombstone deletes the prior memory and writes nothing', async () => {
     const client = twoPhaseClient(
       [itemHit('a', { importance: 0.2, ageSeconds: 100000 })],

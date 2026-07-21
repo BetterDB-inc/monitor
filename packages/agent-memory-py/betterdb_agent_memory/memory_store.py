@@ -1292,6 +1292,13 @@ class MemoryStore:
             "subject",
             "source",
             "date",
+            # Deterministic oldest->newest ordering: subject collisions (e.g.
+            # case-variant duplicates) resolve first-wins downstream, so which
+            # row is "first" must be stable across runs; FT.SEARCH is otherwise
+            # unordered.
+            "SORTBY",
+            "created_at",
+            "ASC",
             "LIMIT",
             "0",
             str(CONSOLIDATE_SCAN_LIMIT),

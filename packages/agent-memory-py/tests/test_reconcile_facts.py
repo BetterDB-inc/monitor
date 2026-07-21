@@ -139,6 +139,20 @@ def test_matches_subjects_case_and_whitespace_insensitively() -> None:
     ]
 
 
+def test_first_case_variant_wins_on_folded_subject_collisions_in_existing() -> None:
+    # Pre-case-folding data can hold "Employer" and "employer" as distinct rows
+    # with different content. Both reconcile() and apply_ops() must pick the
+    # SAME (first) variant as canonical -- if one were last-wins the caller's
+    # first-wins diff would see a phantom change and delete both rows.
+    existing = [
+        Fact(subject="Employer", statement="Acme"),
+        Fact(subject="employer", statement="Globex"),
+    ]
+    ops = reconcile([Fact(subject="employer", statement="Acme")], existing)
+    assert [op.type for op in ops] == ["noop"]
+    assert apply_ops(existing, []) == [Fact(subject="Employer", statement="Acme")]
+
+
 def test_folds_earlier_ops_so_a_later_fact_in_the_same_batch_sees_them() -> None:
     ops = reconcile(
         [

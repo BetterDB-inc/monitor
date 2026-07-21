@@ -117,9 +117,12 @@ def reconcile(incoming: list[Fact], existing: list[Fact]) -> list[FactOp]:
     deletes (unless stale). Ops fold into the working set as they are produced so
     later facts in the same batch see earlier decisions.
     """
+    # First-wins on case-variant subject collisions in ``existing``, matching the
+    # canonical-row choice in _consolidate_facts_impl's self-heal pass -- a
+    # mismatch there would delete both variants and lose one's content.
     by_subject: dict[str, Fact] = {}
     for fact in existing:
-        by_subject[subject_key(fact.subject)] = fact
+        by_subject.setdefault(subject_key(fact.subject), fact)
 
     ops: list[FactOp] = []
     for fact in incoming:
@@ -160,9 +163,11 @@ def reconcile(incoming: list[Fact], existing: list[Fact]) -> list[FactOp]:
 
 def apply_ops(existing: list[Fact], ops: list[FactOp]) -> list[Fact]:
     """Apply reconciliation ops to the ``existing`` set, returning the curated facts."""
+    # First-wins on collisions, same as reconcile() -- both must pick the same
+    # canonical fact per subject.
     by_subject: dict[str, Fact] = {}
     for fact in existing:
-        by_subject[subject_key(fact.subject)] = fact
+        by_subject.setdefault(subject_key(fact.subject), fact)
     for op in ops:
         if isinstance(op, AddOp):
             by_subject[subject_key(op.fact.subject)] = op.fact

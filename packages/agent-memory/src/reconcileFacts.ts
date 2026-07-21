@@ -89,9 +89,15 @@ function isStaleTombstone(tombstone: Fact, prior: Fact): boolean {
  * later facts in the same batch see earlier decisions.
  */
 export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
+  // First-wins on case-variant subject collisions in `existing`, matching the
+  // canonical-row choice in consolidateFacts' self-heal pass — a mismatch there
+  // would delete both variants and lose one's content.
   const bySubject = new Map<string, Fact>();
   for (const fact of existing) {
-    bySubject.set(subjectKey(fact.subject), fact);
+    const key = subjectKey(fact.subject);
+    if (!bySubject.has(key)) {
+      bySubject.set(key, fact);
+    }
   }
 
   const ops: FactOp[] = [];
@@ -140,9 +146,14 @@ export function reconcile(incoming: Fact[], existing: Fact[]): FactOp[] {
 
 /** Apply reconciliation ops to the `existing` set, returning the curated facts. */
 export function applyOps(existing: Fact[], ops: FactOp[]): Fact[] {
+  // First-wins on collisions, same as reconcile() — both must pick the same
+  // canonical fact per subject.
   const bySubject = new Map<string, Fact>();
   for (const fact of existing) {
-    bySubject.set(subjectKey(fact.subject), fact);
+    const key = subjectKey(fact.subject);
+    if (!bySubject.has(key)) {
+      bySubject.set(key, fact);
+    }
   }
   for (const op of ops) {
     if (op.type === 'add') {

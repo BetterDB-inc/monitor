@@ -92,8 +92,9 @@ export interface MemoryConfigRefreshConfig {
 
 /**
  * Fact consolidation (write-time distillation of source memories into curated,
- * additive fact memories via {@link MemoryStore.consolidateFacts}). Off unless
- * explicitly enabled, so callers opt in and can turn it off again.
+ * additive fact memories via {@link MemoryStore.consolidateFacts}). Always
+ * available; this config only customizes the fact source tag and default
+ * importance.
  */
 export interface ConsolidationConfig {
   /** @deprecated Ignored — fact consolidation is always available; the enable-gate was removed. */
@@ -142,7 +143,11 @@ export interface MemoryStoreOptions {
   configRefresh?: boolean | MemoryConfigRefreshConfig;
   telemetry?: MemoryTelemetryOptions;
   analytics?: AnalyticsOptions;
-  /** Enable write-time fact consolidation (consolidateFacts). Off by default. */
+  /**
+   * Customize write-time fact consolidation (consolidateFacts): fact source tag
+   * and default importance. Consolidation itself is always available — passing
+   * `false` (or nothing) no longer disables it.
+   */
   consolidation?: boolean | ConsolidationConfig;
 }
 
@@ -1110,6 +1115,12 @@ export class MemoryStore {
       'subject',
       'source',
       'date',
+      // Deterministic oldest→newest ordering: subject collisions (e.g.
+      // case-variant duplicates) resolve first-wins downstream, so which row is
+      // "first" must be stable across runs; FT.SEARCH is otherwise unordered.
+      'SORTBY',
+      'created_at',
+      'ASC',
       'LIMIT',
       '0',
       String(CONSOLIDATE_SCAN_LIMIT),

@@ -422,6 +422,43 @@ async def test_self_heals_a_concurrent_write_race_by_retracting_duplicate_subjec
     assert delete is not None and "mem:mem:f2" in delete
 
 
+async def test_self_heals_case_variant_duplicates_with_different_content() -> None:
+    # Pre-case-folding runs could store "Employer" and "employer" as distinct
+    # subjects with different content. The first row (oldest, per the scan's
+    # created_at ASC ordering) is canonical in every pass, so the run keeps it
+    # in place and retracts only the later variant -- deleting both would lose
+    # the canonical content.
+    client = two_phase_client(
+        [item_hit("a", 0.2, 100000)],
+        [fact_hit("f1", "Employer", "Acme"), fact_hit("f2", "employer", "Globex")],
+    )
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
+
+    result = await store.consolidate_facts(namespace="u1", extract_facts=extractor([]))
+
+    assert result.created == []
+    assert result.deleted == 1
+    delete = client.find_call("DEL")
+    assert delete is not None and "mem:mem:f2" in delete
+    assert "mem:mem:f1" not in (delete or [])
+    assert not any(c[0] == "HSET" for c in client.calls)
+
+
+async def test_loads_existing_facts_sorted_by_created_at_asc() -> None:
+    # First-wins dedup makes "which row is first" load-bearing, so the
+    # existing-fact scan must order deterministically.
+    client = two_phase_client([item_hit("a", 0.2, 100000)], [])
+    store = MemoryStore(client=client, name="mem", embed_fn=fake_embed(8))
+
+    await store.consolidate_facts(namespace="u1", extract_facts=extractor([]))
+
+    include = include_source_search(client)
+    assert include is not None
+    args = [str(a) for a in include]
+    i = args.index("SORTBY")
+    assert args[i + 1 : i + 3] == ["created_at", "ASC"]
+
+
 async def test_retracts_a_stored_fact_across_runs_via_tombstone() -> None:
     client = two_phase_client(
         [item_hit("a", 0.2, 100000)],

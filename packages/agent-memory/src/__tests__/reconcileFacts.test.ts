@@ -164,6 +164,20 @@ describe('reconcile', () => {
     ]);
   });
 
+  it('picks the first case-variant as canonical on folded subject collisions in existing', () => {
+    // Pre-case-folding data can hold "Employer" and "employer" as distinct rows
+    // with different content. Both reconcile() and applyOps() must pick the
+    // SAME (first) variant as canonical — if one were last-wins the caller's
+    // first-wins diff would see a phantom change and delete both rows.
+    const existing: Fact[] = [
+      { subject: 'Employer', statement: 'Acme' },
+      { subject: 'employer', statement: 'Globex' },
+    ];
+    const ops = reconcile([{ subject: 'employer', statement: 'Acme' }], existing);
+    expect(ops).toEqual([{ type: 'noop', subject: 'employer' }]);
+    expect(applyOps(existing, [])).toEqual([{ subject: 'Employer', statement: 'Acme' }]);
+  });
+
   it('folds earlier ops so a later fact in the same batch sees them', () => {
     const ops = reconcile(
       [
