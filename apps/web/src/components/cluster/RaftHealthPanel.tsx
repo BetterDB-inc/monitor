@@ -1,7 +1,7 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
 import { Badge } from '../ui/badge';
-import { Crown, Users, Vote, CheckCircle, XCircle, GitCommitHorizontal } from 'lucide-react';
-import { parseRaftInfo } from './raft-info';
+import { Crown, Users, Vote, CheckCircle, XCircle, AlertTriangle, GitCommitHorizontal } from 'lucide-react';
+import { parseRaftInfo, RAFT_SEEKING_ROLES } from './raft-info';
 
 const ROLE_CONFIG: Record<string, { icon: typeof Crown; color: string; bg: string; label: string }> = {
   leader: { icon: Crown, color: 'text-green-500', bg: 'bg-green-500/10', label: 'Leader' },
@@ -32,13 +32,21 @@ export function RaftHealthPanel({
   };
   const RoleIcon = roleConfig.icon;
 
-  const healthy = raft.clusterState === 'ok';
+  // `cluster_state` is NOT a reliable health signal on its own: a surviving
+  // replica keeps reporting `ok` through a majority outage. So a node stuck
+  // seeking a leader (candidate/pre-candidate) is surfaced as "Electing" —
+  // it currently has no leader — even while `cluster_state` still reads ok.
+  // (The authoritative, time-based quorum-loss alert lives in the backend
+  // detector; this panel is the at-a-glance snapshot.)
+  const status: 'ok' | 'electing' | 'fail' =
+    raft.clusterState === 'fail' ? 'fail' : RAFT_SEEKING_ROLES.includes(raft.role) ? 'electing' : 'ok';
+
   // Applied trailing far behind the committed index means this node is still
   // catching up (or wedged), so surface the gap rather than a single number.
   const applyLag = raft.commitIndex - raft.lastApplied;
 
   return (
-    <Card className={healthy ? '' : 'border-destructive'}>
+    <Card className={status === 'fail' ? 'border-destructive' : status === 'electing' ? 'border-yellow-500' : ''}>
       <CardHeader className="pb-3">
         <CardTitle className="text-lg flex items-center justify-between">
           <span className="flex items-center gap-2">
@@ -54,11 +62,17 @@ export function RaftHealthPanel({
         {/* Cluster state + this node's role */}
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm text-muted-foreground">State:</span>
-          {healthy ? (
+          {status === 'ok' && (
             <Badge className="bg-green-500/10 text-green-500 border-0 gap-1">
               <CheckCircle className="w-3 h-3" /> OK
             </Badge>
-          ) : (
+          )}
+          {status === 'electing' && (
+            <Badge className="bg-yellow-500/10 text-yellow-500 border-0 gap-1">
+              <AlertTriangle className="w-3 h-3" /> Electing — no leader
+            </Badge>
+          )}
+          {status === 'fail' && (
             <Badge className="bg-destructive/10 text-destructive border-0 gap-1">
               <XCircle className="w-3 h-3" /> Fail (no quorum)
             </Badge>

@@ -74,6 +74,19 @@ describe('RaftHealthPanel', () => {
     expect(screen.getByText('none elected')).toBeInTheDocument();
   });
 
+  it('shows "Electing" (not green OK) when seeking a leader while cluster_state is ok', () => {
+    // Regression: the real majority-loss surface keeps cluster_state:"ok" while
+    // the node re-seeks a leader. The panel must not claim a healthy OK here.
+    render(
+      <RaftHealthPanel
+        clusterInfo={{ ...leaderInfo, cluster_state: 'ok', cluster_raft_role: 'pre-candidate' }}
+      />,
+    );
+    expect(screen.getByText(/Electing — no leader/)).toBeInTheDocument();
+    expect(screen.queryByText('OK')).not.toBeInTheDocument();
+    expect(screen.getByText('Pre-candidate')).toBeInTheDocument();
+  });
+
   it('surfaces apply lag when last-applied trails the commit index', () => {
     render(
       <RaftHealthPanel

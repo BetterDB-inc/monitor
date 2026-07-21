@@ -13,6 +13,14 @@ export interface RaftInfo {
   clusterState: string; // ok | fail
 }
 
+/**
+ * Raft roles that mean the node currently has no leader and is trying to elect
+ * one. A node in one of these is "electing" — not healthy — even while its
+ * `cluster_state` may still read `ok` (a surviving replica reports `ok` through
+ * a majority outage). Mirrors the backend detector's `RAFT_SEEKING_ROLES`.
+ */
+export const RAFT_SEEKING_ROLES = ['candidate', 'pre-candidate'];
+
 function num(v: string | undefined): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
