@@ -49,6 +49,8 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
   /**
    * Dispatch compliance alert event (ENTERPRISE)
    * Called when memory is high with noeviction policy (data loss risk)
+   * Returns whether the alert edge actually fired, so mirrors (e.g. OTLP)
+   * can follow the same hysteresis instead of re-emitting every poll.
    */
   async dispatchComplianceAlert(data: {
     complianceType: string;
@@ -59,13 +61,13 @@ export class WebhookEventsEnterpriseService implements OnModuleInit {
     timestamp: number;
     instance: { host: string; port: number };
     connectionId?: string;
-  }): Promise<void> {
+  }): Promise<boolean> {
     if (!this.isEnabled()) {
       this.logger.debug('Compliance alert event skipped - requires ENTERPRISE license');
-      return;
+      return false;
     }
 
-    await this.webhookDispatcher.dispatchThresholdAlert(
+    return this.webhookDispatcher.dispatchThresholdAlert(
       WebhookEventType.COMPLIANCE_ALERT,
       'compliance_alert',
       data.memoryUsedPercent || 0,

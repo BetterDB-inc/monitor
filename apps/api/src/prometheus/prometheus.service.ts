@@ -853,19 +853,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           this.logger.error('Failed to dispatch memory.critical webhook', err);
         });
 
-      // Compliance alert for enterprise tier
+      // Compliance alert for enterprise tier. OTLP mirrors the webhook's edge
+      // semantics: dispatchComplianceAlert resolves true only when the alert
+      // edge fired (hysteresis) and the license tier allows it.
       if (
         usedPercent > 80 &&
         maxmemoryPolicy === 'noeviction' &&
         this.webhookEventsEnterpriseService
       ) {
-        if (this.webhookEventsEnterpriseService?.isEnabled?.()) {
-          this.otelEvents?.dispatch(
-            WebhookEventType.COMPLIANCE_ALERT,
-            { memoryUsedPercent: usedPercent, maxmemoryPolicy, severity: 'high' },
-            connectionId,
-          );
-        }
         this.webhookEventsEnterpriseService
           .dispatchComplianceAlert({
             complianceType: 'data_retention',
@@ -876,6 +871,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
             timestamp: Date.now(),
             instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
             connectionId,
+          })
+          .then((fired) => {
+            if (fired) {
+              this.otelEvents?.dispatch(
+                WebhookEventType.COMPLIANCE_ALERT,
+                { memoryUsedPercent: usedPercent, maxmemoryPolicy, severity: 'high' },
+                connectionId,
+              );
+            }
           })
           .catch((err) => {
             this.logger.error('Failed to dispatch compliance.alert webhook', err);
@@ -1065,7 +1069,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         const newSlotFailures = state.previousSlotsFail < slotsFail && slotsFail > 0;
 
         if (stateChanged || newSlotFailures) {
-          if (this.webhookEventsProService?.isEnabled?.()) {
+          if (this.webhookEventsProService?.isEnabled()) {
             this.otelEvents?.dispatch(
               WebhookEventType.CLUSTER_FAILOVER,
               {

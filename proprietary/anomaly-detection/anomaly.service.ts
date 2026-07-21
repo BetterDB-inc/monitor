@@ -491,7 +491,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
               );
               await this.addAnomaly(failoverEvent, ctx);
 
-              // Dispatch failover.started webhook
+              // Dispatch failover.started webhook. No OTLP mirror here on
+              // purpose — the cluster.failover OTLP emit lives solely in
+              // PrometheusService to avoid double-emitting.
               if (this.webhookEventsProService) {
                 this.webhookEventsProService
                   .dispatchFailoverStarted({
@@ -1267,7 +1269,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       anomaly.anomalyType,
       ctx?.connectionId,
     );
-    if (this.webhookEventsProService?.isEnabled?.()) {
+    // Intentionally broader than the webhook path: OTLP includes command_p99
+    // anomalies, which webhook-anomaly-integration skips and delivers as
+    // latency.regression.detected instead.
+    if (this.webhookEventsProService?.isEnabled()) {
       this.otelEvents?.dispatch(
         WebhookEventType.ANOMALY_DETECTED,
         {

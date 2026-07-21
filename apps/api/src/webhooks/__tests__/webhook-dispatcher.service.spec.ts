@@ -2,7 +2,12 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { WebhookDispatcherService } from '../webhook-dispatcher.service';
 import { WebhooksService } from '../webhooks.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
-import { WebhookEventType, DeliveryStatus, getDeliveryConfig } from '@betterdb/shared';
+import {
+  WebhookEventType,
+  DeliveryStatus,
+  getDeliveryConfig,
+  type WebhookPayload,
+} from '@betterdb/shared';
 import { ConfigService } from '@nestjs/config';
 
 describe('WebhookDispatcherService', () => {
@@ -15,13 +20,13 @@ describe('WebhookDispatcherService', () => {
     webhooksService = {
       getWebhooksByEvent: jest.fn(),
       generateSignature: jest.fn(),
-    } as any;
+    } as unknown as jest.Mocked<WebhooksService>;
 
     storageClient = {
       createDelivery: jest.fn(),
       getDelivery: jest.fn(),
       updateDelivery: jest.fn(),
-    } as any;
+    } as unknown as jest.Mocked<StoragePort>;
 
     configService = {
       get: jest.fn((key: string) => {
@@ -29,7 +34,7 @@ describe('WebhookDispatcherService', () => {
         if (key === 'database.port') return 6379;
         return undefined;
       }),
-    } as any;
+    } as unknown as jest.Mocked<ConfigService>;
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -72,7 +77,7 @@ describe('WebhookDispatcherService', () => {
         id: 'delivery-1',
         webhookId: '1',
         eventType: WebhookEventType.MEMORY_CRITICAL,
-        payload: {} as any,
+        payload: {} as unknown as WebhookPayload,
         status: DeliveryStatus.PENDING,
         attempts: 0,
         createdAt: Date.now(),
@@ -118,6 +123,30 @@ describe('WebhookDispatcherService', () => {
       expect(webhooksService.getWebhooksByEvent).not.toHaveBeenCalled();
     });
 
+    it('should return true on the alert edge and false while parked above threshold', async () => {
+      webhooksService.getWebhooksByEvent.mockResolvedValue([]);
+
+      const first = await service.dispatchThresholdAlert(
+        WebhookEventType.MEMORY_CRITICAL,
+        'memory_edge',
+        95,
+        90,
+        true,
+        { message: 'Memory critical' }
+      );
+      const repeat = await service.dispatchThresholdAlert(
+        WebhookEventType.MEMORY_CRITICAL,
+        'memory_edge',
+        95,
+        90,
+        true,
+        { message: 'Memory critical' }
+      );
+
+      expect(first).toBe(true);
+      expect(repeat).toBe(false);
+    });
+
     it('should clear alert state after recovery (10% hysteresis)', async () => {
       webhooksService.getWebhooksByEvent.mockResolvedValue([
         {
@@ -137,7 +166,7 @@ describe('WebhookDispatcherService', () => {
         id: 'delivery-1',
         webhookId: '1',
         eventType: WebhookEventType.MEMORY_CRITICAL,
-        payload: {} as any,
+        payload: {} as unknown as WebhookPayload,
         status: DeliveryStatus.PENDING,
         attempts: 0,
         createdAt: Date.now(),
@@ -224,7 +253,7 @@ describe('WebhookDispatcherService', () => {
         id: 'delivery-1',
         webhookId: '1',
         eventType: WebhookEventType.MEMORY_CRITICAL,
-        payload: {} as any,
+        payload: {} as unknown as WebhookPayload,
         status: DeliveryStatus.PENDING,
         attempts: 0,
         createdAt: Date.now(),
@@ -304,7 +333,7 @@ describe('WebhookDispatcherService', () => {
         id: 'delivery-1',
         webhookId: '1',
         eventType: WebhookEventType.MEMORY_CRITICAL,
-        payload: {} as any,
+        payload: {} as unknown as WebhookPayload,
         status: DeliveryStatus.PENDING,
         attempts: 0,
         createdAt: Date.now(),
@@ -346,7 +375,7 @@ describe('WebhookDispatcherService', () => {
         id: 'delivery-1',
         webhookId: '1',
         eventType: WebhookEventType.MEMORY_CRITICAL,
-        payload: {} as any,
+        payload: {} as unknown as WebhookPayload,
         status: DeliveryStatus.PENDING,
         attempts: 0,
         createdAt: Date.now(),
@@ -385,7 +414,7 @@ describe('WebhookDispatcherService', () => {
         id: 'delivery-1',
         webhookId: '1',
         eventType: WebhookEventType.MEMORY_CRITICAL,
-        payload: {} as any,
+        payload: {} as unknown as WebhookPayload,
         status: DeliveryStatus.PENDING,
         attempts: 0,
         createdAt: Date.now(),
@@ -477,7 +506,7 @@ describe('WebhookDispatcherService', () => {
         id: 'delivery-1',
         webhookId: '1',
         eventType: WebhookEventType.MEMORY_CRITICAL,
-        payload: {} as any,
+        payload: {} as unknown as WebhookPayload,
         status: DeliveryStatus.PENDING,
         attempts: 0,
         createdAt: Date.now(),

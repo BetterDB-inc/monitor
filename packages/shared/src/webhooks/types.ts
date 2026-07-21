@@ -313,7 +313,7 @@ export interface LatencyRegressionDetectedData {
  * Implemented by proprietary/webhook-pro/webhook-events-pro.service.ts
  */
 export interface IWebhookEventsProService {
-  isEnabled?(): boolean;
+  isEnabled(): boolean;
   dispatchSlowlogThreshold(data: {
     slowlogCount: number;
     threshold: number;
@@ -434,7 +434,7 @@ export interface IWebhookEventsProService {
  * Implemented by proprietary/webhook-pro/webhook-events-enterprise.service.ts
  */
 export interface IWebhookEventsEnterpriseService {
-  isEnabled?(): boolean;
+  isEnabled(): boolean;
   dispatchComplianceAlert(data: {
     complianceType: string;
     severity: string;
@@ -444,7 +444,7 @@ export interface IWebhookEventsEnterpriseService {
     timestamp: number;
     instance: WebhookInstanceInfo;
     connectionId?: string;
-  }): Promise<void>;
+  }): Promise<boolean>;
 
   dispatchAuditPolicyViolation(data: {
     username: string;

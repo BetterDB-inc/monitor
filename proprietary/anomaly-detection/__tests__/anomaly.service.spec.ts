@@ -45,6 +45,7 @@ describe('AnomalyService', () => {
     };
 
     webhookEventsProService = {
+      isEnabled: jest.fn().mockReturnValue(true),
       dispatchFailoverStarted: jest.fn().mockResolvedValue(undefined),
       dispatchFailoverCompleted: jest.fn().mockResolvedValue(undefined),
       dispatchClusterFailover: jest.fn().mockResolvedValue(undefined),
