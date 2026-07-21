@@ -1,4 +1,4 @@
-import { parseRaftState, isRaftLeaderless, RaftState } from '../raft-health-detector';
+import { parseRaftState, isRaftSeeking, RaftState } from '../raft-health-detector';
 
 // Field values below are taken from a live 3-node Valkey Cluster V2 (Raft) build.
 describe('parseRaftState', () => {
@@ -29,7 +29,7 @@ describe('parseRaftState', () => {
   });
 });
 
-describe('isRaftLeaderless', () => {
+describe('isRaftSeeking', () => {
   const state = (over: Partial<RaftState>): RaftState => ({
     role: 'follower',
     currentTerm: 2,
@@ -41,15 +41,25 @@ describe('isRaftLeaderless', () => {
     ...over,
   });
 
-  it('true when the cluster is down and this node is not the leader (quorum loss)', () => {
-    expect(isRaftLeaderless(state({ clusterState: 'fail', role: 'pre-candidate' }))).toBe(true);
+  it('true when the node is seeking a leader (pre-candidate)', () => {
+    // Verified against a live majority-loss: cluster_state stays "ok", so the
+    // seeking role — not cluster_state — is the quorum-loss signal.
+    expect(isRaftSeeking(state({ clusterState: 'ok', role: 'pre-candidate' }))).toBe(true);
+  });
+
+  it('true for a full candidate', () => {
+    expect(isRaftSeeking(state({ role: 'candidate' }))).toBe(true);
   });
 
   it('false for a healthy follower', () => {
-    expect(isRaftLeaderless(state({ clusterState: 'ok', role: 'follower' }))).toBe(false);
+    expect(isRaftSeeking(state({ role: 'follower' }))).toBe(false);
   });
 
-  it('false when this node itself is the leader', () => {
-    expect(isRaftLeaderless(state({ clusterState: 'fail', role: 'leader' }))).toBe(false);
+  it('false for the leader', () => {
+    expect(isRaftSeeking(state({ role: 'leader' }))).toBe(false);
+  });
+
+  it('false for a joining node', () => {
+    expect(isRaftSeeking(state({ role: 'joiner' }))).toBe(false);
   });
 });

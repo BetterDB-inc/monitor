@@ -25,7 +25,7 @@ import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-detector';
-import { parseRaftState, isRaftLeaderless } from './raft-health-detector';
+import { parseRaftState, isRaftSeeking } from './raft-health-detector';
 import {
   MetricType,
   AnomalyEvent,
@@ -92,11 +92,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // on every poll, and re-arm once it drops back below the warning threshold.
   private clientSaturationLevel = new Map<string, 'none' | 'warning' | 'critical'>();
   // Raft (Cluster V2) health state. `raftPrevTerm` + `raftTermChanges` track the
-  // election-term history to detect churn (repeated elections); `raftLeaderlessSince`
-  // gates the quorum-loss alert on persistence; `raftLeaderlessActive` dedupes it.
+  // election-term history to detect churn (repeated elections). The quorum-loss
+  // "leaderless watch" opens when the node starts seeking a leader it cannot
+  // elect: `raftLeaderlessSince` is the watch-start timestamp, `raftWatchCommit`
+  // the commit index captured then (to detect whether a leader later made
+  // progress), and `raftLeaderlessActive` dedupes the fired alert.
   private raftPrevTerm = new Map<string, number>();
   private raftTermChanges = new Map<string, number[]>();
   private raftLeaderlessSince = new Map<string, number>();
+  private raftWatchCommit = new Map<string, number>();
   private raftLeaderlessActive = new Map<string, boolean>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private prevReplSnapshot = new Map<
@@ -301,6 +305,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftPrevTerm.delete(connectionId);
     this.raftTermChanges.delete(connectionId);
     this.raftLeaderlessSince.delete(connectionId);
+    this.raftWatchCommit.delete(connectionId);
     this.raftLeaderlessActive.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
@@ -845,16 +850,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   /**
    * Health of a Valkey Raft cluster (Cluster V2, `cluster-protocol raft`), from
    * the connected node's `CLUSTER INFO`. No-op in gossip mode. Two signals,
-   * calibrated against a live 3-node Raft cluster:
+   * calibrated against a live 3-node Raft cluster (majority killed, sampled 60s):
    *
-   * - **Leaderless / quorum loss (CRITICAL):** `cluster_state:fail` while this
-   *   node is not the leader — under Raft this means no majority can elect a
-   *   leader, the commit index freezes, and writes are refused (`CLUSTERDOWN`).
-   *   Gated on persistence to exclude the brief election window of a healthy
-   *   failover (which keeps `cluster_state:ok`).
+   * - **Leaderless / quorum loss (CRITICAL):** the node repeatedly seeks a
+   *   leader (`candidate`/`pre-candidate`) it cannot elect while the commit index
+   *   stays frozen. `cluster_state` is deliberately NOT used — a surviving
+   *   replica keeps reporting `cluster_state:ok` through a majority outage. We
+   *   open a watch when seeking begins and fire only if no leader emerges and the
+   *   commit index makes no progress for `RAFT_LEADERLESS_MIN_MS`; a healthy
+   *   failover closes the watch first (it advances the commit index within ~1s).
    * - **Election churn (WARNING):** the term advancing repeatedly in a short
    *   window. The pre-vote protocol means the term only rises on a *completed*
-   *   election, so rapid term growth = genuine flapping leadership.
+   *   election, so rapid term growth = genuine flapping leadership (with quorum),
+   *   distinct from the term-frozen seeking of an outage.
    */
   private async detectRaftHealth(
     clusterInfo: Record<string, string>,
@@ -867,6 +875,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.raftPrevTerm.delete(ctx.connectionId);
       this.raftTermChanges.delete(ctx.connectionId);
       this.raftLeaderlessSince.delete(ctx.connectionId);
+      this.raftWatchCommit.delete(ctx.connectionId);
       this.raftLeaderlessActive.delete(ctx.connectionId);
       return;
     }
@@ -907,15 +916,36 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     }
 
     // --- Leaderless / quorum loss ---
-    if (isRaftLeaderless(state)) {
-      if (!this.raftLeaderlessSince.has(ctx.connectionId)) {
+    // A leader only holds office with a majority, so `role:leader` is proof of
+    // quorum. Otherwise we run a "leaderless watch": it opens the moment the node
+    // starts seeking (candidate/pre-candidate) and stays open while it keeps
+    // seeking OR sits as a follower that makes no commit progress (during an
+    // outage the role oscillates follower↔pre-candidate with the commit index
+    // frozen). The watch closes — quorum is fine — as soon as the node becomes a
+    // leader or the commit index advances past where the watch started (a leader
+    // emerged and committed). Firing requires the watch to persist past
+    // RAFT_LEADERLESS_MIN_MS, which a healthy ~1s failover never does.
+    const watching = this.raftLeaderlessSince.has(ctx.connectionId);
+    const watchCommit = this.raftWatchCommit.get(ctx.connectionId);
+    const madeProgress = watching && watchCommit !== undefined && state.commitIndex > watchCommit;
+
+    if (state.role === 'leader' || madeProgress) {
+      // Proven quorum (a leader, or committed progress) — close the watch.
+      this.raftLeaderlessSince.delete(ctx.connectionId);
+      this.raftWatchCommit.delete(ctx.connectionId);
+      this.raftLeaderlessActive.set(ctx.connectionId, false);
+    } else if (isRaftSeeking(state) || watching) {
+      // Seeking a leader, or already watching an unresolved outage.
+      if (!watching) {
         this.raftLeaderlessSince.set(ctx.connectionId, timestamp);
+        this.raftWatchCommit.set(ctx.connectionId, state.commitIndex);
       }
       const since = this.raftLeaderlessSince.get(ctx.connectionId)!;
       if (
         timestamp - since >= AnomalyService.RAFT_LEADERLESS_MIN_MS &&
         !this.raftLeaderlessActive.get(ctx.connectionId)
       ) {
+        const heldMs = timestamp - since;
         const event: AnomalyEvent = {
           id: randomUUID(),
           timestamp,
@@ -928,10 +958,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           stdDev: 0,
           threshold: 0,
           message:
-            `CRITICAL: Valkey Cluster V2 (Raft) has no reachable leader ` +
-            `(role=${state.role}, term=${state.currentTerm}, cluster_state=fail). A majority of ` +
-            `Raft nodes is likely unreachable — the commit log is frozen and writes are refused ` +
-            `(CLUSTERDOWN). Restore quorum by recovering the failed node(s).`,
+            `CRITICAL: Valkey Cluster V2 (Raft) has no reachable leader — this node has been ` +
+            `unable to elect one for ${Math.round(heldMs / 1000)}s ` +
+            `(role=${state.role}, term=${state.currentTerm}, commit index frozen at ${state.commitIndex}). ` +
+            `A majority of Raft voters is unreachable — the commit log is frozen and writes are refused ` +
+            `(CLUSTERDOWN). Note cluster_state may still read "ok" on this node. ` +
+            `Restore quorum by recovering the failed node(s).`,
           resolved: false,
           connectionId: ctx.connectionId,
         };
@@ -940,7 +972,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         this.raftLeaderlessActive.set(ctx.connectionId, true); // dedupe (only on success)
       }
     } else {
-      this.raftLeaderlessSince.delete(ctx.connectionId);
+      // Healthy follower with a leader (not seeking, no open watch).
       this.raftLeaderlessActive.set(ctx.connectionId, false);
     }
   }

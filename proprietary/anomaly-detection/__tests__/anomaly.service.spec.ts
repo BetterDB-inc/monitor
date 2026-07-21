@@ -2159,14 +2159,17 @@ describe('AnomalyService', () => {
       expect(dbClient.getClusterNodes).toHaveBeenCalled();
     });
 
-    it('emits CRITICAL once leaderless/quorum-loss persists past the gate', async () => {
+    it('emits CRITICAL when the node keeps seeking a leader with no commit progress', async () => {
+      // Regression: the majority-loss surface keeps cluster_state:"ok" with a
+      // frozen commit index (verified live). The alert must fire on the seeking
+      // role + frozen commit — NOT on cluster_state:fail.
       dbClient.getClusterInfo = jest
         .fn()
-        .mockResolvedValue(raftInfo({ cluster_state: 'fail', cluster_raft_role: 'pre-candidate' }));
-      await poll(); // t0: within the failover grace window → no alert
+        .mockResolvedValue(raftInfo({ cluster_state: 'ok', cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: watch opens, within grace → no alert
       expect(raftEvents()).toHaveLength(0);
 
-      now += 11_000; // exceed RAFT_LEADERLESS_MIN_MS (10s)
+      now += 11_000; // exceed RAFT_LEADERLESS_MIN_MS (10s); commit index still 9 (frozen)
       await poll();
       const events = raftEvents();
       expect(events).toHaveLength(1);
@@ -2174,14 +2177,57 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('no reachable leader');
     });
 
-    it('does not alert on a brief leaderless window that recovers (healthy failover)', async () => {
-      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_state: 'fail' }));
-      await poll(); // t0: leaderless observed, within grace
+    it('fires when the role oscillates follower↔pre-candidate with a frozen commit index', async () => {
+      // During a real outage the role flaps between follower and pre-candidate;
+      // the watch must persist across the follower phases (commit stays frozen).
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // watch opens
+      now += 5_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      await poll(); // flapped back to follower, still frozen, only 5s → no alert
+      expect(raftEvents()).toHaveLength(0);
+      now += 6_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // 11s total, no progress → CRITICAL
+      expect(raftEvents()).toHaveLength(1);
+      expect(raftEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('does not alert on a brief seek that recovers into a leader (healthy failover)', async () => {
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: seeking, watch opens, within grace
       now += 4_000;
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
         raftInfo({ cluster_raft_role: 'leader', cluster_raft_current_term: '2' }),
       );
-      await poll(); // recovered before the gate elapsed
+      await poll(); // became leader before the gate → watch closes
+      expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('closes the watch when a leader emerges and the commit index advances', async () => {
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate', cluster_raft_commit_index: '9' }));
+      await poll(); // watch opens at commit 9
+      now += 4_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'follower', cluster_raft_commit_index: '12' }),
+      );
+      await poll(); // commit advanced 9→12 → quorum proven, watch closes
+      now += 20_000; // long past the gate, but the watch is closed
+      await poll();
+      expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('does not alert on an idle healthy follower (frozen commit, never seeking)', async () => {
+      // A quiet cluster also has a frozen commit index; the frozen index alone
+      // must not trip the alert — only seeking-without-progress does.
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      await poll();
+      now += 30_000;
+      await poll();
       expect(raftEvents()).toHaveLength(0);
     });
 
