@@ -840,6 +840,9 @@ export class MemoryAdapter implements StoragePort {
     if (updates.inferenceSlaConfig !== undefined) {
       validUpdates.inferenceSlaConfig = updates.inferenceSlaConfig;
     }
+    if (updates.anomalyDetectorConfig !== undefined) {
+      validUpdates.anomalyDetectorConfig = updates.anomalyDetectorConfig;
+    }
 
     this.settings = {
       ...this.settings,

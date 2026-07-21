@@ -49,6 +49,7 @@ describe('LatencyRegressionService', () => {
           : [],
       ),
       saveAnomalyEvent: jest.fn().mockResolvedValue('saved'),
+      pruneOldOtelSpans: jest.fn().mockResolvedValue(0),
     };
     webhook = {
       dispatchLatencyRegressionDetected: jest.fn().mockResolvedValue(undefined),

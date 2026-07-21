@@ -33,6 +33,7 @@ describe('AnomalyService', () => {
       initialize: jest.fn().mockResolvedValue(undefined),
       close: jest.fn().mockResolvedValue(undefined),
       isReady: jest.fn().mockReturnValue(true),
+      pruneOldOtelSpans: jest.fn().mockResolvedValue(0),
     };
 
     prometheusService = {
@@ -649,6 +650,16 @@ describe('AnomalyService', () => {
       await poll();
       const detectors: Map<MetricType, any> = (service as any).detectors.get('conn-1');
       const config = detectors.get(MetricType.CPU_UTILIZATION).getConfig();
+      expect(config.detectDrops).toBe(true);
+    });
+
+    it('CPU detector uses DEFAULT_SPIKE_CONFIG thresholds, not connections', async () => {
+      const { DEFAULT_SPIKE_CONFIG } = await import('@app/anomaly/anomaly.types');
+      await poll();
+      const detectors: Map<MetricType, any> = (service as any).detectors.get('conn-1');
+      const config = detectors.get(MetricType.CPU_UTILIZATION).getConfig();
+      expect(config.warningZScore).toBe(DEFAULT_SPIKE_CONFIG.warningZScore);
+      expect(config.criticalZScore).toBe(DEFAULT_SPIKE_CONFIG.criticalZScore);
       expect(config.detectDrops).toBe(true);
     });
   });

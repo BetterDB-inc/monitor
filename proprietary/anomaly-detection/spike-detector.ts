@@ -168,4 +168,24 @@ export class SpikeDetector {
   getConfig(): Required<SpikeDetectorConfig> {
     return { ...this.config };
   }
+
+  /**
+   * Replace this detector's thresholds in place.
+   *
+   * Callers MUST pass a complete, already-resolved config — see
+   * `toSpikeDetectorConfig(resolveDetectorConfig(metric, overrides))` in
+   * `apps/api/src/anomaly/anomaly.types.ts`. This method deliberately applies no
+   * defaults of its own: `DETECTOR_DEFAULTS` is the single source of truth for
+   * threshold values.
+   *
+   * `detectDrops` is a per-metric construction-time flag that is not part of the
+   * settings API, so it is preserved across a config swap. The circular buffer is
+   * untouched — baselines survive re-tuning.
+   */
+  updateConfig(config: SpikeDetectorConfig): void {
+    this.config = {
+      ...config,
+      detectDrops: config.detectDrops ?? this.config.detectDrops,
+    };
+  }
 }

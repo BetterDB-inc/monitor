@@ -537,6 +537,43 @@ curl -X PUT http://localhost:3001/settings \
 
 **Note**: Changing `anomalyPollIntervalMs` affects detection sensitivity. Faster polling = quicker detection but higher overhead.
 
+### Per-metric detector thresholds
+
+Tune Z-score, absolute, consecutive-sample, and cooldown thresholds per metric at runtime (no restart). Partial PATCH bodies only override the fields you send.
+
+```bash
+# View defaults, stored overrides, and fully resolved config
+curl http://localhost:3001/settings/anomaly/detectors
+
+# Partial update — only changes warningZScore and consecutiveRequired for connections
+curl -X PATCH http://localhost:3001/settings/anomaly/detectors \
+  -H "Content-Type: application/json" \
+  -d '{"connections": {"warningZScore": 2.5, "consecutiveRequired": 5}}'
+```
+
+**Configurable fields** (all optional per metric):
+
+| Field | Description |
+|-------|-------------|
+| `warningZScore` | Z-score threshold for WARNING (0.5–10) |
+| `criticalZScore` | Z-score threshold for CRITICAL (1–15, must be > warning when both set) |
+| `warningAbsolute` | Absolute value threshold for WARNING |
+| `criticalAbsolute` | Absolute value threshold for CRITICAL |
+| `consecutiveRequired` | Consecutive samples above threshold before alerting (1–20) |
+| `cooldownMs` | Minimum ms between alerts for the same metric (1000–3600000) |
+
+**Metrics**: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`.
+
+`replication_role` is detected via state-diff (not z-score) and is not tunable through this API.
+
+Reset all overrides:
+
+```bash
+curl -X POST http://localhost:3001/settings/anomaly/detectors/reset
+```
+
+Overrides persist in postgres/sqlite settings storage and survive restarts. The memory storage backend resets overrides on restart (same as other settings).
+
 ### Disabling Detection
 
 To completely disable anomaly detection:
@@ -553,6 +590,16 @@ docker run -e ANOMALY_DETECTION_ENABLED=false betterdb/monitor
 ```
 
 ## API Endpoints
+
+### Get / update detector thresholds
+
+```http
+GET /settings/anomaly/detectors
+PATCH /settings/anomaly/detectors
+POST /settings/anomaly/detectors/reset
+```
+
+See [Per-metric detector thresholds](#per-metric-detector-thresholds) above for request examples and field reference.
 
 ### Get Recent Anomaly Events
 
