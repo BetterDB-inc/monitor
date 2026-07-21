@@ -22,7 +22,7 @@ wheels = [
 
 [[package]]
 name = "betterdb-agent-cache"
-version = "0.9.0"
+version = "0.11.1"
 source = { editable = "../agent-cache-py" }
 dependencies = [
     { name = "opentelemetry-api" },
@@ -46,19 +46,26 @@ requires-dist = [
     { name = "llama-index-core", marker = "extra == 'llamaindex'", specifier = ">=0.10.0" },
     { name = "openai", marker = "extra == 'all'", specifier = ">=1.0.0" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0.0" },
+    { name = "openai-agents", marker = "extra == 'all'", specifier = ">=0.1.0" },
+    { name = "openai-agents", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+    { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.1.0" },
     { name = "opentelemetry-api", specifier = ">=1.20.0" },
     { name = "posthog", specifier = ">=3.0.0" },
     { name = "posthog", marker = "extra == 'all'", specifier = ">=3.0.0" },
+    { name = "posthog", marker = "extra == 'analytics'", specifier = ">=3.0.0" },
     { name = "prometheus-client", specifier = ">=0.19.0" },
+    { name = "pydantic-ai-slim", marker = "extra == 'all'", specifier = ">=2.0.0" },
+    { name = "pydantic-ai-slim", marker = "extra == 'dev'", specifier = ">=2.0.0" },
+    { name = "pydantic-ai-slim", marker = "extra == 'pydantic-ai'", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "valkey", specifier = ">=6.0.0" },
 ]
-provides-extras = ["openai", "anthropic", "langchain", "langgraph", "llamaindex", "normalizer", "dev", "all"]
+provides-extras = ["openai", "anthropic", "langchain", "langgraph", "llamaindex", "normalizer", "openai-agents", "pydantic-ai", "analytics", "dev", "all"]
 
 [[package]]
 name = "betterdb-agent-memory"
-version = "0.4.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "betterdb-agent-cache" },
@@ -90,7 +97,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "betterdb-valkey-search-kit"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "../valkey-search-kit-py" }
 
 [package.metadata]

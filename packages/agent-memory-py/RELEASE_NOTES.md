@@ -1,16 +1,25 @@
-# betterdb-agent-memory v0.3.0
+# betterdb-agent-memory v0.6.0
 
 Long-term memory tier for AI agents backed by Valkey Search — semantic recall
 with recency/importance ranking, scoped capacity eviction, and consolidation.
 Pairs with `betterdb-agent-cache`.
 
-## What's new in v0.3.0
+## What's new in v0.6.0
 
-- Product analytics now start on the first data-path call (`remember`,
-  `recall`, `recall_by_vector`, `get`, `list`, `stats`, `forget`,
-  `forget_by_scope`, `consolidate`), not only on `ensure_index`. Apps that
-  attach to an existing index now report usage analytics as expected. Opt out
-  with `BETTERDB_TELEMETRY=false`.
+- `consolidate()` now takes a `mode`: the default summarization behavior, or
+  `mode="facts"` to route to fact consolidation; unknown modes raise.
+- Fact consolidation is always available: `ConsolidationConfig.enabled` is
+  deprecated and ignored, the config now only customizes `fact_source` and
+  `fact_importance`.
+- Tombstones that match no stored fact are surfaced in
+  `ConsolidateFactsResult.unmatched_tombstones` (plus a
+  `fact_tombstone_unmatched` metric) instead of being silently dropped.
+- Fact subjects reconcile case- and whitespace-insensitively (`subject_key`,
+  now exported), with deterministic first-wins dedup of case-variant
+  duplicate rows.
+- Zero-hit recalls whose nearest candidate lands just above the distance
+  threshold emit a `recall_near_miss` metric and a one-time hint, making
+  too-strict thresholds visible.
 
 ## Analytics (since v0.2.0)
 
