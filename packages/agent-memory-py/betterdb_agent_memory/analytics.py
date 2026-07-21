@@ -203,6 +203,9 @@ async def create_analytics(disabled: bool = False) -> Analytics:
         ph = Posthog(
             api_key,
             host=host or "https://app.posthog.com",
+            # flush_at=1 on frozen serverless means no batching: a burst is N flushes,
+            # accepted because the container freezes on return and a buffered batch
+            # would never drain.
             flush_at=1 if _is_frozen_serverless() else 20,
             flush_interval=10,
         )
