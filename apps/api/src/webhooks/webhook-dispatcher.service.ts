@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { LRUCache } from 'lru-cache';
 import type {
   Webhook,
+  WebhookDelivery,
   WebhookPayload,
   WebhookEventType,
   WebhookThresholds,
@@ -109,7 +110,7 @@ export class WebhookDispatcherService {
    */
   async dispatchEvent(
     eventType: WebhookEventType,
-    data: Record<string, any>,
+    data: Record<string, unknown>,
     connectionId?: string,
   ): Promise<void> {
     try {
@@ -187,6 +188,7 @@ export class WebhookDispatcherService {
   /**
    * Dispatch threshold-based alert (e.g., memory.critical, connection.critical)
    * Uses global threshold - consider using dispatchThresholdAlertPerWebhook for per-webhook thresholds
+   * Returns whether the alert edge actually fired (hysteresis suppresses repeats).
    */
   async dispatchThresholdAlert(
     eventType: WebhookEventType,
@@ -194,15 +196,18 @@ export class WebhookDispatcherService {
     currentValue: number,
     threshold: number,
     isAbove: boolean,
-    data: Record<string, any>,
+    data: Record<string, unknown>,
     connectionId?: string,
-  ): Promise<void> {
-    if (this.shouldFireAlert(alertKey, currentValue, threshold, isAbove)) {
-      this.logger.log(
-        `Threshold alert triggered: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`,
-      );
-      await this.dispatchEvent(eventType, data, connectionId);
+  ): Promise<boolean> {
+    if (!this.shouldFireAlert(alertKey, currentValue, threshold, isAbove)) {
+      return false;
     }
+
+    this.logger.log(
+      `Threshold alert triggered: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`,
+    );
+    await this.dispatchEvent(eventType, data, connectionId);
+    return true;
   }
 
   /**
@@ -222,7 +227,7 @@ export class WebhookDispatcherService {
     currentValue: number,
     thresholdKey: keyof WebhookThresholds,
     isAbove: boolean,
-    data: Record<string, any>,
+    data: Record<string, unknown>,
     connectionId?: string,
   ): Promise<void> {
     try {
@@ -287,7 +292,7 @@ export class WebhookDispatcherService {
    */
   async dispatchHealthChange(
     eventType: WebhookEventType.INSTANCE_DOWN | WebhookEventType.INSTANCE_UP,
-    data: Record<string, any>,
+    data: Record<string, unknown>,
     connectionId?: string,
   ): Promise<void> {
     await this.dispatchEvent(eventType, data, connectionId);
@@ -327,7 +332,7 @@ export class WebhookDispatcherService {
   private async dispatchToWebhook(
     webhook: Webhook,
     eventType: WebhookEventType,
-    data: Record<string, any>,
+    data: Record<string, unknown>,
     connectionId?: string,
   ): Promise<void> {
     // Skip if webhook is disabled
@@ -368,7 +373,7 @@ export class WebhookDispatcherService {
    */
   async sendWebhook(webhook: Webhook, deliveryId: string, payload: WebhookPayload): Promise<void> {
     const startTime = Date.now();
-    let status: DeliveryStatus = DeliveryStatus.PENDING;
+    let status: DeliveryStatus;
     let statusCode: number | undefined;
     let responseBody: string | undefined;
 
@@ -435,23 +440,26 @@ export class WebhookDispatcherService {
             `Webhook delivery failed with server error ${statusCode}: ${webhook.id} -> ${webhook.url}`,
           );
         }
-      } catch (fetchError: any) {
+      } catch (fetchError) {
         clearTimeout(timeoutId);
 
         // Handle specific errors
-        if (fetchError.name === 'AbortError') {
+        if (fetchError instanceof Error && fetchError.name === 'AbortError') {
           status = DeliveryStatus.RETRYING;
           responseBody = 'Request timeout';
           this.logger.warn(`Webhook delivery timeout: ${webhook.id} -> ${webhook.url}`);
         } else {
           status = DeliveryStatus.RETRYING;
-          responseBody = fetchError.message || 'Network error';
+          responseBody =
+            fetchError instanceof Error && fetchError.message
+              ? fetchError.message
+              : 'Network error';
           this.logger.error(`Webhook delivery error: ${webhook.id} -> ${webhook.url}`, fetchError);
         }
       }
-    } catch (error: any) {
+    } catch (error) {
       status = DeliveryStatus.FAILED;
-      responseBody = error.message || 'Unknown error';
+      responseBody = error instanceof Error && error.message ? error.message : 'Unknown error';
       this.logger.error(`Failed to send webhook ${webhook.id}:`, error);
     }
 
@@ -486,7 +494,7 @@ export class WebhookDispatcherService {
       }
 
       const attempts = delivery.attempts + 1;
-      const updates: any = {
+      const updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>> = {
         attempts,
         status,
         statusCode: details.statusCode,
@@ -604,11 +612,11 @@ export class WebhookDispatcherService {
         responseBody: responseBody.substring(0, this.MAX_TEST_RESPONSE_PREVIEW_BYTES),
         durationMs,
       };
-    } catch (error: any) {
+    } catch (error) {
       const durationMs = Date.now() - startTime;
       return {
         success: false,
-        error: error.message || 'Unknown error',
+        error: error instanceof Error && error.message ? error.message : 'Unknown error',
         durationMs,
       };
     }

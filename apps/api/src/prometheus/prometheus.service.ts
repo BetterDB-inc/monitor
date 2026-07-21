@@ -24,6 +24,7 @@ import {
 } from '../common/services/multi-connection-poller';
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
 import { ALL_METRIC_KINDS } from '@betterdb/shared';
+import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
@@ -201,6 +202,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     private readonly webhookEventsEnterpriseService?: IWebhookEventsEnterpriseService,
     @Optional()
     private readonly metricForecastingService?: MetricForecastingService,
+    @Optional()
+    private readonly otelEvents?: OtelEventDispatcherService,
   ) {
     super(connectionRegistry);
     this.pollIntervalMs = this.configService.get<number>('PROMETHEUS_POLL_INTERVAL_MS', 5000);
@@ -850,7 +853,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           this.logger.error('Failed to dispatch memory.critical webhook', err);
         });
 
-      // Compliance alert for enterprise tier
+      // Compliance alert for enterprise tier. OTLP mirrors the webhook's edge
+      // semantics: dispatchComplianceAlert resolves true only when the alert
+      // edge fired (hysteresis) and the license tier allows it.
       if (
         usedPercent > 80 &&
         maxmemoryPolicy === 'noeviction' &&
@@ -866,6 +871,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
             timestamp: Date.now(),
             instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
             connectionId,
+          })
+          .then((fired) => {
+            if (fired) {
+              this.otelEvents?.dispatch(
+                WebhookEventType.COMPLIANCE_ALERT,
+                { memoryUsedPercent: usedPercent, maxmemoryPolicy, severity: 'high' },
+                connectionId,
+              );
+            }
           })
           .catch((err) => {
             this.logger.error('Failed to dispatch compliance.alert webhook', err);
@@ -1055,6 +1069,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         const newSlotFailures = state.previousSlotsFail < slotsFail && slotsFail > 0;
 
         if (stateChanged || newSlotFailures) {
+          if (this.webhookEventsProService?.isEnabled()) {
+            this.otelEvents?.dispatch(
+              WebhookEventType.CLUSTER_FAILOVER,
+              {
+                clusterState,
+                slotsFailed: slotsFail,
+                knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
+              },
+              connectionId,
+            );
+          }
           try {
             await this.webhookEventsProService.dispatchClusterFailover({
               clusterState,
@@ -1351,6 +1376,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   getContentType(): string {
     return this.registry.contentType;
+  }
+
+  collectMetricsAsJson(): ReturnType<Registry['getMetricsAsJSON']> {
+    return this.registry.getMetricsAsJSON();
   }
 
   incrementPollCounter(connectionId?: string): void {

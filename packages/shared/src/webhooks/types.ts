@@ -159,9 +159,7 @@ export function getEventsForTier(tier: Tier): WebhookEventType[] {
  */
 export function getLockedEventsForTier(tier: Tier): WebhookEventType[] {
   const allowedEvents = getEventsForTier(tier);
-  return Object.values(WebhookEventType).filter(
-    (event) => !allowedEvents.includes(event)
-  );
+  return Object.values(WebhookEventType).filter((event) => !allowedEvents.includes(event));
 }
 
 /**
@@ -181,7 +179,7 @@ export function getEventsByTierCategory(): Record<Tier, WebhookEventType[]> {
  */
 export function validateEventsForTier(
   events: WebhookEventType[],
-  userTier: Tier
+  userTier: Tier,
 ): WebhookEventType[] {
   return events.filter((event) => !isEventAllowedForTier(event, userTier));
 }
@@ -209,22 +207,22 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 };
 
 export interface WebhookDeliveryConfig {
-  timeoutMs?: number;              // Default: 30000
-  maxResponseBodyBytes?: number;   // Default: 10000
+  timeoutMs?: number; // Default: 30000
+  maxResponseBodyBytes?: number; // Default: 10000
 }
 
 export interface WebhookAlertConfig {
-  hysteresisFactor?: number;       // Default: 0.9
+  hysteresisFactor?: number; // Default: 0.9
 }
 
 export interface WebhookThresholds {
-  memoryCriticalPercent?: number;      // Default: 90
-  connectionCriticalPercent?: number;  // Default: 90
-  complianceMemoryPercent?: number;    // Default: 80
-  slowlogCount?: number;               // Default: 100
-  replicationLagSeconds?: number;      // Default: 10
-  latencySpikeMs?: number;             // Default: 0 (baseline)
-  connectionSpikeCount?: number;       // Default: 0 (baseline)
+  memoryCriticalPercent?: number; // Default: 90
+  connectionCriticalPercent?: number; // Default: 90
+  complianceMemoryPercent?: number; // Default: 80
+  slowlogCount?: number; // Default: 100
+  replicationLagSeconds?: number; // Default: 10
+  latencySpikeMs?: number; // Default: 0 (baseline)
+  connectionSpikeCount?: number; // Default: 0 (baseline)
 }
 
 export interface Webhook {
@@ -315,6 +313,7 @@ export interface LatencyRegressionDetectedData {
  * Implemented by proprietary/webhook-pro/webhook-events-pro.service.ts
  */
 export interface IWebhookEventsProService {
+  isEnabled(): boolean;
   dispatchSlowlogThreshold(data: {
     slowlogCount: number;
     threshold: number;
@@ -435,6 +434,7 @@ export interface IWebhookEventsProService {
  * Implemented by proprietary/webhook-pro/webhook-events-enterprise.service.ts
  */
 export interface IWebhookEventsEnterpriseService {
+  isEnabled(): boolean;
   dispatchComplianceAlert(data: {
     complianceType: string;
     severity: string;
@@ -444,7 +444,7 @@ export interface IWebhookEventsEnterpriseService {
     timestamp: number;
     instance: WebhookInstanceInfo;
     connectionId?: string;
-  }): Promise<void>;
+  }): Promise<boolean>;
 
   dispatchAuditPolicyViolation(data: {
     username: string;

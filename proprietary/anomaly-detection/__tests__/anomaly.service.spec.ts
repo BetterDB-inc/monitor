@@ -8,7 +8,8 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { MetricType, AnomalySeverity, AnomalyType } from '../types';
-import { WEBHOOK_EVENTS_PRO_SERVICE } from '@betterdb/shared';
+import { WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
+import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
 
 describe('AnomalyService', () => {
   let service: AnomalyService;
@@ -16,6 +17,7 @@ describe('AnomalyService', () => {
   let storage: Record<string, jest.Mock>;
   let prometheusService: Record<string, jest.Mock>;
   let webhookEventsProService: Record<string, jest.Mock>;
+  let otelEvents: { dispatch: jest.Mock };
   let dbClient: jest.Mocked<Partial<DatabasePort>>;
   let mockCtx: ConnectionContext;
 
@@ -43,6 +45,7 @@ describe('AnomalyService', () => {
     };
 
     webhookEventsProService = {
+      isEnabled: jest.fn().mockReturnValue(true),
       dispatchFailoverStarted: jest.fn().mockResolvedValue(undefined),
       dispatchFailoverCompleted: jest.fn().mockResolvedValue(undefined),
       dispatchClusterFailover: jest.fn().mockResolvedValue(undefined),
@@ -54,6 +57,8 @@ describe('AnomalyService', () => {
       dispatchMetricForecastLimit: jest.fn().mockResolvedValue(undefined),
       dispatchDataLossDetected: jest.fn().mockResolvedValue(undefined),
     };
+
+    otelEvents = { dispatch: jest.fn() };
 
     dbClient = {
       getInfoParsed: jest.fn().mockResolvedValue({
@@ -124,6 +129,7 @@ describe('AnomalyService', () => {
         },
         { provide: SlowLogAnalyticsService, useValue: slowLogAnalytics },
         { provide: WEBHOOK_EVENTS_PRO_SERVICE, useValue: webhookEventsProService },
+        { provide: OtelEventDispatcherService, useValue: otelEvents },
       ],
     }).compile();
 
@@ -1186,6 +1192,46 @@ describe('AnomalyService', () => {
           instance: { host: 'localhost', port: 6379 },
           connectionId: 'conn-1',
         }),
+      );
+    });
+
+    it('does not mirror cluster.failover to OTLP (PrometheusService owns that emit)', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        server: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+          cluster_enabled: '1',
+        },
+      });
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({
+        cluster_state: 'ok',
+        cluster_slots_assigned: '16384',
+        cluster_slots_fail: '0',
+        cluster_known_nodes: '6',
+      });
+      await poll();
+
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue({
+        cluster_state: 'fail',
+        cluster_slots_assigned: '16384',
+        cluster_slots_fail: '2048',
+        cluster_known_nodes: '6',
+      });
+      await poll();
+
+      expect(webhookEventsProService.dispatchClusterFailover).toHaveBeenCalled();
+      expect(otelEvents.dispatch).not.toHaveBeenCalledWith(
+        WebhookEventType.CLUSTER_FAILOVER,
+        expect.anything(),
+        expect.anything(),
       );
     });
   });
