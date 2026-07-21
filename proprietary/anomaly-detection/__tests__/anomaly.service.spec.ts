@@ -692,7 +692,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.REJECTED_CONNECTIONS && m !== MetricType.CLIENT_SATURATION && m !== MetricType.SLOWLOG_COUNT,
+        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.REJECTED_CONNECTIONS && m !== MetricType.CLIENT_SATURATION && m !== MetricType.RAFT_HEALTH && m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -2089,6 +2089,126 @@ describe('AnomalyService', () => {
       );
       expect(saturationEmits).toHaveLength(2);
       addSpy.mockRestore();
+    });
+  });
+
+  // ─── Raft cluster health (Valkey Cluster V2) ───────────────────────────────
+  describe('raft cluster health', () => {
+    const clusterEnabledInfo = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    // CLUSTER INFO in Raft mode (field names verified against a live cluster-v2 build).
+    const raftInfo = (over: Record<string, string> = {}) => ({
+      cluster_state: 'ok',
+      cluster_known_nodes: '3',
+      cluster_size: '3',
+      cluster_raft_role: 'follower',
+      cluster_raft_current_term: '1',
+      cluster_raft_commit_index: '9',
+      cluster_raft_last_applied: '9',
+      cluster_raft_log_entries: '9',
+      cluster_raft_leader: '4adc1ba9b9a4dd2cdaad18f8f73f6bedc3bc4c7a',
+      ...over,
+    });
+
+    let now: number;
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterEnabledInfo);
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue([]);
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+    afterEach(() => (Date.now as jest.Mock).mockRestore());
+
+    const raftEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.RAFT_HEALTH);
+
+    it('emits nothing for a healthy raft cluster', async () => {
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      await poll();
+      expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('skips the gossip topology detectors in raft mode', async () => {
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo());
+      await poll();
+      // detectDuplicatePrimaries / detectStuckReplicas both call getClusterNodes;
+      // under Raft they must be skipped.
+      expect(dbClient.getClusterNodes).not.toHaveBeenCalled();
+    });
+
+    it('runs the gossip detectors in gossip mode (no raft fields)', async () => {
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue({ cluster_state: 'ok', cluster_size: '3', cluster_known_nodes: '3' });
+      await poll();
+      expect(dbClient.getClusterNodes).toHaveBeenCalled();
+    });
+
+    it('emits CRITICAL once leaderless/quorum-loss persists past the gate', async () => {
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_state: 'fail', cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: within the failover grace window → no alert
+      expect(raftEvents()).toHaveLength(0);
+
+      now += 11_000; // exceed RAFT_LEADERLESS_MIN_MS (10s)
+      await poll();
+      const events = raftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('no reachable leader');
+    });
+
+    it('does not alert on a brief leaderless window that recovers (healthy failover)', async () => {
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_state: 'fail' }));
+      await poll(); // t0: leaderless observed, within grace
+      now += 4_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'leader', cluster_raft_current_term: '2' }),
+      );
+      await poll(); // recovered before the gate elapsed
+      expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('emits WARNING on election churn (repeated term advances)', async () => {
+      const setTerm = (t: number) =>
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+          raftInfo({ cluster_raft_current_term: String(t) }),
+        );
+      setTerm(1); await poll(); // baseline
+      now += 1000; setTerm(2); await poll(); // election #1
+      now += 1000; setTerm(3); await poll(); // election #2
+      now += 1000; setTerm(4); await poll(); // election #3 → churn
+      const events = raftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('flapping');
+    });
+
+    it('does not treat a single healthy failover (one term bump) as churn', async () => {
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_current_term: '1' }));
+      await poll();
+      now += 1000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_current_term: '2', cluster_raft_role: 'leader' }),
+      );
+      await poll();
+      expect(raftEvents()).toHaveLength(0);
     });
   });
 });

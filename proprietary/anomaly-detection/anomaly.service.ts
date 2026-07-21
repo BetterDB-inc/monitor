@@ -25,6 +25,7 @@ import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-detector';
+import { parseRaftState, isRaftLeaderless } from './raft-health-detector';
 import {
   MetricType,
   AnomalyEvent,
@@ -90,6 +91,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
   private clientSaturationLevel = new Map<string, 'none' | 'warning' | 'critical'>();
+  // Raft (Cluster V2) health state. `raftPrevTerm` + `raftTermChanges` track the
+  // election-term history to detect churn (repeated elections); `raftLeaderlessSince`
+  // gates the quorum-loss alert on persistence; `raftLeaderlessActive` dedupes it.
+  private raftPrevTerm = new Map<string, number>();
+  private raftTermChanges = new Map<string, number[]>();
+  private raftLeaderlessSince = new Map<string, number>();
+  private raftLeaderlessActive = new Map<string, boolean>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private prevReplSnapshot = new Map<
     string,
@@ -270,7 +278,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     for (const metricType of Object.values(MetricType)) {
       // REPLICATION_ROLE, CLUSTER_STATE, DATASET_KEYS, COMMAND_P99, PERSISTENCE_CHILD, CLUSTER_TOPOLOGY, SLOWLOG_LAST_ID, REJECTED_CONNECTIONS (delta-fed lazily), CLIENT_SATURATION (state-based), and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.DATASET_KEYS || metricType === MetricType.COMMAND_P99 || metricType === MetricType.PERSISTENCE_CHILD || metricType === MetricType.CLUSTER_TOPOLOGY || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.REJECTED_CONNECTIONS || metricType === MetricType.CLIENT_SATURATION || metricType === MetricType.SLOWLOG_COUNT) continue;
+      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.DATASET_KEYS || metricType === MetricType.COMMAND_P99 || metricType === MetricType.PERSISTENCE_CHILD || metricType === MetricType.CLUSTER_TOPOLOGY || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.REJECTED_CONNECTIONS || metricType === MetricType.CLIENT_SATURATION || metricType === MetricType.RAFT_HEALTH || metricType === MetricType.SLOWLOG_COUNT) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -290,6 +298,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
+    this.raftPrevTerm.delete(connectionId);
+    this.raftTermChanges.delete(connectionId);
+    this.raftLeaderlessSince.delete(connectionId);
+    this.raftLeaderlessActive.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
@@ -659,6 +671,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // Cluster state transition detection
       const clusterEnabled = info['cluster_enabled'];
       if (clusterEnabled === '1') {
+        // Raft (Cluster V2) vs gossip is decided per poll from CLUSTER INFO; the
+        // gossip-era topology detectors below are skipped in Raft mode.
+        let isRaft = false;
         try {
           const clusterInfo = await ctx.client.getClusterInfo();
           const clusterState = clusterInfo?.cluster_state;
@@ -715,19 +730,25 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             }
             this.lastClusterState.set(ctx.connectionId, clusterState);
           }
+
+          // Raft (Cluster V2) health: leaderless/quorum-loss + election churn.
+          // No-op in gossip mode (no cluster_raft_* fields).
+          isRaft = clusterInfo?.['cluster_raft_role'] !== undefined;
+          await this.detectRaftHealth(clusterInfo, ctx, timestamp);
         } catch (clusterErr) {
           this.logger.debug(
             `Failed to get cluster info for ${ctx.connectionName}: ${clusterErr instanceof Error ? clusterErr.message : clusterErr}`,
           );
         }
 
-        // Duplicate-primary (split-brain) detection — two primaries owning the
-        // same slots in one shard (valkey-io/valkey#2261).
-        await this.detectDuplicatePrimaries(ctx, timestamp);
-
-        // Stuck-replica detection — a replica orphaned by a lost/replaced
-        // primary that never re-attaches (valkey-io/valkey#2090).
-        await this.detectStuckReplicas(ctx, timestamp);
+        // Gossip-era topology detectors — two primaries per shard (#2261) and
+        // orphaned/stuck replicas (#2090). Under Raft, topology is consensus-
+        // managed, so these gossip-race detectors are skipped; Raft health is
+        // covered by detectRaftHealth above.
+        if (!isRaft) {
+          await this.detectDuplicatePrimaries(ctx, timestamp);
+          await this.detectStuckReplicas(ctx, timestamp);
+        }
       }
 
       // Persistence-child stall detection (stuck BGSAVE / AOF rewrite) — state-based, not z-score
@@ -815,6 +836,113 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // Advance the level last: on escalation only after addAnomaly resolved; on
     // steady/de-escalation immediately (the latter re-arms alerting on recovery).
     this.clientSaturationLevel.set(ctx.connectionId, level);
+  }
+
+  private static readonly RAFT_CHURN_WINDOW_MS = 60_000;
+  private static readonly RAFT_CHURN_MIN_ELECTIONS = 3;
+  private static readonly RAFT_LEADERLESS_MIN_MS = 10_000;
+
+  /**
+   * Health of a Valkey Raft cluster (Cluster V2, `cluster-protocol raft`), from
+   * the connected node's `CLUSTER INFO`. No-op in gossip mode. Two signals,
+   * calibrated against a live 3-node Raft cluster:
+   *
+   * - **Leaderless / quorum loss (CRITICAL):** `cluster_state:fail` while this
+   *   node is not the leader — under Raft this means no majority can elect a
+   *   leader, the commit index freezes, and writes are refused (`CLUSTERDOWN`).
+   *   Gated on persistence to exclude the brief election window of a healthy
+   *   failover (which keeps `cluster_state:ok`).
+   * - **Election churn (WARNING):** the term advancing repeatedly in a short
+   *   window. The pre-vote protocol means the term only rises on a *completed*
+   *   election, so rapid term growth = genuine flapping leadership.
+   */
+  private async detectRaftHealth(
+    clusterInfo: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    const state = parseRaftState(clusterInfo);
+    if (!state) {
+      // Gossip mode — clear any stale Raft state so a later switch re-arms cleanly.
+      this.raftPrevTerm.delete(ctx.connectionId);
+      this.raftTermChanges.delete(ctx.connectionId);
+      this.raftLeaderlessSince.delete(ctx.connectionId);
+      this.raftLeaderlessActive.delete(ctx.connectionId);
+      return;
+    }
+
+    // --- Election churn ---
+    const prevTerm = this.raftPrevTerm.get(ctx.connectionId);
+    this.raftPrevTerm.set(ctx.connectionId, state.currentTerm);
+    if (prevTerm !== undefined && state.currentTerm > prevTerm) {
+      const cutoff = timestamp - AnomalyService.RAFT_CHURN_WINDOW_MS;
+      const recent = [...(this.raftTermChanges.get(ctx.connectionId) ?? []), timestamp].filter(
+        (t) => t >= cutoff,
+      );
+      if (recent.length >= AnomalyService.RAFT_CHURN_MIN_ELECTIONS) {
+        const event: AnomalyEvent = {
+          id: randomUUID(),
+          timestamp,
+          metricType: MetricType.RAFT_HEALTH,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          value: state.currentTerm,
+          baseline: 0,
+          zScore: 0,
+          stdDev: 0,
+          threshold: AnomalyService.RAFT_CHURN_MIN_ELECTIONS,
+          message:
+            `WARNING: Raft leadership is flapping — ${recent.length} elections in ` +
+            `${Math.round(AnomalyService.RAFT_CHURN_WINDOW_MS / 1000)}s (now term ${state.currentTerm}). ` +
+            `Investigate an unstable/overloaded primary or a split network in the Valkey Cluster V2 (Raft) group.`,
+          resolved: false,
+          connectionId: ctx.connectionId,
+        };
+        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+        await this.addAnomaly(event, ctx);
+        this.raftTermChanges.set(ctx.connectionId, []); // reset after firing (only on success)
+      } else {
+        this.raftTermChanges.set(ctx.connectionId, recent);
+      }
+    }
+
+    // --- Leaderless / quorum loss ---
+    if (isRaftLeaderless(state)) {
+      if (!this.raftLeaderlessSince.has(ctx.connectionId)) {
+        this.raftLeaderlessSince.set(ctx.connectionId, timestamp);
+      }
+      const since = this.raftLeaderlessSince.get(ctx.connectionId)!;
+      if (
+        timestamp - since >= AnomalyService.RAFT_LEADERLESS_MIN_MS &&
+        !this.raftLeaderlessActive.get(ctx.connectionId)
+      ) {
+        const event: AnomalyEvent = {
+          id: randomUUID(),
+          timestamp,
+          metricType: MetricType.RAFT_HEALTH,
+          anomalyType: AnomalyType.DROP,
+          severity: AnomalySeverity.CRITICAL,
+          value: 0,
+          baseline: 1,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 0,
+          message:
+            `CRITICAL: Valkey Cluster V2 (Raft) has no reachable leader ` +
+            `(role=${state.role}, term=${state.currentTerm}, cluster_state=fail). A majority of ` +
+            `Raft nodes is likely unreachable — the commit log is frozen and writes are refused ` +
+            `(CLUSTERDOWN). Restore quorum by recovering the failed node(s).`,
+          resolved: false,
+          connectionId: ctx.connectionId,
+        };
+        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+        await this.addAnomaly(event, ctx);
+        this.raftLeaderlessActive.set(ctx.connectionId, true); // dedupe (only on success)
+      }
+    } else {
+      this.raftLeaderlessSince.delete(ctx.connectionId);
+      this.raftLeaderlessActive.set(ctx.connectionId, false);
+    }
   }
 
   /**
