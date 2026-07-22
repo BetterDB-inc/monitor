@@ -98,15 +98,20 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // the commit index captured then (to detect whether a leader later made
   // progress), `raftLastSeeking` the last time the node was actually seeking (a
   // one-off blip stops updating it → the watch recovers; a real outage keeps
-  // re-seeking → it doesn't), and `raftLeaderlessActive` dedupes the fired alert.
+  // re-seeking → it doesn't).
   // `raftMode` remembers whether the connection is Raft so a transient CLUSTER
   // INFO failure can't make the gossip topology detectors fire in a Raft cluster.
+  // `raftLeaderlessEventId` holds the id of the outage's current CRITICAL event:
+  // the detector keeps exactly one active event present for as long as the outage
+  // is live (re-emitting if it was resolved/evicted) and auto-resolves it on
+  // recovery, so the panel's live-outage pin tracks the real state rather than
+  // whether an operator has dismissed the banner.
   private raftPrevTerm = new Map<string, number>();
   private raftTermChanges = new Map<string, number[]>();
   private raftLeaderlessSince = new Map<string, number>();
   private raftWatchCommit = new Map<string, number>();
   private raftLastSeeking = new Map<string, number>();
-  private raftLeaderlessActive = new Map<string, boolean>();
+  private raftLeaderlessEventId = new Map<string, string>();
   private raftMode = new Map<string, boolean>();
   private raftNodeTimeoutMs = new Map<string, number>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
@@ -314,7 +319,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftLeaderlessSince.delete(connectionId);
     this.raftWatchCommit.delete(connectionId);
     this.raftLastSeeking.delete(connectionId);
-    this.raftLeaderlessActive.delete(connectionId);
+    this.raftLeaderlessEventId.delete(connectionId);
     this.raftMode.delete(connectionId);
     this.raftNodeTimeoutMs.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
@@ -947,7 +952,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.raftLeaderlessSince.delete(ctx.connectionId);
       this.raftWatchCommit.delete(ctx.connectionId);
       this.raftLastSeeking.delete(ctx.connectionId);
-      this.raftLeaderlessActive.delete(ctx.connectionId);
+      this.raftLeaderlessEventId.delete(ctx.connectionId);
       return;
     }
 
@@ -1015,11 +1020,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     if (state.role === 'leader' || madeProgress || settled) {
       // Proven quorum (a leader, committed progress) or a settled node that
-      // stopped seeking — close the watch.
+      // stopped seeking — close the watch and auto-resolve the outage's event so
+      // the panel un-pins on recovery.
       this.raftLeaderlessSince.delete(ctx.connectionId);
       this.raftWatchCommit.delete(ctx.connectionId);
       this.raftLastSeeking.delete(ctx.connectionId);
-      this.raftLeaderlessActive.set(ctx.connectionId, false);
+      const openEventId = this.raftLeaderlessEventId.get(ctx.connectionId);
+      if (openEventId !== undefined) {
+        this.raftLeaderlessEventId.delete(ctx.connectionId);
+        await this.resolveAnomaly(openEventId).catch(() => undefined);
+      }
     } else if (seeking || watching) {
       // Seeking a leader, or already watching an unresolved outage.
       if (!watching) {
@@ -1027,7 +1037,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         this.raftWatchCommit.set(ctx.connectionId, state.commitIndex);
       }
       const since = this.raftLeaderlessSince.get(ctx.connectionId)!;
-      if (timestamp - since >= fireMs && !this.raftLeaderlessActive.get(ctx.connectionId)) {
+      // Keep exactly one active CRITICAL event present for the whole outage:
+      // (re-)emit only when there is no live event for it. If an operator marked
+      // the banner resolved while quorum is still lost, the previous event is now
+      // resolved, so we emit a fresh one — the outage isn't over just because the
+      // alert was dismissed.
+      const openEventId = this.raftLeaderlessEventId.get(ctx.connectionId);
+      const hasLiveEvent =
+        openEventId !== undefined &&
+        this.recentAnomalies.some((a) => a.id === openEventId && !a.resolved);
+      if (timestamp - since >= fireMs && !hasLiveEvent) {
         const heldMs = timestamp - since;
         const event: AnomalyEvent = {
           id: randomUUID(),
@@ -1050,13 +1069,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           resolved: false,
           connectionId: ctx.connectionId,
         };
+        // Track the id BEFORE emitting: addAnomaly pushes to the cache
+        // synchronously, so a throw mid-emit won't cause a duplicate next poll.
+        this.raftLeaderlessEventId.set(ctx.connectionId, event.id);
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
         await this.addAnomaly(event, ctx);
-        this.raftLeaderlessActive.set(ctx.connectionId, true); // dedupe (only on success)
       }
-    } else {
-      // Healthy follower with a leader (not seeking, no open watch).
-      this.raftLeaderlessActive.set(ctx.connectionId, false);
     }
   }
 

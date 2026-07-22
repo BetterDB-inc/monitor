@@ -2268,6 +2268,46 @@ describe('AnomalyService', () => {
       expect(getCfg).toHaveBeenCalledTimes(2);
     });
 
+    const activeCriticalRaft = () =>
+      raftEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL && !e.resolved);
+
+    it('re-emits the outage event if it is resolved while quorum is still lost', async () => {
+      // Bugbot (High): resolving the banner must not un-pin the panel during a live
+      // outage. The detector keeps a live CRITICAL event present until recovery, so
+      // dismissing one re-emits a fresh one on the next poll.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // watch opens
+      now += 61_000;
+      await poll(); // fires E1
+      expect(activeCriticalRaft()).toHaveLength(1);
+      const e1 = activeCriticalRaft()[0].id;
+
+      await service.resolveAnomaly(e1); // operator dismisses while quorum is still lost
+      expect(activeCriticalRaft()).toHaveLength(0);
+
+      now += 1_000;
+      await poll(); // still leaderless → a fresh CRITICAL is emitted
+      expect(activeCriticalRaft()).toHaveLength(1);
+      expect(activeCriticalRaft()[0].id).not.toBe(e1);
+    });
+
+    it('auto-resolves the outage event when quorum is restored', async () => {
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // watch opens
+      now += 61_000;
+      await poll(); // fires
+      expect(activeCriticalRaft()).toHaveLength(1);
+
+      now += 1_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      await poll(); // a leader is elected → outage over → event auto-resolves
+      expect(activeCriticalRaft()).toHaveLength(0);
+    });
+
     it('does not alert on a brief seek that recovers into a leader (healthy failover)', async () => {
       dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
       await poll(); // t0: seeking, watch opens, within grace
