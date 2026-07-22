@@ -15,11 +15,19 @@ const ROLE_CONFIG: Record<string, { icon: typeof Crown; color: string; bg: strin
  * Cluster V2 (Raft) health panel. Shows the connected node's Raft role, term and
  * replicated-log progress. Renders nothing in legacy gossip mode. See the
  * upstream Cluster V2 work (`cluster-protocol raft`).
+ *
+ * `outageActive` comes from the backend's authoritative, time-based quorum-loss
+ * detector (an active `raft_health` CRITICAL event). Because the outage role
+ * flaps `follower`↔`pre-candidate`, a single 30s snapshot can momentarily catch a
+ * healthy-looking `follower`; when the detector says an outage is active we show
+ * it regardless, so the card can't flip to a green OK mid-incident.
  */
 export function RaftHealthPanel({
   clusterInfo,
+  outageActive = false,
 }: {
   clusterInfo: Record<string, string> | null | undefined;
+  outageActive?: boolean;
 }) {
   const raft = parseRaftInfo(clusterInfo);
   if (!raft) return null;
@@ -33,20 +41,33 @@ export function RaftHealthPanel({
   const RoleIcon = roleConfig.icon;
 
   // `cluster_state` is NOT a reliable health signal on its own: a surviving
-  // replica keeps reporting `ok` through a majority outage. So a node stuck
-  // seeking a leader (candidate/pre-candidate) is surfaced as "Electing" —
-  // it currently has no leader — even while `cluster_state` still reads ok.
-  // (The authoritative, time-based quorum-loss alert lives in the backend
-  // detector; this panel is the at-a-glance snapshot.)
-  const status: 'ok' | 'electing' | 'fail' =
-    raft.clusterState === 'fail' ? 'fail' : RAFT_SEEKING_ROLES.includes(raft.role) ? 'electing' : 'ok';
+  // replica keeps reporting `ok` through a majority outage, and `cluster_state:fail`
+  // can also mean unbound slots while a leader is still elected. So:
+  //   - a detected outage (backend) or `fail` with no leader here → "no quorum"
+  //   - `fail` while a leader IS elected → a slot/serving problem, not quorum loss
+  //   - seeking a leader (candidate/pre-candidate) → "Electing" (no leader now)
+  //   - otherwise → OK
+  const status: 'ok' | 'electing' | 'fail-slots' | 'no-quorum' =
+    outageActive || (raft.clusterState === 'fail' && raft.role !== 'leader')
+      ? 'no-quorum'
+      : raft.clusterState === 'fail'
+        ? 'fail-slots'
+        : RAFT_SEEKING_ROLES.includes(raft.role)
+          ? 'electing'
+          : 'ok';
+  const border =
+    status === 'no-quorum' || status === 'fail-slots'
+      ? 'border-destructive'
+      : status === 'electing'
+        ? 'border-yellow-500'
+        : '';
 
   // Applied trailing far behind the committed index means this node is still
   // catching up (or wedged), so surface the gap rather than a single number.
   const applyLag = raft.commitIndex - raft.lastApplied;
 
   return (
-    <Card className={status === 'fail' ? 'border-destructive' : status === 'electing' ? 'border-yellow-500' : ''}>
+    <Card className={border}>
       <CardHeader className="pb-3">
         <CardTitle className="text-lg flex items-center justify-between">
           <span className="flex items-center gap-2">
@@ -72,7 +93,12 @@ export function RaftHealthPanel({
               <AlertTriangle className="w-3 h-3" /> Electing — no leader
             </Badge>
           )}
-          {status === 'fail' && (
+          {status === 'fail-slots' && (
+            <Badge className="bg-destructive/10 text-destructive border-0 gap-1">
+              <XCircle className="w-3 h-3" /> Fail — slots unavailable
+            </Badge>
+          )}
+          {status === 'no-quorum' && (
             <Badge className="bg-destructive/10 text-destructive border-0 gap-1">
               <XCircle className="w-3 h-3" /> Fail (no quorum)
             </Badge>

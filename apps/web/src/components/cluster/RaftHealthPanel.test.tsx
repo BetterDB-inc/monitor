@@ -87,6 +87,27 @@ describe('RaftHealthPanel', () => {
     expect(screen.getByText('Pre-candidate')).toBeInTheDocument();
   });
 
+  it('labels cluster_state:fail with an elected leader as a slot problem, not "no quorum"', () => {
+    // Bugbot: cluster_state:fail can mean unbound slots while a Raft leader is
+    // still elected — that is not a quorum loss and must not read "no quorum".
+    render(<RaftHealthPanel clusterInfo={{ ...leaderInfo, cluster_state: 'fail', cluster_raft_role: 'leader' }} />);
+    expect(screen.getByText(/Fail — slots unavailable/)).toBeInTheDocument();
+    expect(screen.queryByText(/no quorum/)).not.toBeInTheDocument();
+  });
+
+  it('shows a quorum outage (not green OK) when the backend flags one, even on a follower snapshot', () => {
+    // Bugbot: the outage role flaps, so a follower snapshot with cluster_state:ok
+    // must still surface the outage when the backend detector has an active event.
+    render(
+      <RaftHealthPanel
+        clusterInfo={{ ...leaderInfo, cluster_state: 'ok', cluster_raft_role: 'follower' }}
+        outageActive
+      />,
+    );
+    expect(screen.getByText(/Fail \(no quorum\)/)).toBeInTheDocument();
+    expect(screen.queryByText('OK')).not.toBeInTheDocument();
+  });
+
   it('surfaces apply lag when last-applied trails the commit index', () => {
     render(
       <RaftHealthPanel
