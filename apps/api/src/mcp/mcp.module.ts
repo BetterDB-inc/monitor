@@ -4,8 +4,10 @@ import { McpController } from './mcp.controller';
 import { McpMemoryController } from './memory/mcp-memory.controller';
 import { McpMemoryService } from './memory/mcp-memory.service';
 import { McpAiController } from './ai/mcp-ai.controller';
+import { McpAnalyticsController } from './mcp-analytics.controller';
 import { AgentTokenGuard, MCP_TOKEN_SERVICE } from '../common/guards/agent-token.guard';
 import { MetricsModule } from '../metrics/metrics.module';
+import { MetricForecastingModule } from '../metric-forecasting/metric-forecasting.module';
 import { CommandLogAnalyticsModule } from '../commandlog-analytics/commandlog-analytics.module';
 import { ClientAnalyticsModule } from '../client-analytics/client-analytics.module';
 import { ClusterModule } from '../cluster/cluster.module';
@@ -53,9 +55,10 @@ const optionalImports = [AnomalyModule].filter(Boolean);
     ClusterModule,
     TelemetryModule,
     AiObservabilityModule,
+    MetricForecastingModule,
     ...optionalImports,
   ],
-  controllers: [McpController, McpMemoryController, McpAiController],
+  controllers: [McpController, McpMemoryController, McpAiController, McpAnalyticsController],
   providers: [AgentTokenGuard, McpMemoryService, ...tokenProviders],
 })
 export class McpModule {}
