@@ -96,12 +96,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // "leaderless watch" opens when the node starts seeking a leader it cannot
   // elect: `raftLeaderlessSince` is the watch-start timestamp, `raftWatchCommit`
   // the commit index captured then (to detect whether a leader later made
-  // progress), and `raftLeaderlessActive` dedupes the fired alert.
+  // progress), `raftLastSeeking` the last time the node was actually seeking (a
+  // one-off blip stops updating it → the watch recovers; a real outage keeps
+  // re-seeking → it doesn't), and `raftLeaderlessActive` dedupes the fired alert.
+  // `raftMode` remembers whether the connection is Raft so a transient CLUSTER
+  // INFO failure can't make the gossip topology detectors fire in a Raft cluster.
   private raftPrevTerm = new Map<string, number>();
   private raftTermChanges = new Map<string, number[]>();
   private raftLeaderlessSince = new Map<string, number>();
   private raftWatchCommit = new Map<string, number>();
+  private raftLastSeeking = new Map<string, number>();
   private raftLeaderlessActive = new Map<string, boolean>();
+  private raftMode = new Map<string, boolean>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private prevReplSnapshot = new Map<
     string,
@@ -306,7 +312,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftTermChanges.delete(connectionId);
     this.raftLeaderlessSince.delete(connectionId);
     this.raftWatchCommit.delete(connectionId);
+    this.raftLastSeeking.delete(connectionId);
     this.raftLeaderlessActive.delete(connectionId);
+    this.raftMode.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
@@ -676,12 +684,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // Cluster state transition detection
       const clusterEnabled = info['cluster_enabled'];
       if (clusterEnabled === '1') {
-        // Raft (Cluster V2) vs gossip is decided per poll from CLUSTER INFO; the
-        // gossip-era topology detectors below are skipped in Raft mode.
-        let isRaft = false;
+        // Raft (Cluster V2) vs gossip is decided from CLUSTER INFO. Default to the
+        // last known mode so a transient CLUSTER INFO failure can't flip a Raft
+        // connection back to gossip; `clusterInfoOk` gates the gossip detectors on
+        // having fresh info this poll.
+        let isRaft = this.raftMode.get(ctx.connectionId) ?? false;
+        let clusterInfoOk = false;
         try {
           const clusterInfo = await ctx.client.getClusterInfo();
           const clusterState = clusterInfo?.cluster_state;
+          clusterInfoOk = !!clusterInfo;
           if (clusterState) {
             const lastState = this.lastClusterState.get(ctx.connectionId);
             if (lastState !== undefined && clusterState !== lastState) {
@@ -738,8 +750,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
           // Raft (Cluster V2) health: leaderless/quorum-loss + election churn.
           // No-op in gossip mode (no cluster_raft_* fields).
-          isRaft = clusterInfo?.['cluster_raft_role'] !== undefined;
-          await this.detectRaftHealth(clusterInfo, ctx, timestamp);
+          if (clusterInfo) {
+            isRaft = clusterInfo['cluster_raft_role'] !== undefined;
+            this.raftMode.set(ctx.connectionId, isRaft);
+            await this.detectRaftHealth(clusterInfo, ctx, timestamp);
+          }
         } catch (clusterErr) {
           this.logger.debug(
             `Failed to get cluster info for ${ctx.connectionName}: ${clusterErr instanceof Error ? clusterErr.message : clusterErr}`,
@@ -749,8 +764,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // Gossip-era topology detectors — two primaries per shard (#2261) and
         // orphaned/stuck replicas (#2090). Under Raft, topology is consensus-
         // managed, so these gossip-race detectors are skipped; Raft health is
-        // covered by detectRaftHealth above.
-        if (!isRaft) {
+        // covered by detectRaftHealth above. Require fresh cluster info this poll
+        // AND positively-gossip mode: a CLUSTER INFO failure must not resurrect
+        // them on a connection already known to be Raft.
+        if (clusterInfoOk && !isRaft) {
           await this.detectDuplicatePrimaries(ctx, timestamp);
           await this.detectStuckReplicas(ctx, timestamp);
         }
@@ -845,7 +862,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
   private static readonly RAFT_CHURN_WINDOW_MS = 60_000;
   private static readonly RAFT_CHURN_MIN_ELECTIONS = 3;
-  private static readonly RAFT_LEADERLESS_MIN_MS = 10_000;
+  // A quorum-lost node re-enters candidate/pre-candidate roughly every
+  // node-timeout (~15s observed on a live cluster), so the fire window must
+  // span more than one such flap to tell a sustained outage from a one-off
+  // election blip. RAFT_RECOVERED_MS (< the fire window) closes the watch once
+  // the node has stopped seeking for that long — a healthy blip settles and
+  // recovers; a real outage keeps re-seeking and never does.
+  private static readonly RAFT_LEADERLESS_MIN_MS = 30_000;
+  private static readonly RAFT_RECOVERED_MS = 25_000;
 
   /**
    * Health of a Valkey Raft cluster (Cluster V2, `cluster-protocol raft`), from
@@ -855,10 +879,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * - **Leaderless / quorum loss (CRITICAL):** the node repeatedly seeks a
    *   leader (`candidate`/`pre-candidate`) it cannot elect while the commit index
    *   stays frozen. `cluster_state` is deliberately NOT used — a surviving
-   *   replica keeps reporting `cluster_state:ok` through a majority outage. We
-   *   open a watch when seeking begins and fire only if no leader emerges and the
-   *   commit index makes no progress for `RAFT_LEADERLESS_MIN_MS`; a healthy
-   *   failover closes the watch first (it advances the commit index within ~1s).
+   *   replica keeps reporting `cluster_state:ok` through a majority outage. A
+   *   watch opens when seeking begins and fires only if the node keeps failing to
+   *   settle for `RAFT_LEADERLESS_MIN_MS`. The watch closes (no alert) when a
+   *   leader emerges, the commit index advances, or the node stops seeking for
+   *   `RAFT_RECOVERED_MS` — so a one-off election blip that re-hears its leader on
+   *   an idle cluster (commit never advances, role never becomes leader) settles
+   *   and clears instead of firing a false CRITICAL.
    * - **Election churn (WARNING):** the term advancing repeatedly in a short
    *   window. The pre-vote protocol means the term only rises on a *completed*
    *   election, so rapid term growth = genuine flapping leadership (with quorum),
@@ -876,6 +903,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.raftTermChanges.delete(ctx.connectionId);
       this.raftLeaderlessSince.delete(ctx.connectionId);
       this.raftWatchCommit.delete(ctx.connectionId);
+      this.raftLastSeeking.delete(ctx.connectionId);
       this.raftLeaderlessActive.delete(ctx.connectionId);
       return;
     }
@@ -921,20 +949,34 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // starts seeking (candidate/pre-candidate) and stays open while it keeps
     // seeking OR sits as a follower that makes no commit progress (during an
     // outage the role oscillates follower↔pre-candidate with the commit index
-    // frozen). The watch closes — quorum is fine — as soon as the node becomes a
-    // leader or the commit index advances past where the watch started (a leader
-    // emerged and committed). Firing requires the watch to persist past
-    // RAFT_LEADERLESS_MIN_MS, which a healthy ~1s failover never does.
+    // frozen). `raftLastSeeking` tracks the last poll the node was actually
+    // seeking. The watch closes — quorum is fine — when the node becomes a
+    // leader, the commit index advances past where the watch started (a leader
+    // emerged and committed), OR the node has stopped seeking for
+    // RAFT_RECOVERED_MS (it settled back under a live leader). That last clause is
+    // what distinguishes a real outage (keeps re-seeking every ~node-timeout,
+    // never settles) from a one-off blip on an idle cluster (seeks once, then
+    // stays a quiet follower with an unchanged commit index).
+    const seeking = isRaftSeeking(state);
+    if (seeking) this.raftLastSeeking.set(ctx.connectionId, timestamp);
     const watching = this.raftLeaderlessSince.has(ctx.connectionId);
     const watchCommit = this.raftWatchCommit.get(ctx.connectionId);
     const madeProgress = watching && watchCommit !== undefined && state.commitIndex > watchCommit;
+    const lastSeeking = this.raftLastSeeking.get(ctx.connectionId);
+    const settled =
+      watching &&
+      !seeking &&
+      lastSeeking !== undefined &&
+      timestamp - lastSeeking >= AnomalyService.RAFT_RECOVERED_MS;
 
-    if (state.role === 'leader' || madeProgress) {
-      // Proven quorum (a leader, or committed progress) — close the watch.
+    if (state.role === 'leader' || madeProgress || settled) {
+      // Proven quorum (a leader, committed progress) or a settled node that
+      // stopped seeking — close the watch.
       this.raftLeaderlessSince.delete(ctx.connectionId);
       this.raftWatchCommit.delete(ctx.connectionId);
+      this.raftLastSeeking.delete(ctx.connectionId);
       this.raftLeaderlessActive.set(ctx.connectionId, false);
-    } else if (isRaftSeeking(state) || watching) {
+    } else if (seeking || watching) {
       // Seeking a leader, or already watching an unresolved outage.
       if (!watching) {
         this.raftLeaderlessSince.set(ctx.connectionId, timestamp);
