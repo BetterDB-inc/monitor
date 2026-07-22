@@ -101,17 +101,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // re-seeking → it doesn't).
   // `raftMode` remembers whether the connection is Raft so a transient CLUSTER
   // INFO failure can't make the gossip topology detectors fire in a Raft cluster.
-  // `raftLeaderlessEventId` holds the id of the outage's current CRITICAL event:
-  // the detector keeps exactly one active event present for as long as the outage
-  // is live (re-emitting if it was resolved/evicted) and auto-resolves it on
-  // recovery, so the panel's live-outage pin tracks the real state rather than
-  // whether an operator has dismissed the banner.
+  // `raftLeaderlessActive` marks a confirmed live outage for the connection. While
+  // it holds, the detector keeps exactly one active CRITICAL raft_health event in
+  // the authoritative incident feed (re-emitting if the previous one was
+  // dismissed/removed, never duplicating one merely evicted from the in-memory
+  // ring) and resolves every active one on recovery — so the panel's live-outage
+  // pin tracks the real state, not whether an operator dismissed the banner. It
+  // also gates the recovery-time storage query so healthy polls stay cheap.
   private raftPrevTerm = new Map<string, number>();
   private raftTermChanges = new Map<string, number[]>();
   private raftLeaderlessSince = new Map<string, number>();
   private raftWatchCommit = new Map<string, number>();
   private raftLastSeeking = new Map<string, number>();
-  private raftLeaderlessEventId = new Map<string, string>();
+  private raftLeaderlessActive = new Map<string, boolean>();
   private raftMode = new Map<string, boolean>();
   private raftNodeTimeoutMs = new Map<string, number>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
@@ -319,7 +321,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftLeaderlessSince.delete(connectionId);
     this.raftWatchCommit.delete(connectionId);
     this.raftLastSeeking.delete(connectionId);
-    this.raftLeaderlessEventId.delete(connectionId);
+    this.raftLeaderlessActive.delete(connectionId);
     this.raftMode.delete(connectionId);
     this.raftNodeTimeoutMs.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
@@ -943,6 +945,51 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     return { recoveredMs, fireMs };
   }
 
+  /**
+   * The connection's currently-active CRITICAL raft_health incidents, from the
+   * SAME authoritative (storage-backed) feed the panel/banner read. Using this
+   * rather than the in-memory ring makes "is the outage still pinned?" agree with
+   * what the UI shows: an event evicted from the ring but still unresolved in
+   * storage counts as live (no duplicate emit), and one resolved/removed from the
+   * ring counts as gone (re-emit to keep the pin).
+   */
+  private async getActiveRaftOutages(connectionId: string): Promise<AnomalyEvent[]> {
+    return this.getRecentAnomalies(
+      undefined,
+      undefined,
+      AnomalySeverity.CRITICAL,
+      MetricType.RAFT_HEALTH,
+      100,
+      connectionId,
+      true,
+    );
+  }
+
+  /**
+   * Resolve every active CRITICAL raft_health incident for the connection.
+   * Returns true only when all were resolved (or there were none), so callers can
+   * retry on the next poll after a storage blip.
+   */
+  private async resolveRaftOutages(connectionId: string): Promise<boolean> {
+    let active: AnomalyEvent[];
+    try {
+      active = await this.getActiveRaftOutages(connectionId);
+    } catch {
+      return false; // storage unavailable — retry next poll
+    }
+    let allResolved = true;
+    for (const ev of active) {
+      let ok = false;
+      try {
+        ok = await this.resolveAnomaly(ev.id);
+      } catch {
+        ok = false;
+      }
+      if (!ok) allResolved = false;
+    }
+    return allResolved;
+  }
+
   private async detectRaftHealth(
     clusterInfo: Record<string, string>,
     ctx: ConnectionContext,
@@ -956,18 +1003,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.raftLeaderlessSince.delete(ctx.connectionId);
       this.raftWatchCommit.delete(ctx.connectionId);
       this.raftLastSeeking.delete(ctx.connectionId);
-      // If an outage event is still open, resolve it before dropping the id so it
-      // doesn't stay stuck active after the protocol switch (keep it to retry on
-      // a resolve failure).
-      const openEventId = this.raftLeaderlessEventId.get(ctx.connectionId);
-      if (openEventId !== undefined) {
-        let resolved = false;
-        try {
-          resolved = await this.resolveAnomaly(openEventId);
-        } catch {
-          resolved = false;
+      // If an outage was open, resolve its incident(s) before the protocol switch
+      // so nothing stays stuck active; keep the flag to retry on a resolve failure.
+      if (this.raftLeaderlessActive.get(ctx.connectionId)) {
+        if (await this.resolveRaftOutages(ctx.connectionId)) {
+          this.raftLeaderlessActive.set(ctx.connectionId, false);
         }
-        if (resolved) this.raftLeaderlessEventId.delete(ctx.connectionId);
       }
       return;
     }
@@ -1041,18 +1082,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.raftLeaderlessSince.delete(ctx.connectionId);
       this.raftWatchCommit.delete(ctx.connectionId);
       this.raftLastSeeking.delete(ctx.connectionId);
-      // Auto-resolve the outage's event, but KEEP the id if the resolve fails
-      // (storage blip) so the next healthy poll retries — dropping it would leave
-      // the CRITICAL row unresolved and the incident feed pinned after recovery.
-      const openEventId = this.raftLeaderlessEventId.get(ctx.connectionId);
-      if (openEventId !== undefined) {
-        let resolved = false;
-        try {
-          resolved = await this.resolveAnomaly(openEventId);
-        } catch {
-          resolved = false;
+      // Recovery: resolve every active outage incident for this connection so the
+      // panel un-pins. Gated on raftLeaderlessActive so a healthy leader that never
+      // had an outage doesn't hit storage every poll. Clear the flag only once all
+      // are resolved, so a storage blip is retried on the next healthy poll rather
+      // than leaving a stuck-active incident.
+      if (this.raftLeaderlessActive.get(ctx.connectionId)) {
+        if (await this.resolveRaftOutages(ctx.connectionId)) {
+          this.raftLeaderlessActive.set(ctx.connectionId, false);
         }
-        if (resolved) this.raftLeaderlessEventId.delete(ctx.connectionId);
       }
     } else if (seeking || watching) {
       // Seeking a leader, or already watching an unresolved outage.
@@ -1061,47 +1099,48 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         this.raftWatchCommit.set(ctx.connectionId, state.commitIndex);
       }
       const since = this.raftLeaderlessSince.get(ctx.connectionId)!;
-      // Keep exactly one active CRITICAL event present for the whole outage.
-      // (Re-)emit only when we've never emitted for this outage, or the tracked
-      // event was explicitly resolved (operator dismissed the banner while quorum
-      // is still lost). If the id is set but the event is merely absent from the
-      // in-memory ring — evicted, NOT resolved — it is still active in storage and
-      // the feed stays pinned, so emitting again would orphan the prior CRITICAL.
-      // Key off the cached resolved flag, not mere presence.
-      const openEventId = this.raftLeaderlessEventId.get(ctx.connectionId);
-      const trackedEvent =
-        openEventId !== undefined
-          ? this.recentAnomalies.find((a) => a.id === openEventId)
-          : undefined;
-      const needEmit = openEventId === undefined || (trackedEvent !== undefined && trackedEvent.resolved);
-      if (timestamp - since >= fireMs && needEmit) {
-        const heldMs = timestamp - since;
-        const event: AnomalyEvent = {
-          id: randomUUID(),
-          timestamp,
-          metricType: MetricType.RAFT_HEALTH,
-          anomalyType: AnomalyType.DROP,
-          severity: AnomalySeverity.CRITICAL,
-          value: 0,
-          baseline: 1,
-          zScore: 0,
-          stdDev: 0,
-          threshold: 0,
-          message:
-            `CRITICAL: Valkey Cluster V2 (Raft) has no reachable leader — this node has been ` +
-            `unable to elect one for ${Math.round(heldMs / 1000)}s ` +
-            `(role=${state.role}, term=${state.currentTerm}, commit index frozen at ${state.commitIndex}). ` +
-            `A majority of Raft voters is unreachable — the commit log is frozen and writes are refused ` +
-            `(CLUSTERDOWN). Note cluster_state may still read "ok" on this node. ` +
-            `Restore quorum by recovering the failed node(s).`,
-          resolved: false,
-          connectionId: ctx.connectionId,
-        };
-        // Track the id BEFORE emitting: addAnomaly pushes to the cache
-        // synchronously, so a throw mid-emit won't cause a duplicate next poll.
-        this.raftLeaderlessEventId.set(ctx.connectionId, event.id);
-        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx);
+      // Keep exactly one active CRITICAL incident present for the whole outage:
+      // (re-)emit only when the authoritative feed currently has none for this
+      // connection. That feed (storage-backed, same as the UI) treats an evicted-
+      // but-unresolved event as still live (so we don't duplicate) and a
+      // dismissed/removed one as gone (so we re-emit and the pin comes back). The
+      // query only runs past the fire window, i.e. during an actual outage.
+      if (timestamp - since >= fireMs) {
+        let active: AnomalyEvent[];
+        try {
+          active = await this.getActiveRaftOutages(ctx.connectionId);
+        } catch {
+          active = [{} as AnomalyEvent]; // storage unavailable — assume pinned, don't duplicate
+        }
+        // Mark the outage active regardless (so recovery knows to resolve later),
+        // then emit only when nothing is currently pinned.
+        this.raftLeaderlessActive.set(ctx.connectionId, true);
+        if (active.length === 0) {
+          const heldMs = timestamp - since;
+          const event: AnomalyEvent = {
+            id: randomUUID(),
+            timestamp,
+            metricType: MetricType.RAFT_HEALTH,
+            anomalyType: AnomalyType.DROP,
+            severity: AnomalySeverity.CRITICAL,
+            value: 0,
+            baseline: 1,
+            zScore: 0,
+            stdDev: 0,
+            threshold: 0,
+            message:
+              `CRITICAL: Valkey Cluster V2 (Raft) has no reachable leader — this node has been ` +
+              `unable to elect one for ${Math.round(heldMs / 1000)}s ` +
+              `(role=${state.role}, term=${state.currentTerm}, commit index frozen at ${state.commitIndex}). ` +
+              `A majority of Raft voters is unreachable — the commit log is frozen and writes are refused ` +
+              `(CLUSTERDOWN). Note cluster_state may still read "ok" on this node. ` +
+              `Restore quorum by recovering the failed node(s).`,
+            resolved: false,
+            connectionId: ctx.connectionId,
+          };
+          this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+          await this.addAnomaly(event, ctx);
+        }
       }
     }
   }

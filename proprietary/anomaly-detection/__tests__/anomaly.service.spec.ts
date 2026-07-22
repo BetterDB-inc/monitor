@@ -2330,9 +2330,10 @@ describe('AnomalyService', () => {
       expect(activeCriticalRaft()).toHaveLength(0);
     });
 
-    it('does not re-emit (orphan) when the outage event is evicted but still active', async () => {
-      // Bugbot: an evicted-but-active event must not trigger a duplicate emit —
-      // it is still active in storage, so the feed stays pinned without a new row.
+    it('does not re-emit (orphan) when the outage event is evicted but still active in storage', async () => {
+      // Bugbot: an evicted-but-active event must not trigger a duplicate emit — the
+      // authoritative (storage-backed) feed still reports it, so the pin holds
+      // without a new row.
       dbClient.getClusterInfo = jest
         .fn()
         .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
@@ -2340,12 +2341,51 @@ describe('AnomalyService', () => {
       now += 61_000;
       await poll(); // fires E1
       expect(activeCriticalRaft()).toHaveLength(1);
+      const e1id = activeCriticalRaft()[0].id;
 
-      // Simulate E1 evicted from the in-memory ring while still active in storage.
+      // Simulate E1 evicted from the in-memory ring but still unresolved in storage.
       (service as unknown as { recentAnomalies: unknown[] }).recentAnomalies = [];
+      storage.getAnomalyEvents.mockResolvedValue([
+        {
+          id: e1id,
+          timestamp: now,
+          metricType: 'raft_health',
+          anomalyType: 'drop',
+          severity: 'critical',
+          value: 0,
+          baseline: 1,
+          stdDev: 0,
+          zScore: 0,
+          threshold: 0,
+          message: 'live outage',
+          resolved: false,
+        },
+      ]);
       now += 1_000;
-      await poll(); // still leaderless — must NOT emit a duplicate
+      await poll(); // authoritative feed still has E1 → must NOT emit a duplicate
       expect(raftEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL)).toHaveLength(0);
+    });
+
+    it('re-emits after a dismissed event is purged from the cache, outage still live', async () => {
+      // Bugbot ("missed re-emit"): if the dismissed row is removed from the ring
+      // (clearResolved), not just flagged resolved, the pin must still come back —
+      // the authoritative feed reports none active, so a fresh CRITICAL is emitted.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll();
+      now += 61_000;
+      await poll(); // fires E1
+      const e1 = activeCriticalRaft()[0].id;
+
+      await service.resolveAnomaly(e1); // operator dismisses
+      service.clearResolved(); // ...and the resolved row is purged from the ring
+      expect(activeCriticalRaft()).toHaveLength(0);
+
+      now += 1_000;
+      await poll(); // outage persists, nothing active anywhere → re-emit
+      expect(activeCriticalRaft()).toHaveLength(1);
+      expect(activeCriticalRaft()[0].id).not.toBe(e1);
     });
 
     it('does not alert on a brief seek that recovers into a leader (healthy failover)', async () => {
