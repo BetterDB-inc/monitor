@@ -81,6 +81,16 @@ describe('McpAnalyticsController', () => {
     expect(vectorSvc.getIndexInfo).toHaveBeenCalledWith('inst1', 'idx1');
   });
 
+  it('vector indexes keeps successful entries when one index info fails', async () => {
+    vectorSvc.getIndexList.mockResolvedValueOnce(['idx1', 'idx2']);
+    vectorSvc.getIndexInfo
+      .mockResolvedValueOnce({ name: 'idx1', numDocs: 5 })
+      .mockRejectedValueOnce(new Error('FT.INFO failed: Unknown index name'));
+    const controller = await makeController(false);
+    const res = await controller.getVectorIndexes('inst1');
+    expect(res.indexes).toEqual([{ name: 'idx1', numDocs: 5 }]);
+  });
+
   it('vector indexes maps missing Search module to 501', async () => {
     vectorSvc.getIndexList.mockRejectedValueOnce(
       new CapabilityUnavailableError(

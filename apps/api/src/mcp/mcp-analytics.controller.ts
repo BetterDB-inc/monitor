@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { INFERENCE_LATENCY_PRO_SERVICE, IInferenceLatencyProService, MetricKind } from '@betterdb/shared';
 import { AgentTokenGuard } from '../common/guards/agent-token.guard';
+import { VectorIndexInfo } from '../common/types/metrics.types';
 import { ValidateInstanceIdPipe, mapMcpError, safeParseInt } from './mcp-helpers';
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
 import { VectorSearchService } from '../vector-search/vector-search.service';
@@ -54,11 +55,18 @@ export class McpAnalyticsController {
   async getVectorIndexes(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       const names = await this.vectorSearchService.getIndexList(id);
-      const indexes = await Promise.all(
+      const settled = await Promise.allSettled(
         names.map((name) => {
           return this.vectorSearchService.getIndexInfo(id, name);
         }),
       );
+      const indexes = settled
+        .filter((result): result is PromiseFulfilledResult<VectorIndexInfo> => {
+          return result.status === 'fulfilled';
+        })
+        .map((result) => {
+          return result.value;
+        });
       return { indexes };
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get vector indexes');
