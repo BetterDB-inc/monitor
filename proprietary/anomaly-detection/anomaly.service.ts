@@ -910,21 +910,27 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   ): Promise<{ recoveredMs: number; fireMs: number }> {
     let nodeTimeout = this.raftNodeTimeoutMs.get(ctx.connectionId);
     if (nodeTimeout === undefined) {
-      nodeTimeout = AnomalyService.RAFT_DEFAULT_NODE_TIMEOUT_MS;
       try {
         const raw = await ctx.client.getConfigValue('cluster-node-timeout');
         const n = raw != null ? parseInt(raw, 10) : NaN;
-        if (Number.isFinite(n) && n > 0) nodeTimeout = n;
+        // Cache ONLY a real, positive value. A thrown/empty/non-positive result
+        // falls back to the default for this computation but stays uncached, so a
+        // transient CONFIG failure is retried on the next poll rather than pinning
+        // the default forever.
+        if (Number.isFinite(n) && n > 0) {
+          nodeTimeout = n;
+          this.raftNodeTimeoutMs.set(ctx.connectionId, nodeTimeout);
+        }
       } catch {
-        // Keep the default; config may be unavailable on some deployments.
+        // Leave uncached; retry next poll.
       }
-      this.raftNodeTimeoutMs.set(ctx.connectionId, nodeTimeout);
     }
+    const effective = nodeTimeout ?? AnomalyService.RAFT_DEFAULT_NODE_TIMEOUT_MS;
     const recoveredMs = Math.min(
       AnomalyService.RAFT_WINDOW_CAP_MS,
-      Math.max(AnomalyService.RAFT_RECOVERED_FLOOR_MS, 3 * nodeTimeout),
+      Math.max(AnomalyService.RAFT_RECOVERED_FLOOR_MS, 3 * effective),
     );
-    const fireMs = recoveredMs + Math.max(AnomalyService.RAFT_FIRE_MARGIN_MS, nodeTimeout);
+    const fireMs = recoveredMs + Math.max(AnomalyService.RAFT_FIRE_MARGIN_MS, effective);
     return { recoveredMs, fireMs };
   }
 
@@ -946,38 +952,41 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     }
 
     // --- Election churn ---
+    // Record any new election (aging out old ones), persist BEFORE emitting, and
+    // re-check the threshold every poll — not only on a term transition. That way
+    // an addAnomaly failure doesn't drop the election (it stays in the window) and
+    // the WARNING is retried on the next poll even after leadership stabilises.
     const prevTerm = this.raftPrevTerm.get(ctx.connectionId);
     this.raftPrevTerm.set(ctx.connectionId, state.currentTerm);
-    if (prevTerm !== undefined && state.currentTerm > prevTerm) {
-      const cutoff = timestamp - AnomalyService.RAFT_CHURN_WINDOW_MS;
-      const recent = [...(this.raftTermChanges.get(ctx.connectionId) ?? []), timestamp].filter(
-        (t) => t >= cutoff,
-      );
-      if (recent.length >= AnomalyService.RAFT_CHURN_MIN_ELECTIONS) {
-        const event: AnomalyEvent = {
-          id: randomUUID(),
-          timestamp,
-          metricType: MetricType.RAFT_HEALTH,
-          anomalyType: AnomalyType.SPIKE,
-          severity: AnomalySeverity.WARNING,
-          value: state.currentTerm,
-          baseline: 0,
-          zScore: 0,
-          stdDev: 0,
-          threshold: AnomalyService.RAFT_CHURN_MIN_ELECTIONS,
-          message:
-            `WARNING: Raft leadership is flapping — ${recent.length} elections in ` +
-            `${Math.round(AnomalyService.RAFT_CHURN_WINDOW_MS / 1000)}s (now term ${state.currentTerm}). ` +
-            `Investigate an unstable/overloaded primary or a split network in the Valkey Cluster V2 (Raft) group.`,
-          resolved: false,
-          connectionId: ctx.connectionId,
-        };
-        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx);
-        this.raftTermChanges.set(ctx.connectionId, []); // reset after firing (only on success)
-      } else {
-        this.raftTermChanges.set(ctx.connectionId, recent);
-      }
+    const churnCutoff = timestamp - AnomalyService.RAFT_CHURN_WINDOW_MS;
+    const isNewElection = prevTerm !== undefined && state.currentTerm > prevTerm;
+    const recent = [
+      ...(this.raftTermChanges.get(ctx.connectionId) ?? []),
+      ...(isNewElection ? [timestamp] : []),
+    ].filter((t) => t >= churnCutoff);
+    this.raftTermChanges.set(ctx.connectionId, recent);
+    if (recent.length >= AnomalyService.RAFT_CHURN_MIN_ELECTIONS) {
+      const event: AnomalyEvent = {
+        id: randomUUID(),
+        timestamp,
+        metricType: MetricType.RAFT_HEALTH,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: state.currentTerm,
+        baseline: 0,
+        zScore: 0,
+        stdDev: 0,
+        threshold: AnomalyService.RAFT_CHURN_MIN_ELECTIONS,
+        message:
+          `WARNING: Raft leadership is flapping — ${recent.length} elections in ` +
+          `${Math.round(AnomalyService.RAFT_CHURN_WINDOW_MS / 1000)}s (now term ${state.currentTerm}). ` +
+          `Investigate an unstable/overloaded primary or a split network in the Valkey Cluster V2 (Raft) group.`,
+        resolved: false,
+        connectionId: ctx.connectionId,
+      };
+      this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+      await this.addAnomaly(event, ctx);
+      this.raftTermChanges.set(ctx.connectionId, []); // dedupe: clear only after a successful emit
     }
 
     // --- Leaderless / quorum loss ---

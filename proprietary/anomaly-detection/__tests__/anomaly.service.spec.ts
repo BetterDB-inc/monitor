@@ -2252,6 +2252,22 @@ describe('AnomalyService', () => {
       expect(raftEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
     });
 
+    it('retries cluster-node-timeout after a transient CONFIG failure (no permanent fallback)', async () => {
+      // Bugbot: a thrown getConfigValue must not permanently pin the default —
+      // it should be retried on the next poll until a real value is cached.
+      const getCfg = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('LOADING'))
+        .mockResolvedValue('20000');
+      dbClient.getConfigValue = getCfg;
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      await poll(); // attempt 1 throws → not cached
+      await poll(); // attempt 2 succeeds → cached
+      expect(getCfg).toHaveBeenCalledTimes(2);
+      await poll(); // cached → no further CONFIG calls
+      expect(getCfg).toHaveBeenCalledTimes(2);
+    });
+
     it('does not alert on a brief seek that recovers into a leader (healthy failover)', async () => {
       dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
       await poll(); // t0: seeking, watch opens, within grace
@@ -2312,6 +2328,38 @@ describe('AnomalyService', () => {
       );
       await poll();
       expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('retries the churn WARNING on the next poll when the first emit throws', async () => {
+      // Bugbot: if addAnomaly throws on the churn fire path, the election must not
+      // be dropped — the WARNING is retried on the next poll even without a new
+      // term bump (the recorded elections stay in the window until a clean emit).
+      const setTerm = (t: number) =>
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+          raftInfo({ cluster_raft_current_term: String(t) }),
+        );
+      // Throw on the emit that would fire the churn WARNING.
+      (prometheusService.incrementAnomalyEvent as jest.Mock).mockImplementationOnce(() => {
+        throw new Error('otel exporter down');
+      });
+      setTerm(1);
+      await poll(); // baseline
+      now += 1000;
+      setTerm(2);
+      await poll(); // election #1
+      now += 1000;
+      setTerm(3);
+      await poll(); // election #2
+      now += 1000;
+      setTerm(4);
+      await poll(); // election #3 → fires, but the emit throws
+      const callsAfterFailure = (prometheusService.incrementAnomalyEvent as jest.Mock).mock.calls.length;
+
+      now += 1000; // no new election
+      await poll(); // must retry the emit (recent elections still >= threshold)
+      expect(
+        (prometheusService.incrementAnomalyEvent as jest.Mock).mock.calls.length,
+      ).toBeGreaterThan(callsAfterFailure);
     });
   });
 });
