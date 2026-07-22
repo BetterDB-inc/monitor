@@ -2009,6 +2009,45 @@ server.tool(
     }),
 );
 
+server.tool(
+  'get_vector_indexes',
+  'Get health details for every vector search index on the instance: document count, memory usage, indexing failures, and percent indexed. Requires the Search module (valkey-search / RediSearch) on the connection — errors clearly if absent. Use to diagnose incomplete indexing or index memory growth.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_vector_indexes', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/vector-indexes`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'get_inference_latency',
+  'Get the FT.SEARCH latency profile: p50/p95/p99 per vector index over the sampling window, plus SLA breach status per index when BetterDB Pro inference SLA monitoring is active (sla is null otherwise). More specific than get_latency, which covers general command latency. Use to answer "are vector searches meeting their latency budget?".',
+  {
+    windowMs: z
+      .number()
+      .optional()
+      .describe('Profile window in milliseconds (service default if omitted)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ windowMs, instanceId }) =>
+    withTelemetry('get_inference_latency', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ windowMs });
+      const data = await apiFetch(`/mcp/instance/${id}/inference-latency${qs}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
 try {
   if (AUTOSTART) {
     const { startMonitor } = await import('./autostart.js');
