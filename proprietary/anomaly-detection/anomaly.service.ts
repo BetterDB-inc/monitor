@@ -116,7 +116,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private raftLeaderlessActive = new Map<string, boolean>();
   private raftMode = new Map<string, boolean>();
   private raftNodeTimeoutMs = new Map<string, number>();
-  private raftNodeTimeoutAttempts = new Map<string, number>();
+  private raftNodeTimeoutRecheck = new Map<string, number>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private prevReplSnapshot = new Map<
     string,
@@ -325,7 +325,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftLeaderlessActive.delete(connectionId);
     this.raftMode.delete(connectionId);
     this.raftNodeTimeoutMs.delete(connectionId);
-    this.raftNodeTimeoutAttempts.delete(connectionId);
+    this.raftNodeTimeoutRecheck.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
@@ -697,14 +697,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       if (clusterEnabled === '1') {
         // Raft (Cluster V2) vs gossip is decided from CLUSTER INFO. Default to the
         // last known mode so a transient CLUSTER INFO failure can't flip a Raft
-        // connection back to gossip; `clusterInfoOk` gates the gossip detectors on
-        // having fresh info this poll.
+        // connection back to gossip and run the gossip topology detectors on it.
         let isRaft = this.raftMode.get(ctx.connectionId) ?? false;
-        let clusterInfoOk = false;
         try {
           const clusterInfo = await ctx.client.getClusterInfo();
           const clusterState = clusterInfo?.cluster_state;
-          clusterInfoOk = !!clusterInfo;
           if (clusterState) {
             const lastState = this.lastClusterState.get(ctx.connectionId);
             if (lastState !== undefined && clusterState !== lastState) {
@@ -775,10 +772,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // Gossip-era topology detectors — two primaries per shard (#2261) and
         // orphaned/stuck replicas (#2090). Under Raft, topology is consensus-
         // managed, so these gossip-race detectors are skipped; Raft health is
-        // covered by detectRaftHealth above. Require fresh cluster info this poll
-        // AND positively-gossip mode: a CLUSTER INFO failure must not resurrect
-        // them on a connection already known to be Raft.
-        if (clusterInfoOk && !isRaft) {
+        // covered by detectRaftHealth above. Gated on `!isRaft` only, which
+        // defaults to the last known mode — so a transient CLUSTER INFO failure
+        // neither runs them on a known-Raft connection nor suppresses them on a
+        // gossip cluster (where they must keep running through the blip).
+        if (!isRaft) {
           await this.detectDuplicatePrimaries(ctx, timestamp);
           await this.detectStuckReplicas(ctx, timestamp);
         }
@@ -887,10 +885,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // a 5-minute node-timeout) while still bounding worst-case detection latency.
   private static readonly RAFT_MAX_NODE_TIMEOUT_MS = 300_000;
   private static readonly RAFT_FIRE_MARGIN_MS = 10_000;
-  // Retry a failing cluster-node-timeout lookup this many polls (transient errors),
-  // then cache the default so a permanently-unreadable CONFIG (e.g. ACL-restricted)
-  // isn't queried on every poll forever.
-  private static readonly RAFT_NODE_TIMEOUT_MAX_ATTEMPTS = 3;
+  // When cluster-node-timeout is unreadable we fall back to the default window but
+  // keep retrying the lookup every this-many polls — so we neither hammer CONFIG on
+  // every poll (an ACL-restricted read) nor pin the wrong default forever if the
+  // read only fails transiently at startup on a cluster with a larger real timeout.
+  private static readonly RAFT_NODE_TIMEOUT_RECHECK_POLLS = 60;
 
   /**
    * Health of a Valkey Raft cluster (Cluster V2, `cluster-protocol raft`), from
@@ -926,30 +925,33 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     ctx: ConnectionContext,
   ): Promise<{ recoveredMs: number; fireMs: number }> {
     let nodeTimeout = this.raftNodeTimeoutMs.get(ctx.connectionId);
+    // nodeTimeout is only ever cached once a REAL positive value is read. While
+    // it's unknown we retry the lookup, but only every RECHECK_POLLS polls so an
+    // unreadable CONFIG isn't hammered — falling back to the default window in the
+    // meantime and picking up the real value as soon as CONFIG becomes readable.
     if (nodeTimeout === undefined) {
-      let fetched: number | undefined;
-      try {
-        const raw = await ctx.client.getConfigValue('cluster-node-timeout');
-        const n = raw != null ? parseInt(raw, 10) : NaN;
-        if (Number.isFinite(n) && n > 0) fetched = n;
-      } catch {
-        // fetched stays undefined
-      }
-      if (fetched !== undefined) {
-        nodeTimeout = fetched;
-        this.raftNodeTimeoutMs.set(ctx.connectionId, nodeTimeout);
-        this.raftNodeTimeoutAttempts.delete(ctx.connectionId);
+      const countdown = this.raftNodeTimeoutRecheck.get(ctx.connectionId) ?? 0;
+      if (countdown > 0) {
+        this.raftNodeTimeoutRecheck.set(ctx.connectionId, countdown - 1);
       } else {
-        // CONFIG unreadable this poll (thrown/empty/non-positive). Retry a few
-        // polls for a transient error, then cache the default so a permanently
-        // restricted CONFIG isn't queried on every poll forever.
-        const attempts = (this.raftNodeTimeoutAttempts.get(ctx.connectionId) ?? 0) + 1;
-        if (attempts >= AnomalyService.RAFT_NODE_TIMEOUT_MAX_ATTEMPTS) {
-          nodeTimeout = AnomalyService.RAFT_DEFAULT_NODE_TIMEOUT_MS;
+        let fetched: number | undefined;
+        try {
+          const raw = await ctx.client.getConfigValue('cluster-node-timeout');
+          const n = raw != null ? parseInt(raw, 10) : NaN;
+          if (Number.isFinite(n) && n > 0) fetched = n;
+        } catch {
+          // fetched stays undefined
+        }
+        if (fetched !== undefined) {
+          nodeTimeout = fetched;
           this.raftNodeTimeoutMs.set(ctx.connectionId, nodeTimeout);
-          this.raftNodeTimeoutAttempts.delete(ctx.connectionId);
+          this.raftNodeTimeoutRecheck.delete(ctx.connectionId);
         } else {
-          this.raftNodeTimeoutAttempts.set(ctx.connectionId, attempts);
+          // Back off before the next attempt; keep using the default until then.
+          this.raftNodeTimeoutRecheck.set(
+            ctx.connectionId,
+            AnomalyService.RAFT_NODE_TIMEOUT_RECHECK_POLLS,
+          );
         }
       }
     }
@@ -1102,24 +1104,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const settled =
       watching && !seeking && lastSeeking !== undefined && timestamp - lastSeeking >= recoveredMs;
 
-    if (state.role === 'leader' || madeProgress || settled) {
-      // Proven quorum (a leader, committed progress) or a settled node that
-      // stopped seeking — close the watch and auto-resolve the outage's event so
-      // the panel un-pins on recovery.
-      this.raftLeaderlessSince.delete(ctx.connectionId);
-      this.raftWatchCommit.delete(ctx.connectionId);
-      this.raftLastSeeking.delete(ctx.connectionId);
-      // Recovery: resolve every active outage incident for this connection so the
-      // panel un-pins. Gated on raftLeaderlessActive so a healthy leader that never
-      // had an outage doesn't hit storage every poll. Clear the flag only once all
-      // are resolved, so a storage blip is retried on the next healthy poll rather
-      // than leaving a stuck-active incident.
-      if (this.raftLeaderlessActive.get(ctx.connectionId)) {
-        if (await this.resolveRaftOutages(ctx.connectionId)) {
-          this.raftLeaderlessActive.set(ctx.connectionId, false);
-        }
-      }
-    } else if (seeking || watching) {
+    // An active outage this poll = the node is seeking (or watching an already-open
+    // outage) with no recovery signal. Anything else is treated as healthy.
+    const recovered = state.role === 'leader' || madeProgress || settled;
+    if (!recovered && (seeking || watching)) {
       // Seeking a leader, or already watching an unresolved outage.
       if (!watching) {
         this.raftLeaderlessSince.set(ctx.connectionId, timestamp);
@@ -1130,9 +1118,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // (re-)emit only when the authoritative feed currently has none for this
       // connection. That feed (storage-backed, same as the UI) treats an evicted-
       // but-unresolved event as still live (so we don't duplicate) and a
-      // dismissed/removed one as gone (so we re-emit and the pin comes back). The
-      // query only runs past the fire window, i.e. during an actual outage.
-      if (timestamp - since >= fireMs) {
+      // dismissed/removed one as gone (so we re-emit and the pin comes back).
+      //
+      // Fire only while the node is actively seeking: the fire clock runs from
+      // watch-open (`since`) but recovery (`settled`) runs from the last seek, so a
+      // node that sought for a while then quietly recovered into an idle follower
+      // must not trip a CRITICAL in the gap before `settled` closes the watch.
+      if (timestamp - since >= fireMs && seeking) {
         const active = await this.getActiveRaftOutages(ctx.connectionId);
         // Mark the outage active regardless (so recovery knows to resolve later),
         // then emit only when nothing is currently pinned.
@@ -1162,6 +1154,22 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           };
           this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
           await this.addAnomaly(event, ctx);
+        }
+      }
+    } else {
+      // Healthy this poll (a leader, committed progress, a node that settled after
+      // it stopped seeking, or a plain follower with a live leader). Close the watch
+      // and, if an outage was flagged, resolve its incident(s). Gated on
+      // raftLeaderlessActive so a healthy connection that never had an outage doesn't
+      // hit storage every poll; the flag clears only once the resolve durably
+      // succeeds, so it's retried on every healthy poll — including a follower
+      // recovery, whose watch state is already gone — until a storage blip clears.
+      this.raftLeaderlessSince.delete(ctx.connectionId);
+      this.raftWatchCommit.delete(ctx.connectionId);
+      this.raftLastSeeking.delete(ctx.connectionId);
+      if (this.raftLeaderlessActive.get(ctx.connectionId)) {
+        if (await this.resolveRaftOutages(ctx.connectionId)) {
+          this.raftLeaderlessActive.set(ctx.connectionId, false);
         }
       }
     }

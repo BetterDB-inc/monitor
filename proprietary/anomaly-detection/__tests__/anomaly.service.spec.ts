@@ -2209,8 +2209,8 @@ describe('AnomalyService', () => {
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
       await poll(); // t0+40s: re-seek within the recovery window, lastSeeking refreshed
       now += 21_000;
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
-      await poll(); // t0+61s follower: 21s since seek (not settled), 61s watch → CRITICAL
+      // Fire happens on a seeking beat (still pre-candidate here): 61s watch >= 60s.
+      await poll(); // t0+61s pre-candidate: 61s watch, actively seeking → CRITICAL
       expect(raftEvents()).toHaveLength(1);
       expect(raftEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
     });
@@ -2252,30 +2252,24 @@ describe('AnomalyService', () => {
       expect(raftEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
     });
 
-    it('retries cluster-node-timeout after a transient CONFIG failure (no permanent fallback)', async () => {
-      // Bugbot: a thrown getConfigValue must not permanently pin the default —
-      // it should be retried on the next poll until a real value is cached.
+    it('re-checks cluster-node-timeout on a backoff, not every poll, and picks it up when readable', async () => {
+      // Review (Tier 1): an unreadable CONFIG must be neither hammered every poll
+      // NOR pinned to the default forever — it's retried on a backoff and the real
+      // value is adopted as soon as CONFIG becomes readable.
       const getCfg = jest
         .fn()
-        .mockRejectedValueOnce(new Error('LOADING'))
+        .mockRejectedValueOnce(new Error('NOPERM'))
         .mockResolvedValue('20000');
       dbClient.getConfigValue = getCfg;
       dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
-      await poll(); // attempt 1 throws → not cached
-      await poll(); // attempt 2 succeeds → cached
+      await poll(); // attempt 1 fails → backoff armed
+      expect(getCfg).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 5; i++) await poll(); // within backoff → not re-queried
+      expect(getCfg).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 65; i++) await poll(); // drain the backoff → re-attempt succeeds, caches
       expect(getCfg).toHaveBeenCalledTimes(2);
-      await poll(); // cached → no further CONFIG calls
+      await poll(); // real value cached → no further CONFIG calls
       expect(getCfg).toHaveBeenCalledTimes(2);
-    });
-
-    it('stops re-querying cluster-node-timeout after repeated CONFIG failures', async () => {
-      // Bugbot: a permanently unreadable CONFIG (e.g. ACL-restricted) must not be
-      // queried on every poll — retry a few times, then cache the default.
-      const getCfg = jest.fn().mockRejectedValue(new Error('NOPERM'));
-      dbClient.getConfigValue = getCfg;
-      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
-      for (let i = 0; i < 6; i++) await poll();
-      expect(getCfg.mock.calls.length).toBeLessThanOrEqual(3);
     });
 
     it('still emits the first CRITICAL when storage is unavailable (no false "pinned")', async () => {
@@ -2350,6 +2344,50 @@ describe('AnomalyService', () => {
 
       now += 1_000;
       await poll(); // still healthy → retry resolve → succeeds
+      expect(activeCriticalRaft()).toHaveLength(0);
+    });
+
+    it('retries the auto-resolve on a FOLLOWER recovery after a storage blip (no stuck pin)', async () => {
+      // Review (Tier 1): recovery via commit-progress (a different node became
+      // leader, so this node recovers as a follower) deletes the watch state. If the
+      // resolve then blips, subsequent plain-healthy-follower polls must still retry
+      // it — previously only the leader-recovery path retried, stranding the pin.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate', cluster_raft_commit_index: '9' }));
+      await poll();
+      now += 61_000;
+      await poll(); // fires (pre-candidate)
+      expect(activeCriticalRaft()).toHaveLength(1);
+
+      storage.resolveAnomaly.mockResolvedValueOnce(false); // first resolve blips
+      now += 1_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'follower', cluster_raft_commit_index: '20' }),
+      );
+      await poll(); // follower recovery via commit progress; resolve fails → flag kept, watch deleted
+      expect(activeCriticalRaft()).toHaveLength(1);
+
+      now += 1_000; // now a plain healthy follower, no watch state
+      await poll(); // must still retry the resolve → succeeds
+      expect(activeCriticalRaft()).toHaveLength(0);
+    });
+
+    it('does not fire after the node recovers into an idle follower (fire vs recovery clock)', async () => {
+      // Review (Tier 1): the fire clock runs from watch-open (`since`) but recovery
+      // from the last seek, so a node that sought for a while then quietly recovered
+      // into an idle follower must NOT trip a false CRITICAL in the gap before the
+      // watch settles. Fire is gated on the node still actively seeking.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: watch opens, seeking
+      now += 30_000;
+      await poll(); // t30: still seeking, lastSeeking advances to t30
+      // Recover quietly into an idle follower (stops seeking, commit frozen, not leader).
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      now += 31_000;
+      await poll(); // t61: watch age 61s >= fireMs 60s, but NOT seeking → must not fire
       expect(activeCriticalRaft()).toHaveLength(0);
     });
 
