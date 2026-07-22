@@ -91,6 +91,22 @@ describe('McpAnalyticsController', () => {
     expect(res.indexes).toEqual([{ name: 'idx1', numDocs: 5 }]);
   });
 
+  it('vector indexes surfaces an error when every index info call fails', async () => {
+    vectorSvc.getIndexList.mockResolvedValueOnce(['idx1', 'idx2']);
+    vectorSvc.getIndexInfo
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockRejectedValueOnce(new Error('timeout'));
+    const controller = await makeController(false);
+    let caught: unknown;
+    try {
+      await controller.getVectorIndexes('inst1');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(HttpException);
+    expect((caught as HttpException).getStatus()).toBe(500);
+  });
+
   it('vector indexes maps missing Search module to 501', async () => {
     vectorSvc.getIndexList.mockRejectedValueOnce(
       new CapabilityUnavailableError(

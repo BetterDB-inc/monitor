@@ -74,7 +74,7 @@ export interface InferenceProfileTickContext {
 export interface IInferenceLatencyProService {
   onProfileTick(ctx: InferenceProfileTickContext, profile: InferenceLatencyProfile): Promise<void>;
   onConnectionRemoved(connectionId: string): void;
-  getSlaStatus(connectionId: string): InferenceSlaIndexStatus[];
+  getSlaStatus(connectionId: string): InferenceSlaIndexStatus[] | null;
 }
 
 export const INFERENCE_LATENCY_PRO_SERVICE = 'INFERENCE_LATENCY_PRO_SERVICE';
