@@ -1782,6 +1782,100 @@ server.tool(
     }),
 );
 
+server.tool(
+  'ai_list_instances',
+  'List AI component instances (semantic caches, agent caches, agent memory stores, retrieval pipelines) auto-discovered on the connected Valkey/Redis instance, with liveness and the latest stored metrics sample. This is the superset discovery view across all AI components — use cache_list for cache-specific live stats and memory_stores for memory-store details. Use the returned instance field value as the field parameter of ai_instance_history.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('ai_list_instances', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/ai/instances`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'ai_instance_history',
+  'Get the stored metrics time-series for one AI component instance (hits, misses, hit rate, cost saved, evictions, item count, index size, threshold). Use ai_list_instances first to find the instance field identifier. Use this to see trends: hit-rate degradation, growth, threshold drift.',
+  {
+    field: z.string().describe('Instance field identifier from ai_list_instances'),
+    hours: z.number().optional().describe('Look-back window in hours (default 24)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ field, hours, instanceId }) =>
+    withTelemetry('ai_instance_history', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ hours });
+      const data = await apiFetch(
+        `/mcp/instance/${id}/ai/instances/${encodeURIComponent(field)}/history${qs}`,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'list_ai_traces',
+  'List recent AI application traces ingested via OpenTelemetry (LLM calls, cache lookups, memory recalls, retrieval spans). Not tied to a Valkey instance — traces come from instrumented AI apps. Use get_ai_trace for a full span waterfall and correlate_ai_trace to join a trace with live Valkey state.',
+  {
+    hours: z.number().optional().describe('Look-back window in hours (default 1)'),
+    service: z.string().optional().describe('Filter by emitting service name'),
+    limit: z.number().optional().describe('Max traces to return (default 100)'),
+  },
+  async ({ hours, service, limit }) =>
+    withTelemetry('list_ai_traces', async () => {
+      const qs = buildQuery({ hours, service, limit });
+      const data = await apiFetch(`/mcp/ai/traces${qs}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'get_ai_trace',
+  'Get the full span waterfall for one AI trace: every span with timing, parent relationships, and attributes (model, cache hit/miss, similarity scores). Use list_ai_traces to find trace IDs.',
+  {
+    traceId: z.string().describe('Trace ID from list_ai_traces'),
+  },
+  async ({ traceId }) =>
+    withTelemetry('get_ai_trace', async () => {
+      const data = await apiFetch(`/mcp/ai/traces/${encodeURIComponent(traceId)}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'correlate_ai_trace',
+  'Explain WHY a trace behaved the way it did by joining its cache/memory spans with live Valkey state: does the key still exist, what is its TTL, what threshold was active, what is the index state. The strongest tool for diagnosing unexpected cache misses or stale memory recalls. Requires a selected instance (the one the AI components run on).',
+  {
+    traceId: z.string().describe('Trace ID from list_ai_traces'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ traceId, instanceId }) =>
+    withTelemetry('correlate_ai_trace', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(
+        `/mcp/instance/${id}/ai/traces/${encodeURIComponent(traceId)}/correlate`,
+      );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
 try {
   if (AUTOSTART) {
     const { startMonitor } = await import('./autostart.js');
