@@ -31,6 +31,27 @@ describe('InferenceLatencyProService.getSlaStatus', () => {
     } as unknown as InferenceLatencyProfile;
   }
 
+  function recoveredProfile(): InferenceLatencyProfile {
+    return {
+      windowMs: 60000,
+      generatedAt: 2000,
+      buckets: [{ bucket: 'FT.SEARCH:products', p50: 40, p95: 45, p99: 50 }],
+    } as unknown as InferenceLatencyProfile;
+  }
+
+  function makeServiceWithSettings(settingsValue: unknown): InferenceLatencyProService {
+    const settings = {
+      getCachedSettings: jest.fn().mockReturnValue(settingsValue),
+    };
+    return new InferenceLatencyProService(
+      prometheus as unknown as PrometheusService,
+      settings as unknown as SettingsService,
+      undefined,
+      undefined,
+      license as unknown as LicenseService,
+    );
+  }
+
   beforeEach(() => {
     jest.clearAllMocks();
     license.hasFeature.mockReturnValue(true);
@@ -66,6 +87,21 @@ describe('InferenceLatencyProService.getSlaStatus', () => {
 
   it('skips disabled entries', () => {
     const service = makeService({ products: { p99ThresholdUs: 100, enabled: false } });
+    expect(service.getSlaStatus('c1')).toEqual([]);
+  });
+
+  it('reports recovery after a breach resolves on a later tick', async () => {
+    const service = makeService({ products: { p99ThresholdUs: 100, enabled: true } });
+    await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, breachingProfile());
+    await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, recoveredProfile());
+    const statuses = service.getSlaStatus('c1');
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0].breached).toBe(false);
+    expect(typeof statuses[0].lastFiredAt).toBe('number');
+  });
+
+  it('returns no statuses when the cached settings have no inferenceSlaConfig', () => {
+    const service = makeServiceWithSettings({});
     expect(service.getSlaStatus('c1')).toEqual([]);
   });
 });
