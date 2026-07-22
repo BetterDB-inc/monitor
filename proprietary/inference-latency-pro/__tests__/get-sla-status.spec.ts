@@ -57,10 +57,10 @@ describe('InferenceLatencyProService.getSlaStatus', () => {
     license.hasFeature.mockReturnValue(true);
   });
 
-  it('returns empty when the license lacks INFERENCE_SLA', async () => {
+  it('returns null when the license lacks INFERENCE_SLA', async () => {
     license.hasFeature.mockReturnValue(false);
     const service = makeService({ products: { p99ThresholdUs: 100, enabled: true } });
-    expect(service.getSlaStatus('c1')).toEqual([]);
+    expect(service.getSlaStatus('c1')).toBeNull();
   });
 
   it('reports configured index with no state as not breached', () => {
@@ -73,7 +73,7 @@ describe('InferenceLatencyProService.getSlaStatus', () => {
   it('reports a live breach recorded by onProfileTick', async () => {
     const service = makeService({ products: { p99ThresholdUs: 100, enabled: true } });
     await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, breachingProfile());
-    const statuses = service.getSlaStatus('c1');
+    const statuses = service.getSlaStatus('c1') ?? [];
     expect(statuses).toHaveLength(1);
     expect(statuses[0].breached).toBe(true);
     expect(typeof statuses[0].lastFiredAt).toBe('number');
@@ -82,7 +82,8 @@ describe('InferenceLatencyProService.getSlaStatus', () => {
   it('scopes state to the connection', async () => {
     const service = makeService({ products: { p99ThresholdUs: 100, enabled: true } });
     await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, breachingProfile());
-    expect(service.getSlaStatus('c2')[0].breached).toBe(false);
+    const statuses = service.getSlaStatus('c2') ?? [];
+    expect(statuses[0].breached).toBe(false);
   });
 
   it('skips disabled entries', () => {
@@ -94,7 +95,7 @@ describe('InferenceLatencyProService.getSlaStatus', () => {
     const service = makeService({ products: { p99ThresholdUs: 100, enabled: true } });
     await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, breachingProfile());
     await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, recoveredProfile());
-    const statuses = service.getSlaStatus('c1');
+    const statuses = service.getSlaStatus('c1') ?? [];
     expect(statuses).toHaveLength(1);
     expect(statuses[0].breached).toBe(false);
     expect(typeof statuses[0].lastFiredAt).toBe('number');
