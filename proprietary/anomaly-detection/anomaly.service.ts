@@ -1120,11 +1120,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // but-unresolved event as still live (so we don't duplicate) and a
       // dismissed/removed one as gone (so we re-emit and the pin comes back).
       //
-      // Fire only while the node is actively seeking: the fire clock runs from
-      // watch-open (`since`) but recovery (`settled`) runs from the last seek, so a
-      // node that sought for a while then quietly recovered into an idle follower
-      // must not trip a CRITICAL in the gap before `settled` closes the watch.
-      if (timestamp - since >= fireMs && seeking) {
+      // The FIRST fire is gated on the node actively seeking: the fire clock runs
+      // from watch-open (`since`) but recovery (`settled`) runs from the last seek,
+      // so a node that sought for a while then quietly recovered into an idle
+      // follower must not trip a CRITICAL in the gap before `settled` closes the
+      // watch. Once the outage is confirmed (raftLeaderlessActive set), we keep the
+      // pin alive on EVERY poll regardless of the follower↔pre-candidate flap — so
+      // a dismiss landing on a follower beat is re-pinned immediately, not left
+      // green until the next seek.
+      const outageConfirmed = this.raftLeaderlessActive.get(ctx.connectionId) === true;
+      if (timestamp - since >= fireMs && (seeking || outageConfirmed)) {
         const active = await this.getActiveRaftOutages(ctx.connectionId);
         // Mark the outage active regardless (so recovery knows to resolve later),
         // then emit only when nothing is currently pinned.

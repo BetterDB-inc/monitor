@@ -57,7 +57,10 @@ describe('RaftHealthPanel', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows a quorum-loss state and no leader when cluster_state is fail', () => {
+  it('labels cluster_state:fail on a non-leader as a slot problem, not quorum loss', () => {
+    // Review: a follower/pre-candidate can see cluster_state:fail (unbound/unserved
+    // slots) while a leader is elected elsewhere — that must not read "no quorum".
+    // Only the backend outage signal (outageActive) means quorum loss.
     render(
       <RaftHealthPanel
         clusterInfo={{
@@ -69,7 +72,8 @@ describe('RaftHealthPanel', () => {
       />,
     );
 
-    expect(screen.getByText(/Fail \(no quorum\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Fail — slots unavailable/)).toBeInTheDocument();
+    expect(screen.queryByText(/no quorum/)).not.toBeInTheDocument();
     expect(screen.getByText('Pre-candidate')).toBeInTheDocument();
     expect(screen.getByText('none elected')).toBeInTheDocument();
   });

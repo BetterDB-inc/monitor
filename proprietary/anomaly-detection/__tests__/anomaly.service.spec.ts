@@ -2310,6 +2310,31 @@ describe('AnomalyService', () => {
       expect(activeCriticalRaft()[0].id).not.toBe(e1);
     });
 
+    it('re-pins on a follower beat after a dismiss (no green gap during the flap)', async () => {
+      // Review: fire is gated on `seeking` to avoid a false CRITICAL after idle
+      // recovery — but once the outage is confirmed, a dismiss that lands on a
+      // follower beat must still re-pin immediately, not stay green until the next
+      // seek. Re-emit is therefore also allowed while the outage is confirmed.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // watch opens (seeking)
+      now += 61_000;
+      await poll(); // fires E1, outage confirmed
+      expect(activeCriticalRaft()).toHaveLength(1);
+      const e1 = activeCriticalRaft()[0].id;
+
+      await service.resolveAnomaly(e1); // dismiss
+      expect(activeCriticalRaft()).toHaveLength(0);
+
+      now += 1_000;
+      // Role flaps to follower (NOT seeking) — the pin must still come back.
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      await poll();
+      expect(activeCriticalRaft()).toHaveLength(1);
+      expect(activeCriticalRaft()[0].id).not.toBe(e1);
+    });
+
     it('auto-resolves the outage event when quorum is restored', async () => {
       dbClient.getClusterInfo = jest
         .fn()

@@ -42,19 +42,21 @@ export function RaftHealthPanel({
 
   // `cluster_state` is NOT a reliable health signal on its own: a surviving
   // replica keeps reporting `ok` through a majority outage, and `cluster_state:fail`
-  // can also mean unbound slots while a leader is still elected. So:
-  //   - a detected outage (backend) or `fail` with no leader here → "no quorum"
-  //   - `fail` while a leader IS elected → a slot/serving problem, not quorum loss
+  // can mean unbound/unserved slots regardless of whether quorum is intact — any
+  // node role (follower, joiner, leader) can see `fail` while a leader is elected.
+  // So the only trustworthy "no quorum" signal is the backend detector's outage;
+  // `cluster_state:fail` on its own is a slot/serving problem, not quorum loss. So:
+  //   - a detected outage (backend `outageActive`) → "no quorum"
+  //   - `cluster_state:fail` (any role) → a slot/serving problem
   //   - seeking a leader (candidate/pre-candidate) → "Electing" (no leader now)
   //   - otherwise → OK
-  const status: 'ok' | 'electing' | 'fail-slots' | 'no-quorum' =
-    outageActive || (raft.clusterState === 'fail' && raft.role !== 'leader')
-      ? 'no-quorum'
-      : raft.clusterState === 'fail'
-        ? 'fail-slots'
-        : RAFT_SEEKING_ROLES.includes(raft.role)
-          ? 'electing'
-          : 'ok';
+  const status: 'ok' | 'electing' | 'fail-slots' | 'no-quorum' = outageActive
+    ? 'no-quorum'
+    : raft.clusterState === 'fail'
+      ? 'fail-slots'
+      : RAFT_SEEKING_ROLES.includes(raft.role)
+        ? 'electing'
+        : 'ok';
   const border =
     status === 'no-quorum' || status === 'fail-slots'
       ? 'border-destructive'
