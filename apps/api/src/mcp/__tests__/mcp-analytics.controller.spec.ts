@@ -53,4 +53,29 @@ describe('McpAnalyticsController', () => {
     expect(caught).toBeInstanceOf(HttpException);
     expect((caught as HttpException).getStatus()).toBe(500);
   });
+
+  it('latency regressions returns graceful note without anomaly service', async () => {
+    const controller = await makeController(false);
+    const res = (await controller.getLatencyRegressions('inst1')) as {
+      events: unknown[];
+      note?: string;
+    };
+    expect(res.events).toEqual([]);
+    expect(res.note).toContain('BetterDB Pro');
+  });
+
+  it('latency regressions filters the anomaly store by command_p99', async () => {
+    anomalySvc.getRecentAnomalies.mockResolvedValueOnce([{ id: 'a1' }]);
+    const controller = await makeController(true);
+    const res = await controller.getLatencyRegressions('inst1', '10', '5000');
+    expect(res.events).toEqual([{ id: 'a1' }]);
+    expect(anomalySvc.getRecentAnomalies).toHaveBeenCalledWith(
+      5000,
+      undefined,
+      undefined,
+      'command_p99',
+      10,
+      'inst1',
+    );
+  });
 });
