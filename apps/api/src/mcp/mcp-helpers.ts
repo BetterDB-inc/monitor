@@ -64,6 +64,9 @@ export function msToSeconds(value: string | undefined): number | undefined {
 }
 
 export function mapMcpError(logger: Logger, error: unknown, fallback: string): HttpException {
+  if (error instanceof HttpException) {
+    return error;
+  }
   const message = error instanceof Error ? error.message : fallback;
   if (message.includes('not available') || message.includes('not supported')) {
     return new HttpException(message, HttpStatus.NOT_IMPLEMENTED);
