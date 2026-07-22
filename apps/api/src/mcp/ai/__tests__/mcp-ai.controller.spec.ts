@@ -79,6 +79,20 @@ describe('McpAiController', () => {
     expect((caught as HttpException).getStatus()).toBe(500);
   });
 
+  it('GET history clamps hours to 168 and rejects non-positive values', async () => {
+    await controller.getHistory('inst1', 'sc:demo', '999999');
+    expect(aiSvc.getHistory).toHaveBeenCalledWith('inst1', 'sc:demo', 168);
+    await controller.getHistory('inst1', 'sc:demo', '-5');
+    expect(aiSvc.getHistory).toHaveBeenLastCalledWith('inst1', 'sc:demo', 24);
+  });
+
+  it('GET traces clamps hours and limit', async () => {
+    await controller.getTraces('999999', undefined, '999999');
+    expect(aiSvc.getTraces).toHaveBeenCalledWith(168, undefined, 1000);
+    await controller.getTraces('0', undefined, '-1');
+    expect(aiSvc.getTraces).toHaveBeenLastCalledWith(1, undefined, 100);
+  });
+
   it('GET traces uses defaults', async () => {
     await controller.getTraces(undefined, undefined, undefined);
     expect(aiSvc.getTraces).toHaveBeenCalledWith(1, undefined, 100);

@@ -41,6 +41,19 @@ export function safeLimit(value: string | undefined, defaultValue: number): numb
   return Math.max(1, Math.min(safeParseInt(value, defaultValue), MAX_LIMIT));
 }
 
+/** Parse a positive query param, clamping to [1, max]; non-positive or invalid values fall back to the default. */
+export function clampedParseInt(
+  value: string | undefined,
+  defaultValue: number,
+  max: number,
+): number {
+  const parsed = safeParseInt(value, defaultValue);
+  if (Number.isFinite(parsed) === false || parsed <= 0) {
+    return defaultValue;
+  }
+  return Math.min(parsed, max);
+}
+
 /** Convert ms timestamp query param to seconds. */
 export function msToSeconds(value: string | undefined): number | undefined {
   const ms = safeParseInt(value);
