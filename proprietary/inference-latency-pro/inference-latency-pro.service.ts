@@ -1,15 +1,18 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
+  Feature,
   IInferenceLatencyProService,
   IWebhookEventsProService,
   InferenceLatencyProfile,
   InferenceProfileTickContext,
+  InferenceSlaIndexStatus,
   WEBHOOK_EVENTS_PRO_SERVICE,
   WebhookEventType,
 } from '@betterdb/shared';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
+import { LicenseService } from '@proprietary/licenses';
 import { SlaState, evaluateSla } from './sla';
 
 const FT_SEARCH_BUCKET_PREFIX = 'FT.SEARCH:';
@@ -27,6 +30,8 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
     private readonly webhookEventsProService?: IWebhookEventsProService,
     @Optional()
     private readonly otelEvents?: OtelEventDispatcherService,
+    @Optional()
+    private readonly licenseService?: LicenseService,
   ) {}
 
   async onProfileTick(
@@ -146,5 +151,28 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
         this.slaState.delete(key);
       }
     }
+  }
+
+  getSlaStatus(connectionId: string): InferenceSlaIndexStatus[] {
+    const licensed = this.licenseService?.hasFeature(Feature.INFERENCE_SLA) === true;
+    if (licensed === false) {
+      return [];
+    }
+    const settings = this.settingsService.getCachedSettings();
+    const slaConfig = settings.inferenceSlaConfig ?? {};
+    const statuses: InferenceSlaIndexStatus[] = [];
+    for (const [indexName, entry] of Object.entries(slaConfig)) {
+      if (entry?.enabled !== true) {
+        continue;
+      }
+      const prior = this.slaState.get(`${connectionId}|${indexName}`);
+      statuses.push({
+        indexName,
+        thresholdUs: entry.p99ThresholdUs,
+        breached: prior !== undefined && prior.resolved === false,
+        lastFiredAt: prior === undefined ? null : prior.lastFiredAt,
+      });
+    }
+    return statuses;
   }
 }

@@ -33,6 +33,13 @@ export interface InferenceSlaEntry {
 
 export type InferenceSlaConfig = Record<string, InferenceSlaEntry>;
 
+export interface InferenceSlaIndexStatus {
+  indexName: string;
+  thresholdUs: number;
+  breached: boolean;
+  lastFiredAt: number | null;
+}
+
 export const FT_SEARCH_HEALTHY_P50_THRESHOLD_US = 10_000;
 
 export interface InferenceLatencyTrendPoint {
@@ -65,11 +72,9 @@ export interface InferenceProfileTickContext {
 }
 
 export interface IInferenceLatencyProService {
-  onProfileTick(
-    ctx: InferenceProfileTickContext,
-    profile: InferenceLatencyProfile,
-  ): Promise<void>;
+  onProfileTick(ctx: InferenceProfileTickContext, profile: InferenceLatencyProfile): Promise<void>;
   onConnectionRemoved(connectionId: string): void;
+  getSlaStatus(connectionId: string): InferenceSlaIndexStatus[];
 }
 
 export const INFERENCE_LATENCY_PRO_SERVICE = 'INFERENCE_LATENCY_PRO_SERVICE';
