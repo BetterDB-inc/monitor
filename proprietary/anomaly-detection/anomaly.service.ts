@@ -1621,25 +1621,38 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
 
-    this.prometheusService.incrementAnomalyEvent(
-      anomaly.severity,
-      anomaly.metricType,
-      anomaly.anomalyType,
-      ctx?.connectionId,
-    );
+    // Metrics/telemetry emits are best-effort: a failure in the Prometheus counter
+    // or the OTLP dispatch must never abort recording/persisting the anomaly, and
+    // must never propagate out of addAnomaly (that would let one detector's emit
+    // failure abort a later detector in the same poll — e.g. a churn-warning throw
+    // skipping quorum-loss detection).
+    try {
+      this.prometheusService.incrementAnomalyEvent(
+        anomaly.severity,
+        anomaly.metricType,
+        anomaly.anomalyType,
+        ctx?.connectionId,
+      );
+    } catch (err) {
+      this.logger.error('Failed to increment anomaly metric:', err);
+    }
     // Intentionally broader than the webhook path: OTLP includes command_p99
     // anomalies, which webhook-anomaly-integration skips and delivers as
     // latency.regression.detected instead.
     if (this.webhookEventsProService?.isEnabled()) {
-      this.otelEvents?.dispatch(
-        WebhookEventType.ANOMALY_DETECTED,
-        {
-          severity: anomaly.severity,
-          metricType: anomaly.metricType,
-          anomalyType: anomaly.anomalyType,
-        },
-        ctx?.connectionId,
-      );
+      try {
+        this.otelEvents?.dispatch(
+          WebhookEventType.ANOMALY_DETECTED,
+          {
+            severity: anomaly.severity,
+            metricType: anomaly.metricType,
+            anomalyType: anomaly.anomalyType,
+          },
+          ctx?.connectionId,
+        );
+      } catch (err) {
+        this.logger.error('Failed to dispatch anomaly OTLP event:', err);
+      }
     }
 
     try {

@@ -2511,36 +2511,22 @@ describe('AnomalyService', () => {
       expect(raftEvents()).toHaveLength(0);
     });
 
-    it('retries the churn WARNING on the next poll when the first emit throws', async () => {
-      // Bugbot: if addAnomaly throws on the churn fire path, the election must not
-      // be dropped — the WARNING is retried on the next poll even without a new
-      // term bump (the recorded elections stay in the window until a clean emit).
-      const setTerm = (t: number) =>
-        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
-          raftInfo({ cluster_raft_current_term: String(t) }),
-        );
-      // Throw on the emit that would fire the churn WARNING.
-      (prometheusService.incrementAnomalyEvent as jest.Mock).mockImplementationOnce(() => {
-        throw new Error('otel exporter down');
+    it('a throwing churn/metric emit does not block quorum-loss detection', async () => {
+      // Review: the churn block runs before the leaderless block; a metric-emit
+      // failure must not propagate out of addAnomaly and skip quorum-loss detection.
+      // Sustained churn keeps the churn WARNING firing (and its metric emit throwing)
+      // every poll while the node is also seeking — the CRITICAL must still fire.
+      (prometheusService.incrementAnomalyEvent as jest.Mock).mockImplementation(() => {
+        throw new Error('metrics down');
       });
-      setTerm(1);
-      await poll(); // baseline
-      now += 1000;
-      setTerm(2);
-      await poll(); // election #1
-      now += 1000;
-      setTerm(3);
-      await poll(); // election #2
-      now += 1000;
-      setTerm(4);
-      await poll(); // election #3 → fires, but the emit throws
-      const callsAfterFailure = (prometheusService.incrementAnomalyEvent as jest.Mock).mock.calls.length;
-
-      now += 1000; // no new election
-      await poll(); // must retry the emit (recent elections still >= threshold)
-      expect(
-        (prometheusService.incrementAnomalyEvent as jest.Mock).mock.calls.length,
-      ).toBeGreaterThan(callsAfterFailure);
+      for (let i = 1; i <= 65; i++) {
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+          raftInfo({ cluster_raft_role: 'pre-candidate', cluster_raft_current_term: String(i) }),
+        );
+        await poll();
+        now += 1000;
+      }
+      expect(activeCriticalRaft()).toHaveLength(1);
     });
   });
 });
