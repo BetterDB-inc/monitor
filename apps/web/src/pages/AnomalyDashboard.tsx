@@ -14,6 +14,7 @@ import {
 } from './anomalies/capture-on-next-modal';
 import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
+import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import {
   AlertTriangle,
   AlertCircle,
@@ -119,6 +120,7 @@ const METRIC_LABELS: Record<string, string> = {
   command_p99: 'Command P99',
   rejected_connections: 'Rejected Connections',
   client_saturation: 'Client Saturation',
+  raft_health: 'Raft Health',
 };
 
 function formatTime(ts: number): string {
@@ -212,6 +214,14 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
+  // Raft (Cluster V2) quorum-loss is a critical incident that must surface
+  // regardless of the date picker, so it gets its own unfiltered active feed.
+  const { data: raftHealthEvents } = usePolling<AnomalyEvent[]>({
+    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'raft_health', activeOnly: true }),
+    interval: 5000,
+    refetchKey: currentConnection?.id,
+  });
+
   const { data: groups } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
@@ -268,6 +278,7 @@ export function AnomalyDashboard() {
     <div className="space-y-6">
       <DataLossAlertBanner events={dataLossEvents ?? undefined} />
       <LatencyRegressionBanner events={latencyRegressionEvents ?? undefined} />
+      <RaftHealthBanner events={raftHealthEvents ?? undefined} />
 
       {/* Header */}
       <div className="flex justify-between items-center">
