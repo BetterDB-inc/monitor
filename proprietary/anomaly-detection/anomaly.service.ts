@@ -877,7 +877,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // settles and clears before the (larger) fire window elapses.
   private static readonly RAFT_DEFAULT_NODE_TIMEOUT_MS = 15_000;
   private static readonly RAFT_RECOVERED_FLOOR_MS = 30_000;
-  private static readonly RAFT_WINDOW_CAP_MS = 180_000;
+  // Clamp the node-timeout used for sizing (not the derived window): the recovery
+  // window must stay 3x node-timeout to exceed the ~2x inter-seek gap, so bounding
+  // the *input* keeps that invariant for every realistic tuning (this covers up to
+  // a 5-minute node-timeout) while still bounding worst-case detection latency.
+  private static readonly RAFT_MAX_NODE_TIMEOUT_MS = 300_000;
   private static readonly RAFT_FIRE_MARGIN_MS = 10_000;
 
   /**
@@ -930,11 +934,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // Leave uncached; retry next poll.
       }
     }
-    const effective = nodeTimeout ?? AnomalyService.RAFT_DEFAULT_NODE_TIMEOUT_MS;
-    const recoveredMs = Math.min(
-      AnomalyService.RAFT_WINDOW_CAP_MS,
-      Math.max(AnomalyService.RAFT_RECOVERED_FLOOR_MS, 3 * effective),
+    const effective = Math.min(
+      AnomalyService.RAFT_MAX_NODE_TIMEOUT_MS,
+      nodeTimeout ?? AnomalyService.RAFT_DEFAULT_NODE_TIMEOUT_MS,
     );
+    const recoveredMs = Math.max(AnomalyService.RAFT_RECOVERED_FLOOR_MS, 3 * effective);
     const fireMs = recoveredMs + Math.max(AnomalyService.RAFT_FIRE_MARGIN_MS, effective);
     return { recoveredMs, fireMs };
   }
@@ -952,7 +956,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.raftLeaderlessSince.delete(ctx.connectionId);
       this.raftWatchCommit.delete(ctx.connectionId);
       this.raftLastSeeking.delete(ctx.connectionId);
-      this.raftLeaderlessEventId.delete(ctx.connectionId);
+      // If an outage event is still open, resolve it before dropping the id so it
+      // doesn't stay stuck active after the protocol switch (keep it to retry on
+      // a resolve failure).
+      const openEventId = this.raftLeaderlessEventId.get(ctx.connectionId);
+      if (openEventId !== undefined) {
+        let resolved = false;
+        try {
+          resolved = await this.resolveAnomaly(openEventId);
+        } catch {
+          resolved = false;
+        }
+        if (resolved) this.raftLeaderlessEventId.delete(ctx.connectionId);
+      }
       return;
     }
 
@@ -1025,10 +1041,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       this.raftLeaderlessSince.delete(ctx.connectionId);
       this.raftWatchCommit.delete(ctx.connectionId);
       this.raftLastSeeking.delete(ctx.connectionId);
+      // Auto-resolve the outage's event, but KEEP the id if the resolve fails
+      // (storage blip) so the next healthy poll retries — dropping it would leave
+      // the CRITICAL row unresolved and the incident feed pinned after recovery.
       const openEventId = this.raftLeaderlessEventId.get(ctx.connectionId);
       if (openEventId !== undefined) {
-        this.raftLeaderlessEventId.delete(ctx.connectionId);
-        await this.resolveAnomaly(openEventId).catch(() => undefined);
+        let resolved = false;
+        try {
+          resolved = await this.resolveAnomaly(openEventId);
+        } catch {
+          resolved = false;
+        }
+        if (resolved) this.raftLeaderlessEventId.delete(ctx.connectionId);
       }
     } else if (seeking || watching) {
       // Seeking a leader, or already watching an unresolved outage.
@@ -1037,16 +1061,20 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         this.raftWatchCommit.set(ctx.connectionId, state.commitIndex);
       }
       const since = this.raftLeaderlessSince.get(ctx.connectionId)!;
-      // Keep exactly one active CRITICAL event present for the whole outage:
-      // (re-)emit only when there is no live event for it. If an operator marked
-      // the banner resolved while quorum is still lost, the previous event is now
-      // resolved, so we emit a fresh one — the outage isn't over just because the
-      // alert was dismissed.
+      // Keep exactly one active CRITICAL event present for the whole outage.
+      // (Re-)emit only when we've never emitted for this outage, or the tracked
+      // event was explicitly resolved (operator dismissed the banner while quorum
+      // is still lost). If the id is set but the event is merely absent from the
+      // in-memory ring — evicted, NOT resolved — it is still active in storage and
+      // the feed stays pinned, so emitting again would orphan the prior CRITICAL.
+      // Key off the cached resolved flag, not mere presence.
       const openEventId = this.raftLeaderlessEventId.get(ctx.connectionId);
-      const hasLiveEvent =
-        openEventId !== undefined &&
-        this.recentAnomalies.some((a) => a.id === openEventId && !a.resolved);
-      if (timestamp - since >= fireMs && !hasLiveEvent) {
+      const trackedEvent =
+        openEventId !== undefined
+          ? this.recentAnomalies.find((a) => a.id === openEventId)
+          : undefined;
+      const needEmit = openEventId === undefined || (trackedEvent !== undefined && trackedEvent.resolved);
+      if (timestamp - since >= fireMs && needEmit) {
         const heldMs = timestamp - since;
         const event: AnomalyEvent = {
           id: randomUUID(),
