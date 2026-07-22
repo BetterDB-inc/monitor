@@ -88,6 +88,15 @@ async function detectPrefix(): Promise<string> {
   return '/api';
 }
 
+class ApiHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
   if (detectedPrefix === null) {
     detectedPrefix = await detectPrefix();
@@ -128,7 +137,7 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
     } catch {
       if (errText) message = errText;
     }
-    throw new Error(message);
+    throw new ApiHttpError(message, res.status);
   }
 
   const text = await res.text();
@@ -1951,8 +1960,7 @@ server.tool(
       try {
         data = await apiFetch(`/mcp/instance/${id}/largest-keys${qs}`);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (message.includes('Cannot GET')) {
+        if (err instanceof ApiHttpError && err.status === 404) {
           return {
             content: [
               {
