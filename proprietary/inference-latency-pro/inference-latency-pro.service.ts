@@ -153,10 +153,10 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
     }
   }
 
-  getSlaStatus(connectionId: string): InferenceSlaIndexStatus[] {
+  getSlaStatus(connectionId: string): InferenceSlaIndexStatus[] | null {
     const licensed = this.licenseService?.hasFeature(Feature.INFERENCE_SLA) === true;
     if (licensed === false) {
-      return [];
+      return null;
     }
     const settings = this.settingsService.getCachedSettings();
     const slaConfig = settings.inferenceSlaConfig ?? {};

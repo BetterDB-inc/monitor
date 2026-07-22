@@ -60,13 +60,24 @@ export class McpAnalyticsController {
           return this.vectorSearchService.getIndexInfo(id, name);
         }),
       );
-      const indexes = settled
-        .filter((result): result is PromiseFulfilledResult<VectorIndexInfo> => {
-          return result.status === 'fulfilled';
-        })
-        .map((result) => {
-          return result.value;
+      const indexes: VectorIndexInfo[] = [];
+      const failedNames: string[] = [];
+      settled.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          indexes.push(result.value);
+          return;
+        }
+        failedNames.push(names[index]);
+      });
+      if (names.length > 0 && indexes.length === 0) {
+        const failures = settled.filter((result): result is PromiseRejectedResult => {
+          return result.status === 'rejected';
         });
+        throw failures[0].reason;
+      }
+      if (failedNames.length > 0) {
+        this.logger.warn(`Failed to get info for vector indexes: ${failedNames.join(', ')}`);
+      }
       return { indexes };
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get vector indexes');
