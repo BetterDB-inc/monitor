@@ -1894,6 +1894,83 @@ server.tool(
     }),
 );
 
+server.tool(
+  'get_forecast',
+  'Get a capacity forecast for one metric: current trajectory and projected time until the resource ceiling is hit. Metric kinds: opsPerSec, usedMemory, cpuTotal, memFragmentation. Use for capacity planning ("when does memory run out at current growth?").',
+  {
+    metricKind: z
+      .enum(['opsPerSec', 'usedMemory', 'cpuTotal', 'memFragmentation'])
+      .describe('Metric to forecast'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ metricKind, instanceId }) =>
+    withTelemetry('get_forecast', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/forecast/${metricKind}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'get_latency_regressions',
+  'Get detected latency regressions (sustained p99 command-latency degradations vs baseline) from persisted storage. Companion to get_anomalies: same event store, pre-filtered to latency regressions. Use when investigating "the database got slower".',
+  {
+    limit: z.number().optional().describe('Max events to return (default 100)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp ms, default 24h ago)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ limit, startTime, instanceId }) =>
+    withTelemetry('get_latency_regressions', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit, startTime });
+      const data = await apiFetch(`/mcp/instance/${id}/history/latency-regressions${qs}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'get_largest_keys',
+  'Get the largest keys by memory usage from key analytics snapshots. Companion to get_hot_keys: hot keys rank by access frequency, largest keys rank by memory footprint. Use to find memory hogs, bloated hashes/sets, or candidates for TTL/eviction. Requires BetterDB Pro (keyAnalytics).',
+  {
+    limit: z.number().optional().describe('Max keys to return (default 50)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp ms)'),
+    endTime: z.number().optional().describe('End time (Unix timestamp ms)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ limit, startTime, endTime, instanceId }) =>
+    withTelemetry('get_largest_keys', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit, startTime, endTime });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/largest-keys${qs}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.includes('Cannot GET')) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: 'Key analytics is not available (requires BetterDB Pro).',
+              },
+            ],
+          };
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
 try {
   if (AUTOSTART) {
     const { startMonitor } = await import('./autostart.js');
