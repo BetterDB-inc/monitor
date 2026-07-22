@@ -1,4 +1,4 @@
-import { HttpException } from '@nestjs/common';
+import { HttpException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { McpAiController } from '../mcp-ai.controller';
 import { AiObservabilityService } from '../../../ai-observability/ai-observability.service';
@@ -65,6 +65,18 @@ describe('McpAiController', () => {
     }
     expect(caught).toBeInstanceOf(HttpException);
     expect((caught as HttpException).getStatus()).toBe(501);
+  });
+
+  it('rethrows HttpExceptions unchanged (missing connection stays 404)', async () => {
+    aiSvc.getInstances.mockRejectedValueOnce(new NotFoundException('No connection available'));
+    let caught: unknown;
+    try {
+      await controller.getInstances('inst1');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(NotFoundException);
+    expect((caught as HttpException).getStatus()).toBe(404);
   });
 
   it('maps unknown errors to 500', async () => {
