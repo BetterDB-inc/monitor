@@ -78,4 +78,26 @@ describe('McpAiController', () => {
     expect(caught).toBeInstanceOf(HttpException);
     expect((caught as HttpException).getStatus()).toBe(500);
   });
+
+  it('GET traces uses defaults', async () => {
+    await controller.getTraces(undefined, undefined, undefined);
+    expect(aiSvc.getTraces).toHaveBeenCalledWith(1, undefined, 100);
+  });
+
+  it('GET traces forwards filters', async () => {
+    await controller.getTraces('6', 'langchain', '25');
+    expect(aiSvc.getTraces).toHaveBeenCalledWith(6, 'langchain', 25);
+  });
+
+  it('GET trace spans forwards traceId', async () => {
+    const res = await controller.getTraceSpans('abc123');
+    expect(res.spans).toEqual([]);
+    expect(aiSvc.getTraceSpans).toHaveBeenCalledWith('abc123');
+  });
+
+  it('correlate passes traceId then connection id', async () => {
+    const res = await controller.correlateTrace('inst1', 'abc123');
+    expect(res.correlations).toEqual([]);
+    expect(correlationSvc.correlateTrace).toHaveBeenCalledWith('abc123', 'inst1');
+  });
 });
