@@ -13,8 +13,8 @@ const packageJson = require('../package.json') as { version: string };
 
 const args = process.argv.slice(2);
 const AUTOSTART = args.includes('--autostart');
-const PERSIST   = args.includes('--persist');
-const STOP      = args.includes('--stop');
+const PERSIST = args.includes('--persist');
+const STOP = args.includes('--stop');
 
 function getArgValue(flag: string, fallback: string): string {
   const i = args.indexOf(flag);
@@ -24,7 +24,7 @@ function getArgValue(flag: string, fallback: string): string {
   return fallback;
 }
 
-const MONITOR_PORT    = Number(getArgValue('--port', '3001'));
+const MONITOR_PORT = Number(getArgValue('--port', '3001'));
 const MONITOR_STORAGE = getArgValue('--storage', 'sqlite') as 'sqlite' | 'memory';
 
 if (!Number.isFinite(MONITOR_PORT) || MONITOR_PORT < 1 || MONITOR_PORT > 65535) {
@@ -108,7 +108,7 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
   });
 
   if (res.status === 402) {
-    const data = await res.json().catch(() => ({})) as Record<string, unknown>;
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     return {
       __licenseError: true,
       feature: data.feature ?? 'unknown',
@@ -139,11 +139,17 @@ async function apiFetch(path: string): Promise<unknown> {
   return apiRequest('GET', path);
 }
 
-function isLicenseError(data: unknown): data is { __licenseError: true; requiredTier: string; currentTier: string; upgradeUrl: string } {
+function isLicenseError(
+  data: unknown,
+): data is { __licenseError: true; requiredTier: string; currentTier: string; upgradeUrl: string } {
   return data != null && typeof data === 'object' && (data as any).__licenseError === true;
 }
 
-function licenseErrorResult(data: { requiredTier: string; currentTier: string; upgradeUrl: string }): string {
+function licenseErrorResult(data: {
+  requiredTier: string;
+  currentTier: string;
+  upgradeUrl: string;
+}): string {
   return `This feature requires a ${data.requiredTier} license (current tier: ${data.currentTier}). Upgrade at ${data.upgradeUrl}`;
 }
 
@@ -191,37 +197,61 @@ server.tool(
   'list_instances',
   'List all Valkey/Redis instances registered in BetterDB. Shows connection status and capabilities.',
   {},
-  async () => withTelemetry('list_instances', async () => {
-    const data = await apiFetch('/mcp/instances') as { instances: Array<{ id: string; name: string; isDefault: boolean; isConnected: boolean; [key: string]: unknown }> };
-    const lines = data.instances.map((inst) => {
-      const active = inst.id === activeInstanceId ? ' [ACTIVE]' : '';
-      const status = inst.isConnected ? 'connected' : 'disconnected';
-      return `${inst.id} - ${inst.name} (${status})${inst.isDefault ? ' [default]' : ''}${active}`;
-    });
-    return {
-      content: [{ type: 'text' as const, text: lines.join('\n') || 'No instances found.' }],
-    };
-  }),
+  async () =>
+    withTelemetry('list_instances', async () => {
+      const data = (await apiFetch('/mcp/instances')) as {
+        instances: Array<{
+          id: string;
+          name: string;
+          isDefault: boolean;
+          isConnected: boolean;
+          [key: string]: unknown;
+        }>;
+      };
+      const lines = data.instances.map((inst) => {
+        const active = inst.id === activeInstanceId ? ' [ACTIVE]' : '';
+        const status = inst.isConnected ? 'connected' : 'disconnected';
+        return `${inst.id} - ${inst.name} (${status})${inst.isDefault ? ' [default]' : ''}${active}`;
+      });
+      return {
+        content: [{ type: 'text' as const, text: lines.join('\n') || 'No instances found.' }],
+      };
+    }),
 );
 
 server.tool(
   'select_instance',
   'Select which instance subsequent tool calls operate on.',
-  { instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format').describe('The instance ID to select') },
-  async ({ instanceId }) => withTelemetry('select_instance', async () => {
-    const data = await apiFetch('/mcp/instances') as { instances: Array<{ id: string; name: string }> };
-    const found = data.instances.find((inst) => inst.id === instanceId);
-    if (!found) {
-      return {
-        content: [{ type: 'text' as const, text: `Instance '${instanceId}' not found. Use list_instances to see available instances.` }],
-        isError: true,
+  {
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format')
+      .describe('The instance ID to select'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('select_instance', async () => {
+      const data = (await apiFetch('/mcp/instances')) as {
+        instances: Array<{ id: string; name: string }>;
       };
-    }
-    activeInstanceId = instanceId;
-    return {
-      content: [{ type: 'text' as const, text: `Selected instance: ${found.name} (${instanceId})` }],
-    };
-  }),
+      const found = data.instances.find((inst) => inst.id === instanceId);
+      if (!found) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Instance '${instanceId}' not found. Use list_instances to see available instances.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      activeInstanceId = instanceId;
+      return {
+        content: [
+          { type: 'text' as const, text: `Selected instance: ${found.name} (${instanceId})` },
+        ],
+      };
+    }),
 );
 
 // --- Connection management tools ---
@@ -237,22 +267,27 @@ server.tool(
     password: z.string().optional().describe('Auth password'),
     setAsDefault: z.boolean().optional().describe('Set this connection as the active default'),
   },
-  async (params) => withTelemetry('add_connection', async () => {
-    try {
-      const data = await apiRequest('POST', '/connections', params) as { id: string };
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+  async (params) =>
+    withTelemetry('add_connection', async () => {
+      try {
+        const data = (await apiRequest('POST', '/connections', params)) as { id: string };
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return {
+          content: [
+            { type: 'text' as const, text: `Added connection: ${params.name} (${data.id})` },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      return {
-        content: [{ type: 'text' as const, text: `Added connection: ${params.name} (${data.id})` }],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -265,102 +300,133 @@ server.tool(
     username: z.string().optional().describe('ACL username (default: "default")'),
     password: z.string().optional().describe('Auth password'),
   },
-  async (params) => withTelemetry('test_connection', async () => {
-    try {
-      const data = await apiRequest('POST', '/connections/test', params) as {
-        success: boolean;
-        capabilities?: unknown;
-        error?: string;
-      };
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-      }
-      if (!data.success) {
+  async (params) =>
+    withTelemetry('test_connection', async () => {
+      try {
+        const data = (await apiRequest('POST', '/connections/test', params)) as {
+          success: boolean;
+          capabilities?: unknown;
+          error?: string;
+        };
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        if (!data.success) {
+          return {
+            content: [{ type: 'text' as const, text: data.error ?? 'Connection test failed' }],
+            isError: true,
+          };
+        }
         return {
-          content: [{ type: 'text' as const, text: data.error ?? 'Connection test failed' }],
+          content: [
+            {
+              type: 'text' as const,
+              text: data.capabilities
+                ? JSON.stringify(data.capabilities, null, 2)
+                : 'Connection successful',
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
           isError: true,
         };
       }
-      return {
-        content: [{ type: 'text' as const, text: data.capabilities ? JSON.stringify(data.capabilities, null, 2) : 'Connection successful' }],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
   'remove_connection',
   'Remove a connection from BetterDB.',
   {
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format').describe('The instance ID to remove'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format')
+      .describe('The instance ID to remove'),
   },
-  async ({ instanceId }) => withTelemetry('remove_connection', async () => {
-    try {
-      const data = await apiRequest('DELETE', `/connections/${encodeURIComponent(instanceId)}`);
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+  async ({ instanceId }) =>
+    withTelemetry('remove_connection', async () => {
+      try {
+        const data = await apiRequest('DELETE', `/connections/${encodeURIComponent(instanceId)}`);
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return {
+          content: [{ type: 'text' as const, text: `Removed connection: ${instanceId}` }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      return {
-        content: [{ type: 'text' as const, text: `Removed connection: ${instanceId}` }],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
   'set_default_connection',
   'Set a connection as the active default for BetterDB.',
   {
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format').describe('The instance ID to set as default'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/, 'Invalid instance ID format')
+      .describe('The instance ID to set as default'),
   },
-  async ({ instanceId }) => withTelemetry('set_default_connection', async () => {
-    try {
-      const data = await apiRequest('POST', `/connections/${encodeURIComponent(instanceId)}/default`);
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+  async ({ instanceId }) =>
+    withTelemetry('set_default_connection', async () => {
+      try {
+        const data = await apiRequest(
+          'POST',
+          `/connections/${encodeURIComponent(instanceId)}/default`,
+        );
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return {
+          content: [{ type: 'text' as const, text: `Set as default: ${instanceId}` }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      return {
-        content: [{ type: 'text' as const, text: `Set as default: ${instanceId}` }],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
   'get_info',
   'Get INFO stats for the active instance. Contains all health data: memory, clients, replication, keyspace, stats (hit rate, ops/sec), and server info. Optionally filter to a section: server|clients|memory|stats|replication|keyspace.',
   {
-    section: z.string().optional().describe('INFO section to filter (server, clients, memory, stats, replication, keyspace)'),
+    section: z
+      .string()
+      .optional()
+      .describe('INFO section to filter (server, clients, memory, stats, replication, keyspace)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ section, instanceId }) => withTelemetry('get_info', async () => {
-    const id = resolveInstanceId(instanceId);
-    const query = section ? `?section=${encodeURIComponent(section)}` : '';
-    const data = await apiFetch(`/mcp/instance/${id}/info${query}`) as Record<string, unknown>;
-    if (section && data[section] !== undefined) {
+  async ({ section, instanceId }) =>
+    withTelemetry('get_info', async () => {
+      const id = resolveInstanceId(instanceId);
+      const query = section ? `?section=${encodeURIComponent(section)}` : '';
+      const data = (await apiFetch(`/mcp/instance/${id}/info${query}`)) as Record<string, unknown>;
+      if (section && data[section] !== undefined) {
+        return {
+          content: [
+            { type: 'text' as const, text: JSON.stringify({ [section]: data[section] }, null, 2) },
+          ],
+        };
+      }
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ [section]: data[section] }, null, 2) }],
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
       };
-    }
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+    }),
 );
 
 server.tool(
@@ -370,14 +436,15 @@ server.tool(
     count: z.number().optional().describe('Number of entries to return (default 25)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ count, instanceId }) => withTelemetry('get_slowlog', async () => {
-    const id = resolveInstanceId(instanceId);
-    const n = count ?? 25;
-    const data = await apiFetch(`/mcp/instance/${id}/slowlog?count=${n}`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ count, instanceId }) =>
+    withTelemetry('get_slowlog', async () => {
+      const id = resolveInstanceId(instanceId);
+      const n = count ?? 25;
+      const data = await apiFetch(`/mcp/instance/${id}/slowlog?count=${n}`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -387,66 +454,71 @@ server.tool(
     count: z.number().optional().describe('Number of entries to return (default 25)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ count, instanceId }) => withTelemetry('get_commandlog', async () => {
-    const id = resolveInstanceId(instanceId);
-    const n = count ?? 25;
-    const data = await apiFetch(`/mcp/instance/${id}/commandlog?count=${n}`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ count, instanceId }) =>
+    withTelemetry('get_commandlog', async () => {
+      const id = resolveInstanceId(instanceId);
+      const n = count ?? 25;
+      const data = await apiFetch(`/mcp/instance/${id}/commandlog?count=${n}`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
   'get_latency',
   'Get latency event history for the active instance.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => withTelemetry('get_latency', async () => {
-    const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/latency`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ instanceId }) =>
+    withTelemetry('get_latency', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/latency`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
   'get_memory',
   'Get memory diagnostics: MEMORY DOCTOR assessment and MEMORY STATS breakdown.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => withTelemetry('get_memory', async () => {
-    const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/memory`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ instanceId }) =>
+    withTelemetry('get_memory', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/memory`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
   'get_clients',
   'Get the active client list with connection details.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => withTelemetry('get_clients', async () => {
-    const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/clients`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ instanceId }) =>
+    withTelemetry('get_clients', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/clients`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
   'get_health',
   'Get a synthetic health summary for the active instance: keyspace hit rate, memory fragmentation ratio, connected clients, replication lag (replicas only), and keyspace size. Use this as the first call when investigating an instance — it surfaces the most actionable signals without requiring you to parse raw INFO output.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => withTelemetry('get_health', async () => {
-    const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/health`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ instanceId }) =>
+    withTelemetry('get_health', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/health`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 // --- Historical data tools ---
@@ -466,17 +538,18 @@ server.tool(
     limit: z.number().optional().describe('Max entries to analyze'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ limit, instanceId }) => withTelemetry('get_slowlog_patterns', async () => {
-    const id = resolveInstanceId(instanceId);
-    const qs = buildQuery({ limit });
-    const data = await apiFetch(`/mcp/instance/${id}/history/slowlog-patterns${qs}`);
-    if (isLicenseError(data)) {
-      return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-    }
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ limit, instanceId }) =>
+    withTelemetry('get_slowlog_patterns', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit });
+      const data = await apiFetch(`/mcp/instance/${id}/history/slowlog-patterns${qs}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -490,17 +563,18 @@ server.tool(
     limit: z.number().optional().describe('Max entries to return'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ startTime, endTime, command, minDuration, limit, instanceId }) => withTelemetry('get_commandlog_history', async () => {
-    const id = resolveInstanceId(instanceId);
-    const qs = buildQuery({ startTime, endTime, command, minDuration, limit });
-    const data = await apiFetch(`/mcp/instance/${id}/history/commandlog${qs}`);
-    if (isLicenseError(data)) {
-      return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-    }
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ startTime, endTime, command, minDuration, limit, instanceId }) =>
+    withTelemetry('get_commandlog_history', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ startTime, endTime, command, minDuration, limit });
+      const data = await apiFetch(`/mcp/instance/${id}/history/commandlog${qs}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -512,17 +586,18 @@ server.tool(
     limit: z.number().optional().describe('Max entries to analyze'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ startTime, endTime, limit, instanceId }) => withTelemetry('get_commandlog_patterns', async () => {
-    const id = resolveInstanceId(instanceId);
-    const qs = buildQuery({ startTime, endTime, limit });
-    const data = await apiFetch(`/mcp/instance/${id}/history/commandlog-patterns${qs}`);
-    if (isLicenseError(data)) {
-      return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-    }
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ startTime, endTime, limit, instanceId }) =>
+    withTelemetry('get_commandlog_patterns', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ startTime, endTime, limit });
+      const data = await apiFetch(`/mcp/instance/${id}/history/commandlog-patterns${qs}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -534,17 +609,18 @@ server.tool(
     startTime: z.number().optional().describe('Start time (Unix timestamp ms)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ limit, metricType, startTime, instanceId }) => withTelemetry('get_anomalies', async () => {
-    const id = resolveInstanceId(instanceId);
-    const qs = buildQuery({ limit, metricType, startTime });
-    const data = await apiFetch(`/mcp/instance/${id}/history/anomalies${qs}`);
-    if (isLicenseError(data)) {
-      return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-    }
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ limit, metricType, startTime, instanceId }) =>
+    withTelemetry('get_anomalies', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit, metricType, startTime });
+      const data = await apiFetch(`/mcp/instance/${id}/history/anomalies${qs}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -556,17 +632,18 @@ server.tool(
     bucketSizeMinutes: z.number().optional().describe('Bucket size in minutes (default 5)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ startTime, endTime, bucketSizeMinutes, instanceId }) => withTelemetry('get_client_activity', async () => {
-    const id = resolveInstanceId(instanceId);
-    const qs = buildQuery({ startTime, endTime, bucketSizeMinutes });
-    const data = await apiFetch(`/mcp/instance/${id}/history/client-activity${qs}`);
-    if (isLicenseError(data)) {
-      return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-    }
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ startTime, endTime, bucketSizeMinutes, instanceId }) =>
+    withTelemetry('get_client_activity', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ startTime, endTime, bucketSizeMinutes });
+      const data = await apiFetch(`/mcp/instance/${id}/history/client-activity${qs}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 // --- Hot keys ---
@@ -580,17 +657,18 @@ server.tool(
     limit: z.number().optional().describe('Max entries to return (default 50, max 200)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ startTime, endTime, limit, instanceId }) => withTelemetry('get_hot_keys', async () => {
-    const id = resolveInstanceId(instanceId);
-    const qs = buildQuery({ startTime, endTime, limit });
-    const data = await apiFetch(`/mcp/instance/${id}/hot-keys${qs}`);
-    if (isLicenseError(data)) {
-      return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-    }
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ startTime, endTime, limit, instanceId }) =>
+    withTelemetry('get_hot_keys', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ startTime, endTime, limit });
+      const data = await apiFetch(`/mcp/instance/${id}/hot-keys${qs}`);
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 // --- Cluster tools ---
@@ -599,26 +677,28 @@ server.tool(
   'get_cluster_nodes',
   'Discover all nodes in the Valkey cluster — role (master/replica), address, health status, and slot ranges. Returns an error message if this instance is not running in cluster mode.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => withTelemetry('get_cluster_nodes', async () => {
-    const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/cluster/nodes`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ instanceId }) =>
+    withTelemetry('get_cluster_nodes', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/cluster/nodes`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
   'get_cluster_node_stats',
   'Get per-node performance stats: memory usage, ops/sec, connected clients, replication offset, and CPU. Use this to identify hot nodes, lagging replicas, or uneven load distribution.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => withTelemetry('get_cluster_node_stats', async () => {
-    const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/cluster/node-stats`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ instanceId }) =>
+    withTelemetry('get_cluster_node_stats', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/cluster/node-stats`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -628,32 +708,37 @@ server.tool(
     limit: z.number().optional().describe('Max entries to return (default 100)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ limit, instanceId }) => withTelemetry('get_cluster_slowlog', async () => {
-    const id = resolveInstanceId(instanceId);
-    const qs = buildQuery({ limit });
-    const data = await apiFetch(`/mcp/instance/${id}/cluster/slowlog${qs}`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ limit, instanceId }) =>
+    withTelemetry('get_cluster_slowlog', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit });
+      const data = await apiFetch(`/mcp/instance/${id}/cluster/slowlog${qs}`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
   'get_slot_stats',
   "Get per-slot key counts and CPU usage (Valkey 8.0+ only). Use orderBy='cpu-usec' to find hot slots, or 'key-count' to find the most populated slots. Returns an error message if not supported.",
   {
-    orderBy: z.enum(['key-count', 'cpu-usec']).optional().describe("Sort order: 'key-count' or 'cpu-usec' (default 'key-count')"),
+    orderBy: z
+      .enum(['key-count', 'cpu-usec'])
+      .optional()
+      .describe("Sort order: 'key-count' or 'cpu-usec' (default 'key-count')"),
     limit: z.number().optional().describe('Max slots to return (default 20)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ orderBy, limit, instanceId }) => withTelemetry('get_slot_stats', async () => {
-    const id = resolveInstanceId(instanceId);
-    const qs = buildQuery({ orderBy, limit });
-    const data = await apiFetch(`/mcp/instance/${id}/cluster/slot-stats${qs}`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ orderBy, limit, instanceId }) =>
+    withTelemetry('get_slot_stats', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ orderBy, limit });
+      const data = await apiFetch(`/mcp/instance/${id}/cluster/slot-stats${qs}`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 // --- Latency history ---
@@ -662,16 +747,22 @@ server.tool(
   'get_latency_history',
   "Get the full latency history for a named event (e.g. 'command', 'fast-command'). Call get_latency first to see which event names are available, then use this to investigate a specific event's trend over time.",
   {
-    eventName: z.string().regex(/^[a-zA-Z0-9_.-]+$/, 'Invalid event name').describe('Latency event name to query'),
+    eventName: z
+      .string()
+      .regex(/^[a-zA-Z0-9_.-]+$/, 'Invalid event name')
+      .describe('Latency event name to query'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ eventName, instanceId }) => withTelemetry('get_latency_history', async () => {
-    const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/latency/history/${encodeURIComponent(eventName)}`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ eventName, instanceId }) =>
+    withTelemetry('get_latency_history', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(
+        `/mcp/instance/${id}/latency/history/${encodeURIComponent(eventName)}`,
+      );
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 // --- ACL audit ---
@@ -687,14 +778,15 @@ server.tool(
     limit: z.number().optional().describe('Max entries to return'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async ({ username, reason, startTime, endTime, limit, instanceId }) => withTelemetry('get_acl_audit', async () => {
-    const id = resolveInstanceId(instanceId);
-    const qs = buildQuery({ username, reason, startTime, endTime, limit });
-    const data = await apiFetch(`/mcp/instance/${id}/audit${qs}`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ username, reason, startTime, endTime, limit, instanceId }) =>
+    withTelemetry('get_acl_audit', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ username, reason, startTime, endTime, limit });
+      const data = await apiFetch(`/mcp/instance/${id}/audit${qs}`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 // --- Monitor lifecycle tools ---
@@ -703,60 +795,92 @@ server.tool(
   'start_monitor',
   'Start the BetterDB monitor as a persistent background process. If already running, returns the existing URL. The monitor persists across MCP sessions and must be stopped explicitly with stop_monitor.',
   {
-    port: z.number().int().min(1).max(65535).default(3001).describe('Port for the monitor API (default 3001)'),
-    storage: z.enum(['sqlite', 'memory']).default('sqlite').describe('Storage backend (default sqlite)'),
+    port: z
+      .number()
+      .int()
+      .min(1)
+      .max(65535)
+      .default(3001)
+      .describe('Port for the monitor API (default 3001)'),
+    storage: z
+      .enum(['sqlite', 'memory'])
+      .default('sqlite')
+      .describe('Storage backend (default sqlite)'),
   },
-  async ({ port, storage }) => withTelemetry('start_monitor', async () => {
-    try {
-      const { startMonitor } = await import('./autostart.js');
-      const result = await startMonitor({ persist: true, port, storage });
-      BETTERDB_URL = result.url;
-      process.env.BETTERDB_URL = result.url;
-      detectedPrefix = null;
-      const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
-      return {
-        content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Failed to start monitor: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }),
+  async ({ port, storage }) =>
+    withTelemetry('start_monitor', async () => {
+      try {
+        const { startMonitor } = await import('./autostart.js');
+        const result = await startMonitor({ persist: true, port, storage });
+        BETTERDB_URL = result.url;
+        process.env.BETTERDB_URL = result.url;
+        detectedPrefix = null;
+        const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
+        return {
+          content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Failed to start monitor: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }),
 );
 
-const CACHE_NAME_DESC = "Cache name as registered in __betterdb:caches (e.g. 'betterdb_scache_prod').";
+const CACHE_NAME_DESC =
+  "Cache name as registered in __betterdb:caches (e.g. 'betterdb_scache_prod').";
 
 server.tool(
   'cache_list',
   'List all caches (semantic_cache and agent_cache) registered for the active instance, with hit rate and total ops.',
   {
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .optional()
+      .describe('Connection ID; defaults to the active instance'),
   },
-  async (params) => withTelemetry('cache_list', async () => {
-    try {
-      const id = resolveInstanceId(params.instanceId);
-      const data = await apiFetch(`/mcp/instance/${id}/caches`) as {
-        caches: Array<{ name: string; type: string; hit_rate: number; total_ops: number; status: string }>;
-      };
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+  async (params) =>
+    withTelemetry('cache_list', async () => {
+      try {
+        const id = resolveInstanceId(params.instanceId);
+        const data = (await apiFetch(`/mcp/instance/${id}/caches`)) as {
+          caches: Array<{
+            name: string;
+            type: string;
+            hit_rate: number;
+            total_ops: number;
+            status: string;
+          }>;
+        };
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        if (data.caches.length === 0) {
+          return {
+            content: [{ type: 'text' as const, text: 'No caches registered for this instance.' }],
+          };
+        }
+        const lines = data.caches.map(
+          (c) =>
+            `${c.name} (${c.type}, ${c.status}) — hit rate ${(c.hit_rate * 100).toFixed(1)}%, ops ${c.total_ops}`,
+        );
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      if (data.caches.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'No caches registered for this instance.' }] };
-      }
-      const lines = data.caches.map((c) =>
-        `${c.name} (${c.type}, ${c.status}) — hit rate ${(c.hit_rate * 100).toFixed(1)}%, ops ${c.total_ops}`,
-      );
-      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -764,25 +888,32 @@ server.tool(
   'Detailed health for a single cache. Response branches by type: semantic_cache reports category_breakdown + uncertain_hit_rate; agent_cache reports tool_breakdown.',
   {
     cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .optional()
+      .describe('Connection ID; defaults to the active instance'),
   },
-  async (params) => withTelemetry('cache_health', async () => {
-    try {
-      const id = resolveInstanceId(params.instanceId);
-      const data = await apiFetch(
-        `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/health`,
-      );
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+  async (params) =>
+    withTelemetry('cache_health', async () => {
+      try {
+        const id = resolveInstanceId(params.instanceId);
+        const data = await apiFetch(
+          `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/health`,
+        );
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -790,33 +921,48 @@ server.tool(
   'Threshold-tuning recommendation for a semantic_cache, based on the rolling similarity-score window. Errors with INVALID_CACHE_TYPE on agent_cache.',
   {
     cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
-    category: z.string().optional().describe('Restrict to a single category; omit for the global threshold'),
-    minSamples: z.number().int().min(1).optional().describe('Minimum samples required (default 100)'),
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+    category: z
+      .string()
+      .optional()
+      .describe('Restrict to a single category; omit for the global threshold'),
+    minSamples: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe('Minimum samples required (default 100)'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .optional()
+      .describe('Connection ID; defaults to the active instance'),
   },
-  async (params) => withTelemetry('cache_threshold_recommendation', async () => {
-    try {
-      const id = resolveInstanceId(params.instanceId);
-      const qs = new URLSearchParams();
-      if (params.category !== undefined) {
-        qs.set('category', params.category);
+  async (params) =>
+    withTelemetry('cache_threshold_recommendation', async () => {
+      try {
+        const id = resolveInstanceId(params.instanceId);
+        const qs = new URLSearchParams();
+        if (params.category !== undefined) {
+          qs.set('category', params.category);
+        }
+        if (params.minSamples !== undefined) {
+          qs.set('minSamples', String(params.minSamples));
+        }
+        const path = `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/threshold-recommendation${qs.size > 0 ? `?${qs}` : ''}`;
+        const data = await apiFetch(path);
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      if (params.minSamples !== undefined) {
-        qs.set('minSamples', String(params.minSamples));
-      }
-      const path = `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/threshold-recommendation${qs.size > 0 ? `?${qs}` : ''}`;
-      const data = await apiFetch(path);
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-      }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -824,25 +970,32 @@ server.tool(
   'Per-tool hit rate, cost saved, and TTL recommendation for an agent_cache. Errors with INVALID_CACHE_TYPE on semantic_cache.',
   {
     cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .optional()
+      .describe('Connection ID; defaults to the active instance'),
   },
-  async (params) => withTelemetry('cache_tool_effectiveness', async () => {
-    try {
-      const id = resolveInstanceId(params.instanceId);
-      const data = await apiFetch(
-        `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/tool-effectiveness`,
-      );
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+  async (params) =>
+    withTelemetry('cache_tool_effectiveness', async () => {
+      try {
+        const id = resolveInstanceId(params.instanceId);
+        const data = await apiFetch(
+          `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/tool-effectiveness`,
+        );
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -851,32 +1004,45 @@ server.tool(
   {
     cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
     category: z.string().optional().describe('Restrict to a single category'),
-    window_hours: z.number().int().min(1).max(168).optional().describe('Lookback window (default 24h, max 168h)'),
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+    window_hours: z
+      .number()
+      .int()
+      .min(1)
+      .max(168)
+      .optional()
+      .describe('Lookback window (default 24h, max 168h)'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .optional()
+      .describe('Connection ID; defaults to the active instance'),
   },
-  async (params) => withTelemetry('cache_similarity_distribution', async () => {
-    try {
-      const id = resolveInstanceId(params.instanceId);
-      const qs = new URLSearchParams();
-      if (params.category !== undefined) {
-        qs.set('category', params.category);
+  async (params) =>
+    withTelemetry('cache_similarity_distribution', async () => {
+      try {
+        const id = resolveInstanceId(params.instanceId);
+        const qs = new URLSearchParams();
+        if (params.category !== undefined) {
+          qs.set('category', params.category);
+        }
+        if (params.window_hours !== undefined) {
+          qs.set('windowHours', String(params.window_hours));
+        }
+        const path = `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/similarity-distribution${qs.size > 0 ? `?${qs}` : ''}`;
+        const data = await apiFetch(path);
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      if (params.window_hours !== undefined) {
-        qs.set('windowHours', String(params.window_hours));
-      }
-      const path = `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/similarity-distribution${qs.size > 0 ? `?${qs}` : ''}`;
-      const data = await apiFetch(path);
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-      }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -884,91 +1050,141 @@ server.tool(
   'Recent proposals for a single cache (any status), so agents can avoid re-proposing pending or recently-applied changes. Newest first.',
   {
     cache_name: z.string().min(1).describe(CACHE_NAME_DESC),
-    limit: z.number().int().min(1).max(200).optional().describe('Max proposals to return (default 20, max 200)'),
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe('Max proposals to return (default 20, max 200)'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .optional()
+      .describe('Connection ID; defaults to the active instance'),
   },
-  async (params) => withTelemetry('cache_recent_changes', async () => {
-    try {
-      const id = resolveInstanceId(params.instanceId);
-      const qs = params.limit !== undefined ? `?limit=${params.limit}` : '';
-      const data = await apiFetch(
-        `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/recent-changes${qs}`,
-      );
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+  async (params) =>
+    withTelemetry('cache_recent_changes', async () => {
+      try {
+        const id = resolveInstanceId(params.instanceId);
+        const qs = params.limit !== undefined ? `?limit=${params.limit}` : '';
+        const data = await apiFetch(
+          `/mcp/instance/${id}/caches/${encodeURIComponent(params.cache_name)}/recent-changes${qs}`,
+        );
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
   'cache_propose_threshold_adjust',
   'Propose a semantic-cache similarity-threshold change for review. Creates a pending proposal that requires human approval before any change is applied. Reasoning must be at least 20 characters.',
   {
-    cache_name: z.string().min(1).describe("Name of the semantic cache (e.g. 'betterdb_scache_prod')"),
+    cache_name: z
+      .string()
+      .min(1)
+      .describe("Name of the semantic cache (e.g. 'betterdb_scache_prod')"),
     new_threshold: z.number().min(0).max(2).describe('Proposed cosine-distance threshold, 0–2'),
-    category: z.string().nullable().optional().describe('Optional per-category override; null/undefined = global threshold'),
+    category: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('Optional per-category override; null/undefined = global threshold'),
     reasoning: z.string().min(20).describe('Why the change is being proposed (≥20 chars)'),
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .optional()
+      .describe('Connection ID; defaults to the active instance'),
   },
-  async (params) => withTelemetry('cache_propose_threshold_adjust', async () => {
-    try {
-      const id = resolveInstanceId(params.instanceId);
-      const data = await apiRequest('POST', `/mcp/instance/${id}/cache-proposals/threshold-adjust`, {
-        cache_name: params.cache_name,
-        new_threshold: params.new_threshold,
-        category: params.category ?? null,
-        reasoning: params.reasoning,
-      }) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+  async (params) =>
+    withTelemetry('cache_propose_threshold_adjust', async () => {
+      try {
+        const id = resolveInstanceId(params.instanceId);
+        const data = (await apiRequest(
+          'POST',
+          `/mcp/instance/${id}/cache-proposals/threshold-adjust`,
+          {
+            cache_name: params.cache_name,
+            new_threshold: params.new_threshold,
+            category: params.category ?? null,
+            reasoning: params.reasoning,
+          },
+        )) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return formatProposalText(data);
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      return formatProposalText(data);
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
   'cache_propose_tool_ttl_adjust',
   'Propose an agent-cache per-tool TTL change for review. Creates a pending proposal that requires human approval. Reasoning must be at least 20 characters.',
   {
-    cache_name: z.string().min(1).describe("Name of the agent cache (e.g. 'betterdb_agentcache_prod')"),
+    cache_name: z
+      .string()
+      .min(1)
+      .describe("Name of the agent cache (e.g. 'betterdb_agentcache_prod')"),
     tool_name: z.string().min(1).describe('Tool whose TTL is being changed'),
-    new_ttl_seconds: z.number().int().min(10).max(86400).describe('Proposed TTL in seconds (10–86400)'),
+    new_ttl_seconds: z
+      .number()
+      .int()
+      .min(10)
+      .max(86400)
+      .describe('Proposed TTL in seconds (10–86400)'),
     reasoning: z.string().min(20).describe('Why the change is being proposed (≥20 chars)'),
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .optional()
+      .describe('Connection ID; defaults to the active instance'),
   },
-  async (params) => withTelemetry('cache_propose_tool_ttl_adjust', async () => {
-    try {
-      const id = resolveInstanceId(params.instanceId);
-      const data = await apiRequest('POST', `/mcp/instance/${id}/cache-proposals/tool-ttl-adjust`, {
-        cache_name: params.cache_name,
-        tool_name: params.tool_name,
-        new_ttl_seconds: params.new_ttl_seconds,
-        reasoning: params.reasoning,
-      }) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+  async (params) =>
+    withTelemetry('cache_propose_tool_ttl_adjust', async () => {
+      try {
+        const id = resolveInstanceId(params.instanceId);
+        const data = (await apiRequest(
+          'POST',
+          `/mcp/instance/${id}/cache-proposals/tool-ttl-adjust`,
+          {
+            cache_name: params.cache_name,
+            tool_name: params.tool_name,
+            new_ttl_seconds: params.new_ttl_seconds,
+            reasoning: params.reasoning,
+          },
+        )) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return formatProposalText(data);
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      return formatProposalText(data);
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -976,51 +1192,88 @@ server.tool(
   'Propose a cache invalidation for review. Filter shape depends on cache type: semantic_cache requires filter_kind=valkey_search + filter_expression; agent_cache requires filter_kind in (tool|key_prefix|session) + filter_value. Warns when estimated_affected exceeds 10000.',
   {
     cache_name: z.string().min(1).describe('Name of the cache to invalidate'),
-    filter_kind: z.enum(['valkey_search', 'tool', 'key_prefix', 'session']).describe('Discriminator: valkey_search for semantic_cache; tool|key_prefix|session for agent_cache'),
-    filter_expression: z.string().min(1).optional().describe('Required when filter_kind=valkey_search; FT.SEARCH filter'),
-    filter_value: z.string().min(1).optional().describe('Required when filter_kind in (tool|key_prefix|session); the matching value'),
-    estimated_affected: z.number().int().min(0).describe('Caller-estimated number of affected entries'),
+    filter_kind: z
+      .enum(['valkey_search', 'tool', 'key_prefix', 'session'])
+      .describe(
+        'Discriminator: valkey_search for semantic_cache; tool|key_prefix|session for agent_cache',
+      ),
+    filter_expression: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('Required when filter_kind=valkey_search; FT.SEARCH filter'),
+    filter_value: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('Required when filter_kind in (tool|key_prefix|session); the matching value'),
+    estimated_affected: z
+      .number()
+      .int()
+      .min(0)
+      .describe('Caller-estimated number of affected entries'),
     reasoning: z.string().min(20).describe('Why the invalidation is being proposed (≥20 chars)'),
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .optional()
+      .describe('Connection ID; defaults to the active instance'),
   },
-  async (params) => withTelemetry('cache_propose_invalidate', async () => {
-    try {
-      const id = resolveInstanceId(params.instanceId);
-      const body: Record<string, unknown> = {
-        cache_name: params.cache_name,
-        filter_kind: params.filter_kind,
-        estimated_affected: params.estimated_affected,
-        reasoning: params.reasoning,
-      };
-      if (params.filter_kind === 'valkey_search') {
-        if (!params.filter_expression) {
-          return {
-            content: [{ type: 'text' as const, text: 'filter_expression is required when filter_kind=valkey_search' }],
-            isError: true,
-          };
+  async (params) =>
+    withTelemetry('cache_propose_invalidate', async () => {
+      try {
+        const id = resolveInstanceId(params.instanceId);
+        const body: Record<string, unknown> = {
+          cache_name: params.cache_name,
+          filter_kind: params.filter_kind,
+          estimated_affected: params.estimated_affected,
+          reasoning: params.reasoning,
+        };
+        if (params.filter_kind === 'valkey_search') {
+          if (!params.filter_expression) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: 'filter_expression is required when filter_kind=valkey_search',
+                },
+              ],
+              isError: true,
+            };
+          }
+          body.filter_expression = params.filter_expression;
+        } else {
+          if (!params.filter_value) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `filter_value is required when filter_kind=${params.filter_kind}`,
+                },
+              ],
+              isError: true,
+            };
+          }
+          body.filter_value = params.filter_value;
         }
-        body.filter_expression = params.filter_expression;
-      } else {
-        if (!params.filter_value) {
-          return {
-            content: [{ type: 'text' as const, text: `filter_value is required when filter_kind=${params.filter_kind}` }],
-            isError: true,
-          };
+        const data = (await apiRequest(
+          'POST',
+          `/mcp/instance/${id}/cache-proposals/invalidate`,
+          body,
+        )) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
         }
-        body.filter_value = params.filter_value;
+        return formatProposalText(data);
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      const data = await apiRequest('POST', `/mcp/instance/${id}/cache-proposals/invalidate`, body) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-      }
-      return formatProposalText(data);
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -1028,32 +1281,45 @@ server.tool(
   'List pending cache proposals for the active instance, newest first. Optionally filter by cache_name.',
   {
     cache_name: z.string().min(1).optional().describe('Restrict to a single cache'),
-    limit: z.number().int().min(1).max(200).optional().describe('Max proposals to return (default 100, max 200)'),
-    instanceId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Connection ID; defaults to the active instance'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe('Max proposals to return (default 100, max 200)'),
+    instanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .optional()
+      .describe('Connection ID; defaults to the active instance'),
   },
-  async (params) => withTelemetry('cache_list_pending_proposals', async () => {
-    try {
-      const id = resolveInstanceId(params.instanceId);
-      const qs = new URLSearchParams();
-      if (params.cache_name !== undefined) {
-        qs.set('cache_name', params.cache_name);
+  async (params) =>
+    withTelemetry('cache_list_pending_proposals', async () => {
+      try {
+        const id = resolveInstanceId(params.instanceId);
+        const qs = new URLSearchParams();
+        if (params.cache_name !== undefined) {
+          qs.set('cache_name', params.cache_name);
+        }
+        if (params.limit !== undefined) {
+          qs.set('limit', String(params.limit));
+        }
+        const path = `/mcp/instance/${id}/cache-proposals/pending${qs.size > 0 ? `?${qs}` : ''}`;
+        const data = await apiFetch(path);
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      if (params.limit !== undefined) {
-        qs.set('limit', String(params.limit));
-      }
-      const path = `/mcp/instance/${id}/cache-proposals/pending${qs.size > 0 ? `?${qs}` : ''}`;
-      const data = await apiFetch(path);
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-      }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -1062,20 +1328,25 @@ server.tool(
   {
     proposal_id: z.string().min(1).describe('Proposal id (returned by cache_propose_*)'),
   },
-  async (params) => withTelemetry('cache_get_proposal', async () => {
-    try {
-      const data = await apiFetch(`/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}`);
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+  async (params) =>
+    withTelemetry('cache_get_proposal', async () => {
+      try {
+        const data = await apiFetch(
+          `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}`,
+        );
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -1083,30 +1354,37 @@ server.tool(
   'Approve a pending proposal. Synchronously applies the change to Valkey and returns the terminal status (applied|failed). Idempotent: a second call on an already-applied proposal returns the cached result.',
   {
     proposal_id: z.string().min(1).describe('Proposal id'),
-    actor: z.string().min(1).optional().describe('Optional actor identity stamped into the audit trail'),
+    actor: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('Optional actor identity stamped into the audit trail'),
   },
-  async (params) => withTelemetry('cache_approve_proposal', async () => {
-    try {
-      const body: Record<string, unknown> = {};
-      if (params.actor !== undefined) {
-        body.actor = params.actor;
+  async (params) =>
+    withTelemetry('cache_approve_proposal', async () => {
+      try {
+        const body: Record<string, unknown> = {};
+        if (params.actor !== undefined) {
+          body.actor = params.actor;
+        }
+        const data = await apiRequest(
+          'POST',
+          `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/approve`,
+          body,
+        );
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      const data = await apiRequest(
-        'POST',
-        `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/approve`,
-        body,
-      );
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-      }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -1114,34 +1392,45 @@ server.tool(
   'Reject a pending proposal. Optionally records a reason in the audit trail.',
   {
     proposal_id: z.string().min(1).describe('Proposal id'),
-    reason: z.string().min(1).optional().describe('Optional rejection reason recorded on the audit row'),
-    actor: z.string().min(1).optional().describe('Optional actor identity stamped into the audit trail'),
+    reason: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('Optional rejection reason recorded on the audit row'),
+    actor: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('Optional actor identity stamped into the audit trail'),
   },
-  async (params) => withTelemetry('cache_reject_proposal', async () => {
-    try {
-      const body: Record<string, unknown> = {};
-      if (params.reason !== undefined) {
-        body.reason = params.reason;
+  async (params) =>
+    withTelemetry('cache_reject_proposal', async () => {
+      try {
+        const body: Record<string, unknown> = {};
+        if (params.reason !== undefined) {
+          body.reason = params.reason;
+        }
+        if (params.actor !== undefined) {
+          body.actor = params.actor;
+        }
+        const data = await apiRequest(
+          'POST',
+          `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/reject`,
+          body,
+        );
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
+          isError: true,
+        };
       }
-      if (params.actor !== undefined) {
-        body.actor = params.actor;
-      }
-      const data = await apiRequest(
-        'POST',
-        `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/reject`,
-        body,
-      );
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-      }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
 server.tool(
@@ -1150,52 +1439,80 @@ server.tool(
   {
     proposal_id: z.string().min(1).describe('Proposal id'),
     new_threshold: z.number().min(0).max(2).optional().describe('For threshold_adjust proposals'),
-    new_ttl_seconds: z.number().int().min(10).max(86400).optional().describe('For tool_ttl_adjust proposals'),
-    actor: z.string().min(1).optional().describe('Optional actor identity stamped into the audit trail'),
+    new_ttl_seconds: z
+      .number()
+      .int()
+      .min(10)
+      .max(86400)
+      .optional()
+      .describe('For tool_ttl_adjust proposals'),
+    actor: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('Optional actor identity stamped into the audit trail'),
   },
-  async (params) => withTelemetry('cache_edit_and_approve_proposal', async () => {
-    try {
-      if (params.new_threshold === undefined && params.new_ttl_seconds === undefined) {
+  async (params) =>
+    withTelemetry('cache_edit_and_approve_proposal', async () => {
+      try {
+        if (params.new_threshold === undefined && params.new_ttl_seconds === undefined) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: 'Either new_threshold or new_ttl_seconds is required',
+              },
+            ],
+            isError: true,
+          };
+        }
+        if (params.new_threshold !== undefined && params.new_ttl_seconds !== undefined) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: 'new_threshold and new_ttl_seconds are mutually exclusive — provide exactly one',
+              },
+            ],
+            isError: true,
+          };
+        }
+        const body: Record<string, unknown> = {};
+        if (params.new_threshold !== undefined) {
+          body.new_threshold = params.new_threshold;
+        }
+        if (params.new_ttl_seconds !== undefined) {
+          body.new_ttl_seconds = params.new_ttl_seconds;
+        }
+        if (params.actor !== undefined) {
+          body.actor = params.actor;
+        }
+        const data = await apiRequest(
+          'POST',
+          `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/edit-and-approve`,
+          body,
+        );
+        if (isLicenseError(data)) {
+          return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
         return {
-          content: [{ type: 'text' as const, text: 'Either new_threshold or new_ttl_seconds is required' }],
+          content: [
+            { type: 'text' as const, text: err instanceof Error ? err.message : String(err) },
+          ],
           isError: true,
         };
       }
-      if (params.new_threshold !== undefined && params.new_ttl_seconds !== undefined) {
-        return {
-          content: [{ type: 'text' as const, text: 'new_threshold and new_ttl_seconds are mutually exclusive — provide exactly one' }],
-          isError: true,
-        };
-      }
-      const body: Record<string, unknown> = {};
-      if (params.new_threshold !== undefined) {
-        body.new_threshold = params.new_threshold;
-      }
-      if (params.new_ttl_seconds !== undefined) {
-        body.new_ttl_seconds = params.new_ttl_seconds;
-      }
-      if (params.actor !== undefined) {
-        body.actor = params.actor;
-      }
-      const data = await apiRequest(
-        'POST',
-        `/mcp/cache-proposals/${encodeURIComponent(params.proposal_id)}/edit-and-approve`,
-        body,
-      );
-      if (isLicenseError(data)) {
-        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
-      }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
-        isError: true,
-      };
-    }
-  }),
+    }),
 );
 
-function formatProposalText(data: { proposal_id: string; status: string; expires_at: number; warnings: string[] }): ToolResult {
+function formatProposalText(data: {
+  proposal_id: string;
+  status: string;
+  expires_at: number;
+  warnings: string[];
+}): ToolResult {
   const expiresAtIso = new Date(data.expires_at).toISOString();
   const lines = [
     `Proposal created: ${data.proposal_id}`,
@@ -1214,20 +1531,26 @@ server.tool(
   'stop_monitor',
   'Stop a persistent BetterDB monitor process that was previously started with start_monitor or --autostart --persist.',
   {},
-  async () => withTelemetry('stop_monitor', async () => {
-    try {
-      const { stopMonitor } = await import('./autostart.js');
-      const result = await stopMonitor();
-      return {
-        content: [{ type: 'text' as const, text: result.message }],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Failed to stop monitor: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }),
+  async () =>
+    withTelemetry('stop_monitor', async () => {
+      try {
+        const { stopMonitor } = await import('./autostart.js');
+        const result = await stopMonitor();
+        return {
+          content: [{ type: 'text' as const, text: result.message }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Failed to stop monitor: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }),
 );
 
 // --- Memory tools ---
@@ -1235,13 +1558,14 @@ server.tool(
   'memory_stores',
   'List agent-memory stores discovered on an instance (name, capabilities, stats key).',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
-  async ({ instanceId }) => withTelemetry('memory_stores', async () => {
-    const id = resolveInstanceId(instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/memory/stores`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async ({ instanceId }) =>
+    withTelemetry('memory_stores', async () => {
+      const id = resolveInstanceId(instanceId);
+      const data = await apiFetch(`/mcp/instance/${id}/memory/stores`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -1257,21 +1581,25 @@ server.tool(
     offset: z.number().int().min(0).optional().describe('Pagination offset'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async (params) => withTelemetry('memory_list', async () => {
-    const id = resolveInstanceId(params.instanceId);
-    const query = new URLSearchParams();
-    if (params.threadId !== undefined) query.set('threadId', params.threadId);
-    if (params.agentId !== undefined) query.set('agentId', params.agentId);
-    if (params.namespace !== undefined) query.set('namespace', params.namespace);
-    if (params.tags !== undefined && params.tags.length > 0) query.set('tags', params.tags.join(','));
-    if (params.limit !== undefined) query.set('limit', String(params.limit));
-    if (params.offset !== undefined) query.set('offset', String(params.offset));
-    const suffix = query.toString() ? `?${query.toString()}` : '';
-    const data = await apiFetch(`/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/list${suffix}`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async (params) =>
+    withTelemetry('memory_list', async () => {
+      const id = resolveInstanceId(params.instanceId);
+      const query = new URLSearchParams();
+      if (params.threadId !== undefined) query.set('threadId', params.threadId);
+      if (params.agentId !== undefined) query.set('agentId', params.agentId);
+      if (params.namespace !== undefined) query.set('namespace', params.namespace);
+      if (params.tags !== undefined && params.tags.length > 0)
+        query.set('tags', params.tags.join(','));
+      if (params.limit !== undefined) query.set('limit', String(params.limit));
+      if (params.offset !== undefined) query.set('offset', String(params.offset));
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      const data = await apiFetch(
+        `/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/list${suffix}`,
+      );
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -1282,13 +1610,16 @@ server.tool(
     id: z.string().min(1).describe('The memory ID'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async (params) => withTelemetry('memory_get', async () => {
-    const id = resolveInstanceId(params.instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/get/${encodeURIComponent(params.id)}`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async (params) =>
+    withTelemetry('memory_get', async () => {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiFetch(
+        `/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/get/${encodeURIComponent(params.id)}`,
+      );
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -1298,13 +1629,16 @@ server.tool(
     memory_name: z.string().min(1).describe('The memory store name (from memory_stores)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async (params) => withTelemetry('memory_stats', async () => {
-    const id = resolveInstanceId(params.instanceId);
-    const data = await apiFetch(`/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/stats`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async (params) =>
+    withTelemetry('memory_stats', async () => {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiFetch(
+        `/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/stats`,
+      );
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -1321,19 +1655,28 @@ server.tool(
     namespace: z.string().optional().describe('Filter by namespace'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async (params) => withTelemetry('memory_recall', async () => {
-    const id = resolveInstanceId(params.instanceId);
-    const data = await apiRequest('POST', `/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/recall`, {
-      vector: params.vector,
-      k: params.k,
-      threshold: params.threshold,
-      tags: params.tags,
-      scope: { threadId: params.threadId, agentId: params.agentId, namespace: params.namespace },
-    });
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async (params) =>
+    withTelemetry('memory_recall', async () => {
+      const id = resolveInstanceId(params.instanceId);
+      const data = await apiRequest(
+        'POST',
+        `/mcp/instance/${id}/memory/${encodeURIComponent(params.memory_name)}/recall`,
+        {
+          vector: params.vector,
+          k: params.k,
+          threshold: params.threshold,
+          tags: params.tags,
+          scope: {
+            threadId: params.threadId,
+            agentId: params.agentId,
+            namespace: params.namespace,
+          },
+        },
+      );
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 // --- Memory forget tools (human-gated propose/approve) ---
@@ -1350,17 +1693,18 @@ server.tool(
     reasoning: z.string().min(20).describe('Why these memories should be forgotten (min 20 chars)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async (params) => withTelemetry('memory_forget', async () => {
-    const id = resolveInstanceId(params.instanceId);
-    const data = await apiRequest('POST', `/mcp/instance/${id}/memory-proposals/forget`, {
-      memory_name: params.memory_name,
-      id: params.id,
-      scope: { threadId: params.threadId, agentId: params.agentId, namespace: params.namespace },
-      tags: params.tags,
-      reasoning: params.reasoning,
-    }) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
-    return formatProposalText(data);
-  }),
+  async (params) =>
+    withTelemetry('memory_forget', async () => {
+      const id = resolveInstanceId(params.instanceId);
+      const data = (await apiRequest('POST', `/mcp/instance/${id}/memory-proposals/forget`, {
+        memory_name: params.memory_name,
+        id: params.id,
+        scope: { threadId: params.threadId, agentId: params.agentId, namespace: params.namespace },
+        tags: params.tags,
+        reasoning: params.reasoning,
+      })) as { proposal_id: string; status: string; expires_at: number; warnings: string[] };
+      return formatProposalText(data);
+    }),
 );
 
 server.tool(
@@ -1371,36 +1715,45 @@ server.tool(
     limit: z.number().int().min(1).max(200).optional().describe('Max results (default 50)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async (params) => withTelemetry('memory_list_pending_forgets', async () => {
-    const id = resolveInstanceId(params.instanceId);
-    const query = new URLSearchParams();
-    if (params.memory_name !== undefined) query.set('memory_name', params.memory_name);
-    if (params.limit !== undefined) query.set('limit', String(params.limit));
-    const suffix = query.toString() ? `?${query.toString()}` : '';
-    const data = await apiFetch(`/mcp/instance/${id}/memory-proposals/pending${suffix}`);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async (params) =>
+    withTelemetry('memory_list_pending_forgets', async () => {
+      const id = resolveInstanceId(params.instanceId);
+      const query = new URLSearchParams();
+      if (params.memory_name !== undefined) query.set('memory_name', params.memory_name);
+      if (params.limit !== undefined) query.set('limit', String(params.limit));
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      const data = await apiFetch(`/mcp/instance/${id}/memory-proposals/pending${suffix}`);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
   'memory_approve_forget',
   'Approve a pending forget proposal, applying the deletion against the live store.',
   {
-    proposal_id: z.string().min(1).describe('The proposal id (from memory_forget or memory_list_pending_forgets)'),
+    proposal_id: z
+      .string()
+      .min(1)
+      .describe('The proposal id (from memory_forget or memory_list_pending_forgets)'),
     actor: z.string().optional().describe('Who is approving (recorded in the audit log)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async (params) => withTelemetry('memory_approve_forget', async () => {
-    resolveInstanceId(params.instanceId);
-    const data = await apiRequest('POST', `/mcp/memory-proposals/${encodeURIComponent(params.proposal_id)}/approve`, {
-      actor: params.actor,
-    });
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async (params) =>
+    withTelemetry('memory_approve_forget', async () => {
+      resolveInstanceId(params.instanceId);
+      const data = await apiRequest(
+        'POST',
+        `/mcp/memory-proposals/${encodeURIComponent(params.proposal_id)}/approve`,
+        {
+          actor: params.actor,
+        },
+      );
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 server.tool(
@@ -1412,16 +1765,21 @@ server.tool(
     actor: z.string().optional().describe('Who is rejecting (recorded in the audit log)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
-  async (params) => withTelemetry('memory_reject_forget', async () => {
-    resolveInstanceId(params.instanceId);
-    const data = await apiRequest('POST', `/mcp/memory-proposals/${encodeURIComponent(params.proposal_id)}/reject`, {
-      reason: params.reason,
-      actor: params.actor,
-    });
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  async (params) =>
+    withTelemetry('memory_reject_forget', async () => {
+      resolveInstanceId(params.instanceId);
+      const data = await apiRequest(
+        'POST',
+        `/mcp/memory-proposals/${encodeURIComponent(params.proposal_id)}/reject`,
+        {
+          reason: params.reason,
+          actor: params.actor,
+        },
+      );
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
 );
 
 try {
@@ -1454,6 +1812,8 @@ try {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 } catch (error) {
-  console.error(`Failed to start MCP server: ${error instanceof Error ? error.message : 'unknown error'}`);
+  console.error(
+    `Failed to start MCP server: ${error instanceof Error ? error.message : 'unknown error'}`,
+  );
   process.exit(1);
 }
