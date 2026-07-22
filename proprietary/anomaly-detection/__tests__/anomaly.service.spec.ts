@@ -2268,6 +2268,29 @@ describe('AnomalyService', () => {
       expect(getCfg).toHaveBeenCalledTimes(2);
     });
 
+    it('stops re-querying cluster-node-timeout after repeated CONFIG failures', async () => {
+      // Bugbot: a permanently unreadable CONFIG (e.g. ACL-restricted) must not be
+      // queried on every poll — retry a few times, then cache the default.
+      const getCfg = jest.fn().mockRejectedValue(new Error('NOPERM'));
+      dbClient.getConfigValue = getCfg;
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      for (let i = 0; i < 6; i++) await poll();
+      expect(getCfg.mock.calls.length).toBeLessThanOrEqual(3);
+    });
+
+    it('still emits the first CRITICAL when storage is unavailable (no false "pinned")', async () => {
+      // Bugbot: a getActiveRaftOutages storage failure must not suppress the first
+      // alert — with nothing pinned in memory it still emits.
+      storage.getAnomalyEvents.mockRejectedValue(new Error('db down'));
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll();
+      now += 61_000;
+      await poll(); // storage down, nothing pinned → must still fire
+      expect(activeCriticalRaft()).toHaveLength(1);
+    });
+
     const activeCriticalRaft = () =>
       raftEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL && !e.resolved);
 

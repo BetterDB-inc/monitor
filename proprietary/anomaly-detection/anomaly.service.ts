@@ -116,6 +116,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private raftLeaderlessActive = new Map<string, boolean>();
   private raftMode = new Map<string, boolean>();
   private raftNodeTimeoutMs = new Map<string, number>();
+  private raftNodeTimeoutAttempts = new Map<string, number>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private prevReplSnapshot = new Map<
     string,
@@ -324,6 +325,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftLeaderlessActive.delete(connectionId);
     this.raftMode.delete(connectionId);
     this.raftNodeTimeoutMs.delete(connectionId);
+    this.raftNodeTimeoutAttempts.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
@@ -885,6 +887,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // a 5-minute node-timeout) while still bounding worst-case detection latency.
   private static readonly RAFT_MAX_NODE_TIMEOUT_MS = 300_000;
   private static readonly RAFT_FIRE_MARGIN_MS = 10_000;
+  // Retry a failing cluster-node-timeout lookup this many polls (transient errors),
+  // then cache the default so a permanently-unreadable CONFIG (e.g. ACL-restricted)
+  // isn't queried on every poll forever.
+  private static readonly RAFT_NODE_TIMEOUT_MAX_ATTEMPTS = 3;
 
   /**
    * Health of a Valkey Raft cluster (Cluster V2, `cluster-protocol raft`), from
@@ -921,19 +927,30 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   ): Promise<{ recoveredMs: number; fireMs: number }> {
     let nodeTimeout = this.raftNodeTimeoutMs.get(ctx.connectionId);
     if (nodeTimeout === undefined) {
+      let fetched: number | undefined;
       try {
         const raw = await ctx.client.getConfigValue('cluster-node-timeout');
         const n = raw != null ? parseInt(raw, 10) : NaN;
-        // Cache ONLY a real, positive value. A thrown/empty/non-positive result
-        // falls back to the default for this computation but stays uncached, so a
-        // transient CONFIG failure is retried on the next poll rather than pinning
-        // the default forever.
-        if (Number.isFinite(n) && n > 0) {
-          nodeTimeout = n;
-          this.raftNodeTimeoutMs.set(ctx.connectionId, nodeTimeout);
-        }
+        if (Number.isFinite(n) && n > 0) fetched = n;
       } catch {
-        // Leave uncached; retry next poll.
+        // fetched stays undefined
+      }
+      if (fetched !== undefined) {
+        nodeTimeout = fetched;
+        this.raftNodeTimeoutMs.set(ctx.connectionId, nodeTimeout);
+        this.raftNodeTimeoutAttempts.delete(ctx.connectionId);
+      } else {
+        // CONFIG unreadable this poll (thrown/empty/non-positive). Retry a few
+        // polls for a transient error, then cache the default so a permanently
+        // restricted CONFIG isn't queried on every poll forever.
+        const attempts = (this.raftNodeTimeoutAttempts.get(ctx.connectionId) ?? 0) + 1;
+        if (attempts >= AnomalyService.RAFT_NODE_TIMEOUT_MAX_ATTEMPTS) {
+          nodeTimeout = AnomalyService.RAFT_DEFAULT_NODE_TIMEOUT_MS;
+          this.raftNodeTimeoutMs.set(ctx.connectionId, nodeTimeout);
+          this.raftNodeTimeoutAttempts.delete(ctx.connectionId);
+        } else {
+          this.raftNodeTimeoutAttempts.set(ctx.connectionId, attempts);
+        }
       }
     }
     const effective = Math.min(
@@ -954,15 +971,30 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * ring counts as gone (re-emit to keep the pin).
    */
   private async getActiveRaftOutages(connectionId: string): Promise<AnomalyEvent[]> {
-    return this.getRecentAnomalies(
-      undefined,
-      undefined,
-      AnomalySeverity.CRITICAL,
-      MetricType.RAFT_HEALTH,
-      100,
-      connectionId,
-      true,
-    );
+    try {
+      return await this.getRecentAnomalies(
+        undefined,
+        undefined,
+        AnomalySeverity.CRITICAL,
+        MetricType.RAFT_HEALTH,
+        100,
+        connectionId,
+        true,
+      );
+    } catch {
+      // Storage unavailable — fall back to the in-memory cache. This must NOT
+      // pretend an outage is pinned when nothing is: with storage down and an
+      // empty cache we return [], so a first quorum loss still emits a CRITICAL
+      // (which the cache holds and the webhook delivers); an already-emitted one
+      // is still in the cache, so we don't duplicate it.
+      return this.recentAnomalies.filter(
+        (e) =>
+          !e.resolved &&
+          e.severity === AnomalySeverity.CRITICAL &&
+          e.metricType === MetricType.RAFT_HEALTH &&
+          e.connectionId === connectionId,
+      );
+    }
   }
 
   /**
@@ -971,12 +1003,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * retry on the next poll after a storage blip.
    */
   private async resolveRaftOutages(connectionId: string): Promise<boolean> {
-    let active: AnomalyEvent[];
-    try {
-      active = await this.getActiveRaftOutages(connectionId);
-    } catch {
-      return false; // storage unavailable — retry next poll
-    }
+    const active = await this.getActiveRaftOutages(connectionId);
     let allResolved = true;
     for (const ev of active) {
       let ok = false;
@@ -1106,12 +1133,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // dismissed/removed one as gone (so we re-emit and the pin comes back). The
       // query only runs past the fire window, i.e. during an actual outage.
       if (timestamp - since >= fireMs) {
-        let active: AnomalyEvent[];
-        try {
-          active = await this.getActiveRaftOutages(ctx.connectionId);
-        } catch {
-          active = [{} as AnomalyEvent]; // storage unavailable — assume pinned, don't duplicate
-        }
+        const active = await this.getActiveRaftOutages(ctx.connectionId);
         // Mark the outage active regardless (so recovery knows to resolve later),
         // then emit only when nothing is currently pinned.
         this.raftLeaderlessActive.set(ctx.connectionId, true);
