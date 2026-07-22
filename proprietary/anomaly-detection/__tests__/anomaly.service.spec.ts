@@ -692,7 +692,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.REJECTED_CONNECTIONS && m !== MetricType.CLIENT_SATURATION && m !== MetricType.SLOWLOG_COUNT,
+        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.REJECTED_CONNECTIONS && m !== MetricType.CLIENT_SATURATION && m !== MetricType.RAFT_HEALTH && m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -2089,6 +2089,469 @@ describe('AnomalyService', () => {
       );
       expect(saturationEmits).toHaveLength(2);
       addSpy.mockRestore();
+    });
+  });
+
+  // ─── Raft cluster health (Valkey Cluster V2) ───────────────────────────────
+  describe('raft cluster health', () => {
+    const clusterEnabledInfo = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    // CLUSTER INFO in Raft mode (field names verified against a live cluster-v2 build).
+    const raftInfo = (over: Record<string, string> = {}) => ({
+      cluster_state: 'ok',
+      cluster_known_nodes: '3',
+      cluster_size: '3',
+      cluster_raft_role: 'follower',
+      cluster_raft_current_term: '1',
+      cluster_raft_commit_index: '9',
+      cluster_raft_last_applied: '9',
+      cluster_raft_log_entries: '9',
+      cluster_raft_leader: '4adc1ba9b9a4dd2cdaad18f8f73f6bedc3bc4c7a',
+      ...over,
+    });
+
+    let now: number;
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterEnabledInfo);
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue([]);
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      // Leaderless windows scale with cluster-node-timeout: 15000ms → recovery
+      // 45s (3x), fire 60s (recovery + one timeout).
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('15000');
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+    afterEach(() => (Date.now as jest.Mock).mockRestore());
+
+    const raftEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.RAFT_HEALTH);
+
+    it('emits nothing for a healthy raft cluster', async () => {
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      await poll();
+      expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('skips the gossip topology detectors in raft mode', async () => {
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo());
+      await poll();
+      // detectDuplicatePrimaries / detectStuckReplicas both call getClusterNodes;
+      // under Raft they must be skipped.
+      expect(dbClient.getClusterNodes).not.toHaveBeenCalled();
+    });
+
+    it('runs the gossip detectors in gossip mode (no raft fields)', async () => {
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue({ cluster_state: 'ok', cluster_size: '3', cluster_known_nodes: '3' });
+      await poll();
+      expect(dbClient.getClusterNodes).toHaveBeenCalled();
+    });
+
+    it('keeps skipping gossip detectors when CLUSTER INFO fails on a known-Raft connection', async () => {
+      // Bugbot: once Raft mode is established, a transient getClusterInfo() failure
+      // must not fall back to the gossip topology detectors (which call
+      // getClusterNodes) — that would surface false #2261/#2090 alerts.
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      await poll(); // establishes Raft mode
+      expect(dbClient.getClusterNodes).not.toHaveBeenCalled();
+
+      (dbClient.getClusterInfo as jest.Mock).mockRejectedValue(new Error('CLUSTERDOWN'));
+      await poll(); // CLUSTER INFO throws — must stay Raft, skip gossip detectors
+      expect(dbClient.getClusterNodes).not.toHaveBeenCalled();
+    });
+
+    it('emits CRITICAL when the node keeps seeking a leader with no commit progress', async () => {
+      // Regression: the majority-loss surface keeps cluster_state:"ok" with a
+      // frozen commit index (verified live). The alert fires on sustained seeking
+      // + frozen commit — NOT on cluster_state:fail.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_state: 'ok', cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: watch opens, within grace → no alert
+      expect(raftEvents()).toHaveLength(0);
+
+      now += 61_000; // exceed the fire window (60s at node-timeout 15s); still seeking, frozen
+      await poll();
+      const events = raftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('no reachable leader');
+    });
+
+    it('fires when the role oscillates follower↔pre-candidate with a frozen commit index', async () => {
+      // During a real outage the role flaps between follower and pre-candidate;
+      // each seek is within the recovery window (45s) of the last, so the watch
+      // never counts as "settled" and persists across the follower phases.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: watch opens, lastSeeking=t0
+      now += 20_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      await poll(); // t0+20s follower: 20s since seek (< 45s), 20s watch (< 60s) → no alert
+      expect(raftEvents()).toHaveLength(0);
+      now += 20_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0+40s: re-seek within the recovery window, lastSeeking refreshed
+      now += 21_000;
+      // Fire happens on a seeking beat (still pre-candidate here): 61s watch >= 60s.
+      await poll(); // t0+61s pre-candidate: 61s watch, actively seeking → CRITICAL
+      expect(raftEvents()).toHaveLength(1);
+      expect(raftEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('does not alert on a one-off election blip that settles (idle cluster)', async () => {
+      // Bugbot #1: a transient pre-candidate that re-hears its leader on an idle
+      // cluster (commit never advances, role never becomes leader) must settle and
+      // clear — not fire a false CRITICAL once the fire window elapses.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: one seek → watch opens
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      now += 46_000; // no further seeking for > the recovery window (45s) → settled
+      await poll(); // watch closes, no alert
+      now += 20_000; // now well past the 60s fire window, but the watch is closed
+      await poll();
+      expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('scales the windows with cluster-node-timeout so slow flaps still fire', async () => {
+      // Bugbot: a fixed recovery window could close between the seeks of a slow
+      // flap. With node-timeout 20s the recovery window is 60s and the fire window
+      // 80s, so an oscillation with ~40s gaps — which a fixed 25s window would have
+      // dropped — still alerts.
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('20000');
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: watch opens, node-timeout cached (20s → recovery 60s / fire 80s)
+      now += 40_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      await poll(); // t0+40s follower: 40s since seek (< 60s recovery) → not settled
+      expect(raftEvents()).toHaveLength(0);
+      now += 41_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0+81s: still seeking, 81s watch (>= 80s fire) → CRITICAL
+      expect(raftEvents()).toHaveLength(1);
+      expect(raftEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('re-checks cluster-node-timeout on a backoff, not every poll, and picks it up when readable', async () => {
+      // Review (Tier 1): an unreadable CONFIG must be neither hammered every poll
+      // NOR pinned to the default forever — it's retried on a backoff and the real
+      // value is adopted as soon as CONFIG becomes readable.
+      const getCfg = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('NOPERM'))
+        .mockResolvedValue('20000');
+      dbClient.getConfigValue = getCfg;
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      await poll(); // attempt 1 fails → backoff armed
+      expect(getCfg).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 5; i++) await poll(); // within backoff → not re-queried
+      expect(getCfg).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 65; i++) await poll(); // drain the backoff → re-attempt succeeds, caches
+      expect(getCfg).toHaveBeenCalledTimes(2);
+      await poll(); // real value cached → no further CONFIG calls
+      expect(getCfg).toHaveBeenCalledTimes(2);
+    });
+
+    it('still emits the first CRITICAL when storage is unavailable (no false "pinned")', async () => {
+      // Bugbot: a getActiveRaftOutages storage failure must not suppress the first
+      // alert — with nothing pinned in memory it still emits.
+      storage.getAnomalyEvents.mockRejectedValue(new Error('db down'));
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll();
+      now += 61_000;
+      await poll(); // storage down, nothing pinned → must still fire
+      expect(activeCriticalRaft()).toHaveLength(1);
+    });
+
+    const activeCriticalRaft = () =>
+      raftEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL && !e.resolved);
+
+    it('re-emits the outage event if it is resolved while quorum is still lost', async () => {
+      // Bugbot (High): resolving the banner must not un-pin the panel during a live
+      // outage. The detector keeps a live CRITICAL event present until recovery, so
+      // dismissing one re-emits a fresh one on the next poll.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // watch opens
+      now += 61_000;
+      await poll(); // fires E1
+      expect(activeCriticalRaft()).toHaveLength(1);
+      const e1 = activeCriticalRaft()[0].id;
+
+      await service.resolveAnomaly(e1); // operator dismisses while quorum is still lost
+      expect(activeCriticalRaft()).toHaveLength(0);
+
+      now += 1_000;
+      await poll(); // still leaderless → a fresh CRITICAL is emitted
+      expect(activeCriticalRaft()).toHaveLength(1);
+      expect(activeCriticalRaft()[0].id).not.toBe(e1);
+    });
+
+    it('re-pins on a follower beat after a dismiss (no green gap during the flap)', async () => {
+      // Review: fire is gated on `seeking` to avoid a false CRITICAL after idle
+      // recovery — but once the outage is confirmed, a dismiss that lands on a
+      // follower beat must still re-pin immediately, not stay green until the next
+      // seek. Re-emit is therefore also allowed while the outage is confirmed.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // watch opens (seeking)
+      now += 61_000;
+      await poll(); // fires E1, outage confirmed
+      expect(activeCriticalRaft()).toHaveLength(1);
+      const e1 = activeCriticalRaft()[0].id;
+
+      await service.resolveAnomaly(e1); // dismiss
+      expect(activeCriticalRaft()).toHaveLength(0);
+
+      now += 1_000;
+      // Role flaps to follower (NOT seeking) — the pin must still come back.
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      await poll();
+      expect(activeCriticalRaft()).toHaveLength(1);
+      expect(activeCriticalRaft()[0].id).not.toBe(e1);
+    });
+
+    it('auto-resolves the outage event when quorum is restored', async () => {
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // watch opens
+      now += 61_000;
+      await poll(); // fires
+      expect(activeCriticalRaft()).toHaveLength(1);
+
+      now += 1_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      await poll(); // a leader is elected → outage over → event auto-resolves
+      expect(activeCriticalRaft()).toHaveLength(0);
+    });
+
+    it('retries the recovery auto-resolve after a storage blip (no stuck CRITICAL)', async () => {
+      // Bugbot: if the resolve on recovery fails, the id must not be dropped —
+      // otherwise the CRITICAL row stays active forever. It retries next poll.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll();
+      now += 61_000;
+      await poll(); // fires
+      expect(activeCriticalRaft()).toHaveLength(1);
+
+      storage.resolveAnomaly.mockResolvedValueOnce(false); // first resolve fails
+      now += 1_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      await poll(); // recovered but resolve failed → still active, id kept
+      expect(activeCriticalRaft()).toHaveLength(1);
+
+      now += 1_000;
+      await poll(); // still healthy → retry resolve → succeeds
+      expect(activeCriticalRaft()).toHaveLength(0);
+    });
+
+    it('retries the auto-resolve on a FOLLOWER recovery after a storage blip (no stuck pin)', async () => {
+      // Review (Tier 1): recovery via commit-progress (a different node became
+      // leader, so this node recovers as a follower) deletes the watch state. If the
+      // resolve then blips, subsequent plain-healthy-follower polls must still retry
+      // it — previously only the leader-recovery path retried, stranding the pin.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate', cluster_raft_commit_index: '9' }));
+      await poll();
+      now += 61_000;
+      await poll(); // fires (pre-candidate)
+      expect(activeCriticalRaft()).toHaveLength(1);
+
+      storage.resolveAnomaly.mockResolvedValueOnce(false); // first resolve blips
+      now += 1_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'follower', cluster_raft_commit_index: '20' }),
+      );
+      await poll(); // follower recovery via commit progress; resolve fails → flag kept, watch deleted
+      expect(activeCriticalRaft()).toHaveLength(1);
+
+      now += 1_000; // now a plain healthy follower, no watch state
+      await poll(); // must still retry the resolve → succeeds
+      expect(activeCriticalRaft()).toHaveLength(0);
+    });
+
+    it('does not fire after the node recovers into an idle follower (fire vs recovery clock)', async () => {
+      // Review (Tier 1): the fire clock runs from watch-open (`since`) but recovery
+      // from the last seek, so a node that sought for a while then quietly recovered
+      // into an idle follower must NOT trip a false CRITICAL in the gap before the
+      // watch settles. Fire is gated on the node still actively seeking.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: watch opens, seeking
+      now += 30_000;
+      await poll(); // t30: still seeking, lastSeeking advances to t30
+      // Recover quietly into an idle follower (stops seeking, commit frozen, not leader).
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      now += 31_000;
+      await poll(); // t61: watch age 61s >= fireMs 60s, but NOT seeking → must not fire
+      expect(activeCriticalRaft()).toHaveLength(0);
+    });
+
+    it('does not re-emit (orphan) when the outage event is evicted but still active in storage', async () => {
+      // Bugbot: an evicted-but-active event must not trigger a duplicate emit — the
+      // authoritative (storage-backed) feed still reports it, so the pin holds
+      // without a new row.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll();
+      now += 61_000;
+      await poll(); // fires E1
+      expect(activeCriticalRaft()).toHaveLength(1);
+      const e1id = activeCriticalRaft()[0].id;
+
+      // Simulate E1 evicted from the in-memory ring but still unresolved in storage.
+      (service as unknown as { recentAnomalies: unknown[] }).recentAnomalies = [];
+      storage.getAnomalyEvents.mockResolvedValue([
+        {
+          id: e1id,
+          timestamp: now,
+          metricType: 'raft_health',
+          anomalyType: 'drop',
+          severity: 'critical',
+          value: 0,
+          baseline: 1,
+          stdDev: 0,
+          zScore: 0,
+          threshold: 0,
+          message: 'live outage',
+          resolved: false,
+        },
+      ]);
+      now += 1_000;
+      await poll(); // authoritative feed still has E1 → must NOT emit a duplicate
+      expect(raftEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL)).toHaveLength(0);
+    });
+
+    it('re-emits after a dismissed event is purged from the cache, outage still live', async () => {
+      // Bugbot ("missed re-emit"): if the dismissed row is removed from the ring
+      // (clearResolved), not just flagged resolved, the pin must still come back —
+      // the authoritative feed reports none active, so a fresh CRITICAL is emitted.
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll();
+      now += 61_000;
+      await poll(); // fires E1
+      const e1 = activeCriticalRaft()[0].id;
+
+      await service.resolveAnomaly(e1); // operator dismisses
+      service.clearResolved(); // ...and the resolved row is purged from the ring
+      expect(activeCriticalRaft()).toHaveLength(0);
+
+      now += 1_000;
+      await poll(); // outage persists, nothing active anywhere → re-emit
+      expect(activeCriticalRaft()).toHaveLength(1);
+      expect(activeCriticalRaft()[0].id).not.toBe(e1);
+    });
+
+    it('does not alert on a brief seek that recovers into a leader (healthy failover)', async () => {
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: seeking, watch opens, within grace
+      now += 4_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'leader', cluster_raft_current_term: '2' }),
+      );
+      await poll(); // became leader before the gate → watch closes
+      expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('closes the watch when a leader emerges and the commit index advances', async () => {
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate', cluster_raft_commit_index: '9' }));
+      await poll(); // watch opens at commit 9
+      now += 4_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'follower', cluster_raft_commit_index: '12' }),
+      );
+      await poll(); // commit advanced 9→12 → quorum proven, watch closes
+      now += 20_000; // long past the gate, but the watch is closed
+      await poll();
+      expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('does not alert on an idle healthy follower (frozen commit, never seeking)', async () => {
+      // A quiet cluster also has a frozen commit index; the frozen index alone
+      // must not trip the alert — only seeking-without-progress does.
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      await poll();
+      now += 30_000;
+      await poll();
+      expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('emits WARNING on election churn (repeated term advances)', async () => {
+      const setTerm = (t: number) =>
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+          raftInfo({ cluster_raft_current_term: String(t) }),
+        );
+      setTerm(1); await poll(); // baseline
+      now += 1000; setTerm(2); await poll(); // election #1
+      now += 1000; setTerm(3); await poll(); // election #2
+      now += 1000; setTerm(4); await poll(); // election #3 → churn
+      const events = raftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('flapping');
+    });
+
+    it('does not treat a single healthy failover (one term bump) as churn', async () => {
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_current_term: '1' }));
+      await poll();
+      now += 1000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_current_term: '2', cluster_raft_role: 'leader' }),
+      );
+      await poll();
+      expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('a throwing churn/metric emit does not block quorum-loss detection', async () => {
+      // Review: the churn block runs before the leaderless block; a metric-emit
+      // failure must not propagate out of addAnomaly and skip quorum-loss detection.
+      // Sustained churn keeps the churn WARNING firing (and its metric emit throwing)
+      // every poll while the node is also seeking — the CRITICAL must still fire.
+      (prometheusService.incrementAnomalyEvent as jest.Mock).mockImplementation(() => {
+        throw new Error('metrics down');
+      });
+      for (let i = 1; i <= 65; i++) {
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+          raftInfo({ cluster_raft_role: 'pre-candidate', cluster_raft_current_term: String(i) }),
+        );
+        await poll();
+        now += 1000;
+      }
+      expect(activeCriticalRaft()).toHaveLength(1);
     });
   });
 });

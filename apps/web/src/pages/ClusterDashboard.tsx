@@ -15,6 +15,7 @@ import { NodeStatsComparison } from '../components/cluster/NodeStatsComparison';
 import { ClusterSlowlog } from '../components/cluster/ClusterSlowlog';
 import { ReplicationLag } from '../components/cluster/ReplicationLag';
 import { SlotMigrations } from '../components/cluster/SlotMigrations';
+import { RaftHealthPanel } from '../components/cluster/RaftHealthPanel';
 import { buildSlotNodeMap } from '../types/cluster';
 
 export function ClusterDashboard() {
@@ -23,6 +24,7 @@ export function ClusterDashboard() {
     isClusterMode,
     isLoading,
     error,
+    info,
     nodes,
     masters,
     replicas,
@@ -62,6 +64,17 @@ export function ClusterDashboard() {
     enabled: shouldPoll,
     refetchKey: currentConnection?.id,
   });
+
+  // Authoritative Raft quorum-loss signal from the backend detector. The outage
+  // role flaps, so we don't rely on the CLUSTER INFO snapshot alone to decide the
+  // Raft Health card is in trouble — an active raft_health event pins it.
+  const { data: raftHealthEvents } = usePolling<Array<{ id: string; severity: string }>>({
+    fetcher: () => metricsApi.getAnomalyEvents({ metricType: 'raft_health', activeOnly: true }),
+    interval: 5000,
+    enabled: isClusterMode,
+    refetchKey: currentConnection?.id,
+  });
+  const raftOutageActive = (raftHealthEvents ?? []).some((e) => e.severity === 'critical');
 
   // Memoize slot-to-node mapping separately for reuse
   const slotNodeMap = useMemo(() => buildSlotNodeMap(nodes), [nodes]);
@@ -192,6 +205,9 @@ export function ClusterDashboard() {
 
         {/* Overview Tab */}
         <TabsContent value="overview" className="space-y-4">
+          {/* Raft (Cluster V2) health — self-hides in legacy gossip mode */}
+          <RaftHealthPanel clusterInfo={info} outageActive={raftOutageActive} />
+
           {/* Health Card + Topology */}
           <div className="grid md:grid-cols-4 gap-4">
             <div className="md:col-span-1">
