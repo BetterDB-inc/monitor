@@ -108,6 +108,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private raftLastSeeking = new Map<string, number>();
   private raftLeaderlessActive = new Map<string, boolean>();
   private raftMode = new Map<string, boolean>();
+  private raftNodeTimeoutMs = new Map<string, number>();
   private prevCpuByConnection = new Map<string, { sys: number; user: number; ts: number }>();
   private prevReplSnapshot = new Map<
     string,
@@ -315,6 +316,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftLastSeeking.delete(connectionId);
     this.raftLeaderlessActive.delete(connectionId);
     this.raftMode.delete(connectionId);
+    this.raftNodeTimeoutMs.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
@@ -862,14 +864,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
   private static readonly RAFT_CHURN_WINDOW_MS = 60_000;
   private static readonly RAFT_CHURN_MIN_ELECTIONS = 3;
-  // A quorum-lost node re-enters candidate/pre-candidate roughly every
-  // node-timeout (~15s observed on a live cluster), so the fire window must
-  // span more than one such flap to tell a sustained outage from a one-off
-  // election blip. RAFT_RECOVERED_MS (< the fire window) closes the watch once
-  // the node has stopped seeking for that long — a healthy blip settles and
-  // recovers; a real outage keeps re-seeking and never does.
-  private static readonly RAFT_LEADERLESS_MIN_MS = 30_000;
-  private static readonly RAFT_RECOVERED_MS = 25_000;
+  // The leaderless windows are derived from cluster-node-timeout (see
+  // raftLeaderlessWindows): a quorum-lost node re-enters candidate/pre-candidate
+  // within ~1 election timeout (randomised up to ~2x node-timeout), so the
+  // recovery window must exceed that to avoid closing between the seeks of an
+  // oscillating outage, while still being short enough that a one-off blip
+  // settles and clears before the (larger) fire window elapses.
+  private static readonly RAFT_DEFAULT_NODE_TIMEOUT_MS = 15_000;
+  private static readonly RAFT_RECOVERED_FLOOR_MS = 30_000;
+  private static readonly RAFT_WINDOW_CAP_MS = 180_000;
+  private static readonly RAFT_FIRE_MARGIN_MS = 10_000;
 
   /**
    * Health of a Valkey Raft cluster (Cluster V2, `cluster-protocol raft`), from
@@ -881,16 +885,49 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    *   stays frozen. `cluster_state` is deliberately NOT used — a surviving
    *   replica keeps reporting `cluster_state:ok` through a majority outage. A
    *   watch opens when seeking begins and fires only if the node keeps failing to
-   *   settle for `RAFT_LEADERLESS_MIN_MS`. The watch closes (no alert) when a
-   *   leader emerges, the commit index advances, or the node stops seeking for
-   *   `RAFT_RECOVERED_MS` — so a one-off election blip that re-hears its leader on
-   *   an idle cluster (commit never advances, role never becomes leader) settles
-   *   and clears instead of firing a false CRITICAL.
+   *   settle for the fire window. The watch closes (no alert) when a leader
+   *   emerges, the commit index advances, or the node stops seeking for the
+   *   recovery window — so a one-off election blip that re-hears its leader on an
+   *   idle cluster (commit never advances, role never becomes leader) settles and
+   *   clears instead of firing a false CRITICAL. Both windows are derived from
+   *   cluster-node-timeout (see raftLeaderlessWindows) so the recovery window
+   *   always exceeds one flap period regardless of how the cluster is tuned.
    * - **Election churn (WARNING):** the term advancing repeatedly in a short
    *   window. The pre-vote protocol means the term only rises on a *completed*
    *   election, so rapid term growth = genuine flapping leadership (with quorum),
    *   distinct from the term-frozen seeking of an outage.
    */
+  /**
+   * Leaderless watch windows, scaled to the cluster's `cluster-node-timeout`
+   * (fetched once per connection, cached). A quorum-lost node re-seeks within
+   * ~1 election timeout — randomised up to ~2x node-timeout — so the recovery
+   * window is 3x node-timeout (comfortably above the max inter-seek gap) and the
+   * fire window is one more timeout beyond that, guaranteeing a one-off blip
+   * recovers before it could fire while an oscillating outage never settles.
+   */
+  private async raftLeaderlessWindows(
+    ctx: ConnectionContext,
+  ): Promise<{ recoveredMs: number; fireMs: number }> {
+    let nodeTimeout = this.raftNodeTimeoutMs.get(ctx.connectionId);
+    if (nodeTimeout === undefined) {
+      nodeTimeout = AnomalyService.RAFT_DEFAULT_NODE_TIMEOUT_MS;
+      try {
+        const raw = await ctx.client.getConfigValue('cluster-node-timeout');
+        const n = raw != null ? parseInt(raw, 10) : NaN;
+        if (Number.isFinite(n) && n > 0) nodeTimeout = n;
+      } catch {
+        // Keep the default; config may be unavailable on some deployments.
+      }
+      this.raftNodeTimeoutMs.set(ctx.connectionId, nodeTimeout);
+    }
+    const recoveredMs = Math.min(
+      AnomalyService.RAFT_WINDOW_CAP_MS,
+      Math.max(AnomalyService.RAFT_RECOVERED_FLOOR_MS, 3 * nodeTimeout),
+    );
+    const fireMs = recoveredMs + Math.max(AnomalyService.RAFT_FIRE_MARGIN_MS, nodeTimeout);
+    return { recoveredMs, fireMs };
+  }
+
   private async detectRaftHealth(
     clusterInfo: Record<string, string>,
     ctx: ConnectionContext,
@@ -957,6 +994,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // what distinguishes a real outage (keeps re-seeking every ~node-timeout,
     // never settles) from a one-off blip on an idle cluster (seeks once, then
     // stays a quiet follower with an unchanged commit index).
+    const { recoveredMs, fireMs } = await this.raftLeaderlessWindows(ctx);
     const seeking = isRaftSeeking(state);
     if (seeking) this.raftLastSeeking.set(ctx.connectionId, timestamp);
     const watching = this.raftLeaderlessSince.has(ctx.connectionId);
@@ -964,10 +1002,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const madeProgress = watching && watchCommit !== undefined && state.commitIndex > watchCommit;
     const lastSeeking = this.raftLastSeeking.get(ctx.connectionId);
     const settled =
-      watching &&
-      !seeking &&
-      lastSeeking !== undefined &&
-      timestamp - lastSeeking >= AnomalyService.RAFT_RECOVERED_MS;
+      watching && !seeking && lastSeeking !== undefined && timestamp - lastSeeking >= recoveredMs;
 
     if (state.role === 'leader' || madeProgress || settled) {
       // Proven quorum (a leader, committed progress) or a settled node that
@@ -983,10 +1018,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         this.raftWatchCommit.set(ctx.connectionId, state.commitIndex);
       }
       const since = this.raftLeaderlessSince.get(ctx.connectionId)!;
-      if (
-        timestamp - since >= AnomalyService.RAFT_LEADERLESS_MIN_MS &&
-        !this.raftLeaderlessActive.get(ctx.connectionId)
-      ) {
+      if (timestamp - since >= fireMs && !this.raftLeaderlessActive.get(ctx.connectionId)) {
         const heldMs = timestamp - since;
         const event: AnomalyEvent = {
           id: randomUUID(),

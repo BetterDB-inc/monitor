@@ -2129,6 +2129,9 @@ describe('AnomalyService', () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterEnabledInfo);
       dbClient.getClusterNodes = jest.fn().mockResolvedValue([]);
       dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      // Leaderless windows scale with cluster-node-timeout: 15000ms → recovery
+      // 45s (3x), fire 60s (recovery + one timeout).
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('15000');
       now = 1_700_000_000_000;
       jest.spyOn(Date, 'now').mockImplementation(() => now);
     });
@@ -2182,7 +2185,7 @@ describe('AnomalyService', () => {
       await poll(); // t0: watch opens, within grace → no alert
       expect(raftEvents()).toHaveLength(0);
 
-      now += 31_000; // exceed RAFT_LEADERLESS_MIN_MS (30s); still seeking, commit frozen
+      now += 61_000; // exceed the fire window (60s at node-timeout 15s); still seeking, frozen
       await poll();
       const events = raftEvents();
       expect(events).toHaveLength(1);
@@ -2192,22 +2195,22 @@ describe('AnomalyService', () => {
 
     it('fires when the role oscillates follower↔pre-candidate with a frozen commit index', async () => {
       // During a real outage the role flaps between follower and pre-candidate;
-      // each seek is within RAFT_RECOVERED_MS of the last, so the watch never
-      // counts as "settled" and persists across the follower phases.
+      // each seek is within the recovery window (45s) of the last, so the watch
+      // never counts as "settled" and persists across the follower phases.
       dbClient.getClusterInfo = jest
         .fn()
         .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
       await poll(); // t0: watch opens, lastSeeking=t0
-      now += 10_000;
+      now += 20_000;
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
-      await poll(); // t0+10s follower: 10s since seek (< 25s), 10s watch (< 30s) → no alert
+      await poll(); // t0+20s follower: 20s since seek (< 45s), 20s watch (< 60s) → no alert
       expect(raftEvents()).toHaveLength(0);
-      now += 10_000;
+      now += 20_000;
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
-      await poll(); // t0+20s: re-seek, lastSeeking refreshed
-      now += 11_000;
+      await poll(); // t0+40s: re-seek within the recovery window, lastSeeking refreshed
+      now += 21_000;
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
-      await poll(); // t0+31s follower: 11s since seek (not settled), 31s watch → CRITICAL
+      await poll(); // t0+61s follower: 21s since seek (not settled), 61s watch → CRITICAL
       expect(raftEvents()).toHaveLength(1);
       expect(raftEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
     });
@@ -2221,11 +2224,32 @@ describe('AnomalyService', () => {
         .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
       await poll(); // t0: one seek → watch opens
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
-      now += 26_000; // no further seeking for > RAFT_RECOVERED_MS (25s) → settled
+      now += 46_000; // no further seeking for > the recovery window (45s) → settled
       await poll(); // watch closes, no alert
-      now += 10_000; // now well past the 30s fire window, but the watch is closed
+      now += 20_000; // now well past the 60s fire window, but the watch is closed
       await poll();
       expect(raftEvents()).toHaveLength(0);
+    });
+
+    it('scales the windows with cluster-node-timeout so slow flaps still fire', async () => {
+      // Bugbot: a fixed recovery window could close between the seeks of a slow
+      // flap. With node-timeout 20s the recovery window is 60s and the fire window
+      // 80s, so an oscillation with ~40s gaps — which a fixed 25s window would have
+      // dropped — still alerts.
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('20000');
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0: watch opens, node-timeout cached (20s → recovery 60s / fire 80s)
+      now += 40_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      await poll(); // t0+40s follower: 40s since seek (< 60s recovery) → not settled
+      expect(raftEvents()).toHaveLength(0);
+      now += 41_000;
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      await poll(); // t0+81s: still seeking, 81s watch (>= 80s fire) → CRITICAL
+      expect(raftEvents()).toHaveLength(1);
+      expect(raftEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
     });
 
     it('does not alert on a brief seek that recovers into a leader (healthy failover)', async () => {
