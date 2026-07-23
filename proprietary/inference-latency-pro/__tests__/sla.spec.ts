@@ -23,6 +23,7 @@ describe('evaluateSla', () => {
       lastFiredAt: T0,
       resolved: false,
       lastP99Us: 20_000,
+      lastEvaluatedAt: T0,
     });
   });
 
@@ -152,6 +153,7 @@ describe('evaluateSla', () => {
       lastFiredAt: T0 + 4 * MIN,
       resolved: false,
       lastP99Us: 20_000,
+      lastEvaluatedAt: T0 + 4 * MIN,
     });
   });
 
