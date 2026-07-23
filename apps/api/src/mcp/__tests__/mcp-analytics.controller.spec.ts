@@ -4,10 +4,7 @@ import { INFERENCE_LATENCY_PRO_SERVICE } from '@betterdb/shared';
 import { McpAnalyticsController } from '../mcp-analytics.controller';
 import { MetricForecastingService } from '../../metric-forecasting/metric-forecasting.service';
 import { VectorSearchService } from '../../vector-search/vector-search.service';
-import {
-  InferenceLatencyService,
-  InferenceLatencyValidationError,
-} from '../../inference-latency/inference-latency.service';
+import { InferenceLatencyService } from '../../inference-latency/inference-latency.service';
 import { AgentTokenGuard } from '../../common/guards/agent-token.guard';
 import { CapabilityUnavailableError } from '../../common/errors/capability-unavailable.error';
 
@@ -145,16 +142,18 @@ describe('McpAnalyticsController', () => {
     expect(inferenceSvc.getProfile).toHaveBeenCalledWith('inst1', { windowMs: undefined });
   });
 
-  it('inference latency maps validation errors to 400', async () => {
-    inferenceSvc.getProfile.mockRejectedValueOnce(new InferenceLatencyValidationError('bad window'));
+  it('inference latency rejects non-positive or fractional windowMs with 400', async () => {
     const controller = await makeController();
-    let caught: unknown;
-    try {
-      await controller.getInferenceLatency('inst1', '-5');
-    } catch (error) {
-      caught = error;
+    for (const bad of ['-5', '0', '0.5', 'abc']) {
+      let caught: unknown;
+      try {
+        await controller.getInferenceLatency('inst1', bad);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(HttpException);
+      expect((caught as HttpException).getStatus()).toBe(400);
     }
-    expect(caught).toBeInstanceOf(HttpException);
-    expect((caught as HttpException).getStatus()).toBe(400);
+    expect(inferenceSvc.getProfile).not.toHaveBeenCalled();
   });
 });
