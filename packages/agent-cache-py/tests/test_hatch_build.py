@@ -142,3 +142,21 @@ def test_leaves_placeholders_for_a_local_build(tmp_path: Path, package: str) -> 
 
     assert build_data["force_include"] == {}
     assert API_KEY_PLACEHOLDER in (root / HOOKS[package] / "analytics.py").read_text()
+
+
+@pytest.mark.parametrize("package", HOOKS)
+def test_accepts_already_injected_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, package: str
+) -> None:
+    # `python -m build` builds the wheel from a freshly built sdist whose
+    # analytics.py already had the key injected during the sdist pass. The
+    # placeholder is legitimately gone and the real key is present — this must
+    # not be mistaken for a renamed token, and there is nothing left to inject.
+    monkeypatch.setenv("REQUIRE_TELEMETRY_KEY", "1")
+    monkeypatch.setenv("POSTHOG_API_KEY", "phc_real_key")
+    root = _make_root(tmp_path, package, source='_BAKED_POSTHOG_API_KEY = "phc_real_key"\n')
+    build_data = _build_data()
+
+    _make_hook(package, root).initialize("0.1.0", build_data)
+
+    assert build_data["force_include"] == {}

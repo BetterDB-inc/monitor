@@ -35,10 +35,16 @@ class CustomBuildHook(BuildHookInterface):
 
         # An absent placeholder is not proof of success: the token may have been
         # renamed in the source, in which case nothing is injected and every
-        # check below passes while the wheel ships telemetry-blind.
+        # check below passes while the wheel ships telemetry-blind. But `python -m
+        # build` builds the wheel from a freshly built sdist whose analytics.py was
+        # already injected during the sdist pass — there the placeholder is
+        # legitimately gone and the real key is present, which is success, not a
+        # rename. Only fail when neither the placeholder nor the injected key is
+        # there.
         if (
             os.environ.get("REQUIRE_TELEMETRY_KEY")
             and "__BETTERDB_POSTHOG_API_KEY__" not in original_source
+            and api_key not in original_source
         ):
             raise RuntimeError(
                 "REQUIRE_TELEMETRY_KEY is set but __BETTERDB_POSTHOG_API_KEY__ was not "
