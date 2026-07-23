@@ -1453,22 +1453,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         .slice(0, limit);
     }
 
-    const cacheThreshold = Date.now() - this.cacheTtlMs;
-
-    if (!startTime || startTime >= cacheThreshold) {
-      let events = [...this.recentAnomalies];
-      if (connectionId) events = events.filter((e) => e.connectionId === connectionId);
-      if (metricType) events = events.filter((e) => e.metricType === metricType);
-      if (severity) events = events.filter((e) => e.severity === severity);
-      if (endTime) events = events.filter((e) => e.timestamp <= endTime);
-      if (events.length > 0) {
-        return events.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
-      }
-      // Empty cache result must consult storage: some producers (e.g. latency
-      // regressions writing command_p99 via saveAnomalyEvent) persist without
-      // ever entering this cache, and the cache is empty after a restart.
-    }
-
     const stored = await this.storage.getAnomalyEvents({
       startTime,
       endTime,
@@ -1477,8 +1461,28 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       limit,
       connectionId,
     });
+    const storedEvents = stored.map((s) => this.storedToAnomalyEvent(s));
 
-    return stored.map((s) => this.storedToAnomalyEvent(s));
+    // Union with the in-memory cache like the activeOnly branch above: the
+    // cache can hold events whose persist failed, while storage holds events
+    // some producers (e.g. command_p99 latency regressions) write without ever
+    // entering the cache. Neither side alone is complete; storage wins on id.
+    const cacheThreshold = Date.now() - this.cacheTtlMs;
+    if (!startTime || startTime >= cacheThreshold) {
+      const seen = new Set(storedEvents.map((e) => e.id));
+      const cached = this.recentAnomalies.filter(
+        (e) =>
+          !seen.has(e.id) &&
+          (!connectionId || e.connectionId === connectionId) &&
+          (!metricType || e.metricType === metricType) &&
+          (!severity || e.severity === severity) &&
+          (!endTime || e.timestamp <= endTime) &&
+          (!startTime || e.timestamp >= startTime),
+      );
+      return [...storedEvents, ...cached].sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+    }
+
+    return storedEvents;
   }
 
   getRecentGroups(limit = 50, pattern?: AnomalyPattern): CorrelatedAnomalyGroup[] {

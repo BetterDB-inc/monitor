@@ -175,6 +175,51 @@ describe('AnomalyService', () => {
         expect.objectContaining({ metricType: 'command_p99', connectionId: 'c1' }),
       );
     });
+
+    it('unions storage-only events with cached events on unfiltered recent reads', async () => {
+      const storedEvent = {
+        id: 'stored-1',
+        timestamp: Date.now() - 30_000,
+        metric_type: 'command_p99',
+        anomaly_type: 'spike',
+        severity: 'warning',
+        value: 200,
+        baseline: 100,
+        z_score: 0,
+        std_dev: 0,
+        threshold: 2,
+        message: 'p99 regression',
+        resolved: 0,
+        connection_id: 'c1',
+      };
+      storage.getAnomalyEvents.mockResolvedValueOnce([storedEvent]);
+      (service as any).recentAnomalies.push({
+        id: 'cached-1',
+        timestamp: Date.now() - 10_000,
+        metricType: MetricType.MEMORY_USED,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 1,
+        zScore: 3,
+        stdDev: 1,
+        threshold: 3,
+        message: 'memory spike',
+        resolved: false,
+        connectionId: 'c1',
+      });
+      const events = await service.getRecentAnomalies(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        10,
+        'c1',
+      );
+      const ids = events.map((e) => e.id);
+      expect(ids).toContain('stored-1');
+      expect(ids).toContain('cached-1');
+    });
   });
 
   // ─── Fragmentation Extractor ───────────────────────────────────────────────
