@@ -31,7 +31,20 @@ describe('KeyAnalyticsService.getLargestKeys', () => {
     expect(res.map((e) => e.keyName)).toEqual(['blob-hash', 'big-set', 'no-memory']);
   });
 
-  it('applies the limit after ranking and strips it from the storage query', async () => {
+  it('renumbers rank to match the memory ordering', async () => {
+    storage.getHotKeys.mockResolvedValue([
+      { keyName: 'big-set', rank: 1, memoryBytes: 40 },
+      { keyName: 'blob-hash', rank: 2, memoryBytes: 900 },
+    ]);
+    const service = makeService();
+    const res = await service.getLargestKeys({ connectionId: 'c1', latest: true });
+    expect(res.map((e) => [e.keyName, e.rank])).toEqual([
+      ['blob-hash', 1],
+      ['big-set', 2],
+    ]);
+  });
+
+  it('applies the caller limit after ranking and fetches with the explicit cap', async () => {
     storage.getHotKeys.mockResolvedValue([
       { keyName: 'a', memoryBytes: 1 },
       { keyName: 'b', memoryBytes: 3 },
@@ -44,6 +57,7 @@ describe('KeyAnalyticsService.getLargestKeys', () => {
       connectionId: 'c1',
       latest: true,
       signalTypes: ['cardinality'],
+      limit: 10_000,
     });
   });
 });
