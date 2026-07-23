@@ -1405,6 +1405,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       correlationId: s.correlationId,
       relatedMetrics: s.relatedMetrics as MetricType[],
       resolved: s.resolved,
+      connectionId: s.connectionId,
     };
   }
 
