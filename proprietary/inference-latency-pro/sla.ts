@@ -28,15 +28,19 @@ export const SLA_STATE_STALE_MS = 15 * 60 * 1000;
 /**
  * Single source of truth for "is this breach live right now" — used by both the
  * Prometheus carry-forward and getSlaStatus so the two surfaces cannot disagree.
- * Re-evaluates the recorded p99 against the CURRENT threshold and expires
- * bucket-less (quiet/dropped) state after SLA_STATE_STALE_MS.
+ * Re-evaluates the recorded p99 against the CURRENT threshold (so raising the
+ * ceiling clears a stale breach and lowering it re-flags a resolved one) and
+ * expires bucket-less (quiet/dropped) state after SLA_STATE_STALE_MS. The
+ * `resolved` flag stays out of this: it drives webhook re-fire debouncing, not
+ * status, and consulting it here would make one direction of threshold change
+ * behave differently from the other.
  */
 export function isBreachActive(
   prior: SlaState | undefined,
   thresholdUs: number,
   now: number,
 ): boolean {
-  if (prior === undefined || prior.resolved === true) {
+  if (prior === undefined) {
     return false;
   }
   if (now - prior.lastEvaluatedAt > SLA_STATE_STALE_MS) {
