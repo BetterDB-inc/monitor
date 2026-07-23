@@ -1,6 +1,6 @@
 {
   "name": "@betterdb/retrieval",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Developer-facing retrieval SDK over valkey-search: index lifecycle, upsert, vector + filtered query",
   "keywords": [
     "valkey",
