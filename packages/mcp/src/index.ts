@@ -1804,7 +1804,13 @@ server.tool(
   'Get the stored metrics time-series for one AI component instance (hits, misses, hit rate, cost saved, evictions, item count, index size, threshold). Use ai_list_instances first to find the instance field identifier. Use this to see trends: hit-rate degradation, growth, threshold drift.',
   {
     field: z.string().describe('Instance field identifier from ai_list_instances'),
-    hours: z.number().optional().describe('Look-back window in hours (default 24)'),
+    hours: z
+      .number()
+      .int()
+      .min(1)
+      .max(168)
+      .optional()
+      .describe('Look-back window in whole hours, 1-168 (default 24)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
   async ({ field, hours, instanceId }) =>
@@ -1825,9 +1831,21 @@ server.tool(
   'list_ai_traces',
   'List recent AI application traces ingested via OpenTelemetry (LLM calls, cache lookups, memory recalls, retrieval spans). Not tied to a Valkey instance — traces come from instrumented AI apps. Use get_ai_trace for a full span waterfall and correlate_ai_trace to join a trace with live Valkey state.',
   {
-    hours: z.number().optional().describe('Look-back window in hours (default 1)'),
+    hours: z
+      .number()
+      .int()
+      .min(1)
+      .max(168)
+      .optional()
+      .describe('Look-back window in whole hours, 1-168 (default 1)'),
     service: z.string().optional().describe('Filter by emitting service name'),
-    limit: z.number().optional().describe('Max traces to return (default 100)'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(1000)
+      .optional()
+      .describe('Max traces to return, 1-1000 (default 100)'),
   },
   async ({ hours, service, limit }) =>
     withTelemetry('list_ai_traces', async () => {

@@ -6,6 +6,7 @@ import {
   Logger,
   PipeTransform,
 } from '@nestjs/common';
+import { CapabilityUnavailableError } from '../common/errors/capability-unavailable.error';
 
 export const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 export const MAX_LIMIT = 10000;
@@ -36,22 +37,20 @@ export function safeParseInt(value: string | undefined, defaultValue?: number): 
   return parsed;
 }
 
-/** Parse and cap a limit/count query param */
-export function safeLimit(value: string | undefined, defaultValue: number): number {
-  return Math.max(1, Math.min(safeParseInt(value, defaultValue), MAX_LIMIT));
-}
-
-/** Parse a positive query param, clamping to [1, max]; non-positive or invalid values fall back to the default. */
-export function clampedParseInt(
+/** Parse and cap a limit/count query param, clamping into [1, max]. Fractional values round up. */
+export function safeLimit(
   value: string | undefined,
   defaultValue: number,
-  max: number,
+  max = MAX_LIMIT,
 ): number {
-  const parsed = safeParseInt(value, defaultValue);
-  if (Number.isFinite(parsed) === false || parsed <= 0) {
+  if (value === undefined) {
     return defaultValue;
   }
-  return Math.min(parsed, max);
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) === false) {
+    return defaultValue;
+  }
+  return Math.max(1, Math.min(Math.ceil(parsed), max));
 }
 
 /** Convert ms timestamp query param to seconds. */
@@ -67,9 +66,8 @@ export function mapMcpError(logger: Logger, error: unknown, fallback: string): H
   if (error instanceof HttpException) {
     return error;
   }
-  const message = error instanceof Error ? error.message : fallback;
-  if (message.includes('not available') || message.includes('not supported')) {
-    return new HttpException(message, HttpStatus.NOT_IMPLEMENTED);
+  if (error instanceof CapabilityUnavailableError) {
+    return new HttpException(error.message, HttpStatus.NOT_IMPLEMENTED);
   }
   logger.error(fallback, error instanceof Error ? error.stack : String(error));
   return new HttpException(fallback, HttpStatus.INTERNAL_SERVER_ERROR);

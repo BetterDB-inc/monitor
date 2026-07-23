@@ -1,9 +1,23 @@
 import { Controller, Get, Logger, Param, Query, UseGuards } from '@nestjs/common';
 import { AgentTokenGuard } from '../../common/guards/agent-token.guard';
-import { ValidateInstanceIdPipe, clampedParseInt, mapMcpError } from '../mcp-helpers';
+import { ValidateInstanceIdPipe, mapMcpError, safeLimit } from '../mcp-helpers';
 
 const MAX_HISTORY_HOURS = 168;
 const MAX_TRACE_LIMIT = 1000;
+const MAX_HISTORY_POINTS = 200;
+
+function downsample<T>(samples: T[], maxPoints: number): T[] {
+  if (samples.length <= maxPoints) {
+    return samples;
+  }
+  const step = samples.length / maxPoints;
+  const sampled: T[] = [];
+  for (let i = 0; i < maxPoints - 1; i++) {
+    sampled.push(samples[Math.floor(i * step)]);
+  }
+  sampled.push(samples[samples.length - 1]);
+  return sampled;
+}
 import { AiObservabilityService } from '../../ai-observability/ai-observability.service';
 import { TraceCorrelationService } from '../../ai-observability/trace-correlation.service';
 
@@ -37,9 +51,9 @@ export class McpAiController {
       const samples = await this.aiObservability.getHistory(
         id,
         field,
-        clampedParseInt(hours, 24, MAX_HISTORY_HOURS),
+        safeLimit(hours, 24, MAX_HISTORY_HOURS),
       );
-      return { samples };
+      return { samples: downsample(samples, MAX_HISTORY_POINTS) };
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get AI instance history');
     }
@@ -54,9 +68,9 @@ export class McpAiController {
     try {
       const hasService = service !== undefined && service !== '';
       const traces = await this.aiObservability.getTraces(
-        clampedParseInt(hours, 1, MAX_HISTORY_HOURS),
+        safeLimit(hours, 1, MAX_HISTORY_HOURS),
         hasService === true ? service : undefined,
-        clampedParseInt(limit, 100, MAX_TRACE_LIMIT),
+        safeLimit(limit, 100, MAX_TRACE_LIMIT),
       );
       return { traces };
     } catch (error) {
