@@ -5,6 +5,7 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { Tier } from '@proprietary/licenses/types';
 import { KeySizeDistribution, parseKeySizeDistribution, KEY_DETAILS_TOP_N } from '@betterdb/shared';
+import { rankCompositeKeys } from './composite-key-ranker';
 import { randomUUID } from 'crypto';
 
 // The collectors prune keyDetails mid-scan to the top KEY_DETAILS_TOP_N keys per
@@ -15,6 +16,9 @@ import { randomUUID } from 'crypto';
 // the shared constant keeps that invariant true by construction.
 const HOT_KEYS_TOP_N = KEY_DETAILS_TOP_N;
 const LARGEST_KEYS_TOP_N = KEY_DETAILS_TOP_N;
+// Composite (multi-dimensional) ranking reuses the same already-retained per-key
+// data, so its per-dimension cutoff shares the collectors' top-N bound.
+const COMPOSITE_TOP_N = KEY_DETAILS_TOP_N;
 
 /** Retention in days per tier. null = keep indefinitely. */
 const TIER_RETENTION_DAYS: Record<Tier, number | null> = {
@@ -251,6 +255,40 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
         if (largestKeys.length > 0) {
           await this.storage.saveHotKeys(largestKeys, ctx.connectionId);
         }
+
+        // Composite / multi-dimensional keys (valkey #4189): keys that are extreme
+        // on more than one dimension at once — the "hot big key" that the single
+        // signal lists above each miss. Derived from the same per-key data, so no
+        // extra scanning; only keys placing in >= 2 dimensions are emitted.
+        const compositeKeys: HotKeyEntry[] = rankCompositeKeys(
+          result.keyDetails.map((kd) => ({
+            keyName: kd.keyName,
+            keyType: kd.keyType,
+            freqScore: kd.freqScore,
+            memoryBytes: kd.memoryBytes,
+            cardinality: kd.cardinality,
+            ttl: kd.ttl,
+          })),
+          COMPOSITE_TOP_N,
+        )
+          .slice(0, COMPOSITE_TOP_N)
+          .map((ck, idx) => ({
+            id: randomUUID(),
+            keyName: ck.keyName,
+            connectionId: ctx.connectionId,
+            capturedAt,
+            signalType: 'composite' as const,
+            freqScore: ck.freqScore ?? undefined,
+            memoryBytes: ck.memoryBytes ?? undefined,
+            cardinality: ck.cardinality ?? undefined,
+            keyType: ck.keyType ?? undefined,
+            ttl: ck.ttl ?? undefined,
+            rank: idx + 1,
+          }));
+
+        if (compositeKeys.length > 0) {
+          await this.storage.saveHotKeys(compositeKeys, ctx.connectionId);
+        }
       }
 
       const duration = Date.now() - startTime;
@@ -291,6 +329,14 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   /** Top-N largest keys by cardinality (element count / byte length). */
   async getLargestKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
     return this.storage.getHotKeys({ ...options, signalTypes: ['cardinality'] });
+  }
+
+  /**
+   * Top-N composite ("hot big key") keys — extreme on more than one of the
+   * frequency / memory / cardinality dimensions at once (valkey #4189).
+   */
+  async getCompositeKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
+    return this.storage.getHotKeys({ ...options, signalTypes: ['composite'] });
   }
 
   async pruneOldSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {

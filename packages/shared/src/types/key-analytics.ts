@@ -122,14 +122,19 @@ export interface KeyAnalyticsResult {
 
 /**
  * A ranked key entry. `lfu`/`idletime` rank by access recency (hot keys);
- * `cardinality` ranks by element count / byte length (largest keys, valkey #1827).
+ * `cardinality` ranks by element count / byte length (largest keys, valkey #1827);
+ * `composite` ranks keys that are extreme on more than one dimension at once —
+ * the "hot big key" that a single-signal list misses (valkey #4189). On a
+ * composite entry, `freqScore` / `memoryBytes` / `cardinality` are populated only
+ * for the dimensions the key actually placed in, so a consumer can read off which
+ * dimensions drove the ranking.
  */
 export interface HotKeyEntry {
   id: string;
   keyName: string;
   connectionId: string;
   capturedAt: number;
-  signalType: 'lfu' | 'idletime' | 'cardinality';
+  signalType: 'lfu' | 'idletime' | 'cardinality' | 'composite';
   freqScore?: number;
   idleSeconds?: number;
   memoryBytes?: number;
