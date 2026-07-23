@@ -162,6 +162,19 @@ function licenseErrorResult(data: {
   return `This feature requires a ${data.requiredTier} license (current tier: ${data.currentTier}). Upgrade at ${data.upgradeUrl}`;
 }
 
+function unavailableResult(featureLabel: string): {
+  content: Array<{ type: 'text'; text: string }>;
+} {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: `${featureLabel} is unavailable: this monitor build does not include it (requires BetterDB Pro) or predates this tool — check license tier and monitor version.`,
+      },
+    ],
+  };
+}
+
 const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 function resolveInstanceId(overrideId?: string): string {
@@ -622,7 +635,15 @@ server.tool(
     withTelemetry('get_anomalies', async () => {
       const id = resolveInstanceId(instanceId);
       const qs = buildQuery({ limit, metricType, startTime });
-      const data = await apiFetch(`/mcp/instance/${id}/history/anomalies${qs}`);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/history/anomalies${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Anomaly detection');
+        }
+        throw err;
+      }
       if (isLicenseError(data)) {
         return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
       }
@@ -1935,7 +1956,15 @@ server.tool(
     withTelemetry('get_latency_regressions', async () => {
       const id = resolveInstanceId(instanceId);
       const qs = buildQuery({ limit, startTime });
-      const data = await apiFetch(`/mcp/instance/${id}/history/latency-regressions${qs}`);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/history/latency-regressions${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Latency regression detection');
+        }
+        throw err;
+      }
       if (isLicenseError(data)) {
         return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
       }
@@ -1945,7 +1974,7 @@ server.tool(
 
 server.tool(
   'get_largest_keys',
-  'Get the largest keys by memory usage from key analytics snapshots. Companion to get_hot_keys: hot keys rank by access frequency, largest keys rank by memory footprint. Use to find memory hogs, bloated hashes/sets, or candidates for TTL/eviction. Requires BetterDB Pro (keyAnalytics).',
+  'Get the largest keys from key analytics snapshots, ranked by measured memory usage. Coverage note: snapshots track the biggest collections by element count, so a memory-heavy key with few elements may not be tracked. Companion to get_hot_keys, which ranks by access frequency. Use to find memory hogs, bloated hashes/sets, or candidates for TTL/eviction. Requires BetterDB Pro (keyAnalytics).',
   {
     limit: z.number().optional().describe('Max keys to return (default 50)'),
     startTime: z.number().optional().describe('Start time (Unix timestamp ms)'),
@@ -1961,14 +1990,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/largest-keys${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Key analytics is not available (requires BetterDB Pro).',
-              },
-            ],
-          };
+          return unavailableResult('Key analytics');
         }
         throw err;
       }
