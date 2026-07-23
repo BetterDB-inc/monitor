@@ -48,25 +48,4 @@ export class McpAnomalyController {
       throw mapMcpError(this.logger, error, 'Failed to get anomalies');
     }
   }
-
-  @Get('instance/:id/history/latency-regressions')
-  async getLatencyRegressions(
-    @Param('id', ValidateInstanceIdPipe) id: string,
-    @Query('limit') limit?: string,
-    @Query('startTime') startTime?: string,
-  ) {
-    try {
-      const events = await this.anomalyService.getRecentAnomalies(
-        safeParseInt(startTime, Date.now() - DEFAULT_LOOKBACK_MS),
-        undefined,
-        undefined,
-        MetricType.COMMAND_P99,
-        safeLimit(limit, 100),
-        id,
-      );
-      return { events };
-    } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get latency regressions');
-    }
-  }
 }

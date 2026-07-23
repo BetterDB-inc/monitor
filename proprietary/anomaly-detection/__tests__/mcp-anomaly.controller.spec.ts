@@ -58,9 +58,9 @@ describe('McpAnomalyController', () => {
     expect(args[4]).toBe(100);
   });
 
-  it('latency regressions filters by command_p99 and wraps in events', async () => {
-    const res = await controller.getLatencyRegressions('inst1', '10', '5000');
-    expect(res.events).toEqual([{ id: 'a1' }]);
+  it('accepts command_p99 as a metricType filter (latency regressions path)', async () => {
+    const res = await controller.getAnomalies('inst1', '10', 'command_p99', '5000');
+    expect(res).toEqual([{ id: 'a1' }]);
     expect(svc.getRecentAnomalies).toHaveBeenCalledWith(
       5000,
       undefined,
@@ -75,7 +75,7 @@ describe('McpAnomalyController', () => {
     svc.getRecentAnomalies.mockRejectedValueOnce(new Error('boom'));
     let caught: unknown;
     try {
-      await controller.getLatencyRegressions('inst1');
+      await controller.getAnomalies('inst1');
     } catch (error) {
       caught = error;
     }
