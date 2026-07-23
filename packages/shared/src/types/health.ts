@@ -73,9 +73,19 @@ export interface LicenseWarmupStatus {
   tier: string;
 }
 
+/** Advisory finding for a hazardous static server configuration (e.g. valkey#3983). */
+export interface ConfigHazardFinding {
+  id: 'default-user-aof-data-loss';
+  severity: 'warning';
+  /** 'hazard' = dangerous config confirmed; 'unverified' = could not inspect the ACL to rule it out. */
+  status: 'hazard' | 'unverified';
+  message: string;
+}
+
 export interface DetailedHealthResponse extends HealthResponse {
   uptime: number;
   timestamp: number;
   anomalyDetection?: AnomalyWarmupStatus;
   license?: LicenseWarmupStatus;
+  configHazards?: ConfigHazardFinding[];
 }
