@@ -5,20 +5,8 @@ import { ValidateInstanceIdPipe, mapMcpError, safeLimit } from '../mcp-helpers';
 const MAX_HISTORY_HOURS = 168;
 const MAX_TRACE_LIMIT = 1000;
 const MAX_HISTORY_POINTS = 200;
-
-function downsample<T>(samples: T[], maxPoints: number): T[] {
-  if (samples.length <= maxPoints) {
-    return samples;
-  }
-  const step = samples.length / maxPoints;
-  const sampled: T[] = [];
-  for (let i = 0; i < maxPoints - 1; i++) {
-    sampled.push(samples[Math.floor(i * step)]);
-  }
-  sampled.push(samples[samples.length - 1]);
-  return sampled;
-}
 import { AiObservabilityService } from '../../ai-observability/ai-observability.service';
+import { downsampleSeries } from '../../common/utils/downsample';
 import { TraceCorrelationService } from '../../ai-observability/trace-correlation.service';
 
 @Controller('mcp')
@@ -53,7 +41,7 @@ export class McpAiController {
         field,
         safeLimit(hours, 24, MAX_HISTORY_HOURS),
       );
-      return { samples: downsample(samples, MAX_HISTORY_POINTS) };
+      return { samples: downsampleSeries(samples, MAX_HISTORY_POINTS) };
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get AI instance history');
     }

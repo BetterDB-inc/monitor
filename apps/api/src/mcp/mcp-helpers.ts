@@ -43,14 +43,17 @@ export function safeLimit(
   defaultValue: number,
   max = MAX_LIMIT,
 ): number {
+  const clamp = (candidate: number): number => {
+    return Math.max(1, Math.min(Math.ceil(candidate), max));
+  };
   if (value === undefined || value.trim() === '') {
-    return defaultValue;
+    return clamp(defaultValue);
   }
   const parsed = Number(value);
   if (Number.isFinite(parsed) === false) {
-    return defaultValue;
+    return clamp(defaultValue);
   }
-  return Math.max(1, Math.min(Math.ceil(parsed), max));
+  return clamp(parsed);
 }
 
 /** Convert ms timestamp query param to seconds. */
