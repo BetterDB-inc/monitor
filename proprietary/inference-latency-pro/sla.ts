@@ -54,6 +54,14 @@ export function evaluateSla(params: EvaluateSlaParams): EvaluateSlaResult {
   const key = `${connectionId}|${indexName}`;
   const prior = state.get(key);
   if (prior) {
+    // Apply the same re-evaluation rule as isBreachActive to the debounce
+    // state: if the CURRENT threshold clears the last observation (e.g. the
+    // operator raised the ceiling), the old fire is over — a later sample
+    // breaching the new threshold is a fresh episode and must fire, not
+    // silently inherit the previous fire's debounce window.
+    if (prior.resolved === false && prior.lastP99Us <= thresholdUs) {
+      prior.resolved = true;
+    }
     prior.lastP99Us = currentP99Us;
     prior.lastEvaluatedAt = now;
   }
