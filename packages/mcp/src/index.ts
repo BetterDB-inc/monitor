@@ -88,6 +88,15 @@ async function detectPrefix(): Promise<string> {
   return '/api';
 }
 
+class ApiHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
   if (detectedPrefix === null) {
     detectedPrefix = await detectPrefix();
@@ -128,7 +137,7 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
     } catch {
       if (errText) message = errText;
     }
-    throw new Error(message);
+    throw new ApiHttpError(message, res.status);
   }
 
   const text = await res.text();
@@ -151,6 +160,19 @@ function licenseErrorResult(data: {
   upgradeUrl: string;
 }): string {
   return `This feature requires a ${data.requiredTier} license (current tier: ${data.currentTier}). Upgrade at ${data.upgradeUrl}`;
+}
+
+function unavailableResult(featureLabel: string): {
+  content: Array<{ type: 'text'; text: string }>;
+} {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: `${featureLabel} is unavailable: this monitor build does not include it (requires BetterDB Pro) or predates this tool — check license tier and monitor version.`,
+      },
+    ],
+  };
 }
 
 const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
@@ -613,7 +635,15 @@ server.tool(
     withTelemetry('get_anomalies', async () => {
       const id = resolveInstanceId(instanceId);
       const qs = buildQuery({ limit, metricType, startTime });
-      const data = await apiFetch(`/mcp/instance/${id}/history/anomalies${qs}`);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/history/anomalies${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Anomaly detection');
+        }
+        throw err;
+      }
       if (isLicenseError(data)) {
         return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
       }
@@ -1887,6 +1917,91 @@ server.tool(
       const data = await apiFetch(
         `/mcp/instance/${id}/ai/traces/${encodeURIComponent(traceId)}/correlate`,
       );
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'get_forecast',
+  'Get a capacity forecast for one metric: current trajectory and projected time until the resource ceiling is hit. Metric kinds: opsPerSec, usedMemory, cpuTotal, memFragmentation. Use for capacity planning ("when does memory run out at current growth?").',
+  {
+    metricKind: z
+      .enum(['opsPerSec', 'usedMemory', 'cpuTotal', 'memFragmentation'])
+      .describe('Metric to forecast'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ metricKind, instanceId }) =>
+    withTelemetry('get_forecast', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/forecast/${metricKind}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Metric forecasting');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'get_latency_regressions',
+  'Get detected latency regressions (sustained p99 command-latency degradations vs baseline) from persisted storage. Companion to get_anomalies: same event store, pre-filtered to latency regressions. Use when investigating "the database got slower".',
+  {
+    limit: z.number().optional().describe('Max events to return (default 100)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp ms, default 24h ago)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ limit, startTime, instanceId }) =>
+    withTelemetry('get_latency_regressions', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit, startTime, metricType: 'command_p99' });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/history/anomalies${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Latency regression detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'get_largest_keys',
+  'Get the largest keys from key analytics snapshots, ranked by measured memory usage. Coverage note: snapshots track the biggest collections by element count, so a memory-heavy key with few elements may not be tracked. Companion to get_hot_keys, which ranks by access frequency. Use to find memory hogs, bloated hashes/sets, or candidates for TTL/eviction. Requires BetterDB Pro (keyAnalytics).',
+  {
+    limit: z.number().optional().describe('Max keys to return (default 50)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp ms)'),
+    endTime: z.number().optional().describe('End time (Unix timestamp ms)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ limit, startTime, endTime, instanceId }) =>
+    withTelemetry('get_largest_keys', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit, startTime, endTime });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/largest-keys${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Key analytics');
+        }
+        throw err;
+      }
       if (isLicenseError(data)) {
         return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
       }

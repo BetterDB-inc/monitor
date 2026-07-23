@@ -4,8 +4,11 @@ import { McpController } from './mcp.controller';
 import { McpMemoryController } from './memory/mcp-memory.controller';
 import { McpMemoryService } from './memory/mcp-memory.service';
 import { McpAiController } from './ai/mcp-ai.controller';
-import { AgentTokenGuard, MCP_TOKEN_SERVICE } from '../common/guards/agent-token.guard';
+import { McpAnalyticsController } from './mcp-analytics.controller';
+import { AgentTokenGuard } from '../common/guards/agent-token.guard';
+import { createAgentTokenProviders } from '../common/guards/agent-token-providers';
 import { MetricsModule } from '../metrics/metrics.module';
+import { MetricForecastingModule } from '../metric-forecasting/metric-forecasting.module';
 import { CommandLogAnalyticsModule } from '../commandlog-analytics/commandlog-analytics.module';
 import { ClientAnalyticsModule } from '../client-analytics/client-analytics.module';
 import { ClusterModule } from '../cluster/cluster.module';
@@ -14,35 +17,9 @@ import { AiObservabilityModule } from '../ai-observability/ai-observability.modu
 
 const logger = new Logger('McpModule');
 
-let AgentTokensServiceClass: any = null;
-if (process.env.CLOUD_MODE === 'true') {
-  try {
-    const mod = require('../../../../proprietary/agent/agent-tokens.service');
-    AgentTokensServiceClass = mod.AgentTokensService;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : 'module not found';
-    logger.warn(`Agent tokens service failed to load in cloud mode: ${msg}`);
-  }
-}
-
-let AnomalyModule: any = null;
-try {
-  const mod = require('../../../../proprietary/anomaly-detection/anomaly.module');
-  AnomalyModule = mod.AnomalyModule;
-} catch (e) {
-  const msg = e instanceof Error ? e.message : 'module not found';
-  if (process.env.CLOUD_MODE === 'true') {
-    logger.warn(`Anomaly module failed to load in cloud mode: ${msg}`);
-  } else {
-    logger.debug(`Anomaly module not available: ${msg}`);
-  }
-}
-
-const tokenProviders = AgentTokensServiceClass
-  ? [AgentTokensServiceClass, { provide: MCP_TOKEN_SERVICE, useExisting: AgentTokensServiceClass }]
-  : [];
-
-const optionalImports = [AnomalyModule].filter(Boolean);
+const tokenProviders = createAgentTokenProviders(logger, () => {
+  return require('../../../../proprietary/agent/agent-tokens.service');
+});
 
 @Module({
   imports: [
@@ -53,9 +30,9 @@ const optionalImports = [AnomalyModule].filter(Boolean);
     ClusterModule,
     TelemetryModule,
     AiObservabilityModule,
-    ...optionalImports,
+    MetricForecastingModule,
   ],
-  controllers: [McpController, McpMemoryController, McpAiController],
+  controllers: [McpController, McpMemoryController, McpAiController, McpAnalyticsController],
   providers: [AgentTokenGuard, McpMemoryService, ...tokenProviders],
 })
 export class McpModule {}
