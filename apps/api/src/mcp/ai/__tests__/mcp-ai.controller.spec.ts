@@ -121,6 +121,11 @@ describe('McpAiController', () => {
     expect(aiSvc.getTraces).toHaveBeenLastCalledWith(1, undefined, 1);
   });
 
+  it('GET traces treats empty query params as defaults', async () => {
+    await controller.getTraces('', undefined, ' ');
+    expect(aiSvc.getTraces).toHaveBeenLastCalledWith(1, undefined, 100);
+  });
+
   it('GET traces uses defaults', async () => {
     await controller.getTraces(undefined, undefined, undefined);
     expect(aiSvc.getTraces).toHaveBeenCalledWith(1, undefined, 100);

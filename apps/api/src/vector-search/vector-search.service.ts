@@ -214,7 +214,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
     try {
       rawClient = client.getClient();
     } catch {
-      throw new Error('Key browsing is not supported on this connection type');
+      throw new CapabilityUnavailableError('Key browsing is not supported on this connection type');
     }
     const cappedLimit = Math.min(Math.max(limit, 1), 200);
 
