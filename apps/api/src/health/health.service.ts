@@ -17,6 +17,7 @@ import {
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
+import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
 import { LicenseService } from '@proprietary/licenses';
 import {
   MultiConnectionPoller,
@@ -38,6 +39,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     @Optional() private readonly webhookDispatcher?: WebhookDispatcherService,
     @Optional() @Inject(ANOMALY_SERVICE) private readonly anomalyService?: IAnomalyService,
     @Optional() private readonly licenseService?: LicenseService,
+    @Optional() private readonly otelEvents?: OtelEventDispatcherService,
   ) {
     super(connectionRegistry);
     // Initialize all existing connections as up
@@ -246,9 +248,26 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     reason: string,
   ): Promise<void> {
     const wasUp = this.instanceUpStates.get(connectionId) !== false;
-    if (wasUp && this.webhookDispatcher) {
-      this.logger.warn(`Instance went down (${connectionId}): ${reason}`);
-      this.instanceUpStates.set(connectionId, false);
+    if (!wasUp) {
+      return;
+    }
+    this.logger.warn(`Instance went down (${connectionId}): ${reason}`);
+    this.instanceUpStates.set(connectionId, false);
+
+    // Mirror the availability edge to OTLP independent of webhook config: the
+    // down transition is computed above, so an OTLP-only deployment (no webhook)
+    // still sees instance.down. Dispatcher no-ops unless OTEL_* is set.
+    try {
+      this.otelEvents?.dispatch(
+        WebhookEventType.INSTANCE_DOWN,
+        { reason, host, port, message: `Database instance unreachable: ${reason}` },
+        connectionId,
+      );
+    } catch (err) {
+      this.logger.error('Failed to dispatch instance.down OTLP event', err);
+    }
+
+    if (this.webhookDispatcher) {
       try {
         await this.webhookDispatcher.dispatchHealthChange(
           WebhookEventType.INSTANCE_DOWN,
@@ -273,9 +292,25 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
    */
   private async handleInstanceUp(connectionId: string, host: string, port: number): Promise<void> {
     const wasDown = this.instanceUpStates.get(connectionId) === false;
-    if (wasDown && this.webhookDispatcher) {
-      this.logger.log(`Instance recovered (${connectionId})`);
-      this.instanceUpStates.set(connectionId, true);
+    if (!wasDown) {
+      return;
+    }
+    this.logger.log(`Instance recovered (${connectionId})`);
+    this.instanceUpStates.set(connectionId, true);
+
+    // Mirror the recovery edge to OTLP independent of webhook config (see
+    // handleInstanceDown). Dispatcher no-ops unless OTEL_* is set.
+    try {
+      this.otelEvents?.dispatch(
+        WebhookEventType.INSTANCE_UP,
+        { host, port, message: 'Database instance recovered' },
+        connectionId,
+      );
+    } catch (err) {
+      this.logger.error('Failed to dispatch instance.up OTLP event', err);
+    }
+
+    if (this.webhookDispatcher) {
       try {
         await this.webhookDispatcher.dispatchHealthChange(
           WebhookEventType.INSTANCE_UP,

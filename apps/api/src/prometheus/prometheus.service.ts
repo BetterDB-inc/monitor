@@ -1069,7 +1069,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         const newSlotFailures = state.previousSlotsFail < slotsFail && slotsFail > 0;
 
         if (stateChanged || newSlotFailures) {
-          if (this.webhookEventsProService?.isEnabled()) {
+          // OTLP mirror is decoupled from the Pro webhook gate: the failover edge
+          // is computed above independent of webhook config, so ship it to OTLP
+          // whenever it fires (the dispatcher no-ops unless OTEL_* is set).
+          try {
             this.otelEvents?.dispatch(
               WebhookEventType.CLUSTER_FAILOVER,
               {
@@ -1079,6 +1082,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
               },
               connectionId,
             );
+          } catch (err) {
+            this.logger.error('Failed to dispatch cluster.failover OTLP event', err);
           }
           try {
             await this.webhookEventsProService.dispatchClusterFailover({

@@ -1641,23 +1641,25 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     } catch (err) {
       this.logger.error('Failed to increment anomaly metric:', err);
     }
-    // Intentionally broader than the webhook path: OTLP includes command_p99
-    // anomalies, which webhook-anomaly-integration skips and delivers as
+    // OTLP export is decoupled from the Pro webhook: mirroring is its own opt-in
+    // channel (gated only by the OTEL_* env vars inside the dispatcher, which
+    // no-ops when disabled), so an operator can ship anomalies to their OTLP
+    // collector without also configuring/enabling a webhook. Intentionally
+    // broader than the webhook path too: OTLP includes command_p99 anomalies,
+    // which webhook-anomaly-integration skips and delivers as
     // latency.regression.detected instead.
-    if (this.webhookEventsProService?.isEnabled()) {
-      try {
-        this.otelEvents?.dispatch(
-          WebhookEventType.ANOMALY_DETECTED,
-          {
-            severity: anomaly.severity,
-            metricType: anomaly.metricType,
-            anomalyType: anomaly.anomalyType,
-          },
-          ctx?.connectionId,
-        );
-      } catch (err) {
-        this.logger.error('Failed to dispatch anomaly OTLP event:', err);
-      }
+    try {
+      this.otelEvents?.dispatch(
+        WebhookEventType.ANOMALY_DETECTED,
+        {
+          severity: anomaly.severity,
+          metricType: anomaly.metricType,
+          anomalyType: anomaly.anomalyType,
+        },
+        ctx?.connectionId,
+      );
+    } catch (err) {
+      this.logger.error('Failed to dispatch anomaly OTLP event:', err);
     }
 
     try {

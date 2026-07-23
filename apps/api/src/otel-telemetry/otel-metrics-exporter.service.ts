@@ -137,10 +137,15 @@ export class OtelMetricsExporterService implements OnModuleInit, OnModuleDestroy
   }
 
   private createInstrument(meter: Meter, spec: InstrumentSpec): MirrorInstrument {
+    // Only pass unit when we could derive one; an empty unit is meaningful noise
+    // in OTLP metadata, so omit the key entirely in that case.
+    const options = spec.unit
+      ? { description: spec.description, unit: spec.unit }
+      : { description: spec.description };
     if (spec.kind === 'counter') {
-      return meter.createObservableCounter(spec.name, { description: spec.description });
+      return meter.createObservableCounter(spec.name, options);
     }
-    return meter.createObservableGauge(spec.name, { description: spec.description });
+    return meter.createObservableGauge(spec.name, options);
   }
 
   async onModuleDestroy(): Promise<void> {
