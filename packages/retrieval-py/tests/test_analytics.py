@@ -79,6 +79,7 @@ async def test_posthog_init_uses_install_id_with_deployment_group(
     assert ph.events[0]["properties"] == {
         "fieldCount": 2,
         "deployment_id": deployment,
+        "$raw_user_agent": "BetterDB-Retrieval/python",
     }
     # The start event is flushed immediately so it lands without an exit hook.
     assert ph.flush_calls >= 1

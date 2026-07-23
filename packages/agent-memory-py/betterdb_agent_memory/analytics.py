@@ -18,6 +18,7 @@ from typing import Any
 
 
 _EVENT_PREFIX = "agent_memory:"
+_TELEMETRY_USER_AGENT = "BetterDB-AgentMemory/python"
 
 # Build-time placeholders — replaced by hatch_build.py during wheel build.
 # When the placeholder is NOT replaced, the startswith('__') guard treats it as unset.
@@ -28,6 +29,18 @@ _BAKED_POSTHOG_HOST = "__BETTERDB_POSTHOG_HOST__"
 def _is_opted_out() -> bool:
     val = os.environ.get("BETTERDB_TELEMETRY", "")
     return val.lower() in ("false", "0", "no", "off")
+
+
+def _is_frozen_serverless() -> bool:
+    return any(
+        os.environ.get(var)
+        for var in (
+            "AWS_LAMBDA_FUNCTION_NAME",
+            "K_SERVICE",
+            "FUNCTION_TARGET",
+            "FUNCTIONS_WORKER_RUNTIME",
+        )
+    )
 
 
 _INSTALL_ID_ENV = "BETTERDB_INSTANCE_ID"
@@ -138,6 +151,7 @@ class _PostHogAnalytics(Analytics):
             props = dict(properties) if properties else {}
             if self._deployment_id:
                 props.setdefault("deployment_id", self._deployment_id)
+            props.setdefault("$raw_user_agent", _TELEMETRY_USER_AGENT)
             self._ph.capture(
                 distinct_id=self._distinct_id,
                 event=f"{_EVENT_PREFIX}{event}",
@@ -189,7 +203,10 @@ async def create_analytics(disabled: bool = False) -> Analytics:
         ph = Posthog(
             api_key,
             host=host or "https://app.posthog.com",
-            flush_at=20,
+            # flush_at=1 on frozen serverless means no batching: a burst is N flushes,
+            # accepted because the container freezes on return and a buffered batch
+            # would never drain.
+            flush_at=1 if _is_frozen_serverless() else 20,
             flush_interval=10,
         )
         return _PostHogAnalytics(ph)
