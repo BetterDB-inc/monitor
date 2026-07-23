@@ -1955,10 +1955,10 @@ server.tool(
   async ({ limit, startTime, instanceId }) =>
     withTelemetry('get_latency_regressions', async () => {
       const id = resolveInstanceId(instanceId);
-      const qs = buildQuery({ limit, startTime });
+      const qs = buildQuery({ limit, startTime, metricType: 'command_p99' });
       let data: unknown;
       try {
-        data = await apiFetch(`/mcp/instance/${id}/history/latency-regressions${qs}`);
+        data = await apiFetch(`/mcp/instance/${id}/history/anomalies${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
           return unavailableResult('Latency regression detection');
