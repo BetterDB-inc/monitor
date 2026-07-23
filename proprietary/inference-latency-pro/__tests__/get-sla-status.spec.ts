@@ -72,6 +72,7 @@ describe('InferenceLatencyProService.getSlaStatus', () => {
         breached: false,
         lastFiredAt: null,
         lastP99Us: null,
+        lastEvaluatedAt: null,
       },
     ]);
   });

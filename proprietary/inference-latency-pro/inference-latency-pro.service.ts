@@ -173,6 +173,7 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
         breached,
         lastFiredAt: prior === undefined ? null : prior.lastFiredAt,
         lastP99Us: prior === undefined ? null : prior.lastP99Us,
+        lastEvaluatedAt: prior === undefined ? null : prior.lastEvaluatedAt,
       });
     }
     return statuses;

@@ -39,6 +39,7 @@ export interface InferenceSlaIndexStatus {
   breached: boolean;
   lastFiredAt: number | null;
   lastP99Us: number | null;
+  lastEvaluatedAt: number | null;
 }
 
 export const FT_SEARCH_HEALTHY_P50_THRESHOLD_US = 10_000;
