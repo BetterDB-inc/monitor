@@ -1936,7 +1936,15 @@ server.tool(
   async ({ metricKind, instanceId }) =>
     withTelemetry('get_forecast', async () => {
       const id = resolveInstanceId(instanceId);
-      const data = await apiFetch(`/mcp/instance/${id}/forecast/${metricKind}`);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/forecast/${metricKind}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Metric forecasting');
+        }
+        throw err;
+      }
       if (isLicenseError(data)) {
         return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
       }

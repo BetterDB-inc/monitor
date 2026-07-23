@@ -23,6 +23,9 @@ import { randomUUID } from 'crypto';
 // the shared constant keeps that invariant true by construction.
 const HOT_KEYS_TOP_N = KEY_DETAILS_TOP_N;
 const LARGEST_KEYS_TOP_N = KEY_DETAILS_TOP_N;
+// Explicit storage fetch cap for ranked reads: adapters default a missing limit
+// to 50, which would truncate multi-snapshot sets BEFORE the memory re-rank.
+const LARGEST_KEYS_FETCH_CAP = 10_000;
 
 /** Retention in days per tier. null = keep indefinitely. */
 const TIER_RETENTION_DAYS: Record<Tier, number | null> = {
@@ -310,14 +313,18 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   /** Top-N largest keys ranked by memory usage among tracked (cardinality-signal) entries. */
   async getLargestKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
     const { limit, ...rest } = options ?? {};
-    const entries = await this.storage.getHotKeys({ ...rest, signalTypes: ['cardinality'] });
+    const entries = await this.storage.getHotKeys({
+      ...rest,
+      signalTypes: ['cardinality'],
+      limit: LARGEST_KEYS_FETCH_CAP,
+    });
     const ranked = [...entries].sort((a, b) => {
       return (b.memoryBytes ?? 0) - (a.memoryBytes ?? 0);
     });
-    if (limit === undefined) {
-      return ranked;
-    }
-    return ranked.slice(0, limit);
+    const limited = limit === undefined ? ranked : ranked.slice(0, limit);
+    return limited.map((entry, index) => {
+      return { ...entry, rank: index + 1 };
+    });
   }
 
   async pruneOldSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
