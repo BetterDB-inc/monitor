@@ -76,6 +76,19 @@ describe('InferenceLatencyProService.getSlaStatus', () => {
     ]);
   });
 
+  it('re-flags a resolved breach when the threshold is lowered below the last p99', async () => {
+    const slaConfig = { products: { p99ThresholdUs: 100, enabled: true } };
+    const service = makeService(slaConfig);
+    await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, breachingProfile());
+    await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, recoveredProfile());
+    let statuses = service.getSlaStatus('c1') ?? [];
+    expect(statuses[0].breached).toBe(false);
+    slaConfig.products.p99ThresholdUs = 40;
+    statuses = service.getSlaStatus('c1') ?? [];
+    expect(statuses[0].breached).toBe(true);
+    expect(statuses[0].lastP99Us).toBe(50);
+  });
+
   it('clears breached when the threshold is raised above the last observed p99', async () => {
     const slaConfig = { products: { p99ThresholdUs: 100, enabled: true } };
     const service = makeService(slaConfig);
