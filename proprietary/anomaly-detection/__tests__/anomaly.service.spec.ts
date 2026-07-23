@@ -149,17 +149,17 @@ describe('AnomalyService', () => {
       const storedEvent = {
         id: 'e1',
         timestamp: Date.now() - 60_000,
-        metric_type: 'command_p99',
-        anomaly_type: 'spike',
+        metricType: 'command_p99',
+        anomalyType: 'spike',
         severity: 'warning',
         value: 200,
         baseline: 100,
-        z_score: 0,
-        std_dev: 0,
+        zScore: 0,
+        stdDev: 0,
         threshold: 2,
         message: 'p99 regression',
-        resolved: 0,
-        connection_id: 'c1',
+        resolved: false,
+        connectionId: 'c1',
       };
       storage.getAnomalyEvents.mockResolvedValueOnce([storedEvent]);
       const events = await service.getRecentAnomalies(
@@ -180,17 +180,17 @@ describe('AnomalyService', () => {
       const storedEvent = {
         id: 'stored-1',
         timestamp: Date.now() - 30_000,
-        metric_type: 'command_p99',
-        anomaly_type: 'spike',
+        metricType: 'command_p99',
+        anomalyType: 'spike',
         severity: 'warning',
         value: 200,
         baseline: 100,
-        z_score: 0,
-        std_dev: 0,
+        zScore: 0,
+        stdDev: 0,
         threshold: 2,
         message: 'p99 regression',
-        resolved: 0,
-        connection_id: 'c1',
+        resolved: false,
+        connectionId: 'c1',
       };
       storage.getAnomalyEvents.mockResolvedValueOnce([storedEvent]);
       (service as any).recentAnomalies.push({
@@ -219,6 +219,8 @@ describe('AnomalyService', () => {
       const ids = events.map((e) => e.id);
       expect(ids).toContain('stored-1');
       expect(ids).toContain('cached-1');
+      const storedMapped = events.find((e) => e.id === 'stored-1');
+      expect(storedMapped?.connectionId).toBe('c1');
     });
   });
 
