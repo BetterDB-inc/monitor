@@ -44,6 +44,30 @@ describe('KeyAnalyticsService.getLargestKeys', () => {
     ]);
   });
 
+  it('dedupes repeated keys across snapshots for time-range queries, keeping max memory', async () => {
+    storage.getHotKeys.mockResolvedValue([
+      { keyName: 'hot', capturedAt: 1, memoryBytes: 500 },
+      { keyName: 'hot', capturedAt: 2, memoryBytes: 700 },
+      { keyName: 'other', capturedAt: 2, memoryBytes: 600 },
+    ]);
+    const service = makeService();
+    const res = await service.getLargestKeys({ connectionId: 'c1', startTime: 0, endTime: 3 });
+    expect(res.map((e) => [e.keyName, e.memoryBytes, e.rank])).toEqual([
+      ['hot', 700, 1],
+      ['other', 600, 2],
+    ]);
+  });
+
+  it('does not dedupe within a single latest snapshot', async () => {
+    storage.getHotKeys.mockResolvedValue([
+      { keyName: 'a', memoryBytes: 5 },
+      { keyName: 'b', memoryBytes: 9 },
+    ]);
+    const service = makeService();
+    const res = await service.getLargestKeys({ connectionId: 'c1', latest: true });
+    expect(res).toHaveLength(2);
+  });
+
   it('applies the caller limit after ranking and fetches with the explicit cap', async () => {
     storage.getHotKeys.mockResolvedValue([
       { keyName: 'a', memoryBytes: 1 },

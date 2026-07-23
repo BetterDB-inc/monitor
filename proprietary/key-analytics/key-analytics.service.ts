@@ -27,6 +27,17 @@ const LARGEST_KEYS_TOP_N = KEY_DETAILS_TOP_N;
 // to 50, which would truncate multi-snapshot sets BEFORE the memory re-rank.
 const LARGEST_KEYS_FETCH_CAP = 10_000;
 
+function dedupeByKeyMaxMemory(entries: HotKeyEntry[]): HotKeyEntry[] {
+  const byKey = new Map<string, HotKeyEntry>();
+  for (const entry of entries) {
+    const existing = byKey.get(entry.keyName);
+    if (existing === undefined || (entry.memoryBytes ?? 0) > (existing.memoryBytes ?? 0)) {
+      byKey.set(entry.keyName, entry);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
 /** Retention in days per tier. null = keep indefinitely. */
 const TIER_RETENTION_DAYS: Record<Tier, number | null> = {
   [Tier.community]: 7,
@@ -318,7 +329,12 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       signalTypes: ['cardinality'],
       limit: LARGEST_KEYS_FETCH_CAP,
     });
-    const ranked = [...entries].sort((a, b) => {
+    // latest/oldest pin a single snapshot; anything else can span snapshots,
+    // where the same key appears once per snapshot and would dominate the
+    // ranking — keep only each key's largest observation.
+    const singleSnapshot = rest.latest === true || rest.oldest === true;
+    const candidates = singleSnapshot ? entries : dedupeByKeyMaxMemory(entries);
+    const ranked = [...candidates].sort((a, b) => {
       return (b.memoryBytes ?? 0) - (a.memoryBytes ?? 0);
     });
     const limited = limit === undefined ? ranked : ranked.slice(0, limit);
