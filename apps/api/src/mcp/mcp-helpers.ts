@@ -43,7 +43,7 @@ export function safeLimit(
   defaultValue: number,
   max = MAX_LIMIT,
 ): number {
-  if (value === undefined) {
+  if (value === undefined || value.trim() === '') {
     return defaultValue;
   }
   const parsed = Number(value);
@@ -70,5 +70,6 @@ export function mapMcpError(logger: Logger, error: unknown, fallback: string): H
     return new HttpException(error.message, HttpStatus.NOT_IMPLEMENTED);
   }
   logger.error(fallback, error instanceof Error ? error.stack : String(error));
-  return new HttpException(fallback, HttpStatus.INTERNAL_SERVER_ERROR);
+  const detail = error instanceof Error && error.message !== '' ? `: ${error.message}` : '';
+  return new HttpException(`${fallback}${detail}`, HttpStatus.INTERNAL_SERVER_ERROR);
 }
