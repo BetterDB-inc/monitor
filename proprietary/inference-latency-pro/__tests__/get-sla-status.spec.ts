@@ -89,6 +89,21 @@ describe('InferenceLatencyProService.getSlaStatus', () => {
     expect(statuses[0].lastP99Us).toBe(200);
   });
 
+  it('expires a breach for an index with no fresh samples past the stale window', async () => {
+    const service = makeService({ products: { p99ThresholdUs: 100, enabled: true } });
+    await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, breachingProfile());
+    let statuses = service.getSlaStatus('c1') ?? [];
+    expect(statuses[0].breached).toBe(true);
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 16 * 60 * 1000);
+    try {
+      statuses = service.getSlaStatus('c1') ?? [];
+      expect(statuses[0].breached).toBe(false);
+      expect(typeof statuses[0].lastFiredAt).toBe('number');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it('reports a live breach recorded by onProfileTick', async () => {
     const service = makeService({ products: { p99ThresholdUs: 100, enabled: true } });
     await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, breachingProfile());
