@@ -157,6 +157,50 @@ describe('evaluateSla', () => {
     });
   });
 
+  it('fires immediately when a raised threshold cleared the old breach and a new sample breaches it', () => {
+    const state = freshState();
+    evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 200,
+      thresholdUs: 100,
+      now: T0,
+      state,
+    });
+    const newBreach = evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 600,
+      thresholdUs: 500,
+      now: T0 + 2 * MIN,
+      state,
+    });
+    expect(newBreach.fired).toBe(true);
+    expect(state.get('c|i')?.resolved).toBe(false);
+    expect(state.get('c|i')?.lastFiredAt).toBe(T0 + 2 * MIN);
+  });
+
+  it('keeps the debounce window when the breach persists under an unchanged threshold', () => {
+    const state = freshState();
+    evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 200,
+      thresholdUs: 100,
+      now: T0,
+      state,
+    });
+    const repeat = evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 250,
+      thresholdUs: 100,
+      now: T0 + 2 * MIN,
+      state,
+    });
+    expect(repeat.fired).toBe(false);
+  });
+
   it('does not fire on initial sub-threshold reading and stores no state', () => {
     const state = freshState();
     const result = evaluateSla({
