@@ -1,6 +1,7 @@
 export interface SlaState {
   lastFiredAt: number;
   resolved: boolean;
+  lastP99Us: number;
 }
 
 export interface EvaluateSlaParams {
@@ -22,6 +23,9 @@ export function evaluateSla(params: EvaluateSlaParams): EvaluateSlaResult {
   const { connectionId, indexName, currentP99Us, thresholdUs, now, state } = params;
   const key = `${connectionId}|${indexName}`;
   const prior = state.get(key);
+  if (prior) {
+    prior.lastP99Us = currentP99Us;
+  }
 
   // The configured threshold is the allowed ceiling: a p99 exactly at the
   // threshold is still passing. Only a strictly greater value is a breach.
@@ -33,7 +37,7 @@ export function evaluateSla(params: EvaluateSlaParams): EvaluateSlaResult {
   }
 
   if (!prior) {
-    state.set(key, { lastFiredAt: now, resolved: false });
+    state.set(key, { lastFiredAt: now, resolved: false, lastP99Us: currentP99Us });
     return { fired: true };
   }
 

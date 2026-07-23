@@ -66,8 +66,27 @@ describe('InferenceLatencyProService.getSlaStatus', () => {
   it('reports configured index with no state as not breached', () => {
     const service = makeService({ products: { p99ThresholdUs: 100, enabled: true } });
     expect(service.getSlaStatus('c1')).toEqual([
-      { indexName: 'products', thresholdUs: 100, breached: false, lastFiredAt: null },
+      {
+        indexName: 'products',
+        thresholdUs: 100,
+        breached: false,
+        lastFiredAt: null,
+        lastP99Us: null,
+      },
     ]);
+  });
+
+  it('clears breached when the threshold is raised above the last observed p99', async () => {
+    const slaConfig = { products: { p99ThresholdUs: 100, enabled: true } };
+    const service = makeService(slaConfig);
+    await service.onProfileTick({ connectionId: 'c1', host: 'h', port: 1 }, breachingProfile());
+    let statuses = service.getSlaStatus('c1') ?? [];
+    expect(statuses[0].breached).toBe(true);
+    slaConfig.products.p99ThresholdUs = 500;
+    statuses = service.getSlaStatus('c1') ?? [];
+    expect(statuses[0].breached).toBe(false);
+    expect(statuses[0].thresholdUs).toBe(500);
+    expect(statuses[0].lastP99Us).toBe(200);
   });
 
   it('reports a live breach recorded by onProfileTick', async () => {

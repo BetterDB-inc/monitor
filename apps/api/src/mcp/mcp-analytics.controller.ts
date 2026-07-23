@@ -10,16 +10,17 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { INFERENCE_LATENCY_PRO_SERVICE, IInferenceLatencyProService, MetricKind } from '@betterdb/shared';
+import {
+  INFERENCE_LATENCY_PRO_SERVICE,
+  IInferenceLatencyProService,
+  MetricKind,
+} from '@betterdb/shared';
 import { AgentTokenGuard } from '../common/guards/agent-token.guard';
 import { VectorIndexInfo } from '../common/types/metrics.types';
-import { ValidateInstanceIdPipe, mapMcpError, safeParseInt } from './mcp-helpers';
+import { ValidateInstanceIdPipe, mapMcpError } from './mcp-helpers';
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
 import { VectorSearchService } from '../vector-search/vector-search.service';
-import {
-  InferenceLatencyService,
-  InferenceLatencyValidationError,
-} from '../inference-latency/inference-latency.service';
+import { InferenceLatencyService } from '../inference-latency/inference-latency.service';
 import { MetricKindValidationPipe } from '../metric-forecasting/pipes/metric-kind-validation.pipe';
 
 @Controller('mcp')
@@ -89,9 +90,20 @@ export class McpAnalyticsController {
     @Param('id', ValidateInstanceIdPipe) id: string,
     @Query('windowMs') windowMs?: string,
   ) {
+    let parsedWindowMs: number | undefined;
+    if (windowMs !== undefined) {
+      const parsed = Number(windowMs);
+      if (Number.isInteger(parsed) === false || parsed <= 0) {
+        throw new HttpException(
+          'windowMs must be a positive integer (milliseconds)',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      parsedWindowMs = parsed;
+    }
     try {
       const profile = await this.inferenceLatencyService.getProfile(id, {
-        windowMs: safeParseInt(windowMs),
+        windowMs: parsedWindowMs,
       });
       const sla =
         this.inferenceLatencyProService === null
@@ -99,9 +111,6 @@ export class McpAnalyticsController {
           : this.inferenceLatencyProService.getSlaStatus(id);
       return { profile, sla };
     } catch (error) {
-      if (error instanceof InferenceLatencyValidationError) {
-        throw new HttpException(error.message, HttpStatus.BAD_REQUEST);
-      }
       throw mapMcpError(this.logger, error, 'Failed to get inference latency profile');
     }
   }
