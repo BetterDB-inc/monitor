@@ -13,7 +13,7 @@ import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
 import { LicenseService } from '@proprietary/licenses';
-import { SlaState, evaluateSla } from './sla';
+import { SlaState, evaluateSla, isBreachActive } from './sla';
 
 const FT_SEARCH_BUCKET_PREFIX = 'FT.SEARCH:';
 
@@ -112,9 +112,9 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
     }
 
     // Fill in configured-but-quiet indexes so the Prometheus time-series stays
-    // continuous. "No traffic" ≠ "no data"; carry forward the debounce state
-    // (breached if a prior fire wasn't resolved, not breached otherwise) so
-    // Grafana doesn't flip to a false 'resolved' when an index goes quiet.
+    // continuous. "No traffic" ≠ "no data"; carry forward via the shared
+    // isBreachActive rule (same one getSlaStatus uses) so a quiet index keeps
+    // its live breach until it goes stale, and both surfaces always agree.
     for (const [indexName, entry] of Object.entries(slaConfig)) {
       if (!entry?.enabled) {
         continue;
@@ -123,7 +123,7 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
         continue;
       }
       const prior = this.slaState.get(`${ctx.connectionId}|${indexName}`);
-      breachByIndex.set(indexName, Boolean(prior) && !prior!.resolved);
+      breachByIndex.set(indexName, isBreachActive(prior, entry.p99ThresholdUs, now));
     }
 
     const breaches = Array.from(breachByIndex, ([indexName, breached]) => ({
@@ -166,8 +166,7 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
         continue;
       }
       const prior = this.slaState.get(`${connectionId}|${indexName}`);
-      const breached =
-        prior !== undefined && prior.resolved === false && prior.lastP99Us > entry.p99ThresholdUs;
+      const breached = isBreachActive(prior, entry.p99ThresholdUs, Date.now());
       statuses.push({
         indexName,
         thresholdUs: entry.p99ThresholdUs,
