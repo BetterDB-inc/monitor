@@ -162,14 +162,21 @@ function licenseErrorResult(data: {
   return `This feature requires a ${data.requiredTier} license (current tier: ${data.currentTier}). Upgrade at ${data.upgradeUrl}`;
 }
 
-function unavailableResult(featureLabel: string): {
+function unavailableResult(
+  featureLabel: string,
+  requiresPro = true,
+): {
   content: Array<{ type: 'text'; text: string }>;
 } {
+  const reason =
+    requiresPro === true
+      ? 'this monitor build does not include it (requires BetterDB Pro) or predates this tool — check license tier and monitor version.'
+      : 'this monitor build predates this tool — update the monitor to use it.';
   return {
     content: [
       {
         type: 'text' as const,
-        text: `${featureLabel} is unavailable: this monitor build does not include it (requires BetterDB Pro) or predates this tool — check license tier and monitor version.`,
+        text: `${featureLabel} is unavailable: ${reason}`,
       },
     ],
   };
@@ -1941,7 +1948,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/forecast/${metricKind}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('Metric forecasting');
+          return unavailableResult('Metric forecasting', false);
         }
         throw err;
       }
