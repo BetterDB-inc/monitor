@@ -1,21 +1,39 @@
-import { Controller, Get, Post, Param, Body, Query, HttpException, HttpStatus } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Body,
+  Query,
+  HttpException,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
 import { VectorSearchService } from './vector-search.service';
 import { VectorSearchDto } from './dto/vector-search.dto';
 import { ConnectionId } from '../common/decorators';
-import { VectorIndexInfo, TextSearchResult, ProfileResult, FieldDistribution } from '../common/types/metrics.types';
+import {
+  VectorIndexInfo,
+  TextSearchResult,
+  ProfileResult,
+  FieldDistribution,
+} from '../common/types/metrics.types';
+import { mapMcpError } from '../mcp/mcp-helpers';
 
 @ApiTags('vector-search')
 @Controller('vector-search')
 export class VectorSearchController {
-  constructor(
-    private readonly vectorSearchService: VectorSearchService,
-  ) {}
+  private readonly logger = new Logger(VectorSearchController.name);
+
+  constructor(private readonly vectorSearchService: VectorSearchService) {}
 
   @Get('config')
   @ApiOperation({ summary: 'Get search module configuration' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
-  async getSearchConfig(@ConnectionId() connectionId?: string): Promise<{ config: Record<string, string> }> {
+  async getSearchConfig(
+    @ConnectionId() connectionId?: string,
+  ): Promise<{ config: Record<string, string> }> {
     try {
       const config = await this.vectorSearchService.getSearchConfig(connectionId);
       return { config };
@@ -37,7 +55,10 @@ export class VectorSearchController {
   }
 
   @Get('indexes/:name/keys')
-  @ApiOperation({ summary: 'Sample keys from an index', description: 'SCAN for keys matching the index prefix, returning hash fields for each' })
+  @ApiOperation({
+    summary: 'Sample keys from an index',
+    description: 'SCAN for keys matching the index prefix, returning hash fields for each',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   async sampleKeys(
     @Param('name') name: string,
@@ -50,7 +71,7 @@ export class VectorSearchController {
         connectionId,
         name,
         cursor ?? '0',
-        limit ? (parseInt(limit, 10) || 50) : 50,
+        limit ? parseInt(limit, 10) || 50 : 50,
       );
     } catch (error) {
       throw this.mapError(error, 'Failed to sample keys');
@@ -84,7 +105,13 @@ export class VectorSearchController {
   ): Promise<TextSearchResult> {
     try {
       if (!body.query?.trim()) throw new HttpException('Query is required', HttpStatus.BAD_REQUEST);
-      return await this.vectorSearchService.textSearch(connectionId, name, body.query, body.offset, body.limit);
+      return await this.vectorSearchService.textSearch(
+        connectionId,
+        name,
+        body.query,
+        body.offset,
+        body.limit,
+      );
     } catch (error) {
       throw this.mapError(error, 'Text search failed');
     }
@@ -116,7 +143,12 @@ export class VectorSearchController {
     @ConnectionId() connectionId?: string,
   ): Promise<FieldDistribution> {
     try {
-      return await this.vectorSearchService.getFieldDistribution(connectionId, name, field, fieldType || 'TAG');
+      return await this.vectorSearchService.getFieldDistribution(
+        connectionId,
+        name,
+        field,
+        fieldType || 'TAG',
+      );
     } catch (error) {
       throw this.mapError(error, 'Failed to get field distribution');
     }
@@ -132,14 +164,22 @@ export class VectorSearchController {
   ): Promise<ProfileResult> {
     try {
       if (!body.query?.trim()) throw new HttpException('Query is required', HttpStatus.BAD_REQUEST);
-      return await this.vectorSearchService.profileSearch(connectionId, name, body.query, body.limited);
+      return await this.vectorSearchService.profileSearch(
+        connectionId,
+        name,
+        body.query,
+        body.limited,
+      );
     } catch (error) {
       throw this.mapError(error, 'Profile search failed');
     }
   }
 
   @Post('indexes/:name/search')
-  @ApiOperation({ summary: 'Similarity search', description: 'Find keys similar to a source key using KNN vector search' })
+  @ApiOperation({
+    summary: 'Similarity search',
+    description: 'Find keys similar to a source key using KNN vector search',
+  })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   async search(
     @Param('name') name: string,
@@ -178,10 +218,6 @@ export class VectorSearchController {
   }
 
   private mapError(error: unknown, fallback: string): HttpException {
-    if (error instanceof HttpException) return error;
-    const msg = error instanceof Error ? error.message : 'Unknown error';
-    const status = (msg.includes('not available') || msg.includes('not supported'))
-      ? HttpStatus.NOT_IMPLEMENTED : HttpStatus.INTERNAL_SERVER_ERROR;
-    return new HttpException(`${fallback}: ${msg}`, status);
+    return mapMcpError(this.logger, error, fallback);
   }
 }

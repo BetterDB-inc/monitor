@@ -17,6 +17,6 @@ import { TraceCorrelationService } from './trace-correlation.service';
     OtelIngestService,
     TraceCorrelationService,
   ],
-  exports: [DiscoveryReaderService, AiObservabilityService],
+  exports: [DiscoveryReaderService, AiObservabilityService, TraceCorrelationService],
 })
 export class AiObservabilityModule {}
