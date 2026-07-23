@@ -2035,12 +2035,14 @@ server.tool(
 
 server.tool(
   'get_inference_latency',
-  'Get the FT.SEARCH latency profile: p50/p95/p99 per vector index over the sampling window, plus SLA breach status per index when BetterDB Pro inference SLA monitoring is active (sla is null otherwise). More specific than get_latency, which covers general command latency. Use to answer "are vector searches meeting their latency budget?".',
+  'Get the FT.SEARCH latency profile: p50/p95/p99 per vector index over the sampling window, plus SLA breach status per index. sla is null when BetterDB Pro inference SLA monitoring is absent or unlicensed, and an empty array when it is active with no indexes configured. More specific than get_latency, which covers general command latency. Use to answer "are vector searches meeting their latency budget?".',
   {
     windowMs: z
       .number()
+      .int()
+      .min(1000)
       .optional()
-      .describe('Profile window in milliseconds (service default if omitted)'),
+      .describe('Profile window in whole milliseconds, minimum 1000 (service default if omitted)'),
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
   async ({ windowMs, instanceId }) =>

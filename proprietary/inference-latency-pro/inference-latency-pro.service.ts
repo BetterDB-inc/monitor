@@ -166,11 +166,14 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
         continue;
       }
       const prior = this.slaState.get(`${connectionId}|${indexName}`);
+      const breached =
+        prior !== undefined && prior.resolved === false && prior.lastP99Us > entry.p99ThresholdUs;
       statuses.push({
         indexName,
         thresholdUs: entry.p99ThresholdUs,
-        breached: prior !== undefined && prior.resolved === false,
+        breached,
         lastFiredAt: prior === undefined ? null : prior.lastFiredAt,
+        lastP99Us: prior === undefined ? null : prior.lastP99Us,
       });
     }
     return statuses;
