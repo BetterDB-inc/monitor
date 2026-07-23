@@ -19,12 +19,24 @@ describe('evaluateSla', () => {
       state,
     });
     expect(result.fired).toBe(true);
-    expect(state.get('conn-1|idx_cache')).toEqual({ lastFiredAt: T0, resolved: false });
+    expect(state.get('conn-1|idx_cache')).toEqual({
+      lastFiredAt: T0,
+      resolved: false,
+      lastP99Us: 20_000,
+      lastEvaluatedAt: T0,
+    });
   });
 
   it('suppresses a repeat breach 5 min later (debounced within 10 min window)', () => {
     const state = freshState();
-    evaluateSla({ connectionId: 'c', indexName: 'i', currentP99Us: 20_000, thresholdUs: 10_000, now: T0, state });
+    evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 20_000,
+      thresholdUs: 10_000,
+      now: T0,
+      state,
+    });
     const result = evaluateSla({
       connectionId: 'c',
       indexName: 'i',
@@ -38,7 +50,14 @@ describe('evaluateSla', () => {
 
   it('re-fires a repeat breach after the debounce window (11 min later)', () => {
     const state = freshState();
-    evaluateSla({ connectionId: 'c', indexName: 'i', currentP99Us: 20_000, thresholdUs: 10_000, now: T0, state });
+    evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 20_000,
+      thresholdUs: 10_000,
+      now: T0,
+      state,
+    });
     const result = evaluateSla({
       connectionId: 'c',
       indexName: 'i',
@@ -53,7 +72,14 @@ describe('evaluateSla', () => {
 
   it('isolates debounce per (connection, index) pair', () => {
     const state = freshState();
-    evaluateSla({ connectionId: 'c1', indexName: 'i', currentP99Us: 20_000, thresholdUs: 10_000, now: T0, state });
+    evaluateSla({
+      connectionId: 'c1',
+      indexName: 'i',
+      currentP99Us: 20_000,
+      thresholdUs: 10_000,
+      now: T0,
+      state,
+    });
     const otherPair = evaluateSla({
       connectionId: 'c2',
       indexName: 'i',
@@ -76,7 +102,14 @@ describe('evaluateSla', () => {
 
   it('marks a pair resolved when p99 drops below threshold', () => {
     const state = freshState();
-    evaluateSla({ connectionId: 'c', indexName: 'i', currentP99Us: 20_000, thresholdUs: 10_000, now: T0, state });
+    evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 20_000,
+      thresholdUs: 10_000,
+      now: T0,
+      state,
+    });
     const ok = evaluateSla({
       connectionId: 'c',
       indexName: 'i',
@@ -91,8 +124,22 @@ describe('evaluateSla', () => {
 
   it('re-fires immediately after resolution even within the debounce window', () => {
     const state = freshState();
-    evaluateSla({ connectionId: 'c', indexName: 'i', currentP99Us: 20_000, thresholdUs: 10_000, now: T0, state });
-    evaluateSla({ connectionId: 'c', indexName: 'i', currentP99Us: 5_000, thresholdUs: 10_000, now: T0 + 2 * MIN, state });
+    evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 20_000,
+      thresholdUs: 10_000,
+      now: T0,
+      state,
+    });
+    evaluateSla({
+      connectionId: 'c',
+      indexName: 'i',
+      currentP99Us: 5_000,
+      thresholdUs: 10_000,
+      now: T0 + 2 * MIN,
+      state,
+    });
     const reBreach = evaluateSla({
       connectionId: 'c',
       indexName: 'i',
@@ -102,7 +149,12 @@ describe('evaluateSla', () => {
       state,
     });
     expect(reBreach.fired).toBe(true);
-    expect(state.get('c|i')).toEqual({ lastFiredAt: T0 + 4 * MIN, resolved: false });
+    expect(state.get('c|i')).toEqual({
+      lastFiredAt: T0 + 4 * MIN,
+      resolved: false,
+      lastP99Us: 20_000,
+      lastEvaluatedAt: T0 + 4 * MIN,
+    });
   });
 
   it('does not fire on initial sub-threshold reading and stores no state', () => {

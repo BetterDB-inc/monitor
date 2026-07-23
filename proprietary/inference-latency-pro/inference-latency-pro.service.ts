@@ -1,16 +1,19 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
+  Feature,
   IInferenceLatencyProService,
   IWebhookEventsProService,
   InferenceLatencyProfile,
   InferenceProfileTickContext,
+  InferenceSlaIndexStatus,
   WEBHOOK_EVENTS_PRO_SERVICE,
   WebhookEventType,
 } from '@betterdb/shared';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
-import { SlaState, evaluateSla } from './sla';
+import { LicenseService } from '@proprietary/licenses';
+import { SlaState, evaluateSla, isBreachActive } from './sla';
 
 const FT_SEARCH_BUCKET_PREFIX = 'FT.SEARCH:';
 
@@ -27,6 +30,8 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
     private readonly webhookEventsProService?: IWebhookEventsProService,
     @Optional()
     private readonly otelEvents?: OtelEventDispatcherService,
+    @Optional()
+    private readonly licenseService?: LicenseService,
   ) {}
 
   async onProfileTick(
@@ -107,9 +112,9 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
     }
 
     // Fill in configured-but-quiet indexes so the Prometheus time-series stays
-    // continuous. "No traffic" ≠ "no data"; carry forward the debounce state
-    // (breached if a prior fire wasn't resolved, not breached otherwise) so
-    // Grafana doesn't flip to a false 'resolved' when an index goes quiet.
+    // continuous. "No traffic" ≠ "no data"; carry forward via the shared
+    // isBreachActive rule (same one getSlaStatus uses) so a quiet index keeps
+    // its live breach until it goes stale, and both surfaces always agree.
     for (const [indexName, entry] of Object.entries(slaConfig)) {
       if (!entry?.enabled) {
         continue;
@@ -118,7 +123,7 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
         continue;
       }
       const prior = this.slaState.get(`${ctx.connectionId}|${indexName}`);
-      breachByIndex.set(indexName, Boolean(prior) && !prior!.resolved);
+      breachByIndex.set(indexName, isBreachActive(prior, entry.p99ThresholdUs, now));
     }
 
     const breaches = Array.from(breachByIndex, ([indexName, breached]) => ({
@@ -146,5 +151,30 @@ export class InferenceLatencyProService implements IInferenceLatencyProService {
         this.slaState.delete(key);
       }
     }
+  }
+
+  getSlaStatus(connectionId: string): InferenceSlaIndexStatus[] | null {
+    const licensed = this.licenseService?.hasFeature(Feature.INFERENCE_SLA) === true;
+    if (licensed === false) {
+      return null;
+    }
+    const settings = this.settingsService.getCachedSettings();
+    const slaConfig = settings.inferenceSlaConfig ?? {};
+    const statuses: InferenceSlaIndexStatus[] = [];
+    for (const [indexName, entry] of Object.entries(slaConfig)) {
+      if (entry?.enabled !== true) {
+        continue;
+      }
+      const prior = this.slaState.get(`${connectionId}|${indexName}`);
+      const breached = isBreachActive(prior, entry.p99ThresholdUs, Date.now());
+      statuses.push({
+        indexName,
+        thresholdUs: entry.p99ThresholdUs,
+        breached,
+        lastFiredAt: prior === undefined ? null : prior.lastFiredAt,
+        lastP99Us: prior === undefined ? null : prior.lastP99Us,
+      });
+    }
+    return statuses;
   }
 }
