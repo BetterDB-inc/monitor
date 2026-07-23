@@ -2,6 +2,7 @@ import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { CapabilityUnavailableError } from '../common/errors/capability-unavailable.error';
+import { downsampleSeries } from '../common/utils/downsample';
 import {
   VectorIndexInfo,
   VectorSearchResult,
@@ -137,13 +138,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       startTime: Date.now() - hours * 60 * 60 * 1000,
     });
     // Downsample to ~200 points for display — evenly spaced across the window
-    if (allSnapshots.length <= 200) return allSnapshots;
-    const step = allSnapshots.length / 200;
-    const sampled: VectorIndexSnapshot[] = [];
-    for (let i = 0; i < 200; i++) {
-      sampled.push(allSnapshots[Math.round(i * step)]);
-    }
-    return sampled;
+    return downsampleSeries(allSnapshots, 200);
   }
 
   private getCheckedClient(connectionId?: string): ReturnType<ConnectionRegistry['get']> {
