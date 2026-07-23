@@ -142,6 +142,41 @@ describe('AnomalyService', () => {
     await (service as any).pollConnection(ctx);
   }
 
+  // ─── getRecentAnomalies cache fall-through ─────────────────────────────────
+
+  describe('getRecentAnomalies cache fall-through', () => {
+    it('consults storage when the cache has no match for a recent window', async () => {
+      const storedEvent = {
+        id: 'e1',
+        timestamp: Date.now() - 60_000,
+        metric_type: 'command_p99',
+        anomaly_type: 'spike',
+        severity: 'warning',
+        value: 200,
+        baseline: 100,
+        z_score: 0,
+        std_dev: 0,
+        threshold: 2,
+        message: 'p99 regression',
+        resolved: 0,
+        connection_id: 'c1',
+      };
+      storage.getAnomalyEvents.mockResolvedValueOnce([storedEvent]);
+      const events = await service.getRecentAnomalies(
+        Date.now() - 120_000,
+        undefined,
+        undefined,
+        MetricType.COMMAND_P99,
+        10,
+        'c1',
+      );
+      expect(events).toHaveLength(1);
+      expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ metricType: 'command_p99', connectionId: 'c1' }),
+      );
+    });
+  });
+
   // ─── Fragmentation Extractor ───────────────────────────────────────────────
 
   describe('fragmentation extractor', () => {
@@ -325,9 +360,7 @@ describe('AnomalyService', () => {
     it('does not fire anomaly on first poll (no baseline)', async () => {
       await poll();
       const events = service.getRecentEvents();
-      const failoverEvents = events.filter(
-        (e) => e.metricType === MetricType.REPLICATION_ROLE,
-      );
+      const failoverEvents = events.filter((e) => e.metricType === MetricType.REPLICATION_ROLE);
       expect(failoverEvents).toHaveLength(0);
     });
 
@@ -335,9 +368,7 @@ describe('AnomalyService', () => {
       await poll(); // sets baseline to master
       await poll(); // still master
       const events = service.getRecentEvents();
-      const failoverEvents = events.filter(
-        (e) => e.metricType === MetricType.REPLICATION_ROLE,
-      );
+      const failoverEvents = events.filter((e) => e.metricType === MetricType.REPLICATION_ROLE);
       expect(failoverEvents).toHaveLength(0);
     });
 
@@ -359,9 +390,7 @@ describe('AnomalyService', () => {
       await poll();
       await poll();
       const events = service.getRecentEvents();
-      const failoverEvents = events.filter(
-        (e) => e.metricType === MetricType.REPLICATION_ROLE,
-      );
+      const failoverEvents = events.filter((e) => e.metricType === MetricType.REPLICATION_ROLE);
       expect(failoverEvents).toHaveLength(0);
     });
 
@@ -387,9 +416,7 @@ describe('AnomalyService', () => {
       await poll();
 
       const events = service.getRecentEvents();
-      const failoverEvents = events.filter(
-        (e) => e.metricType === MetricType.REPLICATION_ROLE,
-      );
+      const failoverEvents = events.filter((e) => e.metricType === MetricType.REPLICATION_ROLE);
       expect(failoverEvents).toHaveLength(1);
       expect(failoverEvents[0].severity).toBe(AnomalySeverity.CRITICAL);
       expect(failoverEvents[0].anomalyType).toBe(AnomalyType.DROP);
@@ -416,9 +443,7 @@ describe('AnomalyService', () => {
       await poll();
 
       const events = service.getRecentEvents();
-      const failoverEvents = events.filter(
-        (e) => e.metricType === MetricType.REPLICATION_ROLE,
-      );
+      const failoverEvents = events.filter((e) => e.metricType === MetricType.REPLICATION_ROLE);
       expect(failoverEvents).toHaveLength(1);
       expect(failoverEvents[0].severity).toBe(AnomalySeverity.CRITICAL);
     });
@@ -459,9 +484,7 @@ describe('AnomalyService', () => {
       await poll();
 
       const events = service.getRecentEvents();
-      const failoverEvents = events.filter(
-        (e) => e.metricType === MetricType.REPLICATION_ROLE,
-      );
+      const failoverEvents = events.filter((e) => e.metricType === MetricType.REPLICATION_ROLE);
       expect(failoverEvents).toHaveLength(1);
       expect(failoverEvents[0].severity).toBe(AnomalySeverity.WARNING);
       expect(failoverEvents[0].anomalyType).toBe(AnomalyType.SPIKE);
@@ -595,9 +618,7 @@ describe('AnomalyService', () => {
     });
 
     it('records utilization delta on second poll', async () => {
-      jest.spyOn(Date, 'now')
-        .mockReturnValueOnce(1000)
-        .mockReturnValueOnce(2000);
+      jest.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(2000);
 
       mockInfoWithCpu('10.0', '20.0');
       await poll();
@@ -612,9 +633,7 @@ describe('AnomalyService', () => {
     });
 
     it('skips sample when utilization is negative (counter reset)', async () => {
-      jest.spyOn(Date, 'now')
-        .mockReturnValueOnce(1000)
-        .mockReturnValueOnce(2000);
+      jest.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(2000);
 
       mockInfoWithCpu('50.0', '50.0');
       await poll();
@@ -692,7 +711,17 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.REJECTED_CONNECTIONS && m !== MetricType.CLIENT_SATURATION && m !== MetricType.SLOWLOG_COUNT,
+        (m) =>
+          m !== MetricType.REPLICATION_ROLE &&
+          m !== MetricType.CLUSTER_STATE &&
+          m !== MetricType.DATASET_KEYS &&
+          m !== MetricType.COMMAND_P99 &&
+          m !== MetricType.PERSISTENCE_CHILD &&
+          m !== MetricType.CLUSTER_TOPOLOGY &&
+          m !== MetricType.SLOWLOG_LAST_ID &&
+          m !== MetricType.REJECTED_CONNECTIONS &&
+          m !== MetricType.CLIENT_SATURATION &&
+          m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -724,16 +753,18 @@ describe('AnomalyService', () => {
   // ─── Data-Loss Detection (valkey/valkey#579) ─────────────────────────────
 
   describe('data-loss detection', () => {
-    function mockReplInfo(opts: {
-      role?: string;
-      replid?: string;
-      offset?: string;
-      uptime?: string;
-      connectedSlaves?: string;
-      db0?: string;
-      loading?: string;
-      asyncLoading?: string;
-    } = {}) {
+    function mockReplInfo(
+      opts: {
+        role?: string;
+        replid?: string;
+        offset?: string;
+        uptime?: string;
+        connectedSlaves?: string;
+        db0?: string;
+        loading?: string;
+        asyncLoading?: string;
+      } = {},
+    ) {
       dbClient.getInfoParsed = jest.fn().mockResolvedValue({
         server: { role: opts.role ?? 'master', uptime_in_seconds: opts.uptime ?? '1000' },
         clients: { connected_clients: '10', blocked_clients: '0' },
@@ -769,7 +800,12 @@ describe('AnomalyService', () => {
     });
 
     it('fires Rule A when primary restarts empty (replid changed, uptime reset)', async () => {
-      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      mockReplInfo({
+        replid: 'replid-aaaa',
+        uptime: '1000',
+        offset: '5000',
+        db0: 'keys=150,expires=0,avg_ttl=0',
+      });
       await poll();
 
       mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' }); // empty keyspace
@@ -823,7 +859,12 @@ describe('AnomalyService', () => {
       await poll();
 
       // Restarted (new replid, uptime reset) but keys intact via RDB/AOF reload
-      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0', db0: 'keys=150,expires=0,avg_ttl=0' });
+      mockReplInfo({
+        replid: 'replid-bbbb',
+        uptime: '5',
+        offset: '0',
+        db0: 'keys=150,expires=0,avg_ttl=0',
+      });
       await poll();
 
       expect(dataLossEvents()).toHaveLength(0);
@@ -831,7 +872,12 @@ describe('AnomalyService', () => {
     });
 
     it('does not fire on a restart while the server is still loading its dataset from disk', async () => {
-      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      mockReplInfo({
+        replid: 'replid-aaaa',
+        uptime: '1000',
+        offset: '5000',
+        db0: 'keys=150,expires=0,avg_ttl=0',
+      });
       await poll();
 
       // Restarted with RDB/AOF: new replid and empty keyspace, but INFO reports
@@ -844,7 +890,12 @@ describe('AnomalyService', () => {
 
       // Load finishes and the keyspace is restored — still no false alert
       // because the transient empty snapshot was never recorded as baseline.
-      mockReplInfo({ replid: 'replid-bbbb', uptime: '10', offset: '0', db0: 'keys=150,expires=0,avg_ttl=0' });
+      mockReplInfo({
+        replid: 'replid-bbbb',
+        uptime: '10',
+        offset: '0',
+        db0: 'keys=150,expires=0,avg_ttl=0',
+      });
       await poll();
 
       expect(dataLossEvents()).toHaveLength(0);
@@ -875,7 +926,12 @@ describe('AnomalyService', () => {
     });
 
     it('does not fire on FLUSHALL (empty dataset but same replid, no restart evidence)', async () => {
-      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      mockReplInfo({
+        replid: 'replid-aaaa',
+        uptime: '1000',
+        offset: '5000',
+        db0: 'keys=150,expires=0,avg_ttl=0',
+      });
       await poll();
 
       // Same replid, uptime and offset still advancing — intentional flush
@@ -927,7 +983,10 @@ describe('AnomalyService', () => {
       const success = await service.resolveAnomaly('persisted-but-not-cached');
 
       expect(success).toBe(true);
-      expect(storage.resolveAnomaly).toHaveBeenCalledWith('persisted-but-not-cached', expect.any(Number));
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(
+        'persisted-but-not-cached',
+        expect.any(Number),
+      );
     });
 
     it('resolveAnomaly returns false when the event exists neither in cache nor storage', async () => {
@@ -1003,7 +1062,9 @@ describe('AnomalyService', () => {
 
     it('addAnomaly leaves an event memory-only when the store rejects its id, and it stays dismissable', async () => {
       // Simulate Postgres rejecting the non-UUID id.
-      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('invalid input syntax for type uuid'));
+      storage.saveAnomalyEvent.mockRejectedValueOnce(
+        new Error('invalid input syntax for type uuid'),
+      );
       const event = {
         id: 'conn-persistence-error',
         metricType: 'persistence',
@@ -1041,18 +1102,24 @@ describe('AnomalyService', () => {
   // must be read off the typed INFO response (not the stringified flat record,
   // which would collapse an object to "[object Object]") and handle both shapes.
   describe('sumKeyspaceKeys', () => {
-    const sum = (infoResponse: unknown): number =>
-      (service as any).sumKeyspaceKeys(infoResponse);
+    const sum = (infoResponse: unknown): number => (service as any).sumKeyspaceKeys(infoResponse);
 
     it('sums the string shape emitted by the real parser', () => {
       expect(
-        sum({ keyspace: { db0: 'keys=150,expires=5,avg_ttl=0', db1: 'keys=42,expires=0,avg_ttl=0' } }),
+        sum({
+          keyspace: { db0: 'keys=150,expires=5,avg_ttl=0', db1: 'keys=42,expires=0,avg_ttl=0' },
+        }),
       ).toBe(192);
     });
 
     it('sums the typed object shape declared by KeyspaceInfo', () => {
       expect(
-        sum({ keyspace: { db0: { keys: 150, expires: 5, avg_ttl: 0 }, db1: { keys: 42, expires: 0, avg_ttl: 0 } } }),
+        sum({
+          keyspace: {
+            db0: { keys: 150, expires: 5, avg_ttl: 0 },
+            db1: { keys: 42, expires: 0, avg_ttl: 0 },
+          },
+        }),
       ).toBe(192);
     });
 
@@ -1087,7 +1154,13 @@ describe('AnomalyService', () => {
       storage.getAnomalyEvents.mockResolvedValue([oldOpenEvent]);
 
       const events = await service.getRecentAnomalies(
-        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+        undefined,
+        undefined,
+        undefined,
+        MetricType.DATASET_KEYS,
+        100,
+        undefined,
+        true,
       );
 
       expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
@@ -1107,7 +1180,13 @@ describe('AnomalyService', () => {
       (service as any).recentAnomalies = [{ ...oldOpenEvent, id: 'in-mem', timestamp: Date.now() }];
 
       const events = await service.getRecentAnomalies(
-        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+        undefined,
+        undefined,
+        undefined,
+        MetricType.DATASET_KEYS,
+        100,
+        undefined,
+        true,
       );
 
       expect(storage.getAnomalyEvents).toHaveBeenCalled();
@@ -1120,7 +1199,13 @@ describe('AnomalyService', () => {
       (service as any).recentAnomalies = [{ ...oldOpenEvent, timestamp: Date.now() }];
 
       const events = await service.getRecentAnomalies(
-        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+        undefined,
+        undefined,
+        undefined,
+        MetricType.DATASET_KEYS,
+        100,
+        undefined,
+        true,
       );
 
       expect(events).toHaveLength(1);
@@ -1134,7 +1219,13 @@ describe('AnomalyService', () => {
       ];
 
       const events = await service.getRecentAnomalies(
-        undefined, undefined, undefined, MetricType.DATASET_KEYS, 100, undefined, true,
+        undefined,
+        undefined,
+        undefined,
+        MetricType.DATASET_KEYS,
+        100,
+        undefined,
+        true,
       );
 
       expect(events).toHaveLength(0);
@@ -1280,9 +1371,7 @@ describe('AnomalyService', () => {
     }
 
     const persistenceEvents = () =>
-      service
-        .getRecentEvents()
-        .filter((e) => e.metricType === MetricType.PERSISTENCE_CHILD);
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.PERSISTENCE_CHILD);
 
     it('excludes PERSISTENCE_CHILD from the initial buffer loop', async () => {
       mockPersistence({});
@@ -1751,13 +1840,53 @@ describe('AnomalyService', () => {
     });
 
     const healthyNodes = [
-      { id: 'a', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 8191]] },
-      { id: 'b', address: '10.0.0.2:6379@16379', flags: ['master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 2, linkState: 'connected', slots: [[8192, 16383]] },
+      {
+        id: 'a',
+        address: '10.0.0.1:6379@16379',
+        flags: ['myself', 'master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [[0, 8191]],
+      },
+      {
+        id: 'b',
+        address: '10.0.0.2:6379@16379',
+        flags: ['master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 2,
+        linkState: 'connected',
+        slots: [[8192, 16383]],
+      },
     ];
 
     const splitBrainNodes = [
-      { id: 'nodeAAAAAAAA', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 4, linkState: 'connected', slots: [[0, 5460]] },
-      { id: 'nodeCCCCCCCC', address: '10.0.0.3:6379@16379', flags: ['master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 9, linkState: 'connected', slots: [[0, 5460]] },
+      {
+        id: 'nodeAAAAAAAA',
+        address: '10.0.0.1:6379@16379',
+        flags: ['myself', 'master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 4,
+        linkState: 'connected',
+        slots: [[0, 5460]],
+      },
+      {
+        id: 'nodeCCCCCCCC',
+        address: '10.0.0.3:6379@16379',
+        flags: ['master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 9,
+        linkState: 'connected',
+        slots: [[0, 5460]],
+      },
     ];
 
     it('emits a CRITICAL anomaly when two primaries claim the same slots', async () => {
@@ -1876,16 +2005,66 @@ describe('AnomalyService', () => {
     });
 
     const healthyNodes = [
-      { id: 'primA', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
-      { id: 'repB', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'primA', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+      {
+        id: 'primA',
+        address: '10.0.0.1:6379@16379',
+        flags: ['myself', 'master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [[0, 16383]],
+      },
+      {
+        id: 'repB',
+        address: '10.0.0.2:6380@16380',
+        flags: ['slave'],
+        master: 'primA',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+      },
     ];
 
     // valkey#2090: repB still replicates the dead old primary while a fresh
     // primary (newprim) took over the shard; repB never re-attaches.
     const orphanedNodes = [
-      { id: 'newprim', address: '10.0.0.1:6379@16379', flags: ['master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 6, linkState: 'connected', slots: [[0, 16383]] },
-      { id: 'repB', address: '10.0.0.2:6380@16380', flags: ['myself', 'slave'], master: 'deadprim', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
-      { id: 'deadprim', address: ':0@0', flags: ['master', 'fail', 'noaddr'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'disconnected', slots: [] },
+      {
+        id: 'newprim',
+        address: '10.0.0.1:6379@16379',
+        flags: ['master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 6,
+        linkState: 'connected',
+        slots: [[0, 16383]],
+      },
+      {
+        id: 'repB',
+        address: '10.0.0.2:6380@16380',
+        flags: ['myself', 'slave'],
+        master: 'deadprim',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+      },
+      {
+        id: 'deadprim',
+        address: ':0@0',
+        flags: ['master', 'fail', 'noaddr'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'disconnected',
+        slots: [],
+      },
     ];
 
     const topoEvents = () =>

@@ -270,7 +270,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     for (const metricType of Object.values(MetricType)) {
       // REPLICATION_ROLE, CLUSTER_STATE, DATASET_KEYS, COMMAND_P99, PERSISTENCE_CHILD, CLUSTER_TOPOLOGY, SLOWLOG_LAST_ID, REJECTED_CONNECTIONS (delta-fed lazily), CLIENT_SATURATION (state-based), and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.DATASET_KEYS || metricType === MetricType.COMMAND_P99 || metricType === MetricType.PERSISTENCE_CHILD || metricType === MetricType.CLUSTER_TOPOLOGY || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.REJECTED_CONNECTIONS || metricType === MetricType.CLIENT_SATURATION || metricType === MetricType.SLOWLOG_COUNT) continue;
+      if (
+        metricType === MetricType.REPLICATION_ROLE ||
+        metricType === MetricType.CLUSTER_STATE ||
+        metricType === MetricType.DATASET_KEYS ||
+        metricType === MetricType.COMMAND_P99 ||
+        metricType === MetricType.PERSISTENCE_CHILD ||
+        metricType === MetricType.CLUSTER_TOPOLOGY ||
+        metricType === MetricType.SLOWLOG_LAST_ID ||
+        metricType === MetricType.REJECTED_CONNECTIONS ||
+        metricType === MetricType.CLIENT_SATURATION ||
+        metricType === MetricType.SLOWLOG_COUNT
+      )
+        continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -438,15 +450,21 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         this.lastRejectedConnections.set(ctx.connectionId, currentRejected);
 
         if (!buffers.has(MetricType.REJECTED_CONNECTIONS)) {
-          buffers.set(MetricType.REJECTED_CONNECTIONS, new MetricBuffer(MetricType.REJECTED_CONNECTIONS));
-          detectors.set(MetricType.REJECTED_CONNECTIONS, new SpikeDetector(MetricType.REJECTED_CONNECTIONS, {
-            warningZScore: 1.5,
-            criticalZScore: 2.5,
-            warningThreshold: 5,
-            criticalThreshold: 25,
-            consecutiveRequired: 1,
-            cooldownMs: 30000,
-          }));
+          buffers.set(
+            MetricType.REJECTED_CONNECTIONS,
+            new MetricBuffer(MetricType.REJECTED_CONNECTIONS),
+          );
+          detectors.set(
+            MetricType.REJECTED_CONNECTIONS,
+            new SpikeDetector(MetricType.REJECTED_CONNECTIONS, {
+              warningZScore: 1.5,
+              criticalZScore: 2.5,
+              warningThreshold: 5,
+              criticalThreshold: 25,
+              consecutiveRequired: 1,
+              cooldownMs: 30000,
+            }),
+          );
         }
 
         const rejectedBuffer = buffers.get(MetricType.REJECTED_CONNECTIONS)!;
@@ -455,7 +473,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         const rejectedAnomaly = rejectedDetector.detect(rejectedBuffer, rejectedDelta, timestamp);
         if (rejectedAnomaly) {
           rejectedAnomaly.connectionId = ctx.connectionId;
-          this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${rejectedAnomaly.message}`);
+          this.logger.warn(
+            `Anomaly detected for ${ctx.connectionName}: ${rejectedAnomaly.message}`,
+          );
           await this.addAnomaly(rejectedAnomaly, ctx);
         }
       }
@@ -776,8 +796,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           : 'none';
 
     const prev = this.clientSaturationLevel.get(ctx.connectionId) ?? 'none';
-    const escalated =
-      AnomalyService.SATURATION_RANK[level] > AnomalyService.SATURATION_RANK[prev];
+    const escalated = AnomalyService.SATURATION_RANK[level] > AnomalyService.SATURATION_RANK[prev];
 
     // Only alert on escalation; de-escalation / steady state stays quiet.
     if (escalated) {
@@ -1442,7 +1461,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       if (metricType) events = events.filter((e) => e.metricType === metricType);
       if (severity) events = events.filter((e) => e.severity === severity);
       if (endTime) events = events.filter((e) => e.timestamp <= endTime);
-      return events.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+      if (events.length > 0) {
+        return events.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+      }
+      // Empty cache result must consult storage: some producers (e.g. latency
+      // regressions writing command_p99 via saveAnomalyEvent) persist without
+      // ever entering this cache, and the cache is empty after a restart.
     }
 
     const stored = await this.storage.getAnomalyEvents({
