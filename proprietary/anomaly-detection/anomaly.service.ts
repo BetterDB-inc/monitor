@@ -951,13 +951,22 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   ): string {
     const limit = this.clientEvictionLimit.get(connectionId)?.trim() || 'unset';
     const memClients = info['mem_clients_normal'];
-    const memPart = memClients ? ` Current client-buffer memory ~${memClients} bytes.` : '';
+    // mem_clients_normal is sampled in the same poll that already saw the eviction,
+    // i.e. AFTER eviction freed buffers — it reflects post-reclaim memory, not the
+    // pressure that triggered the eviction. Surface it with that caveat rather than
+    // letting a low reading be misread as headroom (a false over-aggressive signal).
+    const memPart = memClients
+      ? ` Post-eviction client-buffer memory ~${memClients} bytes (sampled after buffers were ` +
+        `reclaimed, so it understates the pre-eviction peak).`
+      : '';
     return (
       `${severity.toUpperCase()}: ${delta} Valkey client${delta === 1 ? '' : 's'} disconnected by ` +
       `maxmemory-clients eviction in the last interval (maxmemory-clients=${limit}).${memPart} ` +
-      `If this recurs with headroom below the limit, eviction may be over-aggressive ` +
-      `(valkey#4151); if client-buffer memory is genuinely tight, raise maxmemory-clients or ` +
-      `investigate large client output buffers (pub/sub, MONITOR, oversized replies).`
+      `Eviction has already freed buffers, so this snapshot alone can't separate an over-aggressive ` +
+      `eviction from a justified one: if evictions recur while the limit sits well above steady-state ` +
+      `client memory, eviction may be over-aggressive (valkey#4151); if they cluster with rising ` +
+      `client-buffer memory, it is genuine pressure — raise maxmemory-clients or investigate large ` +
+      `client output buffers (pub/sub, MONITOR, oversized replies).`
     );
   }
 
