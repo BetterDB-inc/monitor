@@ -10,6 +10,8 @@ export enum MetricType {
   REJECTED_CONNECTIONS = 'rejected_connections',
   /** connected_clients / maxclients saturation — state-based, emitted directly (not z-score buffered). */
   CLIENT_SATURATION = 'client_saturation',
+  /** Clients disconnected by maxmemory-clients eviction — per-poll delta of INFO stats evicted_clients (valkey#4151). */
+  EVICTED_CLIENTS = 'evicted_clients',
   /** Raft cluster (Cluster V2) health: leaderless/quorum-loss and election churn — state-based. */
   RAFT_HEALTH = 'raft_health',
   EVICTED_KEYS = 'evicted_keys',

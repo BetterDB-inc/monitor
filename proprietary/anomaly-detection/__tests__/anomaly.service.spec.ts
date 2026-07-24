@@ -692,7 +692,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.REJECTED_CONNECTIONS && m !== MetricType.CLIENT_SATURATION && m !== MetricType.RAFT_HEALTH && m !== MetricType.SLOWLOG_COUNT,
+        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.REJECTED_CONNECTIONS && m !== MetricType.CLIENT_SATURATION && m !== MetricType.EVICTED_CLIENTS && m !== MetricType.RAFT_HEALTH && m !== MetricType.SLOWLOG_COUNT,
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -1995,6 +1995,73 @@ describe('AnomalyService', () => {
       expect(buffers.get(MetricType.REJECTED_CONNECTIONS).getLatest()).toBe(8);
       // ACL_DENIED must NOT include rejected connections (would be 57 if bundled).
       expect(buffers.get(MetricType.ACL_DENIED).getLatest()).toBe(7);
+    });
+  });
+
+  // ─── Client-eviction storm (valkey-io/valkey#4151) ─────────────────────────
+  describe('client-eviction storm detection', () => {
+    const infoWith = (evicted: string, memClients = '1048576') => ({
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1', mem_clients_normal: memClients },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        evicted_clients: evicted,
+      },
+    });
+    const evictedEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.EVICTED_CLIENTS);
+
+    beforeEach(() => {
+      // Eviction enabled (a real byte limit), so the detector arms.
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('3145728');
+    });
+
+    it('feeds the per-poll delta and fires a CRITICAL on an eviction spike', async () => {
+      // Prime a steady baseline (the buffer needs minSamples before it can alert).
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5'));
+      for (let i = 0; i < 30; i++) await poll(); // 30 samples of delta 0 → buffer ready
+      expect(evictedEvents()).toHaveLength(0);
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('20'));
+      await poll(); // 15 new evictions since last poll (>= criticalThreshold 10)
+
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      expect(buffers.get(MetricType.EVICTED_CLIENTS).getLatest()).toBe(15); // delta, not 20
+      const events = evictedEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('maxmemory-clients eviction');
+      expect(events[0].message).toContain('valkey#4151');
+    });
+
+    it('does not arm when eviction is disabled (maxmemory-clients=0)', async () => {
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('0');
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('40'));
+      await poll();
+
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      expect(buffers.has(MetricType.EVICTED_CLIENTS)).toBe(false);
+      expect(evictedEvents()).toHaveLength(0);
+    });
+
+    it('does not false-fire when the counter resets on restart', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll(); // baseline at 100
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('3')); // restart → counter back down
+      await poll(); // max(0, 3-100) = 0, not a huge negative/positive spike
+
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      expect(buffers.get(MetricType.EVICTED_CLIENTS).getLatest()).toBe(0);
+      expect(evictedEvents()).toHaveLength(0);
     });
   });
 
