@@ -125,9 +125,11 @@ export interface KeyAnalyticsResult {
  * `cardinality` ranks by element count / byte length (largest keys, valkey #1827);
  * `composite` ranks keys that are extreme on more than one dimension at once —
  * the "hot big key" that a single-signal list misses (valkey #4189). On a
- * composite entry, `freqScore` / `memoryBytes` / `cardinality` are populated only
- * for the dimensions the key actually placed in, so a consumer can read off which
- * dimensions drove the ranking.
+ * composite entry the hotness / `memoryBytes` / `cardinality` fields are
+ * populated only for the dimensions the key actually placed in, so a consumer
+ * can read off which dimensions drove the ranking; hotness is reported as
+ * `freqScore` (LFU) or `idleSeconds` (recency fallback), whichever the placement
+ * used.
  */
 export interface HotKeyEntry {
   id: string;

@@ -1,14 +1,14 @@
 /**
  * Multi-dimensional ("hot big key") ranking — valkey #4189.
  *
- * The existing key-analytics lists rank each dimension independently: `lfu` (hot
- * by access frequency), `cardinality` (big by element count / byte length), and
- * a key's memory footprint rides along. A key that is *only* hot or *only* big is
- * already covered by those lists. What none of them surface is the key that is
- * extreme on MORE THAN ONE dimension at once — a large collection that is also
- * hammered, or a hot key whose value has quietly grown huge. Those are the ones
- * that actually cause incidents (bandwidth amplification, single-shard hotspots,
- * O(N) commands on a big value under load).
+ * The existing key-analytics lists rank each dimension independently: hot keys
+ * (by access frequency or recency), `cardinality` (big by element count / byte
+ * length), and a key's memory footprint rides along. A key that is *only* hot or
+ * *only* big is already covered by those lists. What none of them surface is the
+ * key that is extreme on MORE THAN ONE dimension at once — a large collection
+ * that is also hammered, or a hot key whose value has quietly grown huge. Those
+ * are the ones that actually cause incidents (bandwidth amplification, single-
+ * shard hotspots, O(N) commands on a big value under load).
  *
  * This is a pure post-processing pass over the per-key data already collected in
  * one scan (no extra key access, no new server round-trips): for each of the
@@ -18,15 +18,25 @@
  * normalized (value / dimension-max) contributions, so ties on dimension-count
  * break toward the key that is more extreme overall.
  *
+ * Hotness is measured by LFU access frequency (`OBJECT FREQ`) when the server's
+ * maxmemory-policy exposes it, and otherwise by recency (`OBJECT IDLETIME`,
+ * lower idle = hotter) — mirroring the fallback the hot-keys collector already
+ * uses. Without that fallback the hotness dimension would be empty on the default
+ * (non-LFU) policy, collapsing "composite" to memory ∩ cardinality and missing
+ * the true hot+big keys this feature exists to catch.
+ *
  * SDK-free and side-effect-free so it can be unit-tested directly.
  */
 
-export type CompositeDimension = 'frequency' | 'memory' | 'cardinality';
+export type CompositeDimension = 'hotness' | 'memory' | 'cardinality';
 
 export interface CompositeCandidate {
   keyName: string;
   keyType: string | null;
+  /** LFU access frequency (OBJECT FREQ). Null unless an LFU maxmemory-policy is set. */
   freqScore: number | null;
+  /** Idle seconds (OBJECT IDLETIME). The recency fallback when freqScore is absent. */
+  idleSeconds: number | null;
   memoryBytes: number | null;
   cardinality: number | null;
   ttl: number | null;
@@ -38,8 +48,10 @@ export interface CompositeKeyRank {
   ttl: number | null;
   /** Dimensions on which the key placed in that dimension's top-N (length >= 2). */
   dimensions: CompositeDimension[];
-  /** Populated only when 'frequency' is in `dimensions`, else null. */
+  /** Set only when the key placed in 'hotness' via LFU frequency, else null. */
   freqScore: number | null;
+  /** Set only when the key placed in 'hotness' via idle recency, else null. */
+  idleSeconds: number | null;
   /** Populated only when 'memory' is in `dimensions`, else null. */
   memoryBytes: number | null;
   /** Populated only when 'cardinality' is in `dimensions`, else null. */
@@ -48,11 +60,35 @@ export interface CompositeKeyRank {
   score: number;
 }
 
+function isUsable(value: number | null): value is number {
+  return value !== null && Number.isFinite(value) && value > 0;
+}
+
+/** True when the key's hotness (below) comes from LFU frequency rather than idle recency. */
+function hotnessFromFrequency(candidate: CompositeCandidate): boolean {
+  return isUsable(candidate.freqScore);
+}
+
+/**
+ * Hotness magnitude for ranking: LFU frequency when present, otherwise recency
+ * derived from idle time (1 / (1 + idle), so a lower idle ranks hotter). Returns
+ * null when neither signal is available for the key.
+ */
+function hotnessMagnitude(candidate: CompositeCandidate): number | null {
+  if (isUsable(candidate.freqScore)) {
+    return candidate.freqScore;
+  }
+  if (candidate.idleSeconds !== null && Number.isFinite(candidate.idleSeconds) && candidate.idleSeconds >= 0) {
+    return 1 / (1 + candidate.idleSeconds);
+  }
+  return null;
+}
+
 const DIMENSIONS: Array<{
   dimension: CompositeDimension;
   read: (c: CompositeCandidate) => number | null;
 }> = [
-  { dimension: 'frequency', read: (c) => c.freqScore },
+  { dimension: 'hotness', read: hotnessMagnitude },
   { dimension: 'memory', read: (c) => c.memoryBytes },
   { dimension: 'cardinality', read: (c) => c.cardinality },
 ];
@@ -62,7 +98,7 @@ export const COMPOSITE_MIN_DIMENSIONS = 2;
 
 /**
  * Ranks the keys that are extreme on at least `COMPOSITE_MIN_DIMENSIONS` of the
- * frequency / memory / cardinality dimensions. `perDimensionTopN` is the cutoff
+ * hotness / memory / cardinality dimensions. `perDimensionTopN` is the cutoff
  * applied to each dimension before intersecting.
  */
 export function rankCompositeKeys(
@@ -73,17 +109,14 @@ export function rankCompositeKeys(
     return [];
   }
 
-  // keyName -> (dimension -> value) for the dimensions where the key made top-N.
+  // keyName -> (dimension -> ranking value) for the dimensions where the key made top-N.
   const membership = new Map<string, Map<CompositeDimension, number>>();
   const dimensionMax = new Map<CompositeDimension, number>();
 
   for (const { dimension, read } of DIMENSIONS) {
     const withValue = candidates
       .map((candidate) => ({ candidate, value: read(candidate) }))
-      .filter(
-        (entry): entry is { candidate: CompositeCandidate; value: number } =>
-          entry.value !== null && Number.isFinite(entry.value) && entry.value > 0,
-      )
+      .filter((entry): entry is { candidate: CompositeCandidate; value: number } => isUsable(entry.value))
       .sort((a, b) => b.value - a.value);
 
     if (withValue.length === 0) {
@@ -121,14 +154,19 @@ export function rankCompositeKeys(
       score += max > 0 ? value / max : 0;
     }
 
+    const placedHotness = dims.has('hotness');
+    const hotnessIsFreq = placedHotness && hotnessFromFrequency(candidate);
+
     ranked.push({
       keyName: candidate.keyName,
       keyType: candidate.keyType,
       ttl: candidate.ttl,
       dimensions: [...dims.keys()],
-      freqScore: dims.has('frequency') ? (dims.get('frequency') as number) : null,
-      memoryBytes: dims.has('memory') ? (dims.get('memory') as number) : null,
-      cardinality: dims.has('cardinality') ? (dims.get('cardinality') as number) : null,
+      // Report the raw signal the hotness placement came from, not the derived magnitude.
+      freqScore: hotnessIsFreq ? candidate.freqScore : null,
+      idleSeconds: placedHotness && !hotnessIsFreq ? candidate.idleSeconds : null,
+      memoryBytes: dims.has('memory') ? candidate.memoryBytes : null,
+      cardinality: dims.has('cardinality') ? candidate.cardinality : null,
       score,
     });
   }

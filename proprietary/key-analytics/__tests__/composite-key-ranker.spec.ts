@@ -8,6 +8,7 @@ function candidate(over: Partial<CompositeCandidate> & { keyName: string }): Com
   return {
     keyType: 'string',
     freqScore: null,
+    idleSeconds: null,
     memoryBytes: null,
     cardinality: null,
     ttl: null,
@@ -28,10 +29,29 @@ describe('rankCompositeKeys', () => {
 
     const ranked = rankCompositeKeys(candidates, 1);
 
-    // Per-dimension top-1: frequency -> hot-big, memory -> mem-hog, cardinality -> hot-big.
+    // Per-dimension top-1: hotness -> hot-big, memory -> mem-hog, cardinality -> hot-big.
     expect(ranked.map((r) => r.keyName)).toEqual(['hot-big']);
     expect(ranked[0].dimensions.length).toBeGreaterThanOrEqual(COMPOSITE_MIN_DIMENSIONS);
-    expect(new Set(ranked[0].dimensions)).toEqual(new Set(['frequency', 'cardinality']));
+    expect(new Set(ranked[0].dimensions)).toEqual(new Set(['hotness', 'cardinality']));
+  });
+
+  it('falls back to idle recency for hotness when LFU frequency is unavailable', () => {
+    // Default (non-LFU) policy: OBJECT FREQ is null for every key, so hotness
+    // must come from idle time (lower idle = hotter).
+    const candidates: CompositeCandidate[] = [
+      candidate({ keyName: 'hot-big', freqScore: null, idleSeconds: 1, memoryBytes: 9000, cardinality: 5000 }),
+      candidate({ keyName: 'cold-big', freqScore: null, idleSeconds: 100000, memoryBytes: 8000, cardinality: 4000 }),
+    ];
+
+    const ranked = rankCompositeKeys(candidates, 1);
+
+    // hotness top-1 -> hot-big (idle 1), memory top-1 -> hot-big, cardinality top-1 -> hot-big.
+    expect(ranked.map((r) => r.keyName)).toEqual(['hot-big']);
+    const hb = ranked[0];
+    expect(hb.dimensions).toContain('hotness');
+    // Hotness placement came from idle, so idleSeconds is reported and freqScore stays null.
+    expect(hb.idleSeconds).toBe(1);
+    expect(hb.freqScore).toBeNull();
   });
 
   it('populates a value only for the dimensions the key placed in', () => {
