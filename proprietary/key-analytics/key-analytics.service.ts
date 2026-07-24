@@ -338,11 +338,34 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   }
 
   /**
-   * Top-N composite ("hot big key") keys — extreme on more than one of the
-   * frequency / memory / cardinality dimensions at once (valkey #4189).
+   * Top-N composite ("hot big key") keys — extreme on both the hotness and
+   * cardinality dimensions at once (valkey #4189).
    */
   async getCompositeKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
-    return this.storage.getHotKeys({ ...options, signalTypes: ['composite'] });
+    const composite = await this.storage.getHotKeys({ ...options, signalTypes: ['composite'] });
+
+    // Unlike the other lists, a scan can legitimately find zero composite keys
+    // (nothing hot AND big) even on a full database. When that happens no
+    // 'composite' row is written, so a `latest` query — MAX(captured_at) over
+    // composite rows — would pin the previous non-empty batch and keep serving
+    // keys that are no longer composite. Every signal in one collection shares a
+    // capturedAt, so if the connection's newest row (any signal) is newer than
+    // the newest composite row, the latest scan produced no composites: return
+    // empty. Only applies to the default latest view, not explicit time ranges.
+    if (options?.latest && !options.startTime && !options.endTime && composite.length > 0) {
+      const newestAny = await this.storage.getHotKeys({
+        connectionId: options.connectionId,
+        signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
+        latest: true,
+        limit: 1,
+      });
+      const latestCollectionAt = newestAny[0]?.capturedAt;
+      if (latestCollectionAt !== undefined && composite[0].capturedAt < latestCollectionAt) {
+        return [];
+      }
+    }
+
+    return composite;
   }
 
   async pruneOldSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
