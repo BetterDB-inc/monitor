@@ -11,6 +11,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card'
 import { SlowLogTable } from '../components/metrics/SlowLogTable';
 import { CommandLogTable } from '../components/metrics/CommandLogTable';
 import { SlowLogPatternAnalysisView } from '../components/metrics/SlowLogPatternAnalysis';
+import { ScanSkewAdvisory } from '../components/metrics/ScanSkewAdvisory';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { CapabilityStatusBanner } from '../components/CapabilityStatusBanner';
 import type { CommandLogType, LogSortBy } from '../types/metrics';
@@ -183,6 +184,15 @@ export function SlowLog() {
     refetchKey: currentConnection?.id,
   });
 
+  // SCAN large-reply / hash-skew advisory (valkey#3955) — rides the stored
+  // large-reply log, so it works the same with or without a time filter.
+  const { data: scanSkewReport } = usePolling({
+    fetcher: () => metricsApi.getScanSkewAnalysis({ startTime, endTime }),
+    interval: 30000,
+    enabled: hasCommandLog && activeTab === 'large-reply',
+    refetchKey: `${currentConnection?.id ?? 'none'}:${startTime ?? ''}:${endTime ?? ''}`,
+  });
+
   // Stored pattern analysis (with time filter)
   const { data: storedCommandLogPatternAnalysis } = useStoredCommandLogPatterns({
     connectionId: currentConnection?.id,
@@ -341,6 +351,11 @@ export function SlowLog() {
             </div>
           </CardHeader>
           <CardContent>
+            {activeTab === 'large-reply' && (
+              <div className="mb-4 empty:hidden">
+                <ScanSkewAdvisory report={scanSkewReport} />
+              </div>
+            )}
             {viewMode === 'patterns' && commandLogPatternAnalysis ? (
               <SlowLogPatternAnalysisView
                 analysis={commandLogPatternAnalysis}
