@@ -48,6 +48,23 @@ describe('KeyAnalyticsService.getCompositeKeys freshness guard', () => {
     expect(res).toEqual([]);
   });
 
+  it('does not apply the freshness guard for unscoped (all-connections) queries', async () => {
+    // Across connections a shared capturedAt does not hold: connection A collecting
+    // later with no composites must not suppress connection B's valid batch.
+    const getHotKeys = jest.fn(async (opts: HotKeyQueryOptions) =>
+      isCompositeOnly(opts)
+        ? [hotKey({ capturedAt: 1000, keyName: 'b-composite', connectionId: 'B' })]
+        : [hotKey({ capturedAt: 2000, signalType: 'cardinality', connectionId: 'A' })],
+    );
+
+    const service = makeService(getHotKeys);
+    const res = await service.getCompositeKeys({ latest: true }); // no connectionId
+
+    expect(res.map((r) => r.keyName)).toEqual(['b-composite']);
+    // No cross-connection freshness lookup for unscoped queries.
+    expect(getHotKeys).toHaveBeenCalledTimes(1);
+  });
+
   it('does not apply the freshness guard for explicit time ranges', async () => {
     const getHotKeys = jest.fn(async () => [hotKey({ capturedAt: 1000, keyName: 'ranged' })]);
 

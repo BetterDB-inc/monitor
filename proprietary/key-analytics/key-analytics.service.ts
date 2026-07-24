@@ -351,8 +351,20 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     // keys that are no longer composite. Every signal in one collection shares a
     // capturedAt, so if the connection's newest row (any signal) is newer than
     // the newest composite row, the latest scan produced no composites: return
-    // empty. Only applies to the default latest view, not explicit time ranges.
-    if (options?.latest && !options.startTime && !options.endTime && composite.length > 0) {
+    // empty.
+    //
+    // This comparison is only sound *per connection*: a shared capturedAt holds
+    // within one connection, not across connections. For an unscoped query
+    // (connectionId omitted), a later empty scan on connection A would otherwise
+    // wrongly suppress connection B's still-valid composites — so the guard is
+    // limited to connection-scoped latest views (and never to explicit ranges).
+    if (
+      options?.connectionId &&
+      options.latest &&
+      !options.startTime &&
+      !options.endTime &&
+      composite.length > 0
+    ) {
       const newestAny = await this.storage.getHotKeys({
         connectionId: options.connectionId,
         signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
