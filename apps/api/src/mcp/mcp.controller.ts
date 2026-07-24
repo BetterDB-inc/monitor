@@ -1,4 +1,18 @@
-import { Controller, Get, Post, Body, Param, Query, HttpException, HttpStatus, UseGuards, Optional, Inject, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Query,
+  HttpException,
+  HttpStatus,
+  UseGuards,
+  Optional,
+  Inject,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
 import { ANOMALY_SERVICE } from '@betterdb/shared';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
@@ -9,7 +23,15 @@ import { ClientAnalyticsAnalysisService } from '../client-analytics/client-analy
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
-import { MAX_LIMIT, ValidateInstanceIdPipe, msToSeconds, safeLimit, safeParseInt } from './mcp-helpers';
+import { ConfigHazardService } from '../monitor/config-hazard.service';
+import { ConfigHazardFinding } from '../monitor/config-hazard';
+import {
+  MAX_LIMIT,
+  ValidateInstanceIdPipe,
+  msToSeconds,
+  safeLimit,
+  safeParseInt,
+} from './mcp-helpers';
 
 const EVENT_NAME_RE = /^[a-zA-Z0-9_.-]+$/;
 const VALID_ORDER_BY = new Set(['key-count', 'cpu-usec']);
@@ -34,6 +56,7 @@ export class McpController {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     @Optional() @Inject(ANOMALY_SERVICE) anomalyService?: any,
     @Optional() telemetryService?: UsageTelemetryService,
+    @Optional() private readonly configHazardService?: ConfigHazardService,
   ) {
     this.anomalyService = anomalyService ?? null;
     this.telemetryService = telemetryService ?? null;
@@ -56,26 +79,38 @@ export class McpController {
   }
 
   @Get('instance/:id/info')
-  async getInfo(@Param('id', ValidateInstanceIdPipe) id: string, @Query('section') section?: string) {
+  async getInfo(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Query('section') section?: string,
+  ) {
     try {
       const client = this.registry.get(id);
       const sections = section ? section.split(',') : undefined;
       const info = await client.getInfoParsed(sections);
       return info;
     } catch (error) {
-      this.logger.error(`Failed to get info for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get info for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get info', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
   @Get('instance/:id/slowlog')
-  async getSlowlog(@Param('id', ValidateInstanceIdPipe) id: string, @Query('count') count?: string) {
+  async getSlowlog(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Query('count') count?: string,
+  ) {
     try {
       const client = this.registry.get(id);
       const parsedCount = safeLimit(count, 25);
       return await client.getSlowLog(parsedCount);
     } catch (error) {
-      this.logger.error(`Failed to get slowlog for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get slowlog for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get slowlog', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -86,7 +121,10 @@ export class McpController {
       const client = this.registry.get(id);
       return await client.getLatestLatencyEvents();
     } catch (error) {
-      this.logger.error(`Failed to get latency for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get latency for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get latency', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -101,13 +139,19 @@ export class McpController {
       ]);
       return { doctor, stats };
     } catch (error) {
-      this.logger.error(`Failed to get memory for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get memory for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get memory diagnostics', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
   @Get('instance/:id/commandlog')
-  async getCommandlog(@Param('id', ValidateInstanceIdPipe) id: string, @Query('count') count?: string) {
+  async getCommandlog(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Query('count') count?: string,
+  ) {
     try {
       const client = this.registry.get(id);
       const capabilities = client.getCapabilities();
@@ -121,7 +165,10 @@ export class McpController {
       if (msg.includes('unknown command') || msg.includes('COMMANDLOG')) {
         return { entries: [], note: 'COMMANDLOG not available on this instance' };
       }
-      this.logger.error(`Failed to get commandlog for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get commandlog for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get commandlog', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -132,7 +179,10 @@ export class McpController {
       const client = this.registry.get(id);
       return await client.getClients();
     } catch (error) {
-      this.logger.error(`Failed to get clients for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get clients for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get clients', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -146,7 +196,10 @@ export class McpController {
       const parsedLimit = limit !== undefined ? safeLimit(limit, MAX_LIMIT) : undefined;
       return await this.metricsService.getSlowLogPatternAnalysis(parsedLimit, id);
     } catch (error) {
-      this.logger.error(`Failed to get slowlog patterns for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get slowlog patterns for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get slowlog patterns', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -175,7 +228,10 @@ export class McpController {
       if (msg.includes('unknown command') || msg.includes('COMMANDLOG')) {
         return { entries: [], note: 'COMMANDLOG not available on this instance' };
       }
-      this.logger.error(`Failed to get commandlog history for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get commandlog history for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get commandlog history', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -199,8 +255,14 @@ export class McpController {
       if (msg.includes('unknown command') || msg.includes('COMMANDLOG')) {
         return { entries: [], note: 'COMMANDLOG not available on this instance' };
       }
-      this.logger.error(`Failed to get commandlog patterns for ${id}`, error instanceof Error ? error.stack : error);
-      throw new HttpException('Failed to get commandlog patterns', HttpStatus.INTERNAL_SERVER_ERROR);
+      this.logger.error(
+        `Failed to get commandlog patterns for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
+      throw new HttpException(
+        'Failed to get commandlog patterns',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -229,7 +291,10 @@ export class McpController {
         id,
       );
     } catch (error) {
-      this.logger.error(`Failed to get anomalies for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get anomalies for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get anomalies', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -251,7 +316,10 @@ export class McpController {
         id,
       );
     } catch (error) {
-      this.logger.error(`Failed to get client activity for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get client activity for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get client activity', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -265,7 +333,10 @@ export class McpController {
       if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
         return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
       }
-      this.logger.error(`Failed to get cluster nodes for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get cluster nodes for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get cluster nodes', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -279,7 +350,10 @@ export class McpController {
       if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
         return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
       }
-      this.logger.error(`Failed to get cluster node stats for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get cluster node stats for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get cluster node stats', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -297,7 +371,10 @@ export class McpController {
       if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
         return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
       }
-      this.logger.error(`Failed to get cluster slowlog for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get cluster slowlog for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get cluster slowlog', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -309,9 +386,10 @@ export class McpController {
     @Query('limit') limit?: string,
   ) {
     try {
-      const parsedOrderBy = (orderBy && VALID_ORDER_BY.has(orderBy))
-        ? (orderBy as 'key-count' | 'cpu-usec')
-        : 'key-count';
+      const parsedOrderBy =
+        orderBy && VALID_ORDER_BY.has(orderBy)
+          ? (orderBy as 'key-count' | 'cpu-usec')
+          : 'key-count';
       const parsedLimit = safeLimit(limit, 20);
       return await this.metricsService.getClusterSlotStats(parsedOrderBy, parsedLimit, id);
     } catch (error) {
@@ -322,7 +400,10 @@ export class McpController {
       if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
         return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
       }
-      this.logger.error(`Failed to get cluster slot stats for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get cluster slot stats for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get cluster slot stats', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -338,7 +419,10 @@ export class McpController {
     try {
       return await this.metricsService.getLatencyHistory(eventName, id);
     } catch (error) {
-      this.logger.error(`Failed to get latency history for ${id}/${eventName}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get latency history for ${id}/${eventName}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get latency history', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -362,7 +446,10 @@ export class McpController {
         connectionId: id,
       });
     } catch (error) {
-      this.logger.error(`Failed to get audit entries for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get audit entries for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get audit entries', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -384,7 +471,10 @@ export class McpController {
         latest: true,
       });
     } catch (error) {
-      this.logger.error(`Failed to get hot keys for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get hot keys for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get hot keys', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -392,16 +482,40 @@ export class McpController {
   @Get('instance/:id/health')
   async getHealth(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
-      return await this.metricsService.getHealthSummary(id);
+      const summary = await this.metricsService.getHealthSummary(id);
+      const result: typeof summary & { configHazards?: ConfigHazardFinding[] } = { ...summary };
+      if (this.configHazardService) {
+        try {
+          result.configHazards = await this.configHazardService.getHazards(id);
+        } catch (err) {
+          this.logger.debug(
+            `Config-hazard probe failed for ${id}: ${err instanceof Error ? err.message : err}`,
+          );
+          result.configHazards = [];
+        }
+      }
+      return result;
     } catch (error) {
-      this.logger.error(`Failed to get health for ${id}`, error instanceof Error ? error.stack : error);
+      this.logger.error(
+        `Failed to get health for ${id}`,
+        error instanceof Error ? error.stack : error,
+      );
       throw new HttpException('Failed to get health', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
   @Post('telemetry')
   async postTelemetry(
-    @Body() body: { events?: Array<{ toolName: string; success: boolean; durationMs: number; timestamp?: number; error?: string }> },
+    @Body()
+    body: {
+      events?: Array<{
+        toolName: string;
+        success: boolean;
+        durationMs: number;
+        timestamp?: number;
+        error?: string;
+      }>;
+    },
   ) {
     if (!this.telemetryService) {
       return { ok: true };
@@ -410,15 +524,16 @@ export class McpController {
     if (!Array.isArray(events) || events.length === 0 || events.length > 100) {
       throw new BadRequestException('events must be an array of 1–100 items');
     }
-    await Promise.all(events.map(event =>
-      this.telemetryService!.trackMcpToolCall({
-        toolName: event.toolName,
-        success: event.success,
-        durationMs: event.durationMs,
-        error: event.error,
-      }),
-    ));
+    await Promise.all(
+      events.map((event) =>
+        this.telemetryService!.trackMcpToolCall({
+          toolName: event.toolName,
+          success: event.success,
+          durationMs: event.durationMs,
+          error: event.error,
+        }),
+      ),
+    );
     return { ok: true };
   }
-
 }

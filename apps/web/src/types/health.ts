@@ -1,1 +1,6 @@
-export type { HealthResponse, DatabaseCapabilities } from '@betterdb/shared';
+export type {
+  HealthResponse,
+  DatabaseCapabilities,
+  DetailedHealthResponse,
+  ConfigHazardFinding,
+} from '@betterdb/shared';
