@@ -5,6 +5,7 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { Tier } from '@proprietary/licenses/types';
 import { KeySizeDistribution, parseKeySizeDistribution, KEY_DETAILS_TOP_N } from '@betterdb/shared';
+import { rankCompositeKeys } from './composite-key-ranker';
 import { randomUUID } from 'crypto';
 
 // The collectors prune keyDetails mid-scan to the top KEY_DETAILS_TOP_N keys per
@@ -15,6 +16,13 @@ import { randomUUID } from 'crypto';
 // the shared constant keeps that invariant true by construction.
 const HOT_KEYS_TOP_N = KEY_DETAILS_TOP_N;
 const LARGEST_KEYS_TOP_N = KEY_DETAILS_TOP_N;
+// Composite (multi-dimensional) ranking reuses the same per-key data. Its two
+// dimensions — hotness (LFU/idletime) and cardinality — are both signals the
+// collector already retains a global top-N for, so a genuine composite (extreme
+// on both) is always present in keyDetails; the per-dimension cutoff below shares
+// that same top-N bound. (Memory is NOT globally retained and so is reported as
+// context only, never as a ranking dimension — see composite-key-ranker.)
+const COMPOSITE_TOP_N = KEY_DETAILS_TOP_N;
 
 /** Retention in days per tier. null = keep indefinitely. */
 const TIER_RETENTION_DAYS: Record<Tier, number | null> = {
@@ -226,10 +234,6 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
           };
         });
 
-        if (hotKeys.length > 0) {
-          await this.storage.saveHotKeys(hotKeys, ctx.connectionId);
-        }
-
         // Largest keys (valkey #1827): rank by cardinality (element count / byte length).
         const largestKeys: HotKeyEntry[] = result.keyDetails
           .filter((kd) => kd.cardinality !== null)
@@ -248,8 +252,49 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
             rank: idx + 1,
           }));
 
-        if (largestKeys.length > 0) {
-          await this.storage.saveHotKeys(largestKeys, ctx.connectionId);
+        // Composite / multi-dimensional keys (valkey #4189): keys that are extreme
+        // on more than one dimension at once — the "hot big key" that the single
+        // signal lists above each miss. Derived from the same per-key data, so no
+        // extra scanning; only keys placing in >= 2 dimensions are emitted.
+        const compositeKeys: HotKeyEntry[] = rankCompositeKeys(
+          result.keyDetails.map((kd) => ({
+            keyName: kd.keyName,
+            keyType: kd.keyType,
+            freqScore: kd.freqScore,
+            idleSeconds: kd.idleSeconds,
+            memoryBytes: kd.memoryBytes,
+            cardinality: kd.cardinality,
+            ttl: kd.ttl,
+          })),
+          COMPOSITE_TOP_N,
+        )
+          .slice(0, COMPOSITE_TOP_N)
+          .map((ck, idx) => ({
+            id: randomUUID(),
+            keyName: ck.keyName,
+            connectionId: ctx.connectionId,
+            capturedAt,
+            signalType: 'composite' as const,
+            freqScore: ck.freqScore ?? undefined,
+            idleSeconds: ck.idleSeconds ?? undefined,
+            memoryBytes: ck.memoryBytes ?? undefined,
+            cardinality: ck.cardinality ?? undefined,
+            keyType: ck.keyType ?? undefined,
+            ttl: ck.ttl ?? undefined,
+            rank: idx + 1,
+          }));
+
+        // Persist all three signal groups in ONE atomic saveHotKeys call so a
+        // reader never sees a half-written collection. If hot/largest rows landed
+        // first under this capturedAt while composites were still pending, the
+        // composite freshness guard (getCompositeKeys) would read the newer
+        // non-composite rows, conclude the scan produced no composites, and
+        // return empty even though composites were about to be written. Writing
+        // them together (saveHotKeys wraps the batch in a transaction) means a
+        // capturedAt is either fully visible with its composites or not at all.
+        const hotKeyRows = [...hotKeys, ...largestKeys, ...compositeKeys];
+        if (hotKeyRows.length > 0) {
+          await this.storage.saveHotKeys(hotKeyRows, ctx.connectionId);
         }
       }
 
@@ -291,6 +336,49 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   /** Top-N largest keys by cardinality (element count / byte length). */
   async getLargestKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
     return this.storage.getHotKeys({ ...options, signalTypes: ['cardinality'] });
+  }
+
+  /**
+   * Top-N composite ("hot big key") keys — extreme on both the hotness and
+   * cardinality dimensions at once (valkey #4189).
+   */
+  async getCompositeKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
+    const composite = await this.storage.getHotKeys({ ...options, signalTypes: ['composite'] });
+
+    // Unlike the other lists, a scan can legitimately find zero composite keys
+    // (nothing hot AND big) even on a full database. When that happens no
+    // 'composite' row is written, so a `latest` query — MAX(captured_at) over
+    // composite rows — would pin the previous non-empty batch and keep serving
+    // keys that are no longer composite. Every signal in one collection shares a
+    // capturedAt, so if the connection's newest row (any signal) is newer than
+    // the newest composite row, the latest scan produced no composites: return
+    // empty.
+    //
+    // This comparison is only sound *per connection*: a shared capturedAt holds
+    // within one connection, not across connections. For an unscoped query
+    // (connectionId omitted), a later empty scan on connection A would otherwise
+    // wrongly suppress connection B's still-valid composites — so the guard is
+    // limited to connection-scoped latest views (and never to explicit ranges).
+    if (
+      options?.connectionId &&
+      options.latest &&
+      !options.startTime &&
+      !options.endTime &&
+      composite.length > 0
+    ) {
+      const newestAny = await this.storage.getHotKeys({
+        connectionId: options.connectionId,
+        signalTypes: ['lfu', 'idletime', 'cardinality', 'composite'],
+        latest: true,
+        limit: 1,
+      });
+      const latestCollectionAt = newestAny[0]?.capturedAt;
+      if (latestCollectionAt !== undefined && composite[0].capturedAt < latestCollectionAt) {
+        return [];
+      }
+    }
+
+    return composite;
   }
 
   async pruneOldSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {

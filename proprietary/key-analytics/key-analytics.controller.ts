@@ -98,6 +98,30 @@ export class KeyAnalyticsController {
     });
   }
 
+  @Get('composite-keys')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature('keyAnalytics')
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getCompositeKeys(
+    @ConnectionId() connectionId?: string,
+    @Query('limit') limit?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+    @Query('latest') latest?: string,
+    @Query('oldest') oldest?: string,
+  ) {
+    const wantOldest = oldest === 'true';
+    return this.keyAnalytics.getCompositeKeys({
+      connectionId,
+      limit: safeInt(limit, 50, MAX_LIMIT),
+      startTime: safeInt(startTime),
+      endTime: safeInt(endTime),
+      // Default to the latest snapshot unless an explicit time range or oldest is requested.
+      latest: wantOldest ? false : latest !== 'false',
+      oldest: wantOldest,
+    });
+  }
+
   @Get('trends')
   @UseGuards(LicenseGuard)
   @RequiresFeature('keyAnalytics')
