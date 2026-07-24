@@ -92,7 +92,8 @@
     "iovalkey": ">=0.3.0",
     "openai": "^6.34.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.1"
+    "vitest": "^4.1.1",
+    "zod": "^3.25.0"
   },
   "engines": {
     "node": ">=20.0.0"

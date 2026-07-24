@@ -297,6 +297,8 @@ const effectiveness = await cache.toolEffectiveness();
 
 ### LangChain
 
+**Zero-config caching** — plug into LangChain's native `cache` option:
+
 ```typescript
 import { ChatOpenAI } from '@langchain/openai';
 import { BetterDBLlmCache } from '@betterdb/agent-cache/langchain';
@@ -306,6 +308,26 @@ const model = new ChatOpenAI({
   cache: new BetterDBLlmCache({ cache }),
 });
 ```
+
+**Tool-schema-aware caching (`CachedChatModel`)** — when your model uses `.bindTools(...)`,
+wrap the chat model so bound tool schemas are included in the cache key (unlike
+`BetterDBLlmCache`, which only sees `(prompt, llm_string)` via LangChain's `BaseCache`):
+
+```typescript
+import { ChatOpenAI } from '@langchain/openai';
+import { CachedChatModel } from '@betterdb/agent-cache/langchain';
+
+const base = new ChatOpenAI({ model: 'gpt-4o-mini' });
+const model = new CachedChatModel({ model: base, cache });
+const withTools = model.bindTools([/* tool definitions */]);
+await withTools.invoke(messages); // keys on messages + bound tools
+```
+
+`CachedChatModel` implements `bindTools` via `withConfig()` — the same mechanism
+`ChatOpenAI` uses internally. Tool schemas are normalized via `convertToOpenAITool`,
+so Zod tools key on JSON Schema; `tool_choice` and sampling params are keyed too;
+cached streams replay as a single chunk. Tool-call responses are stored via
+`storeMultipart` and rebuilt on cache hit.
 
 See [`examples/langchain`](./examples/langchain) for a full working example. Sample output:
 
@@ -504,6 +526,9 @@ Awaits the in-flight discovery registration. Rejects with `AgentCacheUsageError`
 
 ## Known limitations
 
+- **LangChain `BetterDBLlmCache` (`cache=`):** tool-schema drift is not reflected in the cache key — LangChain's `BaseCache` interface only exposes `(prompt, llm_string)` to the cache layer. Use `CachedChatModel` (model-level wrapper) when bound tools must be keyed; see the LangChain section above.
+- **`CachedChatModel` cache hits carry no token usage.** `LlmCacheResult` does not expose stored token counts, so a rebuilt `AIMessage` has no `usage_metadata`. Cost accounting on hits is handled by the cache's own stats, not by the message.
+- **`CachedChatModel` callbacks:** the wrapped model's LLM run is traced as a separate root run rather than a child of the wrapper's run.
 - **LangGraph `list()` memory usage:** The `list()` method loads all checkpoint data for a thread into memory before filtering and applying the limit. For typical agent deployments with hundreds of checkpoints per thread, this is acceptable. For threads with thousands of large checkpoints, this causes memory pressure even when requesting `limit: 1`. If you have millions of checkpoints per thread, consider using `langgraph-checkpoint-redis` with Redis 8+ instead.
 - **Session `getAll()`:** SCAN-based. Fine for dozens of fields, consider Redis HASH if you have thousands per thread.
 - **`active_sessions` gauge:** Approximate and does not survive process restarts.

@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`CachedChatModel` — tool-schema-aware LangChain caching.** A `BaseChatModel`
+  wrapper (`@betterdb/agent-cache/langchain`) that caches at the model level
+  instead of through LangChain's `BaseCache`, so bound tool schemas
+  (`.bindTools(...)`), `tool_choice`, and the wrapped model's sampling params are
+  all included in the cache key. Wrap any chat model:
+  `new CachedChatModel({ model, cache })`. Tool schemas are normalized with
+  LangChain's `convertToOpenAITool`, so Zod-based tools key on canonical JSON
+  Schema rather than on Zod internals. Streaming is supported: on a miss the
+  upstream chunks pass through untouched and the aggregate is stored on
+  completion; on a hit the stored response replays as a single chunk. Tool-call
+  responses are stored via `storeMultipart` and rebuilt on hit.
+
+  Resolves the tool-schema-drift limitation documented under v0.7.0 for callers
+  who opt into the wrapper; the existing `BetterDBLlmCache` (`cache=`) path is
+  unchanged and retains the `(prompt, llm_string)` limitation by design.
+
+### Behavior
+
+- No cache keys change for existing `BetterDBLlmCache` users. `CachedChatModel`
+  is a separate, opt-in integration.
+
 ## [0.11.1] - 2026-07-09
 
 ### Fixed

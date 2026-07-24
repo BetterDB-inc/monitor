@@ -5,9 +5,10 @@ A minimal example demonstrating two caching tiers with LangChain.
 ## What it shows
 
 1. **LLM response caching** — `BetterDBLlmCache` plugs into LangChain's native `cache` option so identical prompts return cached responses instantly from Valkey.
-2. **Tool result caching** — the `get_weather` function checks `cache.tool` before calling the (simulated) API, so repeated tool calls with the same arguments are free.
-3. **Cost tracking** — the `costTable` option tracks estimated savings from LLM cache hits per model.
-4. **Stats** — `cache.stats()` returns hit rates, miss counts, and cumulative cost savings.
+2. **Tool-schema-aware caching** — `CachedChatModel` wraps a chat model so `.bindTools(...)` schemas are included in the cache key; the example shows the same prompt with different tool sets producing separate cache entries.
+3. **Tool result caching** — the `get_weather` function checks `cache.tool` before calling the (simulated) API, so repeated tool calls with the same arguments are free.
+4. **Cost tracking** — the `costTable` option tracks estimated savings from LLM cache hits per model.
+5. **Stats** — `cache.stats()` returns hit rates, miss counts, and cumulative cost savings.
 
 ## Prerequisites
 
