@@ -23,6 +23,7 @@ import {
 const REASONING_MIN_LENGTH = 20;
 const PROPOSAL_RATE_LIMIT = 30;
 const PROPOSAL_RATE_WINDOW_MS = 60 * 60 * 1000;
+const STALE_APPLY_GRACE_MS = 60 * 60 * 1000;
 
 export interface ProposeForgetInput {
   storeName: string;
@@ -131,7 +132,26 @@ export class MemoryProposalService {
         );
       }
     }
-    return expired.length;
+
+    const failed = await this.storage.failStaleApplyingMemoryProposalsBefore(
+      now - STALE_APPLY_GRACE_MS,
+    );
+    for (const proposal of failed) {
+      try {
+        await this.appendAudit(
+          proposal.id,
+          'failed',
+          { reason: 'stale_apply', stale_after_ms: STALE_APPLY_GRACE_MS },
+          'system',
+          actorSource,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Failed to write stale-apply audit for ${proposal.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return expired.length + failed.length;
   }
 
   async approve(input: {
@@ -146,7 +166,10 @@ export class MemoryProposalService {
         appliedResult: approved.applied_result ?? { success: false, error: 'apply unavailable' },
       };
     }
-    return this.applyService.apply(approved, { actor: input.actor, actorSource: input.actorSource });
+    return this.applyService.apply(approved, {
+      actor: input.actor,
+      actorSource: input.actorSource,
+    });
   }
 
   async reject(input: {

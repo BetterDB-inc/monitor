@@ -573,7 +573,9 @@ export interface StoragePort {
     samples: Omit<StoredCommandStatsSample, 'id' | 'connectionId'>[],
     connectionId: string,
   ): Promise<number>;
-  getCommandStatsHistory(options: CommandStatsHistoryQueryOptions): Promise<StoredCommandStatsSample[]>;
+  getCommandStatsHistory(
+    options: CommandStatsHistoryQueryOptions,
+  ): Promise<StoredCommandStatsSample[]>;
   pruneOldCommandStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Latency Stats Sample Methods (INFO latencystats) - connectionId required for writes
@@ -703,4 +705,5 @@ export interface StoragePort {
   ): Promise<StoredMemoryProposalAudit>;
   getMemoryProposalAudit(proposalId: string): Promise<StoredMemoryProposalAudit[]>;
   expireMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]>;
+  failStaleApplyingMemoryProposalsBefore(now: number): Promise<StoredMemoryProposal[]>;
 }
