@@ -2,33 +2,39 @@
  * Multi-dimensional ("hot big key") ranking — valkey #4189.
  *
  * The existing key-analytics lists rank each dimension independently: hot keys
- * (by access frequency or recency), `cardinality` (big by element count / byte
- * length), and a key's memory footprint rides along. A key that is *only* hot or
- * *only* big is already covered by those lists. What none of them surface is the
- * key that is extreme on MORE THAN ONE dimension at once — a large collection
- * that is also hammered, or a hot key whose value has quietly grown huge. Those
- * are the ones that actually cause incidents (bandwidth amplification, single-
- * shard hotspots, O(N) commands on a big value under load).
+ * (by access frequency or recency) and `cardinality` (big by element count / byte
+ * length). A key that is *only* hot or *only* big is already covered by those
+ * lists. What none of them surface is the key that is extreme on BOTH at once — a
+ * large collection that is also hammered, or a hot key whose value has quietly
+ * grown huge. Those are the ones that actually cause incidents (bandwidth
+ * amplification, single-shard hotspots, O(N) commands on a big value under load).
  *
  * This is a pure post-processing pass over the per-key data already collected in
- * one scan (no extra key access, no new server round-trips): for each of the
- * three dimensions we take the per-dimension top-N, and a key that lands in at
- * least two of those top-N sets is a composite candidate. Candidates are ranked
- * first by how many dimensions they are extreme on, then by the sum of their
- * normalized (value / dimension-max) contributions, so ties on dimension-count
- * break toward the key that is more extreme overall.
+ * one scan (no extra key access, no new server round-trips): we take the
+ * per-dimension top-N of hotness and of cardinality, and a key that lands in both
+ * is a composite. Composites are ranked by the sum of their normalized
+ * (value / dimension-max) contributions, so the most extreme rise to the top.
+ *
+ * Why only hotness and cardinality: both are signals the collector already
+ * retains a *global* top-N for, so their per-dimension cutoff here is over the
+ * true keyspace, not a biased subset. `memoryBytes` is NOT globally retained
+ * (the collector prunes keyDetails by LFU / idletime / cardinality only), so
+ * ranking a "memory top-N" over that already-pruned pool would mislabel keys as
+ * memory-extreme when they are merely the biggest of an interesting subset. It is
+ * therefore reported as informational context on each composite entry but is not
+ * a ranking dimension. (A globally-ranked memory dimension needs collector-side
+ * memory retention — deferred to a later phase.) Cardinality already captures
+ * "big" across types: element count for collections, byte length for strings.
  *
  * Hotness is measured by LFU access frequency (`OBJECT FREQ`) when the server's
  * maxmemory-policy exposes it, and otherwise by recency (`OBJECT IDLETIME`,
  * lower idle = hotter) — mirroring the fallback the hot-keys collector already
- * uses. Without that fallback the hotness dimension would be empty on the default
- * (non-LFU) policy, collapsing "composite" to memory ∩ cardinality and missing
- * the true hot+big keys this feature exists to catch.
+ * uses, so the hotness dimension is populated on the default (non-LFU) policy too.
  *
  * SDK-free and side-effect-free so it can be unit-tested directly.
  */
 
-export type CompositeDimension = 'hotness' | 'memory' | 'cardinality';
+export type CompositeDimension = 'hotness' | 'cardinality';
 
 export interface CompositeCandidate {
   keyName: string;
@@ -37,6 +43,7 @@ export interface CompositeCandidate {
   freqScore: number | null;
   /** Idle seconds (OBJECT IDLETIME). The recency fallback when freqScore is absent. */
   idleSeconds: number | null;
+  /** Reported as context on the composite entry; not a ranking dimension (see file header). */
   memoryBytes: number | null;
   cardinality: number | null;
   ttl: number | null;
@@ -52,7 +59,7 @@ export interface CompositeKeyRank {
   freqScore: number | null;
   /** Set only when the key placed in 'hotness' via idle recency, else null. */
   idleSeconds: number | null;
-  /** Populated only when 'memory' is in `dimensions`, else null. */
+  /** Informational memory footprint of the key (not a ranking dimension), passed through as-is. */
   memoryBytes: number | null;
   /** Populated only when 'cardinality' is in `dimensions`, else null. */
   cardinality: number | null;
@@ -89,17 +96,19 @@ const DIMENSIONS: Array<{
   read: (c: CompositeCandidate) => number | null;
 }> = [
   { dimension: 'hotness', read: hotnessMagnitude },
-  { dimension: 'memory', read: (c) => c.memoryBytes },
   { dimension: 'cardinality', read: (c) => c.cardinality },
 ];
 
-/** Minimum number of dimensions a key must be extreme on to count as composite. */
+/**
+ * Minimum number of dimensions a key must be extreme on to count as composite.
+ * With two dimensions this means both hotness AND cardinality.
+ */
 export const COMPOSITE_MIN_DIMENSIONS = 2;
 
 /**
  * Ranks the keys that are extreme on at least `COMPOSITE_MIN_DIMENSIONS` of the
- * hotness / memory / cardinality dimensions. `perDimensionTopN` is the cutoff
- * applied to each dimension before intersecting.
+ * hotness / cardinality dimensions. `perDimensionTopN` is the cutoff applied to
+ * each dimension before intersecting.
  */
 export function rankCompositeKeys(
   candidates: CompositeCandidate[],
@@ -165,13 +174,15 @@ export function rankCompositeKeys(
       // Report the raw signal the hotness placement came from, not the derived magnitude.
       freqScore: hotnessIsFreq ? candidate.freqScore : null,
       idleSeconds: placedHotness && !hotnessIsFreq ? candidate.idleSeconds : null,
-      memoryBytes: dims.has('memory') ? candidate.memoryBytes : null,
+      // Memory is context, not a dimension — always passed through when known.
+      memoryBytes: candidate.memoryBytes,
       cardinality: dims.has('cardinality') ? candidate.cardinality : null,
       score,
     });
   }
 
-  // Most dimensions first; break ties by the higher normalized composite score.
+  // Ranked by the higher normalized composite score (all entries share the same
+  // dimension count today, but keep the count as the primary key for generality).
   ranked.sort((a, b) => b.dimensions.length - a.dimensions.length || b.score - a.score);
   return ranked;
 }

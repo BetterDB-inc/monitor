@@ -16,8 +16,12 @@ import { randomUUID } from 'crypto';
 // the shared constant keeps that invariant true by construction.
 const HOT_KEYS_TOP_N = KEY_DETAILS_TOP_N;
 const LARGEST_KEYS_TOP_N = KEY_DETAILS_TOP_N;
-// Composite (multi-dimensional) ranking reuses the same already-retained per-key
-// data, so its per-dimension cutoff shares the collectors' top-N bound.
+// Composite (multi-dimensional) ranking reuses the same per-key data. Its two
+// dimensions — hotness (LFU/idletime) and cardinality — are both signals the
+// collector already retains a global top-N for, so a genuine composite (extreme
+// on both) is always present in keyDetails; the per-dimension cutoff below shares
+// that same top-N bound. (Memory is NOT globally retained and so is reported as
+// context only, never as a ranking dimension — see composite-key-ranker.)
 const COMPOSITE_TOP_N = KEY_DETAILS_TOP_N;
 
 /** Retention in days per tier. null = keep indefinitely. */
