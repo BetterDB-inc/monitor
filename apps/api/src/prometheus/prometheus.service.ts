@@ -1063,28 +1063,32 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           .set(parseInt(clusterInfo.cluster_slots_pfail) || 0);
       }
 
-      // Webhook dispatch for cluster.failover
-      if (this.webhookEventsProService) {
-        const stateChanged = state.previousClusterState === 'ok' && clusterState === 'fail';
-        const newSlotFailures = state.previousSlotsFail < slotsFail && slotsFail > 0;
+      // cluster.failover: detect the edge, mirror to OTLP, and advance the
+      // tracked state independent of webhook wiring, so an OTLP-only deployment
+      // (no Pro webhook service) still sees failover — parity with the
+      // instance.down / instance.up availability edges. Only the webhook dispatch
+      // itself is gated on the Pro service being present.
+      const stateChanged = state.previousClusterState === 'ok' && clusterState === 'fail';
+      const newSlotFailures = state.previousSlotsFail < slotsFail && slotsFail > 0;
 
-        if (stateChanged || newSlotFailures) {
-          // OTLP mirror is decoupled from the Pro webhook gate: the failover edge
-          // is computed above independent of webhook config, so ship it to OTLP
-          // whenever it fires (the dispatcher no-ops unless OTEL_* is set).
-          try {
-            this.otelEvents?.dispatch(
-              WebhookEventType.CLUSTER_FAILOVER,
-              {
-                clusterState,
-                slotsFailed: slotsFail,
-                knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
-              },
-              connectionId,
-            );
-          } catch (err) {
-            this.logger.error('Failed to dispatch cluster.failover OTLP event', err);
-          }
+      if (stateChanged || newSlotFailures) {
+        // OTLP mirror is decoupled from the Pro webhook gate (the dispatcher
+        // no-ops unless OTEL_* is set).
+        try {
+          this.otelEvents?.dispatch(
+            WebhookEventType.CLUSTER_FAILOVER,
+            {
+              clusterState,
+              slotsFailed: slotsFail,
+              knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
+            },
+            connectionId,
+          );
+        } catch (err) {
+          this.logger.error('Failed to dispatch cluster.failover OTLP event', err);
+        }
+
+        if (this.webhookEventsProService) {
           try {
             await this.webhookEventsProService.dispatchClusterFailover({
               clusterState,
@@ -1100,10 +1104,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
             this.logger.error('Failed to dispatch cluster.failover webhook', err);
           }
         }
-
-        state.previousClusterState = clusterState;
-        state.previousSlotsFail = slotsFail;
       }
+
+      state.previousClusterState = clusterState;
+      state.previousSlotsFail = slotsFail;
 
       const capabilities = client.getCapabilities();
       if (
