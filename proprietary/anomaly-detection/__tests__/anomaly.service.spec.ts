@@ -796,6 +796,29 @@ describe('AnomalyService', () => {
       );
     });
 
+    it('mirrors the anomaly to OTLP even when the Pro webhook is disabled', async () => {
+      // OTLP export is its own opt-in channel (gated only by OTEL_* in the
+      // dispatcher); a disabled or unconfigured Pro webhook must not suppress it
+      // (valkey#4078).
+      webhookEventsProService.isEnabled.mockReturnValue(false);
+
+      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      await poll();
+      mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' }); // empty keyspace
+      await poll();
+
+      expect(dataLossEvents()).toHaveLength(1);
+      expect(otelEvents.dispatch).toHaveBeenCalledWith(
+        WebhookEventType.ANOMALY_DETECTED,
+        expect.objectContaining({
+          severity: AnomalySeverity.CRITICAL,
+          metricType: MetricType.DATASET_KEYS,
+          anomalyType: AnomalyType.DROP,
+        }),
+        'conn-1',
+      );
+    });
+
     it('fires Rule B when a replica is wiped by a full resync from an empty primary', async () => {
       mockReplInfo({ role: 'replica', replid: 'replid-aaaa', db0: 'keys=200,expires=0,avg_ttl=0' });
       await poll();

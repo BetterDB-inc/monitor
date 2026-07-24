@@ -1,4 +1,9 @@
-import { planInstruments, collectDataPoints, type PromMetricJson } from '../prom-otel-bridge';
+import {
+  planInstruments,
+  collectDataPoints,
+  deriveUnit,
+  type PromMetricJson,
+} from '../prom-otel-bridge';
 
 describe('prom-otel-bridge', () => {
   const sample: PromMetricJson[] = [
@@ -29,18 +34,36 @@ describe('prom-otel-bridge', () => {
           name: 'betterdb_memory_used_bytes',
           kind: 'gauge',
           description: 'Total allocated memory in bytes',
+          unit: 'By',
         },
         {
           name: 'betterdb_polls_total',
           kind: 'counter',
           description: 'Total number of poll cycles completed',
+          unit: '',
         },
       ]);
     });
 
     it('defaults an empty description when help is missing', () => {
       const specs = planInstruments([{ name: 'x', type: 'gauge', values: [] }]);
-      expect(specs).toEqual([{ name: 'x', kind: 'gauge', description: '' }]);
+      expect(specs).toEqual([{ name: 'x', kind: 'gauge', description: '', unit: '' }]);
+    });
+  });
+
+  describe('deriveUnit', () => {
+    it('maps unambiguous prom-name suffixes to UCUM units', () => {
+      expect(deriveUnit('betterdb_memory_used_bytes')).toBe('By');
+      expect(deriveUnit('betterdb_poll_duration_seconds')).toBe('s');
+      expect(deriveUnit('betterdb_latency_milliseconds')).toBe('ms');
+      expect(deriveUnit('betterdb_fragmentation_ratio')).toBe('1');
+      expect(deriveUnit('betterdb_cpu_percent')).toBe('%');
+    });
+
+    it('returns no unit for the _total counter suffix and unknown names', () => {
+      expect(deriveUnit('betterdb_polls_total')).toBe('');
+      expect(deriveUnit('betterdb_connected_clients')).toBe('');
+      expect(deriveUnit('some_metric')).toBe('');
     });
   });
 

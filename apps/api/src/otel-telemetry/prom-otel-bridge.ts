@@ -24,6 +24,8 @@ export interface InstrumentSpec {
   name: string;
   kind: MirrorKind;
   description: string;
+  /** UCUM unit derived from the prom-client name suffix, or '' when unknown. */
+  unit: string;
 }
 
 export interface MirrorDataPoint {
@@ -41,6 +43,32 @@ function toMirrorKind(type: string): MirrorKind | null {
   return null;
 }
 
+/**
+ * Derives a UCUM unit from the prom-client metric-name suffix, following the
+ * Prometheus→OTel naming convention. Only unambiguous suffixes are mapped; an
+ * unknown suffix yields '' (no unit), which the SDK treats as unset. The '_total'
+ * counter suffix carries no unit and is intentionally left blank. Unit lives in
+ * OTLP metadata, not the name, so the mirrored name is never rewritten.
+ */
+export function deriveUnit(name: string): string {
+  if (name.endsWith('_bytes')) {
+    return 'By';
+  }
+  if (name.endsWith('_seconds')) {
+    return 's';
+  }
+  if (name.endsWith('_milliseconds')) {
+    return 'ms';
+  }
+  if (name.endsWith('_ratio')) {
+    return '1';
+  }
+  if (name.endsWith('_percent')) {
+    return '%';
+  }
+  return '';
+}
+
 export function planInstruments(metrics: PromMetricJson[]): InstrumentSpec[] {
   const specs: InstrumentSpec[] = [];
   for (const metric of metrics) {
@@ -48,7 +76,12 @@ export function planInstruments(metrics: PromMetricJson[]): InstrumentSpec[] {
     if (!kind) {
       continue;
     }
-    specs.push({ name: metric.name, kind, description: metric.help ?? '' });
+    specs.push({
+      name: metric.name,
+      kind,
+      description: metric.help ?? '',
+      unit: deriveUnit(metric.name),
+    });
   }
   return specs;
 }
