@@ -9,6 +9,7 @@ import {
 } from '../common/interfaces/storage-port.interface';
 import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
+import { analyzeScanSkew, ScanSkewReport } from './scan-skew-analyzer';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
@@ -104,7 +105,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
 
         // Update cache for Prometheus metrics
         connectionCachedEntries.set(type, entries);
-        connectionCachedAnalysis.set(type, analyzeSlowLogPatterns(entries as any));
+        connectionCachedAnalysis.set(type, analyzeSlowLogPatterns(entries));
         this.lastCacheUpdate.set(ctx.connectionId, now);
 
         // Detect ID wraparound (e.g., after COMMANDLOG RESET)
@@ -186,6 +187,20 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
     });
 
     return analyzeSlowLogPatterns(entries.map(toSlowLogEntry));
+  }
+
+  /**
+   * SCAN large-reply / hash-skew advisory (valkey#3955) over stored
+   * large-reply entries. The type filter is forced: the analysis is only
+   * meaningful against the large-reply log, whose magnitude column is bytes.
+   */
+  async getScanSkewAnalysis(options?: CommandLogQueryOptions): Promise<ScanSkewReport> {
+    const entries = await this.storage.getCommandLogEntries({
+      ...options,
+      type: 'large-reply',
+      limit: options?.limit || 500,
+    });
+    return analyzeScanSkew(entries);
   }
 
   async pruneOldEntries(retentionDays: number = 7, connectionId?: string): Promise<number> {
