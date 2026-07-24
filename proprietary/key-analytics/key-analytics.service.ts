@@ -234,10 +234,6 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
           };
         });
 
-        if (hotKeys.length > 0) {
-          await this.storage.saveHotKeys(hotKeys, ctx.connectionId);
-        }
-
         // Largest keys (valkey #1827): rank by cardinality (element count / byte length).
         const largestKeys: HotKeyEntry[] = result.keyDetails
           .filter((kd) => kd.cardinality !== null)
@@ -255,10 +251,6 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
             ttl: kd.ttl ?? undefined,
             rank: idx + 1,
           }));
-
-        if (largestKeys.length > 0) {
-          await this.storage.saveHotKeys(largestKeys, ctx.connectionId);
-        }
 
         // Composite / multi-dimensional keys (valkey #4189): keys that are extreme
         // on more than one dimension at once — the "hot big key" that the single
@@ -292,8 +284,17 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
             rank: idx + 1,
           }));
 
-        if (compositeKeys.length > 0) {
-          await this.storage.saveHotKeys(compositeKeys, ctx.connectionId);
+        // Persist all three signal groups in ONE atomic saveHotKeys call so a
+        // reader never sees a half-written collection. If hot/largest rows landed
+        // first under this capturedAt while composites were still pending, the
+        // composite freshness guard (getCompositeKeys) would read the newer
+        // non-composite rows, conclude the scan produced no composites, and
+        // return empty even though composites were about to be written. Writing
+        // them together (saveHotKeys wraps the batch in a transaction) means a
+        // capturedAt is either fully visible with its composites or not at all.
+        const hotKeyRows = [...hotKeys, ...largestKeys, ...compositeKeys];
+        if (hotKeyRows.length > 0) {
+          await this.storage.saveHotKeys(hotKeyRows, ctx.connectionId);
         }
       }
 

@@ -58,6 +58,25 @@ describe('rankCompositeKeys', () => {
     expect(hb.freqScore).toBeNull();
   });
 
+  it('treats a present zero freqScore as LFU-cold, not a missing signal', () => {
+    // Under an LFU policy freqScore is present; a decayed 0 counter means the key
+    // is cold and must NOT fall back to idle recency, even if it was just accessed.
+    const candidates: CompositeCandidate[] = [
+      // cold by LFU (freq 0) but idle 0 and the biggest key
+      candidate({ keyName: 'cold-lfu-big', freqScore: 0, idleSeconds: 0, cardinality: 10000 }),
+      // genuinely hot (freq) and big
+      candidate({ keyName: 'hot-big', freqScore: 255, cardinality: 9000 }),
+      candidate({ keyName: 'filler', freqScore: 10, cardinality: 1 }),
+    ];
+
+    const ranked = rankCompositeKeys(candidates, 2);
+
+    // cold-lfu-big has no hotness (freq 0 dropped, no idle fallback under LFU), so
+    // it is big-only -> not composite, despite idle 0 that would top the idle path.
+    expect(ranked.map((r) => r.keyName)).toEqual(['hot-big']);
+    expect(ranked.find((r) => r.keyName === 'cold-lfu-big')).toBeUndefined();
+  });
+
   it('ranks composites by their normalized score', () => {
     const candidates: CompositeCandidate[] = [
       candidate({ keyName: 'most', freqScore: 255, cardinality: 10000 }),

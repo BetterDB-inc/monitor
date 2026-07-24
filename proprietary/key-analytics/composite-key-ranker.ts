@@ -71,18 +71,25 @@ function isUsable(value: number | null): value is number {
   return value !== null && Number.isFinite(value) && value > 0;
 }
 
-/** True when the key's hotness (below) comes from LFU frequency rather than idle recency. */
-function hotnessFromFrequency(candidate: CompositeCandidate): boolean {
-  return isUsable(candidate.freqScore);
+/** True when LFU frequency is available for the key (an LFU maxmemory-policy is set). */
+function hasFrequencySignal(candidate: CompositeCandidate): boolean {
+  return candidate.freqScore !== null && Number.isFinite(candidate.freqScore);
 }
 
 /**
- * Hotness magnitude for ranking: LFU frequency when present, otherwise recency
- * derived from idle time (1 / (1 + idle), so a lower idle ranks hotter). Returns
- * null when neither signal is available for the key.
+ * Hotness magnitude for ranking: LFU frequency when the signal is available,
+ * otherwise recency derived from idle time (1 / (1 + idle), so a lower idle ranks
+ * hotter). Returns null when neither signal is available.
+ *
+ * When freqScore is present it is used even if it is 0 — under an LFU policy a
+ * decayed counter of 0 means the key is LFU-cold, not "no signal", so it must NOT
+ * fall back to idle (which would let a cold key sneak into the hotness top-N). A
+ * magnitude of 0 is then dropped by the isUsable(> 0) filter in the ranker, i.e.
+ * a cold key correctly places on no hotness dimension. Idle fallback applies only
+ * on non-LFU policies, where freqScore is null for every key.
  */
 function hotnessMagnitude(candidate: CompositeCandidate): number | null {
-  if (isUsable(candidate.freqScore)) {
+  if (hasFrequencySignal(candidate)) {
     return candidate.freqScore;
   }
   if (candidate.idleSeconds !== null && Number.isFinite(candidate.idleSeconds) && candidate.idleSeconds >= 0) {
@@ -164,7 +171,7 @@ export function rankCompositeKeys(
     }
 
     const placedHotness = dims.has('hotness');
-    const hotnessIsFreq = placedHotness && hotnessFromFrequency(candidate);
+    const hotnessIsFreq = placedHotness && hasFrequencySignal(candidate);
 
     ranked.push({
       keyName: candidate.keyName,
