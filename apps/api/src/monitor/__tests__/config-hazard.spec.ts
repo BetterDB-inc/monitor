@@ -84,6 +84,19 @@ describe('evaluateAclAofHazard', () => {
     expect(finding?.message).toContain('could not verify');
   });
 
+  it('returns an unverified finding when ACL GETUSER returns nil', () => {
+    // Bugbot (#337): a nil reply must not read as "clean" — only a positively
+    // verified safe config may return null. Same contract as the denied path.
+    const finding = evaluateAclAofHazard(input({ aclGetUserResult: null }));
+    expect(finding?.status).toBe('unverified');
+    expect(finding?.message).toContain('could not verify');
+  });
+
+  it('returns an unverified finding when the ACL GETUSER reply is unparseable', () => {
+    const finding = evaluateAclAofHazard(input({ aclGetUserResult: 42 }));
+    expect(finding?.status).toBe('unverified');
+  });
+
   it('returns null below version 6.0 (pre-ACL servers)', () => {
     expect(evaluateAclAofHazard(input({ version: '5.0.7' }))).toBeNull();
   });

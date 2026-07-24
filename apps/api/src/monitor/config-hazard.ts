@@ -24,9 +24,18 @@ const HAZARD_MESSAGE =
   'AOF reload (valkey#3983). Grant `default +@all ~* &*`, or keep the user enabled.';
 
 const UNVERIFIED_MESSAGE =
-  'AOF is enabled but the default user ACL could not be verified (ACL GETUSER denied) — if the ' +
+  'AOF is enabled but the default user ACL could not be verified — if the ' +
   'default user is disabled without `+@all ~* &*`, EXEC/function writes can be silently lost on ' +
   'AOF reload (valkey#3983).';
+
+function unverifiedFinding(reason: string): ConfigHazardFinding {
+  return {
+    id: 'default-user-aof-data-loss',
+    severity: 'warning',
+    status: 'unverified',
+    message: `${UNVERIFIED_MESSAGE} (could not verify the default user's grants: ${reason})`,
+  };
+}
 
 export function evaluateAclAofHazard(input: ConfigHazardInput): ConfigHazardFinding | null {
   if (input.appendonly !== 'yes') {
@@ -37,17 +46,15 @@ export function evaluateAclAofHazard(input: ConfigHazardInput): ConfigHazardFind
   }
 
   if (input.aclGetUserResult === 'denied') {
-    return {
-      id: 'default-user-aof-data-loss',
-      severity: 'warning',
-      status: 'unverified',
-      message: `${UNVERIFIED_MESSAGE} (could not verify the default user's grants)`,
-    };
+    return unverifiedFinding('ACL GETUSER was denied');
   }
 
+  // A nil or unparseable reply must not read as "clean": only a positively
+  // verified safe configuration may return null (same contract as the denied
+  // path — never a silent false negative).
   const user = parseAclUser(input.aclGetUserResult);
   if (user === null) {
-    return null;
+    return unverifiedFinding('unexpected ACL GETUSER reply');
   }
 
   const isDisabled = user.flags.includes('off');
