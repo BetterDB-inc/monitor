@@ -30,10 +30,13 @@ function createClient(config: TelemetryConfig): TelemetryClient {
       }
       const apiKey = import.meta.env.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN;
       const host = import.meta.env.VITE_PUBLIC_POSTHOG_HOST;
+      // Monitor version, baked into the frontend build (see Dockerfile), so every
+      // PostHog event carries the release it came from.
+      const version = import.meta.env.VITE_PUBLIC_APP_VERSION;
       if (!apiKey) {
         return clientsMap.get('http')!;
       }
-      const client = new PosthogTelemetryClient(apiKey, host);
+      const client = new PosthogTelemetryClient(apiKey, host, version);
       if (config.instanceId) {
         client.identify(config.instanceId, { provider: config.provider });
       }
