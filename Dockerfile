@@ -1,3 +1,8 @@
+# Monitor/app version. Passed by CI (docker-publish.yml) as --build-arg APP_VERSION
+# and applied to every stage that re-declares `ARG APP_VERSION`. Declared once here
+# as a global ARG (before the first FROM) so the default lives in a single place.
+ARG APP_VERSION=0.1.1
+
 # ============================================
 # Build Stage
 # ============================================
@@ -45,9 +50,9 @@ ENV VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=$VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
 ENV VITE_PUBLIC_POSTHOG_HOST=$VITE_PUBLIC_POSTHOG_HOST
 
 # Monitor version (baked into the frontend so PostHog events carry the release).
-# Sourced from the same APP_VERSION build-arg the production stage uses; exposed
-# to Vite via the VITE_PUBLIC_ prefix so it reaches import.meta.env in the build.
-ARG APP_VERSION=0.1.1
+# Re-declares the global ARG to bring it into this stage, then exposes it to Vite
+# via the VITE_PUBLIC_ prefix so it reaches import.meta.env in the web build.
+ARG APP_VERSION
 ENV VITE_PUBLIC_APP_VERSION=$APP_VERSION
 
 # Registration proxy URL (baked into frontend at build time).
@@ -72,8 +77,8 @@ RUN apk add --no-cache wget tar>=7.5.4 && \
 
 WORKDIR /app
 
-# Set APP_VERSION from build argument
-ARG APP_VERSION=0.1.1
+# Set APP_VERSION from build argument (re-declares the global ARG for this stage)
+ARG APP_VERSION
 ENV APP_VERSION=$APP_VERSION
 
 # Copy pre-built node_modules from builder (includes native modules already compiled)
