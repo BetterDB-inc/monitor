@@ -44,6 +44,12 @@ ARG VITE_PUBLIC_POSTHOG_HOST=https://eu.i.posthog.com
 ENV VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=$VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
 ENV VITE_PUBLIC_POSTHOG_HOST=$VITE_PUBLIC_POSTHOG_HOST
 
+# Monitor version (baked into the frontend so PostHog events carry the release).
+# Sourced from the same APP_VERSION build-arg the production stage uses; exposed
+# to Vite via the VITE_PUBLIC_ prefix so it reaches import.meta.env in the build.
+ARG APP_VERSION=0.1.1
+ENV VITE_PUBLIC_APP_VERSION=$APP_VERSION
+
 # Registration proxy URL (baked into frontend at build time).
 # Defaults to the canonical www host so the in-app registration form on
 # self-hosted instances reaches the public website proxy out of the box.

@@ -6,6 +6,7 @@ const { mockInstance } = vi.hoisted(() => ({
   mockInstance: {
     capture: vi.fn(),
     identify: vi.fn(),
+    register: vi.fn(),
     reset: vi.fn(),
   },
 }));
@@ -33,6 +34,18 @@ describe('PosthogTelemetryClient', () => {
     expect(mockInit).toHaveBeenCalledWith('phc_test_key', expect.objectContaining({
       api_host: 'https://ph.example.com',
     }));
+  });
+
+  it('registers the provided monitor version as a super property on init', () => {
+    const _client = new PosthogTelemetryClient('phc_key', undefined, '1.2.3');
+
+    expect(mockInstance.register).toHaveBeenCalledWith({ version: '1.2.3' });
+  });
+
+  it('falls back to an "unknown" version super property when none is provided', () => {
+    const _client = new PosthogTelemetryClient('phc_key');
+
+    expect(mockInstance.register).toHaveBeenCalledWith({ version: 'unknown' });
   });
 
   it('should map page_view to $pageview on capture', () => {
