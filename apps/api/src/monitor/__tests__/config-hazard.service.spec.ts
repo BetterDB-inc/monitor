@@ -77,11 +77,36 @@ describe('ConfigHazardService', () => {
     expect(findings).toHaveLength(0);
   });
 
+  it('does not cache a failed CONFIG GET probe', async () => {
+    client.getConfigValue.mockRejectedValue(new Error('ERR unknown command'));
+    await service.getHazards('conn-1');
+    await service.getHazards('conn-1');
+    expect(client.getConfigValue).toHaveBeenCalledTimes(2);
+  });
+
+  it('surfaces the hazard as soon as a probe succeeds after a failure', async () => {
+    client.getConfigValue.mockRejectedValueOnce(new Error('LOADING'));
+    const failed = await service.getHazards('conn-1');
+    expect(failed).toHaveLength(0);
+    const recovered = await service.getHazards('conn-1');
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0].status).toBe('hazard');
+  });
+
   it('returns no findings when the connection is not registered', async () => {
     (registry.get as jest.Mock).mockImplementation(() => {
       throw new Error('Connection not found');
     });
     const findings = await service.getHazards('missing');
     expect(findings).toHaveLength(0);
+  });
+
+  it('does not cache a probe for an unregistered connection', async () => {
+    (registry.get as jest.Mock).mockImplementationOnce(() => {
+      throw new Error('Connection not found');
+    });
+    await service.getHazards('conn-1');
+    const findings = await service.getHazards('conn-1');
+    expect(findings).toHaveLength(1);
   });
 });

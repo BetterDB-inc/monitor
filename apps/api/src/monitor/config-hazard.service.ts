@@ -16,7 +16,9 @@ interface ProbeClientLike {
 /**
  * Probes each connection for hazardous static configuration (valkey#3983) on
  * the health-polling path. Results are TTL-cached per connection so dashboard
- * polling does not hammer CONFIG GET / ACL GETUSER.
+ * polling does not hammer CONFIG GET / ACL GETUSER. Failed probes (missing
+ * connection, CONFIG GET error) are never cached, so a transient failure at
+ * startup cannot suppress the advisory as a false clean for a full TTL.
  */
 @Injectable()
 export class ConfigHazardService {
@@ -33,6 +35,9 @@ export class ConfigHazardService {
     }
 
     const findings = await this.probe(connectionId);
+    if (findings === null) {
+      return [];
+    }
     this.cache.set(connectionId, {
       findings,
       expiresAt: Date.now() + ConfigHazardService.CACHE_TTL_MS,
@@ -40,7 +45,7 @@ export class ConfigHazardService {
     return findings;
   }
 
-  private async probe(connectionId: string): Promise<ConfigHazardFinding[]> {
+  private async probe(connectionId: string): Promise<ConfigHazardFinding[] | null> {
     let client: ProbeClientLike;
     try {
       client = this.connectionRegistry.get(connectionId) as unknown as ProbeClientLike;
@@ -48,7 +53,7 @@ export class ConfigHazardService {
       this.logger.debug(
         `Config-hazard probe skipped for ${connectionId}: ${(err as Error).message}`,
       );
-      return [];
+      return null;
     }
 
     let appendonly: string | null;
@@ -58,7 +63,7 @@ export class ConfigHazardService {
       this.logger.debug(
         `CONFIG GET appendonly failed for ${connectionId}: ${(err as Error).message}`,
       );
-      return [];
+      return null;
     }
 
     if (appendonly !== 'yes') {
