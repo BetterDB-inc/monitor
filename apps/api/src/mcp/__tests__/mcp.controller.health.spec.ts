@@ -42,7 +42,6 @@ describe('McpController getHealth', () => {
       {} as ClusterMetricsService,
       {} as StoragePort,
       undefined,
-      undefined,
       withHazardService ? (configHazards as unknown as ConfigHazardService) : undefined,
     );
   };
