@@ -12,6 +12,7 @@ import {
   AclLogEntry,
   RoleInfo,
   ClusterNode,
+  ClusterShard,
   SlotStats,
   ConfigGetResponse,
   VectorIndexInfo,
@@ -69,6 +70,7 @@ export interface DatabasePort {
   getRole(): Promise<RoleInfo>;
   getClusterInfo(): Promise<Record<string, string>>;
   getClusterNodes(): Promise<ClusterNode[]>;
+  getClusterShards(): Promise<ClusterShard[]>;
   getClusterSlotStats(orderBy?: 'key-count' | 'cpu-usec', limit?: number): Promise<SlotStats>;
   getConfigValue(parameter: string): Promise<string | null>;
   getConfigValues(pattern: string): Promise<ConfigGetResponse>;

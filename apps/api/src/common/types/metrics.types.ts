@@ -414,6 +414,27 @@ export interface ClusterNode {
   importingSlots?: Array<{ slot: number; sourceNodeId: string }>;
 }
 
+/** A node entry within a `CLUSTER SHARDS` shard. */
+export interface ClusterShardNode {
+  id: string;
+  /** Authoritative role from the shard view: 'master' | 'replica' (kept as string for forward-compat). */
+  role: string;
+  health?: string;
+  endpoint?: string;
+  port?: number;
+  replicationOffset?: number;
+}
+
+/**
+ * A shard from `CLUSTER SHARDS` — the authoritative, shard-grouped view of slot
+ * ownership and node roles (available on Valkey/Redis 7.0+). `slots` is a list
+ * of [start, end] ranges the shard owns.
+ */
+export interface ClusterShard {
+  slots: number[][];
+  nodes: ClusterShardNode[];
+}
+
 export interface SlotStatsMetric {
   key_count: number;
   expires_count: number;

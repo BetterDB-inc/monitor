@@ -7,7 +7,12 @@ import { SlowLogAnalyticsService } from '@app/slowlog-analytics/slowlog-analytic
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
-import { MetricType, AnomalySeverity, AnomalyType } from '../types';
+import {
+  MetricType,
+  METRICS_HANDLED_OUTSIDE_EXTRACTOR,
+  AnomalySeverity,
+  AnomalyType,
+} from '../types';
 import { WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
 
@@ -680,6 +685,12 @@ describe('AnomalyService', () => {
       expect(buffers.has(MetricType.CLUSTER_TOPOLOGY)).toBe(false);
     });
 
+    it('excludes REPLICA_SLOT_STATE from initial buffer loop', async () => {
+      await poll();
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      expect(buffers.has(MetricType.REPLICA_SLOT_STATE)).toBe(false);
+    });
+
     it('excludes SLOWLOG_LAST_ID from initial buffer loop', async () => {
       await poll();
       // Without slowlog data, SLOWLOG_LAST_ID should not be present
@@ -692,7 +703,7 @@ describe('AnomalyService', () => {
       await poll();
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       const expectedMetrics = Object.values(MetricType).filter(
-        (m) => m !== MetricType.REPLICATION_ROLE && m !== MetricType.CLUSTER_STATE && m !== MetricType.DATASET_KEYS && m !== MetricType.COMMAND_P99 && m !== MetricType.PERSISTENCE_CHILD && m !== MetricType.CLUSTER_TOPOLOGY && m !== MetricType.SLOWLOG_LAST_ID && m !== MetricType.REJECTED_CONNECTIONS && m !== MetricType.CLIENT_SATURATION && m !== MetricType.RAFT_HEALTH && m !== MetricType.SLOWLOG_COUNT,
+        (m) => !METRICS_HANDLED_OUTSIDE_EXTRACTOR.has(m),
       );
       for (const metric of expectedMetrics) {
         expect(buffers.has(metric)).toBe(true);
@@ -1963,6 +1974,190 @@ describe('AnomalyService', () => {
       dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('CLUSTER NODES failed'));
       await expect(poll()).resolves.not.toThrow();
       expect(topoEvents()).toHaveLength(0);
+    });
+  });
+
+  describe('replica slot-state detection (valkey#1664)', () => {
+    const clusterInfoResponse = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    let now: number;
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const healthyNodes = [
+      { id: 'primA', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
+      { id: 'repB', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'primA', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+    ];
+
+    // valkey#1664: repB (a replica) wrongly reports slot 42 in importing state.
+    const badReplicaNodes = [
+      { id: 'primA', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
+      { id: 'repB', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'primA', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [], importingSlots: [{ slot: 42, sourceNodeId: 'primA' }] },
+    ];
+
+    const shards = [
+      { slots: [[0, 16383]], nodes: [ { id: 'primA', role: 'master' }, { id: 'repB', role: 'replica' } ] },
+    ];
+    // CLUSTER SHARDS disagrees with CLUSTER NODES: repB is actually a master
+    // (mid-promotion), so its slot state is legitimate and must not alert.
+    const shardsRepBIsMaster = [
+      { slots: [[0, 16383]], nodes: [ { id: 'primA', role: 'replica' }, { id: 'repB', role: 'master' } ] },
+    ];
+
+    const slotEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.REPLICA_SLOT_STATE);
+
+    it('does not alert within the persistence grace window', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      expect(slotEvents()).toHaveLength(0);
+    });
+
+    it('emits a WARNING once the bad replica slot state persists past the grace window', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      expect(slotEvents()).toHaveLength(0);
+
+      now += 31_000; // exceed REPLICA_SLOT_STATE_MIN_PERSIST_MS (30s)
+      await poll();
+
+      const events = slotEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('1664');
+      expect(events[0].message).toContain('CLUSTER SETSLOT');
+      expect(events[0].message).toContain('IMPORTING');
+    });
+
+    it('suppresses the alert when CLUSTER SHARDS reports the node is a master (mid-promotion)', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shardsRepBIsMaster);
+      await poll();
+      now += 31_000;
+      await poll();
+      expect(slotEvents()).toHaveLength(0);
+    });
+
+    it('still detects via CLUSTER NODES when CLUSTER SHARDS is unavailable (degrade)', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('ERR unknown subcommand'));
+      await poll();
+      now += 31_000;
+      await poll();
+      expect(slotEvents()).toHaveLength(1);
+    });
+
+    it('dedupes a persistent condition to a single alert across polls', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      now += 31_000;
+      await poll(); // fires
+      now += 5_000;
+      await poll(); // still stuck, deduped
+      expect(slotEvents()).toHaveLength(1);
+    });
+
+    it('does not alert for a healthy shard', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(healthyNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      now += 31_000;
+      await poll();
+      expect(slotEvents()).toHaveLength(0);
+    });
+
+    it('does not throw when getClusterNodes fails', async () => {
+      dbClient.getClusterNodes = jest.fn().mockRejectedValue(new Error('CLUSTER NODES failed'));
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await expect(poll()).resolves.not.toThrow();
+      expect(slotEvents()).toHaveLength(0);
+    });
+
+    it('does NOT re-fire a duplicate after a transient CLUSTER NODES failure', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      now += 31_000;
+      await poll(); // fires (1)
+      // Transient fetch failure — must not clear dedupe state.
+      (dbClient.getClusterNodes as jest.Mock).mockRejectedValueOnce(new Error('blip'));
+      now += 5_000;
+      await poll(); // observation gap
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(badReplicaNodes);
+      now += 5_000;
+      await poll(); // still stuck — deduped, no second alert
+      expect(slotEvents()).toHaveLength(1);
+    });
+
+    it('auto-resolves the emitted event when the condition clears', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      now += 31_000;
+      await poll(); // fires
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
+
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(healthyNodes);
+      now += 5_000;
+      await poll(); // recovered → auto-resolve so the activeOnly banner clears
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(0);
+    });
+
+    it('per-node fan-out surfaces a stuck replica invisible in the connected node view', async () => {
+      // The connected node (primary) view lists the replica with NO migration
+      // markers — they are node-local. Fan-out queries the replica directly.
+      const primaryView = [
+        { id: 'aaaaaaaa', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
+        { id: 'bbbbbbbb', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'aaaaaaaa', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+      ];
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(primaryView);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue([
+        { slots: [[0, 16383]], nodes: [{ id: 'aaaaaaaa', role: 'master' }, { id: 'bbbbbbbb', role: 'replica' }] },
+      ]);
+
+      // The replica's OWN CLUSTER NODES reply carries the importing marker on its
+      // myself line (source id must be hex for the parser to match).
+      const replicaSelfView =
+        'aaaaaaaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\n' +
+        'bbbbbbbb 10.0.0.2:6380@16380 myself,slave aaaaaaaa 0 0 1 connected [42-<-aaaaaaaa]';
+      const nodeClient = { call: jest.fn().mockResolvedValue(replicaSelfView) };
+      const getNodeConnection = jest.fn().mockResolvedValue(nodeClient);
+      (service as any).clusterDiscovery = { getNodeConnection };
+
+      await poll();
+      expect(slotEvents()).toHaveLength(0); // within grace
+      now += 31_000;
+      await poll();
+      const events = slotEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('IMPORTING');
+      expect(getNodeConnection).toHaveBeenCalledWith('bbbbbbbb', 'conn-1');
     });
   });
 

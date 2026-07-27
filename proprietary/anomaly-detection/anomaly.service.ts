@@ -25,9 +25,18 @@ import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-detector';
+import {
+  detectReplicaSlotState,
+  replicaSlotSignature,
+  ReplicaSlotAnomaly,
+} from './replica-slot-state-detector';
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
+import { MetricsParser } from '@app/database/parsers/metrics.parser';
+import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
+import { ClusterNode, ClusterShard } from '@app/common/types/metrics.types';
 import {
   MetricType,
+  METRICS_HANDLED_OUTSIDE_EXTRACTOR,
   AnomalyEvent,
   CorrelatedAnomalyGroup,
   AnomalySeverity,
@@ -87,6 +96,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // the alert once the persistence gate has fired.
   private stuckReplicaFirstSeen = new Map<string, Map<string, number>>();
   private activeStuckReplicas = new Map<string, Set<string>>();
+  // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
+  // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
+  // alert, `active` dedupes once the gate has fired.
+  private replicaSlotFirstSeen = new Map<string, Map<string, number>>();
+  private activeReplicaSlotAnomalies = new Map<string, Set<string>>();
+  // signature -> emitted event id, so a recovered condition can resolve exactly
+  // its own event (clearing the activeOnly banner) instead of all of them.
+  private replicaSlotEventIds = new Map<string, Map<string, string>>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
@@ -154,6 +171,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     private readonly webhookEventsProService?: IWebhookEventsProService,
     @Optional()
     private readonly otelEvents?: OtelEventDispatcherService,
+    // Optional so unit tests and minimal deployments still construct the service;
+    // when absent, replica slot-state detection degrades to the connected node's
+    // own CLUSTER NODES view (no per-node fan-out).
+    @Optional()
+    private readonly clusterDiscovery?: ClusterDiscoveryService,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs);
@@ -296,8 +318,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const connectionDetectors = new Map<MetricType, SpikeDetector>();
 
     for (const metricType of Object.values(MetricType)) {
-      // REPLICATION_ROLE, CLUSTER_STATE, DATASET_KEYS, COMMAND_P99, PERSISTENCE_CHILD, CLUSTER_TOPOLOGY, SLOWLOG_LAST_ID, REJECTED_CONNECTIONS (delta-fed lazily), CLIENT_SATURATION (state-based), and deprecated SLOWLOG_COUNT are handled outside the normal extractor loop
-      if (metricType === MetricType.REPLICATION_ROLE || metricType === MetricType.CLUSTER_STATE || metricType === MetricType.DATASET_KEYS || metricType === MetricType.COMMAND_P99 || metricType === MetricType.PERSISTENCE_CHILD || metricType === MetricType.CLUSTER_TOPOLOGY || metricType === MetricType.SLOWLOG_LAST_ID || metricType === MetricType.REJECTED_CONNECTIONS || metricType === MetricType.CLIENT_SATURATION || metricType === MetricType.RAFT_HEALTH || metricType === MetricType.SLOWLOG_COUNT) continue;
+      // State-based / delta-fed / deprecated metric types get no baseline buffer
+      // (single source of truth shared with the test — see types.ts).
+      if (METRICS_HANDLED_OUTSIDE_EXTRACTOR.has(metricType)) continue;
       connectionBuffers.set(metricType, new MetricBuffer(metricType));
       const config = configs[metricType] || {};
       connectionDetectors.set(metricType, new SpikeDetector(metricType, config));
@@ -328,6 +351,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftNodeTimeoutRecheck.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
+    this.replicaSlotFirstSeen.delete(connectionId);
+    this.activeReplicaSlotAnomalies.delete(connectionId);
+    this.replicaSlotEventIds.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
@@ -777,8 +803,34 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // neither runs them on a known-Raft connection nor suppresses them on a
         // gossip cluster (where they must keep running through the blip).
         if (!isRaft) {
-          await this.detectDuplicatePrimaries(ctx, timestamp);
-          await this.detectStuckReplicas(ctx, timestamp);
+          // Fetch the topology ONCE for all three gossip-era detectors (was three
+          // independent CLUSTER NODES calls per poll), and CLUSTER SHARDS
+          // concurrently (optional refinement — never rejects). A CLUSTER NODES
+          // failure is a single observation gap: skip the detectors this poll
+          // WITHOUT clearing the WARNING detectors' dedupe/grace state (so a
+          // transient blip can't re-fire a duplicate), while preserving the
+          // duplicate-primary detector's deliberate re-alert-after-gap behavior.
+          const shardsPromise = this.safeGetClusterShards(ctx);
+          let nodes: ClusterNode[] | undefined;
+          try {
+            nodes = await ctx.client.getClusterNodes();
+          } catch (topologyErr) {
+            this.activeTopologyConflicts.delete(ctx.connectionId);
+            this.logger.debug(
+              `Failed to fetch cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
+            );
+          }
+          const shards = await shardsPromise;
+
+          if (nodes) {
+            await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
+            await this.detectStuckReplicas(ctx, timestamp, nodes);
+            // Replica migrating/importing markers are node-local — only the
+            // queried node's own line carries them — so aggregate each replica's
+            // self-view before detecting (falls back to `nodes` without fan-out).
+            const perNodeView = await this.gatherReplicaSlotView(nodes, ctx);
+            await this.detectReplicaSlotState(ctx, timestamp, perNodeView, shards);
+          }
         }
       }
 
@@ -1427,9 +1479,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * CRITICAL anomaly per distinct conflict and clears the dedupe entry once the
    * conflict resolves, so recovery re-arms alerting.
    */
-  private async detectDuplicatePrimaries(ctx: ConnectionContext, timestamp: number): Promise<void> {
+  private async detectDuplicatePrimaries(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+  ): Promise<void> {
     try {
-      const nodes = await ctx.client.getClusterNodes();
       const conflicts = detectDuplicatePrimaries(nodes);
 
       const active = this.activeTopologyConflicts.get(ctx.connectionId) ?? new Set<string>();
@@ -1470,16 +1525,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       }
 
       // Keep only signatures still in conflict so a resolved-then-recurring
-      // conflict alerts again.
+      // conflict alerts again. (A CLUSTER NODES observation gap is handled at the
+      // poll level, which clears this set so a missed heal re-alerts.)
       this.activeTopologyConflicts.set(ctx.connectionId, currentSignatures);
     } catch (topologyErr) {
-      // A failed poll yields no observation of the topology, so we cannot know
-      // whether a previously-seen conflict is still present. Clearing the dedupe
-      // state ensures the next successful poll re-alerts on any conflict rather
-      // than suppressing it because the cluster might have healed and re-split in
-      // between (missed heal). Re-alerting on an unresolved CRITICAL split-brain
-      // is preferable to silently dropping it.
-      this.activeTopologyConflicts.delete(ctx.connectionId);
       this.logger.debug(
         `Failed to check cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
       );
@@ -1501,41 +1550,91 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * dedupes per (replica, primary) pair, and clears state on recovery so a
    * resolved-then-recurring stuck replica alerts again.
    */
-  private async detectStuckReplicas(ctx: ConnectionContext, timestamp: number): Promise<void> {
+  private async detectStuckReplicas(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+  ): Promise<void> {
     try {
-      const nodes = await ctx.client.getClusterNodes();
-      const stuck = detectStuckReplicas(nodes);
+      await this.applyTopologyPersistenceGate({
+        ctx,
+        timestamp,
+        findings: detectStuckReplicas(nodes),
+        signatureOf: stuckReplicaSignature,
+        firstSeenByConn: this.stuckReplicaFirstSeen,
+        activeByConn: this.activeStuckReplicas,
+        minPersistMs: AnomalyService.STUCK_REPLICA_MIN_PERSIST_MS,
+        buildEvent: (s, signature) => {
+          const primaryLabel =
+            s.reason === 'primary_unknown'
+              ? `unknown primary ${s.primaryId.substring(0, 8)} (absent from the cluster view)`
+              : `failed primary ${s.primaryId.substring(0, 8)} at ${s.primaryAddress}`;
+          return {
+            id: `${ctx.connectionId}-stuck-replica-${signature}-${timestamp}`,
+            timestamp,
+            metricType: MetricType.CLUSTER_TOPOLOGY,
+            anomalyType: AnomalyType.SPIKE,
+            severity: AnomalySeverity.WARNING,
+            value: 1,
+            baseline: 0,
+            zScore: 0,
+            stdDev: 0,
+            threshold: 0,
+            message:
+              `WARNING: Replica ${this.clientAddress(s.replicaAddress)} (${s.replicaId.substring(0, 8)}) is stuck replicating a ` +
+              `${primaryLabel} and has not re-attached to a live primary (valkey#2090). ` +
+              `If a replacement node took over this shard, run ` +
+              `\`CLUSTER REPLICATE <new-primary-id>\` on ${this.clientAddress(s.replicaAddress)} to recover.`,
+            resolved: false,
+            connectionId: ctx.connectionId,
+          };
+        },
+      });
+    } catch (stuckErr) {
+      this.logger.debug(
+        `Failed to check stuck replicas for ${ctx.connectionName}: ${stuckErr instanceof Error ? stuckErr.message : stuckErr}`,
+      );
+    }
+  }
 
-      const firstSeen =
-        this.stuckReplicaFirstSeen.get(ctx.connectionId) ?? new Map<string, number>();
-      const active = this.activeStuckReplicas.get(ctx.connectionId) ?? new Set<string>();
-      const currentSignatures = new Set(stuck.map((s) => stuckReplicaSignature(s)));
+  /**
+   * How long a replica slot-state anomaly (valkey#1664) must persist before it
+   * is alerted, to exclude the transient window of a normal reshard/failover
+   * where a node may briefly show slot state. A healthy reshard settles within a
+   * few polls; a stuck replica stays inconsistent indefinitely.
+   */
+  private static readonly REPLICA_SLOT_STATE_MIN_PERSIST_MS = 30_000;
 
-      // Forget pairs that have recovered so their grace window restarts if the
-      // same pair goes stuck again later.
-      for (const sig of [...firstSeen.keys()]) {
-        if (!currentSignatures.has(sig)) firstSeen.delete(sig);
-      }
-
-      for (const s of stuck) {
-        const signature = stuckReplicaSignature(s);
-        const seenAt = firstSeen.get(signature) ?? timestamp;
-        if (!firstSeen.has(signature)) firstSeen.set(signature, timestamp);
-
-        // Persistence gate: ignore until the pair has been orphaned long enough
-        // to rule out a normal failover in progress.
-        if (timestamp - seenAt < AnomalyService.STUCK_REPLICA_MIN_PERSIST_MS) continue;
-        if (active.has(signature)) continue; // already alerted for this pair
-
-        const primaryLabel =
-          s.reason === 'primary_unknown'
-            ? `unknown primary ${s.primaryId.substring(0, 8)} (absent from the cluster view)`
-            : `failed primary ${s.primaryId.substring(0, 8)} at ${s.primaryAddress}`;
-
-        const event: AnomalyEvent = {
-          id: `${ctx.connectionId}-stuck-replica-${signature}-${timestamp}`,
+  /**
+   * Detects a replica wrongly reporting slot migrating/importing/owned state
+   * (valkey-io/valkey#1664) from a per-node-aggregated `CLUSTER NODES` view (see
+   * `gatherReplicaSlotView` — migration markers are node-local, so each replica
+   * must be queried directly), refined with `CLUSTER SHARDS` for role authority,
+   * shard attribution, and slot-view divergence. Emits a WARNING once the
+   * condition has persisted past the reshard grace window, dedupes per (replica,
+   * reason, slots) signature, and — via the shared gate's auto-resolve — resolves
+   * the emitted event on recovery so the activeOnly banner clears.
+   */
+  private async detectReplicaSlotState(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+    shards: ClusterShard[] | undefined,
+  ): Promise<void> {
+    try {
+      await this.applyTopologyPersistenceGate({
+        ctx,
+        timestamp,
+        findings: detectReplicaSlotState(nodes, shards),
+        signatureOf: replicaSlotSignature,
+        firstSeenByConn: this.replicaSlotFirstSeen,
+        activeByConn: this.activeReplicaSlotAnomalies,
+        eventIdsByConn: this.replicaSlotEventIds,
+        minPersistMs: AnomalyService.REPLICA_SLOT_STATE_MIN_PERSIST_MS,
+        buildEvent: (a, signature) => ({
+          id: `${ctx.connectionId}-replica-slot-state-${signature}-${timestamp}`,
           timestamp,
-          metricType: MetricType.CLUSTER_TOPOLOGY,
+          metricType: MetricType.REPLICA_SLOT_STATE,
           anomalyType: AnomalyType.SPIKE,
           severity: AnomalySeverity.WARNING,
           value: 1,
@@ -1543,36 +1642,220 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           zScore: 0,
           stdDev: 0,
           threshold: 0,
-          message:
-            `WARNING: Replica ${s.replicaAddress} (${s.replicaId.substring(0, 8)}) is stuck replicating a ` +
-            `${primaryLabel} and has not re-attached to a live primary (valkey#2090). ` +
-            `If a replacement node took over this shard, run ` +
-            `\`CLUSTER REPLICATE <new-primary-id>\` on ${s.replicaAddress} to recover.`,
+          message: this.buildReplicaSlotMessage(a),
           resolved: false,
           connectionId: ctx.connectionId,
-        };
-
-        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx);
-        active.add(signature);
-      }
-
-      // Keep only pairs still stuck so a recovered pair re-arms alerting.
-      this.stuckReplicaFirstSeen.set(ctx.connectionId, firstSeen);
-      this.activeStuckReplicas.set(
-        ctx.connectionId,
-        new Set([...active].filter((sig) => currentSignatures.has(sig))),
-      );
-    } catch (stuckErr) {
-      // A failed poll gives no topology observation; clear dedupe/grace state so
-      // the next successful poll re-evaluates from scratch rather than
-      // suppressing (or prematurely firing) based on stale data.
-      this.stuckReplicaFirstSeen.delete(ctx.connectionId);
-      this.activeStuckReplicas.delete(ctx.connectionId);
+        }),
+      });
+    } catch (err) {
       this.logger.debug(
-        `Failed to check stuck replicas for ${ctx.connectionName}: ${stuckErr instanceof Error ? stuckErr.message : stuckErr}`,
+        `Failed to check replica slot state for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
       );
     }
+  }
+
+  /**
+   * Fetch `CLUSTER SHARDS`, degrading to `undefined` (never throwing) if the
+   * command is unsupported or the call fails — it is an optional refinement.
+   */
+  private async safeGetClusterShards(
+    ctx: ConnectionContext,
+  ): Promise<ClusterShard[] | undefined> {
+    try {
+      return await ctx.client.getClusterShards();
+    } catch (err) {
+      this.logger.debug(
+        `CLUSTER SHARDS unavailable for ${ctx.connectionName}, using CLUSTER NODES only: ${err instanceof Error ? err.message : err}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Build a topology view where each replica's slot-migration state reflects its
+   * OWN `CLUSTER NODES` line. Migrating/importing markers are node-local — the
+   * connected node's reply annotates only its own (`myself`) line — so detecting
+   * a stuck replica requires querying that replica directly. When cluster
+   * discovery is unavailable, returns the base view unchanged (degrade: detection
+   * then works only when the monitor connects directly to the stuck replica).
+   */
+  private async gatherReplicaSlotView(
+    baseNodes: ClusterNode[],
+    ctx: ConnectionContext,
+  ): Promise<ClusterNode[]> {
+    if (!this.clusterDiscovery) return baseNodes;
+
+    const remoteReplicas = baseNodes.filter(
+      (n) =>
+        (n.flags.includes('slave') || n.flags.includes('replica')) &&
+        !n.flags.includes('myself'),
+    );
+    if (remoteReplicas.length === 0) return baseNodes;
+
+    const selfViews = await Promise.allSettled(
+      remoteReplicas.map(async (r) => {
+        const client = await this.clusterDiscovery!.getNodeConnection(r.id, ctx.connectionId);
+        const raw = await client.call('CLUSTER', 'NODES');
+        const self = MetricsParser.parseClusterNodes(raw as string).find((n) =>
+          n.flags.includes('myself'),
+        );
+        return self ? { id: r.id, self } : null;
+      }),
+    );
+
+    const merged = baseNodes.map((n) => ({ ...n }));
+    const byId = new Map(merged.map((n) => [n.id, n]));
+    for (const result of selfViews) {
+      if (result.status !== 'fulfilled' || !result.value) continue;
+      const target = byId.get(result.value.id);
+      if (!target) continue;
+      // Overlay the replica's authoritative self-reported slot state.
+      target.slots = result.value.self.slots;
+      target.migratingSlots = result.value.self.migratingSlots;
+      target.importingSlots = result.value.self.importingSlots;
+    }
+    return merged;
+  }
+
+  /**
+   * Shared persistence-gated dedupe pipeline for snapshot topology detectors
+   * (stuck-replica #2090, replica-slot-state #1664). Given this poll's findings it
+   * restarts the grace clock for recovered signatures, emits one event per finding
+   * that has persisted past `minPersistMs` and isn't already active, dedupes
+   * repeats, and re-arms after recovery. It performs NO I/O and never clears state
+   * on error — a transient fetch failure is handled upstream (the detectors aren't
+   * called), so an already-alerted condition can't re-fire a duplicate. When
+   * `eventIdsByConn` is supplied, it also records each emitted event id and, on
+   * recovery, resolves exactly that event so an activeOnly banner clears.
+   */
+  private async applyTopologyPersistenceGate<T>(params: {
+    ctx: ConnectionContext;
+    timestamp: number;
+    findings: T[];
+    signatureOf: (finding: T) => string;
+    firstSeenByConn: Map<string, Map<string, number>>;
+    activeByConn: Map<string, Set<string>>;
+    minPersistMs: number;
+    buildEvent: (finding: T, signature: string) => AnomalyEvent;
+    eventIdsByConn?: Map<string, Map<string, string>>;
+  }): Promise<void> {
+    const {
+      ctx,
+      timestamp,
+      findings,
+      signatureOf,
+      firstSeenByConn,
+      activeByConn,
+      minPersistMs,
+      buildEvent,
+      eventIdsByConn,
+    } = params;
+    const connId = ctx.connectionId;
+
+    const firstSeen = firstSeenByConn.get(connId) ?? new Map<string, number>();
+    const active = activeByConn.get(connId) ?? new Set<string>();
+    const eventIds = eventIdsByConn?.get(connId) ?? new Map<string, string>();
+    const currentSignatures = new Set(findings.map(signatureOf));
+
+    // Forget recovered signatures so their grace window restarts if they recur.
+    for (const sig of [...firstSeen.keys()]) {
+      if (!currentSignatures.has(sig)) firstSeen.delete(sig);
+    }
+
+    for (const finding of findings) {
+      const signature = signatureOf(finding);
+      const seenAt = firstSeen.get(signature) ?? timestamp;
+      if (!firstSeen.has(signature)) firstSeen.set(signature, timestamp);
+
+      // Persistence gate, then dedupe.
+      if (timestamp - seenAt < minPersistMs) continue;
+      if (active.has(signature)) continue;
+
+      const event = buildEvent(finding, signature);
+      this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+      await this.addAnomaly(event, ctx);
+      active.add(signature);
+      if (eventIdsByConn) eventIds.set(signature, event.id);
+    }
+
+    // Auto-resolve (when wired): a previously-active signature absent this poll
+    // has recovered — resolve exactly its event so an activeOnly banner clears.
+    if (eventIdsByConn) {
+      for (const sig of [...active]) {
+        if (currentSignatures.has(sig)) continue;
+        const id = eventIds.get(sig);
+        if (id) {
+          try {
+            await this.resolveAnomaly(id);
+          } catch {
+            /* leave it active; retry resolution on the next poll */
+          }
+        }
+        eventIds.delete(sig);
+      }
+      eventIdsByConn.set(connId, eventIds);
+    }
+
+    firstSeenByConn.set(connId, firstSeen);
+    activeByConn.set(
+      connId,
+      new Set([...active].filter((sig) => currentSignatures.has(sig))),
+    );
+  }
+
+  /** Human-readable message for a replica slot-state anomaly (valkey#1664). */
+  private buildReplicaSlotMessage(a: ReplicaSlotAnomaly): string {
+    const addr = this.clientAddress(a.replicaAddress);
+    const replica = `${addr} (${a.replicaId.substring(0, 8)})`;
+    const shard =
+      a.shardId && a.shardSlots && a.shardSlots.length > 0
+        ? ` Its shard (${a.shardId.substring(0, 8)}) authoritatively owns slots ${this.formatSlotRanges(a.shardSlots)}.`
+        : '';
+
+    if (a.reason === 'slot_view_divergence') {
+      // SETSLOT ... STABLE only clears migrating/importing markers — it does NOT
+      // fix a replica that OWNS slots — so give ownership-divergence guidance.
+      const owned =
+        a.ownedSlots && a.ownedSlots.length > 0
+          ? this.formatSlotRanges(a.ownedSlots)
+          : this.formatSlotList(a.affectedSlots);
+      return (
+        `WARNING: Replica ${replica} owns slots ${owned} in CLUSTER NODES that diverge from its ` +
+        `shard's authoritative ownership — a replica should never own slots (valkey#1664).${shard} ` +
+        `Verify the shard topology; if the replica is genuinely stuck, re-attach it to its primary ` +
+        `with \`CLUSTER REPLICATE <primary-id>\` on ${addr}. Do NOT run \`SETSLOT ... STABLE\` — ` +
+        `it clears migration markers, not slot ownership.`
+      );
+    }
+
+    const state = a.reason === 'replica_migrating' ? 'MIGRATING' : 'IMPORTING';
+    const slotList = this.formatSlotList(a.affectedSlots);
+    // Every stuck slot needs its own SETSLOT STABLE, not just the first.
+    return (
+      `WARNING: Replica ${replica} is reporting slot(s) ${slotList} in ${state} state — replicas must ` +
+      `never carry slot-migration state, so this is a stuck, inconsistent cluster state (valkey#1664).${shard} ` +
+      `Run \`CLUSTER SETSLOT <slot> STABLE\` on ${addr} for each affected slot (${slotList}) to clear it.`
+    );
+  }
+
+  /**
+   * Strip the cluster-bus port from a `CLUSTER NODES` address (`ip:port@cport`)
+   * so the shown `host:port` is directly usable with valkey-cli.
+   */
+  private clientAddress(address: string): string {
+    return address.split('@')[0];
+  }
+
+  /** Compact rendering of a slot-number list for messages. */
+  private formatSlotList(slots: number[]): string {
+    if (slots.length === 0) return 'none';
+    if (slots.length <= 5) return slots.join(', ');
+    return `${slots.slice(0, 5).join(', ')}, … (${slots.length} total)`;
+  }
+
+  /** Render `[[start,end], …]` ranges as `start-end` (or `n` for singletons). */
+  private formatSlotRanges(ranges: number[][]): string {
+    return ranges.map(([s, e]) => (s === e ? String(s) : `${s}-${e}`)).join(', ');
   }
 
   private convertInfoToRecord(infoResponse: any): Record<string, string> {

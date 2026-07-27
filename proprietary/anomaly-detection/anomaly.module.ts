@@ -5,9 +5,10 @@ import { AnomalyController } from './anomaly.controller';
 import { StorageModule } from '@app/storage/storage.module';
 import { PrometheusModule } from '@app/prometheus/prometheus.module';
 import { SlowLogAnalyticsModule } from '@app/slowlog-analytics/slowlog-analytics.module';
+import { ClusterModule } from '@app/cluster/cluster.module';
 
 @Module({
-  imports: [StorageModule, PrometheusModule, SlowLogAnalyticsModule],
+  imports: [StorageModule, PrometheusModule, SlowLogAnalyticsModule, ClusterModule],
   controllers: [AnomalyController],
   providers: [
     AnomalyService,

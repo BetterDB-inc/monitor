@@ -15,6 +15,7 @@ import {
 import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
+import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
 import {
   AlertTriangle,
   AlertCircle,
@@ -121,6 +122,7 @@ const METRIC_LABELS: Record<string, string> = {
   rejected_connections: 'Rejected Connections',
   client_saturation: 'Client Saturation',
   raft_health: 'Raft Health',
+  replica_slot_state: 'Replica Slot State',
 };
 
 function formatTime(ts: number): string {
@@ -222,6 +224,15 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
+  // A replica stuck in slot-migration state (valkey#1664) is a silent, active
+  // inconsistency that must surface regardless of the date picker.
+  const { data: replicaSlotStateEvents } = usePolling<AnomalyEvent[]>({
+    fetcher: () =>
+      metricsApi.getAnomalyEvents({ metricType: 'replica_slot_state', activeOnly: true }),
+    interval: 5000,
+    refetchKey: currentConnection?.id,
+  });
+
   const { data: groups } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
@@ -279,6 +290,7 @@ export function AnomalyDashboard() {
       <DataLossAlertBanner events={dataLossEvents ?? undefined} />
       <LatencyRegressionBanner events={latencyRegressionEvents ?? undefined} />
       <RaftHealthBanner events={raftHealthEvents ?? undefined} />
+      <ReplicaSlotStateBanner events={replicaSlotStateEvents ?? undefined} />
 
       {/* Header */}
       <div className="flex justify-between items-center">
