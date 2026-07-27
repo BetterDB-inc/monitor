@@ -22,6 +22,8 @@ import { ClientAnalyticsAnalysisService } from '../client-analytics/client-analy
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { ConfigHazardService } from '../monitor/config-hazard.service';
+import { ConfigHazardFinding } from '../monitor/config-hazard';
 import {
   MAX_LIMIT,
   ValidateInstanceIdPipe,
@@ -49,6 +51,7 @@ export class McpController {
     private readonly clusterMetricsService: ClusterMetricsService,
     @Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort,
     @Optional() telemetryService?: UsageTelemetryService,
+    @Optional() private readonly configHazardService?: ConfigHazardService,
   ) {
     this.telemetryService = telemetryService ?? null;
   }
@@ -440,7 +443,19 @@ export class McpController {
   @Get('instance/:id/health')
   async getHealth(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
-      return await this.metricsService.getHealthSummary(id);
+      const summary = await this.metricsService.getHealthSummary(id);
+      const result: typeof summary & { configHazards?: ConfigHazardFinding[] } = { ...summary };
+      if (this.configHazardService) {
+        try {
+          result.configHazards = await this.configHazardService.getHazards(id);
+        } catch (err) {
+          this.logger.debug(
+            `Config-hazard probe failed for ${id}: ${err instanceof Error ? err.message : err}`,
+          );
+          result.configHazards = [];
+        }
+      }
+      return result;
     } catch (error) {
       this.logger.error(
         `Failed to get health for ${id}`,

@@ -16,6 +16,7 @@ import { TelemetryModule } from '../telemetry/telemetry.module';
 import { AiObservabilityModule } from '../ai-observability/ai-observability.module';
 import { VectorSearchModule } from '../vector-search/vector-search.module';
 import { InferenceLatencyModule } from '../inference-latency/inference-latency.module';
+import { HealthModule } from '../health/health.module';
 
 const logger = new Logger('McpModule');
 
@@ -35,6 +36,7 @@ const tokenProviders = createAgentTokenProviders(logger, () => {
     MetricForecastingModule,
     VectorSearchModule,
     InferenceLatencyModule,
+    HealthModule,
   ],
   controllers: [McpController, McpMemoryController, McpAiController, McpAnalyticsController],
   providers: [AgentTokenGuard, McpMemoryService, ...tokenProviders],
