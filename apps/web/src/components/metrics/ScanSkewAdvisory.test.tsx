@@ -28,6 +28,16 @@ describe('ScanSkewAdvisory', () => {
     expect(screen.getByText(/4 sightings/)).toBeInTheDocument();
   });
 
+  it('renders a singular sighting label for a single-hit offender', () => {
+    const singleHit: ScanSkewReport = {
+      entriesAnalyzed: 3,
+      offenders: [{ ...report.offenders[0], sightings: 1 }],
+    };
+    render(<ScanSkewAdvisory report={singleHit} />);
+    expect(screen.getByText(/1 sighting\b/)).toBeInTheDocument();
+    expect(screen.queryByText(/1 sightings/)).not.toBeInTheDocument();
+  });
+
   it('renders nothing when there are no offenders', () => {
     const { container } = render(
       <ScanSkewAdvisory report={{ entriesAnalyzed: 5, offenders: [] }} />,

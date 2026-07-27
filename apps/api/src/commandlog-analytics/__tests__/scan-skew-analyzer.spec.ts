@@ -87,6 +87,25 @@ describe('analyzeScanSkew', () => {
     expect(report.offenders[0].sightings).toBe(2);
     expect(report.offenders[0].worstBytesPerElement).toBeGreaterThan(SCAN_SKEW_BYTES_PER_ELEMENT);
     expect(report.offenders[0].message).toContain('valkey#3955');
+    expect(report.offenders[0].message).toContain('re-creating the key');
+  });
+
+  it('does not advise re-creating a key for keyless SCAN offenders', () => {
+    const entries = [
+      entry({ id: 1, command: ['SCAN', '0', 'MATCH', 'sess:*', 'COUNT', '1024'], duration: 50_000_000 }),
+      entry({
+        id: 2,
+        command: ['SCAN', '0', 'MATCH', 'sess:*', 'COUNT', '1024'],
+        duration: 48_000_000,
+        timestamp: 1_700_000_100,
+      }),
+    ];
+    const report = analyzeScanSkew(entries);
+    expect(report.offenders).toHaveLength(1);
+    expect(report.offenders[0].key).toBe('SCAN sess:*');
+    expect(report.offenders[0].message).not.toContain('re-creating the key');
+    expect(report.offenders[0].message).toContain('main keyspace dictionary');
+    expect(report.offenders[0].message).toContain('valkey#3955');
   });
 
   it('does not flag a proportional large reply', () => {

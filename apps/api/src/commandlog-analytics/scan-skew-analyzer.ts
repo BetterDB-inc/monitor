@@ -143,6 +143,14 @@ export function analyzeScanSkew(entries: StoredCommandLogEntry[]): ScanSkewRepor
     if (acc.sightings < SCAN_SKEW_MIN_SIGHTINGS && isExtreme === false) {
       continue;
     }
+    let subject = `${acc.verb} replies on ${key}`;
+    let remediation = 'Consider re-creating the key, or upgrade once the upstream fix lands.';
+    if (acc.verb === 'SCAN') {
+      subject = `${key} replies`;
+      remediation =
+        'The skew is in the main keyspace dictionary, so re-creating individual keys will not ' +
+        'help — upgrade once the upstream fix lands.';
+    }
     offenders.push({
       key,
       verb: acc.verb,
@@ -151,10 +159,9 @@ export function analyzeScanSkew(entries: StoredCommandLogEntry[]): ScanSkewRepor
       totalBytes: acc.totalBytes,
       lastTimestamp: acc.lastTimestamp,
       message:
-        `${acc.verb} replies on ${key} far exceed the requested COUNT ` +
+        `${subject} far exceed the requested COUNT ` +
         `(~${Math.round(acc.worstBytesPerElement / 1024)}KB per requested element) — possible ` +
-        `degenerate hash chain (valkey#3955). Consider re-creating the key, or upgrade once the ` +
-        `upstream fix lands.`,
+        `degenerate hash chain (valkey#3955). ${remediation}`,
     });
   }
 
