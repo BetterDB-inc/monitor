@@ -1778,20 +1778,23 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       if (eventIdsByConn) eventIds.set(signature, event.id);
     }
 
-    // Auto-resolve (when wired): a previously-active signature absent this poll
-    // has recovered — resolve exactly its event so an activeOnly banner clears.
+    // Auto-resolve (when wired): a recovered signature (has an emitted event id
+    // but is absent this poll) gets its event resolved so an activeOnly banner
+    // clears. Iterate the id map, not `active`, and only drop the mapping once
+    // resolution SUCCEEDS — a failed/thrown resolve (e.g. a storage blip) keeps
+    // the mapping so the next poll retries, rather than leaving the banner stuck
+    // open forever. Retry is decoupled from `active`, so a genuine recurrence of
+    // the same signature still re-alerts.
     if (eventIdsByConn) {
-      for (const sig of [...active]) {
-        if (currentSignatures.has(sig)) continue;
-        const id = eventIds.get(sig);
-        if (id) {
-          try {
-            await this.resolveAnomaly(id);
-          } catch {
-            /* leave it active; retry resolution on the next poll */
-          }
+      for (const [sig, id] of [...eventIds]) {
+        if (currentSignatures.has(sig)) continue; // still active — don't resolve
+        let resolved = false;
+        try {
+          resolved = await this.resolveAnomaly(id);
+        } catch {
+          resolved = false;
         }
-        eventIds.delete(sig);
+        if (resolved) eventIds.delete(sig);
       }
       eventIdsByConn.set(connId, eventIds);
     }

@@ -2129,6 +2129,27 @@ describe('AnomalyService', () => {
       expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(0);
     });
 
+    it('retries auto-resolution after a failure so the banner is not left stuck open', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      now += 31_000;
+      await poll(); // fires
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
+
+      // Recovered, but resolution fails this poll → event stays unresolved, retry pending.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(healthyNodes);
+      storage.resolveAnomaly.mockResolvedValueOnce(false);
+      now += 5_000;
+      await poll();
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
+
+      // Next poll retries; resolution now succeeds → event resolves, banner clears.
+      now += 5_000;
+      await poll();
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(0);
+    });
+
     it('per-node fan-out surfaces a stuck replica invisible in the connected node view', async () => {
       // The connected node (primary) view lists the replica with NO migration
       // markers — they are node-local. Fan-out queries the replica directly.

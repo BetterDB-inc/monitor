@@ -154,11 +154,17 @@ export function detectReplicaSlotState(
     }
 
     // Divergence: a replica owning slots in CLUSTER NODES is inconsistent with
-    // the shard authority. Only meaningful with the shard cross-view, so gate on
-    // `hasShards`. Signature on the distinct bounds of each owned range so a
-    // range that grows/shrinks (even keeping its start) re-signatures and
-    // re-alerts; keep the raw ranges for the message.
-    if (hasShards && node.slots.length > 0) {
+    // the shard authority. This is a FALLBACK signal — only raised when the
+    // replica has no explicit migrating/importing markers, so a single stuck
+    // replica never yields two anomalies with contradictory remediation (a
+    // migration alert says "run SETSLOT ... STABLE"; divergence says not to).
+    // Only meaningful with the shard cross-view, so gate on `hasShards`.
+    // Signature on the distinct bounds of each owned range so a range that
+    // grows/shrinks (even keeping its start) re-signatures and re-alerts; keep
+    // the raw ranges for the message.
+    const hasMigrationMarkers =
+      (node.migratingSlots?.length ?? 0) > 0 || (node.importingSlots?.length ?? 0) > 0;
+    if (hasShards && !hasMigrationMarkers && node.slots.length > 0) {
       anomalies.push({
         replicaId: node.id,
         replicaAddress: node.address,

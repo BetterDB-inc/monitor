@@ -135,6 +135,24 @@ describe('detectReplicaSlotState', () => {
     expect(sigFor(200)).not.toBe(sigFor(16000));
   });
 
+  it('suppresses divergence when the replica also has migration markers (no contradictory dual alert)', () => {
+    const nodes = [
+      node({ id: 'prim', flags: ['master'], slots: [[0, 16383]] }),
+      node({
+        id: 'rep',
+        flags: ['slave'],
+        master: 'prim',
+        slots: [[100, 200]], // owns slots …
+        importingSlots: [{ slot: 42, sourceNodeId: 'prim' }], // … AND has a migration marker
+      }),
+    ];
+    const shards = [shard([[0, 16383]], [{ id: 'prim', role: 'master' }, { id: 'rep', role: 'replica' }])];
+    const found = detectReplicaSlotState(nodes, shards);
+    // Only the migration anomaly — divergence is a fallback and must not also fire.
+    expect(found).toHaveLength(1);
+    expect(found[0].reason).toBe('replica_importing');
+  });
+
   it('does not run the divergence check without CLUSTER SHARDS (Layer 1 only)', () => {
     const nodes = [
       node({ id: 'prim', flags: ['master'], slots: [[0, 16383]] }),
