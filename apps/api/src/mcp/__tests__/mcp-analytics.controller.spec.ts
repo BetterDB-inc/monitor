@@ -1,18 +1,40 @@
-import { HttpException } from '@nestjs/common';
+import { HttpException, type Provider } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { INFERENCE_LATENCY_PRO_SERVICE } from '@betterdb/shared';
 import { McpAnalyticsController } from '../mcp-analytics.controller';
 import { MetricForecastingService } from '../../metric-forecasting/metric-forecasting.service';
+import { VectorSearchService } from '../../vector-search/vector-search.service';
+import { InferenceLatencyService } from '../../inference-latency/inference-latency.service';
 import { AgentTokenGuard } from '../../common/guards/agent-token.guard';
+import { CapabilityUnavailableError } from '../../common/errors/capability-unavailable.error';
 
 describe('McpAnalyticsController', () => {
   const forecastSvc = {
     getForecast: jest.fn(),
   };
+  const vectorSvc = {
+    getIndexList: jest.fn(),
+    getIndexInfo: jest.fn(),
+  };
+  const inferenceSvc = {
+    getProfile: jest.fn(),
+  };
+  const proSvc = {
+    getSlaStatus: jest.fn(),
+  };
 
-  async function makeController(): Promise<McpAnalyticsController> {
+  async function makeController(withPro = false): Promise<McpAnalyticsController> {
+    const providers: Provider[] = [
+      { provide: MetricForecastingService, useValue: forecastSvc },
+      { provide: VectorSearchService, useValue: vectorSvc },
+      { provide: InferenceLatencyService, useValue: inferenceSvc },
+    ];
+    if (withPro === true) {
+      providers.push({ provide: INFERENCE_LATENCY_PRO_SERVICE, useValue: proSvc });
+    }
     const mod = await Test.createTestingModule({
       controllers: [McpAnalyticsController],
-      providers: [{ provide: MetricForecastingService, useValue: forecastSvc }],
+      providers,
     })
       .overrideGuard(AgentTokenGuard)
       .useValue({ canActivate: () => true })
@@ -23,6 +45,10 @@ describe('McpAnalyticsController', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     forecastSvc.getForecast.mockResolvedValue({ metricKind: 'usedMemory', points: [] });
+    vectorSvc.getIndexList.mockResolvedValue(['idx1']);
+    vectorSvc.getIndexInfo.mockResolvedValue({ name: 'idx1', numDocs: 5 });
+    inferenceSvc.getProfile.mockResolvedValue({ windowMs: 60000, buckets: [] });
+    proSvc.getSlaStatus.mockReturnValue([]);
   });
 
   it('forecast forwards connection id and metric kind', async () => {
@@ -43,5 +69,91 @@ describe('McpAnalyticsController', () => {
     }
     expect(caught).toBeInstanceOf(HttpException);
     expect((caught as HttpException).getStatus()).toBe(500);
+  });
+
+  it('vector indexes expands each index to its info', async () => {
+    const controller = await makeController();
+    const res = await controller.getVectorIndexes('inst1');
+    expect(res.indexes).toEqual([{ name: 'idx1', numDocs: 5 }]);
+    expect(vectorSvc.getIndexInfo).toHaveBeenCalledWith('inst1', 'idx1');
+  });
+
+  it('vector indexes keeps successful entries when one index info fails', async () => {
+    vectorSvc.getIndexList.mockResolvedValueOnce(['idx1', 'idx2']);
+    vectorSvc.getIndexInfo
+      .mockResolvedValueOnce({ name: 'idx1', numDocs: 5 })
+      .mockRejectedValueOnce(new Error('FT.INFO failed: Unknown index name'));
+    const controller = await makeController(false);
+    const res = await controller.getVectorIndexes('inst1');
+    expect(res.indexes).toEqual([{ name: 'idx1', numDocs: 5 }]);
+  });
+
+  it('vector indexes surfaces an error when every index info call fails', async () => {
+    vectorSvc.getIndexList.mockResolvedValueOnce(['idx1', 'idx2']);
+    vectorSvc.getIndexInfo
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockRejectedValueOnce(new Error('timeout'));
+    const controller = await makeController(false);
+    let caught: unknown;
+    try {
+      await controller.getVectorIndexes('inst1');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(HttpException);
+    expect((caught as HttpException).getStatus()).toBe(500);
+  });
+
+  it('vector indexes maps missing Search module to 501', async () => {
+    vectorSvc.getIndexList.mockRejectedValueOnce(
+      new CapabilityUnavailableError(
+        'Vector search is not available on this connection (Search module not loaded)',
+      ),
+    );
+    const controller = await makeController();
+    let caught: unknown;
+    try {
+      await controller.getVectorIndexes('inst1');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(HttpException);
+    expect((caught as HttpException).getStatus()).toBe(501);
+  });
+
+  it('inference latency returns profile with null sla when pro absent', async () => {
+    const controller = await makeController();
+    const res = await controller.getInferenceLatency('inst1', '30000');
+    expect(res.profile).toEqual({ windowMs: 60000, buckets: [] });
+    expect(res.sla).toBeNull();
+    expect(inferenceSvc.getProfile).toHaveBeenCalledWith('inst1', { windowMs: 30000 });
+  });
+
+  it('inference latency merges sla status when pro present', async () => {
+    proSvc.getSlaStatus.mockReturnValue([
+      { indexName: 'products', thresholdUs: 100, breached: true, lastFiredAt: 5 },
+    ]);
+    const controller = await makeController(true);
+    const res = await controller.getInferenceLatency('inst1', undefined);
+    expect(res.sla).toEqual([
+      { indexName: 'products', thresholdUs: 100, breached: true, lastFiredAt: 5 },
+    ]);
+    expect(proSvc.getSlaStatus).toHaveBeenCalledWith('inst1');
+    expect(inferenceSvc.getProfile).toHaveBeenCalledWith('inst1', { windowMs: undefined });
+  });
+
+  it('inference latency rejects non-positive or fractional windowMs with 400', async () => {
+    const controller = await makeController();
+    for (const bad of ['-5', '0', '0.5', 'abc']) {
+      let caught: unknown;
+      try {
+        await controller.getInferenceLatency('inst1', bad);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(HttpException);
+      expect((caught as HttpException).getStatus()).toBe(400);
+    }
+    expect(inferenceSvc.getProfile).not.toHaveBeenCalled();
   });
 });
