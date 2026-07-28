@@ -1773,16 +1773,30 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const seenAt = firstSeen.get(signature) ?? timestamp;
       if (!firstSeen.has(signature)) firstSeen.set(signature, timestamp);
 
-      // Persistence gate, then dedupe.
+      // Persistence gate.
       if (timestamp - seenAt < minPersistMs) continue;
-      if (active.has(signature)) continue;
-      // An unresolved event may still track this signature even after it dropped
-      // out of `active` — i.e. it recovered, its auto-resolve failed (kept for
-      // retry), and now it has recurred. Reuse that still-open event instead of
-      // emitting a second one, which would overwrite the id map and orphan the
-      // first (leaving a stale banner that can never auto-resolve).
-      if (eventIdsByConn && eventIds.has(signature)) {
-        active.add(signature);
+
+      // Dedupe — but stay aware of EXTERNAL resolution. For tracked detectors an
+      // operator can dismiss the banner (resolve the event) while the condition
+      // is still present; a non-self-healing valkey#1664 state must then RE-EMIT
+      // rather than stay silently suppressed. So we dedupe only while the tracked
+      // event is still unresolved and present in the cache. This also covers the
+      // recovered-then-failed-resolve-then-recurred case: the still-open event is
+      // reused, never orphaned by a second emit. If the event was resolved
+      // externally or evicted, we stop tracking it and fall through to re-emit
+      // (mirrors the Raft re-pin behavior).
+      if (eventIdsByConn) {
+        const existingId = eventIds.get(signature);
+        if (existingId) {
+          const existing = this.recentAnomalies.find((e) => e.id === existingId);
+          if (existing && !existing.resolved) {
+            active.add(signature);
+            continue;
+          }
+          eventIds.delete(signature);
+          active.delete(signature);
+        }
+      } else if (active.has(signature)) {
         continue;
       }
 

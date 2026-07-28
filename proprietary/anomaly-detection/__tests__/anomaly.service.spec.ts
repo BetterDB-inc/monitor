@@ -2174,6 +2174,25 @@ describe('AnomalyService', () => {
       expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
     });
 
+    it('re-alerts if an operator dismisses the banner while the replica is still stuck', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      now += 31_000;
+      await poll(); // fires E1
+      const active1 = slotEvents().filter((e) => !e.resolved);
+      expect(active1).toHaveLength(1);
+
+      // Operator dismisses the banner while the replica is STILL stuck.
+      await service.resolveAnomaly(active1[0].id);
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(0);
+
+      // Condition persists → the non-self-healing alert must re-pin, not stay muted.
+      now += 5_000;
+      await poll();
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
+    });
+
     it('fan-out skips replicas flagged dead/unreachable (no wasted connect attempts)', async () => {
       const primaryView = [
         { id: 'aaaaaaaa', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
