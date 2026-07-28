@@ -153,6 +153,35 @@ Once connected, your AI assistant can query your databases directly:
 | `get_cluster_slowlog` | Aggregated slowlog across all cluster nodes |
 | `get_slot_stats` | Per-slot key counts and CPU usage (Valkey 8+) |
 
+### Analytics Tools
+
+| Tool | Description |
+|---|---|
+| `get_forecast` | Capacity forecast for a metric (`opsPerSec`, `usedMemory`, `cpuTotal`, `memFragmentation`) with projected time to ceiling |
+| `get_latency_regressions` | Detected sustained p99 latency regressions vs baseline from the anomaly store *(Pro)* |
+| `get_largest_keys` | Largest keys by measured memory usage from key analytics snapshots *(Pro)* |
+
+### Vector Search Tools
+
+For deployments running the Search module (valkey-search / RediSearch).
+
+| Tool | Description |
+|---|---|
+| `get_vector_indexes` | Per-index health: document count, memory usage, indexing failures, and percent indexed |
+| `get_inference_latency` | FT.SEARCH p50/p95/p99 per vector index plus SLA breach status (SLA fields require Pro) |
+
+### AI Observability Tools
+
+For AI components (semantic caches, agent caches, agent-memory stores, retrieval pipelines) and traces ingested via OpenTelemetry.
+
+| Tool | Description |
+|---|---|
+| `ai_list_instances` | Superset discovery view of all AI component instances with liveness and latest metrics sample |
+| `ai_instance_history` | Stored metrics time-series for one AI component instance (hit rate, cost saved, evictions, threshold, …) |
+| `list_ai_traces` | List recent AI application traces (LLM calls, cache lookups, memory recalls, retrieval spans) |
+| `get_ai_trace` | Full span waterfall for one trace with timing, parent relationships, and attributes |
+| `correlate_ai_trace` | Join a trace's cache/memory spans with live Valkey state to explain misses or stale recalls |
+
 ### Connection Management Tools
 
 | Tool | Description |
