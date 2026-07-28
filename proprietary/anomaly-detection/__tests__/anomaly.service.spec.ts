@@ -2150,6 +2150,49 @@ describe('AnomalyService', () => {
       expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(0);
     });
 
+    it('does not orphan an unresolved event when the same signature recurs after a failed resolve', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      now += 31_000;
+      await poll(); // fires E1
+      expect(slotEvents()).toHaveLength(1);
+
+      // Recover, resolution fails → E1 kept for retry.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(healthyNodes);
+      storage.resolveAnomaly.mockResolvedValueOnce(false);
+      now += 5_000;
+      await poll();
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
+
+      // Same signature recurs before E1 resolved → must reuse E1, not emit a 2nd.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(badReplicaNodes);
+      await poll(); // recurrence observed (fresh grace)
+      now += 31_000;
+      await poll(); // grace passed — E1 reused, no duplicate/orphan
+      expect(slotEvents()).toHaveLength(1);
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
+    });
+
+    it('fan-out skips replicas flagged dead/unreachable (no wasted connect attempts)', async () => {
+      const primaryView = [
+        { id: 'aaaaaaaa', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
+        { id: 'bbbbbbbb', address: '10.0.0.2:6380@16380', flags: ['slave', 'fail'], master: 'aaaaaaaa', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'disconnected', slots: [] },
+      ];
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(primaryView);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue([
+        { slots: [[0, 16383]], nodes: [{ id: 'aaaaaaaa', role: 'master' }, { id: 'bbbbbbbb', role: 'replica' }] },
+      ]);
+      const getNodeConnection = jest.fn().mockResolvedValue({ call: jest.fn() });
+      (service as any).clusterDiscovery = { getNodeConnection };
+
+      await poll();
+      now += 31_000;
+      await poll();
+      // bbbbbbbb is a replica flagged `fail` — it must never be dialed.
+      expect(getNodeConnection).not.toHaveBeenCalled();
+    });
+
     it('per-node fan-out surfaces a stuck replica invisible in the connected node view', async () => {
       // The connected node (primary) view lists the replica with NO migration
       // markers — they are node-local. Fan-out queries the replica directly.

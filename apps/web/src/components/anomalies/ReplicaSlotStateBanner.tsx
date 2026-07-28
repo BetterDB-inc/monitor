@@ -14,10 +14,10 @@ export interface ReplicaSlotStateEvent {
 }
 
 const RUNBOOK = [
-  'A replica must never carry slot migrating/importing state — this is a stuck, inconsistent cluster state (valkey#1664) that does not self-heal.',
-  'Identify the affected slot(s) and replica from the message, then run `CLUSTER SETSLOT <slot> STABLE` on that replica to clear the stuck state.',
-  'Do NOT force a failover or reset the node to "unstick" it — that risks reshaping ownership; clearing the slot state is the targeted fix.',
-  'Confirm recovery: after SETSLOT STABLE the replica should report no migrating/importing slots in CLUSTER NODES and this alert will resolve on the next poll.',
+  'A replica must never carry slot migrating/importing state or own slots — this is a stuck, inconsistent cluster state (valkey#1664) that does not self-heal.',
+  'Apply the exact remediation in the alert above, which depends on the symptom: for a replica reporting slots in migrating/importing state, run `CLUSTER SETSLOT <slot> STABLE` on that replica for each affected slot; for a replica that owns slots (ownership divergence), re-attach it with `CLUSTER REPLICATE <primary-id>` instead — do NOT run SETSLOT STABLE for that case.',
+  'Do NOT blindly force a failover or reset the node to "unstick" it — apply the targeted fix for the reported symptom.',
+  'Confirm recovery: the replica should report no migrating/importing slots (and no owned slots) in CLUSTER NODES, and this alert will resolve on the next poll.',
 ];
 
 /**

@@ -32,6 +32,9 @@ describe('ReplicaSlotStateBanner', () => {
     expect(screen.getByText('Remediation runbook')).toBeInTheDocument();
     // "SETSLOT" appears in both the message and the runbook step.
     expect(screen.getAllByText(/SETSLOT/).length).toBeGreaterThan(0);
+    // The runbook must cover BOTH remediations so it can't contradict a
+    // divergence event (which says to use CLUSTER REPLICATE, not SETSLOT).
+    expect(screen.getByText(/CLUSTER REPLICATE/)).toBeInTheDocument();
   });
 
   it('renders nothing when there are no events', () => {

@@ -1685,10 +1685,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   ): Promise<ClusterNode[]> {
     if (!this.clusterDiscovery) return baseNodes;
 
+    // Only fan out to reachable remote replicas. A replica flagged dead/
+    // unreachable (fail/fail?/noaddr/handshake) can't provide a self-view, and
+    // attempting it would burn a connection timeout every poll — worst exactly
+    // when the cluster is already degraded.
+    const DEAD_FLAGS = ['fail', 'fail?', 'noaddr', 'handshake'];
     const remoteReplicas = baseNodes.filter(
       (n) =>
         (n.flags.includes('slave') || n.flags.includes('replica')) &&
-        !n.flags.includes('myself'),
+        !n.flags.includes('myself') &&
+        !DEAD_FLAGS.some((flag) => n.flags.includes(flag)),
     );
     if (remoteReplicas.length === 0) return baseNodes;
 
@@ -1770,6 +1776,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // Persistence gate, then dedupe.
       if (timestamp - seenAt < minPersistMs) continue;
       if (active.has(signature)) continue;
+      // An unresolved event may still track this signature even after it dropped
+      // out of `active` — i.e. it recovered, its auto-resolve failed (kept for
+      // retry), and now it has recurred. Reuse that still-open event instead of
+      // emitting a second one, which would overwrite the id map and orphan the
+      // first (leaving a stale banner that can never auto-resolve).
+      if (eventIdsByConn && eventIds.has(signature)) {
+        active.add(signature);
+        continue;
+      }
 
       const event = buildEvent(finding, signature);
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
