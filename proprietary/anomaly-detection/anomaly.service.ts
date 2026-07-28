@@ -500,15 +500,21 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         this.lastRejectedConnections.set(ctx.connectionId, currentRejected);
 
         if (!buffers.has(MetricType.REJECTED_CONNECTIONS)) {
-          buffers.set(MetricType.REJECTED_CONNECTIONS, new MetricBuffer(MetricType.REJECTED_CONNECTIONS));
-          detectors.set(MetricType.REJECTED_CONNECTIONS, new SpikeDetector(MetricType.REJECTED_CONNECTIONS, {
-            warningZScore: 1.5,
-            criticalZScore: 2.5,
-            warningThreshold: 5,
-            criticalThreshold: 25,
-            consecutiveRequired: 1,
-            cooldownMs: 30000,
-          }));
+          buffers.set(
+            MetricType.REJECTED_CONNECTIONS,
+            new MetricBuffer(MetricType.REJECTED_CONNECTIONS),
+          );
+          detectors.set(
+            MetricType.REJECTED_CONNECTIONS,
+            new SpikeDetector(MetricType.REJECTED_CONNECTIONS, {
+              warningZScore: 1.5,
+              criticalZScore: 2.5,
+              warningThreshold: 5,
+              criticalThreshold: 25,
+              consecutiveRequired: 1,
+              cooldownMs: 30000,
+            }),
+          );
         }
 
         const rejectedBuffer = buffers.get(MetricType.REJECTED_CONNECTIONS)!;
@@ -517,7 +523,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         const rejectedAnomaly = rejectedDetector.detect(rejectedBuffer, rejectedDelta, timestamp);
         if (rejectedAnomaly) {
           rejectedAnomaly.connectionId = ctx.connectionId;
-          this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${rejectedAnomaly.message}`);
+          this.logger.warn(
+            `Anomaly detected for ${ctx.connectionName}: ${rejectedAnomaly.message}`,
+          );
           await this.addAnomaly(rejectedAnomaly, ctx);
         }
       }
@@ -880,8 +888,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           : 'none';
 
     const prev = this.clientSaturationLevel.get(ctx.connectionId) ?? 'none';
-    const escalated =
-      AnomalyService.SATURATION_RANK[level] > AnomalyService.SATURATION_RANK[prev];
+    const escalated = AnomalyService.SATURATION_RANK[level] > AnomalyService.SATURATION_RANK[prev];
 
     // Only alert on escalation; de-escalation / steady state stays quiet.
     if (escalated) {
@@ -2086,6 +2093,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       correlationId: s.correlationId,
       relatedMetrics: s.relatedMetrics as MetricType[],
       resolved: s.resolved,
+      connectionId: s.connectionId,
     };
   }
 
@@ -2134,17 +2142,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         .slice(0, limit);
     }
 
-    const cacheThreshold = Date.now() - this.cacheTtlMs;
-
-    if (!startTime || startTime >= cacheThreshold) {
-      let events = [...this.recentAnomalies];
-      if (connectionId) events = events.filter((e) => e.connectionId === connectionId);
-      if (metricType) events = events.filter((e) => e.metricType === metricType);
-      if (severity) events = events.filter((e) => e.severity === severity);
-      if (endTime) events = events.filter((e) => e.timestamp <= endTime);
-      return events.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
-    }
-
     const stored = await this.storage.getAnomalyEvents({
       startTime,
       endTime,
@@ -2153,8 +2150,28 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       limit,
       connectionId,
     });
+    const storedEvents = stored.map((s) => this.storedToAnomalyEvent(s));
 
-    return stored.map((s) => this.storedToAnomalyEvent(s));
+    // Union with the in-memory cache like the activeOnly branch above: the
+    // cache can hold events whose persist failed, while storage holds events
+    // some producers (e.g. command_p99 latency regressions) write without ever
+    // entering the cache. Neither side alone is complete; storage wins on id.
+    const cacheThreshold = Date.now() - this.cacheTtlMs;
+    if (!startTime || startTime >= cacheThreshold) {
+      const seen = new Set(storedEvents.map((e) => e.id));
+      const cached = this.recentAnomalies.filter(
+        (e) =>
+          !seen.has(e.id) &&
+          (!connectionId || e.connectionId === connectionId) &&
+          (!metricType || e.metricType === metricType) &&
+          (!severity || e.severity === severity) &&
+          (!endTime || e.timestamp <= endTime) &&
+          (!startTime || e.timestamp >= startTime),
+      );
+      return [...storedEvents, ...cached].sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+    }
+
+    return storedEvents;
   }
 
   getRecentGroups(limit = 50, pattern?: AnomalyPattern): CorrelatedAnomalyGroup[] {

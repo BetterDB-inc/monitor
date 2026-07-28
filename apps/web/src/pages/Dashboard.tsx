@@ -4,6 +4,7 @@ import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { useStoredMemorySnapshots } from '../hooks/useStoredMemorySnapshots';
 import { ConnectionCard } from '../components/dashboard/ConnectionCard';
+import { ConfigHazardBanner } from '../components/dashboard/ConfigHazardBanner';
 import { OverviewCards } from '../components/dashboard/OverviewCards';
 import { MemoryChart } from '../components/dashboard/MemoryChart';
 import { OpsChart } from '../components/dashboard/OpsChart';
@@ -29,10 +30,23 @@ export function Dashboard() {
     refetchKey: currentConnection?.id,
   });
 
-  const [memoryHistory, setMemoryHistory] = useState<Array<{ time: string; used: number; peak: number }>>([]);
+  // Config hazards change rarely and are TTL-cached server-side — poll slowly.
+  const { data: detailedHealth } = usePolling({
+    fetcher: metricsApi.getDetailedHealth,
+    interval: 30000,
+    refetchKey: currentConnection?.id,
+  });
+
+  const [memoryHistory, setMemoryHistory] = useState<
+    Array<{ time: string; used: number; peak: number }>
+  >([]);
   const [opsHistory, setOpsHistory] = useState<Array<{ time: string; ops: number }>>([]);
-  const [cpuHistory, setCpuHistory] = useState<Array<{ time: string; sys: number; user: number }>>([]);
-  const [ioThreadHistory, setIoThreadHistory] = useState<Array<{ time: string; reads: number; writes: number }>>([]);
+  const [cpuHistory, setCpuHistory] = useState<Array<{ time: string; sys: number; user: number }>>(
+    [],
+  );
+  const [ioThreadHistory, setIoThreadHistory] = useState<
+    Array<{ time: string; reads: number; writes: number }>
+  >([]);
   const [hasEverSeenIoActivity, setHasEverSeenIoActivity] = useState(false);
   const prevCpuRef = useRef<{ sys: number; user: number; ts: number } | null>(null);
   const prevIoCounters = useRef<{ reads: number; writes: number; ts: number } | null>(null);
@@ -57,31 +71,37 @@ export function Dashboard() {
 
   const formatStoredTime = (ts: number): string => {
     const d = new Date(ts);
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString();
+    return (
+      d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
+      ' ' +
+      d.toLocaleTimeString()
+    );
   };
 
-  const storedMemoryHistory: Array<{ time: string; used: number; peak: number }> | null = sortedStoredSnapshots
-    ? sortedStoredSnapshots.map(s => ({
+  const storedMemoryHistory: Array<{ time: string; used: number; peak: number }> | null =
+    sortedStoredSnapshots
+      ? sortedStoredSnapshots.map((s) => ({
           time: formatStoredTime(s.timestamp),
           used: s.usedMemory,
           peak: s.usedMemoryPeak,
         }))
-    : null;
+      : null;
 
   const storedOpsHistory: Array<{ time: string; ops: number }> | null = sortedStoredSnapshots
-    ? sortedStoredSnapshots.map(s => ({
-          time: formatStoredTime(s.timestamp),
-          ops: s.opsPerSec ?? 0,
-        }))
+    ? sortedStoredSnapshots.map((s) => ({
+        time: formatStoredTime(s.timestamp),
+        ops: s.opsPerSec ?? 0,
+      }))
     : null;
 
-  const storedCpuHistory: Array<{ time: string; sys: number; user: number }> | null = sortedStoredSnapshots
-    ? sortedStoredSnapshots.map(s => ({
+  const storedCpuHistory: Array<{ time: string; sys: number; user: number }> | null =
+    sortedStoredSnapshots
+      ? sortedStoredSnapshots.map((s) => ({
           time: formatStoredTime(s.timestamp),
           sys: s.cpuSys ?? 0,
           user: s.cpuUser ?? 0,
         }))
-    : null;
+      : null;
 
   const storedIoThreadHistory = sortedStoredSnapshots
     ? deriveStoredIoDeltas(sortedStoredSnapshots, formatStoredTime)
@@ -104,11 +124,14 @@ export function Dashboard() {
     const time = new Date().toLocaleTimeString();
 
     setMemoryHistory((prev) => {
-      const next = [...prev, {
-        time,
-        used: parseInt(info.memory!.used_memory, 10),
-        peak: parseInt(info.memory!.used_memory_peak, 10)
-      }];
+      const next = [
+        ...prev,
+        {
+          time,
+          used: parseInt(info.memory!.used_memory, 10),
+          peak: parseInt(info.memory!.used_memory_peak, 10),
+        },
+      ];
       return next.slice(-60);
     });
 
@@ -129,11 +152,16 @@ export function Dashboard() {
         if (readsPerSec > 0 || writesPerSec > 0) {
           setHasEverSeenIoActivity(true);
         }
-        setIoThreadHistory(prev => [...prev, {
-          time,
-          reads: parseFloat(readsPerSec.toFixed(1)),
-          writes: parseFloat(writesPerSec.toFixed(1)),
-        }].slice(-60));
+        setIoThreadHistory((prev) =>
+          [
+            ...prev,
+            {
+              time,
+              reads: parseFloat(readsPerSec.toFixed(1)),
+              writes: parseFloat(writesPerSec.toFixed(1)),
+            },
+          ].slice(-60),
+        );
       }
     }
     prevIoCounters.current = { reads: rawReads, writes: rawWrites, ts: ioTs };
@@ -164,6 +192,8 @@ export function Dashboard() {
 
   return (
     <div className="space-y-6">
+      <ConfigHazardBanner hazards={detailedHealth?.configHazards} />
+
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Dashboard</h1>
         <div className="flex items-center gap-4">
@@ -183,7 +213,11 @@ export function Dashboard() {
         <MemoryChart data={isTimeFiltered ? (storedMemoryHistory ?? []) : memoryHistory} />
         <OpsChart data={isTimeFiltered ? (storedOpsHistory ?? []) : opsHistory} />
         <CpuChart data={isTimeFiltered ? (storedCpuHistory ?? []) : cpuHistory} />
-        <IoThreadChart data={isTimeFiltered ? (storedIoThreadHistory ?? []) : ioThreadHistory} isMultiThreaded={info?.server?.io_threads_active === '1'} hasEverSeenActivity={hasEverSeenIoActivity} />
+        <IoThreadChart
+          data={isTimeFiltered ? (storedIoThreadHistory ?? []) : ioThreadHistory}
+          isMultiThreaded={info?.server?.io_threads_active === '1'}
+          hasEverSeenActivity={hasEverSeenIoActivity}
+        />
       </div>
     </div>
   );
