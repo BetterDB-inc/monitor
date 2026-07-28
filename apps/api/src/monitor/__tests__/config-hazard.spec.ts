@@ -78,6 +78,29 @@ describe('evaluateAclAofHazard', () => {
     expect(finding?.status).toBe('hazard');
   });
 
+  it('does not accept +@all when a later rule denies a command category', () => {
+    const finding = evaluateAclAofHazard(
+      input({ aclGetUserResult: resp3User(['off'], '+@all -@transaction', '~*', '&*') }),
+    );
+    expect(finding?.status).toBe('hazard');
+  });
+
+  it('does not accept +@all when a later rule denies individual commands', () => {
+    const finding = evaluateAclAofHazard(
+      input({ aclGetUserResult: resp3User(['off'], '+@all -exec -multi', '~*', '&*') }),
+    );
+    expect(finding?.status).toBe('hazard');
+  });
+
+  it('does not accept the allcommands flag when the rules carry an explicit denial', () => {
+    const finding = evaluateAclAofHazard(
+      input({
+        aclGetUserResult: resp3User(['off', 'allkeys', 'allchannels'], 'allcommands -exec', '', ''),
+      }),
+    );
+    expect(finding?.status).toBe('hazard');
+  });
+
   it('returns an unverified finding when ACL GETUSER was denied', () => {
     const finding = evaluateAclAofHazard(input({ aclGetUserResult: 'denied' }));
     expect(finding?.status).toBe('unverified');

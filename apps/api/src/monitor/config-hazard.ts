@@ -121,6 +121,14 @@ function parseAclUser(raw: unknown): ParsedAclUser | null {
 
 function hasUnrestrictedGrant(user: ParsedAclUser): boolean {
   const commandTokens = user.commands.split(/\s+/).filter(Boolean);
+  // An explicit deny (e.g. -exec, -@transaction) can still break AOF reload
+  // under +@all, so any deny token defeats the unrestricted workaround.
+  const hasExplicitDenial = commandTokens.some((token) => {
+    return token.startsWith('-');
+  });
+  if (hasExplicitDenial) {
+    return false;
+  }
   const allCommands =
     commandTokens.includes('+@all') ||
     commandTokens.includes('allcommands') ||
