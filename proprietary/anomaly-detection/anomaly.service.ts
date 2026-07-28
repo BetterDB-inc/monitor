@@ -1715,10 +1715,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       if (result.status !== 'fulfilled' || !result.value) continue;
       const target = byId.get(result.value.id);
       if (!target) continue;
-      // Overlay the replica's authoritative self-reported slot state.
-      target.slots = result.value.self.slots;
-      target.migratingSlots = result.value.self.migratingSlots;
-      target.importingSlots = result.value.self.importingSlots;
+      const self = result.value.self;
+      // Overlay the node's authoritative self-reported view: its ROLE (flags +
+      // master) as well as its slot state. The connected node's gossip flags can
+      // be stale — e.g. it still calls a just-promoted node a `slave` — and so
+      // can the same-origin CLUSTER SHARDS role. Trusting the node's own line
+      // prevents flagging a live primary that now legitimately owns slots as a
+      // divergent replica (which would emit CLUSTER REPLICATE advice demoting it).
+      // Strip `myself` — that flag is relative to the queried node, not this view.
+      target.flags = self.flags.filter((flag) => flag !== 'myself');
+      target.master = self.master;
+      target.slots = self.slots;
+      target.migratingSlots = self.migratingSlots;
+      target.importingSlots = self.importingSlots;
     }
     return merged;
   }

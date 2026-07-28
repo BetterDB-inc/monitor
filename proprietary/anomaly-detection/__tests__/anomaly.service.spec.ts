@@ -2193,6 +2193,33 @@ describe('AnomalyService', () => {
       expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
     });
 
+    it('fan-out trusts the node self-reported role, so a stale-promoted primary is not flagged', async () => {
+      // The connected node's gossip view still calls bbbbbbbb a replica (stale).
+      const primaryView = [
+        { id: 'aaaaaaaa', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 8191]] },
+        { id: 'bbbbbbbb', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'aaaaaaaa', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+      ];
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(primaryView);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue([
+        { slots: [[0, 8191]], nodes: [{ id: 'aaaaaaaa', role: 'master' }] },
+        { slots: [[8192, 16383]], nodes: [{ id: 'bbbbbbbb', role: 'master' }] },
+      ]);
+      // bbbbbbbb's OWN line: it is actually a primary now, legitimately owning slots.
+      const selfView =
+        'aaaaaaaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n' +
+        'bbbbbbbb 10.0.0.2:6380@16380 myself,master - 0 0 2 connected 8192-16383';
+      const nodeClient = { call: jest.fn().mockResolvedValue(selfView) };
+      (service as any).clusterDiscovery = {
+        getNodeConnection: jest.fn().mockResolvedValue(nodeClient),
+      };
+
+      await poll();
+      now += 31_000;
+      await poll();
+      // A live primary owning its slots is NOT a divergent replica.
+      expect(slotEvents()).toHaveLength(0);
+    });
+
     it('fan-out skips replicas flagged dead/unreachable (no wasted connect attempts)', async () => {
       const primaryView = [
         { id: 'aaaaaaaa', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
