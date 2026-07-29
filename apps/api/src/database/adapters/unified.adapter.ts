@@ -19,6 +19,7 @@ import {
   RoleInfo,
   ReplicaInfo,
   ClusterNode,
+  ClusterShard,
   SlotStats,
   ConfigGetResponse,
   VectorIndexInfo,
@@ -490,6 +491,16 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   async getClusterNodes(): Promise<ClusterNode[]> {
     const nodesString = await this.client.call('CLUSTER', 'NODES');
     return MetricsParser.parseClusterNodes(nodesString as string);
+  }
+
+  /**
+   * Fetch the authoritative shard-grouped topology via `CLUSTER SHARDS`
+   * (Valkey/Redis 7.0+). Rejects if the command is unsupported; callers that
+   * only need it as a refinement should catch and degrade rather than fail.
+   */
+  async getClusterShards(): Promise<ClusterShard[]> {
+    const raw = await this.client.call('CLUSTER', 'SHARDS');
+    return MetricsParser.parseClusterShards(raw as unknown[]);
   }
 
   async getClusterSlotStats(orderBy: 'key-count' | 'cpu-usec' = 'key-count', limit: number = 100): Promise<SlotStats> {

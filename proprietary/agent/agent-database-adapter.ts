@@ -22,6 +22,7 @@ import type {
   RoleInfo,
   ReplicaInfo,
   ClusterNode,
+  ClusterShard,
   SlotStats,
   ConfigGetResponse,
   VectorIndexInfo,
@@ -412,6 +413,11 @@ export class AgentDatabaseAdapter implements DatabasePort {
   async getClusterNodes(): Promise<ClusterNode[]> {
     const nodesString = await this.sendCommand('CLUSTER', ['NODES']);
     return MetricsParser.parseClusterNodes(nodesString as string);
+  }
+
+  async getClusterShards(): Promise<ClusterShard[]> {
+    const raw = await this.sendCommand('CLUSTER', ['SHARDS']);
+    return MetricsParser.parseClusterShards(raw as unknown[]);
   }
 
   async getClusterSlotStats(

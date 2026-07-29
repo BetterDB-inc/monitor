@@ -21,6 +21,8 @@ export enum MetricType {
   CPU_UTILIZATION = 'cpu_utilization',
   REPLICATION_ROLE = 'replication_role',
   CLUSTER_STATE = 'cluster_state',
+  /** Replica wrongly reporting slot migrating/importing/owned state (valkey#1664) — state-based. */
+  REPLICA_SLOT_STATE = 'replica_slot_state',
   DATASET_KEYS = 'dataset_keys',
   /** Per-command P99 latency regression (INFO latencystats) — handled by LatencyRegressionService, not z-score buffers */
   COMMAND_P99 = 'command_p99',
@@ -29,6 +31,29 @@ export enum MetricType {
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',
 }
+
+/**
+ * Metric types handled OUTSIDE the normal z-score extractor/buffer loop: they are
+ * state-based (emitted directly on a state transition), delta/lazily fed, or
+ * deprecated — so no baseline buffer/detector is created for them. This single
+ * source of truth is referenced by both the buffer-init guard in AnomalyService
+ * and its test, so the two can never drift out of lockstep.
+ */
+export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Set([
+  MetricType.REPLICATION_ROLE,
+  MetricType.CLUSTER_STATE,
+  MetricType.REPLICA_SLOT_STATE,
+  MetricType.DATASET_KEYS,
+  MetricType.COMMAND_P99,
+  MetricType.PERSISTENCE_CHILD,
+  MetricType.CLUSTER_TOPOLOGY,
+  MetricType.SLOWLOG_LAST_ID,
+  MetricType.REJECTED_CONNECTIONS,
+  MetricType.CLIENT_SATURATION,
+  MetricType.EVICTED_CLIENTS,
+  MetricType.RAFT_HEALTH,
+  MetricType.SLOWLOG_COUNT,
+]);
 
 export enum AnomalySeverity {
   INFO = 'info',

@@ -119,23 +119,28 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   async getNodeConnection(nodeId: string, connectionId?: string): Promise<Valkey> {
     const existingConnection = this.discoveredNodes.get(nodeId);
     if (existingConnection) {
-      if (
-        existingConnection.client.status === 'ready' &&
-        Date.now() - existingConnection.lastHealthCheck < this.HEALTH_CHECK_INTERVAL
-      ) {
+      if (existingConnection.client.status === 'ready') {
+        // Reuse the live client and refresh its check stamp. A ready connection
+        // older than HEALTH_CHECK_INTERVAL must NOT fall through to the create
+        // path below: that overwrites the map entry and orphans this still-open
+        // socket (cleanupIdleConnections can't reach it once it's out of the map,
+        // and MAX_CONNECTIONS never trips because the map size is unchanged),
+        // leaking one ESTABLISHED connection to the monitored node per stale
+        // reuse. Active liveness is validated separately by healthCheckNode.
+        existingConnection.lastHealthCheck = Date.now();
+        existingConnection.healthy = true;
         return existingConnection.client;
       }
 
-      if (existingConnection.client.status !== 'ready') {
-        try {
-          await existingConnection.client.connect();
-          existingConnection.lastHealthCheck = Date.now();
-          existingConnection.healthy = true;
-          return existingConnection.client;
-        } catch (error) {
-          this.logger.warn(`Failed to reconnect to node ${nodeId}: ${error}`);
-          existingConnection.healthy = false;
-        }
+      // Not ready — revive it in place before falling back to a brand-new client.
+      try {
+        await existingConnection.client.connect();
+        existingConnection.lastHealthCheck = Date.now();
+        existingConnection.healthy = true;
+        return existingConnection.client;
+      } catch (error) {
+        this.logger.warn(`Failed to reconnect to node ${nodeId}: ${error}`);
+        existingConnection.healthy = false;
       }
     }
 
@@ -221,6 +226,14 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         lastHealthCheck: Date.now(),
         healthy: true,
       };
+
+      // Quit any stale client we're about to replace so the overwrite never
+      // orphans a still-open socket (belt-and-suspenders for the not-ready path
+      // that falls through above).
+      const replaced = this.discoveredNodes.get(nodeId);
+      if (replaced && replaced.client !== client) {
+        await replaced.client.quit().catch(() => {});
+      }
 
       this.discoveredNodes.set(nodeId, connection);
       this.logger.log(`Connected to node ${nodeId} at ${host}:${port}`);

@@ -6,6 +6,8 @@ import {
   ClientInfo,
   AclLogEntry,
   ClusterNode,
+  ClusterShard,
+  ClusterShardNode,
   SlotStats,
 } from '../../common/types/metrics.types';
 import { InfoParser } from './info.parser';
@@ -219,6 +221,93 @@ export class MetricsParser {
 
       return node;
     });
+  }
+
+  /**
+   * Coerce a RESP map reply into a `Map<string, unknown>`. iovalkey returns map
+   * replies as a flat `[key, value, key, value, ...]` array under RESP2 and as a
+   * plain object under RESP3, so handle both shapes.
+   */
+  private static flatReplyToMap(entry: unknown): Map<string, unknown> | null {
+    if (Array.isArray(entry)) {
+      const map = new Map<string, unknown>();
+      for (let i = 0; i + 1 < entry.length; i += 2) {
+        const key = entry[i];
+        if (typeof key === 'string') map.set(key, entry[i + 1]);
+      }
+      return map;
+    }
+    // RESP3 returns map-typed replies as a JS Map, not a flat array or plain
+    // object — Object.entries(Map) is [] and would silently yield empty shards,
+    // disabling Layer 2. Read the Map's string entries directly.
+    if (entry instanceof Map) {
+      const map = new Map<string, unknown>();
+      for (const [key, value] of entry) {
+        if (typeof key === 'string') map.set(key, value);
+      }
+      return map;
+    }
+    if (entry && typeof entry === 'object') {
+      return new Map(Object.entries(entry as Record<string, unknown>));
+    }
+    return null;
+  }
+
+  /**
+   * Parse a `CLUSTER SHARDS` reply into `ClusterShard[]`. The reply is an array
+   * of shards, each a map with `slots` (a flat `[start, end, start, end, ...]`
+   * array) and `nodes` (an array of per-node maps carrying id/role/health/etc.).
+   * Malformed or role-less entries are skipped defensively.
+   */
+  static parseClusterShards(raw: unknown[]): ClusterShard[] {
+    if (!Array.isArray(raw)) return [];
+    const shards: ClusterShard[] = [];
+
+    for (const shardEntry of raw) {
+      const shardMap = MetricsParser.flatReplyToMap(shardEntry);
+      if (!shardMap) continue;
+
+      const slots: number[][] = [];
+      const rawSlots = shardMap.get('slots');
+      if (Array.isArray(rawSlots)) {
+        for (let i = 0; i + 1 < rawSlots.length; i += 2) {
+          const start = Number(rawSlots[i]);
+          const end = Number(rawSlots[i + 1]);
+          if (!isNaN(start) && !isNaN(end)) slots.push([start, end]);
+        }
+      }
+
+      const nodes: ClusterShardNode[] = [];
+      const rawNodes = shardMap.get('nodes');
+      if (Array.isArray(rawNodes)) {
+        for (const nodeEntry of rawNodes) {
+          const nodeMap = MetricsParser.flatReplyToMap(nodeEntry);
+          if (!nodeMap) continue;
+
+          const id = nodeMap.get('id');
+          if (typeof id !== 'string' || !id) continue;
+
+          const role = nodeMap.get('role');
+          const endpoint = nodeMap.get('endpoint') ?? nodeMap.get('ip');
+          const port = nodeMap.get('port') ?? nodeMap.get('tls-port');
+          const replOffset = nodeMap.get('replication-offset');
+          const health = nodeMap.get('health');
+
+          nodes.push({
+            id,
+            role: typeof role === 'string' ? role : 'unknown',
+            ...(typeof health === 'string' ? { health } : {}),
+            ...(typeof endpoint === 'string' ? { endpoint } : {}),
+            ...(typeof port === 'number' ? { port } : {}),
+            ...(typeof replOffset === 'number' ? { replicationOffset: replOffset } : {}),
+          });
+        }
+      }
+
+      shards.push({ slots, nodes });
+    }
+
+    return shards;
   }
 
   static parseSlotStats(rawStats: unknown[] | unknown[][]): SlotStats {

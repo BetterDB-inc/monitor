@@ -180,6 +180,44 @@ describe('ClusterDiscoveryService', () => {
       );
     });
 
+    it('reuses a ready-but-stale cached connection instead of orphaning it', async () => {
+      // Regression for the per-poll fan-out leak: a ready client whose health
+      // stamp is older than HEALTH_CHECK_INTERVAL must be REUSED (and its stamp
+      // refreshed), not replaced by a fresh Valkey that overwrites the map entry
+      // and orphans this still-open socket.
+      const nodes = await service.discoverNodes();
+      const target = nodes.find((n) => n.role === 'replica') ?? nodes[0];
+
+      type FakeConn = {
+        node: DiscoveredNode;
+        client: { status: string; quit: jest.Mock };
+        lastHealthCheck: number;
+        healthy: boolean;
+      };
+      const internal = service as unknown as {
+        discoveredNodes: Map<string, FakeConn>;
+        readonly HEALTH_CHECK_INTERVAL: number;
+      };
+      const readyClient = { status: 'ready', quit: jest.fn().mockResolvedValue(undefined) };
+      const staleStamp = Date.now() - (internal.HEALTH_CHECK_INTERVAL + 60_000);
+      internal.discoveredNodes.set(target.id, {
+        node: target,
+        client: readyClient,
+        lastHealthCheck: staleStamp,
+        healthy: true,
+      });
+
+      const returned = await service.getNodeConnection(target.id);
+
+      // Same client handed back (no new connection created → nothing leaked),
+      // the old client is never quit, and the stamp is refreshed.
+      expect(returned).toBe(readyClient as unknown as typeof returned);
+      expect(readyClient.quit).not.toHaveBeenCalled();
+      const entry = internal.discoveredNodes.get(target.id)!;
+      expect(entry.client).toBe(readyClient);
+      expect(entry.lastHealthCheck).toBeGreaterThan(staleStamp);
+    });
+
     it('should throw error for invalid node address', async () => {
       mockDbClient.getClusterNodes.mockResolvedValueOnce([
         {

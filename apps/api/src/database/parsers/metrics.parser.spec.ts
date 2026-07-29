@@ -264,6 +264,91 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
     });
   });
 
+  describe('parseClusterShards', () => {
+    // iovalkey returns CLUSTER SHARDS map replies as flat [k, v, k, v] arrays
+    // under RESP2: each shard has `slots` (flat [start, end, ...]) and `nodes`.
+    const flatReply = [
+      [
+        'slots',
+        [0, 5460],
+        'nodes',
+        [
+          ['id', 'primA', 'port', 6379, 'ip', '10.0.0.1', 'endpoint', '10.0.0.1', 'role', 'master', 'replication-offset', 1000, 'health', 'online'],
+          ['id', 'repB', 'port', 6380, 'ip', '10.0.0.2', 'endpoint', '10.0.0.2', 'role', 'replica', 'replication-offset', 990, 'health', 'online'],
+        ],
+      ],
+      [
+        'slots',
+        [5461, 16383],
+        'nodes',
+        [['id', 'primC', 'port', 6381, 'ip', '10.0.0.3', 'endpoint', '10.0.0.3', 'role', 'master', 'replication-offset', 2000, 'health', 'online']],
+      ],
+    ];
+
+    it('parses shards, slot ranges, and node roles from the flat RESP2 reply', () => {
+      const shards = MetricsParser.parseClusterShards(flatReply);
+      expect(shards).toHaveLength(2);
+      expect(shards[0].slots).toEqual([[0, 5460]]);
+      expect(shards[0].nodes).toHaveLength(2);
+      expect(shards[0].nodes[0]).toMatchObject({
+        id: 'primA',
+        role: 'master',
+        port: 6379,
+        endpoint: '10.0.0.1',
+        replicationOffset: 1000,
+        health: 'online',
+      });
+      expect(shards[0].nodes[1]).toMatchObject({ id: 'repB', role: 'replica' });
+      expect(shards[1].slots).toEqual([[5461, 16383]]);
+    });
+
+    it('parses the RESP3 object (map) reply shape', () => {
+      const objReply = [
+        {
+          slots: [0, 16383],
+          nodes: [{ id: 'primA', role: 'master', endpoint: '10.0.0.1', port: 6379 }],
+        },
+      ];
+      const shards = MetricsParser.parseClusterShards(objReply);
+      expect(shards).toHaveLength(1);
+      expect(shards[0].slots).toEqual([[0, 16383]]);
+      expect(shards[0].nodes[0]).toMatchObject({ id: 'primA', role: 'master' });
+    });
+
+    it('parses the RESP3 Map reply shape (HELLO 3)', () => {
+      // Under RESP3 iovalkey can surface map replies as JS Maps rather than flat
+      // arrays or plain objects. Object.entries(Map) is [], so without an
+      // instanceof-Map branch these would yield empty shards and disable Layer 2.
+      const mapReply = [
+        new Map<string, unknown>([
+          ['slots', [0, 16383]],
+          [
+            'nodes',
+            [new Map<string, unknown>([['id', 'primA'], ['role', 'master'], ['endpoint', '10.0.0.1'], ['port', 6379]])],
+          ],
+        ]),
+      ];
+      const shards = MetricsParser.parseClusterShards(mapReply);
+      expect(shards).toHaveLength(1);
+      expect(shards[0].slots).toEqual([[0, 16383]]);
+      expect(shards[0].nodes[0]).toMatchObject({ id: 'primA', role: 'master', port: 6379 });
+    });
+
+    it('skips node entries with no id and defaults an unknown role', () => {
+      const reply = [
+        ['slots', [0, 1], 'nodes', [['port', 6379, 'role', 'master'], ['id', 'x']]],
+      ];
+      const shards = MetricsParser.parseClusterShards(reply);
+      expect(shards[0].nodes).toHaveLength(1);
+      expect(shards[0].nodes[0]).toEqual({ id: 'x', role: 'unknown' });
+    });
+
+    it('handles empty and non-array input', () => {
+      expect(MetricsParser.parseClusterShards([])).toEqual([]);
+      expect(MetricsParser.parseClusterShards('nope' as unknown as unknown[])).toEqual([]);
+    });
+  });
+
   describe('parseSlowLog', () => {
     it('should parse slowlog entries', () => {
       const rawEntries = [
