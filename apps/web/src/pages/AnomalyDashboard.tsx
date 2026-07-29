@@ -125,6 +125,7 @@ const METRIC_LABELS: Record<string, string> = {
   raft_health: 'Raft Health',
   replica_slot_state: 'Replica Slot State',
   failover_churn: 'Failover Churn',
+  repl_buffer_pressure: 'Replica Buffer Pressure',
 };
 
 function formatTime(ts: number): string {
