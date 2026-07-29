@@ -380,4 +380,7 @@ describe('constants', () => {
     expect(SATURATION_MIN_STREAK).toBe(3);
   });
 
+  it('counts gossip failover churn as control-plane impact evidence', () => {
+    expect(CONTROL_PLANE_CORROBORATING_METRICS).toContain(MetricType.FAILOVER_CHURN);
+  });
 });

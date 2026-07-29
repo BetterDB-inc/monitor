@@ -32,16 +32,13 @@ export const SATURATION_CORROBORATION_WINDOW_MS = 60_000;
 const RTT_SAMPLE_LIMIT = 30;
 const RTT_MIN_SAMPLES = 5;
 
-/**
- * Anomaly metric types that count as control-plane impact evidence.
- * FAILOVER_CHURN joins this list once #346 (which owns that enum member)
- * lands and this branch rebases over it.
- */
+/** Anomaly metric types that count as control-plane impact evidence. */
 export const CONTROL_PLANE_CORROBORATING_METRICS: MetricType[] = [
   MetricType.REPLICATION_ROLE,
   MetricType.CLUSTER_STATE,
   MetricType.CLUSTER_TOPOLOGY,
   MetricType.RAFT_HEALTH,
+  MetricType.FAILOVER_CHURN,
   MetricType.REPL_BUFFER_PRESSURE,
 ];
 
