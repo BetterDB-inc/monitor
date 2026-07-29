@@ -18,6 +18,7 @@ import type {
   StoredAclEntry,
   AuditStats,
   SlowLogPatternAnalysis,
+  ScanSkewReport,
   StoredClientSnapshot,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
@@ -41,6 +42,12 @@ import type {
   FieldDistribution,
   ProfileResult,
 } from '../types/metrics';
+import type {
+  AnomalyEvent,
+  CorrelatedAnomalyGroup,
+  AnomalySummary,
+  AnomalyBufferStats,
+} from '../types/anomaly';
 import type {
   DiscoveredNode,
   NodeStats,
@@ -136,6 +143,15 @@ export const metricsApi = {
     return fetchApi<SlowLogPatternAnalysis>(
       `/commandlog-analytics/patterns${queryString ? `?${queryString}` : ''}`,
     );
+  },
+  // SCAN large-reply / hash-skew advisory over stored large-reply entries
+  getScanSkewAnalysis: (options?: { startTime?: number; endTime?: number; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (options?.startTime) params.set('startTime', options.startTime.toString());
+    if (options?.endTime) params.set('endTime', options.endTime.toString());
+    if (options?.limit) params.set('limit', options.limit.toString());
+    const queryString = params.toString();
+    return fetchApi<ScanSkewReport>(`/commandlog-analytics/scan-skew${queryString ? `?${queryString}` : ''}`);
   },
   getSlowLogPatternAnalysis: (count?: number) => {
     const params = count ? `?count=${count}` : '';
@@ -395,7 +411,7 @@ export const metricsApi = {
     // never hidden.
     if (params?.activeOnly) query.append('activeOnly', 'true');
     const queryString = query.toString();
-    return fetchApi<any[]>(`/anomaly/events${queryString ? `?${queryString}` : ''}`);
+    return fetchApi<AnomalyEvent[]>(`/anomaly/events${queryString ? `?${queryString}` : ''}`);
   },
 
   getAnomalyGroups: (params?: {
@@ -410,7 +426,7 @@ export const metricsApi = {
     if (params?.startTime) query.append('startTime', params.startTime.toString());
     if (params?.endTime) query.append('endTime', params.endTime.toString());
     const queryString = query.toString();
-    return fetchApi<any[]>(`/anomaly/groups${queryString ? `?${queryString}` : ''}`);
+    return fetchApi<CorrelatedAnomalyGroup[]>(`/anomaly/groups${queryString ? `?${queryString}` : ''}`);
   },
 
   getAnomalySummary: (params?: { startTime?: number; endTime?: number }) => {
@@ -418,10 +434,10 @@ export const metricsApi = {
     if (params?.startTime) query.append('startTime', params.startTime.toString());
     if (params?.endTime) query.append('endTime', params.endTime.toString());
     const queryString = query.toString();
-    return fetchApi<any>(`/anomaly/summary${queryString ? `?${queryString}` : ''}`);
+    return fetchApi<AnomalySummary>(`/anomaly/summary${queryString ? `?${queryString}` : ''}`);
   },
 
-  getAnomalyBuffers: () => fetchApi<any[]>('/anomaly/buffers'),
+  getAnomalyBuffers: () => fetchApi<AnomalyBufferStats[]>('/anomaly/buffers'),
 
   resolveAnomalyEvent: (id: string) =>
     fetchApi<{ success: boolean }>(`/anomaly/events/${encodeURIComponent(id)}/resolve`, {

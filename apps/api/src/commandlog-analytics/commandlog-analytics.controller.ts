@@ -3,7 +3,10 @@ import { ApiTags, ApiQuery, ApiHeader } from '@nestjs/swagger';
 import { CommandLogAnalyticsService } from './commandlog-analytics.service';
 import { StoredCommandLogEntry, CommandLogType } from '../common/interfaces/storage-port.interface';
 import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
+import { ScanSkewReport } from './scan-skew-analyzer';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../common/decorators';
+
+export const SCAN_SKEW_MAX_ANALYZE_LIMIT = 5000;
 
 @ApiTags('command-log-analytics')
 @Controller('commandlog-analytics')
@@ -67,5 +70,35 @@ export class CommandLogAnalyticsController {
       limit: limit ? parseInt(limit, 10) : 500,
       connectionId,
     });
+  }
+
+  @Get('scan-skew')
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  @ApiQuery({ name: 'startTime', required: false, description: 'Start time filter (Unix timestamp in seconds)' })
+  @ApiQuery({ name: 'endTime', required: false, description: 'End time filter (Unix timestamp in seconds)' })
+  @ApiQuery({ name: 'limit', required: false, description: `Maximum number of large-reply entries to analyze (default 500, max ${SCAN_SKEW_MAX_ANALYZE_LIMIT})` })
+  async getScanSkewAnalysis(
+    @ConnectionId() connectionId?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+    @Query('limit') limit?: string,
+  ): Promise<ScanSkewReport> {
+    return this.commandLogAnalyticsService.getScanSkewAnalysis({
+      startTime: startTime ? parseInt(startTime, 10) : undefined,
+      endTime: endTime ? parseInt(endTime, 10) : undefined,
+      limit: this.parseScanSkewLimit(limit),
+      connectionId,
+    });
+  }
+
+  private parseScanSkewLimit(limit?: string): number | undefined {
+    if (limit === undefined) {
+      return undefined;
+    }
+    const parsed = parseInt(limit, 10);
+    if (Number.isFinite(parsed) === false || parsed <= 0) {
+      return undefined;
+    }
+    return Math.min(parsed, SCAN_SKEW_MAX_ANALYZE_LIMIT);
   }
 }

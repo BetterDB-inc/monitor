@@ -1,0 +1,201 @@
+import {
+  parseScanCommand,
+  analyzeScanSkew,
+  SCAN_SKEW_BYTES_PER_ELEMENT,
+  SCAN_SKEW_MIN_KEYED_REPLY_BYTES,
+} from '../scan-skew-analyzer';
+import { StoredCommandLogEntry } from '../../common/interfaces/storage-port.interface';
+
+const entry = (over: Partial<StoredCommandLogEntry>): StoredCommandLogEntry => {
+  return {
+    id: 1,
+    timestamp: 1_700_000_000,
+    duration: 500_000,
+    command: ['SSCAN', 'recroom:todo:redo', '3112', 'count', '1024'],
+    clientAddress: '127.0.0.1:50000',
+    clientName: 'app',
+    type: 'large-reply',
+    capturedAt: 1_700_000_000_000,
+    sourceHost: 'localhost',
+    sourcePort: 6379,
+    ...over,
+  };
+};
+
+describe('parseScanCommand', () => {
+  it('parses SSCAN with an explicit COUNT', () => {
+    expect(parseScanCommand(['SSCAN', 'myset', '0', 'COUNT', '1024'])).toEqual({
+      verb: 'SSCAN',
+      key: 'myset',
+      count: 1024,
+    });
+  });
+
+  it('parses HSCAN with MATCH before COUNT and a trailing NOVALUES', () => {
+    expect(
+      parseScanCommand(['HSCAN', 'myhash', '0', 'MATCH', 'f:*', 'COUNT', '500', 'NOVALUES']),
+    ).toEqual({ verb: 'HSCAN', key: 'myhash', count: 500 });
+  });
+
+  it('parses MATCH after COUNT', () => {
+    expect(
+      parseScanCommand(['HSCAN', 'myhash', '0', 'COUNT', '500', 'MATCH', 'f:*']),
+    ).toEqual({ verb: 'HSCAN', key: 'myhash', count: 500 });
+    expect(parseScanCommand(['SCAN', '0', 'COUNT', '64', 'MATCH', 'sess:*'])).toEqual({
+      verb: 'SCAN',
+      key: null,
+      count: 64,
+    });
+  });
+
+  it('parses keyless SCAN with COUNT and TYPE', () => {
+    expect(parseScanCommand(['SCAN', '3112', 'COUNT', '64', 'TYPE', 'set'])).toEqual({
+      verb: 'SCAN',
+      key: null,
+      count: 64,
+    });
+  });
+
+  it('defaults COUNT to 10 when absent', () => {
+    expect(parseScanCommand(['SSCAN', 'myset', '0'])).toEqual({
+      verb: 'SSCAN',
+      key: 'myset',
+      count: 10,
+    });
+  });
+
+  it('is case-insensitive for the verb and keywords', () => {
+    expect(parseScanCommand(['sscan', 'myset', '0', 'count', '32'])).toEqual({
+      verb: 'SSCAN',
+      key: 'myset',
+      count: 32,
+    });
+  });
+
+  it('parses ZSCAN like the other keyed scans', () => {
+    expect(parseScanCommand(['ZSCAN', 'myzset', '0', 'COUNT', '100'])).toEqual({
+      verb: 'ZSCAN',
+      key: 'myzset',
+      count: 100,
+    });
+  });
+
+  it('returns null for non-SCAN-family commands', () => {
+    expect(parseScanCommand(['GET', 'bigkey'])).toBeNull();
+    expect(parseScanCommand(['HGETALL', 'myhash'])).toBeNull();
+  });
+});
+
+describe('analyzeScanSkew', () => {
+  it('surfaces a key seen twice with reply bytes far above the per-element budget', () => {
+    // COUNT 1024 with a 50MB reply → ~48KB per requested element.
+    const entries = [
+      entry({ id: 1, duration: 50_000_000 }),
+      entry({ id: 2, duration: 48_000_000, timestamp: 1_700_000_100 }),
+    ];
+    const report = analyzeScanSkew(entries);
+    expect(report.offenders).toHaveLength(1);
+    expect(report.offenders[0].key).toBe('recroom:todo:redo');
+    expect(report.offenders[0].sightings).toBe(2);
+    expect(report.offenders[0].worstBytesPerElement).toBeGreaterThan(SCAN_SKEW_BYTES_PER_ELEMENT);
+    expect(report.offenders[0].message).toContain('valkey#3955');
+    expect(report.offenders[0].message).toContain('re-creating the key');
+    expect(report.offenders[0].message).toContain('compact encoding');
+  });
+
+  it('skips keyed-scan replies small enough to be compact-encoding full returns', () => {
+    // A 200-field listpack hash returned whole: ~100KB reply at COUNT 10 is
+    // over the per-element budget but under the keyed floor — a normal full
+    // return, not a degenerate chain.
+    const smallReply = SCAN_SKEW_MIN_KEYED_REPLY_BYTES - 1;
+    const report = analyzeScanSkew([
+      entry({ id: 1, command: ['HSCAN', 'smallhash', '0'], duration: smallReply }),
+      entry({
+        id: 2,
+        command: ['HSCAN', 'smallhash', '0'],
+        duration: smallReply,
+        timestamp: 1_700_000_100,
+      }),
+    ]);
+    expect(report.offenders).toHaveLength(0);
+    expect(report.entriesAnalyzed).toBe(2);
+  });
+
+  it('does not apply the keyed reply-size floor to keyless SCAN', () => {
+    const smallReply = SCAN_SKEW_MIN_KEYED_REPLY_BYTES - 1;
+    const report = analyzeScanSkew([
+      entry({ id: 1, command: ['SCAN', '0', 'COUNT', '1'], duration: smallReply }),
+    ]);
+    expect(report.offenders).toHaveLength(1);
+  });
+
+  it('does not advise re-creating a key for keyless SCAN offenders', () => {
+    const entries = [
+      entry({ id: 1, command: ['SCAN', '0', 'MATCH', 'sess:*', 'COUNT', '1024'], duration: 50_000_000 }),
+      entry({
+        id: 2,
+        command: ['SCAN', '0', 'MATCH', 'sess:*', 'COUNT', '1024'],
+        duration: 48_000_000,
+        timestamp: 1_700_000_100,
+      }),
+    ];
+    const report = analyzeScanSkew(entries);
+    expect(report.offenders).toHaveLength(1);
+    expect(report.offenders[0].key).toBe('SCAN sess:*');
+    expect(report.offenders[0].message).not.toContain('re-creating the key');
+    expect(report.offenders[0].message).toContain('main keyspace dictionary');
+    expect(report.offenders[0].message).toContain('valkey#3955');
+  });
+
+  it('does not flag a proportional large reply', () => {
+    // COUNT 5000 with a 6MB reply → ~1.2KB per requested element: big but proportional.
+    const report = analyzeScanSkew([
+      entry({ command: ['SSCAN', 'bigset', '0', 'COUNT', '5000'], duration: 6_000_000 }),
+      entry({ command: ['SSCAN', 'bigset', '0', 'COUNT', '5000'], duration: 6_000_000, id: 2 }),
+    ]);
+    expect(report.offenders).toHaveLength(0);
+  });
+
+  it('suppresses a single ordinary sighting', () => {
+    // Just over budget, seen once → recorded but not surfaced.
+    const report = analyzeScanSkew([
+      entry({ duration: 1024 * (SCAN_SKEW_BYTES_PER_ELEMENT + 1000) }),
+    ]);
+    expect(report.offenders).toHaveLength(0);
+  });
+
+  it('surfaces a single sighting when the ratio is extreme', () => {
+    // COUNT 1 returning ~5MB — the upstream repro class.
+    const report = analyzeScanSkew([
+      entry({ command: ['SSCAN', 'recroom:todo:redo', '3112', 'COUNT', '1'], duration: 5_000_000 }),
+    ]);
+    expect(report.offenders).toHaveLength(1);
+    expect(report.offenders[0].sightings).toBe(1);
+  });
+
+  it('ignores non-SCAN large replies and SCAN entries of other log types', () => {
+    const report = analyzeScanSkew([
+      entry({ command: ['HGETALL', 'bigkey'], duration: 50_000_000 }),
+      entry({ id: 2, type: 'slow', duration: 50_000_000 }),
+    ]);
+    expect(report.offenders).toHaveLength(0);
+  });
+
+  it('ranks offenders worst-first by bytes-per-element', () => {
+    const report = analyzeScanSkew([
+      entry({ command: ['SSCAN', 'mild', '0', 'COUNT', '100'], duration: 1_000_000, id: 1 }),
+      entry({ command: ['SSCAN', 'mild', '0', 'COUNT', '100'], duration: 1_000_000, id: 2 }),
+      entry({ command: ['SSCAN', 'severe', '0', 'COUNT', '1'], duration: 5_000_000, id: 3 }),
+      entry({ command: ['SSCAN', 'severe', '0', 'COUNT', '1'], duration: 5_000_000, id: 4 }),
+    ]);
+    expect(report.offenders.map((o) => o.key)).toEqual(['severe', 'mild']);
+  });
+
+  it('groups keyless SCAN entries under the scan pattern', () => {
+    const report = analyzeScanSkew([
+      entry({ command: ['SCAN', '0', 'MATCH', 'sess:*', 'COUNT', '1'], duration: 5_000_000, id: 1 }),
+    ]);
+    expect(report.offenders).toHaveLength(1);
+    expect(report.offenders[0].key).toBe('SCAN sess:*');
+  });
+});

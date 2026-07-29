@@ -57,3 +57,20 @@ export interface SlowLogPatternAnalysis {
   byKeyPrefix: KeyPrefixBreakdown[];
   byClient: ClientBreakdown[];
 }
+
+/** One key whose SCAN-family replies vastly exceed the requested COUNT (valkey#3955). */
+export interface ScanSkewOffender {
+  /** The scanned key, or `SCAN <pattern>` for keyless keyspace scans. */
+  key: string;
+  verb: string;
+  sightings: number;
+  worstBytesPerElement: number;
+  totalBytes: number;
+  lastTimestamp: number;
+  message: string;
+}
+
+export interface ScanSkewReport {
+  offenders: ScanSkewOffender[];
+  entriesAnalyzed: number;
+}

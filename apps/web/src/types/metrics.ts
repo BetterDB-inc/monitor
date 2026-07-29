@@ -333,6 +333,8 @@ export type {
   CommandBreakdown,
   KeyPrefixBreakdown,
   SlowLogPatternAnalysis,
+  ScanSkewOffender,
+  ScanSkewReport,
   StoredClientSnapshot,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,

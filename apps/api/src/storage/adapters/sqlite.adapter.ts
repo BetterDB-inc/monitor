@@ -2773,7 +2773,7 @@ export class SqliteAdapter implements StoragePort {
       params.push(options.endTime);
     }
     if (options.command) {
-      conditions.push('command LIKE ?');
+      conditions.push("json_extract(command, '$[0]') LIKE ?");
       params.push(`%${options.command}%`);
     }
     if (options.clientName) {
