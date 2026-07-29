@@ -891,7 +891,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             // queried node's own line carries them — so aggregate each replica's
             // self-view before detecting (falls back to `nodes` without fan-out).
             const perNodeView = await this.gatherReplicaSlotView(nodes, ctx);
-            await this.detectReplicaSlotState(ctx, timestamp, perNodeView, shards);
+            await this.detectReplicaSlotState(
+              ctx,
+              timestamp,
+              perNodeView.nodes,
+              shards,
+              perNodeView.unreachableIds,
+            );
           }
         }
       }
@@ -1719,6 +1725,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private static readonly REPLICA_SLOT_STATE_MIN_PERSIST_MS = 30_000;
 
   /**
+   * Per-command timeout for the replica slot-state fan-out. Bounds each remote
+   * `CLUSTER NODES` so a blackholed replica can't hang the shared poll loop.
+   * Matches the spirit of healthCheckNode's 2s ping race.
+   */
+  private static readonly FANOUT_COMMAND_TIMEOUT_MS = 2_000;
+
+  /**
    * Detects a replica wrongly reporting slot migrating/importing/owned state
    * (valkey-io/valkey#1664) from a per-node-aggregated `CLUSTER NODES` view (see
    * `gatherReplicaSlotView` — migration markers are node-local, so each replica
@@ -1733,8 +1746,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     timestamp: number,
     nodes: ClusterNode[],
     shards: ClusterShard[] | undefined,
+    unreachableReplicaIds: Set<string> = new Set(),
   ): Promise<void> {
     try {
+      // A replica we couldn't reach this poll is an observation GAP, not a
+      // recovery: its base gossip line never carries node-local migrating/
+      // importing markers, so its finding would vanish and the gate would restart
+      // the grace clock and auto-resolve a still-open WARNING. Preserve the prior
+      // state of any signature belonging to an unreachable replica (the signature
+      // is `<replicaId>|<reason>|<slots>`, so the node id is the leading field) —
+      // mirroring how a failed base CLUSTER NODES fetch skips detectors entirely.
+      const preserveSignature = unreachableReplicaIds.size
+        ? (signature: string) => unreachableReplicaIds.has(signature.split('|')[0])
+        : undefined;
       await this.applyTopologyPersistenceGate({
         ctx,
         timestamp,
@@ -1744,6 +1768,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         activeByConn: this.activeReplicaSlotAnomalies,
         eventIdsByConn: this.replicaSlotEventIds,
         minPersistMs: AnomalyService.REPLICA_SLOT_STATE_MIN_PERSIST_MS,
+        metricType: MetricType.REPLICA_SLOT_STATE,
+        preserveSignature,
         buildEvent: (a, signature) => ({
           id: `${ctx.connectionId}-replica-slot-state-${signature}-${timestamp}`,
           timestamp,
@@ -1795,8 +1821,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private async gatherReplicaSlotView(
     baseNodes: ClusterNode[],
     ctx: ConnectionContext,
-  ): Promise<ClusterNode[]> {
-    if (!this.clusterDiscovery) return baseNodes;
+  ): Promise<{ nodes: ClusterNode[]; unreachableIds: Set<string> }> {
+    if (!this.clusterDiscovery) return { nodes: baseNodes, unreachableIds: new Set() };
 
     // Only fan out to reachable remote replicas. A replica flagged dead/
     // unreachable (fail/fail?/noaddr/handshake) can't provide a self-view, and
@@ -1809,12 +1835,23 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         !n.flags.includes('myself') &&
         !DEAD_FLAGS.some((flag) => n.flags.includes(flag)),
     );
-    if (remoteReplicas.length === 0) return baseNodes;
+    if (remoteReplicas.length === 0) return { nodes: baseNodes, unreachableIds: new Set() };
 
     const selfViews = await Promise.allSettled(
       remoteReplicas.map(async (r) => {
         const client = await this.clusterDiscovery!.getNodeConnection(r.id, ctx.connectionId);
-        const raw = await client.call('CLUSTER', 'NODES');
+        // Bound the command itself, not just connect(): a blackholed peer (socket
+        // established but unresponsive) leaves iovalkey `ready`, so the reused
+        // client's CLUSTER NODES would otherwise hang for TCP-retransmit
+        // timescales. MultiConnectionPoller holds `polling` until every
+        // pollConnection settles, so one hung fan-out would suspend anomaly
+        // detection for ALL connections. Race a timeout the way healthCheckNode
+        // does; a timeout surfaces as a rejected (unreachable) self-view.
+        const raw = await this.raceWithTimeout(
+          client.call('CLUSTER', 'NODES'),
+          AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+          `CLUSTER NODES to replica ${r.id.substring(0, 8)} timed out`,
+        );
         const self = MetricsParser.parseClusterNodes(raw as string).find((n) =>
           n.flags.includes('myself'),
         );
@@ -1824,19 +1861,20 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     const merged = baseNodes.map((n) => ({ ...n }));
     const byId = new Map(merged.map((n) => [n.id, n]));
-    let unreachable = 0;
-    for (const result of selfViews) {
-      // A rejected self-view is an unreachable replica (connect timeout / call
-      // error). Count it so we can surface a degraded-detection signal below —
-      // the discovery service logs each unique connect error only once, so
-      // without this the detector goes silently blind for that node.
+    const unreachableIds = new Set<string>();
+    // allSettled preserves order, so selfViews[i] corresponds to remoteReplicas[i].
+    selfViews.forEach((result, i) => {
+      // A rejected self-view is an unreachable replica (connect/command timeout or
+      // error). Track its id so detection can PRESERVE that node's prior state
+      // instead of reading the absence as recovery, and surface a degraded signal
+      // below — the discovery service logs each unique connect error only once.
       if (result.status === 'rejected') {
-        unreachable++;
-        continue;
+        unreachableIds.add(remoteReplicas[i].id);
+        return;
       }
-      if (!result.value) continue;
+      if (!result.value) return;
       const target = byId.get(result.value.id);
-      if (!target) continue;
+      if (!target) return;
       const self = result.value.self;
       // Overlay the node's authoritative self-reported view: its ROLE (flags +
       // master) as well as its slot state. The connected node's gossip flags can
@@ -1850,11 +1888,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       target.slots = self.slots;
       target.migratingSlots = self.migratingSlots;
       target.importingSlots = self.importingSlots;
-    }
+    });
 
     // Log only on a change in the degraded count (the poll runs ~1/s, so an
     // every-poll warn would spam). This gives an ongoing signal that slot-state
     // detection is blind for some replicas, and a recovery line when it clears.
+    const unreachable = unreachableIds.size;
     const prevUnreachable = this.replicaFanoutUnreachable.get(ctx.connectionId) ?? 0;
     if (unreachable !== prevUnreachable) {
       if (unreachable > 0) {
@@ -1868,7 +1907,25 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       }
       this.replicaFanoutUnreachable.set(ctx.connectionId, unreachable);
     }
-    return merged;
+    return { nodes: merged, unreachableIds };
+  }
+
+  /**
+   * Resolve a promise, or reject with `message` if it doesn't settle within `ms`.
+   * The timer is always cleared so a settled race can't leave a dangling handle.
+   */
+  private async raceWithTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), ms);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**
@@ -1892,6 +1949,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     minPersistMs: number;
     buildEvent: (finding: T, signature: string) => AnomalyEvent;
     eventIdsByConn?: Map<string, Map<string, string>>;
+    // Metric type of the emitted events — narrows the storage dedupe lookup below.
+    metricType?: MetricType;
+    // Predicate marking signatures whose source node is an observation GAP this
+    // poll (e.g. an unreachable replica). Such signatures are neither forgotten
+    // (grace preserved) nor auto-resolved — their prior state is carried forward
+    // rather than read as recovery.
+    preserveSignature?: (signature: string) => boolean;
   }): Promise<void> {
     const {
       ctx,
@@ -1903,8 +1967,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       minPersistMs,
       buildEvent,
       eventIdsByConn,
+      metricType,
+      preserveSignature,
     } = params;
     const connId = ctx.connectionId;
+    const isPreserved = (sig: string): boolean => preserveSignature?.(sig) ?? false;
 
     const firstSeen = firstSeenByConn.get(connId) ?? new Map<string, number>();
     const active = activeByConn.get(connId) ?? new Set<string>();
@@ -1912,8 +1979,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const currentSignatures = new Set(findings.map(signatureOf));
 
     // Forget recovered signatures so their grace window restarts if they recur.
+    // A preserved (observation-gap) signature is NOT recovered — keep its clock.
     for (const sig of [...firstSeen.keys()]) {
-      if (!currentSignatures.has(sig)) firstSeen.delete(sig);
+      if (!currentSignatures.has(sig) && !isPreserved(sig)) firstSeen.delete(sig);
     }
 
     for (const finding of findings) {
@@ -1937,7 +2005,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         const existingId = eventIds.get(signature);
         if (existingId) {
           const existing = this.recentAnomalies.find((e) => e.id === existingId);
-          if (existing && !existing.resolved) {
+          // Still open in the in-memory ring → dedupe. If it's been evicted from
+          // the ring we can't tell from memory alone, so consult the storage-
+          // backed feed (the source of truth for activeOnly reads): only re-emit
+          // when the tracked event is genuinely gone/resolved there — otherwise a
+          // still-unresolved stored row would get a duplicate WARNING alongside it.
+          const stillOpen =
+            existing !== undefined
+              ? !existing.resolved
+              : await this.isAnomalyUnresolvedInStorage(existingId, connId, metricType);
+          if (stillOpen) {
             active.add(signature);
             continue;
           }
@@ -1966,7 +2043,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // recurrence of the same signature still re-alerts.
     if (eventIdsByConn) {
       for (const [sig, id] of [...eventIds]) {
-        if (currentSignatures.has(sig)) continue; // still active — don't resolve
+        // Still active this poll, or an observation gap (unreachable node) — don't
+        // resolve: a gap must not read as recovery.
+        if (currentSignatures.has(sig) || isPreserved(sig)) continue;
         let outcome: 'resolved' | 'retry' | 'gone' = 'retry';
         try {
           outcome = await this.resolveAnomalyOutcome(id);
@@ -1981,8 +2060,33 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     firstSeenByConn.set(connId, firstSeen);
     activeByConn.set(
       connId,
-      new Set([...active].filter((sig) => currentSignatures.has(sig))),
+      // Keep signatures active this poll AND preserved ones (unreachable nodes),
+      // so a transient connectivity gap doesn't drop a still-open finding.
+      new Set([...active].filter((sig) => currentSignatures.has(sig) || isPreserved(sig))),
     );
+  }
+
+  /**
+   * Whether an emitted anomaly is still present-and-unresolved in the storage-
+   * backed feed. Used by the dedupe gate when the event has been evicted from the
+   * in-memory ring, so a still-open stored row isn't duplicated. On a storage
+   * read error, assume still-open (conservative: avoid emitting a duplicate).
+   */
+  private async isAnomalyUnresolvedInStorage(
+    id: string,
+    connectionId: string,
+    metricType?: MetricType,
+  ): Promise<boolean> {
+    try {
+      const open = await this.storage.getAnomalyEvents({
+        connectionId,
+        resolved: false,
+        metricType,
+      });
+      return open.some((e) => e.id === id);
+    } catch {
+      return true;
+    }
   }
 
   /** Human-readable message for a replica slot-state anomaly (valkey#1664). */

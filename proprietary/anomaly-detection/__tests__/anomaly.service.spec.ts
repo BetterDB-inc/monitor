@@ -2542,6 +2542,96 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('IMPORTING');
       expect(getNodeConnection).toHaveBeenCalledWith('bbbbbbbb', 'conn-1');
     });
+
+    // Shared stuck-replica fan-out fixture: primary view lists bbbbbbbb as a plain
+    // replica (no node-local markers); the replica's own line carries IMPORTING.
+    const stuckPrimaryView = [
+      { id: 'aaaaaaaa', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
+      { id: 'bbbbbbbb', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'aaaaaaaa', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+    ];
+    const stuckShards = [
+      { slots: [[0, 16383]], nodes: [{ id: 'aaaaaaaa', role: 'master' }, { id: 'bbbbbbbb', role: 'replica' }] },
+    ];
+    const stuckReplicaSelfView =
+      'aaaaaaaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\n' +
+      'bbbbbbbb 10.0.0.2:6380@16380 myself,slave aaaaaaaa 0 0 1 connected [42-<-aaaaaaaa]';
+
+    it('preserves a stuck replica WARNING when its self-view becomes unreachable (gap is not recovery)', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(stuckPrimaryView);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(stuckShards);
+      const nodeClient = { call: jest.fn().mockResolvedValue(stuckReplicaSelfView) };
+      (service as any).clusterDiscovery = {
+        getNodeConnection: jest.fn().mockResolvedValue(nodeClient),
+      };
+
+      await poll();
+      now += 31_000;
+      await poll(); // fires the WARNING
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
+
+      // The replica becomes unreachable — its self-view now rejects. Its base
+      // gossip line carries no markers, so the finding vanishes this poll.
+      nodeClient.call.mockRejectedValue(new Error('blackholed'));
+      const resolveCallsBefore = storage.resolveAnomaly.mock.calls.length;
+      now += 5_000;
+      await poll();
+
+      // Observation gap, NOT recovery: the WARNING stays open and no resolve is
+      // even attempted for the preserved signature.
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
+      expect(storage.resolveAnomaly.mock.calls.length).toBe(resolveCallsBefore);
+    });
+
+    it('does not emit a duplicate when the tracked event is evicted but still unresolved in storage', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(stuckPrimaryView);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(stuckShards);
+      const nodeClient = { call: jest.fn().mockResolvedValue(stuckReplicaSelfView) };
+      (service as any).clusterDiscovery = {
+        getNodeConnection: jest.fn().mockResolvedValue(nodeClient),
+      };
+
+      await poll();
+      now += 31_000;
+      await poll(); // fires E1
+      const fired = slotEvents().filter((e) => !e.resolved);
+      expect(fired).toHaveLength(1);
+      const eventId = fired[0].id;
+
+      // E1 is evicted from the 1000-cap in-memory ring but is still unresolved in
+      // the storage-backed feed.
+      (service as any).recentAnomalies = [];
+      storage.getAnomalyEvents = jest
+        .fn()
+        .mockResolvedValue([{ id: eventId, resolved: false }]);
+
+      // Still stuck next poll: the dedupe must consult storage and reuse E1, not
+      // emit a duplicate WARNING alongside the still-open stored row.
+      now += 5_000;
+      await poll();
+      expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ resolved: false, connectionId: 'conn-1' }),
+      );
+      // No duplicate replica-slot event was emitted.
+      expect(slotEvents()).toHaveLength(0);
+    });
+  });
+
+  describe('raceWithTimeout', () => {
+    it('rejects when the wrapped promise does not settle within the timeout', async () => {
+      const svc = service as unknown as {
+        raceWithTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T>;
+      };
+      await expect(
+        svc.raceWithTimeout(new Promise(() => {}), 5, 'CLUSTER NODES timed out'),
+      ).rejects.toThrow('CLUSTER NODES timed out');
+    });
+
+    it('resolves with the value when the promise settles first', async () => {
+      const svc = service as unknown as {
+        raceWithTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T>;
+      };
+      await expect(svc.raceWithTimeout(Promise.resolve('ok'), 10_000, 'boom')).resolves.toBe('ok');
+    });
   });
 
   // ─── Connection limits (valkey-io/valkey#3918) ─────────────────────────────
