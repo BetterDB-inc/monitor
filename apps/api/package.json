@@ -1,6 +1,6 @@
 {
   "name": "api",
-  "version": "0.30.0",
+  "version": "0.32.0",
   "homepage": "https://betterdb.com",
   "private": true,
   "scripts": {
@@ -41,7 +41,7 @@
   "dependencies": {
     "@betterdb/agent-memory": "workspace:*",
     "@betterdb/shared": "workspace:*",
-    "@fastify/static": "^9.1.1",
+    "@fastify/static": "^10.1.2",
     "@fastify/swagger": "^9.7.0",
     "@fastify/swagger-ui": "^5.2.5",
     "@lancedb/lancedb": "^0.23.0",
@@ -85,7 +85,7 @@
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "semver": "^7.7.4",
-    "ws": "^8.20.1",
+    "ws": "^8.21.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

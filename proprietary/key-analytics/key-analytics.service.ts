@@ -1,6 +1,14 @@
 import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
-import { StoragePort, KeyPatternSnapshot, HotKeyEntry, HotKeyQueryOptions } from '@app/common/interfaces/storage-port.interface';
-import { MultiConnectionPoller, ConnectionContext } from '@app/common/services/multi-connection-poller';
+import {
+  StoragePort,
+  KeyPatternSnapshot,
+  HotKeyEntry,
+  HotKeyQueryOptions,
+} from '@app/common/interfaces/storage-port.interface';
+import {
+  MultiConnectionPoller,
+  ConnectionContext,
+} from '@app/common/services/multi-connection-poller';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseService } from '@proprietary/licenses/license.service';
 import { Tier } from '@proprietary/licenses/types';
@@ -23,6 +31,20 @@ const LARGEST_KEYS_TOP_N = KEY_DETAILS_TOP_N;
 // that same top-N bound. (Memory is NOT globally retained and so is reported as
 // context only, never as a ranking dimension — see composite-key-ranker.)
 const COMPOSITE_TOP_N = KEY_DETAILS_TOP_N;
+// Explicit storage fetch cap for ranked reads: adapters default a missing limit
+// to 50, which would truncate multi-snapshot sets BEFORE the memory re-rank.
+const LARGEST_KEYS_FETCH_CAP = 10_000;
+
+function dedupeByKeyMaxMemory(entries: HotKeyEntry[]): HotKeyEntry[] {
+  const byKey = new Map<string, HotKeyEntry>();
+  for (const entry of entries) {
+    const existing = byKey.get(entry.keyName);
+    if (existing === undefined || (entry.memoryBytes ?? 0) > (existing.memoryBytes ?? 0)) {
+      byKey.set(entry.keyName, entry);
+    }
+  }
+  return Array.from(byKey.values());
+}
 
 /** Retention in days per tier. null = keep indefinitely. */
 const TIER_RETENTION_DAYS: Record<Tier, number | null> = {
@@ -110,7 +132,9 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
 
   private async collect(ctx: ConnectionContext, fullScan: boolean): Promise<void> {
     if (this.isRunning.get(ctx.connectionId)) {
-      this.logger.debug(`Key analytics collection already running for ${ctx.connectionName}, skipping`);
+      this.logger.debug(
+        `Key analytics collection already running for ${ctx.connectionName}, skipping`,
+      );
       return;
     }
 
@@ -156,9 +180,12 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
         const minTtl = stats.ttlValues.length > 0 ? Math.min(...stats.ttlValues) : undefined;
         const maxTtl = stats.ttlValues.length > 0 ? Math.max(...stats.ttlValues) : undefined;
 
-        const staleCount = avgIdleTime > 86400 ? Math.round((avgIdleTime / 86400) * stats.count) : 0;
+        const staleCount =
+          avgIdleTime > 86400 ? Math.round((avgIdleTime / 86400) * stats.count) : 0;
         const expiringSoon = stats.ttlValues.filter((t) => t < 3600).length;
-        const expiringSoonCount = Math.round((expiringSoon / (stats.ttlValues.length || 1)) * stats.withTtl);
+        const expiringSoonCount = Math.round(
+          (expiringSoon / (stats.ttlValues.length || 1)) * stats.withTtl,
+        );
 
         let hotCount: number | undefined;
         let coldCount: number | undefined;
@@ -168,7 +195,8 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
             (stats.accessFrequencies.filter((f) => f > avgFreq).length / stats.count) * stats.count,
           );
           coldCount = Math.round(
-            (stats.accessFrequencies.filter((f) => f < coldThreshold).length / stats.count) * stats.count,
+            (stats.accessFrequencies.filter((f) => f < coldThreshold).length / stats.count) *
+              stats.count,
           );
         }
 
@@ -199,8 +227,8 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       // Collect hot keys from per-key pipeline data
       if (result.keyDetails && result.keyDetails.length > 0) {
         const capturedAt = Date.now();
-        const lfuKeys: Array<typeof result.keyDetails[number]> = [];
-        const idletimeKeys: Array<typeof result.keyDetails[number]> = [];
+        const lfuKeys: Array<(typeof result.keyDetails)[number]> = [];
+        const idletimeKeys: Array<(typeof result.keyDetails)[number]> = [];
 
         for (const kd of result.keyDetails) {
           if (kd.freqScore !== null) {
@@ -225,7 +253,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
             keyName: kd.keyName,
             connectionId: ctx.connectionId,
             capturedAt,
-            signalType: isLfu ? 'lfu' as const : 'idletime' as const,
+            signalType: isLfu ? ('lfu' as const) : ('idletime' as const),
             freqScore: isLfu ? (kd.freqScore ?? undefined) : undefined,
             idleSeconds: !isLfu ? (kd.idleSeconds ?? undefined) : undefined,
             memoryBytes: kd.memoryBytes ?? undefined,
@@ -301,7 +329,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       const duration = Date.now() - startTime;
       this.logger.log(
         `Key Analytics (${ctx.connectionName}): ${fullScan ? 'deep-scanned' : 'sampled'} ${result.scanned}/${result.dbSize} keys (${(Math.min(1, samplingRatio) * 100).toFixed(1)}%), ` +
-        `found ${result.patterns.length} patterns in ${duration}ms`,
+          `found ${result.patterns.length} patterns in ${duration}ms`,
       );
     } catch (error) {
       this.logger.error(`Error collecting key analytics for ${ctx.connectionName}:`, error);
@@ -325,7 +353,12 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     return this.storage.getKeyPatternSnapshots(options);
   }
 
-  async getPatternTrends(pattern: string, startTime: number, endTime: number, connectionId?: string) {
+  async getPatternTrends(
+    pattern: string,
+    startTime: number,
+    endTime: number,
+    connectionId?: string,
+  ) {
     return this.storage.getKeyPatternTrends(pattern, startTime, endTime, connectionId);
   }
 
@@ -333,9 +366,26 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     return this.storage.getHotKeys(options);
   }
 
-  /** Top-N largest keys by cardinality (element count / byte length). */
+  /** Top-N largest keys ranked by memory usage among tracked (cardinality-signal) entries. */
   async getLargestKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
-    return this.storage.getHotKeys({ ...options, signalTypes: ['cardinality'] });
+    const { limit, ...rest } = options ?? {};
+    const entries = await this.storage.getHotKeys({
+      ...rest,
+      signalTypes: ['cardinality'],
+      limit: LARGEST_KEYS_FETCH_CAP,
+    });
+    // latest/oldest pin a single snapshot; anything else can span snapshots,
+    // where the same key appears once per snapshot and would dominate the
+    // ranking — keep only each key's largest observation.
+    const singleSnapshot = rest.latest === true || rest.oldest === true;
+    const candidates = singleSnapshot ? entries : dedupeByKeyMaxMemory(entries);
+    const ranked = [...candidates].sort((a, b) => {
+      return (b.memoryBytes ?? 0) - (a.memoryBytes ?? 0);
+    });
+    const limited = limit === undefined ? ranked : ranked.slice(0, limit);
+    return limited.map((entry, index) => {
+      return { ...entry, rank: index + 1 };
+    });
   }
 
   /**

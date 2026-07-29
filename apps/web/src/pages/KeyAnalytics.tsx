@@ -7,7 +7,14 @@ import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
-import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '../components/ui/table';
+import {
+  Table,
+  TableHeader,
+  TableRow,
+  TableHead,
+  TableBody,
+  TableCell,
+} from '../components/ui/table';
 import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
 import { Tooltip as UITooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
@@ -28,9 +35,13 @@ import {
 import { BarChart3, HelpCircle } from 'lucide-react';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 
-function getRankDelta(currentRank: number, keyName: string, prevKeys: HotKeyEntry[] | null): { label: string; className: string } {
+function getRankDelta(
+  currentRank: number,
+  keyName: string,
+  prevKeys: HotKeyEntry[] | null,
+): { label: string; className: string } {
   if (!prevKeys || prevKeys.length === 0) return { label: '', className: '' };
-  const prev = prevKeys.find(k => k.keyName === keyName);
+  const prev = prevKeys.find((k) => k.keyName === keyName);
   if (!prev) return { label: 'NEW', className: 'text-emerald-600 font-semibold' };
   const delta = prev.rank - currentRank;
   if (delta > 0) return { label: `\u2191${delta}`, className: 'text-emerald-600' };
@@ -88,11 +99,20 @@ function formatTtl(ttl?: number): string {
   return formatTime(ttl);
 }
 
-const COLORS = ['var(--primary)', 'var(--secondary)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-1)'];
+const COLORS = [
+  'var(--primary)',
+  'var(--secondary)',
+  'var(--chart-2)',
+  'var(--chart-3)',
+  'var(--chart-4)',
+  'var(--chart-1)',
+];
 
 export function KeyAnalytics() {
   const { currentConnection } = useConnection();
-  const [activeTab, setActiveTab] = useState<'patterns' | 'hot-keys' | 'largest-keys' | 'key-sizes'>('patterns');
+  const [activeTab, setActiveTab] = useState<
+    'patterns' | 'hot-keys' | 'largest-keys' | 'key-sizes'
+  >('patterns');
   const [sortField, setSortField] = useState<SortField>('keyCount');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [selectedPattern, setSelectedPattern] = useState<string | null>(null);
@@ -107,13 +127,21 @@ export function KeyAnalytics() {
     }
   }, [selectedPattern]);
 
-  const { data: summary, loading: _summaryLoading, refresh: refetchSummary } = usePolling({
+  const {
+    data: summary,
+    loading: _summaryLoading,
+    refresh: refetchSummary,
+  } = usePolling({
     fetcher: () => keyAnalyticsApi.getSummary(),
     interval: 60000, // 1 minute
     refetchKey: currentConnection?.id,
   });
 
-  const { data: rawPatterns, loading: patternsLoading, refresh: refetchPatterns } = usePolling({
+  const {
+    data: rawPatterns,
+    loading: patternsLoading,
+    refresh: refetchPatterns,
+  } = usePolling({
     fetcher: () => keyAnalyticsApi.getPatterns({ limit: 100 }),
     interval: 60000,
     refetchKey: currentConnection?.id,
@@ -126,13 +154,18 @@ export function KeyAnalytics() {
   const isHotKeyTimeFiltered = hotKeyStartTime !== undefined && hotKeyEndTime !== undefined;
 
   // Fetch the latest snapshot within the selected date range (or overall if no range)
-  const { data: hotKeys, loading: hotKeysLoading, refresh: refetchHotKeys } = usePolling({
-    fetcher: () => keyAnalyticsApi.getHotKeys({
-      limit: 50,
-      latest: true,
-      startTime: hotKeyStartTime,
-      endTime: hotKeyEndTime,
-    }),
+  const {
+    data: hotKeys,
+    loading: hotKeysLoading,
+    refresh: refetchHotKeys,
+  } = usePolling({
+    fetcher: () =>
+      keyAnalyticsApi.getHotKeys({
+        limit: 50,
+        latest: true,
+        startTime: hotKeyStartTime,
+        endTime: hotKeyEndTime,
+      }),
     interval: 60000,
     refetchKey: `${currentConnection?.id}-${hotKeyStartTime}-${hotKeyEndTime}`,
     enabled: activeTab === 'hot-keys',
@@ -157,14 +190,22 @@ export function KeyAnalytics() {
     });
   }, [rawPatterns]);
 
-  const { data: keySizes, loading: keySizesLoading, refresh: refetchKeySizes } = usePolling({
+  const {
+    data: keySizes,
+    loading: keySizesLoading,
+    refresh: refetchKeySizes,
+  } = usePolling({
     fetcher: () => keyAnalyticsApi.getKeySizes(),
     interval: 60000,
     refetchKey: currentConnection?.id,
     enabled: activeTab === 'key-sizes',
   });
 
-  const { data: largestKeys, loading: largestKeysLoading, refresh: refetchLargestKeys } = usePolling({
+  const {
+    data: largestKeys,
+    loading: largestKeysLoading,
+    refresh: refetchLargestKeys,
+  } = usePolling({
     fetcher: () => keyAnalyticsApi.getLargestKeys({ limit: 50, latest: true }),
     interval: 60000,
     refetchKey: currentConnection?.id,
@@ -179,14 +220,17 @@ export function KeyAnalytics() {
     setBusy(true);
     try {
       await keyAnalyticsApi.triggerCollection(deep);
-      setTimeout(() => {
-        refetchSummary();
-        refetchPatterns();
-        refetchHotKeys();
-        refetchLargestKeys();
-        refetchKeySizes();
-        setBusy(false);
-      }, deep ? 4000 : 2000);
+      setTimeout(
+        () => {
+          refetchSummary();
+          refetchPatterns();
+          refetchHotKeys();
+          refetchLargestKeys();
+          refetchKeySizes();
+          setBusy(false);
+        },
+        deep ? 4000 : 2000,
+      );
     } catch (error) {
       console.error('Failed to trigger collection:', error);
       setBusy(false);
@@ -229,7 +273,7 @@ export function KeyAnalytics() {
     return [...patterns]
       .sort((a, b) => b.keyCount - a.keyCount)
       .slice(0, 10)
-      .map(p => ({
+      .map((p) => ({
         name: p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern,
         fullName: p.pattern,
         value: p.keyCount,
@@ -241,7 +285,7 @@ export function KeyAnalytics() {
     return [...patterns]
       .sort((a, b) => b.totalMemoryBytes - a.totalMemoryBytes)
       .slice(0, 10)
-      .map(p => ({
+      .map((p) => ({
         name: p.pattern.length > 20 ? p.pattern.substring(0, 20) + '...' : p.pattern,
         fullName: p.pattern,
         value: p.totalMemoryBytes,
@@ -280,7 +324,12 @@ export function KeyAnalytics() {
 
   return (
     <div className="space-y-6">
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'patterns' | 'hot-keys' | 'largest-keys' | 'key-sizes')}>
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) =>
+          setActiveTab(v as 'patterns' | 'hot-keys' | 'largest-keys' | 'key-sizes')
+        }
+      >
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-3xl font-bold">Key Analytics</h1>
@@ -752,7 +801,11 @@ export function KeyAnalytics() {
                     </TableHeader>
                     <TableBody>
                       {hotKeys?.map((entry: HotKeyEntry) => {
-                        const delta = getRankDelta(entry.rank, entry.keyName, baselineHotKeys ?? null);
+                        const delta = getRankDelta(
+                          entry.rank,
+                          entry.keyName,
+                          baselineHotKeys ?? null,
+                        );
                         const isTop10 = entry.rank <= 10;
                         return (
                           <TableRow
@@ -831,7 +884,8 @@ export function KeyAnalytics() {
               <CardHeader>
                 <CardTitle>Largest Keys</CardTitle>
                 <p className="text-sm text-muted-foreground">
-                  Top 50 keys by cardinality — element count for collections, byte length for
+                  Top 50 tracked keys ranked by memory usage. Tracking covers the biggest
+                  collections by cardinality — element count for collections, byte length for
                   strings (the valkey big-key metric). Sampled from the most recent collection.
                 </p>
               </CardHeader>
@@ -863,12 +917,24 @@ export function KeyAnalytics() {
                     <TableBody>
                       {Array.from({ length: 5 }).map((_, i) => (
                         <TableRow key={i}>
-                          <TableCell><Skeleton className="h-4 w-6" /></TableCell>
-                          <TableCell><Skeleton className="h-4 w-48" /></TableCell>
-                          <TableCell><Skeleton className="h-4 w-16" /></TableCell>
-                          <TableCell><Skeleton className="h-4 w-20" /></TableCell>
-                          <TableCell><Skeleton className="h-4 w-16" /></TableCell>
-                          <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-6" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-48" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-16" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-20" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-16" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-20" />
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -971,8 +1037,8 @@ export function KeyAnalytics() {
                 ) : !keySizes || !keySizes.available ? (
                   <div className="text-center py-12 text-muted-foreground">
                     No key size data available. The{' '}
-                    <code className="font-mono text-xs">keysizes</code> INFO section is only
-                    exposed by Redis 8.0+; Valkey does not currently emit it.
+                    <code className="font-mono text-xs">keysizes</code> INFO section is only exposed
+                    by Redis 8.0+; Valkey does not currently emit it.
                   </div>
                 ) : (
                   <div className="space-y-8">
