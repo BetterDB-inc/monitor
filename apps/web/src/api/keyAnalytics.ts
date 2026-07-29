@@ -47,6 +47,17 @@ export const keyAnalyticsApi = {
     return fetchApi<HotKeyEntry[]>(query ? `/key-analytics/largest-keys?${query}` : '/key-analytics/largest-keys');
   },
 
+  getCompositeKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean }) => {
+    const params = new URLSearchParams();
+    if (options?.limit) params.append('limit', options.limit.toString());
+    if (options?.startTime) params.append('startTime', options.startTime.toString());
+    if (options?.endTime) params.append('endTime', options.endTime.toString());
+    if (options?.latest !== undefined) params.append('latest', options.latest ? 'true' : 'false');
+    if (options?.oldest) params.append('oldest', 'true');
+    const query = params.toString();
+    return fetchApi<HotKeyEntry[]>(query ? `/key-analytics/composite-keys?${query}` : '/key-analytics/composite-keys');
+  },
+
   getHotKeys: (options?: { limit?: number; startTime?: number; endTime?: number; latest?: boolean; oldest?: boolean }) => {
     const params = new URLSearchParams();
     if (options?.limit) params.append('limit', options.limit.toString());
