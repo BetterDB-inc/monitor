@@ -14,6 +14,8 @@ export enum MetricType {
   EVICTED_CLIENTS = 'evicted_clients',
   /** Raft cluster (Cluster V2) health: leaderless/quorum-loss and election churn — state-based. */
   RAFT_HEALTH = 'raft_health',
+  /** Gossip-mode failover churn: one shard re-electing repeatedly (valkey#3996) — state-based. */
+  FAILOVER_CHURN = 'failover_churn',
   EVICTED_KEYS = 'evicted_keys',
   BLOCKED_CLIENTS = 'blocked_clients',
   KEYSPACE_MISSES = 'keyspace_misses',
@@ -52,6 +54,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.CLIENT_SATURATION,
   MetricType.EVICTED_CLIENTS,
   MetricType.RAFT_HEALTH,
+  MetricType.FAILOVER_CHURN,
   MetricType.SLOWLOG_COUNT,
 ]);
 

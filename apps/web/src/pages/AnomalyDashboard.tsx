@@ -124,6 +124,7 @@ const METRIC_LABELS: Record<string, string> = {
   evicted_clients: 'Client Evictions',
   raft_health: 'Raft Health',
   replica_slot_state: 'Replica Slot State',
+  failover_churn: 'Failover Churn',
 };
 
 function formatTime(ts: number): string {

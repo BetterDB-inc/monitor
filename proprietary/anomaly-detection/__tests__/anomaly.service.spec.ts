@@ -3289,4 +3289,149 @@ describe('AnomalyService', () => {
       expect(activeCriticalRaft()).toHaveLength(1);
     });
   });
+
+  // ─── Failover churn, gossip mode (valkey#3996) ─────────────────────────────
+
+  describe('failover churn detection (gossip mode)', () => {
+    const clusterEnabledInfo = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    const shardNodes = (epoch: number, ownerId: string) => [
+      {
+        id: ownerId,
+        address: '10.0.0.1:6379@16379',
+        flags: ['master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: epoch,
+        linkState: 'connected',
+        slots: [[0, 16383]],
+      },
+    ];
+
+    let now: number;
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterEnabledInfo);
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(shardNodes(1, 'primA'));
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const churnEvents = () => {
+      return service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.FAILOVER_CHURN);
+    };
+
+    const setShard = (epoch: number, ownerId: string) => {
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(shardNodes(epoch, ownerId));
+    };
+
+    it('does not fire on a single clean failover', async () => {
+      setShard(1, 'primA');
+      await poll();
+      now += 5_000;
+      setShard(2, 'primB');
+      await poll();
+      now += 5_000;
+      await poll();
+      expect(churnEvents()).toHaveLength(0);
+    });
+
+    it('emits WARNING when a shard re-elects three times inside the window', async () => {
+      setShard(1, 'primA');
+      await poll();
+      now += 5_000;
+      setShard(2, 'primB');
+      await poll();
+      now += 5_000;
+      setShard(3, 'primA');
+      await poll();
+      now += 5_000;
+      setShard(4, 'primB');
+      await poll();
+      const events = churnEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('valkey#3996');
+      expect(events[0].message).toContain('single failover coordinator');
+    });
+
+    it('escalates to CRITICAL when churn continues into a second window', async () => {
+      let epoch = 1;
+      const owners = ['primA', 'primB'];
+      for (let i = 0; i < 7; i++) {
+        setShard(epoch, owners[epoch % 2]);
+        await poll();
+        epoch += 1;
+        now += 10_000;
+      }
+      const severities = churnEvents().map((e) => e.severity);
+      expect(severities).toContain(AnomalySeverity.WARNING);
+      expect(severities).toContain(AnomalySeverity.CRITICAL);
+    });
+
+    it('carries window state across a CLUSTER NODES failure', async () => {
+      setShard(1, 'primA');
+      await poll();
+      now += 5_000;
+      setShard(2, 'primB');
+      await poll();
+      now += 5_000;
+      setShard(3, 'primA');
+      await poll();
+      now += 5_000;
+      // Persistent rejection so the poll's shared topology fetch fails and the
+      // gossip detectors — churn included — skip this poll without resetting
+      // their window state.
+      (dbClient.getClusterNodes as jest.Mock).mockRejectedValue(new Error('probe failed'));
+      await poll();
+      expect(churnEvents()).toHaveLength(0);
+      now += 5_000;
+      setShard(4, 'primB');
+      await poll();
+      expect(churnEvents()).toHaveLength(1);
+    });
+
+    it('does not run in raft mode', async () => {
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({
+        cluster_state: 'ok',
+        cluster_raft_role: 'leader',
+        cluster_raft_current_term: '1',
+        cluster_raft_leader: 'x',
+      });
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('15000');
+      await poll();
+      expect(dbClient.getClusterNodes).not.toHaveBeenCalled();
+      expect(churnEvents()).toHaveLength(0);
+    });
+
+    it('clears churn state on connection removal', async () => {
+      setShard(1, 'primA');
+      await poll();
+      expect((service as any).failoverChurnState.has('conn-1')).toBe(true);
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).failoverChurnState.has('conn-1')).toBe(false);
+    });
+  });
 });

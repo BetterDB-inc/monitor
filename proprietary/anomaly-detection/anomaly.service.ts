@@ -35,6 +35,12 @@ import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
 import { ClusterNode, ClusterShard } from '@app/common/types/metrics.types';
 import {
+  FAILOVER_CHURN_MIN_CHANGES,
+  FailoverChurnStateMap,
+  acknowledgeChurnFinding,
+  evaluateFailoverChurn,
+} from './failover-churn-detector';
+import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
   AnomalyEvent,
@@ -114,6 +120,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // signature -> emitted event id, so a recovered condition can resolve exactly
   // its own event (clearing the activeOnly banner) instead of all of them.
   private replicaSlotEventIds = new Map<string, Map<string, string>>();
+  // Per-connection per-shard failover-churn windows (valkey#3996, gossip mode).
+  private failoverChurnState = new Map<string, FailoverChurnStateMap>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
@@ -367,6 +375,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
+    this.failoverChurnState.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
@@ -865,13 +874,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // neither runs them on a known-Raft connection nor suppresses them on a
         // gossip cluster (where they must keep running through the blip).
         if (!isRaft) {
-          // Fetch the topology ONCE for all three gossip-era detectors (was three
+          // Fetch the topology ONCE for all gossip-era detectors (was multiple
           // independent CLUSTER NODES calls per poll), and CLUSTER SHARDS
           // concurrently (optional refinement — never rejects). A CLUSTER NODES
           // failure is a single observation gap: skip the detectors this poll
           // WITHOUT clearing the WARNING detectors' dedupe/grace state (so a
           // transient blip can't re-fire a duplicate), while preserving the
           // duplicate-primary detector's deliberate re-alert-after-gap behavior.
+          // For failover churn the skip also carries the window state — churn
+          // evidence must survive a probe blip or a flapping shard could never
+          // accumulate enough observations to fire.
           const shardsPromise = this.safeGetClusterShards(ctx);
           let nodes: ClusterNode[] | undefined;
           try {
@@ -887,6 +899,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           if (nodes) {
             await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
             await this.detectStuckReplicas(ctx, timestamp, nodes);
+            await this.detectFailoverChurn(ctx, timestamp, nodes);
             // Replica migrating/importing markers are node-local — only the
             // queried node's own line carries them — so aggregate each replica's
             // self-view before detecting (falls back to `nodes` without fan-out).
@@ -2142,6 +2155,47 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   /** Render `[[start,end], …]` ranges as `start-end` (or `n` for singletons). */
   private formatSlotRanges(ranges: number[][]): string {
     return ranges.map(([s, e]) => (s === e ? String(s) : `${s}-${e}`)).join(', ');
+  }
+
+  /**
+   * Gossip-mode failover churn (valkey#3996): one shard re-electing repeatedly
+   * within the detector window — competing FAILOVER coordinators. Raft-mode
+   * churn is covered by detectRaftHealth; callers gate this on `!isRaft` and
+   * pass the poll's CLUSTER NODES snapshot (fetch failures are handled at the
+   * call site by skipping the evaluation, which carries the window state).
+   */
+  private async detectFailoverChurn(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+  ): Promise<void> {
+    const state = this.failoverChurnState.get(ctx.connectionId) ?? new Map();
+    this.failoverChurnState.set(ctx.connectionId, state);
+
+    const findings = evaluateFailoverChurn(state, nodes, timestamp);
+    for (const finding of findings) {
+      const severity =
+        finding.severity === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
+      const prefix = finding.severity === 'critical' ? 'CRITICAL' : 'WARNING';
+      const event: AnomalyEvent = {
+        id: randomUUID(),
+        timestamp,
+        metricType: MetricType.FAILOVER_CHURN,
+        anomalyType: AnomalyType.SPIKE,
+        severity,
+        value: finding.changes,
+        baseline: 0,
+        zScore: 0,
+        stdDev: 0,
+        threshold: FAILOVER_CHURN_MIN_CHANGES,
+        message: `${prefix}: ${finding.message}`,
+        resolved: false,
+        connectionId: ctx.connectionId,
+      };
+      this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+      await this.addAnomaly(event, ctx);
+      acknowledgeChurnFinding(state, finding.shardKey, timestamp);
+    }
   }
 
   private convertInfoToRecord(infoResponse: any): Record<string, string> {
