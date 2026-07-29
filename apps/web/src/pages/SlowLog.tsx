@@ -185,7 +185,7 @@ export function SlowLog() {
   });
 
   // SCAN large-reply / hash-skew advisory (valkey#3955) — rides the stored
-  // large-reply log, so it works the same with or without a time filter.
+  // large-reply log, scoped to the active time filter via startTime/endTime.
   const { data: scanSkewReport } = usePolling({
     fetcher: () => metricsApi.getScanSkewAnalysis({ startTime, endTime }),
     interval: 30000,

@@ -17,6 +17,15 @@ export const SCAN_SKEW_BYTES_PER_ELEMENT = 4096;
 export const SCAN_SKEW_EXTREME_MULTIPLIER = 10;
 /** Ordinary over-budget sightings require this many occurrences before surfacing. */
 export const SCAN_SKEW_MIN_SIGHTINGS = 2;
+/**
+ * Keyed scans (SSCAN/HSCAN/ZSCAN) over a compact-encoded collection
+ * (listpack/intset) legitimately return the whole collection in one reply
+ * regardless of COUNT, so a high bytes-per-element ratio there is normal, not
+ * a degenerate chain. Compact encodings are size-bounded, so replies under
+ * this floor are skipped rather than flagged (256KB covers even generously
+ * raised *-max-listpack-entries / *-max-listpack-value configs).
+ */
+export const SCAN_SKEW_MIN_KEYED_REPLY_BYTES = 262_144;
 
 const KEYED_SCAN_VERBS = new Set(['SSCAN', 'HSCAN', 'ZSCAN']);
 
@@ -112,6 +121,10 @@ export function analyzeScanSkew(entries: StoredCommandLogEntry[]): ScanSkewRepor
     }
     entriesAnalyzed += 1;
 
+    if (parsed.key !== null && item.duration < SCAN_SKEW_MIN_KEYED_REPLY_BYTES) {
+      continue;
+    }
+
     const bytesPerElement = item.duration / parsed.count;
     if (bytesPerElement < SCAN_SKEW_BYTES_PER_ELEMENT) {
       continue;
@@ -144,7 +157,10 @@ export function analyzeScanSkew(entries: StoredCommandLogEntry[]): ScanSkewRepor
       continue;
     }
     let subject = `${acc.verb} replies on ${key}`;
-    let remediation = 'Consider re-creating the key, or upgrade once the upstream fix lands.';
+    let remediation =
+      'Consider re-creating the key, or upgrade once the upstream fix lands. If the collection ' +
+      'is small enough to use a compact encoding (listpack/intset), a single full-collection ' +
+      'reply is expected server behavior and needs no action.';
     if (acc.verb === 'SCAN') {
       subject = `${key} replies`;
       remediation =

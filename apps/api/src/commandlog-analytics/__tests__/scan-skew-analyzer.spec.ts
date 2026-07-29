@@ -2,6 +2,7 @@ import {
   parseScanCommand,
   analyzeScanSkew,
   SCAN_SKEW_BYTES_PER_ELEMENT,
+  SCAN_SKEW_MIN_KEYED_REPLY_BYTES,
 } from '../scan-skew-analyzer';
 import { StoredCommandLogEntry } from '../../common/interfaces/storage-port.interface';
 
@@ -34,6 +35,17 @@ describe('parseScanCommand', () => {
     expect(
       parseScanCommand(['HSCAN', 'myhash', '0', 'MATCH', 'f:*', 'COUNT', '500', 'NOVALUES']),
     ).toEqual({ verb: 'HSCAN', key: 'myhash', count: 500 });
+  });
+
+  it('parses MATCH after COUNT', () => {
+    expect(
+      parseScanCommand(['HSCAN', 'myhash', '0', 'COUNT', '500', 'MATCH', 'f:*']),
+    ).toEqual({ verb: 'HSCAN', key: 'myhash', count: 500 });
+    expect(parseScanCommand(['SCAN', '0', 'COUNT', '64', 'MATCH', 'sess:*'])).toEqual({
+      verb: 'SCAN',
+      key: null,
+      count: 64,
+    });
   });
 
   it('parses keyless SCAN with COUNT and TYPE', () => {
@@ -88,6 +100,33 @@ describe('analyzeScanSkew', () => {
     expect(report.offenders[0].worstBytesPerElement).toBeGreaterThan(SCAN_SKEW_BYTES_PER_ELEMENT);
     expect(report.offenders[0].message).toContain('valkey#3955');
     expect(report.offenders[0].message).toContain('re-creating the key');
+    expect(report.offenders[0].message).toContain('compact encoding');
+  });
+
+  it('skips keyed-scan replies small enough to be compact-encoding full returns', () => {
+    // A 200-field listpack hash returned whole: ~100KB reply at COUNT 10 is
+    // over the per-element budget but under the keyed floor — a normal full
+    // return, not a degenerate chain.
+    const smallReply = SCAN_SKEW_MIN_KEYED_REPLY_BYTES - 1;
+    const report = analyzeScanSkew([
+      entry({ id: 1, command: ['HSCAN', 'smallhash', '0'], duration: smallReply }),
+      entry({
+        id: 2,
+        command: ['HSCAN', 'smallhash', '0'],
+        duration: smallReply,
+        timestamp: 1_700_000_100,
+      }),
+    ]);
+    expect(report.offenders).toHaveLength(0);
+    expect(report.entriesAnalyzed).toBe(2);
+  });
+
+  it('does not apply the keyed reply-size floor to keyless SCAN', () => {
+    const smallReply = SCAN_SKEW_MIN_KEYED_REPLY_BYTES - 1;
+    const report = analyzeScanSkew([
+      entry({ id: 1, command: ['SCAN', '0', 'COUNT', '1'], duration: smallReply }),
+    ]);
+    expect(report.offenders).toHaveLength(1);
   });
 
   it('does not advise re-creating a key for keyless SCAN offenders', () => {
