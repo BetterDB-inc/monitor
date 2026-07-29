@@ -237,6 +237,16 @@ export class MetricsParser {
       }
       return map;
     }
+    // RESP3 returns map-typed replies as a JS Map, not a flat array or plain
+    // object — Object.entries(Map) is [] and would silently yield empty shards,
+    // disabling Layer 2. Read the Map's string entries directly.
+    if (entry instanceof Map) {
+      const map = new Map<string, unknown>();
+      for (const [key, value] of entry) {
+        if (typeof key === 'string') map.set(key, value);
+      }
+      return map;
+    }
     if (entry && typeof entry === 'object') {
       return new Map(Object.entries(entry as Record<string, unknown>));
     }

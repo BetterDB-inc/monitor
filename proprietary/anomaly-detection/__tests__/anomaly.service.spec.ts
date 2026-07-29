@@ -2389,6 +2389,40 @@ describe('AnomalyService', () => {
       expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(0);
     });
 
+    it('stops retrying auto-resolution once the event is gone from both cache and storage', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      now += 31_000;
+      await poll(); // fires
+      const fired = slotEvents().filter((e) => !e.resolved);
+      expect(fired).toHaveLength(1);
+
+      // Simulate the emitted event being evicted from the 1000-cap cache while it
+      // was never durably persisted (a deterministic id the Postgres UUID PK
+      // rejected) — storage can never resolve it, so resolution is impossible.
+      const recent = (service as any).recentAnomalies as Array<{ id: string }>;
+      recent.splice(
+        recent.findIndex((a) => a.id === fired[0].id),
+        1,
+      );
+      storage.resolveAnomaly.mockResolvedValue(false);
+
+      // Recover → auto-resolve runs once, sees the event is gone, drops the mapping.
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(healthyNodes);
+      now += 5_000;
+      await poll();
+      const callsAfterGiveUp = storage.resolveAnomaly.mock.calls.length;
+      expect(callsAfterGiveUp).toBeGreaterThanOrEqual(1);
+
+      // Subsequent recovered polls must NOT retry the gone event forever.
+      now += 5_000;
+      await poll();
+      now += 5_000;
+      await poll();
+      expect(storage.resolveAnomaly.mock.calls.length).toBe(callsAfterGiveUp);
+    });
+
     it('does not orphan an unresolved event when the same signature recurs after a failed resolve', async () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
       dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);

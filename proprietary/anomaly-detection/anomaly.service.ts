@@ -90,6 +90,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // enabled and contextualise justified-vs-over-aggressive (valkey#4151).
   private lastEvictedClients = new Map<string, number>();
   private clientEvictionLimit = new Map<string, string>();
+  // Last-logged count of unreachable replicas in the slot-state fan-out, per
+  // connection — so the degraded-detection warning is emitted only on a change,
+  // not every ~1s poll.
+  private replicaFanoutUnreachable = new Map<string, number>();
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
   private lastPersistenceState = new Map<string, ConnectionPersistenceState>();
@@ -342,6 +346,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.lastSlowlogId.delete(connectionId);
     this.lastRejectedConnections.delete(connectionId);
     this.lastEvictedClients.delete(connectionId);
+    this.replicaFanoutUnreachable.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
@@ -1819,8 +1824,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     const merged = baseNodes.map((n) => ({ ...n }));
     const byId = new Map(merged.map((n) => [n.id, n]));
+    let unreachable = 0;
     for (const result of selfViews) {
-      if (result.status !== 'fulfilled' || !result.value) continue;
+      // A rejected self-view is an unreachable replica (connect timeout / call
+      // error). Count it so we can surface a degraded-detection signal below —
+      // the discovery service logs each unique connect error only once, so
+      // without this the detector goes silently blind for that node.
+      if (result.status === 'rejected') {
+        unreachable++;
+        continue;
+      }
+      if (!result.value) continue;
       const target = byId.get(result.value.id);
       if (!target) continue;
       const self = result.value.self;
@@ -1836,6 +1850,23 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       target.slots = self.slots;
       target.migratingSlots = self.migratingSlots;
       target.importingSlots = self.importingSlots;
+    }
+
+    // Log only on a change in the degraded count (the poll runs ~1/s, so an
+    // every-poll warn would spam). This gives an ongoing signal that slot-state
+    // detection is blind for some replicas, and a recovery line when it clears.
+    const prevUnreachable = this.replicaFanoutUnreachable.get(ctx.connectionId) ?? 0;
+    if (unreachable !== prevUnreachable) {
+      if (unreachable > 0) {
+        this.logger.warn(
+          `Replica slot-state fan-out for ${ctx.connectionName}: ${unreachable}/${remoteReplicas.length} replica self-views unreachable — divergence/stuck detection is degraded for those nodes.`,
+        );
+      } else {
+        this.logger.log(
+          `Replica slot-state fan-out for ${ctx.connectionName}: all replica self-views reachable again.`,
+        );
+      }
+      this.replicaFanoutUnreachable.set(ctx.connectionId, unreachable);
     }
     return merged;
   }
@@ -1926,21 +1957,23 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     // Auto-resolve (when wired): a recovered signature (has an emitted event id
     // but is absent this poll) gets its event resolved so an activeOnly banner
-    // clears. Iterate the id map, not `active`, and only drop the mapping once
-    // resolution SUCCEEDS — a failed/thrown resolve (e.g. a storage blip) keeps
-    // the mapping so the next poll retries, rather than leaving the banner stuck
-    // open forever. Retry is decoupled from `active`, so a genuine recurrence of
-    // the same signature still re-alerts.
+    // clears. Iterate the id map, not `active`. Drop the mapping when resolution
+    // SUCCEEDS, and also when the event is `gone` (absent from both cache and
+    // storage — otherwise a never-persisted, since-evicted id retries every poll
+    // forever and the map grows unbounded). Only a `retry` outcome (transient
+    // storage blip, or a cache-present momentary miss) keeps the mapping so the
+    // next poll retries. Retry is decoupled from `active`, so a genuine
+    // recurrence of the same signature still re-alerts.
     if (eventIdsByConn) {
       for (const [sig, id] of [...eventIds]) {
         if (currentSignatures.has(sig)) continue; // still active — don't resolve
-        let resolved = false;
+        let outcome: 'resolved' | 'retry' | 'gone' = 'retry';
         try {
-          resolved = await this.resolveAnomaly(id);
+          outcome = await this.resolveAnomalyOutcome(id);
         } catch {
-          resolved = false;
+          outcome = 'retry';
         }
-        if (resolved) eventIds.delete(sig);
+        if (outcome !== 'retry') eventIds.delete(sig);
       }
       eventIdsByConn.set(connId, eventIds);
     }
@@ -2481,6 +2514,22 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   }
 
   async resolveAnomaly(anomalyId: string): Promise<boolean> {
+    return (await this.resolveAnomalyOutcome(anomalyId)) === 'resolved';
+  }
+
+  /**
+   * Resolve an anomaly, distinguishing three outcomes so auto-resolve callers can
+   * decide whether to retry:
+   *   - `resolved`: the event was dismissed (cache flip or durable storage write).
+   *   - `retry`:    a transient storage error, or a cache-present event storage
+   *                 momentarily couldn't confirm — try again next poll.
+   *   - `gone`:     the event exists in neither the cache nor storage, so it can
+   *                 never be resolved (e.g. a deterministic string id the Postgres
+   *                 UUID PK rejected, since evicted from recentAnomalies). Callers
+   *                 must STOP retrying, or the id mapping is retried every poll
+   *                 forever and grows unbounded.
+   */
+  private async resolveAnomalyOutcome(anomalyId: string): Promise<'resolved' | 'retry' | 'gone'> {
     const anomaly = this.recentAnomalies.find((a) => a.id === anomalyId);
 
     // Memory-only event (never durably stored — e.g. a deterministic string id
@@ -2488,7 +2537,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
-      return true;
+      return 'resolved';
     }
 
     // Durable event: storage is the source of truth for later (storage-backed)
@@ -2500,11 +2549,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       persisted = await this.storage.resolveAnomaly(anomalyId, Date.now());
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
-      return false;
+      return 'retry';
     }
 
     if (!persisted) {
-      return false;
+      // Storage has no such row. If the event is also absent from the cache it no
+      // longer exists anywhere and can never be resolved — report `gone` so the
+      // caller drops it. A cache-present event may just be a momentary storage
+      // miss, so keep retrying that one.
+      return anomaly ? 'retry' : 'gone';
     }
 
     // Keep the cached copy in sync with the durable store.
@@ -2512,7 +2565,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       anomaly.resolved = true;
     }
 
-    return true;
+    return 'resolved';
   }
 
   async resolveGroup(correlationId: string): Promise<boolean> {
