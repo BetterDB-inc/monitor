@@ -24,8 +24,29 @@ describe('ScanSkewAdvisory', () => {
     render(<ScanSkewAdvisory report={report} />);
     expect(screen.getByText('Possible degenerate hash chains')).toBeInTheDocument();
     expect(screen.getByText('recroom:todo:redo')).toBeInTheDocument();
-    expect(screen.getByText(/valkey#3955/)).toBeInTheDocument();
+    expect(screen.getAllByText(/valkey#3955/).length).toBeGreaterThan(0);
     expect(screen.getByText(/4 sightings/)).toBeInTheDocument();
+    expect(screen.getByText(/Consider re-creating the key/)).toBeInTheDocument();
+  });
+
+  it('surfaces backend guidance, including the compact-encoding caveat', () => {
+    const withCaveat: ScanSkewReport = {
+      entriesAnalyzed: 6,
+      offenders: [
+        {
+          ...report.offenders[0],
+          message:
+            'SSCAN replies on recroom:todo:redo far exceed the requested COUNT — possible ' +
+            'degenerate hash chain (valkey#3955). Consider re-creating the key, or upgrade once ' +
+            'the upstream fix lands. If the collection is small enough to use a compact encoding ' +
+            '(listpack/intset), a single full-collection reply is expected server behavior and ' +
+            'needs no action.',
+        },
+      ],
+    };
+    render(<ScanSkewAdvisory report={withCaveat} />);
+    expect(screen.getByText(/compact encoding/)).toBeInTheDocument();
+    expect(screen.getByText(/needs no action/)).toBeInTheDocument();
   });
 
   it('renders a singular sighting label for a single-hit offender', () => {

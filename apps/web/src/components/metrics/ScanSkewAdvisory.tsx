@@ -39,19 +39,22 @@ export function ScanSkewAdvisory({ report }: { report: ScanSkewReport | null | u
       <AlertDescription>
         <p>
           SCAN-family replies on the entries below far exceed the requested COUNT — a signature of
-          a skewed hashtable (valkey#3955). For keyed scans (SSCAN/HSCAN/ZSCAN) consider
-          re-creating the affected key; keyspace SCAN skew lives in the main dictionary and needs
-          the upstream fix.
+          a skewed hashtable (valkey#3955).
         </p>
-        <ul className="mt-2 space-y-1">
+        <ul className="mt-2 space-y-2">
           {offenders.map((offender) => {
             return (
-              <li key={offender.key} className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="font-mono break-all">{offender.key}</span>
-                <span className="text-muted-foreground">
-                  {offender.verb} · {formatSightings(offender.sightings)} · worst ~
-                  {formatBytes(offender.worstBytesPerElement)} per requested element
-                </span>
+              <li key={offender.key} className="text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono break-all">{offender.key}</span>
+                  <span className="text-muted-foreground">
+                    {offender.verb} · {formatSightings(offender.sightings)} · worst ~
+                    {formatBytes(offender.worstBytesPerElement)} per requested element
+                  </span>
+                </div>
+                {offender.message !== undefined && offender.message !== '' && (
+                  <p className="text-muted-foreground mt-0.5">{offender.message}</p>
+                )}
               </li>
             );
           })}
