@@ -83,6 +83,7 @@ export enum AnomalyPattern {
   NODE_FAILOVER = 'node_failover',
   PERSISTENCE_STALL = 'persistence_stall',
   SPLIT_BRAIN = 'split_brain',
+  CONTROL_PLANE_SATURATION = 'control_plane_saturation',
   UNKNOWN = 'unknown',
 }
 
@@ -102,6 +103,14 @@ export interface AnomalyEvent {
   relatedMetrics?: MetricType[];
   resolved: boolean;
   connectionId?: string;
+  /**
+   * Set only by synthetic-event constructors (e.g.
+   * createControlPlaneSaturationEvent) to mark an event that represents a
+   * correlated pattern rather than a raw metric observation. In-memory only
+   * (recentAnomalies / correlator) — not persisted, and never inferred from
+   * the numeric fields.
+   */
+  syntheticPattern?: AnomalyPattern;
   /**
    * Transient (not persisted): whether this cached event was durably written to
    * storage. Deterministic string-id events (failover/promotion/cluster/

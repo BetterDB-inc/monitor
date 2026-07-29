@@ -32,6 +32,55 @@ describe('Correlator', () => {
     correlator = new Correlator(5000);
   });
 
+  describe('CONTROL_PLANE_SATURATION pattern', () => {
+    const saturationMarker = (overrides: Partial<AnomalyEvent> = {}) =>
+      makeAnomaly({
+        metricType: MetricType.CPU_UTILIZATION,
+        severity: AnomalySeverity.CRITICAL,
+        zScore: 0,
+        threshold: 90,
+        value: 96,
+        message: 'CRITICAL: Engine near CPU saturation with control-plane impact (valkey#3927)',
+        syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
+        ...overrides,
+      });
+
+    it('matches the synthetic saturation marker event', () => {
+      const groups = correlator.correlate([saturationMarker()]);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.CONTROL_PLANE_SATURATION);
+      expect(groups[0].diagnosis).toContain('valkey#3927');
+      expect(groups[0].severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('does not match an ordinary z-score CPU anomaly', () => {
+      const zScoreCpu = makeAnomaly({
+        metricType: MetricType.CPU_UTILIZATION,
+        severity: AnomalySeverity.CRITICAL,
+        zScore: 4.5,
+        threshold: 3,
+      });
+      const groups = correlator.correlate([zScoreCpu]);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).not.toBe(AnomalyPattern.CONTROL_PLANE_SATURATION);
+    });
+
+    it('wins over NODE_FAILOVER in a mixed window containing its side effects', () => {
+      const ts = Date.now();
+      const groups = correlator.correlate([
+        saturationMarker({ timestamp: ts }),
+        makeAnomaly({
+          metricType: MetricType.REPLICATION_ROLE,
+          anomalyType: AnomalyType.DROP,
+          severity: AnomalySeverity.CRITICAL,
+          timestamp: ts + 1000,
+        }),
+      ]);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.CONTROL_PLANE_SATURATION);
+    });
+  });
+
   describe('NODE_FAILOVER pattern', () => {
     it('matches on REPLICATION_ROLE metric', () => {
       const anomaly = makeAnomaly({

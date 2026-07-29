@@ -3641,4 +3641,146 @@ describe('AnomalyService', () => {
       expect(prometheusService.updateReplBufferPressure).toHaveBeenLastCalledWith('conn-1', []);
     });
   });
+
+  // ─── Control-plane saturation (valkey#3927) ────────────────────────────────
+
+  describe('control-plane saturation detection', () => {
+    const saturatedInfo = (cpuTotal: number, over: Record<string, unknown> = {}) => ({
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+      replication: { connected_slaves: '3' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+      },
+      cpu: { used_cpu_sys: String(cpuTotal / 2), used_cpu_user: String(cpuTotal / 2) },
+      ...over,
+    });
+
+    let now: number;
+    let cpuCounter: number;
+
+    beforeEach(() => {
+      now = 1_700_000_000_000;
+      cpuCounter = 100;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const saturationEvents = () => {
+      return service.getRecentEvents().filter((e) => {
+        return (
+          e.metricType === MetricType.CPU_UTILIZATION &&
+          e.severity === AnomalySeverity.CRITICAL &&
+          e.zScore === 0
+        );
+      });
+    };
+
+    // One poll, advancing the cumulative CPU counter by `cpuDeltaSec` over a
+    // 10s interval: +9.5 → 95% utilization, +0.5 → 5%.
+    const pollWith = async (cpuDeltaSec: number, slaves = '3') => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(
+        saturatedInfo(cpuCounter, { replication: { connected_slaves: slaves } }),
+      );
+      await poll();
+      cpuCounter += cpuDeltaSec;
+      now += 10_000;
+    };
+
+    // Baseline poll + N saturated polls (95% each).
+    const pollSaturated = async (polls: number, slaves = '3') => {
+      for (let i = 0; i < polls; i++) {
+        await pollWith(9.5, slaves);
+      }
+    };
+
+    it('never fires on sustained high CPU without corroboration', async () => {
+      await pollSaturated(8);
+      expect(saturationEvents()).toHaveLength(0);
+    });
+
+    it('fires once per episode when a replica drop corroborates the saturated CPU', async () => {
+      await pollSaturated(5);
+      // replica count 3 → 1 (a mass drop) while CPU stays pinned
+      await pollSaturated(2, '1');
+      const events = saturationEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('valkey#3927');
+      expect(events[0].threshold).toBe(90);
+      // continued saturation + another drop does not re-fire within the episode
+      await pollSaturated(2, '0');
+      expect(saturationEvents()).toHaveLength(1);
+    });
+
+    it('does not fire when a single replica is removed under busy-but-healthy CPU', async () => {
+      await pollSaturated(5);
+      // maintenance: one replica taken out while the primary is merely busy
+      await pollSaturated(3, '2');
+      expect(saturationEvents()).toHaveLength(0);
+    });
+
+    it('corroborates from a recent control-plane anomaly event', async () => {
+      await pollSaturated(4);
+      (service as any).recentAnomalies.push({
+        id: 'seed-repl-event',
+        timestamp: now - 5_000,
+        metricType: MetricType.REPLICATION_ROLE,
+        anomalyType: AnomalyType.DROP,
+        severity: AnomalySeverity.CRITICAL,
+        value: 0,
+        baseline: 1,
+        zScore: 0,
+        stdDev: 0,
+        threshold: 0,
+        message: 'failover',
+        resolved: false,
+        connectionId: 'conn-1',
+      });
+      await pollSaturated(1);
+      expect(saturationEvents()).toHaveLength(1);
+    });
+
+    it('re-arms after CPU recovery and fires again on a new episode', async () => {
+      await pollSaturated(5);
+      await pollSaturated(1, '1');
+      expect(saturationEvents()).toHaveLength(1);
+
+      // recovery: one idle poll (5% CPU) resets the streak and the replicas rejoin
+      await pollWith(0.5, '3');
+
+      await pollSaturated(4, '3');
+      await pollSaturated(1, '1');
+      expect(saturationEvents()).toHaveLength(2);
+    });
+
+    it('does not pair a pre-restart streak with restart-driven replica loss', async () => {
+      await pollSaturated(4);
+      // server restart: counters go backwards and a replica drops in the same poll
+      cpuCounter = 5;
+      await pollWith(9.5, '1');
+      expect(saturationEvents()).toHaveLength(0);
+      // streak must rebuild from scratch after the restart
+      await pollWith(9.5, '1');
+      await pollWith(9.5, '1');
+      expect(saturationEvents()).toHaveLength(0);
+    });
+
+    it('clears saturation state on connection removal', async () => {
+      await pollSaturated(2);
+      expect((service as any).controlPlaneState.has('conn-1')).toBe(true);
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).controlPlaneState.has('conn-1')).toBe(false);
+      expect((service as any).cpSatLastConnectedSlaves.has('conn-1')).toBe(false);
+    });
+  });
 });
