@@ -121,6 +121,7 @@ const METRIC_LABELS: Record<string, string> = {
   command_p99: 'Command P99',
   rejected_connections: 'Rejected Connections',
   client_saturation: 'Client Saturation',
+  evicted_clients: 'Client Evictions',
   raft_health: 'Raft Health',
   replica_slot_state: 'Replica Slot State',
 };

@@ -46,6 +46,7 @@ describe('HealthService detailed health', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       withHazardService ? (configHazards as unknown as ConfigHazardService) : undefined,
     );
   };

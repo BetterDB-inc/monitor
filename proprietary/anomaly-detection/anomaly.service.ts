@@ -84,6 +84,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // the per-poll DELTA (new refusals) to the detector rather than the ever-growing
   // counter — otherwise a single historical maxclients hit would alert forever.
   private lastRejectedConnections = new Map<string, number>();
+  // Previous lifetime evicted_clients counter per connection — same DELTA reasoning
+  // as rejected_connections; `clientEvictionLimit` caches the maxmemory-clients
+  // config value (fetched once) so the alert can say whether eviction is even
+  // enabled and contextualise justified-vs-over-aggressive (valkey#4151).
+  private lastEvictedClients = new Map<string, number>();
+  private clientEvictionLimit = new Map<string, string>();
   private lastReplicationRole = new Map<string, number>();
   private lastClusterState = new Map<string, string>();
   private lastPersistenceState = new Map<string, ConnectionPersistenceState>();
@@ -335,6 +341,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.detectors.delete(connectionId);
     this.lastSlowlogId.delete(connectionId);
     this.lastRejectedConnections.delete(connectionId);
+    this.lastEvictedClients.delete(connectionId);
+    this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
     this.lastClusterState.delete(connectionId);
     this.lastPersistenceState.delete(connectionId);
@@ -527,6 +535,47 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             `Anomaly detected for ${ctx.connectionName}: ${rejectedAnomaly.message}`,
           );
           await this.addAnomaly(rejectedAnomaly, ctx);
+        }
+      }
+
+      // Client-eviction storm (maxmemory-clients). evicted_clients is a lifetime
+      // counter, so we feed the per-poll delta — the count of clients disconnected
+      // by client-buffer eviction since the last poll — not the raw counter. Any
+      // eviction is abnormal, so absolute thresholds are low. Skipped when eviction
+      // is disabled (maxmemory-clients = 0). See valkey#4151.
+      const currentEvicted = this.parseNumber(info.evicted_clients);
+      if (currentEvicted !== null && (await this.clientEvictionEnabled(ctx))) {
+        const lastEvicted = this.lastEvictedClients.get(ctx.connectionId);
+        // max(0, …) absorbs a counter reset on server restart.
+        const evictedDelta = Math.max(0, currentEvicted - (lastEvicted ?? currentEvicted));
+        this.lastEvictedClients.set(ctx.connectionId, currentEvicted);
+
+        if (!buffers.has(MetricType.EVICTED_CLIENTS)) {
+          buffers.set(MetricType.EVICTED_CLIENTS, new MetricBuffer(MetricType.EVICTED_CLIENTS));
+          detectors.set(MetricType.EVICTED_CLIENTS, new SpikeDetector(MetricType.EVICTED_CLIENTS, {
+            warningZScore: 1.5,
+            criticalZScore: 2.5,
+            warningThreshold: 1,
+            criticalThreshold: 10,
+            consecutiveRequired: 1,
+            cooldownMs: 30000,
+          }));
+        }
+
+        const evictedBuffer = buffers.get(MetricType.EVICTED_CLIENTS)!;
+        const evictedDetector = detectors.get(MetricType.EVICTED_CLIENTS)!;
+        evictedBuffer.addSample(evictedDelta, timestamp);
+        const evictedAnomaly = evictedDetector.detect(evictedBuffer, evictedDelta, timestamp);
+        if (evictedAnomaly) {
+          evictedAnomaly.connectionId = ctx.connectionId;
+          evictedAnomaly.message = this.describeClientEviction(
+            evictedDelta,
+            info,
+            ctx.connectionId,
+            evictedAnomaly.severity,
+          );
+          this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${evictedAnomaly.message}`);
+          await this.addAnomaly(evictedAnomaly, ctx);
         }
       }
 
@@ -926,6 +975,58 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // Advance the level last: on escalation only after addAnomaly resolved; on
     // steady/de-escalation immediately (the latter re-arms alerting on recovery).
     this.clientSaturationLevel.set(ctx.connectionId, level);
+  }
+
+  /**
+   * Whether client-buffer eviction is active for this connection. Cached once from
+   * `maxmemory-clients` (getConfigValue): a value of "0" means eviction is disabled
+   * so evicted_clients can't climb and we skip the detector. On an unreadable or
+   * absent config we default to enabled (better to arm than to miss a real storm).
+   */
+  private async clientEvictionEnabled(ctx: ConnectionContext): Promise<boolean> {
+    let limit = this.clientEvictionLimit.get(ctx.connectionId);
+    if (limit === undefined) {
+      try {
+        limit = (await ctx.client.getConfigValue('maxmemory-clients')) ?? '';
+      } catch {
+        limit = '';
+      }
+      this.clientEvictionLimit.set(ctx.connectionId, limit);
+    }
+    return limit.trim() !== '0';
+  }
+
+  /**
+   * Message for a client-eviction spike. Surfaces the maxmemory-clients limit and
+   * current client-buffer memory so operators can tell the justified case (real
+   * client-buffer pressure) from the over-aggressive one (valkey#4151), where the
+   * same eviction happens with comfortable headroom below the limit.
+   */
+  private describeClientEviction(
+    delta: number,
+    info: Record<string, string>,
+    connectionId: string,
+    severity: AnomalySeverity,
+  ): string {
+    const limit = this.clientEvictionLimit.get(connectionId)?.trim() || 'unset';
+    const memClients = info['mem_clients_normal'];
+    // mem_clients_normal is sampled in the same poll that already saw the eviction,
+    // i.e. AFTER eviction freed buffers — it reflects post-reclaim memory, not the
+    // pressure that triggered the eviction. Surface it with that caveat rather than
+    // letting a low reading be misread as headroom (a false over-aggressive signal).
+    const memPart = memClients
+      ? ` Post-eviction client-buffer memory ~${memClients} bytes (sampled after buffers were ` +
+        `reclaimed, so it understates the pre-eviction peak).`
+      : '';
+    return (
+      `${severity.toUpperCase()}: ${delta} Valkey client${delta === 1 ? '' : 's'} disconnected by ` +
+      `maxmemory-clients eviction in the last interval (maxmemory-clients=${limit}).${memPart} ` +
+      `Eviction has already freed buffers, so this snapshot alone can't separate an over-aggressive ` +
+      `eviction from a justified one: if evictions recur while the limit sits well above steady-state ` +
+      `client memory, eviction may be over-aggressive (valkey#4151); if they cluster with rising ` +
+      `client-buffer memory, it is genuine pressure — raise maxmemory-clients or investigate large ` +
+      `client output buffers (pub/sub, MONITOR, oversized replies).`
+    );
   }
 
   private static readonly RAFT_CHURN_WINDOW_MS = 60_000;
@@ -1972,23 +2073,25 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     } catch (err) {
       this.logger.error('Failed to increment anomaly metric:', err);
     }
-    // Intentionally broader than the webhook path: OTLP includes command_p99
-    // anomalies, which webhook-anomaly-integration skips and delivers as
+    // OTLP export is decoupled from the Pro webhook: mirroring is its own opt-in
+    // channel (gated only by the OTEL_* env vars inside the dispatcher, which
+    // no-ops when disabled), so an operator can ship anomalies to their OTLP
+    // collector without also configuring/enabling a webhook. Intentionally
+    // broader than the webhook path too: OTLP includes command_p99 anomalies,
+    // which webhook-anomaly-integration skips and delivers as
     // latency.regression.detected instead.
-    if (this.webhookEventsProService?.isEnabled()) {
-      try {
-        this.otelEvents?.dispatch(
-          WebhookEventType.ANOMALY_DETECTED,
-          {
-            severity: anomaly.severity,
-            metricType: anomaly.metricType,
-            anomalyType: anomaly.anomalyType,
-          },
-          ctx?.connectionId,
-        );
-      } catch (err) {
-        this.logger.error('Failed to dispatch anomaly OTLP event:', err);
-      }
+    try {
+      this.otelEvents?.dispatch(
+        WebhookEventType.ANOMALY_DETECTED,
+        {
+          severity: anomaly.severity,
+          metricType: anomaly.metricType,
+          anomalyType: anomaly.anomalyType,
+        },
+        ctx?.connectionId,
+      );
+    } catch (err) {
+      this.logger.error('Failed to dispatch anomaly OTLP event:', err);
     }
 
     try {

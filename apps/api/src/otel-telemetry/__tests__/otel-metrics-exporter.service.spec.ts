@@ -36,14 +36,17 @@ interface ObservedPoint {
 class FakeMeter {
   callback?: (result: { observe: jest.Mock }) => Promise<void>;
   observedCount = 0;
+  readonly options = new Map<string, { description?: string; unit?: string }>();
   private observed: object[] = [];
   private readonly names = new Map<object, string>();
 
-  createObservableGauge(name: string): object {
+  createObservableGauge(name: string, options?: { description?: string; unit?: string }): object {
+    this.options.set(name, options ?? {});
     return this.track(name);
   }
 
-  createObservableCounter(name: string): object {
+  createObservableCounter(name: string, options?: { description?: string; unit?: string }): object {
+    this.options.set(name, options ?? {});
     return this.track(name);
   }
 
@@ -284,6 +287,33 @@ describe('OtelMetricsExporterService', () => {
       value: 42,
       attributes: {},
     });
+    await service.onModuleDestroy();
+  });
+
+  it('attaches a derived UCUM unit only to instruments whose name implies one', async () => {
+    const prom = makePrometheus([
+      {
+        name: 'betterdb_memory_used_bytes',
+        help: 'mem',
+        type: 'gauge',
+        values: [{ value: 1, labels: {} }],
+      },
+      {
+        name: 'betterdb_polls_total',
+        help: 'polls',
+        type: 'counter',
+        values: [{ value: 1, labels: {} }],
+      },
+    ]);
+    const meter = new FakeMeter();
+    const service = await initWithMeter(prom, meter);
+
+    expect(meter.options.get('betterdb_memory_used_bytes')).toEqual({
+      description: 'mem',
+      unit: 'By',
+    });
+    // No derivable unit → the key is omitted entirely, not set to ''.
+    expect(meter.options.get('betterdb_polls_total')).toEqual({ description: 'polls' });
     await service.onModuleDestroy();
   });
 
