@@ -39,6 +39,7 @@ export interface AnalyticsOptions {
 }
 
 const EVENT_PREFIX = 'retrieval:';
+const TELEMETRY_USER_AGENT = 'BetterDB-Retrieval/node';
 
 // Build-time placeholders — replaced by scripts/inject-telemetry-defaults.mjs.
 // When the placeholder is NOT replaced, the startsWith('__') guard treats it as unset.
@@ -129,8 +130,22 @@ function getRequestWaitUntil(): WaitUntil | undefined {
   return undefined;
 }
 
+function isFrozenServerless(): boolean {
+  const env = process.env;
+  return Boolean(
+    env.AWS_LAMBDA_FUNCTION_NAME ||
+    env.K_SERVICE ||
+    env.FUNCTION_TARGET ||
+    env.FUNCTIONS_WORKER_RUNTIME,
+  );
+}
+
 type PostHogClient = {
-  capture: (opts: { distinctId?: string; event: string; properties?: Record<string, unknown> }) => void;
+  capture: (opts: {
+    distinctId?: string;
+    event: string;
+    properties?: Record<string, unknown>;
+  }) => void;
   flush: () => Promise<void>;
   shutdown: () => Promise<void>;
 };
@@ -159,7 +174,11 @@ export class PostHogAnalytics implements Analytics {
     process.once('beforeExit', this.flushOnExit);
   }
 
-  async init(client: AnalyticsClient, name: string, configProps?: Record<string, unknown>): Promise<void> {
+  async init(
+    client: AnalyticsClient,
+    name: string,
+    configProps?: Record<string, unknown>,
+  ): Promise<void> {
     this.distinctId = getInstallId();
     this.deploymentId = await this.resolveDeploymentId(client, name);
     const merged: Record<string, unknown> = { ...(configProps ?? {}) };
@@ -195,6 +214,9 @@ export class PostHogAnalytics implements Analytics {
       const props: Record<string, unknown> = { ...(properties ?? {}) };
       if (this.deploymentId && props.deployment_id === undefined) {
         props.deployment_id = this.deploymentId;
+      }
+      if (props.$raw_user_agent === undefined) {
+        props.$raw_user_agent = TELEMETRY_USER_AGENT;
       }
       this.posthog.capture({
         distinctId: this.distinctId,
@@ -235,10 +257,22 @@ export class PostHogAnalytics implements Analytics {
   onActivity(): void {
     // Serverless: emit from request traffic, handing the work to the request's
     // waitUntil so the invocation stays alive until it completes. The setInterval
-    // that long-lived servers rely on is frozen between invocations.
+    // that long-lived servers rely on is frozen between invocations. On frozen
+    // serverless with no waitUntil (AWS Lambda, Cloud Functions, Azure) delivery
+    // is best-effort: the flush is fire-and-forget and the container freezes on
+    // return, so it only completes if a later invocation thaws this container.
+    // Events are lost if it is reaped while idle. No delivery guarantee exists
+    // on these runtimes without a waitUntil equivalent.
     const waitUntil = getRequestWaitUntil();
-    if (!waitUntil) return;
-    this.emitSnapshotIfDue(waitUntil);
+    if (waitUntil) {
+      this.emitSnapshotIfDue(waitUntil);
+      return;
+    }
+    if (isFrozenServerless()) {
+      this.emitSnapshotIfDue((p) => {
+        void p;
+      });
+    }
   }
 
   snapshotTick(): void {

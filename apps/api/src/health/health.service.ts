@@ -18,6 +18,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
+import { ConfigHazardService } from '../monitor/config-hazard.service';
 import { LicenseService } from '@proprietary/licenses';
 import {
   MultiConnectionPoller,
@@ -40,6 +41,7 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
     @Optional() @Inject(ANOMALY_SERVICE) private readonly anomalyService?: IAnomalyService,
     @Optional() private readonly licenseService?: LicenseService,
     @Optional() private readonly otelEvents?: OtelEventDispatcherService,
+    @Optional() private readonly configHazardService?: ConfigHazardService,
   ) {
     super(connectionRegistry);
     // Initialize all existing connections as up
@@ -352,6 +354,21 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
         isValidated: this.licenseService.isValidationComplete(),
         tier: this.licenseService.getLicenseTier(),
       };
+    }
+
+    // Add static config-hazard advisories (e.g. valkey#3983) if available
+    if (this.configHazardService) {
+      const targetId = connectionId || this.connectionRegistry.getDefaultId();
+      if (targetId) {
+        try {
+          detailed.configHazards = await this.configHazardService.getHazards(targetId);
+        } catch (err) {
+          this.logger.debug(
+            `Config-hazard probe failed for ${targetId}: ${err instanceof Error ? err.message : err}`,
+          );
+          detailed.configHazards = [];
+        }
+      }
     }
 
     return detailed;
