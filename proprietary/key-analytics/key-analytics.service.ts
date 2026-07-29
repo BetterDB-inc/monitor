@@ -391,6 +391,15 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
   /**
    * Top-N composite ("hot big key") keys — extreme on both the hotness and
    * cardinality dimensions at once (valkey #4189).
+   *
+   * Note the two "big" surfaces deliberately measure different things:
+   * getLargestKeys ranks by memoryBytes (re-ranked from a single MEMORY USAGE
+   * pass), whereas composite "big" is cardinality. Memory is not globally
+   * retained by the collectors, so a memory top-N over the pruned pool would be
+   * biased (see COMPOSITE_TOP_N above); cardinality is. A consequence is that a
+   * hot, memory-huge but low-cardinality value can top getLargestKeys yet never
+   * qualify as composite. Unifying the two on a memory-aware "big" is Phase-B
+   * work gated on the collectors retaining a global memory top-N.
    */
   async getCompositeKeys(options?: HotKeyQueryOptions): Promise<HotKeyEntry[]> {
     const composite = await this.storage.getHotKeys({ ...options, signalTypes: ['composite'] });

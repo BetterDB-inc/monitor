@@ -116,9 +116,25 @@ describe('rankCompositeKeys', () => {
     const ranked = rankCompositeKeys(candidates, 5);
 
     // 'zeros' contributes to no dimension; 'nan-hot' places in cardinality only
-    // (NaN frequency dropped, no idle fallback) -> one dimension, excluded;
-    // 'real' places in both.
+    // -> one dimension, excluded; 'real' places in both. Note 'nan-hot' gets no
+    // hotness not because NaN suppresses the idle fallback, but because its idle
+    // signal is also absent (idleSeconds defaults to null) — the NaN freq falls
+    // through to idle, which is itself null, so the magnitude is null.
     expect(ranked.map((r) => r.keyName)).toEqual(['real']);
+  });
+
+  it('falls back to idle recency when freqScore is non-finite but idle data exists', () => {
+    // A non-finite freqScore is treated as absent (not as LFU-cold-zero), so a key
+    // with usable idle data still places on the hotness dimension via the fallback.
+    const candidates: CompositeCandidate[] = [
+      candidate({ keyName: 'nan-but-recent', freqScore: Number.NaN, idleSeconds: 0, cardinality: 100 }),
+      candidate({ keyName: 'big-cold', freqScore: null, idleSeconds: 100000, cardinality: 100 }),
+    ];
+
+    // 'nan-but-recent' places on both hotness (idle fallback) and cardinality;
+    // 'big-cold' is far idler so ranks lower on hotness but still qualifies on both.
+    const ranked = rankCompositeKeys(candidates, 5);
+    expect(ranked.map((r) => r.keyName)).toEqual(['nan-but-recent', 'big-cold']);
   });
 
   it('returns nothing for empty input or a non-positive cutoff', () => {

@@ -85,8 +85,14 @@ function hasFrequencySignal(candidate: CompositeCandidate): boolean {
  * decayed counter of 0 means the key is LFU-cold, not "no signal", so it must NOT
  * fall back to idle (which would let a cold key sneak into the hotness top-N). A
  * magnitude of 0 is then dropped by the isUsable(> 0) filter in the ranker, i.e.
- * a cold key correctly places on no hotness dimension. Idle fallback applies only
- * on non-LFU policies, where freqScore is null for every key.
+ * a cold key correctly places on no hotness dimension. Idle fallback applies
+ * whenever freqScore is absent per hasFrequencySignal — null for every key on a
+ * non-LFU policy (the normal case), and also a defensive guard against a
+ * non-finite (NaN) freqScore. Because the two magnitudes share one hotness
+ * dimensionMax, a scan mixing freq- and idle-derived hotness (only reachable via
+ * that NaN edge) normalizes the idle contributions against the freq max, which
+ * can deflate them toward zero; this affects composite score weighting, not the
+ * top-N gate.
  */
 function hotnessMagnitude(candidate: CompositeCandidate): number | null {
   if (hasFrequencySignal(candidate)) {
