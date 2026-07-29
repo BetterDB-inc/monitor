@@ -16,6 +16,8 @@ export enum MetricType {
   RAFT_HEALTH = 'raft_health',
   /** Gossip-mode failover churn: one shard re-electing repeatedly (valkey#3996) — state-based. */
   FAILOVER_CHURN = 'failover_churn',
+  /** Replica output buffer approaching client-output-buffer-limit slave (valkey#3963) — state-based. */
+  REPL_BUFFER_PRESSURE = 'repl_buffer_pressure',
   EVICTED_KEYS = 'evicted_keys',
   BLOCKED_CLIENTS = 'blocked_clients',
   KEYSPACE_MISSES = 'keyspace_misses',
@@ -55,6 +57,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.EVICTED_CLIENTS,
   MetricType.RAFT_HEALTH,
   MetricType.FAILOVER_CHURN,
+  MetricType.REPL_BUFFER_PRESSURE,
   MetricType.SLOWLOG_COUNT,
 ]);
 

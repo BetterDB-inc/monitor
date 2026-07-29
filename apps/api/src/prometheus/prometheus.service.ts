@@ -45,6 +45,8 @@ interface ConnectionMetricState {
   currentCorrelatedPatternLabels: Set<string>;
   // Vector index labels (per-connection)
   currentVectorIndexLabels: Set<string>;
+  // Replication output-buffer pressure labels (per-connection)
+  currentReplBufferReplicaLabels: Set<string>;
   // Commandstats labels (per-connection)
   currentCommandStatsLabels: Set<string>;
   // Inference latency labels (per-connection)
@@ -115,6 +117,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Standard INFO Metrics - Replication
   private connectedSlaves: Gauge;
+  private replOutputBufferRatio: Gauge;
   private replicationOffset: Gauge;
   private masterLinkUp: Gauge;
   private masterLastIoSecondsAgo: Gauge;
@@ -275,6 +278,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         currentCorrelatedPatternLabels: new Set(),
         // Vector index labels
         currentVectorIndexLabels: new Set(),
+        // Replication output-buffer pressure labels
+        currentReplBufferReplicaLabels: new Set(),
         // Commandstats labels
         currentCommandStatsLabels: new Set(),
         // Inference latency labels
@@ -444,6 +449,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     // Standard INFO - Replication (per connection)
     this.connectedSlaves = this.createGauge('connected_slaves', 'Number of connected replicas');
+    this.replOutputBufferRatio = this.createGauge(
+      'repl_output_buffer_ratio',
+      'Replica output buffer size as a fraction of the client-output-buffer-limit slave hard limit',
+      ['replica'],
+    );
     this.replicationOffset = this.createGauge('replication_offset', 'Replication offset');
     this.masterLinkUp = this.createGauge(
       'master_link_up',
@@ -1429,6 +1439,27 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
     }
     state.currentVectorIndexLabels = currentIndexLabels;
+  }
+
+  updateReplBufferPressure(
+    connectionId: string,
+    entries: Array<{ replica: string; ratio: number }>,
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    const state = this.getConnectionState(connectionId);
+    const currentLabels = new Set<string>();
+
+    for (const entry of entries) {
+      currentLabels.add(entry.replica);
+      this.replOutputBufferRatio.labels(connLabel, entry.replica).set(entry.ratio);
+    }
+
+    for (const staleLabel of state.currentReplBufferReplicaLabels) {
+      if (!currentLabels.has(staleLabel)) {
+        this.replOutputBufferRatio.remove(connLabel, staleLabel);
+      }
+    }
+    state.currentReplBufferReplicaLabels = currentLabels;
   }
 
   updateCommandstatsMetrics(

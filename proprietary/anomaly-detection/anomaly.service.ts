@@ -41,6 +41,16 @@ import {
   evaluateFailoverChurn,
 } from './failover-churn-detector';
 import {
+  COB_WARN_RATIO,
+  CobConnectionState,
+  ReplicaObservation,
+  SlaveOutputBufferLimit,
+  acknowledgeCobFinding,
+  createCobConnectionState,
+  evaluateCobPressure,
+  parseSlaveOutputBufferLimit,
+} from './cob-pressure-detector';
+import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
   AnomalyEvent,
@@ -122,6 +132,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private replicaSlotEventIds = new Map<string, Map<string, string>>();
   // Per-connection per-shard failover-churn windows (valkey#3996, gossip mode).
   private failoverChurnState = new Map<string, FailoverChurnStateMap>();
+  // Replication output-buffer pressure (valkey#3963): per-connection replica
+  // hysteresis state, cached slave limit triplet with slow recheck, and the
+  // last-seen sync_full counter for delta computation.
+  private cobState = new Map<string, CobConnectionState>();
+  private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
+  private cobLimitRecheck = new Map<string, number>();
+  private cobLastSyncFull = new Map<string, number>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
@@ -376,6 +393,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
     this.failoverChurnState.delete(connectionId);
+    const hadCobState = this.cobState.delete(connectionId);
+    this.cobLimitCache.delete(connectionId);
+    this.cobLimitRecheck.delete(connectionId);
+    this.cobLastSyncFull.delete(connectionId);
+    if (hadCobState) {
+      try {
+        this.prometheusService.updateReplBufferPressure(connectionId, []);
+      } catch (promErr) {
+        this.logger.debug(
+          `Failed to clear repl buffer gauge for removed connection ${connectionId}: ${promErr instanceof Error ? promErr.message : promErr}`,
+        );
+      }
+    }
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
@@ -922,6 +952,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // (valkey-io/valkey#3918): warns before the pool exhausts and operators
       // can no longer connect. State-based with hysteresis, not z-score.
       await this.detectClientSaturation(info, ctx, timestamp);
+
+      // Replication output-buffer pressure (valkey-io/valkey#3963): replica
+      // omem approaching the slave COB limit, and the resync-loop signal once
+      // an overflow already forced a full sync. State-based with hysteresis.
+      await this.detectCobPressure(info, ctx, timestamp);
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
@@ -1051,6 +1086,149 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       `client-buffer memory, it is genuine pressure — raise maxmemory-clients or investigate large ` +
       `client output buffers (pub/sub, MONITOR, oversized replies).`
     );
+  }
+
+  private static readonly COB_LIMIT_RECHECK_POLLS = 60;
+
+  /**
+   * Replication output-buffer pressure (valkey-io/valkey#3963). Standalone
+   * primaries and primaries with zero replicas (and no pending state) add no
+   * command overhead. CLIENT LIST being unavailable degrades to the
+   * mem_clients_slaves aggregate (which still needs the limit triplet for a
+   * ratio); CONFIG GET being unavailable degrades further, to the
+   * growth-gated sync_full delta alone. Neither crashes the poll. The limit
+   * triplet is cached and re-read on a slow cadence so a runtime CONFIG SET
+   * is eventually picked up; a failed read retries next poll instead of
+   * pinning one value forever.
+   */
+  private async detectCobPressure(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    if (info.role !== 'master') {
+      // A demoted node keeps no COB history: pressure memory and the
+      // sync_full baseline from its master era would otherwise turn a
+      // legitimate first sync after failback into a false resync-loop
+      // CRITICAL, and its per-replica gauges would go stale.
+      const hadState = this.cobState.delete(ctx.connectionId);
+      this.cobLastSyncFull.delete(ctx.connectionId);
+      if (hadState) {
+        try {
+          this.prometheusService.updateReplBufferPressure(ctx.connectionId, []);
+        } catch (promErr) {
+          this.logger.debug(
+            `Failed to clear repl buffer gauge for ${ctx.connectionName}: ${promErr instanceof Error ? promErr.message : promErr}`,
+          );
+        }
+      }
+      return;
+    }
+
+    const connectedSlaves = this.parseNumber(info.connected_slaves) ?? 0;
+
+    let syncFullDelta = 0;
+    const syncFull = this.parseNumber(info.sync_full);
+    if (syncFull !== null) {
+      const prev = this.cobLastSyncFull.get(ctx.connectionId);
+      if (prev !== undefined && syncFull > prev) {
+        syncFullDelta = syncFull - prev;
+      }
+      this.cobLastSyncFull.set(ctx.connectionId, syncFull);
+    }
+
+    const state = this.cobState.get(ctx.connectionId) ?? createCobConnectionState();
+    this.cobState.set(ctx.connectionId, state);
+
+    if (connectedSlaves === 0 && state.replicas.size === 0 && syncFullDelta === 0) {
+      return;
+    }
+
+    let limit = this.cobLimitCache.get(ctx.connectionId) ?? null;
+    const countdown = this.cobLimitRecheck.get(ctx.connectionId) ?? 0;
+    if (countdown > 0) {
+      this.cobLimitRecheck.set(ctx.connectionId, countdown - 1);
+    } else {
+      try {
+        const raw = await ctx.client.getConfigValue('client-output-buffer-limit');
+        const parsed = parseSlaveOutputBufferLimit(raw);
+        if (parsed !== null) {
+          limit = parsed;
+          this.cobLimitCache.set(ctx.connectionId, parsed);
+          this.cobLimitRecheck.set(ctx.connectionId, AnomalyService.COB_LIMIT_RECHECK_POLLS);
+        }
+      } catch (cobErr) {
+        this.logger.debug(
+          `CONFIG GET client-output-buffer-limit failed for ${ctx.connectionName}: ${cobErr instanceof Error ? cobErr.message : cobErr}`,
+        );
+      }
+    }
+
+    let replicas: ReplicaObservation[] | null = [];
+    if (connectedSlaves > 0) {
+      try {
+        const clients = await ctx.client.getClients({ type: 'replica' });
+        replicas = clients.map((c) => {
+          return { addr: c.addr, omem: c.omem };
+        });
+      } catch (listErr) {
+        this.logger.debug(
+          `CLIENT LIST TYPE replica failed for ${ctx.connectionName}: ${listErr instanceof Error ? listErr.message : listErr}`,
+        );
+        replicas = null;
+      }
+    }
+
+    // Published even when ratios are uncomputable (unlimited/unreadable limit,
+    // CLIENT LIST denied): an empty set removes stale per-replica series so a
+    // runtime switch to `slave 0 0 0` doesn't leave dashboards showing
+    // outdated pressure.
+    const hardBytes = limit !== null ? limit.hardBytes : 0;
+    const gaugeEntries =
+      replicas !== null && hardBytes > 0
+        ? replicas.map((r) => {
+            return { replica: r.addr, ratio: r.omem / hardBytes };
+          })
+        : [];
+    try {
+      this.prometheusService.updateReplBufferPressure(ctx.connectionId, gaugeEntries);
+    } catch (promErr) {
+      this.logger.debug(
+        `Failed to update repl buffer gauge for ${ctx.connectionName}: ${promErr instanceof Error ? promErr.message : promErr}`,
+      );
+    }
+
+    const findings = evaluateCobPressure(state, {
+      replicas,
+      limit,
+      memClientsSlaves: this.parseNumber(info.mem_clients_slaves),
+      connectedSlaves,
+      syncFullDelta,
+      timestamp,
+    });
+
+    for (const finding of findings) {
+      const isCritical = finding.level === 'critical';
+      const event: AnomalyEvent = {
+        id: randomUUID(),
+        timestamp,
+        metricType: MetricType.REPL_BUFFER_PRESSURE,
+        anomalyType: AnomalyType.SPIKE,
+        severity: isCritical ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+        value: finding.ratio !== null ? Math.round(finding.ratio * 100) : 0,
+        baseline:
+          finding.kind === 'soft-sustained' ? (limit?.softBytes ?? 0) : (limit?.hardBytes ?? 0),
+        zScore: 0,
+        stdDev: 0,
+        threshold: Math.round(COB_WARN_RATIO * 100),
+        message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
+        resolved: false,
+        connectionId: ctx.connectionId,
+      };
+      this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+      await this.addAnomaly(event, ctx);
+      acknowledgeCobFinding(state, finding);
+    }
   }
 
   private static readonly RAFT_CHURN_WINDOW_MS = 60_000;

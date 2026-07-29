@@ -47,6 +47,7 @@ describe('AnomalyService', () => {
       incrementCorrelatedGroup: jest.fn(),
       updateAnomalySummary: jest.fn(),
       updateAnomalyBufferStats: jest.fn(),
+      updateReplBufferPressure: jest.fn(),
     };
 
     webhookEventsProService = {
@@ -2863,7 +2864,9 @@ describe('AnomalyService', () => {
     beforeEach(() => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterEnabledInfo);
       dbClient.getClusterNodes = jest.fn().mockResolvedValue([]);
-      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
       // Leaderless windows scale with cluster-node-timeout: 15000ms → recovery
       // 45s (3x), fire 60s (recovery + one timeout).
       dbClient.getConfigValue = jest.fn().mockResolvedValue('15000');
@@ -2876,7 +2879,9 @@ describe('AnomalyService', () => {
       service.getRecentEvents().filter((e) => e.metricType === MetricType.RAFT_HEALTH);
 
     it('emits nothing for a healthy raft cluster', async () => {
-      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
       await poll();
       expect(raftEvents()).toHaveLength(0);
     });
@@ -2901,7 +2906,9 @@ describe('AnomalyService', () => {
       // Bugbot: once Raft mode is established, a transient getClusterInfo() failure
       // must not fall back to the gossip topology detectors (which call
       // getClusterNodes) — that would surface false #2261/#2090 alerts.
-      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
       await poll(); // establishes Raft mode
       expect(dbClient.getClusterNodes).not.toHaveBeenCalled();
 
@@ -2937,11 +2944,15 @@ describe('AnomalyService', () => {
         .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
       await poll(); // t0: watch opens, lastSeeking=t0
       now += 20_000;
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'follower' }),
+      );
       await poll(); // t0+20s follower: 20s since seek (< 45s), 20s watch (< 60s) → no alert
       expect(raftEvents()).toHaveLength(0);
       now += 20_000;
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'pre-candidate' }),
+      );
       await poll(); // t0+40s: re-seek within the recovery window, lastSeeking refreshed
       now += 21_000;
       // Fire happens on a seeking beat (still pre-candidate here): 61s watch >= 60s.
@@ -2958,7 +2969,9 @@ describe('AnomalyService', () => {
         .fn()
         .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
       await poll(); // t0: one seek → watch opens
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'follower' }),
+      );
       now += 46_000; // no further seeking for > the recovery window (45s) → settled
       await poll(); // watch closes, no alert
       now += 20_000; // now well past the 60s fire window, but the watch is closed
@@ -2977,11 +2990,15 @@ describe('AnomalyService', () => {
         .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
       await poll(); // t0: watch opens, node-timeout cached (20s → recovery 60s / fire 80s)
       now += 40_000;
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'follower' }),
+      );
       await poll(); // t0+40s follower: 40s since seek (< 60s recovery) → not settled
       expect(raftEvents()).toHaveLength(0);
       now += 41_000;
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'pre-candidate' }),
+      );
       await poll(); // t0+81s: still seeking, 81s watch (>= 80s fire) → CRITICAL
       expect(raftEvents()).toHaveLength(1);
       expect(raftEvents()[0].severity).toBe(AnomalySeverity.CRITICAL);
@@ -2996,7 +3013,9 @@ describe('AnomalyService', () => {
         .mockRejectedValueOnce(new Error('NOPERM'))
         .mockResolvedValue('20000');
       dbClient.getConfigValue = getCfg;
-      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
       await poll(); // attempt 1 fails → backoff armed
       expect(getCfg).toHaveBeenCalledTimes(1);
       for (let i = 0; i < 5; i++) await poll(); // within backoff → not re-queried
@@ -3064,7 +3083,9 @@ describe('AnomalyService', () => {
 
       now += 1_000;
       // Role flaps to follower (NOT seeking) — the pin must still come back.
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'follower' }),
+      );
       await poll();
       expect(activeCriticalRaft()).toHaveLength(1);
       expect(activeCriticalRaft()[0].id).not.toBe(e1);
@@ -3080,7 +3101,9 @@ describe('AnomalyService', () => {
       expect(activeCriticalRaft()).toHaveLength(1);
 
       now += 1_000;
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'leader' }),
+      );
       await poll(); // a leader is elected → outage over → event auto-resolves
       expect(activeCriticalRaft()).toHaveLength(0);
     });
@@ -3098,7 +3121,9 @@ describe('AnomalyService', () => {
 
       storage.resolveAnomaly.mockResolvedValueOnce(false); // first resolve fails
       now += 1_000;
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'leader' }),
+      );
       await poll(); // recovered but resolve failed → still active, id kept
       expect(activeCriticalRaft()).toHaveLength(1);
 
@@ -3114,7 +3139,9 @@ describe('AnomalyService', () => {
       // it — previously only the leader-recovery path retried, stranding the pin.
       dbClient.getClusterInfo = jest
         .fn()
-        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate', cluster_raft_commit_index: '9' }));
+        .mockResolvedValue(
+          raftInfo({ cluster_raft_role: 'pre-candidate', cluster_raft_commit_index: '9' }),
+        );
       await poll();
       now += 61_000;
       await poll(); // fires (pre-candidate)
@@ -3145,7 +3172,9 @@ describe('AnomalyService', () => {
       now += 30_000;
       await poll(); // t30: still seeking, lastSeeking advances to t30
       // Recover quietly into an idle follower (stops seeking, commit frozen, not leader).
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_role: 'follower' }),
+      );
       now += 31_000;
       await poll(); // t61: watch age 61s >= fireMs 60s, but NOT seeking → must not fire
       expect(activeCriticalRaft()).toHaveLength(0);
@@ -3210,7 +3239,9 @@ describe('AnomalyService', () => {
     });
 
     it('does not alert on a brief seek that recovers into a leader (healthy failover)', async () => {
-      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate' }));
       await poll(); // t0: seeking, watch opens, within grace
       now += 4_000;
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
@@ -3223,7 +3254,9 @@ describe('AnomalyService', () => {
     it('closes the watch when a leader emerges and the commit index advances', async () => {
       dbClient.getClusterInfo = jest
         .fn()
-        .mockResolvedValue(raftInfo({ cluster_raft_role: 'pre-candidate', cluster_raft_commit_index: '9' }));
+        .mockResolvedValue(
+          raftInfo({ cluster_raft_role: 'pre-candidate', cluster_raft_commit_index: '9' }),
+        );
       await poll(); // watch opens at commit 9
       now += 4_000;
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
@@ -3238,7 +3271,9 @@ describe('AnomalyService', () => {
     it('does not alert on an idle healthy follower (frozen commit, never seeking)', async () => {
       // A quiet cluster also has a frozen commit index; the frozen index alone
       // must not trip the alert — only seeking-without-progress does.
-      dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
+      dbClient.getClusterInfo = jest
+        .fn()
+        .mockResolvedValue(raftInfo({ cluster_raft_role: 'follower' }));
       await poll();
       now += 30_000;
       await poll();
@@ -3250,10 +3285,17 @@ describe('AnomalyService', () => {
         (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
           raftInfo({ cluster_raft_current_term: String(t) }),
         );
-      setTerm(1); await poll(); // baseline
-      now += 1000; setTerm(2); await poll(); // election #1
-      now += 1000; setTerm(3); await poll(); // election #2
-      now += 1000; setTerm(4); await poll(); // election #3 → churn
+      setTerm(1);
+      await poll(); // baseline
+      now += 1000;
+      setTerm(2);
+      await poll(); // election #1
+      now += 1000;
+      setTerm(3);
+      await poll(); // election #2
+      now += 1000;
+      setTerm(4);
+      await poll(); // election #3 → churn
       const events = raftEvents();
       expect(events).toHaveLength(1);
       expect(events[0].severity).toBe(AnomalySeverity.WARNING);
@@ -3261,7 +3303,9 @@ describe('AnomalyService', () => {
     });
 
     it('does not treat a single healthy failover (one term bump) as churn', async () => {
-      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(raftInfo({ cluster_raft_current_term: '1' }));
+      (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+        raftInfo({ cluster_raft_current_term: '1' }),
+      );
       await poll();
       now += 1000;
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
@@ -3432,6 +3476,169 @@ describe('AnomalyService', () => {
       expect((service as any).failoverChurnState.has('conn-1')).toBe(true);
       (service as any).onConnectionRemoved('conn-1');
       expect((service as any).failoverChurnState.has('conn-1')).toBe(false);
+    });
+  });
+
+  // ─── Replication output-buffer pressure (valkey#3963) ──────────────────────
+
+  describe('COB pressure detection', () => {
+    const MB = 1024 * 1024;
+    const HARD = 256 * MB;
+    const LIMIT_RAW = `normal 0 0 0 slave ${HARD} ${64 * MB} 60 pubsub 33554432 8388608 60`;
+
+    const replicatedInfo = (over: Record<string, string> = {}) => ({
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1', mem_clients_slaves: '0' },
+      replication: { connected_slaves: '1', sync_full: '1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        ...over,
+      },
+    });
+
+    const replicaClient = (omem: number) => [
+      {
+        id: '77',
+        addr: '10.0.0.5:6380',
+        name: '',
+        age: 100,
+        idle: 0,
+        flags: 'S',
+        db: 0,
+        sub: 0,
+        psub: 0,
+        multi: -1,
+        qbuf: 0,
+        qbufFree: 0,
+        obl: 0,
+        oll: 0,
+        omem,
+        events: 'rw',
+        cmd: 'psync',
+        user: 'default',
+      },
+    ];
+
+    let now: number;
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(replicatedInfo());
+      dbClient.getConfigValue = jest.fn().mockResolvedValue(LIMIT_RAW);
+      dbClient.getClients = jest.fn().mockResolvedValue(replicaClient(0));
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const cobEvents = () => {
+      return service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.REPL_BUFFER_PRESSURE);
+    };
+
+    it('emits WARNING when a replica buffer crosses 60% of the hard limit', async () => {
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(HARD * 0.7));
+      await poll();
+      const events = cobEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('valkey#3963');
+      expect(events[0].message).toContain('10.0.0.5:6380');
+    });
+
+    it('does not re-emit while pressure holds steady (hysteresis)', async () => {
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(HARD * 0.7));
+      await poll();
+      now += 5_000;
+      await poll();
+      expect(cobEvents()).toHaveLength(1);
+    });
+
+    it('escalates to CRITICAL on a sync_full increment after pressure', async () => {
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(HARD * 0.7));
+      await poll();
+      now += 5_000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...replicatedInfo(),
+        replication: { connected_slaves: '1', sync_full: '2' },
+      });
+      // the pressured replica's connection is gone — it was dropped and is resyncing
+      (dbClient.getClients as jest.Mock).mockResolvedValue([]);
+      await poll();
+      const critical = cobEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL);
+      expect(critical).toHaveLength(1);
+      expect(critical[0].message).toContain('resync');
+    });
+
+    it('updates the per-replica Prometheus ratio gauge each poll', async () => {
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(HARD * 0.5));
+      await poll();
+      expect(prometheusService.updateReplBufferPressure).toHaveBeenCalledWith('conn-1', [
+        { replica: '10.0.0.5:6380', ratio: 0.5 },
+      ]);
+    });
+
+    it('makes no replica-related calls when there are no replicas and no state', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...replicatedInfo(),
+        replication: { connected_slaves: '0', sync_full: '0' },
+      });
+      await poll();
+      expect(dbClient.getClients).not.toHaveBeenCalled();
+      expect(dbClient.getConfigValue).not.toHaveBeenCalled();
+      expect(cobEvents()).toHaveLength(0);
+    });
+
+    it('survives CONFIG GET and CLIENT LIST failures without crashing the poll', async () => {
+      (dbClient.getConfigValue as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+      (dbClient.getClients as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+      await expect(poll()).resolves.not.toThrow();
+      expect(cobEvents()).toHaveLength(0);
+    });
+
+    it('drops COB state and clears gauges when the node is demoted', async () => {
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(HARD * 0.7));
+      await poll();
+      expect((service as any).cobState.has('conn-1')).toBe(true);
+      now += 5_000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...replicatedInfo(),
+        server: { role: 'slave' },
+      });
+      await poll();
+      expect((service as any).cobState.has('conn-1')).toBe(false);
+      expect((service as any).cobLastSyncFull.has('conn-1')).toBe(false);
+      expect(prometheusService.updateReplBufferPressure).toHaveBeenLastCalledWith('conn-1', []);
+    });
+
+    it('publishes an empty gauge set when the limit is unlimited', async () => {
+      (dbClient.getConfigValue as jest.Mock).mockResolvedValue(
+        'normal 0 0 0 slave 0 0 0 pubsub 33554432 8388608 60',
+      );
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(HARD * 0.7));
+      await poll();
+      expect(prometheusService.updateReplBufferPressure).toHaveBeenCalledWith('conn-1', []);
+      expect(cobEvents()).toHaveLength(0);
+    });
+
+    it('clears COB state and gauges on connection removal', async () => {
+      await poll();
+      expect((service as any).cobState.has('conn-1')).toBe(true);
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).cobState.has('conn-1')).toBe(false);
+      expect((service as any).cobLastSyncFull.has('conn-1')).toBe(false);
+      expect((service as any).cobLimitCache.has('conn-1')).toBe(false);
+      expect(prometheusService.updateReplBufferPressure).toHaveBeenLastCalledWith('conn-1', []);
     });
   });
 });
