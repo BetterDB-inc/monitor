@@ -34,7 +34,12 @@ describe('CommandLogAnalyticsService getScanSkewAnalysis', () => {
   it('queries only large-reply entries and returns the skew report', async () => {
     const report = await service.getScanSkewAnalysis({ connectionId: 'conn-1' });
     expect(storage.getCommandLogEntries).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'large-reply', connectionId: 'conn-1', limit: 500 }),
+      expect.objectContaining({
+        type: 'large-reply',
+        connectionId: 'conn-1',
+        limit: 500,
+        command: 'SCAN',
+      }),
     );
     expect(report.offenders).toHaveLength(1);
     expect(report.offenders[0].key).toBe('recroom:todo:redo');

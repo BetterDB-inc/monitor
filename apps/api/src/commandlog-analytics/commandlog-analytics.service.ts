@@ -198,6 +198,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
     const entries = await this.storage.getCommandLogEntries({
       ...options,
       type: 'large-reply',
+      command: 'SCAN',
       limit: options?.limit || 500,
     });
     return analyzeScanSkew(entries);
