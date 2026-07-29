@@ -92,6 +92,7 @@ jobs:
         env:
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+          REQUIRE_TELEMETRY_KEY: '1'
         run: pnpm --filter @betterdb/agent-memory... build
 
       - name: Verify build

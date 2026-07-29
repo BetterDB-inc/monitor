@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAnalytics, NOOP_ANALYTICS, PostHogAnalytics, type ValkeyLike } from '../analytics';
 
-function createMockValkeyClient(): ValkeyLike & { get: ReturnType<typeof vi.fn>; set: ReturnType<typeof vi.fn> } {
+function createMockValkeyClient(): ValkeyLike & {
+  get: ReturnType<typeof vi.fn>;
+  set: ReturnType<typeof vi.fn>;
+} {
   return {
     get: vi.fn().mockResolvedValue(null),
     set: vi.fn().mockResolvedValue('OK'),
@@ -254,6 +257,30 @@ describe('analytics', () => {
       analytics.registerSnapshot(1, snapshot);
       analytics.onActivity();
       expect(snapshot).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('serverless delivery (frozen, no waitUntil)', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('emits a snapshot fire-and-forget on frozen serverless (AWS Lambda)', async () => {
+      process.env.AWS_LAMBDA_FUNCTION_NAME = 'my-fn';
+      vi.useFakeTimers();
+      const ph = createMockPostHog();
+      const analytics = new PostHogAnalytics(ph);
+      const snapshot = vi.fn().mockResolvedValue(undefined);
+      analytics.registerSnapshot(1000, snapshot);
+
+      await vi.advanceTimersByTimeAsync(1001);
+      analytics.onActivity();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(snapshot).toHaveBeenCalledTimes(1);
+      expect(ph.flush).toHaveBeenCalled();
+
+      await analytics.shutdown();
     });
   });
 });
