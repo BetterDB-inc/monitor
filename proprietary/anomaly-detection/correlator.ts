@@ -7,6 +7,7 @@ import {
   MetricType,
   AnomalyType,
 } from './types';
+import { isControlPlaneSaturationEvent } from './control-plane-saturation-detector';
 
 interface PatternRule {
   pattern: AnomalyPattern;
@@ -28,6 +29,26 @@ export class Correlator {
 
   private initializePatternRules(): PatternRule[] {
     return [
+      // First so a window holding the saturation marker plus its side effects
+      // (failover, cluster-state) resolves to saturation, not NODE_FAILOVER.
+      {
+        pattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
+        requiredMetrics: [MetricType.CPU_UTILIZATION],
+        check: (anomalies) => {
+          return anomalies.some((a) => {
+            return isControlPlaneSaturationEvent(a);
+          });
+        },
+        diagnosis:
+          'Engine near CPU saturation with control-plane impact (replica drops / node timeouts / ' +
+          'slow admin commands) — cluster stability at risk (valkey#3927)',
+        recommendations: [
+          'Shed load or isolate expensive queries (range scans, large-object serialization, heavy Lua)',
+          'Check replica connection stability and cluster heartbeat health',
+          'Keep a management path available: connect over a unix socket or reserved port for admin commands',
+          'Upgrade to a QoS-capable version once the upstream trusted-sources feature (valkey#3927) lands',
+        ],
+      },
       {
         pattern: AnomalyPattern.AUTH_ATTACK,
         requiredMetrics: [MetricType.ACL_DENIED],
@@ -42,11 +63,13 @@ export class Correlator {
       {
         pattern: AnomalyPattern.NODE_FAILOVER,
         requiredMetrics: [MetricType.REPLICATION_ROLE],
-        optionalMetrics: [MetricType.SLOWLOG_LAST_ID, MetricType.CLUSTER_STATE, MetricType.OPS_PER_SEC],
+        optionalMetrics: [
+          MetricType.SLOWLOG_LAST_ID,
+          MetricType.CLUSTER_STATE,
+          MetricType.OPS_PER_SEC,
+        ],
         check: (anomalies) => {
-          return anomalies.some(a =>
-            a.metricType === MetricType.REPLICATION_ROLE
-          );
+          return anomalies.some((a) => a.metricType === MetricType.REPLICATION_ROLE);
         },
         get diagnosis() {
           return 'Node failover detected — this instance transitioned role';
@@ -74,7 +97,8 @@ export class Correlator {
       {
         pattern: AnomalyPattern.PERSISTENCE_STALL,
         requiredMetrics: [MetricType.PERSISTENCE_CHILD],
-        diagnosis: 'Persistence fork child not advancing — BGSAVE/AOF-rewrite may be stuck or failing',
+        diagnosis:
+          'Persistence fork child not advancing — BGSAVE/AOF-rewrite may be stuck or failing',
         recommendations: [
           'Check memory headroom and copy-on-write growth (current_cow_size)',
           'Inspect the server log for fork or allocator errors',
@@ -85,7 +109,8 @@ export class Correlator {
       {
         pattern: AnomalyPattern.SLOW_QUERIES,
         requiredMetrics: [MetricType.SLOWLOG_LAST_ID],
-        diagnosis: 'Slow query rate spike detected — elevated rate of new slow queries per interval',
+        diagnosis:
+          'Slow query rate spike detected — elevated rate of new slow queries per interval',
         recommendations: [
           'Review slow log entries to identify problematic commands',
           'Check for operations on large data structures',
@@ -98,10 +123,10 @@ export class Correlator {
         requiredMetrics: [MetricType.MEMORY_USED],
         optionalMetrics: [MetricType.EVICTED_KEYS, MetricType.FRAGMENTATION_RATIO],
         check: (anomalies) => {
-          const hasMemorySpike = anomalies.some(a =>
-            a.metricType === MetricType.MEMORY_USED && a.anomalyType === AnomalyType.SPIKE
+          const hasMemorySpike = anomalies.some(
+            (a) => a.metricType === MetricType.MEMORY_USED && a.anomalyType === AnomalyType.SPIKE,
           );
-          const hasEvictions = anomalies.some(a => a.metricType === MetricType.EVICTED_KEYS);
+          const hasEvictions = anomalies.some((a) => a.metricType === MetricType.EVICTED_KEYS);
           return hasMemorySpike && (hasEvictions || anomalies.length === 1);
         },
         diagnosis: 'Memory pressure detected with potential evictions',
@@ -127,14 +152,15 @@ export class Correlator {
         pattern: AnomalyPattern.CONNECTION_LEAK,
         requiredMetrics: [MetricType.CONNECTIONS],
         check: (anomalies) => {
-          const connAnomaly = anomalies.find(a => a.metricType === MetricType.CONNECTIONS);
+          const connAnomaly = anomalies.find((a) => a.metricType === MetricType.CONNECTIONS);
           if (!connAnomaly || connAnomaly.anomalyType !== AnomalyType.SPIKE) return false;
 
           // Connection leak: connections spike but ops remain stable
-          const hasOpsAnomaly = anomalies.some(a => a.metricType === MetricType.OPS_PER_SEC);
+          const hasOpsAnomaly = anomalies.some((a) => a.metricType === MetricType.OPS_PER_SEC);
           return !hasOpsAnomaly;
         },
-        diagnosis: 'Potential connection leak: connections increasing without corresponding traffic',
+        diagnosis:
+          'Potential connection leak: connections increasing without corresponding traffic',
         recommendations: [
           'Check for idle connections in client analytics',
           'Review client applications for connection pool leaks',
@@ -147,19 +173,20 @@ export class Correlator {
         requiredMetrics: [MetricType.CONNECTIONS, MetricType.OPS_PER_SEC],
         optionalMetrics: [MetricType.MEMORY_USED],
         check: (anomalies) => {
-          const hasConnSpike = anomalies.some(a =>
-            a.metricType === MetricType.CONNECTIONS && a.anomalyType === AnomalyType.SPIKE
+          const hasConnSpike = anomalies.some(
+            (a) => a.metricType === MetricType.CONNECTIONS && a.anomalyType === AnomalyType.SPIKE,
           );
-          const hasOpsSpike = anomalies.some(a =>
-            a.metricType === MetricType.OPS_PER_SEC && a.anomalyType === AnomalyType.SPIKE
+          const hasOpsSpike = anomalies.some(
+            (a) => a.metricType === MetricType.OPS_PER_SEC && a.anomalyType === AnomalyType.SPIKE,
           );
-          const hasMemorySpike = anomalies.some(a =>
-            a.metricType === MetricType.MEMORY_USED && a.anomalyType === AnomalyType.SPIKE
+          const hasMemorySpike = anomalies.some(
+            (a) => a.metricType === MetricType.MEMORY_USED && a.anomalyType === AnomalyType.SPIKE,
           );
 
           return hasConnSpike && hasOpsSpike && hasMemorySpike;
         },
-        diagnosis: 'Batch job or bulk operation detected with concurrent spikes in connections, operations, and memory',
+        diagnosis:
+          'Batch job or bulk operation detected with concurrent spikes in connections, operations, and memory',
         recommendations: [
           'Identify the client or job causing the spike',
           'Consider scheduling batch jobs during off-peak hours',
@@ -171,16 +198,16 @@ export class Correlator {
         pattern: AnomalyPattern.TRAFFIC_BURST,
         requiredMetrics: [MetricType.CONNECTIONS, MetricType.OPS_PER_SEC],
         check: (anomalies) => {
-          const hasConnSpike = anomalies.some(a =>
-            a.metricType === MetricType.CONNECTIONS && a.anomalyType === AnomalyType.SPIKE
+          const hasConnSpike = anomalies.some(
+            (a) => a.metricType === MetricType.CONNECTIONS && a.anomalyType === AnomalyType.SPIKE,
           );
-          const hasOpsSpike = anomalies.some(a =>
-            a.metricType === MetricType.OPS_PER_SEC && a.anomalyType === AnomalyType.SPIKE
+          const hasOpsSpike = anomalies.some(
+            (a) => a.metricType === MetricType.OPS_PER_SEC && a.anomalyType === AnomalyType.SPIKE,
           );
 
           // Traffic burst: connections and ops spike, but NOT memory
-          const hasMemorySpike = anomalies.some(a =>
-            a.metricType === MetricType.MEMORY_USED && a.anomalyType === AnomalyType.SPIKE
+          const hasMemorySpike = anomalies.some(
+            (a) => a.metricType === MetricType.MEMORY_USED && a.anomalyType === AnomalyType.SPIKE,
           );
 
           return hasConnSpike && hasOpsSpike && !hasMemorySpike;
@@ -323,12 +350,17 @@ export class Correlator {
           groups.push(this.createGroup(windowAnomalies, pattern));
         } else {
           // Single anomaly without specific pattern
-          groups.push(this.createGroup(windowAnomalies, {
-            pattern: AnomalyPattern.UNKNOWN,
-            requiredMetrics: [],
-            diagnosis: `${windowAnomalies[0].metricType} anomaly detected`,
-            recommendations: ['Investigate the specific metric trend', 'Check for related system events'],
-          }));
+          groups.push(
+            this.createGroup(windowAnomalies, {
+              pattern: AnomalyPattern.UNKNOWN,
+              requiredMetrics: [],
+              diagnosis: `${windowAnomalies[0].metricType} anomaly detected`,
+              recommendations: [
+                'Investigate the specific metric trend',
+                'Check for related system events',
+              ],
+            }),
+          );
         }
       } else {
         // Multiple anomalies - detect pattern
@@ -337,16 +369,18 @@ export class Correlator {
           groups.push(this.createGroup(windowAnomalies, pattern));
         } else {
           // Multiple anomalies but no specific pattern match
-          groups.push(this.createGroup(windowAnomalies, {
-            pattern: AnomalyPattern.UNKNOWN,
-            requiredMetrics: [],
-            diagnosis: `Multiple concurrent anomalies detected: ${windowAnomalies.map(a => a.metricType).join(', ')}`,
-            recommendations: [
-              'Investigate correlation between affected metrics',
-              'Check for external system events or changes',
-              'Review application behavior during this time',
-            ],
-          }));
+          groups.push(
+            this.createGroup(windowAnomalies, {
+              pattern: AnomalyPattern.UNKNOWN,
+              requiredMetrics: [],
+              diagnosis: `Multiple concurrent anomalies detected: ${windowAnomalies.map((a) => a.metricType).join(', ')}`,
+              recommendations: [
+                'Investigate correlation between affected metrics',
+                'Check for external system events or changes',
+                'Review application behavior during this time',
+              ],
+            }),
+          );
         }
       }
     }
@@ -355,12 +389,12 @@ export class Correlator {
   }
 
   private detectPattern(anomalies: AnomalyEvent[]): PatternRule | null {
-    const metricTypes = new Set(anomalies.map(a => a.metricType));
+    const metricTypes = new Set(anomalies.map((a) => a.metricType));
 
     // Check each pattern rule
     for (const rule of this.patternRules) {
       // Check if all required metrics are present
-      const hasAllRequired = rule.requiredMetrics.every(m => metricTypes.has(m));
+      const hasAllRequired = rule.requiredMetrics.every((m) => metricTypes.has(m));
       if (!hasAllRequired) continue;
 
       // If there's a custom check function, use it
@@ -381,11 +415,11 @@ export class Correlator {
     const correlationId = randomUUID();
 
     // Update correlation ID on all anomalies
-    anomalies.forEach(a => {
+    anomalies.forEach((a) => {
       a.correlationId = correlationId;
       a.relatedMetrics = anomalies
-        .filter(other => other.id !== a.id)
-        .map(other => other.metricType);
+        .filter((other) => other.id !== a.id)
+        .map((other) => other.metricType);
     });
 
     // Determine overall severity (highest severity wins)
@@ -401,7 +435,7 @@ export class Correlator {
 
     return {
       correlationId,
-      timestamp: Math.min(...anomalies.map(a => a.timestamp)),
+      timestamp: Math.min(...anomalies.map((a) => a.timestamp)),
       anomalies,
       pattern: rule.pattern,
       diagnosis: this.enrichDiagnosis(rule, anomalies),
@@ -416,16 +450,18 @@ export class Correlator {
    */
   private enrichDiagnosis(rule: PatternRule, anomalies: AnomalyEvent[]): string {
     if (rule.pattern === AnomalyPattern.NODE_FAILOVER) {
-      const hasSlowlogSpike = anomalies.some(a => a.metricType === MetricType.SLOWLOG_LAST_ID);
-      const hasClusterState = anomalies.some(a => a.metricType === MetricType.CLUSTER_STATE);
-      const hasRoleChange = anomalies.some(a => a.metricType === MetricType.REPLICATION_ROLE);
+      const hasSlowlogSpike = anomalies.some((a) => a.metricType === MetricType.SLOWLOG_LAST_ID);
+      const hasClusterState = anomalies.some((a) => a.metricType === MetricType.CLUSTER_STATE);
+      const hasRoleChange = anomalies.some((a) => a.metricType === MetricType.REPLICATION_ROLE);
 
       let diagnosis = rule.diagnosis;
 
       if (hasRoleChange && hasSlowlogSpike) {
-        diagnosis = 'Node failover detected with correlated slowlog spike — the slow queries are likely caused by the failover transition';
+        diagnosis =
+          'Node failover detected with correlated slowlog spike — the slow queries are likely caused by the failover transition';
       } else if (hasClusterState && hasSlowlogSpike) {
-        diagnosis = 'Cluster state transition detected with correlated slowlog spike — slot re-coverage may have caused latency';
+        diagnosis =
+          'Cluster state transition detected with correlated slowlog spike — slot re-coverage may have caused latency';
       }
 
       return diagnosis;
@@ -435,12 +471,12 @@ export class Correlator {
   }
 
   getPatternDescription(pattern: AnomalyPattern): string {
-    const rule = this.patternRules.find(r => r.pattern === pattern);
+    const rule = this.patternRules.find((r) => r.pattern === pattern);
     return rule?.diagnosis || 'Unknown pattern';
   }
 
   getPatternRecommendations(pattern: AnomalyPattern): string[] {
-    const rule = this.patternRules.find(r => r.pattern === pattern);
+    const rule = this.patternRules.find((r) => r.pattern === pattern);
     return rule?.recommendations || [];
   }
 }

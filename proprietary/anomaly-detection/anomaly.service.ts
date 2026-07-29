@@ -51,6 +51,16 @@ import {
   parseSlaveOutputBufferLimit,
 } from './cob-pressure-detector';
 import {
+  CONTROL_PLANE_CORROBORATING_METRICS,
+  ControlPlaneState,
+  SATURATION_CORROBORATION_WINDOW_MS,
+  acknowledgeSaturationFinding,
+  createControlPlaneSaturationEvent,
+  createControlPlaneState,
+  evaluateControlPlaneSaturation,
+  isControlPlaneSaturationEvent,
+} from './control-plane-saturation-detector';
+import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
   AnomalyEvent,
@@ -139,6 +149,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
+  // Control-plane saturation (valkey#3927): per-connection episode state and
+  // the last connected_slaves count for replica-drop corroboration.
+  private controlPlaneState = new Map<string, ControlPlaneState>();
+  private cpSatLastConnectedSlaves = new Map<string, number>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
@@ -339,6 +353,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         consecutiveRequired: 5,
         cooldownMs: 120000,
       },
+      // Keep CPU z-score-only (no absolute warning/criticalThreshold): the
+      // control-plane saturation detector already emits its own synthetic
+      // CRITICAL CPU event at a fixed 90% threshold (see
+      // createControlPlaneSaturationEvent) — a second absolute-threshold
+      // source on this metric would double-alert the same condition.
       [MetricType.CPU_UTILIZATION]: {
         warningZScore: 2.0,
         criticalZScore: 3.0,
@@ -406,6 +425,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         );
       }
     }
+    this.controlPlaneState.delete(connectionId);
+    this.cpSatLastConnectedSlaves.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
@@ -447,9 +468,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     try {
+      // Timed around the socket call only: this round-trip doubles as the
+      // control-plane probe latency sample for detectControlPlaneSaturation.
+      const probeStart = performance.now();
       const infoResponse = await ctx.client.getInfoParsed();
+      const probeRttMs = performance.now() - probeStart;
       const info = this.convertInfoToRecord(infoResponse);
       const timestamp = Date.now();
+      let cpuUtilizationSample: number | null = null;
+      let cpuCounterReset = false;
 
       const { buffers, detectors } = this.getOrCreateBuffersAndDetectors(ctx.connectionId);
 
@@ -487,7 +514,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             const utilization = ((cpuTotal - prevTotal) / dtSec) * 100;
             if (utilization < 0) {
               // counter reset (server restart) - skip this sample, new baseline set below
+              cpuCounterReset = true;
             } else {
+              cpuUtilizationSample = utilization;
               const cpuBuffer = buffers.get(MetricType.CPU_UTILIZATION)!;
               const cpuDetector = detectors.get(MetricType.CPU_UTILIZATION)!;
               cpuBuffer.addSample(utilization, timestamp);
@@ -957,6 +986,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // omem approaching the slave COB limit, and the resync-loop signal once
       // an overflow already forced a full sync. State-based with hysteresis.
       await this.detectCobPressure(info, ctx, timestamp);
+
+      // Control-plane saturation (valkey-io/valkey#3927): sustained CPU
+      // saturation paired with control-plane impact evidence. Runs last so
+      // this poll's detector emissions can corroborate.
+      await this.detectControlPlaneSaturation(
+        info,
+        ctx,
+        timestamp,
+        cpuUtilizationSample,
+        probeRttMs,
+        cpuCounterReset,
+      );
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
@@ -1229,6 +1270,71 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       await this.addAnomaly(event, ctx);
       acknowledgeCobFinding(state, finding);
     }
+  }
+
+  /**
+   * Control-plane saturation (valkey-io/valkey#3927): sustained ≥90% CPU
+   * paired with control-plane impact evidence — probe RTT spike, replica
+   * drops (a lone single drop needs a second signal; see the detector), or a
+   * recent replication/cluster/COB anomaly. Emits one synthetic
+   * CRITICAL CPU_UTILIZATION event per episode; the correlator maps its
+   * structural marker to CONTROL_PLANE_SATURATION. CPU alone never fires.
+   */
+  private async detectControlPlaneSaturation(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+    cpuUtilization: number | null,
+    probeRttMs: number,
+    cpuCounterReset: boolean,
+  ): Promise<void> {
+    const state = this.controlPlaneState.get(ctx.connectionId) ?? createControlPlaneState();
+    this.controlPlaneState.set(ctx.connectionId, state);
+
+    const connectedSlaves = this.parseNumber(info.connected_slaves);
+    let replicaDropCount = 0;
+    if (connectedSlaves !== null) {
+      const prev = this.cpSatLastConnectedSlaves.get(ctx.connectionId);
+      if (prev !== undefined && connectedSlaves < prev) {
+        replicaDropCount = prev - connectedSlaves;
+      }
+      this.cpSatLastConnectedSlaves.set(ctx.connectionId, connectedSlaves);
+    }
+
+    const recentControlPlaneEvents = this.recentAnomalies
+      .filter((a) => {
+        return (
+          a.connectionId === ctx.connectionId &&
+          timestamp - a.timestamp <= SATURATION_CORROBORATION_WINDOW_MS &&
+          CONTROL_PLANE_CORROBORATING_METRICS.includes(a.metricType) &&
+          isControlPlaneSaturationEvent(a) === false
+        );
+      })
+      .map((a) => {
+        return { metricType: a.metricType as string, timestamp: a.timestamp };
+      });
+
+    const finding = evaluateControlPlaneSaturation(state, {
+      cpuUtilization,
+      cpuCounterReset,
+      probeRttMs,
+      replicaDropCount,
+      recentControlPlaneEvents,
+      timestamp,
+    });
+    if (finding === null) {
+      return;
+    }
+
+    const event = createControlPlaneSaturationEvent(
+      finding,
+      randomUUID(),
+      timestamp,
+      ctx.connectionId,
+    );
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    await this.addAnomaly(event, ctx);
+    acknowledgeSaturationFinding(state, timestamp);
   }
 
   private static readonly RAFT_CHURN_WINDOW_MS = 60_000;
