@@ -26,7 +26,6 @@ describe('evaluateForkMemoryRisk', () => {
       usedMemory: 4 * GB,
       usedMemoryRss: 4 * GB,
       totalSystemMemory: TOTAL,
-      maxmemory: 0,
       writeRatePerSec: 0,
       timestamp: base,
       ...over,
@@ -168,6 +167,37 @@ describe('evaluateForkMemoryRisk', () => {
     expect(finding).not.toBeNull();
     expect(finding!.level).toBe('warning');
     expect(finding!.kind).toBe('projected-fork-oom');
+  });
+
+  it('surfaces a live WARNING even after a projected WARNING was acknowledged (kind-aware)', () => {
+    const state = createForkMemoryState();
+    // Idle + high write rate projects a WARNING; acknowledge it.
+    const projected = evaluateForkMemoryRisk(
+      state,
+      input({
+        usedMemoryRss: 13 * GB,
+        rdbLastCowSize: 0.5 * GB,
+        writeRatePerSec: FORK_PROJECT_WRITE_RATE_PER_SEC + 1,
+        timestamp: base,
+      }),
+    );
+    expect(projected!.kind).toBe('projected-fork-oom');
+    acknowledgeForkMemoryFinding(state, projected!);
+    // A real BGSAVE now makes the LIVE risk active at WARNING (13.2/16 = 82.5%).
+    // Even though the level is still 'warning', the live kind outranks the
+    // projected one, so the imminent-danger alert must not be masked (finding #2).
+    const live = evaluateForkMemoryRisk(
+      state,
+      input({
+        bgsaveInProgress: true,
+        usedMemoryRss: 13 * GB,
+        currentCowSize: 0.2 * GB,
+        timestamp: base + 1000,
+      }),
+    );
+    expect(live).not.toBeNull();
+    expect(live!.level).toBe('warning');
+    expect(live!.kind).toBe('live-cow-oom');
   });
 
   it('does NOT treat read traffic as write pressure (high ops/sec, low changes)', () => {

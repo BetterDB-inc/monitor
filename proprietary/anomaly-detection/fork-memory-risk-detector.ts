@@ -65,7 +65,6 @@ export interface ForkMemoryInput {
   usedMemory: number;
   usedMemoryRss: number | null;
   totalSystemMemory: number | null;
-  maxmemory: number;
   /** Current write rate (writes/sec) from the per-poll delta of rdb_changes_since_last_save. */
   writeRatePerSec: number | null;
   timestamp: number;
@@ -73,6 +72,8 @@ export interface ForkMemoryInput {
 
 export interface ForkMemoryState {
   ackedLevel: ForkRiskLevel;
+  /** Kind of the acknowledged finding, so a live risk isn't masked by a projected one. */
+  ackedKind: ForkRiskKind;
 }
 
 export interface ForkMemoryFinding {
@@ -83,10 +84,22 @@ export interface ForkMemoryFinding {
   timestamp: number;
 }
 
-const LEVEL_RANK: Record<ForkRiskLevel, number> = { none: 0, warning: 1, critical: 2 };
+/**
+ * Combined severity, so hysteresis compares BOTH the level and the kind. The
+ * live-cow-oom (imminent, save-in-progress) path outranks a speculative
+ * projected-fork-oom at the SAME level — otherwise a projected WARNING that was
+ * already acknowledged would suppress the live WARNING once a save actually
+ * starts, hiding the imminent-danger alert unless it reached CRITICAL.
+ */
+function severityScore(level: ForkRiskLevel, kind: ForkRiskKind): number {
+  if (level === 'none') return 0;
+  const levelPart = level === 'critical' ? 2 : 1;
+  const kindPart = kind === 'live-cow-oom' ? 1 : 0;
+  return levelPart * 10 + kindPart;
+}
 
 export function createForkMemoryState(): ForkMemoryState {
-  return { ackedLevel: 'none' };
+  return { ackedLevel: 'none', ackedKind: 'projected-fork-oom' };
 }
 
 function formatBytes(bytes: number): string {
@@ -232,14 +245,17 @@ export function evaluateForkMemoryRisk(
   input: ForkMemoryInput,
 ): ForkMemoryFinding | null {
   const assessment = assess(input);
+  const currentScore = severityScore(assessment.level, assessment.kind);
 
-  // De-escalation re-arms immediately: lower the acknowledged level so a later
-  // rise escalates and alerts again. (Steady state stays quiet — no escalation.)
-  if (LEVEL_RANK[assessment.level] < LEVEL_RANK[state.ackedLevel]) {
+  // De-escalation re-arms immediately: a drop to a lower combined severity —
+  // whether a level drop OR a live->projected kind drop at the same level —
+  // lowers the acknowledged severity so a later rise escalates and alerts again.
+  if (currentScore < severityScore(state.ackedLevel, state.ackedKind)) {
     state.ackedLevel = assessment.level;
+    state.ackedKind = assessment.kind;
   }
 
-  const escalated = LEVEL_RANK[assessment.level] > LEVEL_RANK[state.ackedLevel];
+  const escalated = currentScore > severityScore(state.ackedLevel, state.ackedKind);
   if (!escalated) {
     return null;
   }
@@ -262,4 +278,5 @@ export function acknowledgeForkMemoryFinding(
   finding: ForkMemoryFinding,
 ): void {
   state.ackedLevel = finding.level;
+  state.ackedKind = finding.kind;
 }

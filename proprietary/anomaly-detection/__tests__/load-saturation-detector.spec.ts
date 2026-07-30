@@ -83,19 +83,35 @@ describe('evaluateLoadSaturation', () => {
     expect(finding!.message).toContain('CRITICAL');
   });
 
-  it('escalates an acknowledged WARNING to CRITICAL when busyness grows', () => {
+  it('escalates an acknowledged WARNING to CRITICAL only after the critical band holds N polls', () => {
     const state = createLoadSaturationState();
     const warn = pollN(state, 0.85, LOAD_CONSECUTIVE_REQUIRED);
     expect(warn!.level).toBe('warning');
     acknowledgeLoadSaturationFinding(state, warn!);
 
-    // Already past the consecutive gate; a single critical poll escalates.
-    const crit = evaluateLoadSaturation(
-      state,
-      input({ fraction: 0.97, timestamp: base + 10_000 }),
-    );
+    // A single critical poll must NOT escalate — the critical band has to hold
+    // for LOAD_CONSECUTIVE_REQUIRED polls, so a one-poll spike is suppressed.
+    expect(
+      evaluateLoadSaturation(state, input({ fraction: 0.97, timestamp: base + 10_000 })),
+    ).toBeNull();
+    // Sustained critical then escalates.
+    const crit = pollN(state, 0.97, LOAD_CONSECUTIVE_REQUIRED, base + 11_000);
     expect(crit).not.toBeNull();
     expect(crit!.level).toBe('critical');
+  });
+
+  it('does not escalate to CRITICAL on a single-poll spike from a sustained WARNING (burst)', () => {
+    const state = createLoadSaturationState();
+    const warn = pollN(state, 0.85, LOAD_CONSECUTIVE_REQUIRED);
+    acknowledgeLoadSaturationFinding(state, warn!);
+    // One momentary batch/pipeline poll into the critical band, then back down.
+    expect(
+      evaluateLoadSaturation(state, input({ fraction: 0.97, timestamp: base + 10_000 })),
+    ).toBeNull();
+    // Back to the warning band: no new alert (already acknowledged at warning).
+    expect(
+      evaluateLoadSaturation(state, input({ fraction: 0.85, timestamp: base + 11_000 })),
+    ).toBeNull();
   });
 
   it('returns null when eventloop duration is missing (older server)', () => {
@@ -206,7 +222,7 @@ describe('evaluateLoadSaturation', () => {
     expect(again!.level).toBe('warning');
   });
 
-  it('re-alerts CRITICAL after a critical→warning dip and climb back (no full drop to none)', () => {
+  it('re-alerts CRITICAL after a critical→warning dip and sustained climb back (no full drop to none)', () => {
     const state = createLoadSaturationState();
     // Reach and acknowledge CRITICAL.
     const crit = pollN(state, 0.97, LOAD_CONSECUTIVE_REQUIRED);
@@ -217,8 +233,8 @@ describe('evaluateLoadSaturation', () => {
     const dip = evaluateLoadSaturation(state, input({ fraction: 0.85, timestamp: base + 10_000 }));
     expect(dip).toBeNull();
     expect(state.ackedLevel).toBe('warning');
-    // Climb back to CRITICAL — must re-emit rather than being swallowed.
-    const again = evaluateLoadSaturation(state, input({ fraction: 0.97, timestamp: base + 11_000 }));
+    // A sustained climb back to CRITICAL must re-emit rather than being swallowed.
+    const again = pollN(state, 0.97, LOAD_CONSECUTIVE_REQUIRED, base + 11_000);
     expect(again).not.toBeNull();
     expect(again!.level).toBe('critical');
   });

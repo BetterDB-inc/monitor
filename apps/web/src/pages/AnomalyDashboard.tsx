@@ -141,6 +141,10 @@ function formatValue(value: number, metric: string): string {
     if (value > 1e6) return `${(value / 1e6).toFixed(1)} MB`;
     return `${(value / 1e3).toFixed(0)} KB`;
   }
+  // Percentage-valued events (value/baseline/threshold are all percentages).
+  if (metric === 'load_saturation' || metric === 'fork_memory_risk') {
+    return `${value.toFixed(1)}%`;
+  }
   if (metric === 'fragmentation_ratio') return value.toFixed(2);
   if (metric === 'command_p99') {
     // Stored in microseconds; show ms once past 1ms, else µs.

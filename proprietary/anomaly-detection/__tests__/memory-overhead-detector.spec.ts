@@ -109,26 +109,46 @@ describe('evaluateMemoryOverhead', () => {
     expect(finding).toBeNull();
   });
 
-  it('fires eviction-driven CRITICAL below the crit fraction when overhead squeezes data out', () => {
+  it('fires eviction-driven CRITICAL when overhead exceeds the dataset and eviction is active', () => {
     const state = createMemoryOverheadState();
-    // Overhead = 35% of maxmemory (WARNING band by fraction alone), but the
-    // dataset already fills the rest so remaining budget < overhead, and
-    // eviction is actively firing → escalated to CRITICAL.
+    // Overhead = 35% of maxmemory (WARNING band by fraction alone), but it is
+    // LARGER than the user dataset itself and eviction is firing → overhead, not
+    // data, is driving eviction → escalated to CRITICAL.
     const overhead = startup + 0.35 * MAXMEMORY;
     const finding = evaluateMemoryOverhead(
       state,
       input({
         usedMemoryOverhead: overhead,
         components: components({ clientsNormal: 0.35 * MAXMEMORY }),
-        usedMemory: 0.95 * MAXMEMORY,
+        usedMemoryDataset: 0.2 * MAXMEMORY, // 200MB dataset < 350MB overhead
         evictedKeysDelta: 42,
         maxmemoryPolicy: 'allkeys-lru',
       }),
     );
     expect(finding).not.toBeNull();
     expect(finding!.level).toBe('critical');
-    expect(finding!.message).toContain('squeezing user data out');
+    expect(finding!.message).toContain('driving eviction');
     expect(finding!.message).toContain('42');
+  });
+
+  it('does NOT fire eviction-driven CRITICAL for a normal full cache (dataset >> overhead)', () => {
+    const state = createMemoryOverheadState();
+    // A capacity-bound LRU cache: 35% overhead, but the DATASET is far larger
+    // and eviction fires every poll by design. Overhead does not exceed the
+    // dataset, so this must stay a WARNING, not a false CRITICAL (finding #1).
+    const finding = evaluateMemoryOverhead(
+      state,
+      input({
+        usedMemoryOverhead: startup + 0.35 * MAXMEMORY,
+        components: components({ clientsNormal: 0.35 * MAXMEMORY }),
+        usedMemory: 0.98 * MAXMEMORY,
+        usedMemoryDataset: 0.6 * MAXMEMORY, // 600MB dataset > 350MB overhead
+        evictedKeysDelta: 500,
+        maxmemoryPolicy: 'allkeys-lru',
+      }),
+    );
+    expect(finding).not.toBeNull();
+    expect(finding!.level).toBe('warning');
   });
 
   it('does not escalate on eviction under noeviction policy', () => {
@@ -165,6 +185,23 @@ describe('evaluateMemoryOverhead', () => {
     expect(finding!.dominantComponent).toBe('replBacklog');
     expect(finding!.message).toContain('replication backlog');
     expect(finding!.message).toContain('repl-backlog-size');
+  });
+
+  it('does not blame a component when the mem_* breakdown is unavailable (all zero)', () => {
+    const state = createMemoryOverheadState();
+    // High overhead but the per-component breakdown is absent (all 0): must not
+    // falsely attribute it to the first component (finding #7).
+    const finding = evaluateMemoryOverhead(
+      state,
+      input({
+        usedMemoryOverhead: startup + 0.4 * MAXMEMORY,
+        components: components(), // every component 0
+      }),
+    );
+    expect(finding).not.toBeNull();
+    expect(finding!.dominantComponent).toBe('unknown');
+    expect(finding!.message).toContain('breakdown unavailable');
+    expect(finding!.message).not.toContain('client output buffers');
   });
 
   it('keeps returning an unacknowledged finding, and stops after acknowledgement', () => {

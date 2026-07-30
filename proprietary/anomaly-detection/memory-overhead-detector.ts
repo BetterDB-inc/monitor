@@ -33,11 +33,13 @@ export const OVERHEAD_WARN_FRACTION = 0.3;
 export const OVERHEAD_CRIT_FRACTION = 0.5;
 /**
  * Eviction-driven CRITICAL floor. When keys are actively being evicted under an
- * eviction policy AND overhead exceeds the remaining data budget (dataset room
- * left under maxmemory), overhead is the dominant force pushing data out — a
- * CRITICAL even below OVERHEAD_CRIT_FRACTION, but only once overhead is at
- * least a non-trivial share of the budget (the WARN floor) so a tiny overhead
- * next to an already-full dataset doesn't get blamed for normal eviction.
+ * eviction policy AND operational overhead has grown LARGER THAN THE USER
+ * DATASET ITSELF, overhead — not the data — is the dominant consumer driving
+ * eviction: a CRITICAL even below OVERHEAD_CRIT_FRACTION, but only once overhead
+ * is at least a non-trivial share of the budget (the WARN floor). Comparing
+ * against the dataset (not the near-zero "remaining budget" of a full cache) is
+ * what keeps a normal capacity-bound LRU cache — large dataset, small overhead,
+ * evicting every poll by design — from reading as a CRITICAL.
  */
 export const EVICTION_OVERHEAD_MIN_FRACTION = OVERHEAD_WARN_FRACTION;
 
@@ -122,9 +124,14 @@ function formatBytes(bytes: number): string {
   return `${(mb / 1024).toFixed(1)}GB`;
 }
 
-/** Largest single overhead component, with its byte size (for the message). */
+/**
+ * Largest single overhead component, with its byte size (for the message).
+ * Returns `key: null` when the per-component `mem_*` breakdown is unavailable
+ * (every component parsed to 0) — so a high-overhead alert on a server that
+ * doesn't expose the breakdown doesn't falsely blame the first component.
+ */
 function dominantComponent(components: OverheadComponents): {
-  key: keyof OverheadComponents;
+  key: keyof OverheadComponents | null;
   bytes: number;
 } {
   const keys = Object.keys(components) as Array<keyof OverheadComponents>;
@@ -135,6 +142,9 @@ function dominantComponent(components: OverheadComponents): {
       bestKey = key;
       bestBytes = components[key];
     }
+  }
+  if (bestBytes <= 0) {
+    return { key: null, bytes: 0 };
   }
   return { key: bestKey, bytes: bestBytes };
 }
@@ -158,16 +168,17 @@ export function evaluateMemoryOverhead(
   const operationalOverhead = Math.max(0, input.usedMemoryOverhead - input.usedMemoryStartup);
   const overheadFraction = operationalOverhead / input.maxmemory;
 
-  // Remaining data budget: maxmemory minus everything already allocated. When
-  // overhead exceeds this, overhead is larger than the room left for growth of
-  // user data — i.e. it is the component squeezing data out.
-  const remainingBudget = input.maxmemory - input.usedMemory;
+  // Overhead outgrowing the user dataset ITSELF, while eviction is active, is
+  // the signature of overhead (not data growth) driving eviction. Comparing
+  // against the dataset — rather than the near-zero "remaining budget" of a
+  // capacity-bound cache — is what stops a normal full LRU cache (large dataset,
+  // small overhead, evicting every poll by design) from reading as a CRITICAL.
   const evictionActive =
     input.maxmemoryPolicy !== 'noeviction' && input.evictedKeysDelta > 0;
   const overheadSqueezingData =
     evictionActive &&
     overheadFraction >= EVICTION_OVERHEAD_MIN_FRACTION &&
-    operationalOverhead > remainingBudget;
+    operationalOverhead > input.usedMemoryDataset;
 
   let level: OverheadLevel = 'none';
   if (overheadFraction >= OVERHEAD_CRIT_FRACTION || overheadSqueezingData) {
@@ -191,25 +202,35 @@ export function evaluateMemoryOverhead(
   const pct = (overheadFraction * 100).toFixed(1);
   const isCritical = level === 'critical';
 
+  // When the per-component breakdown is unavailable, name no component and point
+  // the operator at the breakdown itself rather than at an arbitrary knob.
+  const dominantClause =
+    dominant.key !== null
+      ? `, dominated by ${COMPONENT_LABELS[dominant.key]} (${formatBytes(dominant.bytes)})`
+      : ' (per-component mem_* breakdown unavailable)';
+  const remedy =
+    dominant.key !== null
+      ? COMPONENT_REMEDY[dominant.key]
+      : 'inspect the INFO memory mem_* fields to find the dominant consumer';
+
   const squeezeClause = overheadSqueezingData
     ? ` Eviction is active (${input.evictedKeysDelta} keys evicted since last poll under ` +
       `maxmemory-policy ${input.maxmemoryPolicy}) and overhead (${formatBytes(operationalOverhead)}) ` +
-      `now exceeds the remaining data budget (${formatBytes(Math.max(0, remainingBudget))}) — ` +
-      `non-dataset memory is squeezing user data out.`
+      `now exceeds the user dataset itself (${formatBytes(Math.max(0, input.usedMemoryDataset))}) — ` +
+      `non-dataset memory is the dominant consumer driving eviction.`
     : '';
 
   const message =
     `${isCritical ? 'CRITICAL' : 'WARNING'}: Non-dataset memory overhead is ` +
-    `${formatBytes(operationalOverhead)} (${pct}% of maxmemory ${formatBytes(input.maxmemory)}), ` +
-    `dominated by ${COMPONENT_LABELS[dominant.key]} (${formatBytes(dominant.bytes)}). ` +
-    `This overhead is charged against the maxmemory budget, leaving less room for user data ` +
-    `(valkey#1792).${squeezeClause} Remediation: ${COMPONENT_REMEDY[dominant.key]}, or raise maxmemory.`;
+    `${formatBytes(operationalOverhead)} (${pct}% of maxmemory ${formatBytes(input.maxmemory)})` +
+    `${dominantClause}. This overhead is charged against the maxmemory budget, leaving less room ` +
+    `for user data (valkey#1792).${squeezeClause} Remediation: ${remedy}, or raise maxmemory.`;
 
   return {
     level,
     overheadBytes: operationalOverhead,
     overheadFraction,
-    dominantComponent: dominant.key,
+    dominantComponent: dominant.key ?? 'unknown',
     message,
     timestamp: input.timestamp,
   };

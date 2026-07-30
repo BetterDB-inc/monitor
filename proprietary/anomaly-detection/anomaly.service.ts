@@ -53,12 +53,14 @@ import {
 import {
   MemoryOverheadState,
   OVERHEAD_WARN_FRACTION,
+  OVERHEAD_CRIT_FRACTION,
   acknowledgeMemoryOverheadFinding,
   createMemoryOverheadState,
   evaluateMemoryOverhead,
 } from './memory-overhead-detector';
 import {
   FORK_OOM_WARN_FRACTION,
+  FORK_OOM_CRIT_FRACTION,
   ForkMemoryState,
   acknowledgeForkMemoryFinding,
   createForkMemoryState,
@@ -1244,7 +1246,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       usedMemory: this.parseNumber(info.used_memory) ?? 0,
       usedMemoryRss: this.parseNumber(info.used_memory_rss),
       totalSystemMemory: this.parseNumber(info.total_system_memory),
-      maxmemory: this.parseNumber(info.maxmemory) ?? 0,
       writeRatePerSec,
       timestamp,
     });
@@ -1262,7 +1263,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       baseline: Math.round(FORK_OOM_WARN_FRACTION * 100),
       zScore: 0,
       stdDev: 0,
-      threshold: Math.round(FORK_OOM_WARN_FRACTION * 100),
+      // Report the boundary actually crossed, not always the WARN fraction.
+      threshold: Math.round((isCritical ? FORK_OOM_CRIT_FRACTION : FORK_OOM_WARN_FRACTION) * 100),
       message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
       resolved: false,
       connectionId: ctx.connectionId,
@@ -1487,6 +1489,20 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     ctx: ConnectionContext,
     timestamp: number,
   ): Promise<void> {
+    // evicted_keys is a lifetime counter, so feed the per-poll delta. max(0, …)
+    // absorbs a counter reset (server restart), like the rejected_connections
+    // block above. Tracked BEFORE the maxmemory gate so a stretch with
+    // maxmemory unset keeps the baseline current — otherwise the first poll
+    // after maxmemory is restored would absorb every eviction from the gap as a
+    // single spike and flip the eviction-driven CRITICAL.
+    const currentEvicted = this.parseNumber(info.evicted_keys);
+    let evictedKeysDelta = 0;
+    if (currentEvicted !== null) {
+      const lastEvicted = this.memOverheadLastEvictedKeys.get(ctx.connectionId);
+      evictedKeysDelta = Math.max(0, currentEvicted - (lastEvicted ?? currentEvicted));
+      this.memOverheadLastEvictedKeys.set(ctx.connectionId, currentEvicted);
+    }
+
     const maxmemory = this.parseNumber(info.maxmemory);
     // No eviction budget → the pure detector returns null anyway; skip early.
     if (maxmemory === null || maxmemory <= 0) return;
@@ -1496,17 +1512,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const usedMemoryStartup = this.parseNumber(info.used_memory_startup);
     if (usedMemory === null || usedMemoryOverhead === null || usedMemoryStartup === null) {
       return;
-    }
-
-    // evicted_keys is a lifetime counter, so feed the per-poll delta. max(0, …)
-    // absorbs a counter reset (server restart), like the rejected_connections
-    // block above.
-    const currentEvicted = this.parseNumber(info.evicted_keys);
-    let evictedKeysDelta = 0;
-    if (currentEvicted !== null) {
-      const lastEvicted = this.memOverheadLastEvictedKeys.get(ctx.connectionId);
-      evictedKeysDelta = Math.max(0, currentEvicted - (lastEvicted ?? currentEvicted));
-      this.memOverheadLastEvictedKeys.set(ctx.connectionId, currentEvicted);
     }
 
     const state =
@@ -1548,7 +1553,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       baseline: maxmemory,
       zScore: 0,
       stdDev: 0,
-      threshold: Math.round(maxmemory * OVERHEAD_WARN_FRACTION),
+      // Report the boundary actually crossed, not always the WARN fraction.
+      threshold: Math.round(
+        maxmemory * (isCritical ? OVERHEAD_CRIT_FRACTION : OVERHEAD_WARN_FRACTION),
+      ),
       message: finding.message,
       resolved: false,
       connectionId: ctx.connectionId,

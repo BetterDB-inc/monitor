@@ -60,7 +60,9 @@ export interface LoadSaturationInput {
 export interface LoadSaturationState {
   /** Highest level already emitted-and-acknowledged; re-armed to 'none' on a drop. */
   ackedLevel: LoadLevel;
-  /** Consecutive polls at or above the warning threshold, reset on a below-warning sample. */
+  /** The band classified on the previous poll, so a band change can restart the hold count. */
+  lastLevel: LoadLevel;
+  /** Consecutive polls at the SAME band, reset whenever the band changes. */
   consecutive: number;
 }
 
@@ -74,7 +76,7 @@ export interface LoadSaturationFinding {
 const LEVEL_RANK: Record<LoadLevel, number> = { none: 0, warning: 1, critical: 2 };
 
 export function createLoadSaturationState(): LoadSaturationState {
-  return { ackedLevel: 'none', consecutive: 0 };
+  return { ackedLevel: 'none', lastLevel: 'none', consecutive: 0 };
 }
 
 function classify(busyFraction: number): LoadLevel {
@@ -156,10 +158,19 @@ export function evaluateLoadSaturation(
     // A below-warning sample re-arms alerting (drop) and resets the consecutive
     // counter so a fresh burst must build up again from scratch.
     state.consecutive = 0;
+    state.lastLevel = 'none';
     state.ackedLevel = 'none';
     return null;
   }
 
+  // A change of band restarts the hold count, so the CRITICAL band must itself
+  // hold for LOAD_CONSECUTIVE_REQUIRED polls before firing — a single-poll spike
+  // from a sustained WARNING no longer escalates to CRITICAL immediately (the
+  // burst suppression the counter is documented to provide applies per band).
+  if (level !== state.lastLevel) {
+    state.consecutive = 0;
+  }
+  state.lastLevel = level;
   state.consecutive += 1;
 
   // De-escalation re-arms even without a full drop to 'none': a critical→warning
