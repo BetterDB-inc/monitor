@@ -52,8 +52,6 @@ import {
 } from './cob-pressure-detector';
 import {
   MemoryOverheadState,
-  OVERHEAD_WARN_FRACTION,
-  OVERHEAD_CRIT_FRACTION,
   acknowledgeMemoryOverheadFinding,
   createMemoryOverheadState,
   evaluateMemoryOverhead,
@@ -1553,10 +1551,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       baseline: maxmemory,
       zScore: 0,
       stdDev: 0,
-      // Report the boundary actually crossed, not always the WARN fraction.
-      threshold: Math.round(
-        maxmemory * (isCritical ? OVERHEAD_CRIT_FRACTION : OVERHEAD_WARN_FRACTION),
-      ),
+      // Boundary actually crossed (the detector distinguishes the fraction vs
+      // eviction-driven CRITICAL), so value stays consistent with threshold.
+      threshold: Math.round(maxmemory * finding.thresholdFraction),
       message: finding.message,
       resolved: false,
       connectionId: ctx.connectionId,

@@ -76,6 +76,14 @@ export interface MemoryOverheadFinding {
   level: 'warning' | 'critical';
   overheadBytes: number;
   overheadFraction: number;
+  /**
+   * Fraction of maxmemory representing the boundary actually crossed, so the
+   * emitted event's threshold is consistent with its value. Note an
+   * eviction-driven CRITICAL crosses only the WARN-band floor (overhead exceeds
+   * the dataset while evicting), NOT the crit fraction — reporting the crit
+   * fraction there would put value below threshold on a CRITICAL.
+   */
+  thresholdFraction: number;
   dominantComponent: string;
   message: string;
   timestamp: number;
@@ -226,10 +234,21 @@ export function evaluateMemoryOverhead(
     `${dominantClause}. This overhead is charged against the maxmemory budget, leaving less room ` +
     `for user data (valkey#1792).${squeezeClause} Remediation: ${remedy}, or raise maxmemory.`;
 
+  // The boundary actually crossed: the crit fraction only when it was the crit
+  // fraction that triggered CRITICAL; an eviction-driven CRITICAL crosses just
+  // the WARN-band floor, so value stays >= threshold in both cases.
+  const thresholdFraction =
+    level === 'critical'
+      ? overheadFraction >= OVERHEAD_CRIT_FRACTION
+        ? OVERHEAD_CRIT_FRACTION
+        : EVICTION_OVERHEAD_MIN_FRACTION
+      : OVERHEAD_WARN_FRACTION;
+
   return {
     level,
     overheadBytes: operationalOverhead,
     overheadFraction,
+    thresholdFraction,
     dominantComponent: dominant.key ?? 'unknown',
     message,
     timestamp: input.timestamp,

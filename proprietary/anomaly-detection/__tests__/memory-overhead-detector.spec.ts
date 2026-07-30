@@ -78,6 +78,7 @@ describe('evaluateMemoryOverhead', () => {
     expect(finding).not.toBeNull();
     expect(finding!.level).toBe('warning');
     expect(finding!.overheadFraction).toBeCloseTo(OVERHEAD_WARN_FRACTION, 5);
+    expect(finding!.thresholdFraction).toBe(OVERHEAD_WARN_FRACTION);
     expect(finding!.message).toContain('valkey#1792');
     expect(finding!.message).toContain('WARNING');
     expect(finding!.message).toContain('% of maxmemory');
@@ -91,6 +92,7 @@ describe('evaluateMemoryOverhead', () => {
     );
     expect(finding).not.toBeNull();
     expect(finding!.level).toBe('critical');
+    expect(finding!.thresholdFraction).toBe(OVERHEAD_CRIT_FRACTION);
     expect(finding!.message).toContain('CRITICAL');
   });
 
@@ -129,6 +131,11 @@ describe('evaluateMemoryOverhead', () => {
     expect(finding!.level).toBe('critical');
     expect(finding!.message).toContain('driving eviction');
     expect(finding!.message).toContain('42');
+    // The eviction-driven CRITICAL crosses only the WARN-band floor, so its
+    // threshold must be the warn fraction (not the crit fraction) and stay <=
+    // the reported overhead — otherwise value < threshold on a CRITICAL.
+    expect(finding!.thresholdFraction).toBe(OVERHEAD_WARN_FRACTION);
+    expect(finding!.overheadBytes).toBeGreaterThanOrEqual(finding!.thresholdFraction * MAXMEMORY);
   });
 
   it('does NOT fire eviction-driven CRITICAL for a normal full cache (dataset >> overhead)', () => {
