@@ -1,5 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { LicenseService } from '../license.service';
 import { TelemetryPort } from '@app/common/interfaces/telemetry-port.interface';
 
@@ -456,6 +459,116 @@ describe('LicenseService', () => {
 
       const tier = keyedService.getLicenseTier();
       expect(tier).toBe('enterprise');
+    });
+  });
+
+  describe('instanceId persistence', () => {
+    let dataDir: string;
+
+    const makeService = () =>
+      new LicenseService({ get: jest.fn() } as unknown as ConfigService, mockTelemetryClient);
+
+    beforeEach(() => {
+      dataDir = mkdtempSync(join(tmpdir(), 'betterdb-license-'));
+      process.env.BETTERDB_DATA_DIR = dataDir;
+      process.env.BETTERDB_TELEMETRY = 'false';
+      delete process.env.BETTERDB_LICENSE_KEY;
+    });
+
+    afterEach(() => {
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('persists the derived id and reuses it across restarts', () => {
+      const first = makeService();
+      const id1 = first.getInstanceId();
+
+      expect(existsSync(join(dataDir, 'instance-id'))).toBe(true);
+      expect(readFileSync(join(dataDir, 'instance-id'), 'utf-8')).toBe(id1);
+
+      // A fresh process with a totally different HOSTNAME (e.g. a redeployed
+      // container) must still adopt the persisted id rather than derive a new one.
+      process.env.HOSTNAME = 'a-completely-different-host';
+      const second = makeService();
+      expect(second.getInstanceId()).toBe(id1);
+    });
+
+    it('derives a random uuid when no infrastructure identifiers are set', () => {
+      for (const k of ['DB_HOST', 'DB_PORT', 'STORAGE_URL', 'HOSTNAME']) delete process.env[k];
+
+      const id = makeService().getInstanceId();
+      expect(id).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    it('derives a stable hash from infra identifiers when nothing is persisted', () => {
+      delete process.env.HOSTNAME;
+      process.env.DB_HOST = 'db.internal';
+      process.env.DB_PORT = '6379';
+
+      const idA = makeService().getInstanceId();
+      // Wipe the persisted file: identical infra inputs must reproduce the hash.
+      rmSync(join(dataDir, 'instance-id'), { force: true });
+      const idB = makeService().getInstanceId();
+
+      expect(idB).toBe(idA);
+      expect(idA).toMatch(/^[0-9a-f]{32}$/);
+    });
+  });
+
+  describe('collectStats ephemerality signals', () => {
+    let dataDir: string;
+
+    const makeService = () =>
+      new LicenseService({ get: jest.fn() } as unknown as ConfigService, mockTelemetryClient);
+
+    const statsFromPing = async (): Promise<Record<string, unknown>> => {
+      const svc = makeService();
+      await svc.onModuleInit();
+      await flushPromises();
+      svc.onModuleDestroy();
+      return JSON.parse(mockFetch.mock.calls[0][1].body).stats;
+    };
+
+    beforeEach(() => {
+      dataDir = mkdtempSync(join(tmpdir(), 'betterdb-license-'));
+      process.env.BETTERDB_DATA_DIR = dataDir;
+      process.env.BETTERDB_TELEMETRY = 'false';
+      delete process.env.BETTERDB_LICENSE_KEY;
+      mockFetch.mockResolvedValue(
+        createMockResponse({ valid: true, tier: 'community', expiresAt: null }),
+      );
+    });
+
+    afterEach(() => {
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('flags CI runs and container-id hostnames', async () => {
+      process.env.CI = 'true';
+      process.env.HOSTNAME = 'a1b2c3d4e5f6'; // Docker's default 12-hex short id
+
+      const stats = await statsFromPing();
+      expect(stats.ci).toBe(true);
+      expect(stats.hostnameIsContainerId).toBe(true);
+    });
+
+    it('reports non-CI, human-named hosts as such', async () => {
+      for (const k of ['CI', 'GITHUB_ACTIONS', 'GITLAB_CI', 'CIRCLECI', 'BUILDKITE', 'JENKINS_URL', 'TF_BUILD'])
+        delete process.env[k];
+      process.env.HOSTNAME = 'prod-monitor-01';
+
+      const stats = await statsFromPing();
+      expect(stats.ci).toBe(false);
+      expect(stats.hostnameIsContainerId).toBe(false);
+    });
+
+    it('detects kubernetes via the downward-API service host', async () => {
+      process.env.KUBERNETES_SERVICE_HOST = '10.0.0.1';
+
+      const stats = await statsFromPing();
+      expect(stats.container).toBe('kubernetes');
+
+      delete process.env.KUBERNETES_SERVICE_HOST;
     });
   });
 });

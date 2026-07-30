@@ -1,8 +1,8 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { compare, valid as validSemver } from 'semver';
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { Tier, Feature, TIER_FEATURES, EntitlementResponse, EntitlementRequest } from './types';
 import type { LicenseSource, LicenseTokenClaims } from './types';
@@ -46,6 +46,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   private readonly licenseJwtFile: string;
   private readonly offlineLicenseFile: string;
   private readonly clockFile: string;
+  private readonly instanceIdFile: string;
   private licenseKey: string | null;
   private readonly entitlementUrl: string;
   private readonly allowUnsigned: boolean;
@@ -93,6 +94,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     this.licenseJwtFile = join(this.dataDir, 'license.jwt');
     this.offlineLicenseFile = join(this.dataDir, 'license-offline.jwt');
     this.clockFile = join(this.dataDir, 'license-clock.json');
+    this.instanceIdFile = join(this.dataDir, 'instance-id');
 
     this.licenseKey = process.env.BETTERDB_LICENSE_KEY || this.loadPersistedKey();
     // Use the canonical www host directly: the apex betterdb.com 307-redirects
@@ -102,7 +104,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     this.cacheTtlMs = parseInt(process.env.LICENSE_CACHE_TTL_MS || '3600000', 10);
     this.maxStaleCacheMs = parseInt(process.env.LICENSE_MAX_STALE_MS || '604800000', 10);
     this.timeoutMs = parseInt(process.env.LICENSE_TIMEOUT_MS || '10000', 10);
-    this.instanceId = this.generateInstanceId();
+    this.instanceId = this.resolveInstanceId();
     this.telemetryEnabled = process.env.BETTERDB_TELEMETRY !== 'false';
     this.versionCheckIntervalMs = this.config.get<number>('VERSION_CHECK_INTERVAL_MS') || 3600000;
     // Escape hatch for legacy entitlement servers that don't sign responses.
@@ -122,12 +124,63 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Resolve this instance's stable id. A previously persisted id is preferred so
+   * a restart/redeploy keeps ONE identity instead of re-deriving a fresh one on
+   * every boot. Without this, every ephemeral container that Docker assigns a
+   * random HOSTNAME looks like a brand-new install and inflates the
+   * distinct-instance count server-side. On first boot we derive an id and
+   * persist it best-effort so the NEXT boot is stable; an unwritable/ephemeral
+   * data dir just falls back to per-boot derivation — identical to the
+   * pre-persistence behavior.
+   */
+  private resolveInstanceId(): string {
+    const persisted = this.loadPersistedInstanceId();
+    if (persisted) return persisted;
+
+    const id = this.generateInstanceId();
+    this.persistInstanceId(id);
+    return id;
+  }
+
+  private loadPersistedInstanceId(): string | null {
+    try {
+      const id = readFileSync(this.instanceIdFile, 'utf-8').trim();
+      // Only accept a well-formed id (32-hex derived, or a UUID) so a truncated
+      // or garbage file can't pin a bad identity forever.
+      if (/^[0-9a-f]{32}$/.test(id) || /^[0-9a-f-]{36}$/.test(id)) {
+        return id;
+      }
+    } catch {
+      // No persisted id yet (first boot) or a non-readable data dir.
+    }
+    return null;
+  }
+
+  private persistInstanceId(id: string): void {
+    try {
+      mkdirSync(this.dataDir, { recursive: true });
+      writeFileSync(this.instanceIdFile, id, { encoding: 'utf-8', mode: 0o600 });
+    } catch {
+      // Best-effort: an unwritable/ephemeral data dir means the id is re-derived
+      // next boot — no worse than before persistence existed.
+    }
+  }
+
   private generateInstanceId(): string {
     // Use infrastructure identifiers only - avoid including license key to prevent fingerprinting
     const dbHost = process.env.DB_HOST || '';
     const dbPort = process.env.DB_PORT || '';
     const storageUrl = process.env.STORAGE_URL || '';
     const hostname = process.env.HOSTNAME || '';
+
+    // With NONE of these set the hash is a shared constant across every such
+    // host, collapsing them onto a single phantom "instance". A random id keeps
+    // them distinct; resolveInstanceId persists it, so it's stable from the next
+    // boot on (when the data dir survives).
+    if (!dbHost && !dbPort && !storageUrl && !hostname) {
+      return randomUUID();
+    }
 
     const input = `${dbHost}|${dbPort}|${storageUrl}|${hostname}`;
     return createHash('sha256').update(input).digest('hex').slice(0, 32);
@@ -695,7 +748,45 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       nodeVersion: process.version,
       platform: process.platform,
       arch: process.arch,
+      // Ephemerality signals — let the backend segment/exclude throwaway boots
+      // (CI jobs, e2e spin-ups, restart loops) from real installs instead of
+      // counting each one as a distinct instance.
+      ci: this.isCiEnvironment(),
+      container: this.detectContainerRuntime(),
+      // Docker's default hostname is the 12-hex short container id — a strong
+      // hint that this instance's identity is random per `docker run` and won't
+      // recur, so a fresh id here is expected churn rather than a new install.
+      hostnameIsContainerId: /^[0-9a-f]{12}$/.test(process.env.HOSTNAME || ''),
     };
+  }
+
+  /** Whether we appear to be running inside a CI/build pipeline. */
+  private isCiEnvironment(): boolean {
+    return Boolean(
+      process.env.CI ||
+        process.env.GITHUB_ACTIONS ||
+        process.env.GITLAB_CI ||
+        process.env.CIRCLECI ||
+        process.env.BUILDKITE ||
+        process.env.JENKINS_URL ||
+        process.env.TF_BUILD,
+    );
+  }
+
+  /**
+   * Best-effort container/orchestrator detection: 'kubernetes' when the
+   * downward-API service host is present, else 'docker'/'podman' from the
+   * telltale marker files, else undefined (bare metal / VM).
+   */
+  private detectContainerRuntime(): 'kubernetes' | 'docker' | 'podman' | undefined {
+    if (process.env.KUBERNETES_SERVICE_HOST) return 'kubernetes';
+    try {
+      if (existsSync('/.dockerenv')) return 'docker';
+      if (existsSync('/run/.containerenv')) return 'podman';
+    } catch {
+      // existsSync shouldn't throw, but never let stats collection break a ping.
+    }
+    return undefined;
   }
 
   private sendHeartbeat(data: Record<string, unknown> = {}): void {
