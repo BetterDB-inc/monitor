@@ -1217,13 +1217,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       aofRewriteInProgress: info.aof_rewrite_in_progress === '1',
       currentCowSize: this.parseNumber(info.current_cow_size),
       rdbLastCowSize: this.parseNumber(info.rdb_last_cow_size),
+      aofLastCowSize: this.parseNumber(info.aof_last_cow_size),
       latestForkUsec: this.parseNumber(info.latest_fork_usec),
       usedMemory: this.parseNumber(info.used_memory) ?? 0,
       usedMemoryRss: this.parseNumber(info.used_memory_rss),
       totalSystemMemory: this.parseNumber(info.total_system_memory),
       maxmemory: this.parseNumber(info.maxmemory) ?? 0,
       changesSinceLastSave: this.parseNumber(info.rdb_changes_since_last_save),
-      opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec),
       timestamp,
     });
 

@@ -17,9 +17,11 @@
  *       the imminent-danger path.
  *   (b) PROJECTED fork-OOM — while NO save is in progress but write pressure is
  *       high, estimate the NEXT save's peak as `used_memory_rss +
- *       rdb_last_cow_size` (last save's COW is a good estimator of the next).
- *       WARNING only, and only when there is a real basis (rdb_last_cow_size > 0
- *       and total_system_memory known).
+ *       max(rdb_last_cow_size, aof_last_cow_size)` (the last save's COW is a good
+ *       estimator of the next, and either an RDB save or an AOF rewrite may fork
+ *       next, so an AOF-only deployment is covered too). WARNING only, and only
+ *       when there is a real basis (a positive last COW and total_system_memory
+ *       known).
  *
  * The evaluator is re-entrant on an external per-connection state object (the
  * anomaly service holds one per connection) and follows the client-saturation /
@@ -38,12 +40,15 @@ export const FORK_OOM_CRIT_FRACTION = 0.9;
 /** latest_fork_usec above this (0.5s) is a slow fork worth noting (large dataset / THP). */
 export const SLOW_FORK_USEC = 500_000;
 /**
- * Write-pressure gates for the PROJECTED (idle) path — the next save is only
- * "likely to be triggered soon under load" when at least one holds. Either a
- * large accumulation of unsaved changes or a high sustained write rate qualifies.
+ * Write-pressure gate for the PROJECTED (idle) path — the next save is only
+ * "likely to be triggered soon under load" when a large accumulation of unsaved
+ * changes has built up. Deliberately keyed on rdb_changes_since_last_save, which
+ * counts WRITE operations since the last save (reads never increment it), NOT
+ * instantaneous_ops_per_sec — that counter includes reads, so a read-heavy
+ * instance with a prior COW footprint would otherwise raise a false projected
+ * warning.
  */
 export const FORK_PROJECT_CHANGES_THRESHOLD = 100_000;
-export const FORK_PROJECT_OPS_THRESHOLD = 1_000;
 
 export type ForkRiskLevel = 'none' | 'warning' | 'critical';
 export type ForkRiskKind = 'live-cow-oom' | 'projected-fork-oom';
@@ -53,13 +58,13 @@ export interface ForkMemoryInput {
   aofRewriteInProgress: boolean;
   currentCowSize: number | null;
   rdbLastCowSize: number | null;
+  aofLastCowSize: number | null;
   latestForkUsec: number | null;
   usedMemory: number;
   usedMemoryRss: number | null;
   totalSystemMemory: number | null;
   maxmemory: number;
   changesSinceLastSave: number | null;
-  opsPerSec: number | null;
   timestamp: number;
 }
 
@@ -178,14 +183,17 @@ function assess(input: ForkMemoryInput): Assessment {
   if (!systemMemoryKnown) {
     return NONE_PROJECTED;
   }
-  const lastCow = input.rdbLastCowSize;
-  if (lastCow === null || lastCow <= 0) {
+  // Either persistence type may fork next, so estimate from the larger of the
+  // two last-save COW footprints — this keeps an AOF-only deployment (no RDB
+  // COW history) covered.
+  const lastCow = Math.max(input.rdbLastCowSize ?? 0, input.aofLastCowSize ?? 0);
+  if (lastCow <= 0) {
     return NONE_PROJECTED;
   }
+  // Write-only pressure signal: reads never increment rdb_changes_since_last_save.
   const highWrite =
-    (input.changesSinceLastSave !== null &&
-      input.changesSinceLastSave >= FORK_PROJECT_CHANGES_THRESHOLD) ||
-    (input.opsPerSec !== null && input.opsPerSec >= FORK_PROJECT_OPS_THRESHOLD);
+    input.changesSinceLastSave !== null &&
+    input.changesSinceLastSave >= FORK_PROJECT_CHANGES_THRESHOLD;
   if (!highWrite) {
     return NONE_PROJECTED;
   }
@@ -196,10 +204,7 @@ function assess(input: ForkMemoryInput): Assessment {
     return NONE_PROJECTED;
   }
   const pct = (fraction * 100).toFixed(1);
-  const changesText =
-    input.changesSinceLastSave !== null ? `changes_since_last_save=${input.changesSinceLastSave}` : '';
-  const opsText = input.opsPerSec !== null ? `ops/sec=${Math.round(input.opsPerSec)}` : '';
-  const pressureText = [changesText, opsText].filter((s) => s !== '').join(', ');
+  const pressureText = `changes_since_last_save=${input.changesSinceLastSave}`;
   const message =
     `No save in progress but write pressure is high (${pressureText}): the next BGSAVE / AOF ` +
     `rewrite fork is projected to reach ~${formatBytes(projectedPeak)} RSS (current RSS ` +

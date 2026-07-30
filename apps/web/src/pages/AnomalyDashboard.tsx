@@ -136,7 +136,7 @@ function formatTime(ts: number): string {
 }
 
 function formatValue(value: number, metric: string): string {
-  if (metric === 'memory_used') {
+  if (metric === 'memory_used' || metric === 'memory_overhead') {
     if (value > 1e9) return `${(value / 1e9).toFixed(2)} GB`;
     if (value > 1e6) return `${(value / 1e6).toFixed(1)} MB`;
     return `${(value / 1e3).toFixed(0)} KB`;

@@ -2,7 +2,6 @@ import {
   FORK_OOM_CRIT_FRACTION,
   FORK_OOM_WARN_FRACTION,
   FORK_PROJECT_CHANGES_THRESHOLD,
-  FORK_PROJECT_OPS_THRESHOLD,
   SLOW_FORK_USEC,
   ForkMemoryInput,
   acknowledgeForkMemoryFinding,
@@ -22,13 +21,13 @@ describe('evaluateForkMemoryRisk', () => {
       aofRewriteInProgress: false,
       currentCowSize: null,
       rdbLastCowSize: null,
+      aofLastCowSize: null,
       latestForkUsec: 20_000,
       usedMemory: 4 * GB,
       usedMemoryRss: 4 * GB,
       totalSystemMemory: TOTAL,
       maxmemory: 0,
       changesSinceLastSave: 0,
-      opsPerSec: 0,
       timestamp: base,
       ...over,
     };
@@ -128,19 +127,33 @@ describe('evaluateForkMemoryRisk', () => {
     expect(finding!.message).toContain('changes_since_last_save');
   });
 
-  it('fires the projected warning on high ops/sec alone', () => {
+  it('projects an AOF-only deployment from aof_last_cow_size (no RDB COW history)', () => {
     const state = createForkMemoryState();
+    // AOF-only: rdb_last_cow_size is 0/absent but the last AOF rewrite's COW is
+    // the estimator for the next fork.
     const finding = evaluateForkMemoryRisk(
       state,
       input({
         usedMemoryRss: 13 * GB,
-        rdbLastCowSize: 0.5 * GB,
-        opsPerSec: FORK_PROJECT_OPS_THRESHOLD,
+        rdbLastCowSize: 0,
+        aofLastCowSize: 0.5 * GB,
+        changesSinceLastSave: FORK_PROJECT_CHANGES_THRESHOLD + 1,
       }),
     );
     expect(finding).not.toBeNull();
+    expect(finding!.level).toBe('warning');
     expect(finding!.kind).toBe('projected-fork-oom');
-    expect(finding!.message).toContain('ops/sec');
+  });
+
+  it('does NOT treat read traffic as write pressure (high ops/sec, low changes)', () => {
+    const state = createForkMemoryState();
+    // Read-heavy: a prior COW footprint and high RSS, but writes (the only
+    // signal that grows changes_since_last_save) are low — must not project.
+    const finding = evaluateForkMemoryRisk(
+      state,
+      input({ usedMemoryRss: 13 * GB, rdbLastCowSize: 0.5 * GB, changesSinceLastSave: 10 }),
+    );
+    expect(finding).toBeNull();
   });
 
   it('does NOT project when write pressure is low even if the next fork would be large', () => {
@@ -152,13 +165,14 @@ describe('evaluateForkMemoryRisk', () => {
     expect(finding).toBeNull();
   });
 
-  it('does NOT project without a real basis (rdb_last_cow_size <= 0)', () => {
+  it('does NOT project without a real basis (no rdb or aof last COW)', () => {
     const state = createForkMemoryState();
     const finding = evaluateForkMemoryRisk(
       state,
       input({
         usedMemoryRss: 15 * GB,
         rdbLastCowSize: 0,
+        aofLastCowSize: 0,
         changesSinceLastSave: FORK_PROJECT_CHANGES_THRESHOLD + 1,
       }),
     );
