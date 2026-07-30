@@ -51,6 +51,20 @@ import {
   parseSlaveOutputBufferLimit,
 } from './cob-pressure-detector';
 import {
+  MemoryOverheadState,
+  OVERHEAD_WARN_FRACTION,
+  acknowledgeMemoryOverheadFinding,
+  createMemoryOverheadState,
+  evaluateMemoryOverhead,
+} from './memory-overhead-detector';
+import {
+  FORK_OOM_WARN_FRACTION,
+  ForkMemoryState,
+  acknowledgeForkMemoryFinding,
+  createForkMemoryState,
+  evaluateForkMemoryRisk,
+} from './fork-memory-risk-detector';
+import {
   CONTROL_PLANE_CORROBORATING_METRICS,
   ControlPlaneState,
   SATURATION_CORROBORATION_WINDOW_MS,
@@ -60,6 +74,14 @@ import {
   evaluateControlPlaneSaturation,
   isControlPlaneSaturationEvent,
 } from './control-plane-saturation-detector';
+import {
+  LOAD_CRIT_FRACTION,
+  LOAD_WARN_FRACTION,
+  LoadSaturationState,
+  acknowledgeLoadSaturationFinding,
+  createLoadSaturationState,
+  evaluateLoadSaturation,
+} from './load-saturation-detector';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
@@ -146,13 +168,24 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // hysteresis state, cached slave limit triplet with slow recheck, and the
   // last-seen sync_full counter for delta computation.
   private cobState = new Map<string, CobConnectionState>();
+  // Fork-based-save COW/OOM memory-risk (valkey#3609): per-connection
+  // escalation hysteresis for the live-COW and projected-next-fork advisories.
+  private forkMemoryState = new Map<string, ForkMemoryState>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
+  // Non-dataset memory overhead (valkey#1792): per-connection hysteresis state
+  // and the last-seen evicted_keys counter for computing the per-poll delta.
+  private memoryOverheadState = new Map<string, MemoryOverheadState>();
+  private memOverheadLastEvictedKeys = new Map<string, number>();
   // Control-plane saturation (valkey#3927): per-connection episode state and
   // the last connected_slaves count for replica-drop corroboration.
   private controlPlaneState = new Map<string, ControlPlaneState>();
   private cpSatLastConnectedSlaves = new Map<string, number>();
+  // Event-loop load saturation (valkey#2055): per-connection hysteresis state
+  // tracking the acknowledged level and the consecutive-poll counter that keeps
+  // a momentary batch/burst from alerting.
+  private loadSaturationState = new Map<string, LoadSaturationState>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
@@ -412,10 +445,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
     this.failoverChurnState.delete(connectionId);
+    this.forkMemoryState.delete(connectionId);
     const hadCobState = this.cobState.delete(connectionId);
     this.cobLimitCache.delete(connectionId);
     this.cobLimitRecheck.delete(connectionId);
     this.cobLastSyncFull.delete(connectionId);
+    this.memoryOverheadState.delete(connectionId);
+    this.memOverheadLastEvictedKeys.delete(connectionId);
     if (hadCobState) {
       try {
         this.prometheusService.updateReplBufferPressure(connectionId, []);
@@ -427,6 +463,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     }
     this.controlPlaneState.delete(connectionId);
     this.cpSatLastConnectedSlaves.delete(connectionId);
+    this.loadSaturationState.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
@@ -977,6 +1014,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // Persistence-child stall detection (stuck BGSAVE / AOF rewrite) — state-based, not z-score
       await this.detectPersistenceStall(info, ctx, timestamp);
 
+      // Fork-based-save COW/OOM memory-risk (valkey-io/valkey#3609): projected
+      // peak RSS (used_memory_rss + COW growth) approaching total system memory
+      // during — or, under write pressure, just before — a BGSAVE/AOF rewrite.
+      // State-based with hysteresis; complementary to the stall detector above.
+      await this.detectForkMemoryRisk(info, ctx, timestamp);
+
       // Client-saturation detection — connected_clients approaching maxclients
       // (valkey-io/valkey#3918): warns before the pool exhausts and operators
       // can no longer connect. State-based with hysteresis, not z-score.
@@ -986,6 +1029,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // omem approaching the slave COB limit, and the resync-loop signal once
       // an overflow already forced a full sync. State-based with hysteresis.
       await this.detectCobPressure(info, ctx, timestamp);
+
+      // Non-dataset memory overhead (valkey-io/valkey#1792): operational
+      // overhead (client buffers, repl backlog/buffers, AOF buffer, scripts,
+      // cluster links) consuming the maxmemory budget and/or driving eviction
+      // of user data. State-based with hysteresis, not z-score.
+      await this.detectMemoryOverhead(info, ctx, timestamp);
 
       // Control-plane saturation (valkey-io/valkey#3927): sustained CPU
       // saturation paired with control-plane impact evidence. Runs last so
@@ -998,6 +1047,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         probeRttMs,
         cpuCounterReset,
       );
+
+      // Event-loop load saturation (valkey-io/valkey#2055): busy-fraction of
+      // the event loop — the real-work busyness that raw CPU% hides. Passes the
+      // same cpuUtilizationSample so the message can call out when CPU%
+      // understates the load. State-based with hysteresis.
+      await this.detectLoadSaturation(info, ctx, timestamp, cpuUtilizationSample);
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
@@ -1075,6 +1130,127 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // Advance the level last: on escalation only after addAnomaly resolved; on
     // steady/de-escalation immediately (the latter re-arms alerting on recovery).
     this.clientSaturationLevel.set(ctx.connectionId, level);
+  }
+
+  /**
+   * Detect event-loop SATURATION using the real-work busyness signal that raw
+   * CPU% hides (valkey-io/valkey#2055). On a largely single-threaded server the
+   * true busyness indicator is how much of wall-clock time the event loop
+   * spends doing work, derived from INFO stats
+   * `instantaneous_eventloop_duration_usec` * `instantaneous_eventloop_cycles_per_sec`.
+   * Those fields are optional (older servers omit them), so this is a graceful
+   * no-op when they are absent. State-based with hysteresis: emits only when
+   * busyness escalates and re-arms on a drop; the passed cpuUtilization lets the
+   * message point out when CPU% understates the load.
+   */
+  private async detectLoadSaturation(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+    cpuUtilization: number | null,
+  ): Promise<void> {
+    let state = this.loadSaturationState.get(ctx.connectionId);
+    if (state === undefined) {
+      state = createLoadSaturationState();
+      this.loadSaturationState.set(ctx.connectionId, state);
+    }
+
+    const finding = evaluateLoadSaturation(state, {
+      eventloopDurationUsecPerCycle: this.parseNumber(info.instantaneous_eventloop_duration_usec),
+      eventloopCyclesPerSec: this.parseNumber(info.instantaneous_eventloop_cycles_per_sec),
+      cpuUtilizationPct: cpuUtilization,
+      opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec),
+      timestamp,
+    });
+    if (finding === null) return;
+
+    const severity =
+      finding.level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
+    const busyPct = finding.busyFraction * 100;
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.LOAD_SATURATION,
+      anomalyType: AnomalyType.SPIKE,
+      severity,
+      value: busyPct,
+      baseline: LOAD_WARN_FRACTION * 100,
+      zScore: 0,
+      stdDev: 0,
+      threshold:
+        (finding.level === 'critical' ? LOAD_CRIT_FRACTION : LOAD_WARN_FRACTION) * 100,
+      message: finding.message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    // Await the emit so a failure propagates to the poll error handler, and
+    // acknowledge only AFTER a successful emit — a failed escalation is then
+    // retried on the next poll rather than being swallowed by the hysteresis.
+    await this.addAnomaly(event, ctx);
+    acknowledgeLoadSaturationFinding(state, finding);
+  }
+
+  /**
+   * Detect fork-based-persistence copy-on-write (COW) memory blow-up / OOM risk
+   * (valkey-io/valkey#3609). BGSAVE and AOF rewrite fork the server; writes
+   * arriving while the child runs dirty COW-shared pages, so RSS climbs toward
+   * used_memory + bytes-written-during-save and can cross available RAM, letting
+   * the OOM killer terminate the server mid-save. Surfaces the LIVE risk while a
+   * save runs and the PROJECTED risk (from the last save's COW) when write
+   * pressure makes the next save imminent.
+   *
+   * State-based with escalation-only hysteresis (mirrors detectClientSaturation /
+   * detectCobPressure): the finding is emitted on escalation, the stored level is
+   * advanced ONLY after a successful emit, and it re-arms as the risk recedes.
+   */
+  private async detectForkMemoryRisk(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    const state = this.forkMemoryState.get(ctx.connectionId) ?? createForkMemoryState();
+    this.forkMemoryState.set(ctx.connectionId, state);
+
+    const finding = evaluateForkMemoryRisk(state, {
+      bgsaveInProgress: info.rdb_bgsave_in_progress === '1',
+      aofRewriteInProgress: info.aof_rewrite_in_progress === '1',
+      currentCowSize: this.parseNumber(info.current_cow_size),
+      rdbLastCowSize: this.parseNumber(info.rdb_last_cow_size),
+      latestForkUsec: this.parseNumber(info.latest_fork_usec),
+      usedMemory: this.parseNumber(info.used_memory) ?? 0,
+      usedMemoryRss: this.parseNumber(info.used_memory_rss),
+      totalSystemMemory: this.parseNumber(info.total_system_memory),
+      maxmemory: this.parseNumber(info.maxmemory) ?? 0,
+      changesSinceLastSave: this.parseNumber(info.rdb_changes_since_last_save),
+      opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec),
+      timestamp,
+    });
+
+    if (finding === null) return;
+
+    const isCritical = finding.level === 'critical';
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.FORK_MEMORY_RISK,
+      anomalyType: AnomalyType.SPIKE,
+      severity: isCritical ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      value: Math.round(finding.projectedFraction * 100),
+      baseline: Math.round(FORK_OOM_WARN_FRACTION * 100),
+      zScore: 0,
+      stdDev: 0,
+      threshold: Math.round(FORK_OOM_WARN_FRACTION * 100),
+      message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    // Await so a failed emit propagates to the poll error handler; the
+    // acknowledged level is advanced only AFTER a successful emit, so a failed
+    // escalation is retried on the next poll rather than swallowed by hysteresis.
+    await this.addAnomaly(event, ctx);
+    acknowledgeForkMemoryFinding(state, finding);
   }
 
   /**
@@ -1270,6 +1446,96 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       await this.addAnomaly(event, ctx);
       acknowledgeCobFinding(state, finding);
     }
+  }
+
+  /**
+   * Detect non-dataset memory overhead consuming the maxmemory budget
+   * (valkey-io/valkey#1792). Operational overhead (used_memory_overhead minus
+   * the fixed startup baseline) is charged against the same maxmemory budget as
+   * user data, so when it grows it shrinks the room for the dataset and, under
+   * an eviction policy, drives eviction of keys that would otherwise fit.
+   *
+   * State-based with escalation-only hysteresis (mirrors detectClientSaturation
+   * and detectCobPressure): the finding is emitted only when the level escalates
+   * above the acknowledged level, and the ackedLevel is advanced only AFTER a
+   * successful emit so a failed emit retries on the next poll.
+   */
+  private async detectMemoryOverhead(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    const maxmemory = this.parseNumber(info.maxmemory);
+    // No eviction budget → the pure detector returns null anyway; skip early.
+    if (maxmemory === null || maxmemory <= 0) return;
+
+    const usedMemory = this.parseNumber(info.used_memory);
+    const usedMemoryOverhead = this.parseNumber(info.used_memory_overhead);
+    const usedMemoryStartup = this.parseNumber(info.used_memory_startup);
+    if (usedMemory === null || usedMemoryOverhead === null || usedMemoryStartup === null) {
+      return;
+    }
+
+    // evicted_keys is a lifetime counter, so feed the per-poll delta. max(0, …)
+    // absorbs a counter reset (server restart), like the rejected_connections
+    // block above.
+    const currentEvicted = this.parseNumber(info.evicted_keys);
+    let evictedKeysDelta = 0;
+    if (currentEvicted !== null) {
+      const lastEvicted = this.memOverheadLastEvictedKeys.get(ctx.connectionId);
+      evictedKeysDelta = Math.max(0, currentEvicted - (lastEvicted ?? currentEvicted));
+      this.memOverheadLastEvictedKeys.set(ctx.connectionId, currentEvicted);
+    }
+
+    const state =
+      this.memoryOverheadState.get(ctx.connectionId) ?? createMemoryOverheadState();
+    this.memoryOverheadState.set(ctx.connectionId, state);
+
+    const finding = evaluateMemoryOverhead(state, {
+      usedMemory,
+      usedMemoryOverhead,
+      usedMemoryStartup,
+      usedMemoryDataset: this.parseNumber(info.used_memory_dataset) ?? 0,
+      maxmemory,
+      maxmemoryPolicy: info.maxmemory_policy ?? 'noeviction',
+      components: {
+        clientsNormal: this.parseNumber(info.mem_clients_normal) ?? 0,
+        clientsSlaves: this.parseNumber(info.mem_clients_slaves) ?? 0,
+        replBacklog: this.parseNumber(info.mem_replication_backlog) ?? 0,
+        replBuffers: this.parseNumber(info.mem_total_replication_buffers) ?? 0,
+        aofBuffer: this.parseNumber(info.mem_aof_buffer) ?? 0,
+        scriptsFunctions:
+          (this.parseNumber(info.used_memory_scripts) ?? 0) +
+          (this.parseNumber(info.used_memory_functions) ?? 0),
+        clusterLinks: this.parseNumber(info.mem_cluster_links) ?? 0,
+      },
+      evictedKeysDelta,
+      timestamp,
+    });
+
+    if (finding === null) return;
+
+    const isCritical = finding.level === 'critical';
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.MEMORY_OVERHEAD,
+      anomalyType: AnomalyType.SPIKE,
+      severity: isCritical ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      value: finding.overheadBytes,
+      baseline: maxmemory,
+      zScore: 0,
+      stdDev: 0,
+      threshold: Math.round(maxmemory * OVERHEAD_WARN_FRACTION),
+      message: finding.message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    // Await the emit so a failure propagates; advance ackedLevel only AFTER a
+    // successful emit so a failed escalation is retried next poll.
+    await this.addAnomaly(event, ctx);
+    acknowledgeMemoryOverheadFinding(state, finding);
   }
 
   /**

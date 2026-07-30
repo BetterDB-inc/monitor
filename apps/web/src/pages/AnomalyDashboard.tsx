@@ -126,6 +126,9 @@ const METRIC_LABELS: Record<string, string> = {
   replica_slot_state: 'Replica Slot State',
   failover_churn: 'Failover Churn',
   repl_buffer_pressure: 'Replica Buffer Pressure',
+  memory_overhead: 'Memory Overhead',
+  load_saturation: 'Load Saturation',
+  fork_memory_risk: 'Fork Memory Risk',
 };
 
 function formatTime(ts: number): string {

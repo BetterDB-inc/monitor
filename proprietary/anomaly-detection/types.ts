@@ -18,6 +18,12 @@ export enum MetricType {
   FAILOVER_CHURN = 'failover_churn',
   /** Replica output buffer approaching client-output-buffer-limit slave (valkey#3963) — state-based. */
   REPL_BUFFER_PRESSURE = 'repl_buffer_pressure',
+  /** Non-dataset memory overhead consuming the maxmemory budget / driving eviction (valkey#1792) — state-based. */
+  MEMORY_OVERHEAD = 'memory_overhead',
+  /** Event-loop busy-fraction saturation — the real-work busyness raw CPU% hides (valkey#2055) — state-based. */
+  LOAD_SATURATION = 'load_saturation',
+  /** Fork-based-save (BGSAVE/AOF) copy-on-write RSS blow-up / OOM risk (valkey#3609) — state-based. */
+  FORK_MEMORY_RISK = 'fork_memory_risk',
   EVICTED_KEYS = 'evicted_keys',
   BLOCKED_CLIENTS = 'blocked_clients',
   KEYSPACE_MISSES = 'keyspace_misses',
@@ -58,6 +64,9 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.RAFT_HEALTH,
   MetricType.FAILOVER_CHURN,
   MetricType.REPL_BUFFER_PRESSURE,
+  MetricType.MEMORY_OVERHEAD,
+  MetricType.LOAD_SATURATION,
+  MetricType.FORK_MEMORY_RISK,
   MetricType.SLOWLOG_COUNT,
 ]);
 
