@@ -169,8 +169,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // last-seen sync_full counter for delta computation.
   private cobState = new Map<string, CobConnectionState>();
   // Fork-based-save COW/OOM memory-risk (valkey#3609): per-connection
-  // escalation hysteresis for the live-COW and projected-next-fork advisories.
+  // escalation hysteresis for the live-COW and projected-next-fork advisories,
+  // plus the last rdb_changes_since_last_save counter (+ its timestamp) so the
+  // projected path is gated on a CURRENT write RATE rather than the raw
+  // cumulative counter (which never resets on AOF-only deployments).
   private forkMemoryState = new Map<string, ForkMemoryState>();
+  private forkMemLastChanges = new Map<string, { changes: number; ts: number }>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -446,6 +450,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.replicaSlotEventIds.delete(connectionId);
     this.failoverChurnState.delete(connectionId);
     this.forkMemoryState.delete(connectionId);
+    this.forkMemLastChanges.delete(connectionId);
     const hadCobState = this.cobState.delete(connectionId);
     this.cobLimitCache.delete(connectionId);
     this.cobLimitRecheck.delete(connectionId);
@@ -1212,6 +1217,23 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const state = this.forkMemoryState.get(ctx.connectionId) ?? createForkMemoryState();
     this.forkMemoryState.set(ctx.connectionId, state);
 
+    // Current write rate from the per-poll delta of rdb_changes_since_last_save.
+    // max(0, …) absorbs the counter reset on an RDB save (and server restart);
+    // null on the first poll (no baseline yet) so the projected path stays quiet
+    // until a rate can be measured.
+    let writeRatePerSec: number | null = null;
+    const currentChanges = this.parseNumber(info.rdb_changes_since_last_save);
+    if (currentChanges !== null) {
+      const prev = this.forkMemLastChanges.get(ctx.connectionId);
+      if (prev !== undefined) {
+        const dtSec = (timestamp - prev.ts) / 1000;
+        if (dtSec > 0) {
+          writeRatePerSec = Math.max(0, currentChanges - prev.changes) / dtSec;
+        }
+      }
+      this.forkMemLastChanges.set(ctx.connectionId, { changes: currentChanges, ts: timestamp });
+    }
+
     const finding = evaluateForkMemoryRisk(state, {
       bgsaveInProgress: info.rdb_bgsave_in_progress === '1',
       aofRewriteInProgress: info.aof_rewrite_in_progress === '1',
@@ -1223,7 +1245,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       usedMemoryRss: this.parseNumber(info.used_memory_rss),
       totalSystemMemory: this.parseNumber(info.total_system_memory),
       maxmemory: this.parseNumber(info.maxmemory) ?? 0,
-      changesSinceLastSave: this.parseNumber(info.rdb_changes_since_last_save),
+      writeRatePerSec,
       timestamp,
     });
 

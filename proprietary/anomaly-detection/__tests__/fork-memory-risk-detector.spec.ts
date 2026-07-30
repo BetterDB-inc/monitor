@@ -1,7 +1,7 @@
 import {
   FORK_OOM_CRIT_FRACTION,
   FORK_OOM_WARN_FRACTION,
-  FORK_PROJECT_CHANGES_THRESHOLD,
+  FORK_PROJECT_WRITE_RATE_PER_SEC,
   SLOW_FORK_USEC,
   ForkMemoryInput,
   acknowledgeForkMemoryFinding,
@@ -27,7 +27,7 @@ describe('evaluateForkMemoryRisk', () => {
       usedMemoryRss: 4 * GB,
       totalSystemMemory: TOTAL,
       maxmemory: 0,
-      changesSinceLastSave: 0,
+      writeRatePerSec: 0,
       timestamp: base,
       ...over,
     };
@@ -116,7 +116,7 @@ describe('evaluateForkMemoryRisk', () => {
       input({
         usedMemoryRss: 13 * GB,
         rdbLastCowSize: 0.5 * GB,
-        changesSinceLastSave: FORK_PROJECT_CHANGES_THRESHOLD + 1,
+        writeRatePerSec: FORK_PROJECT_WRITE_RATE_PER_SEC + 1,
       }),
     );
     expect(finding).not.toBeNull();
@@ -124,7 +124,32 @@ describe('evaluateForkMemoryRisk', () => {
     expect(finding!.kind).toBe('projected-fork-oom');
     expect(finding!.message).toContain('No save in progress');
     expect(finding!.message).toContain('valkey#3609');
-    expect(finding!.message).toContain('changes_since_last_save');
+    expect(finding!.message).toContain('write rate');
+  });
+
+  it('re-arms the projected warning when the write rate falls back to zero (AOF-only staleness)', () => {
+    const state = createForkMemoryState();
+    const args = { usedMemoryRss: 13 * GB, rdbLastCowSize: 0.5 * GB } as const;
+    // High write rate → fires WARNING and is acknowledged.
+    const warn = evaluateForkMemoryRisk(
+      state,
+      input({ ...args, writeRatePerSec: FORK_PROJECT_WRITE_RATE_PER_SEC + 1, timestamp: base }),
+    );
+    expect(warn!.level).toBe('warning');
+    acknowledgeForkMemoryFinding(state, warn!);
+    // Writes stop (rate → 0): the projected gate opens false and re-arms, unlike
+    // the old cumulative counter that stayed above threshold forever.
+    expect(
+      evaluateForkMemoryRisk(state, input({ ...args, writeRatePerSec: 0, timestamp: base + 1000 })),
+    ).toBeNull();
+    expect(state.ackedLevel).toBe('none');
+    // A fresh write burst then re-fires the WARNING.
+    const again = evaluateForkMemoryRisk(
+      state,
+      input({ ...args, writeRatePerSec: FORK_PROJECT_WRITE_RATE_PER_SEC + 1, timestamp: base + 2000 }),
+    );
+    expect(again).not.toBeNull();
+    expect(again!.level).toBe('warning');
   });
 
   it('projects an AOF-only deployment from aof_last_cow_size (no RDB COW history)', () => {
@@ -137,7 +162,7 @@ describe('evaluateForkMemoryRisk', () => {
         usedMemoryRss: 13 * GB,
         rdbLastCowSize: 0,
         aofLastCowSize: 0.5 * GB,
-        changesSinceLastSave: FORK_PROJECT_CHANGES_THRESHOLD + 1,
+        writeRatePerSec: FORK_PROJECT_WRITE_RATE_PER_SEC + 1,
       }),
     );
     expect(finding).not.toBeNull();
@@ -151,7 +176,7 @@ describe('evaluateForkMemoryRisk', () => {
     // signal that grows changes_since_last_save) are low — must not project.
     const finding = evaluateForkMemoryRisk(
       state,
-      input({ usedMemoryRss: 13 * GB, rdbLastCowSize: 0.5 * GB, changesSinceLastSave: 10 }),
+      input({ usedMemoryRss: 13 * GB, rdbLastCowSize: 0.5 * GB, writeRatePerSec: 10 }),
     );
     expect(finding).toBeNull();
   });
@@ -160,7 +185,7 @@ describe('evaluateForkMemoryRisk', () => {
     const state = createForkMemoryState();
     const finding = evaluateForkMemoryRisk(
       state,
-      input({ usedMemoryRss: 13 * GB, rdbLastCowSize: 0.5 * GB, changesSinceLastSave: 10 }),
+      input({ usedMemoryRss: 13 * GB, rdbLastCowSize: 0.5 * GB, writeRatePerSec: 10 }),
     );
     expect(finding).toBeNull();
   });
@@ -173,7 +198,7 @@ describe('evaluateForkMemoryRisk', () => {
         usedMemoryRss: 15 * GB,
         rdbLastCowSize: 0,
         aofLastCowSize: 0,
-        changesSinceLastSave: FORK_PROJECT_CHANGES_THRESHOLD + 1,
+        writeRatePerSec: FORK_PROJECT_WRITE_RATE_PER_SEC + 1,
       }),
     );
     expect(finding).toBeNull();
@@ -187,7 +212,7 @@ describe('evaluateForkMemoryRisk', () => {
       input({
         usedMemoryRss: 4 * GB,
         rdbLastCowSize: 0.5 * GB,
-        changesSinceLastSave: FORK_PROJECT_CHANGES_THRESHOLD + 1,
+        writeRatePerSec: FORK_PROJECT_WRITE_RATE_PER_SEC + 1,
       }),
     );
     expect(finding).toBeNull();
@@ -214,7 +239,7 @@ describe('evaluateForkMemoryRisk', () => {
       input({
         usedMemoryRss: 14 * GB,
         rdbLastCowSize: 4 * GB,
-        changesSinceLastSave: FORK_PROJECT_CHANGES_THRESHOLD + 1,
+        writeRatePerSec: FORK_PROJECT_WRITE_RATE_PER_SEC + 1,
         totalSystemMemory: null,
       }),
     );

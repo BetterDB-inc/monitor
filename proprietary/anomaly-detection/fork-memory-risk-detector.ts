@@ -41,14 +41,16 @@ export const FORK_OOM_CRIT_FRACTION = 0.9;
 export const SLOW_FORK_USEC = 500_000;
 /**
  * Write-pressure gate for the PROJECTED (idle) path — the next save is only
- * "likely to be triggered soon under load" when a large accumulation of unsaved
- * changes has built up. Deliberately keyed on rdb_changes_since_last_save, which
- * counts WRITE operations since the last save (reads never increment it), NOT
- * instantaneous_ops_per_sec — that counter includes reads, so a read-heavy
- * instance with a prior COW footprint would otherwise raise a false projected
- * warning.
+ * "likely to be triggered soon under load" under a genuine CURRENT write rate.
+ * Keyed on the per-poll RATE of rdb_changes_since_last_save (writes/sec, derived
+ * by the caller from the counter delta), for two reasons: reads never increment
+ * that counter (so ops/sec, which includes reads, would false-fire on a
+ * read-heavy instance), and a rate CLEARS when writes stop — the raw cumulative
+ * counter only resets on an RDB save, so on an AOF-only (or save-disabled)
+ * deployment it grows for the process lifetime and would pin the warning on a
+ * stale signal forever.
  */
-export const FORK_PROJECT_CHANGES_THRESHOLD = 100_000;
+export const FORK_PROJECT_WRITE_RATE_PER_SEC = 1_000;
 
 export type ForkRiskLevel = 'none' | 'warning' | 'critical';
 export type ForkRiskKind = 'live-cow-oom' | 'projected-fork-oom';
@@ -64,7 +66,8 @@ export interface ForkMemoryInput {
   usedMemoryRss: number | null;
   totalSystemMemory: number | null;
   maxmemory: number;
-  changesSinceLastSave: number | null;
+  /** Current write rate (writes/sec) from the per-poll delta of rdb_changes_since_last_save. */
+  writeRatePerSec: number | null;
   timestamp: number;
 }
 
@@ -190,10 +193,11 @@ function assess(input: ForkMemoryInput): Assessment {
   if (lastCow <= 0) {
     return NONE_PROJECTED;
   }
-  // Write-only pressure signal: reads never increment rdb_changes_since_last_save.
+  // Current write rate (writes/sec). Reads never increment the source counter,
+  // and unlike the raw cumulative counter this falls back to ~0 when writes stop
+  // — so the warning re-arms on a now-idle server instead of staying pinned.
   const highWrite =
-    input.changesSinceLastSave !== null &&
-    input.changesSinceLastSave >= FORK_PROJECT_CHANGES_THRESHOLD;
+    input.writeRatePerSec !== null && input.writeRatePerSec >= FORK_PROJECT_WRITE_RATE_PER_SEC;
   if (!highWrite) {
     return NONE_PROJECTED;
   }
@@ -204,7 +208,7 @@ function assess(input: ForkMemoryInput): Assessment {
     return NONE_PROJECTED;
   }
   const pct = (fraction * 100).toFixed(1);
-  const pressureText = `changes_since_last_save=${input.changesSinceLastSave}`;
+  const pressureText = `write rate ~${Math.round(input.writeRatePerSec as number).toLocaleString()} writes/s`;
   const message =
     `No save in progress but write pressure is high (${pressureText}): the next BGSAVE / AOF ` +
     `rewrite fork is projected to reach ~${formatBytes(projectedPeak)} RSS (current RSS ` +

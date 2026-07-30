@@ -161,6 +161,16 @@ export function evaluateLoadSaturation(
   }
 
   state.consecutive += 1;
+
+  // De-escalation re-arms even without a full drop to 'none': a critical→warning
+  // dip must lower the acknowledged level so a later climb back to critical is
+  // treated as a fresh escalation and re-emits. Without this a critical alert is
+  // swallowed forever after the first dip. Mirrors the fork-memory-risk and
+  // memory-overhead sibling detectors, which lower ackedLevel on any drop.
+  if (LEVEL_RANK[level] < LEVEL_RANK[state.ackedLevel]) {
+    state.ackedLevel = level;
+  }
+
   if (state.consecutive < LOAD_CONSECUTIVE_REQUIRED) {
     return null;
   }

@@ -206,6 +206,23 @@ describe('evaluateLoadSaturation', () => {
     expect(again!.level).toBe('warning');
   });
 
+  it('re-alerts CRITICAL after a critical→warning dip and climb back (no full drop to none)', () => {
+    const state = createLoadSaturationState();
+    // Reach and acknowledge CRITICAL.
+    const crit = pollN(state, 0.97, LOAD_CONSECUTIVE_REQUIRED);
+    expect(crit!.level).toBe('critical');
+    acknowledgeLoadSaturationFinding(state, crit!);
+    // Dip to WARNING (still above the warning threshold — never touches none).
+    // This must lower the acknowledged level so a later climb re-escalates.
+    const dip = evaluateLoadSaturation(state, input({ fraction: 0.85, timestamp: base + 10_000 }));
+    expect(dip).toBeNull();
+    expect(state.ackedLevel).toBe('warning');
+    // Climb back to CRITICAL — must re-emit rather than being swallowed.
+    const again = evaluateLoadSaturation(state, input({ fraction: 0.97, timestamp: base + 11_000 }));
+    expect(again).not.toBeNull();
+    expect(again!.level).toBe('critical');
+  });
+
   it('notes that CPU% understates the load when CPU sits well below busy fraction', () => {
     const state = createLoadSaturationState();
     // Busy 90%, but CPU reads a low 20% — the #2055 signature.
