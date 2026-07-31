@@ -126,6 +126,9 @@ const METRIC_LABELS: Record<string, string> = {
   replica_slot_state: 'Replica Slot State',
   failover_churn: 'Failover Churn',
   repl_buffer_pressure: 'Replica Buffer Pressure',
+  memory_overhead: 'Memory Overhead',
+  load_saturation: 'Load Saturation',
+  fork_memory_risk: 'Fork Memory Risk',
 };
 
 function formatTime(ts: number): string {
@@ -133,10 +136,14 @@ function formatTime(ts: number): string {
 }
 
 function formatValue(value: number, metric: string): string {
-  if (metric === 'memory_used') {
+  if (metric === 'memory_used' || metric === 'memory_overhead') {
     if (value > 1e9) return `${(value / 1e9).toFixed(2)} GB`;
     if (value > 1e6) return `${(value / 1e6).toFixed(1)} MB`;
     return `${(value / 1e3).toFixed(0)} KB`;
+  }
+  // Percentage-valued events (value/baseline/threshold are all percentages).
+  if (metric === 'load_saturation' || metric === 'fork_memory_risk') {
+    return `${value.toFixed(1)}%`;
   }
   if (metric === 'fragmentation_ratio') return value.toFixed(2);
   if (metric === 'command_p99') {
