@@ -25,6 +25,7 @@ import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-detector';
+import { detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
 import {
   detectReplicaSlotState,
   replicaSlotSignature,
@@ -154,6 +155,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // the alert once the persistence gate has fired.
   private stuckReplicaFirstSeen = new Map<string, Map<string, number>>();
   private activeStuckReplicas = new Map<string, Set<string>>();
+  // Ghost-membership (valkey#1757) state, same discipline as stuck-replica:
+  // `firstSeen` gates on persistence so a transient re-MEET/handshake window
+  // doesn't alert, `active` dedupes the alert once the gate has fired.
+  private ghostMemberFirstSeen = new Map<string, Map<string, number>>();
+  private activeGhostMembers = new Map<string, Set<string>>();
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
@@ -1000,6 +1006,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           if (nodes) {
             await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
             await this.detectStuckReplicas(ctx, timestamp, nodes);
+            await this.detectGhostMembers(ctx, timestamp, nodes);
             await this.detectFailoverChurn(ctx, timestamp, nodes);
             // Replica migrating/importing markers are node-local — only the
             // queried node's own line carries them — so aggregate each replica's
@@ -2302,6 +2309,69 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     } catch (stuckErr) {
       this.logger.debug(
         `Failed to check stuck replicas for ${ctx.connectionName}: ${stuckErr instanceof Error ? stuckErr.message : stuckErr}`,
+      );
+    }
+  }
+
+  /**
+   * How long a ghost membership (valkey#1757) must persist before it is alerted,
+   * to exclude the transient re-MEET/handshake window of a normal node join or
+   * failover where an endpoint may briefly carry two ids. A real ghost — an old
+   * node-id peers never forgot after a reset — lingers indefinitely.
+   */
+  private static readonly GHOST_MEMBER_MIN_PERSIST_MS = 30_000;
+
+  /**
+   * Detects a ghost cluster member (valkey-io/valkey#1757) from this connection's
+   * `CLUSTER NODES` view: an endpoint claimed by a stale (`fail`/`fail?`/`noaddr`)
+   * node-id that peers never forgot after a `CLUSTER RESET`/restart, alongside the
+   * live id that now occupies it. Emits a WARNING once the ghost has persisted
+   * past the re-MEET grace window, dedupes per (endpoint, ids) signature, and
+   * clears state on recovery so a re-appearing ghost alerts again.
+   */
+  private async detectGhostMembers(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+  ): Promise<void> {
+    try {
+      await this.applyTopologyPersistenceGate({
+        ctx,
+        timestamp,
+        findings: detectGhostMembers(nodes),
+        signatureOf: ghostMemberSignature,
+        firstSeenByConn: this.ghostMemberFirstSeen,
+        activeByConn: this.activeGhostMembers,
+        minPersistMs: AnomalyService.GHOST_MEMBER_MIN_PERSIST_MS,
+        buildEvent: (g, signature) => {
+          const ghostLabel = g.ghostIds.map((id) => id.substring(0, 8)).join(', ');
+          const forgetCmds = g.ghostIds.map((id) => `CLUSTER FORGET ${id}`).join('; ');
+          const plural = g.ghostIds.length > 1;
+          return {
+            id: `${ctx.connectionId}-ghost-member-${signature}-${timestamp}`,
+            timestamp,
+            metricType: MetricType.GHOST_MEMBERSHIP,
+            anomalyType: AnomalyType.SPIKE,
+            severity: AnomalySeverity.WARNING,
+            value: g.ghostIds.length,
+            baseline: 0,
+            zScore: 0,
+            stdDev: 0,
+            threshold: 0,
+            message:
+              `WARNING: Endpoint ${g.endpoint} is now node ${g.liveId.substring(0, 8)}, but ` +
+              `stale node-id${plural ? 's' : ''} ${ghostLabel} still linger${plural ? '' : 's'} in the ` +
+              `cluster view. A CLUSTER RESET/restart does not make peers forget a node (valkey#1757), ` +
+              `so the old identity keeps re-joining and causing errors. Run \`${forgetCmds}\` on all ` +
+              `other primaries to evict the ghost.`,
+            resolved: false,
+            connectionId: ctx.connectionId,
+          };
+        },
+      });
+    } catch (ghostErr) {
+      this.logger.debug(
+        `Failed to check ghost membership for ${ctx.connectionName}: ${ghostErr instanceof Error ? ghostErr.message : ghostErr}`,
       );
     }
   }
