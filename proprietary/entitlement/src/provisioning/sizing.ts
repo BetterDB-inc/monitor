@@ -30,8 +30,29 @@ export function parseMaxmemoryMi(maxmemory: string): number | null {
   return Number.isFinite(mi) && mi > 0 ? mi : null;
 }
 
-function formatMi(mi: number): string {
+export function formatMi(mi: number): string {
   return mi % 1024 === 0 ? `${mi / 1024}Gi` : `${mi}Mi`;
+}
+
+/**
+ * The chart's default container memory limit in MiB (values.yaml
+ * resources.limits.memory: 512Mi). Applied when no maxmemory override is set,
+ * and used as the floor for the sized case.
+ */
+export const VALKEY_DEFAULT_LIMIT_MI = 512;
+
+/**
+ * The container memory limit in MiB the chart will be rendered with for a given
+ * maxmemory: 2x maxmemory (see computeValkeySizing), floored at the chart
+ * default and capped at the 2gb tier. Returns the chart default for a missing
+ * or unparseable maxmemory. Callers (e.g. the namespace ResourceQuota) use this
+ * to reserve exactly the headroom the Valkey pod will request.
+ */
+export function valkeyMemoryLimitMi(maxmemory: string | null): number {
+  const mi = maxmemory ? parseMaxmemoryMi(maxmemory) : null;
+  if (mi === null) return VALKEY_DEFAULT_LIMIT_MI;
+  const cappedMi = Math.min(mi, MAX_VALKEY_MAXMEMORY_MI);
+  return Math.max(VALKEY_DEFAULT_LIMIT_MI, cappedMi * 2);
 }
 
 /**
@@ -61,7 +82,7 @@ export function computeValkeySizing(maxmemory: string | null): ValkeySizing | nu
   const cappedMi = Math.min(maxmemoryMi, MAX_VALKEY_MAXMEMORY_MI);
 
   return {
-    memoryLimit: formatMi(Math.max(512, cappedMi * 2)),
+    memoryLimit: formatMi(valkeyMemoryLimitMi(maxmemory)),
     persistenceSize: formatMi(Math.max(1024, cappedMi * 4)),
   };
 }

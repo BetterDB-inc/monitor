@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   computeValkeySizing,
   parseMaxmemoryMi,
+  valkeyMemoryLimitMi,
+  VALKEY_DEFAULT_LIMIT_MI,
   MAX_VALKEY_MAXMEMORY_MI,
 } from '../sizing';
 
@@ -68,6 +70,37 @@ describe('computeValkeySizing', () => {
       memoryLimit: '4Gi',
       persistenceSize: '8Gi',
     });
+  });
+});
+
+describe('valkeyMemoryLimitMi', () => {
+  it('returns the pod memory limit (2x maxmemory) the chart is rendered with', () => {
+    expect(valkeyMemoryLimitMi('768mb')).toBe(1536);
+    expect(valkeyMemoryLimitMi('1gb')).toBe(2048);
+    expect(valkeyMemoryLimitMi('2gb')).toBe(4096);
+  });
+
+  it('floors at the chart default and caps at the 2gb tier', () => {
+    expect(valkeyMemoryLimitMi('64mb')).toBe(VALKEY_DEFAULT_LIMIT_MI);
+    expect(valkeyMemoryLimitMi('100gb')).toBe(4096); // capped at 2gb -> 2x
+  });
+
+  it('returns the chart default for missing or unparseable values', () => {
+    expect(valkeyMemoryLimitMi(null)).toBe(VALKEY_DEFAULT_LIMIT_MI);
+    expect(valkeyMemoryLimitMi('')).toBe(VALKEY_DEFAULT_LIMIT_MI);
+    expect(valkeyMemoryLimitMi('1g')).toBe(VALKEY_DEFAULT_LIMIT_MI);
+  });
+
+  // The regression this fixes: the namespace ResourceQuota reserves
+  // app (512Mi) + schema-job (128Mi) + this value for limits.memory. With the
+  // old hardcoded 2Gi quota, a 1gb/2gb pod (2Gi/4Gi limit) plus the running
+  // 512Mi app pod exceeded quota and the StatefulSet pod was never created.
+  it('leaves the pod fitting within the sized quota for every UI tier', () => {
+    for (const tier of ['768mb', '1gb', '2gb']) {
+      const quotaLimitMi = 512 + 128 + valkeyMemoryLimitMi(tier);
+      const podDemandMi = 512 /* running app */ + valkeyMemoryLimitMi(tier);
+      expect(podDemandMi).toBeLessThanOrEqual(quotaLimitMi);
+    }
   });
 });
 
