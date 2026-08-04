@@ -2,7 +2,7 @@ import { Injectable, Logger, NotFoundException, BadRequestException } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailService } from '../email/email.service';
-import { computeValkeySizing } from './sizing';
+import { computeValkeySizing, valkeyMemoryLimitMi, formatMi } from './sizing';
 import { TenantStatus, ValkeyInstanceStatus } from '@prisma/client';
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
@@ -200,10 +200,16 @@ export class ProvisioningService {
       // tenant already has a managed instance, so re-provisioning the tenant
       // doesn't shrink the quota below what the running Valkey pod needs.
       this.logger.log(`[${tenant.subdomain}] Creating K8s resource quota`);
-      const existingValkey = await this.prisma.valkeyInstance.count({
+      // v1 caps tenants at one instance, so findFirst is sufficient; size the
+      // quota to that instance's maxmemory so re-provisioning never shrinks the
+      // quota below what its running Valkey pod already requests.
+      const existingValkey = await this.prisma.valkeyInstance.findFirst({
         where: { tenantId, status: { not: 'deleting' } },
       });
-      await this.createResourceQuota(namespace, existingValkey > 0);
+      await this.createResourceQuota(
+        namespace,
+        existingValkey ? { maxmemory: existingValkey.maxmemory } : false,
+      );
 
       // Step 7: Create K8s Deployment
       this.logger.log(`[${tenant.subdomain}] Creating K8s deployment`);
@@ -384,7 +390,7 @@ export class ProvisioningService {
       // Existing tenants were provisioned before Valkey support: widen the
       // quota to fit the Valkey pod and open the isolation policy so the
       // shared Traefik proxy can route to it. Both are idempotent.
-      await this.createResourceQuota(namespace, true);
+      await this.createResourceQuota(namespace, { maxmemory: instance.maxmemory });
       await this.ensureTenantNetworkPolicy(namespace);
 
       // Generate the credential and create the Secret the chart will reference.
@@ -1076,17 +1082,29 @@ export class ProvisioningService {
     }
   }
 
-  private async createResourceQuota(namespace: string, includeValkey = false): Promise<void> {
+  private async createResourceQuota(
+    namespace: string,
+    valkey: { maxmemory: string | null } | false = false,
+  ): Promise<void> {
     // Base budget covers the Monitor app pod (250m/256Mi req, 500m/512Mi lim)
-    // plus a transient schema job. includeValkey adds headroom for one managed
-    // Valkey pod (100m/256Mi req, 500m/1Gi lim) so the chart can schedule.
+    // plus a transient schema job (50m/64Mi req, 100m/128Mi lim).
+    //
+    // When a managed Valkey pod shares the namespace, add headroom for it. Its
+    // memory *limit* is not fixed: the chart is rendered with
+    // resources.limits.memory = 2x maxmemory (see sizing.ts), which for the
+    // selectable 1gb/2gb tiers is 2Gi/4Gi — far above the old hardcoded 2Gi
+    // total. Size the quota's limits.memory to the pod the chart will actually
+    // request (app 512Mi + schema-job 128Mi + valkey 2x-maxmemory) so the
+    // StatefulSet isn't rejected with "exceeded quota". CPU and memory requests
+    // don't scale with maxmemory (chart defaults 100m/256Mi), so those stay put.
     const quotaSpec = {
-      hard: includeValkey
+      hard: valkey
         ? {
             'requests.cpu': '450m',
             'requests.memory': '640Mi',
             'limits.cpu': '1200m',
-            'limits.memory': '2Gi',
+            // 512Mi (app) + 128Mi (schema job) + valkey pod limit.
+            'limits.memory': formatMi(512 + 128 + valkeyMemoryLimitMi(valkey.maxmemory)),
             'pods': '3', // app + schema job + valkey
           }
         : {
