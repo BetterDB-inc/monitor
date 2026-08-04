@@ -451,6 +451,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftNodeTimeoutRecheck.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
+    this.ghostMemberFirstSeen.delete(connectionId);
+    this.activeGhostMembers.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
