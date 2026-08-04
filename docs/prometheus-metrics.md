@@ -26,6 +26,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/promethe
   - [Keyspace Metrics](#keyspace-metrics)
   - [Cluster Metrics](#cluster-metrics)
   - [Anomaly Detection Metrics](#anomaly-detection-metrics)
+  - [Metric Forecasting Metrics](#metric-forecasting-metrics)
   - [Internal Metrics](#internal-metrics)
   - [Node.js Process Metrics](#nodejs-process-metrics)
 - [Scrape Configuration](#scrape-configuration)
@@ -70,6 +71,9 @@ Monitor client connection patterns and trends.
 | `betterdb_client_connections_peak` | gauge | - | Peak connections in retention period | `256` |
 | `betterdb_client_connections_by_name` | gauge | `client_name` | Current connections by client name | `12` |
 | `betterdb_client_connections_by_user` | gauge | `user` | Current connections by ACL user | `25` |
+| `betterdb_connected_clients` | gauge | - | Number of client connections (from INFO clients) | `127` |
+| `betterdb_blocked_clients` | gauge | - | Clients blocked on BLPOP, BRPOP, etc | `2` |
+| `betterdb_tracking_clients` | gauge | - | Clients being tracked for client-side caching | `5` |
 
 **Cardinality Warning**: Label-based metrics scale with unique client names and usernames.
 
@@ -210,6 +214,7 @@ Replication status and offset tracking.
 | Metric | Type | Labels | Description | Example |
 |--------|------|--------|-------------|---------|
 | `betterdb_connected_slaves` | gauge | - | Number of connected replicas | `2` |
+| `betterdb_repl_output_buffer_ratio` | gauge | `replica` | Replica output buffer size as a fraction of the client-output-buffer-limit slave hard limit | `0.12` |
 | `betterdb_replication_offset` | gauge | - | Replication offset | `123456789` |
 | `betterdb_master_link_up` | gauge | - | 1 if link to master is up (replica only) | `1` |
 | `betterdb_master_last_io_seconds_ago` | gauge | - | Seconds since last I/O with master (replica only) | `2` |
@@ -286,6 +291,14 @@ Real-time anomaly detection system metrics.
 | `betterdb_anomaly_buffer_ready` | gauge | `metric_type` | Buffer ready state (1=ready, 0=warming) | `1` |
 | `betterdb_anomaly_buffer_mean` | gauge | `metric_type` | Rolling mean for anomaly detection | `2450` |
 | `betterdb_anomaly_buffer_stddev` | gauge | `metric_type` | Rolling stddev for anomaly detection | `125.5` |
+
+### Metric Forecasting Metrics
+
+Forward-looking projections of when a tracked metric will reach its configured ceiling.
+
+| Metric | Type | Labels | Description | Example |
+|--------|------|--------|-------------|---------|
+| `betterdb_metric_forecast_time_to_limit_seconds` | gauge | `metric_kind` | Projected seconds until the metric reaches its configured ceiling | `3600` |
 
 ### Internal Metrics
 
