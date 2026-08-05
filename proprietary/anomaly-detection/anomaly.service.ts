@@ -2364,8 +2364,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
               `WARNING: Endpoint ${g.endpoint} is now node ${g.liveId.substring(0, 8)}, but ` +
               `stale node-id${plural ? 's' : ''} ${ghostLabel} still linger${plural ? '' : 's'} in the ` +
               `cluster view. A CLUSTER RESET/restart does not make peers forget a node (valkey#1757), ` +
-              `so the old identity keeps re-joining and causing errors. Run \`${forgetCmds}\` on all ` +
-              `other primaries to evict the ghost.`,
+              `so the old identity keeps re-joining and causing errors. Run \`${forgetCmds}\` on every ` +
+              `other node in the cluster — primaries AND replicas — to fully evict the ghost; any node ` +
+              `that still remembers it re-gossips it back after the 60s FORGET ban expires.`,
             resolved: false,
             connectionId: ctx.connectionId,
           };

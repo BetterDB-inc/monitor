@@ -30,6 +30,12 @@ describe('canonicalEndpoint', () => {
     expect(canonicalEndpoint(':0@0')).toBe('');
     expect(canonicalEndpoint('')).toBe('');
   });
+
+  it('keeps compressed IPv6 hosts (leading ::) instead of dropping them', () => {
+    expect(canonicalEndpoint('::1:6379@16379')).toBe('::1:6379');
+    expect(canonicalEndpoint('2001:db8::1:6379@16379')).toBe('2001:db8::1:6379');
+    expect(canonicalEndpoint('[::1]:6379@16379')).toBe('[::1]:6379');
+  });
 });
 
 describe('detectGhostMembers', () => {
@@ -114,6 +120,16 @@ describe('detectGhostMembers', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].ghostIds).toEqual(['ghost-a', 'ghost-b']); // sorted
     expect(findings[0].liveId).toBe('live');
+  });
+
+  it('detects a ghost on a compressed IPv6 endpoint', () => {
+    const nodes = [
+      node({ id: 'ghost', flags: ['master', 'fail'], address: '::1:6379@16379' }),
+      node({ id: 'live', flags: ['myself', 'master'], address: '::1:6379@16379', slots: [[0, 16383]] }),
+    ];
+    const findings = detectGhostMembers(nodes);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ endpoint: '::1:6379', ghostIds: ['ghost'], liveId: 'live' });
   });
 
   it('produces a stable, order-independent signature', () => {

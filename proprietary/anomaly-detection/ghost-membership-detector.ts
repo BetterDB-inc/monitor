@@ -54,10 +54,15 @@ function isGhost(node: ClusterNode): boolean {
  * Canonical `ip:port` for a node, with the cluster-bus `@cport` suffix stripped.
  * Returns '' for an address with no host (a `noaddr`/`:0` line), so those never
  * group together into a spurious endpoint collision.
+ *
+ * The host is everything before the *last* colon (the port separator), so a
+ * compressed IPv6 address whose own colons — including a leading `::` — are part
+ * of the host is still recognised as having a host rather than being dropped.
  */
 export function canonicalEndpoint(address: string): string {
   const hostPort = (address ?? '').split('@')[0];
-  const host = hostPort.split(':')[0];
+  const portColon = hostPort.lastIndexOf(':');
+  const host = portColon === -1 ? hostPort : hostPort.slice(0, portColon);
   return host ? hostPort : '';
 }
 
