@@ -87,6 +87,25 @@ describe('detectHostnameStaleness', () => {
     expect(detectHostnameStaleness(nodes)).toEqual([]);
   });
 
+  it('does not flag a dead (fail) node that lacks a hostname — it cannot self-heal', () => {
+    const nodes = [
+      node({ id: 'a', flags: ['myself', 'master'], hostname: 'node-a.example.com' }),
+      node({ id: 'dead', flags: ['master', 'fail'] }), // hostname-less but dead → not serving traffic
+    ];
+    expect(detectHostnameStaleness(nodes)).toEqual([]);
+  });
+
+  it('a dead (fail?) node that kept a hostname does not make the cluster look hostname-enabled', () => {
+    // Only the dead node has a hostname; the two live nodes have none. A dead
+    // node must not make every live node get flagged as missing a hostname.
+    const nodes = [
+      node({ id: 'a', flags: ['myself', 'master'] }),
+      node({ id: 'b', flags: ['master'] }),
+      node({ id: 'dead', flags: ['master', 'fail?'], hostname: 'gone.example.com' }),
+    ];
+    expect(detectHostnameStaleness(nodes)).toEqual([]);
+  });
+
   // Core valkey#304 symptom: CLUSTER NODES and CLUSTER SHARDS both carry a
   // hostname for the same node but they DISAGREE.
   it('flags a node whose CLUSTER NODES hostname disagrees with its CLUSTER SHARDS hostname', () => {

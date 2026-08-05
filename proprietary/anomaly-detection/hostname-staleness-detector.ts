@@ -56,27 +56,35 @@ export interface HostnameStaleness {
   shardsHostname?: string;
 }
 
-/** Flags marking a node not yet fully known to the gossip layer — its identity fields aren't reliable yet. */
-const UNRELIABLE_FLAGS = ['handshake', 'noaddr'];
+/**
+ * Flags marking a node whose hostname state is not a live, actionable signal:
+ * `handshake`/`noaddr` haven't settled their identity yet, and `fail`/`fail?`
+ * are dead — a dead node isn't serving TLS-SNI traffic, so its hostname is
+ * irrelevant. Counting a failed node would both make the cluster look
+ * hostname-enabled (flagging every live node that lacks one) and keep alerting
+ * on the dead node itself, and neither warning can self-heal. Matches the
+ * duplicate-primary detector's live-node filter.
+ */
+const NON_LIVE_FLAGS = ['handshake', 'noaddr', 'fail', 'fail?'];
 
-function isKnownNode(node: ClusterNode): boolean {
-  return !!node.id && !UNRELIABLE_FLAGS.some((flag) => node.flags.includes(flag));
+function isLiveNode(node: ClusterNode): boolean {
+  return !!node.id && !NON_LIVE_FLAGS.some((flag) => node.flags.includes(flag));
 }
 
 /**
  * Returns every node whose hostname info is missing (while peers have one) or
- * disagrees with `CLUSTER SHARDS`. Nodes not yet known to the gossip layer
- * (`handshake`/`noaddr`) are excluded — their identity fields aren't settled
- * yet, so including them would just restate the same eventual-consistency
- * window this detector is meant to filter out. Callers should gate on
- * persistence over time to exclude the transient convergence window of a
- * normal join/restart (see file header).
+ * disagrees with `CLUSTER SHARDS`. Non-live nodes (`handshake`/`noaddr` not yet
+ * settled, or `fail`/`fail?` dead) are excluded — an unsettled or dead node's
+ * hostname is not an actionable live-routing signal, and counting a failed node
+ * would falsely make the cluster look hostname-enabled (or keep alerting on the
+ * dead node forever). Callers should gate on persistence over time to exclude
+ * the transient convergence window of a normal join/restart (see file header).
  */
 export function detectHostnameStaleness(
   nodes: ClusterNode[],
   shards?: ClusterShard[],
 ): HostnameStaleness[] {
-  const known = nodes.filter(isKnownNode);
+  const known = nodes.filter(isLiveNode);
   if (known.length === 0) return [];
 
   const findings: HostnameStaleness[] = [];
