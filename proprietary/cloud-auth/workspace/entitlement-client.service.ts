@@ -1,4 +1,31 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+
+/**
+ * Downstream statuses that are caused by — and meaningful to — the end user:
+ * validation, conflict, not-found, unprocessable, rate-limit. These are safe to
+ * forward. Everything else (notably 401/403, which mean OUR service credential
+ * to entitlement is bad, and any 5xx) is an infra fault, not the caller's, so it
+ * is logged and surfaced as a generic 502 without leaking the downstream body.
+ */
+const FORWARDABLE_ENTITLEMENT_STATUSES = new Set([400, 404, 409, 422, 429]);
+
+/**
+ * Pull a human-readable message out of an entitlement error response. Nest's
+ * ValidationPipe returns `{ message: string | string[], error, statusCode }`;
+ * fall back to the raw text, or undefined if the body is empty.
+ */
+function extractEntitlementError(body: string): string | undefined {
+  if (!body) return undefined;
+  try {
+    const parsed = JSON.parse(body);
+    const message = parsed?.message;
+    if (Array.isArray(message)) return message.join('; ');
+    if (typeof message === 'string') return message;
+  } catch {
+    // Non-JSON body — fall through to the raw text.
+  }
+  return body;
+}
 
 @Injectable()
 export class EntitlementClientService {
@@ -36,7 +63,17 @@ export class EntitlementClientService {
 
       if (!response.ok) {
         const body = await response.text().catch(() => '');
-        throw new Error(`Entitlement API ${response.status}: ${body}`);
+        // Forward only client-caused validation-type errors with their real
+        // status + message (e.g. an invalid instance name → 400), so the caller
+        // gets an actionable error instead of an opaque 500. Auth failures
+        // (401/403 — our entitlement credential) and 5xx are infra faults: log
+        // them server-side and return a generic 502 that leaks no internal body.
+        if (FORWARDABLE_ENTITLEMENT_STATUSES.has(response.status)) {
+          const message = extractEntitlementError(body) ?? `Entitlement API error (${response.status})`;
+          throw new HttpException(message, response.status);
+        }
+        this.logger.error(`Entitlement API ${response.status} for ${path}: ${body}`);
+        throw new HttpException('Upstream provisioning service error', HttpStatus.BAD_GATEWAY);
       }
 
       const text = await response.text();
