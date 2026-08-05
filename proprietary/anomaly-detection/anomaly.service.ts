@@ -2362,11 +2362,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
                 `nodes in the cluster view do — hostname gossip has not converged for this node ` +
                 `(valkey#304). TLS-SNI clients or hostname-keyed routing against this node may fail ` +
                 `until it propagates. This usually self-heals; investigate if it persists.`
-              : `WARNING: Node ${addr} (${f.nodeId.substring(0, 8)}) reports a different hostname/endpoint ` +
-                `in CLUSTER NODES (${f.nodesHostname || 'none, raw IP'}) than in CLUSTER SHARDS ` +
-                `(${f.shardsEndpoint}) — the two views disagree about this node's identity (valkey#304). ` +
-                `TLS-SNI clients or hostname-keyed routing may hit the wrong endpoint until this ` +
-                `converges. This usually self-heals; investigate if it persists.`;
+              : `WARNING: Node ${addr} (${f.nodeId.substring(0, 8)}) reports a different hostname in ` +
+                `CLUSTER NODES (${f.nodesHostname}) than in CLUSTER SHARDS (${f.shardsHostname}) — the two ` +
+                `views disagree about this node's hostname (valkey#304). TLS-SNI clients or hostname-keyed ` +
+                `routing may hit the wrong endpoint until this converges. This usually self-heals; ` +
+                `investigate if it persists.`;
           return {
             id: `${ctx.connectionId}-hostname-staleness-${signature}-${timestamp}`,
             timestamp,

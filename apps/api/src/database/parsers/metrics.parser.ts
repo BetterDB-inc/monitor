@@ -300,6 +300,10 @@ export class MetricsParser {
 
           const role = nodeMap.get('role');
           const endpoint = nodeMap.get('endpoint') ?? nodeMap.get('ip');
+          // Announced hostname (valkey#304) — present only when the node sets
+          // cluster-announce-hostname; distinct from `endpoint`, which follows
+          // cluster-preferred-endpoint-type (default `ip`).
+          const hostname = nodeMap.get('hostname');
           const port = nodeMap.get('port') ?? nodeMap.get('tls-port');
           const replOffset = nodeMap.get('replication-offset');
           const health = nodeMap.get('health');
@@ -309,6 +313,7 @@ export class MetricsParser {
             role: typeof role === 'string' ? role : 'unknown',
             ...(typeof health === 'string' ? { health } : {}),
             ...(typeof endpoint === 'string' ? { endpoint } : {}),
+            ...(typeof hostname === 'string' && hostname ? { hostname } : {}),
             ...(typeof port === 'number' ? { port } : {}),
             ...(typeof replOffset === 'number' ? { replicationOffset: replOffset } : {}),
           });

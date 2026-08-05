@@ -23,12 +23,14 @@ import { ClusterNode, ClusterShard } from '@app/common/types/metrics.types';
  *     single gossip snapshot means this node's hostname simply hasn't
  *     propagated yet (as opposed to a cluster that doesn't use hostnames at
  *     all, where every node lacks one — that is not flagged).
- *  2. `endpoint_mismatch` — a node's hostname/address in `CLUSTER NODES`
- *     disagrees with the endpoint reported for the same node id in `CLUSTER
- *     SHARDS`. `CLUSTER SHARDS`'s `endpoint` field is the hostname when one is
- *     announced, else the raw IP — so this fires when the two views genuinely
- *     disagree about the same node's identity, not merely because one of the
- *     two omits a hostname.
+ *  2. `hostname_mismatch` — `CLUSTER NODES` and `CLUSTER SHARDS` both carry a
+ *     hostname for the same node id but they DISAGREE. We compare hostname to
+ *     hostname only: `CLUSTER SHARDS`'s `endpoint` field follows
+ *     `cluster-preferred-endpoint-type` (default `ip`), so it is usually the raw
+ *     IP even on a cluster that announces hostnames — comparing a NODES hostname
+ *     against that endpoint would false-positive on every healthy hostname
+ *     cluster. A hostname present in one view but absent in the other is
+ *     convergence lag (covered by Reason 1 / self-heals), not a hard mismatch.
  *
  * IMPORTANT — this is a *snapshot* detector. Gossip convergence after a node
  * joins, restarts, or has its `cluster-announce-hostname` changed is normal
@@ -40,8 +42,8 @@ import { ClusterNode, ClusterShard } from '@app/common/types/metrics.types';
 export type HostnameStalenessReason =
   /** This node has no hostname while at least one peer in the same view does. */
   | 'missing_hostname'
-  /** This node's CLUSTER NODES hostname (or IP, if it has none) disagrees with its CLUSTER SHARDS endpoint. */
-  | 'endpoint_mismatch';
+  /** This node's CLUSTER NODES hostname disagrees with its CLUSTER SHARDS hostname (both present). */
+  | 'hostname_mismatch';
 
 export interface HostnameStaleness {
   nodeId: string;
@@ -50,8 +52,8 @@ export interface HostnameStaleness {
   reason: HostnameStalenessReason;
   /** Hostname carried on this node's own CLUSTER NODES line, if any. */
   nodesHostname?: string;
-  /** Endpoint reported for this same node id in CLUSTER SHARDS, when available. */
-  shardsEndpoint?: string;
+  /** Hostname reported for this same node id in CLUSTER SHARDS, when both views carry one. */
+  shardsHostname?: string;
 }
 
 /** Flags marking a node not yet fully known to the gossip layer — its identity fields aren't reliable yet. */
@@ -59,13 +61,6 @@ const UNRELIABLE_FLAGS = ['handshake', 'noaddr'];
 
 function isKnownNode(node: ClusterNode): boolean {
   return !!node.id && !UNRELIABLE_FLAGS.some((flag) => node.flags.includes(flag));
-}
-
-/** Strips the cluster-bus port (and any trailing hostname, already split by the parser) to the bare `ip`. */
-function ipFromAddress(address: string): string {
-  const withoutCport = address.split('@')[0] ?? '';
-  const idx = withoutCport.lastIndexOf(':');
-  return idx === -1 ? withoutCport : withoutCport.slice(0, idx);
 }
 
 /**
@@ -98,27 +93,32 @@ export function detectHostnameStaleness(
     }
   }
 
-  // Reason 2: CLUSTER NODES vs CLUSTER SHARDS endpoint disagreement.
+  // Reason 2: CLUSTER NODES vs CLUSTER SHARDS hostname disagreement. Compare
+  // hostname-to-hostname ONLY. CLUSTER SHARDS's `endpoint` follows
+  // `cluster-preferred-endpoint-type` (default `ip`), so on a healthy cluster
+  // that announces hostnames the SHARDS endpoint is the raw IP while CLUSTER
+  // NODES carries the hostname — comparing hostname-to-endpoint would flag that
+  // normal steady state forever. Fire only when BOTH views carry a hostname for
+  // the node and they differ; a present-vs-absent hostname is convergence lag
+  // (Reason 1 / self-heals), not a hard mismatch.
   if (shards && shards.length > 0) {
-    const shardEndpointById = new Map<string, string>();
+    const shardHostnameById = new Map<string, string>();
     for (const shard of shards) {
       for (const shardNode of shard.nodes) {
-        if (shardNode.endpoint) shardEndpointById.set(shardNode.id, shardNode.endpoint);
+        if (shardNode.hostname) shardHostnameById.set(shardNode.id, shardNode.hostname);
       }
     }
 
     for (const n of known) {
-      const shardsEndpoint = shardEndpointById.get(n.id);
-      if (!shardsEndpoint) continue; // node absent from CLUSTER SHARDS this poll — nothing to compare
-
-      const expected = n.hostname || ipFromAddress(n.address);
-      if (expected && shardsEndpoint !== expected) {
+      const shardsHostname = shardHostnameById.get(n.id);
+      if (!n.hostname || !shardsHostname) continue; // one side omits a hostname — convergence lag, not a mismatch
+      if (n.hostname !== shardsHostname) {
         findings.push({
           nodeId: n.id,
           address: n.address,
-          reason: 'endpoint_mismatch',
+          reason: 'hostname_mismatch',
           nodesHostname: n.hostname,
-          shardsEndpoint,
+          shardsHostname,
         });
       }
     }

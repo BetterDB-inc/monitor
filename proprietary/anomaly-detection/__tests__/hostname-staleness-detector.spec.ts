@@ -87,9 +87,9 @@ describe('detectHostnameStaleness', () => {
     expect(detectHostnameStaleness(nodes)).toEqual([]);
   });
 
-  // Core valkey#304 symptom: CLUSTER NODES and CLUSTER SHARDS disagree about
-  // the same node's hostname/endpoint.
-  it('flags a node whose CLUSTER NODES hostname disagrees with its CLUSTER SHARDS endpoint', () => {
+  // Core valkey#304 symptom: CLUSTER NODES and CLUSTER SHARDS both carry a
+  // hostname for the same node but they DISAGREE.
+  it('flags a node whose CLUSTER NODES hostname disagrees with its CLUSTER SHARDS hostname', () => {
     const nodes = [
       node({
         id: 'a',
@@ -99,45 +99,25 @@ describe('detectHostnameStaleness', () => {
       }),
     ];
     const shards = [
-      shard([{ id: 'a', role: 'master', endpoint: 'stale-node-a.example.com' }]),
+      shard([{ id: 'a', role: 'master', hostname: 'stale-node-a.example.com' }]),
     ];
 
     const findings = detectHostnameStaleness(nodes, shards);
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({
       nodeId: 'a',
-      reason: 'endpoint_mismatch',
+      reason: 'hostname_mismatch',
       nodesHostname: 'node-a.example.com',
-      shardsEndpoint: 'stale-node-a.example.com',
+      shardsHostname: 'stale-node-a.example.com',
     });
   });
 
-  it('flags a hostname-less node whose CLUSTER SHARDS endpoint disagrees with its raw IP', () => {
-    const nodes = [
-      node({ id: 'a', flags: ['myself', 'master'], address: '10.0.0.1:6379@16379' }),
-    ];
-    const shards = [shard([{ id: 'a', role: 'master', endpoint: '10.0.0.99' }])];
-
-    const findings = detectHostnameStaleness(nodes, shards);
-    expect(findings).toHaveLength(1);
-    expect(findings[0]).toMatchObject({
-      nodeId: 'a',
-      reason: 'endpoint_mismatch',
-      nodesHostname: undefined,
-      shardsEndpoint: '10.0.0.99',
-    });
-  });
-
-  it('does not flag a mismatch when CLUSTER SHARDS endpoint matches the hostname-less node’s IP', () => {
-    const nodes = [
-      node({ id: 'a', flags: ['myself', 'master'], address: '10.0.0.1:6379@16379' }),
-    ];
-    const shards = [shard([{ id: 'a', role: 'master', endpoint: '10.0.0.1' }])];
-
-    expect(detectHostnameStaleness(nodes, shards)).toEqual([]);
-  });
-
-  it('does not flag a mismatch when CLUSTER SHARDS endpoint matches the announced hostname', () => {
+  // Bugbot regression guard: CLUSTER SHARDS `endpoint` follows
+  // cluster-preferred-endpoint-type (default `ip`), so a healthy hostname
+  // cluster has NODES.hostname set while SHARDS.endpoint is the raw IP. The old
+  // hostname-vs-endpoint compare false-fired here; the hostname-vs-hostname
+  // compare (SHARDS hostname agrees) must stay silent.
+  it('does not flag when CLUSTER SHARDS endpoint is the raw IP but its hostname agrees', () => {
     const nodes = [
       node({
         id: 'a',
@@ -146,7 +126,43 @@ describe('detectHostnameStaleness', () => {
         hostname: 'node-a.example.com',
       }),
     ];
-    const shards = [shard([{ id: 'a', role: 'master', endpoint: 'node-a.example.com' }])];
+    const shards = [
+      shard([
+        { id: 'a', role: 'master', endpoint: '10.0.0.1', hostname: 'node-a.example.com' },
+      ]),
+    ];
+
+    expect(detectHostnameStaleness(nodes, shards)).toEqual([]);
+  });
+
+  it('does not flag a hostname mismatch when CLUSTER SHARDS carries no hostname (one side omits it)', () => {
+    const nodes = [
+      node({
+        id: 'a',
+        flags: ['myself', 'master'],
+        address: '10.0.0.1:6379@16379',
+        hostname: 'node-a.example.com',
+      }),
+    ];
+    // SHARDS only has an endpoint (the IP), no announced hostname → convergence
+    // lag, not a hard mismatch.
+    const shards = [shard([{ id: 'a', role: 'master', endpoint: '10.0.0.1' }])];
+
+    expect(detectHostnameStaleness(nodes, shards)).toEqual([]);
+  });
+
+  it('does not flag when both views carry the same hostname', () => {
+    const nodes = [
+      node({
+        id: 'a',
+        flags: ['myself', 'master'],
+        address: '10.0.0.1:6379@16379',
+        hostname: 'node-a.example.com',
+      }),
+    ];
+    const shards = [
+      shard([{ id: 'a', role: 'master', hostname: 'node-a.example.com' }]),
+    ];
 
     expect(detectHostnameStaleness(nodes, shards)).toEqual([]);
   });
@@ -161,8 +177,8 @@ describe('detectHostnameStaleness', () => {
       }),
     ];
     const shards = [
-      shard([{ id: 'a', role: 'master', endpoint: 'node-a.example.com' }]),
-      shard([{ id: 'ghost', role: 'master', endpoint: 'ghost.example.com' }]),
+      shard([{ id: 'a', role: 'master', hostname: 'node-a.example.com' }]),
+      shard([{ id: 'ghost', role: 'master', hostname: 'ghost.example.com' }]),
     ];
 
     expect(detectHostnameStaleness(nodes, shards)).toEqual([]);
@@ -182,23 +198,24 @@ describe('detectHostnameStaleness', () => {
     expect(detectHostnameStaleness(nodes, undefined)).toEqual([]);
   });
 
-  it('can report both reasons for the same node independently', () => {
+  it('can report both reasons across nodes in one view', () => {
     const nodes = [
+      // Node a carries a hostname that disagrees with CLUSTER SHARDS.
       node({ id: 'a', flags: ['myself', 'master'], hostname: 'node-a.example.com' }),
-      node({ id: 'b', flags: ['master'], address: '10.0.0.2:6379@16379' }), // missing hostname
+      // Node b has no hostname while its peer does.
+      node({ id: 'b', flags: ['master'], address: '10.0.0.2:6379@16379' }),
     ];
     const shards = [
       shard([
-        { id: 'a', role: 'master', endpoint: 'node-a.example.com' },
-        { id: 'b', role: 'master', endpoint: '10.0.0.99' }, // disagrees with b's raw IP too
+        { id: 'a', role: 'master', hostname: 'stale-node-a.example.com' },
+        { id: 'b', role: 'master', endpoint: '10.0.0.2' }, // no announced hostname
       ]),
     ];
 
     const findings = detectHostnameStaleness(nodes, shards);
     expect(findings).toHaveLength(2);
-    const reasons = findings.map((f) => f.reason).sort();
-    expect(reasons).toEqual(['endpoint_mismatch', 'missing_hostname']);
-    expect(findings.every((f) => f.nodeId === 'b')).toBe(true);
+    expect(findings.find((f) => f.nodeId === 'a')?.reason).toBe('hostname_mismatch');
+    expect(findings.find((f) => f.nodeId === 'b')?.reason).toBe('missing_hostname');
   });
 });
 
@@ -220,7 +237,7 @@ describe('hostnameStalenessSignature', () => {
 
   it('differs by reason for the same node, so both can be tracked independently', () => {
     const missing: HostnameStaleness = { nodeId: 'a', address: '', reason: 'missing_hostname' };
-    const mismatch: HostnameStaleness = { nodeId: 'a', address: '', reason: 'endpoint_mismatch' };
+    const mismatch: HostnameStaleness = { nodeId: 'a', address: '', reason: 'hostname_mismatch' };
     expect(hostnameStalenessSignature(missing)).not.toBe(hostnameStalenessSignature(mismatch));
   });
 });

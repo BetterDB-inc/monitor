@@ -330,6 +330,31 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
       expect(shards[1].slots).toEqual([[5461, 16383]]);
     });
 
+    it('captures the announced hostname distinctly from the endpoint (valkey#304)', () => {
+      // When cluster-announce-hostname is set, CLUSTER SHARDS carries a separate
+      // `hostname` field; `endpoint` still follows cluster-preferred-endpoint-type
+      // (default `ip`), so the two legitimately differ.
+      const reply = [
+        [
+          'slots',
+          [0, 16383],
+          'nodes',
+          [['id', 'primA', 'port', 6379, 'ip', '10.0.0.1', 'endpoint', '10.0.0.1', 'hostname', 'node-a.example.com', 'role', 'master']],
+        ],
+      ];
+      const shards = MetricsParser.parseClusterShards(reply);
+      expect(shards[0].nodes[0]).toMatchObject({
+        id: 'primA',
+        endpoint: '10.0.0.1',
+        hostname: 'node-a.example.com',
+      });
+    });
+
+    it('does not set hostname when CLUSTER SHARDS has no announced hostname', () => {
+      const shards = MetricsParser.parseClusterShards(flatReply);
+      expect(shards[0].nodes[0]).not.toHaveProperty('hostname');
+    });
+
     it('parses the RESP3 object (map) reply shape', () => {
       const objReply = [
         {

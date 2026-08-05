@@ -428,6 +428,8 @@ export interface ClusterShardNode {
   role: string;
   health?: string;
   endpoint?: string;
+  /** Announced hostname for this node, when `cluster-announce-hostname` is set (valkey#304). Distinct from `endpoint`, which follows `cluster-preferred-endpoint-type` (default `ip`). */
+  hostname?: string;
   port?: number;
   replicationOffset?: number;
 }
