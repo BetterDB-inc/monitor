@@ -130,6 +130,7 @@ const METRIC_LABELS: Record<string, string> = {
   load_saturation: 'Load Saturation',
   fork_memory_risk: 'Fork Memory Risk',
   config_drift: 'Config Drift',
+  hostname_staleness: 'Hostname Staleness',
 };
 
 function formatTime(ts: number): string {

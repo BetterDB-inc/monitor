@@ -33,11 +33,17 @@ export enum MetricType {
   CLUSTER_STATE = 'cluster_state',
   /** Replica wrongly reporting slot migrating/importing/owned state (valkey#1664) — state-based. */
   REPLICA_SLOT_STATE = 'replica_slot_state',
+  /** Ghost membership: a stale node-id lingering at an endpoint peers never forgot after a reset (valkey#1757) — state-based. */
+  GHOST_MEMBERSHIP = 'ghost_membership',
+  /** Uncoordinated standalone promotion (REPLICAOF NO ONE) of a lagging replica → data loss (valkey#2587) — state-based. */
+  LAGGING_PROMOTION = 'lagging_promotion',
   DATASET_KEYS = 'dataset_keys',
   /** Per-command P99 latency regression (INFO latencystats) — handled by LatencyRegressionService, not z-score buffers */
   COMMAND_P99 = 'command_p99',
   PERSISTENCE_CHILD = 'persistence_child',
   CLUSTER_TOPOLOGY = 'cluster_topology',
+  /** Node hostname missing/inconsistent between CLUSTER NODES and CLUSTER SHARDS (valkey#304) — state-based. */
+  HOSTNAME_STALENESS = 'hostname_staleness',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',
   /** A curated critical config key (maxmemory, maxmemory-policy, ...) differs across nodes in the same replication group (valkey#1193) — state-based. */
@@ -55,10 +61,13 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.REPLICATION_ROLE,
   MetricType.CLUSTER_STATE,
   MetricType.REPLICA_SLOT_STATE,
+  MetricType.GHOST_MEMBERSHIP,
+  MetricType.LAGGING_PROMOTION,
   MetricType.DATASET_KEYS,
   MetricType.COMMAND_P99,
   MetricType.PERSISTENCE_CHILD,
   MetricType.CLUSTER_TOPOLOGY,
+  MetricType.HOSTNAME_STALENESS,
   MetricType.SLOWLOG_LAST_ID,
   MetricType.REJECTED_CONNECTIONS,
   MetricType.CLIENT_SATURATION,
