@@ -26,6 +26,7 @@ import { Correlator } from './correlator';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import {
   DEFAULT_CONFIG_DRIFT_KEYS,
+  ConfigDrift,
   ConfigDriftNode,
   detectConfigDrift,
   configDriftSignature,
@@ -1222,14 +1223,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         } else {
           // Bounded to the curated allowlist (not CONFIG GET '*'): all calls
           // race concurrently against this connection's OWN already-open
-          // client (no fan-out to sibling nodes), and a per-key failure
-          // (e.g. unsupported on this server version) just omits that key
-          // rather than failing the whole snapshot.
+          // client (no fan-out to sibling nodes). Use getConfigValues (which
+          // returns the parsed map) rather than getConfigValue (which collapses
+          // an empty value to null): a key set to the EMPTY string — e.g.
+          // `save ""` (RDB disabled) — must be recorded as "" and compared, not
+          // dropped as if unsupported, since an empty-vs-non-empty `save` is
+          // exactly the persistence drift we want to catch. A per-key failure
+          // (unsupported on this version, or a transient error) omits that key.
           const entries = await Promise.all(
             AnomalyService.CONFIG_DRIFT_KEYS.map(async (key) => {
               try {
-                const value = await ctx.client.getConfigValue(key);
-                return value !== null ? ([key, value] as const) : null;
+                const cfg = await ctx.client.getConfigValues(key);
+                const value = cfg[key];
+                return value !== undefined ? ([key, value] as const) : null;
               } catch {
                 return null;
               }
@@ -1239,11 +1245,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           for (const entry of entries) {
             if (entry) config[entry[0]] = entry[1];
           }
-          this.configSnapshot.set(ctx.connectionId, {
-            groupKey: `replid:${replid}`,
-            name: ctx.connectionName,
-            config,
-          });
+          // Only replace the snapshot when we actually read something. If every
+          // key failed this poll (a transient CONFIG GET blip), keep the
+          // last-known values rather than overwriting with an empty map — an
+          // empty snapshot would make a real drift momentarily vanish (no
+          // comparable pair) and then re-fire once fetches recover.
+          if (Object.keys(config).length > 0) {
+            this.configSnapshot.set(ctx.connectionId, {
+              groupKey: `replid:${replid}`,
+              name: ctx.connectionName,
+              config,
+            });
+          }
         }
       }
 
@@ -1258,9 +1271,30 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const drifts = detectConfigDrift(nodes, AnomalyService.CONFIG_DRIFT_KEYS);
       const currentSignatures = new Set(drifts.map(configDriftSignature));
 
+      // This method runs from EVERY connection's poll and MultiConnectionPoller
+      // runs those polls concurrently, all mutating the shared
+      // activeConfigDriftSignatures set. Reconcile it SYNCHRONOUSLY here — with
+      // no await in between — so the check-and-claim is atomic per poll: a
+      // concurrent poll can neither double-emit the same new drift nor drop
+      // another poll's still-active signature. Snapshots persist across polls
+      // (a failed fetch keeps the last-known values, above), so every poll
+      // computes the same currentSignatures rather than a partial view.
+      const newDrifts: ConfigDrift[] = [];
       for (const drift of drifts) {
         const signature = configDriftSignature(drift);
-        if (this.activeConfigDriftSignatures.has(signature)) continue; // already alerted for this exact mismatch
+        if (this.activeConfigDriftSignatures.has(signature)) continue; // already claimed/alerted
+        this.activeConfigDriftSignatures.add(signature); // claim before the emit await
+        newDrifts.push(drift);
+      }
+      // Drop only signatures that are genuinely no longer drifting, so a
+      // resolved-then-recurring mismatch alerts again (targeted delete, not a
+      // whole-set replace that a concurrent poll's claim could be lost to).
+      for (const signature of this.activeConfigDriftSignatures) {
+        if (!currentSignatures.has(signature)) this.activeConfigDriftSignatures.delete(signature);
+      }
+
+      for (const drift of newDrifts) {
+        const signature = configDriftSignature(drift);
 
         const valuesLabel = drift.values
           .map((v) => `${v.name ?? v.connectionId} = ${v.value}`)
@@ -1296,10 +1330,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // of mis-tagging it under the polling connection.
         await this.addAnomaly(event);
       }
-
-      // Keep only signatures still drifting so a resolved-then-recurring
-      // mismatch alerts again.
-      this.activeConfigDriftSignatures = currentSignatures;
     } catch (err) {
       this.logger.debug(
         `Failed to check config drift for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,

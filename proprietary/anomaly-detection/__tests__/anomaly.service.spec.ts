@@ -2851,7 +2851,11 @@ describe('AnomalyService', () => {
           replication: { master_replid: opts.replid ?? 'replid-shared' },
         }),
         getCapabilities: jest.fn().mockReturnValue({ hasConfig: opts.hasConfig ?? true }),
-        getConfigValue: jest.fn((key: string) => Promise.resolve(opts.config[key] ?? null)),
+        // getConfigValues returns the parsed map; a key present with an empty
+        // value (e.g. `save ""`) is preserved, an absent key yields no entry.
+        getConfigValues: jest.fn((pattern: string) =>
+          Promise.resolve(pattern in opts.config ? { [pattern]: opts.config[pattern] } : {}),
+        ),
       };
       return {
         connectionId,
@@ -2929,6 +2933,37 @@ describe('AnomalyService', () => {
       await poll(ctxA);
       await poll(makeCtx('conn-b', { replid: 'replid-z', config: { maxmemory: '3000000' } }));
       expect(driftEvents()).toHaveLength(2);
+    });
+
+    it('detects drift on an empty save value (RDB disabled on one node only)', async () => {
+      // Regression: an empty `save ""` must be recorded and compared, not
+      // dropped as if the key were unsupported.
+      const ctxA = makeCtx('conn-a', { replid: 'replid-save', config: { save: '3600 1 300 100' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-save', config: { save: '' } });
+      await poll(ctxA);
+      await poll(ctxB);
+
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('save');
+    });
+
+    it('keeps the last-known snapshot when a poll fails to read any config', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-blip', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-blip', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+      expect(driftEvents()).toHaveLength(1);
+
+      // conn-b hits a transient CONFIG GET failure → must NOT wipe its snapshot
+      // (which would drop the drift and re-fire it once fetches recover).
+      const ctxBFail = makeCtx('conn-b', { replid: 'replid-blip', config: { maxmemory: '2000000' } });
+      (ctxBFail.client.getConfigValues as jest.Mock).mockRejectedValue(new Error('LOADING'));
+      await poll(ctxBFail);
+
+      expect((service as any).configSnapshot.get('conn-b')?.config).toEqual({ maxmemory: '2000000' });
+      // Still exactly one alert — the drift never spuriously cleared/re-fired.
+      expect(driftEvents()).toHaveLength(1);
     });
 
     it('skips connections without CONFIG support and does not record a snapshot for them', async () => {
