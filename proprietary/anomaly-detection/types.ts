@@ -35,6 +35,8 @@ export enum MetricType {
   REPLICA_SLOT_STATE = 'replica_slot_state',
   /** Ghost membership: a stale node-id lingering at an endpoint peers never forgot after a reset (valkey#1757) — state-based. */
   GHOST_MEMBERSHIP = 'ghost_membership',
+  /** Uncoordinated standalone promotion (REPLICAOF NO ONE) of a lagging replica → data loss (valkey#2587) — state-based. */
+  LAGGING_PROMOTION = 'lagging_promotion',
   DATASET_KEYS = 'dataset_keys',
   /** Per-command P99 latency regression (INFO latencystats) — handled by LatencyRegressionService, not z-score buffers */
   COMMAND_P99 = 'command_p99',
@@ -56,6 +58,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.CLUSTER_STATE,
   MetricType.REPLICA_SLOT_STATE,
   MetricType.GHOST_MEMBERSHIP,
+  MetricType.LAGGING_PROMOTION,
   MetricType.DATASET_KEYS,
   MetricType.COMMAND_P99,
   MetricType.PERSISTENCE_CHILD,
