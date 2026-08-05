@@ -895,6 +895,9 @@ function AgentTab({
 
 const MAX_VALKEY_INSTANCES = 1;
 const VALKEY_NAME_MAX_LENGTH = 25;
+// Default name so the create form is one-click; also restored after a successful
+// create so re-creating (e.g. after a delete) stays one-click.
+const DEFAULT_VALKEY_NAME = 'my-cache';
 const VALKEY_ACTIVE_STATUSES: DatabaseStatus[] = ['pending', 'provisioning', 'deleting'];
 
 // The instance name becomes a Helm release name / k8s label downstream, so it
@@ -925,7 +928,7 @@ function ValkeyInstancesTab({
   const [databases, setDatabases] = useState<Database[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAdminOrOwner, setIsAdminOrOwner] = useState(false);
-  const [name, setName] = useState('my-cache');
+  const [name, setName] = useState(DEFAULT_VALKEY_NAME);
   const [maxmemory, setMaxmemory] = useState(initialMaxmemory ?? '768mb');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -990,7 +993,9 @@ function ValkeyInstancesTab({
         maxmemory: maxmemory.trim() || undefined,
       });
       setSuccess(`Creating instance '${cleanName}'`);
-      setName('');
+      // Reset to the default rather than empty so re-create (e.g. after deleting
+      // this instance in the same session) stays one-click.
+      setName(DEFAULT_VALKEY_NAME);
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create instance');
