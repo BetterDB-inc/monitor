@@ -897,6 +897,20 @@ const MAX_VALKEY_INSTANCES = 1;
 const VALKEY_NAME_MAX_LENGTH = 25;
 const VALKEY_ACTIVE_STATUSES: DatabaseStatus[] = ['pending', 'provisioning', 'deleting'];
 
+// The instance name becomes a Helm release name / k8s label downstream, so it
+// must be a DNS-style label: lowercase alphanumerics and hyphens, starting with
+// a letter and ending alphanumeric. A name with spaces (or other invalid chars)
+// used to reach the API verbatim and 500 the provisioner — normalize it here so
+// "my cache" becomes "my-cache": lowercase, collapse any run of invalid chars
+// (spaces included) to a single hyphen, and trim leading/trailing hyphens.
+function sanitizeValkeyName(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, VALKEY_NAME_MAX_LENGTH);
+}
+
 function ValkeyInstancesTab({
   connections,
   initialMaxmemory,
@@ -911,7 +925,7 @@ function ValkeyInstancesTab({
   const [databases, setDatabases] = useState<Database[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAdminOrOwner, setIsAdminOrOwner] = useState(false);
-  const [name, setName] = useState('');
+  const [name, setName] = useState('my-cache');
   const [maxmemory, setMaxmemory] = useState(initialMaxmemory ?? '768mb');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -962,16 +976,20 @@ function ValkeyInstancesTab({
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    const cleanName = sanitizeValkeyName(name);
+    if (!cleanName) {
+      setError('Enter a name using letters, digits and hyphens.');
+      return;
+    }
     try {
       setCreating(true);
       setError(null);
       setSuccess(null);
       await databasesApi.create({
-        name: name.trim().toLowerCase(),
+        name: cleanName,
         maxmemory: maxmemory.trim() || undefined,
       });
-      setSuccess(`Creating instance '${name.trim().toLowerCase()}'`);
+      setSuccess(`Creating instance '${cleanName}'`);
       setName('');
       await loadData();
     } catch (err) {
@@ -1049,7 +1067,7 @@ function ValkeyInstancesTab({
               <input
                 type="text"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(e) => setName(e.target.value.replace(/\s+/g, '-').toLowerCase())}
                 placeholder="my-cache"
                 required
                 maxLength={VALKEY_NAME_MAX_LENGTH}

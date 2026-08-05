@@ -1,4 +1,22 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, Injectable, Logger } from '@nestjs/common';
+
+/**
+ * Pull a human-readable message out of an entitlement error response. Nest's
+ * ValidationPipe returns `{ message: string | string[], error, statusCode }`;
+ * fall back to the raw text, or undefined if the body is empty.
+ */
+function extractEntitlementError(body: string): string | undefined {
+  if (!body) return undefined;
+  try {
+    const parsed = JSON.parse(body);
+    const message = parsed?.message;
+    if (Array.isArray(message)) return message.join('; ');
+    if (typeof message === 'string') return message;
+  } catch {
+    // Non-JSON body — fall through to the raw text.
+  }
+  return body;
+}
 
 @Injectable()
 export class EntitlementClientService {
@@ -36,7 +54,12 @@ export class EntitlementClientService {
 
       if (!response.ok) {
         const body = await response.text().catch(() => '');
-        throw new Error(`Entitlement API ${response.status}: ${body}`);
+        // Preserve the downstream status so a validation failure (e.g. an
+        // invalid instance name) surfaces to the client as its real 4xx with a
+        // readable message, instead of collapsing every entitlement error into a
+        // generic 500. Only 5xx/unknown stays a 500.
+        const message = extractEntitlementError(body) ?? `Entitlement API error (${response.status})`;
+        throw new HttpException(message, response.status);
       }
 
       const text = await response.text();
