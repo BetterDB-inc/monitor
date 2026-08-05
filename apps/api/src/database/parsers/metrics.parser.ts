@@ -169,9 +169,19 @@ export class MetricsParser {
     const lines = nodesString.trim().split('\n');
     return lines.map((line) => {
       const parts = line.split(' ');
+      // The address field is `ip:port@cport` with an optional `,hostname`
+      // suffix (valkey-io/valkey#304): `ip:port@cport[,hostname]`. The
+      // hostname segment is empty when the node has no announced hostname
+      // yet. Split it off so `address` stays exactly `ip:port@cport` for
+      // every existing caller, and surface the hostname separately.
+      const addressField = parts[1] || '';
+      const commaIdx = addressField.indexOf(',');
+      const address = commaIdx === -1 ? addressField : addressField.slice(0, commaIdx);
+      const hostname = commaIdx === -1 ? '' : addressField.slice(commaIdx + 1);
+
       const node: ClusterNode = {
         id: parts[0] || '',
-        address: parts[1] || '',
+        address,
         flags: (parts[2] || '').split(','),
         master: parts[3] || '',
         pingSent: parseInt(parts[4] || '0', 10),
@@ -182,6 +192,7 @@ export class MetricsParser {
         migratingSlots: [],
         importingSlots: [],
       };
+      if (hostname) node.hostname = hostname;
 
       for (let i = 8; i < parts.length; i++) {
         const slotPart = parts[i];

@@ -38,6 +38,8 @@ export enum MetricType {
   COMMAND_P99 = 'command_p99',
   PERSISTENCE_CHILD = 'persistence_child',
   CLUSTER_TOPOLOGY = 'cluster_topology',
+  /** Node hostname missing/inconsistent between CLUSTER NODES and CLUSTER SHARDS (valkey#304) — state-based. */
+  HOSTNAME_STALENESS = 'hostname_staleness',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',
 }
@@ -57,6 +59,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.COMMAND_P99,
   MetricType.PERSISTENCE_CHILD,
   MetricType.CLUSTER_TOPOLOGY,
+  MetricType.HOSTNAME_STALENESS,
   MetricType.SLOWLOG_LAST_ID,
   MetricType.REJECTED_CONNECTIONS,
   MetricType.CLIENT_SATURATION,

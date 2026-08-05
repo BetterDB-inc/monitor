@@ -412,6 +412,13 @@ export interface ClusterNode {
   slots: number[][];
   migratingSlots?: Array<{ slot: number; targetNodeId: string }>;
   importingSlots?: Array<{ slot: number; sourceNodeId: string }>;
+  /**
+   * Announced hostname from the trailing `,hostname` segment of the
+   * `CLUSTER NODES` address field (`ip:port@cport,hostname`), when the node
+   * has one. Absent (not just empty) when the node has not yet gossiped a
+   * hostname — see valkey-io/valkey#304.
+   */
+  hostname?: string;
 }
 
 /** A node entry within a `CLUSTER SHARDS` shard. */

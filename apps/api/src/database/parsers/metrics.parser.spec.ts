@@ -178,6 +178,34 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
 
       expect(nodes[0]).not.toHaveProperty('importingSlots');
     });
+
+    // valkey-io/valkey#304: the address field carries an optional trailing
+    // `,hostname` segment. It must be split off `address` (so every existing
+    // caller keeps getting exactly `ip:port@cport`) and surfaced separately.
+    it('should parse a trailing hostname off the address field', () => {
+      const withHostname = `abc123 192.168.1.10:6379@16379,node-a.example.com master - 0 0 1 connected 0-5460`;
+
+      const nodes = MetricsParser.parseClusterNodes(withHostname);
+
+      expect(nodes[0].address).toBe('192.168.1.10:6379@16379');
+      expect(nodes[0].hostname).toBe('node-a.example.com');
+    });
+
+    it('should not set hostname when the address has no trailing hostname segment', () => {
+      const nodes = MetricsParser.parseClusterNodes(sampleClusterNodes);
+
+      expect(nodes[0].address).toBe('192.168.1.10:6379@16379');
+      expect(nodes[0]).not.toHaveProperty('hostname');
+    });
+
+    it('should not set hostname when the trailing hostname segment is empty', () => {
+      const emptyHostname = `abc123 192.168.1.10:6379@16379, master - 0 0 1 connected 0-5460`;
+
+      const nodes = MetricsParser.parseClusterNodes(emptyHostname);
+
+      expect(nodes[0].address).toBe('192.168.1.10:6379@16379');
+      expect(nodes[0]).not.toHaveProperty('hostname');
+    });
   });
 
   describe('parseSlotStats', () => {
