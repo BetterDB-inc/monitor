@@ -24,6 +24,12 @@ import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
+import {
+  DEFAULT_CONFIG_DRIFT_KEYS,
+  ConfigDriftNode,
+  detectConfigDrift,
+  configDriftSignature,
+} from './config-drift-detector';
 import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-detector';
 import {
   detectReplicaSlotState,
@@ -232,6 +238,21 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       connectedSlaves: number; // connected_slaves
     }
   >();
+  // Shared cross-connection snapshot for config-drift detection
+  // (valkey-io/valkey#1193): each connection records its OWN curated config
+  // subset + replication-group key every poll; detectConfigDrift scans this
+  // map across ALL connections rather than fanning out live to sibling
+  // nodes. Grouped by `master_replid` — shared by a primary and its attached
+  // replicas (and, for a cluster shard, by that shard's primary + replicas).
+  private configSnapshot = new Map<
+    string,
+    { groupKey: string; name: string; config: Record<string, string> }
+  >();
+  // Global (not per-connection) dedupe: a drift finding is a property of the
+  // GROUP, not of whichever connection's poll happened to detect it.
+  // Recomputed from the full snapshot on every call, so it self-heals if a
+  // group member's snapshot lags a poll behind its peers.
+  private activeConfigDriftSignatures = new Set<string>();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
 
@@ -471,6 +492,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.loadSaturationState.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
+    // Drop this connection's config snapshot so it can't linger as a phantom
+    // drift source (comparisons would otherwise keep "seeing" its last-known
+    // config forever). Signatures involving it self-heal on the next
+    // detectConfigDrift call, which rebuilds its node list from what remains.
+    this.configSnapshot.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -1030,6 +1056,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // can no longer connect. State-based with hysteresis, not z-score.
       await this.detectClientSaturation(info, ctx, timestamp);
 
+      // Cross-node config drift (valkey-io/valkey#1193): CONFIG SET only ever
+      // applies to the single node it's sent to today, so nodes in the same
+      // replication group can silently drift on a critical setting (e.g. one
+      // primary/replica ends up with a different maxmemory-policy). Updates
+      // this connection's slice of the shared snapshot, then scans the whole
+      // snapshot for cross-node disagreement. State-based, not z-score.
+      await this.detectConfigDrift(info, ctx, timestamp);
+
       // Replication output-buffer pressure (valkey-io/valkey#3963): replica
       // omem approaching the slave COB limit, and the resync-loop signal once
       // an overflow already forced a full sync. State-based with hysteresis.
@@ -1135,6 +1169,142 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // Advance the level last: on escalation only after addAnomaly resolved; on
     // steady/de-escalation immediately (the latter re-arms alerting on recovery).
     this.clientSaturationLevel.set(ctx.connectionId, level);
+  }
+
+  /**
+   * Curated CONFIG keys compared for cross-node drift (valkey-io/valkey#1193).
+   * Deliberately excludes node-specific keys that legitimately differ (bind,
+   * port, dir, replica-announce-ip/port, unixsocket, logfile, requirepass, …).
+   */
+  private static readonly CONFIG_DRIFT_KEYS = DEFAULT_CONFIG_DRIFT_KEYS;
+
+  /**
+   * Detects a curated CRITICAL config key (maxmemory, maxmemory-policy, …)
+   * disagreeing across nodes in the same replication group (valkey-io/
+   * valkey#1193): `CONFIG SET` only ever applies to the node it's sent to, so
+   * nodes can silently drift apart over time — a real source of incidents
+   * (eviction behaving differently per node, one node not persisting, …).
+   *
+   * This is a two-part, cross-connection detector built the "shared snapshot"
+   * way (no live fan-out to sibling nodes, so a hung peer can never stall this
+   * poll): first it refreshes THIS connection's own slice of the shared
+   * `configSnapshot` map — its curated config subset plus a replication-group
+   * key (`master_replid`, shared by a primary and its attached replicas, and
+   * — for a cluster shard — by that shard's primary and replicas). It then
+   * hands the FULL snapshot (every connection's last-known slice) to the pure
+   * `detectConfigDrift`, which does the actual grouping/comparison.
+   *
+   * Because every connection's poll calls this, the same global state may be
+   * recomputed several times per tick; that's intentional idempotent
+   * reconciliation, not redundant alerting — `activeConfigDriftSignatures` is
+   * a single dedupe set (not per-connection, since a drift is a property of
+   * the GROUP), so only a genuinely NEW mismatch pattern emits, and a
+   * resolved one is dropped so a later recurrence re-alerts.
+   */
+  private async detectConfigDrift(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    try {
+      const replid = info['master_replid'];
+      const roleStr = info['role'];
+      const isReplicating = roleStr === 'master' || roleStr === 'slave' || roleStr === 'replica';
+
+      if (!replid || !isReplicating) {
+        // Not (yet) part of a known replication group — drop any stale entry
+        // so it can't linger as a phantom drift source.
+        this.configSnapshot.delete(ctx.connectionId);
+      } else {
+        const capabilities = ctx.client.getCapabilities();
+        if (!capabilities.hasConfig) {
+          this.configSnapshot.delete(ctx.connectionId);
+        } else {
+          // Bounded to the curated allowlist (not CONFIG GET '*'): all calls
+          // race concurrently against this connection's OWN already-open
+          // client (no fan-out to sibling nodes), and a per-key failure
+          // (e.g. unsupported on this server version) just omits that key
+          // rather than failing the whole snapshot.
+          const entries = await Promise.all(
+            AnomalyService.CONFIG_DRIFT_KEYS.map(async (key) => {
+              try {
+                const value = await ctx.client.getConfigValue(key);
+                return value !== null ? ([key, value] as const) : null;
+              } catch {
+                return null;
+              }
+            }),
+          );
+          const config: Record<string, string> = {};
+          for (const entry of entries) {
+            if (entry) config[entry[0]] = entry[1];
+          }
+          this.configSnapshot.set(ctx.connectionId, {
+            groupKey: `replid:${replid}`,
+            name: ctx.connectionName,
+            config,
+          });
+        }
+      }
+
+      const nodes: ConfigDriftNode[] = Array.from(this.configSnapshot.entries()).map(
+        ([connectionId, snap]) => ({
+          connectionId,
+          name: snap.name,
+          groupKey: snap.groupKey,
+          config: snap.config,
+        }),
+      );
+      const drifts = detectConfigDrift(nodes, AnomalyService.CONFIG_DRIFT_KEYS);
+      const currentSignatures = new Set(drifts.map(configDriftSignature));
+
+      for (const drift of drifts) {
+        const signature = configDriftSignature(drift);
+        if (this.activeConfigDriftSignatures.has(signature)) continue; // already alerted for this exact mismatch
+
+        const valuesLabel = drift.values
+          .map((v) => `${v.name ?? v.connectionId} = ${v.value}`)
+          .join(', ');
+
+        const event: AnomalyEvent = {
+          id: `config-drift-${signature}-${timestamp}`,
+          timestamp,
+          metricType: MetricType.CONFIG_DRIFT,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          value: new Set(drift.values.map((v) => v.value)).size,
+          baseline: 1,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 1,
+          message:
+            `WARNING: Config key '${drift.key}' differs across nodes in the same replication ` +
+            `group: ${valuesLabel}. valkey-io/valkey#1193 — CONFIG SET only applies to the node ` +
+            `it's sent to, so this key must be reconciled on every node by hand until an ` +
+            `in-engine cluster-wide CONFIG SET exists.`,
+          resolved: false,
+          // Attributed to the first drifting node — NOT necessarily ctx, whose
+          // own poll may just be the one that happened to run this scan (this
+          // method runs from every connection's poll; see class doc above).
+          connectionId: drift.values[0].connectionId,
+        };
+        this.logger.warn(`Anomaly detected: ${event.message}`);
+        // No ctx passed: this event is about a specific member of the
+        // drifting group, which is frequently NOT the connection whose poll
+        // happened to run this scan. addAnomaly() falls back to
+        // anomaly.connectionId (set above) for storage attribution instead
+        // of mis-tagging it under the polling connection.
+        await this.addAnomaly(event);
+      }
+
+      // Keep only signatures still drifting so a resolved-then-recurring
+      // mismatch alerts again.
+      this.activeConfigDriftSignatures = currentSignatures;
+    } catch (err) {
+      this.logger.debug(
+        `Failed to check config drift for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   /**
