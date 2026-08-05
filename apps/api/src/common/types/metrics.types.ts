@@ -412,6 +412,13 @@ export interface ClusterNode {
   slots: number[][];
   migratingSlots?: Array<{ slot: number; targetNodeId: string }>;
   importingSlots?: Array<{ slot: number; sourceNodeId: string }>;
+  /**
+   * Announced hostname from the trailing `,hostname` segment of the
+   * `CLUSTER NODES` address field (`ip:port@cport,hostname`), when the node
+   * has one. Absent (not just empty) when the node has not yet gossiped a
+   * hostname — see valkey-io/valkey#304.
+   */
+  hostname?: string;
 }
 
 /** A node entry within a `CLUSTER SHARDS` shard. */
@@ -421,6 +428,8 @@ export interface ClusterShardNode {
   role: string;
   health?: string;
   endpoint?: string;
+  /** Announced hostname for this node, when `cluster-announce-hostname` is set (valkey#304). Distinct from `endpoint`, which follows `cluster-preferred-endpoint-type` (default `ip`). */
+  hostname?: string;
   port?: number;
   replicationOffset?: number;
 }

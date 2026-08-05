@@ -28,6 +28,10 @@ import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-dete
 import { detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
 import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import {
+  detectHostnameStaleness,
+  hostnameStalenessSignature,
+} from './hostname-staleness-detector';
+import {
   detectReplicaSlotState,
   replicaSlotSignature,
   ReplicaSlotAnomaly,
@@ -156,6 +160,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // the alert once the persistence gate has fired.
   private stuckReplicaFirstSeen = new Map<string, Map<string, number>>();
   private activeStuckReplicas = new Map<string, Set<string>>();
+  // Hostname-staleness (valkey#304) state, same discipline as stuck-replica:
+  // `firstSeen` gates on persistence so a transient gossip-convergence window
+  // (a node just joined/restarted, or is mid-rollout of
+  // cluster-announce-hostname) doesn't alert, `active` dedupes once the gate
+  // has fired.
+  private hostnameStalenessFirstSeen = new Map<string, Map<string, number>>();
+  private activeHostnameStaleness = new Map<string, Set<string>>();
   // Ghost-membership (valkey#1757) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient re-MEET/handshake window
   // doesn't alert, `active` dedupes the alert once the gate has fired.
@@ -452,6 +463,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftNodeTimeoutRecheck.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
+    this.hostnameStalenessFirstSeen.delete(connectionId);
+    this.activeHostnameStaleness.delete(connectionId);
     this.ghostMemberFirstSeen.delete(connectionId);
     this.activeGhostMembers.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
@@ -995,9 +1008,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           );
         }
 
-        // Gossip-era topology detectors — two primaries per shard (#2261) and
-        // orphaned/stuck replicas (#2090). Under Raft, topology is consensus-
-        // managed, so these gossip-race detectors are skipped; Raft health is
+        // Gossip-era topology detectors — two primaries per shard (#2261),
+        // orphaned/stuck replicas (#2090), and stale/inconsistent hostname
+        // gossip (#304). Under Raft, topology is consensus-managed, so these
+        // gossip-race detectors are skipped; Raft health is
         // covered by detectRaftHealth above. Gated on `!isRaft` only, which
         // defaults to the last known mode — so a transient CLUSTER INFO failure
         // neither runs them on a known-Raft connection nor suppresses them on a
@@ -1028,6 +1042,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           if (nodes) {
             await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
             await this.detectStuckReplicas(ctx, timestamp, nodes);
+            await this.detectHostnameStaleness(ctx, timestamp, nodes, shards);
             await this.detectGhostMembers(ctx, timestamp, nodes);
             await this.detectFailoverChurn(ctx, timestamp, nodes);
             // Replica migrating/importing markers are node-local — only the
@@ -2400,6 +2415,76 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     } catch (stuckErr) {
       this.logger.debug(
         `Failed to check stuck replicas for ${ctx.connectionName}: ${stuckErr instanceof Error ? stuckErr.message : stuckErr}`,
+      );
+    }
+  }
+
+  /**
+   * How long a hostname-staleness finding (valkey#304) must persist before it
+   * is alerted, to exclude the transient gossip-convergence window of a
+   * normal node join/restart or a `cluster-announce-hostname` rollout. A
+   * healthy convergence settles within roughly a cluster-node-timeout; a
+   * genuinely stuck/inconsistent node stays that way indefinitely.
+   */
+  private static readonly HOSTNAME_STALENESS_MIN_PERSIST_MS = 30_000;
+
+  /**
+   * Detects hostname info that is missing (while peers have one) or
+   * inconsistent between `CLUSTER NODES` and `CLUSTER SHARDS` for the same
+   * node (valkey-io/valkey#304). This typically self-heals once gossip
+   * converges — TLS-SNI clients and hostname-keyed routing can fail in the
+   * meantime — so we emit a WARNING only once the condition has persisted
+   * past the convergence grace window, deduped per (node, reason), and
+   * cleared on recovery so a resolved-then-recurring case alerts again.
+   */
+  private async detectHostnameStaleness(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+    shards: ClusterShard[] | undefined,
+  ): Promise<void> {
+    try {
+      await this.applyTopologyPersistenceGate({
+        ctx,
+        timestamp,
+        findings: detectHostnameStaleness(nodes, shards),
+        signatureOf: hostnameStalenessSignature,
+        firstSeenByConn: this.hostnameStalenessFirstSeen,
+        activeByConn: this.activeHostnameStaleness,
+        minPersistMs: AnomalyService.HOSTNAME_STALENESS_MIN_PERSIST_MS,
+        buildEvent: (f, signature) => {
+          const addr = this.clientAddress(f.address);
+          const message =
+            f.reason === 'missing_hostname'
+              ? `WARNING: Node ${addr} (${f.nodeId.substring(0, 8)}) has no announced hostname while other ` +
+                `nodes in the cluster view do — hostname gossip has not converged for this node ` +
+                `(valkey#304). TLS-SNI clients or hostname-keyed routing against this node may fail ` +
+                `until it propagates. This usually self-heals; investigate if it persists.`
+              : `WARNING: Node ${addr} (${f.nodeId.substring(0, 8)}) reports a different hostname in ` +
+                `CLUSTER NODES (${f.nodesHostname}) than in CLUSTER SHARDS (${f.shardsHostname}) — the two ` +
+                `views disagree about this node's hostname (valkey#304). TLS-SNI clients or hostname-keyed ` +
+                `routing may hit the wrong endpoint until this converges. This usually self-heals; ` +
+                `investigate if it persists.`;
+          return {
+            id: `${ctx.connectionId}-hostname-staleness-${signature}-${timestamp}`,
+            timestamp,
+            metricType: MetricType.HOSTNAME_STALENESS,
+            anomalyType: AnomalyType.SPIKE,
+            severity: AnomalySeverity.WARNING,
+            value: 1,
+            baseline: 0,
+            zScore: 0,
+            stdDev: 0,
+            threshold: 0,
+            message,
+            resolved: false,
+            connectionId: ctx.connectionId,
+          };
+        },
+      });
+    } catch (hostnameErr) {
+      this.logger.debug(
+        `Failed to check hostname staleness for ${ctx.connectionName}: ${hostnameErr instanceof Error ? hostnameErr.message : hostnameErr}`,
       );
     }
   }
