@@ -25,6 +25,7 @@ import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-detector';
+import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import {
   detectReplicaSlotState,
   replicaSlotSignature,
@@ -881,6 +882,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
                 });
             }
           }
+
+          // Lagging uncoordinated promotion (valkey#2587): in a standalone
+          // (cluster-mode-disabled) setup a REPLICAOF NO ONE just promoted this
+          // replica — warn if a sibling replica was further ahead, meaning its
+          // extra writes are lost and it must full-resync down to this node.
+          if (
+            info['cluster_enabled'] !== '1' &&
+            prev.role === 'replica' &&
+            snapshot.role === 'master'
+          ) {
+            await this.detectLaggingPromotion(ctx, timestamp, prev.replid, prev.offset);
+          }
         }
 
         // Don't record the transient empty snapshot taken mid-load; otherwise
@@ -1068,6 +1081,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private static readonly CLIENT_SATURATION_CRIT = 0.95;
   private static readonly SATURATION_RANK = { none: 0, warning: 1, critical: 2 } as const;
 
+  // Minimum replication-offset gap (bytes) for a lagging-promotion alert
+  // (valkey#2587). Sibling-replica offsets are compared same-cycle from the last
+  // poll snapshot; healthy co-replicas sit at near-identical offsets, so any real
+  // gap is meaningful. Kept as a single tunable knob so poll-skew noise (should
+  // it appear under heavy write load) can be dialed up without touching logic.
+  private static readonly LAGGING_PROMOTION_MIN_GAP_BYTES = 1;
+
   /**
    * Detect connected_clients approaching maxclients (valkey-io/valkey#3918).
    * Once the pool is exhausted, new connections — including operator/monitoring
@@ -1135,6 +1155,66 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // Advance the level last: on escalation only after addAnomaly resolved; on
     // steady/de-escalation immediately (the latter re-arms alerting on recovery).
     this.clientSaturationLevel.set(ctx.connectionId, level);
+  }
+
+  /**
+   * Emits a data-loss WARNING when a standalone node was just promoted to primary
+   * (REPLICAOF NO ONE) while a sibling replica of the same primary was further
+   * ahead in the replication stream (valkey-io/valkey#2587). Siblings are found
+   * from the last-poll replication snapshots by matching the master replication
+   * id; the byte gap is the data the ahead replica must discard on its forced
+   * full resync. No-op when no sibling replica is visible to compare against —
+   * so it never fires on a coordinated FAILOVER (the target is caught up first).
+   */
+  private async detectLaggingPromotion(
+    ctx: ConnectionContext,
+    timestamp: number,
+    replid: string,
+    promotedOffset: number,
+  ): Promise<void> {
+    const peers: ReplPeer[] = [];
+    for (const [connId, snap] of this.prevReplSnapshot) {
+      if (connId === ctx.connectionId) continue;
+      if (snap.role !== 'replica') continue;
+      if (snap.replid !== replid) continue;
+      peers.push({ connectionId: connId, offset: snap.offset, role: 'slave' });
+    }
+
+    const finding = detectLaggingPromotion(
+      ctx.connectionId,
+      promotedOffset,
+      peers,
+      AnomalyService.LAGGING_PROMOTION_MIN_GAP_BYTES,
+    );
+    if (!finding) return;
+
+    const aheadName =
+      this.connectionRegistry.list().find((c) => c.id === finding.aheadId)?.name ??
+      finding.aheadId.substring(0, 8);
+
+    const event: AnomalyEvent = {
+      // Storage adapters (postgres) require UUID event ids.
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.LAGGING_PROMOTION,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: finding.lagBytes,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: 0,
+      message:
+        `WARNING: This node was promoted to primary while sibling replica '${aheadName}' was ` +
+        `${finding.lagBytes} bytes ahead in the replication stream (offset ${finding.aheadOffset} vs ` +
+        `${finding.promotedOffset}). An uncoordinated REPLICAOF NO ONE promotes a possibly-lagging ` +
+        `replica, so those writes are lost and the more up-to-date replica must full-resync down to ` +
+        `this node (valkey#2587). Prefer a coordinated FAILOVER, or promote the most up-to-date replica.`,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    await this.addAnomaly(event, ctx);
   }
 
   /**
