@@ -8,6 +8,7 @@ import { createAgentTokenProviders } from '@app/common/guards/agent-token-provid
 import { StorageModule } from '@app/storage/storage.module';
 import { PrometheusModule } from '@app/prometheus/prometheus.module';
 import { SlowLogAnalyticsModule } from '@app/slowlog-analytics/slowlog-analytics.module';
+import { CommandLogAnalyticsModule } from '@app/commandlog-analytics/commandlog-analytics.module';
 import { ClusterModule } from '@app/cluster/cluster.module';
 
 const logger = new Logger('AnomalyModule');
@@ -16,7 +17,7 @@ const tokenProviders = createAgentTokenProviders(logger, () => {
 });
 
 @Module({
-  imports: [StorageModule, PrometheusModule, SlowLogAnalyticsModule, ClusterModule],
+  imports: [StorageModule, PrometheusModule, SlowLogAnalyticsModule, CommandLogAnalyticsModule, ClusterModule],
   controllers: [AnomalyController, McpAnomalyController],
   providers: [
     AnomalyService,

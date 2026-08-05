@@ -4,6 +4,7 @@ import { AnomalyService } from '../anomaly.service';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
 import { SlowLogAnalyticsService } from '@app/slowlog-analytics/slowlog-analytics.service';
+import { CommandLogAnalyticsService } from '@app/commandlog-analytics/commandlog-analytics.service';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
@@ -19,6 +20,7 @@ import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispa
 describe('AnomalyService', () => {
   let service: AnomalyService;
   let slowLogAnalytics: { getLastSeenId: jest.Mock };
+  let commandLogAnalytics: { getCachedEntries: jest.Mock };
   let storage: Record<string, jest.Mock>;
   let prometheusService: Record<string, jest.Mock>;
   let webhookEventsProService: Record<string, jest.Mock>;
@@ -29,6 +31,10 @@ describe('AnomalyService', () => {
   beforeEach(async () => {
     slowLogAnalytics = {
       getLastSeenId: jest.fn().mockReturnValue(null),
+    };
+
+    commandLogAnalytics = {
+      getCachedEntries: jest.fn().mockReturnValue([]),
     };
 
     storage = {
@@ -134,6 +140,7 @@ describe('AnomalyService', () => {
           },
         },
         { provide: SlowLogAnalyticsService, useValue: slowLogAnalytics },
+        { provide: CommandLogAnalyticsService, useValue: commandLogAnalytics },
         { provide: WEBHOOK_EVENTS_PRO_SERVICE, useValue: webhookEventsProService },
         { provide: OtelEventDispatcherService, useValue: otelEvents },
       ],
@@ -796,6 +803,134 @@ describe('AnomalyService', () => {
       expect((service as any).lastClusterState.has('conn-1')).toBe(false);
       expect((service as any).buffers.has('conn-1')).toBe(false);
       expect((service as any).detectors.has('conn-1')).toBe(false);
+    });
+
+    it('clears large-reply pressure state maps', async () => {
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+      commandLogAnalytics.getCachedEntries.mockReturnValue([
+        { id: 1, timestamp: 1000, duration: 20000, command: ['GET', 'k'], clientAddress: '', clientName: '', type: 'large-reply' },
+      ]);
+      await poll(); // populates state
+
+      expect((service as any).activeLargeReplyOffenders.has('conn-1')).toBe(true);
+      expect((service as any).largeReplyThresholdCache.has('conn-1')).toBe(true);
+      expect((service as any).largeReplyThresholdRecheck.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).activeLargeReplyOffenders.has('conn-1')).toBe(false);
+      expect((service as any).largeReplyThresholdCache.has('conn-1')).toBe(false);
+      expect((service as any).largeReplyThresholdRecheck.has('conn-1')).toBe(false);
+    });
+  });
+
+  // ─── Large-Reply Commandlog Pressure (valkey#2926) ──────────────────────
+
+  describe('large-reply commandlog pressure', () => {
+    function largeReplyEntry(command: string[], duration: number, id = 1, timestamp = 1000) {
+      return {
+        id,
+        timestamp,
+        duration,
+        command,
+        clientAddress: '127.0.0.1:1234',
+        clientName: '',
+        type: 'large-reply' as const,
+      };
+    }
+
+    function eventsOf(metricType: MetricType) {
+      return service.getRecentEvents().filter((e) => e.metricType === metricType);
+    }
+
+    it('does nothing and never calls CONFIG GET when the cache is empty', async () => {
+      commandLogAnalytics.getCachedEntries.mockReturnValue([]);
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+      await poll();
+      expect(dbClient.getConfigValue).not.toHaveBeenCalled();
+      expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(0);
+    });
+
+    it('emits a WARNING once a command crosses the threshold enough times', async () => {
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+
+      await poll();
+
+      expect(dbClient.getConfigValue).toHaveBeenCalledWith('commandlog-reply-larger-than');
+      const events = eventsOf(MetricType.LARGE_REPLY_PRESSURE);
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('GET');
+      expect(events[0].message).toContain('valkey#2926');
+    });
+
+    it('does not re-emit on a subsequent poll for the same offending command (dedupe)', async () => {
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+
+      await poll();
+      await poll();
+
+      expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(1);
+    });
+
+    it('re-arms and alerts again once the offender clears then recurs', async () => {
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+      await poll();
+      expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(1);
+
+      // Recovery: cache goes empty (e.g. COMMANDLOG RESET).
+      commandLogAnalytics.getCachedEntries.mockReturnValue([]);
+      await poll();
+
+      // Recurs.
+      commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+      await poll();
+
+      expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(2);
+    });
+
+    it('does not fire for a single rare large reply below the frequency floor', async () => {
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+      commandLogAnalytics.getCachedEntries.mockReturnValue([largeReplyEntry(['GET', 'k'], 20000)]);
+
+      await poll();
+
+      expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(0);
+    });
+
+    it('does not fire when replies are below the configured threshold', async () => {
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('20000');
+      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 8192, i + 1));
+      commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+
+      await poll();
+
+      expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(0);
+    });
+
+    it('does not fire when large-reply logging is disabled (threshold -1)', async () => {
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('-1');
+      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+
+      await poll();
+
+      expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(0);
+    });
+
+    it('gracefully no-ops when CONFIG GET fails', async () => {
+      dbClient.getConfigValue = jest.fn().mockRejectedValue(new Error('NOPERM'));
+      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+
+      await expect(poll()).resolves.not.toThrow();
+      expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(0);
     });
   });
 

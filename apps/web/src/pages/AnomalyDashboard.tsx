@@ -129,6 +129,7 @@ const METRIC_LABELS: Record<string, string> = {
   memory_overhead: 'Memory Overhead',
   load_saturation: 'Load Saturation',
   fork_memory_risk: 'Fork Memory Risk',
+  large_reply_pressure: 'Large-Reply Pressure',
 };
 
 function formatTime(ts: number): string {

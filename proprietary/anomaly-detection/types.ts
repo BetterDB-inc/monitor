@@ -38,6 +38,8 @@ export enum MetricType {
   COMMAND_P99 = 'command_p99',
   PERSISTENCE_CHILD = 'persistence_child',
   CLUSTER_TOPOLOGY = 'cluster_topology',
+  /** Hot command(s) repeatedly crossing commandlog-reply-larger-than, taxing throughput via the large-reply commandlog path (valkey#2926) — state-based, per-command dedupe. */
+  LARGE_REPLY_PRESSURE = 'large_reply_pressure',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',
 }
@@ -68,6 +70,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.LOAD_SATURATION,
   MetricType.FORK_MEMORY_RISK,
   MetricType.SLOWLOG_COUNT,
+  MetricType.LARGE_REPLY_PRESSURE,
 ]);
 
 export enum AnomalySeverity {
