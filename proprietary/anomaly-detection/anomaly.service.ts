@@ -14,6 +14,7 @@ import {
   MultiConnectionPoller,
   ConnectionContext,
 } from '@app/common/services/multi-connection-poller';
+import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
@@ -1292,15 +1293,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
               }
             }),
           );
-          const config: Record<string, string> = {};
+          // MERGE freshly-read keys onto the last-known snapshot rather than
+          // replacing it, so a PARTIAL CONFIG GET failure (some keys succeed,
+          // some fail this poll) doesn't drop the keys that failed — dropping a
+          // drifted key from one node would make the mismatch momentarily vanish
+          // and then re-fire once that key's fetch recovers. A key that failed
+          // this poll simply retains its prior value; keys never seen stay
+          // absent. (An all-keys-failed poll therefore leaves the snapshot
+          // unchanged.)
+          const prior = this.configSnapshot.get(ctx.connectionId)?.config ?? {};
+          const config: Record<string, string> = { ...prior };
           for (const entry of entries) {
             if (entry) config[entry[0]] = entry[1];
           }
-          // Only replace the snapshot when we actually read something. If every
-          // key failed this poll (a transient CONFIG GET blip), keep the
-          // last-known values rather than overwriting with an empty map — an
-          // empty snapshot would make a real drift momentarily vanish (no
-          // comparable pair) and then re-fire once fetches recover.
           if (Object.keys(config).length > 0) {
             this.configSnapshot.set(ctx.connectionId, {
               groupKey: `replid:${replid}`,
@@ -1374,18 +1379,46 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           connectionId: drift.values[0].connectionId,
         };
         this.logger.warn(`Anomaly detected: ${event.message}`);
-        // No ctx passed: this event is about a specific member of the
-        // drifting group, which is frequently NOT the connection whose poll
-        // happened to run this scan. addAnomaly() falls back to
-        // anomaly.connectionId (set above) for storage attribution instead
-        // of mis-tagging it under the polling connection.
-        await this.addAnomaly(event);
+        // Resolve the ATTRIBUTED node's own context (host/port/name) so
+        // Prometheus/OTLP labels and the stored sourceHost/sourcePort reflect
+        // the drifting node rather than defaulting to `unknown`/database.host.
+        // The attributed node is frequently NOT the connection whose poll ran
+        // this scan, so we must not pass the polling ctx. Falls back to the
+        // event's connectionId (storage-only) if the node isn't resolvable.
+        const attributedCtx = this.buildConnectionContext(drift.values[0].connectionId);
+        await this.addAnomaly(event, attributedCtx);
       }
     } catch (err) {
       this.logger.debug(
         `Failed to check config drift for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
       );
     }
+  }
+
+  /**
+   * Builds a ConnectionContext for an arbitrary connection id from the registry,
+   * so an event attributed to a node OTHER than the polling connection (e.g. a
+   * config-drift member) carries that node's real host/port/name for telemetry
+   * and storage. Returns undefined if the connection is no longer registered or
+   * its client can't be resolved (a since-removed node) — the caller then falls
+   * back to storage-only attribution via the event's connectionId.
+   */
+  private buildConnectionContext(connectionId: string): ConnectionContext | undefined {
+    const info = this.connectionRegistry.list().find((c) => c.id === connectionId);
+    if (!info) return undefined;
+    let client: DatabasePort;
+    try {
+      client = this.connectionRegistry.get(connectionId);
+    } catch {
+      return undefined;
+    }
+    return {
+      connectionId,
+      connectionName: info.name,
+      client,
+      host: info.host,
+      port: info.port,
+    };
   }
 
   /**

@@ -2966,6 +2966,63 @@ describe('AnomalyService', () => {
       expect(driftEvents()).toHaveLength(1);
     });
 
+    it('retains a key whose fetch fails while other keys succeed (partial CONFIG GET failure)', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-partial', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-partial', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+      expect(driftEvents()).toHaveLength(1);
+
+      // conn-b: maxmemory fetch fails this poll but appendonly succeeds. The
+      // drifted maxmemory must be retained from the prior snapshot (merge, not
+      // replace) so the mismatch does NOT vanish and re-fire.
+      const ctxBPartial = makeCtx('conn-b', { replid: 'replid-partial', config: { maxmemory: '2000000' } });
+      (ctxBPartial.client.getConfigValues as jest.Mock).mockImplementation((pattern: string) =>
+        pattern === 'maxmemory'
+          ? Promise.reject(new Error('blip'))
+          : Promise.resolve(pattern === 'appendonly' ? { appendonly: 'yes' } : {}),
+      );
+      await poll(ctxBPartial);
+
+      const snap = (service as any).configSnapshot.get('conn-b')?.config;
+      expect(snap.maxmemory).toBe('2000000'); // retained despite this poll's failure
+      expect(snap.appendonly).toBe('yes'); // freshly merged in
+      expect(driftEvents()).toHaveLength(1); // drift never spuriously re-fired
+    });
+
+    it('attributes the drift event to the drifting node (telemetry + source), not the poller/unknown', async () => {
+      (service as any).connectionRegistry.list.mockReturnValue([
+        { id: 'conn-a', name: 'A', host: 'host-a', port: 7001 },
+        { id: 'conn-b', name: 'B', host: 'host-b', port: 7002 },
+      ]);
+      (service as any).connectionRegistry.get.mockReturnValue({} as any);
+
+      const ctxA = makeCtx('conn-a', { replid: 'replid-attr', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-attr', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+
+      const event = driftEvents()[0];
+      const attributed =
+        event.connectionId === 'conn-a'
+          ? { host: 'host-a', port: 7001 }
+          : { host: 'host-b', port: 7002 };
+
+      // Prometheus labelled with the attributed node id (not undefined/unknown).
+      expect(prometheusService.incrementAnomalyEvent).toHaveBeenCalledWith(
+        expect.anything(),
+        MetricType.CONFIG_DRIFT,
+        expect.anything(),
+        event.connectionId,
+      );
+      // Stored event's source host/port reflect the attributed node, not the default.
+      const storedCall = storage.saveAnomalyEvent.mock.calls.find(
+        ([e]: any[]) => e.metricType === MetricType.CONFIG_DRIFT,
+      );
+      expect(storedCall?.[0].sourceHost).toBe(attributed.host);
+      expect(storedCall?.[0].sourcePort).toBe(attributed.port);
+    });
+
     it('skips connections without CONFIG support and does not record a snapshot for them', async () => {
       const ctxA = makeCtx('conn-a', { replid: 'replid-nc', config: {}, hasConfig: false });
       await poll(ctxA);
