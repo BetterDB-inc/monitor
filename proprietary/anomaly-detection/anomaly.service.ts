@@ -555,21 +555,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * Reads the typed `keyspace` section straight off the parsed INFO response —
    * NOT the flattened record — because `convertInfoToRecord` stringifies each
    * value, which would turn an object-shaped db into `"[object Object]"` and
-   * silently zero the count. `InfoParser` today emits each db as a raw string
-   * (`"keys=123,expires=5,avg_ttl=0"`), but the `KeyspaceInfo` type declares an
-   * object (`{ keys, expires, avg_ttl }`), so we handle both shapes: this stays
-   * correct whether or not the parser is ever aligned with the type.
+   * silently zero the count. `MetricsParser.parseInfoToTyped` owns db-key
+   * matching and emits every db* entry as a `{ keys, expires, avg_ttl }`
+   * object; a string value here means the line was not a parseable db entry
+   * and contributes nothing.
    */
   private sumKeyspaceKeys(infoResponse: { keyspace?: Record<string, unknown> } | null): number {
     const keyspace = infoResponse?.keyspace;
     if (keyspace === null || typeof keyspace !== 'object') return 0;
     let total = 0;
-    for (const [key, value] of Object.entries(keyspace)) {
-      if (!/^db\d+$/.test(key)) continue;
-      if (typeof value === 'string') {
-        const match = /keys=(\d+)/.exec(value);
-        if (match) total += parseInt(match[1], 10);
-      } else if (value !== null && typeof value === 'object' && 'keys' in value) {
+    for (const value of Object.values(keyspace)) {
+      if (value !== null && typeof value === 'object' && 'keys' in value) {
         total += Number((value as { keys: unknown }).keys) || 0;
       }
     }
