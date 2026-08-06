@@ -10,6 +10,7 @@ import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
 import { SettingsService } from '@app/settings/settings.service';
 import { SlowLogAnalyticsService } from '@app/slowlog-analytics/slowlog-analytics.service';
+import { CommandLogAnalyticsService } from '@app/commandlog-analytics/commandlog-analytics.service';
 import {
   MultiConnectionPoller,
   ConnectionContext,
@@ -96,6 +97,11 @@ import {
   createLoadSaturationState,
   evaluateLoadSaturation,
 } from './load-saturation-detector';
+import {
+  LargeReplyEntry,
+  detectLargeReplyPressure,
+  largeReplyPressureSignature,
+} from './large-reply-pressure-detector';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
@@ -220,6 +226,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
   private clientSaturationLevel = new Map<string, 'none' | 'warning' | 'critical'>();
+  // Large-reply commandlog pressure (valkey#2926): per-connection set of active
+  // offending-command signatures (dedupe, like activeTopologyConflicts), plus
+  // the cached commandlog-reply-larger-than threshold with a slow recheck
+  // countdown (same discipline as cobLimitCache/cobLimitRecheck) so a runtime
+  // CONFIG SET is eventually picked up without a CONFIG GET on every poll.
+  private activeLargeReplyOffenders = new Map<string, Set<string>>();
+  private largeReplyThresholdCache = new Map<string, number>();
+  private largeReplyThresholdRecheck = new Map<string, number>();
   // Raft (Cluster V2) health state. `raftPrevTerm` + `raftTermChanges` track the
   // election-term history to detect churn (repeated elections). The quorum-loss
   // "leaderless watch" opens when the node starts seeking a leader it cannot
@@ -293,6 +307,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     private readonly prometheusService: PrometheusService,
     private readonly settingsService: SettingsService,
     private readonly slowLogAnalytics: SlowLogAnalyticsService,
+    private readonly commandLogAnalytics: CommandLogAnalyticsService,
     @Optional()
     @Inject(WEBHOOK_EVENTS_PRO_SERVICE)
     private readonly webhookEventsProService?: IWebhookEventsProService,
@@ -516,6 +531,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.loadSaturationState.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
+    this.activeLargeReplyOffenders.delete(connectionId);
+    this.largeReplyThresholdCache.delete(connectionId);
+    this.largeReplyThresholdRecheck.delete(connectionId);
     // Drop this connection's config snapshot so it can't linger as a phantom
     // drift source (comparisons would otherwise keep "seeing" its last-known
     // config forever). Signatures involving it self-heal on the next
@@ -1138,6 +1156,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // same cpuUtilizationSample so the message can call out when CPU%
       // understates the load. State-based with hysteresis.
       await this.detectLoadSaturation(info, ctx, timestamp, cpuUtilizationSample);
+
+      // Large-reply commandlog throughput pressure (valkey-io/valkey#2926): hot
+      // commands repeatedly crossing commandlog-reply-larger-than pay the
+      // large-reply logging/copy path's cost on every call — a regression
+      // observed to cost up to ~25% GET throughput and still unfixed upstream.
+      // Sourced from CommandLogAnalyticsService's cached LARGE-REPLY entries
+      // (already polled on its own 30s cadence, so no extra COMMANDLOG call
+      // here); the threshold config is fetched on a slow recheck like the COB
+      // limit. State-based with per-offending-command dedupe.
+      await this.detectLargeReplyPressure(ctx, timestamp);
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
@@ -1546,6 +1574,138 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // retried on the next poll rather than being swallowed by the hysteresis.
     await this.addAnomaly(event, ctx);
     acknowledgeLoadSaturationFinding(state, finding);
+  }
+
+  /**
+   * How often (in polls) the cached commandlog-reply-larger-than threshold is
+   * re-read via CONFIG GET. Mirrors COB_LIMIT_RECHECK_POLLS: a slow-changing
+   * config value doesn't need re-fetching on every ~1s poll, but a runtime
+   * CONFIG SET should still be picked up eventually.
+   */
+  private static readonly LARGE_REPLY_THRESHOLD_RECHECK_POLLS = 60;
+
+  /**
+   * Large-reply commandlog throughput pressure (valkey-io/valkey#2926): warns
+   * when a hot command is repeatedly producing replies that cross the
+   * configured `commandlog-reply-larger-than` threshold, meaning it routinely
+   * pays the LARGE-REPLY logging/copy path's cost — observed upstream to cost
+   * up to ~25% GET throughput, and still unfixed (PR #3397 only raised the
+   * default threshold).
+   *
+   * Entries come from `CommandLogAnalyticsService`'s cache, which is already
+   * populated on its own ~30s poll cadence — this method issues NO extra
+   * COMMANDLOG call. The threshold config is fetched via CONFIG GET only when
+   * there is at least one cached entry to evaluate, and even then only on a
+   * slow recheck cadence (like the COB limit triplet), so a connection that
+   * never produces large replies costs nothing beyond the free cache read.
+   *
+   * State-based with per-offending-command dedupe (mirrors
+   * detectDuplicatePrimaries' activeTopologyConflicts): each distinct
+   * offending command is alerted once, and dropping out of the current
+   * offender set (recovery, or threshold raised past its replies) clears its
+   * signature so a later recurrence alerts again.
+   */
+  private async detectLargeReplyPressure(
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    try {
+      const cachedEntries = this.commandLogAnalytics.getCachedEntries(
+        'large-reply',
+        ctx.connectionId,
+      );
+
+      if (cachedEntries.length === 0) {
+        // Nothing to evaluate this poll. Also clears any stale active
+        // offenders (e.g. after COMMANDLOG RESET) so a future recurrence
+        // re-alerts rather than staying suppressed by dedupe forever.
+        if ((this.activeLargeReplyOffenders.get(ctx.connectionId)?.size ?? 0) > 0) {
+          this.activeLargeReplyOffenders.set(ctx.connectionId, new Set());
+        }
+        return;
+      }
+
+      let thresholdBytes = this.largeReplyThresholdCache.get(ctx.connectionId) ?? null;
+      const countdown = this.largeReplyThresholdRecheck.get(ctx.connectionId) ?? 0;
+      if (countdown > 0) {
+        this.largeReplyThresholdRecheck.set(ctx.connectionId, countdown - 1);
+      } else {
+        try {
+          const raw = await ctx.client.getConfigValue('commandlog-reply-larger-than');
+          const parsed = raw !== null ? parseInt(raw, 10) : NaN;
+          if (Number.isFinite(parsed)) {
+            thresholdBytes = parsed;
+            this.largeReplyThresholdCache.set(ctx.connectionId, parsed);
+          }
+          this.largeReplyThresholdRecheck.set(
+            ctx.connectionId,
+            AnomalyService.LARGE_REPLY_THRESHOLD_RECHECK_POLLS,
+          );
+        } catch (cfgErr) {
+          this.logger.debug(
+            `CONFIG GET commandlog-reply-larger-than failed for ${ctx.connectionName}: ${cfgErr instanceof Error ? cfgErr.message : cfgErr}`,
+          );
+        }
+      }
+
+      // Threshold unknown (never successfully fetched) or negative (large-reply
+      // logging disabled server-side) — nothing meaningful to compare against.
+      // Clear any armed offenders too (as the empty-cache path does): cached
+      // LARGE-REPLY entries can linger after logging is disabled, so without
+      // this the re-arm reconcile below is skipped and prior command signatures
+      // stay armed — suppressing recurrence alerts if logging is later
+      // re-enabled, until a COMMANDLOG RESET or connection cleanup.
+      if (thresholdBytes === null || thresholdBytes < 0) {
+        if ((this.activeLargeReplyOffenders.get(ctx.connectionId)?.size ?? 0) > 0) {
+          this.activeLargeReplyOffenders.set(ctx.connectionId, new Set());
+        }
+        return;
+      }
+
+      const entries: LargeReplyEntry[] = cachedEntries.map((e) => {
+        return {
+          command: (e.command[0] ?? '').toUpperCase(),
+          replyBytes: e.duration,
+          timestamp: e.timestamp,
+        };
+      });
+
+      const offenders = detectLargeReplyPressure(entries, thresholdBytes);
+
+      const active = this.activeLargeReplyOffenders.get(ctx.connectionId) ?? new Set<string>();
+      const currentSignatures = new Set(offenders.map(largeReplyPressureSignature));
+
+      for (const offender of offenders) {
+        const signature = largeReplyPressureSignature(offender);
+        if (active.has(signature)) continue; // already alerted for this command
+
+        const event: AnomalyEvent = {
+          id: randomUUID(),
+          timestamp,
+          metricType: MetricType.LARGE_REPLY_PRESSURE,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          value: offender.crossings,
+          baseline: 0,
+          zScore: 0,
+          stdDev: 0,
+          threshold: thresholdBytes,
+          message: offender.message,
+          resolved: false,
+          connectionId: ctx.connectionId,
+        };
+        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+        await this.addAnomaly(event, ctx);
+      }
+
+      // Keep only signatures still offending so a resolved-then-recurring
+      // command alerts again (mirrors activeTopologyConflicts).
+      this.activeLargeReplyOffenders.set(ctx.connectionId, currentSignatures);
+    } catch (err) {
+      this.logger.debug(
+        `Failed to check large-reply commandlog pressure for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   /**

@@ -131,6 +131,7 @@ const METRIC_LABELS: Record<string, string> = {
   fork_memory_risk: 'Fork Memory Risk',
   config_drift: 'Config Drift',
   hostname_staleness: 'Hostname Staleness',
+  large_reply_pressure: 'Large-Reply Pressure',
 };
 
 function formatTime(ts: number): string {

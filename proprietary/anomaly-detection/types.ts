@@ -44,6 +44,8 @@ export enum MetricType {
   CLUSTER_TOPOLOGY = 'cluster_topology',
   /** Node hostname missing/inconsistent between CLUSTER NODES and CLUSTER SHARDS (valkey#304) — state-based. */
   HOSTNAME_STALENESS = 'hostname_staleness',
+  /** Hot command(s) repeatedly crossing commandlog-reply-larger-than, taxing throughput via the large-reply commandlog path (valkey#2926) — state-based, per-command dedupe. */
+  LARGE_REPLY_PRESSURE = 'large_reply_pressure',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',
   /** A curated critical config key (maxmemory, maxmemory-policy, ...) differs across nodes in the same replication group (valkey#1193) — state-based. */
@@ -80,6 +82,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.FORK_MEMORY_RISK,
   MetricType.SLOWLOG_COUNT,
   MetricType.CONFIG_DRIFT,
+  MetricType.LARGE_REPLY_PRESSURE,
 ]);
 
 export enum AnomalySeverity {
