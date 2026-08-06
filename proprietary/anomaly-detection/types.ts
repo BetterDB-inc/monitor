@@ -46,6 +46,8 @@ export enum MetricType {
   HOSTNAME_STALENESS = 'hostname_staleness',
   /** @deprecated Use SLOWLOG_LAST_ID instead — retained only for backwards compatibility */
   SLOWLOG_COUNT = 'slowlog_count',
+  /** A curated critical config key (maxmemory, maxmemory-policy, ...) differs across nodes in the same replication group (valkey#1193) — state-based. */
+  CONFIG_DRIFT = 'config_drift',
 }
 
 /**
@@ -77,6 +79,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.LOAD_SATURATION,
   MetricType.FORK_MEMORY_RISK,
   MetricType.SLOWLOG_COUNT,
+  MetricType.CONFIG_DRIFT,
 ]);
 
 export enum AnomalySeverity {
