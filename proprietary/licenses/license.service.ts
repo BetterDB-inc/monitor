@@ -608,6 +608,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       instanceId: this.instanceId,
       eventType: 'license_check',
       deploymentMode: isCloud ? 'cloud' : 'self-hosted',
+      telemetryEnabled: this.telemetryEnabled,
       stats: await this.collectStats(),
       ...(isCloud && process.env.DB_SCHEMA ? { tenantId: process.env.DB_SCHEMA } : {}),
     };

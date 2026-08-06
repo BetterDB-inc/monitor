@@ -144,6 +144,7 @@ describe('LicenseService', () => {
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody).toHaveProperty('instanceId');
       expect(callBody).toHaveProperty('stats');
+      expect(callBody.telemetryEnabled).toBe(false); // setup forces BETTERDB_TELEMETRY=false
       expect(callBody.stats).toHaveProperty('platform');
       expect(callBody.stats).toHaveProperty('arch');
       expect(callBody.stats).toHaveProperty('nodeVersion');
