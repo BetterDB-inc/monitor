@@ -129,6 +129,8 @@ const METRIC_LABELS: Record<string, string> = {
   memory_overhead: 'Memory Overhead',
   load_saturation: 'Load Saturation',
   fork_memory_risk: 'Fork Memory Risk',
+  config_drift: 'Config Drift',
+  hostname_staleness: 'Hostname Staleness',
   large_reply_pressure: 'Large-Reply Pressure',
 };
 

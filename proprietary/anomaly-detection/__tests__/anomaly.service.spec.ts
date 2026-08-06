@@ -2986,6 +2986,237 @@ describe('AnomalyService', () => {
     });
   });
 
+  // ─── Config drift detection (valkey-io/valkey#1193) ────────────────────────
+  describe('config drift detection', () => {
+    function makeCtx(
+      connectionId: string,
+      opts: { role?: string; replid?: string; config: Record<string, string>; hasConfig?: boolean },
+    ): ConnectionContext {
+      const client: jest.Mocked<Partial<DatabasePort>> = {
+        getInfoParsed: jest.fn().mockResolvedValue({
+          server: { role: opts.role ?? 'master' },
+          clients: { connected_clients: '10', blocked_clients: '0' },
+          memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+          stats: {
+            instantaneous_ops_per_sec: '100',
+            instantaneous_input_kbps: '50',
+            instantaneous_output_kbps: '30',
+            evicted_keys: '0',
+            keyspace_misses: '5',
+            rejected_connections: '0',
+            acl_access_denied_auth: '0',
+          },
+          replication: { master_replid: opts.replid ?? 'replid-shared' },
+        }),
+        getCapabilities: jest.fn().mockReturnValue({ hasConfig: opts.hasConfig ?? true }),
+        // getConfigValues returns the parsed map; a key present with an empty
+        // value (e.g. `save ""`) is preserved, an absent key yields no entry.
+        getConfigValues: jest.fn((pattern: string) =>
+          Promise.resolve(pattern in opts.config ? { [pattern]: opts.config[pattern] } : {}),
+        ),
+      };
+      return {
+        connectionId,
+        connectionName: connectionId,
+        client: client as any,
+        host: 'localhost',
+        port: 6379,
+      };
+    }
+
+    const driftEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.CONFIG_DRIFT);
+
+    it('emits a WARNING when two same-group nodes disagree on a curated key', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-x', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-x', config: { maxmemory: '2000000' } });
+
+      await poll(ctxA);
+      await poll(ctxB);
+
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('maxmemory');
+      // Attributed to a real member of the drifting group, not whichever
+      // connection's poll happened to run the scan.
+      expect(['conn-a', 'conn-b']).toContain(events[0].connectionId);
+    });
+
+    it('does not alert when only one node of a group is monitored', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-solo', config: { maxmemory: '1000000' } });
+      await poll(ctxA);
+      expect(driftEvents()).toHaveLength(0);
+    });
+
+    it('does not alert across different groups even when values differ', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-group-1', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-group-2', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+      expect(driftEvents()).toHaveLength(0);
+    });
+
+    it('does not alert when the group agrees on every curated key', async () => {
+      const cfg = { maxmemory: '1000000', appendonly: 'yes' };
+      const ctxA = makeCtx('conn-a', { replid: 'replid-agree', config: cfg });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-agree', config: cfg });
+      await poll(ctxA);
+      await poll(ctxB);
+      expect(driftEvents()).toHaveLength(0);
+    });
+
+    it('deduplicates while the same mismatch persists across polls', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-y', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-y', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+      await poll(ctxA);
+      await poll(ctxB);
+      expect(driftEvents()).toHaveLength(1);
+    });
+
+    it('re-arms after convergence and re-fires on a new mismatch', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-z', config: { maxmemory: '1000000' } });
+      await poll(ctxA);
+      await poll(makeCtx('conn-b', { replid: 'replid-z', config: { maxmemory: '2000000' } }));
+      expect(driftEvents()).toHaveLength(1);
+
+      // Converges — re-polling both while equal must clear the active signature.
+      await poll(ctxA);
+      await poll(makeCtx('conn-b', { replid: 'replid-z', config: { maxmemory: '1000000' } }));
+      expect(driftEvents()).toHaveLength(1); // still just the one from before, no new alert
+
+      // Diverges again with a DIFFERENT value — must re-fire, not stay suppressed.
+      await poll(ctxA);
+      await poll(makeCtx('conn-b', { replid: 'replid-z', config: { maxmemory: '3000000' } }));
+      expect(driftEvents()).toHaveLength(2);
+    });
+
+    it('detects drift on an empty save value (RDB disabled on one node only)', async () => {
+      // Regression: an empty `save ""` must be recorded and compared, not
+      // dropped as if the key were unsupported.
+      const ctxA = makeCtx('conn-a', { replid: 'replid-save', config: { save: '3600 1 300 100' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-save', config: { save: '' } });
+      await poll(ctxA);
+      await poll(ctxB);
+
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('save');
+    });
+
+    it('keeps the last-known snapshot when a poll fails to read any config', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-blip', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-blip', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+      expect(driftEvents()).toHaveLength(1);
+
+      // conn-b hits a transient CONFIG GET failure → must NOT wipe its snapshot
+      // (which would drop the drift and re-fire it once fetches recover).
+      const ctxBFail = makeCtx('conn-b', { replid: 'replid-blip', config: { maxmemory: '2000000' } });
+      (ctxBFail.client.getConfigValues as jest.Mock).mockRejectedValue(new Error('LOADING'));
+      await poll(ctxBFail);
+
+      expect((service as any).configSnapshot.get('conn-b')?.config).toEqual({ maxmemory: '2000000' });
+      // Still exactly one alert — the drift never spuriously cleared/re-fired.
+      expect(driftEvents()).toHaveLength(1);
+    });
+
+    it('does not move a node to a new group on an all-keys-failed poll (stale replid during failover)', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-fo', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-fo', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+      expect(driftEvents()).toHaveLength(1);
+
+      // conn-b's replid changes (failover) AND every config read fails (LOADING).
+      // The snapshot must keep its OLD groupKey rather than move conn-b onto
+      // replid-new with stale config, which would clear/re-fire the drift.
+      const ctxBFo = makeCtx('conn-b', { replid: 'replid-new', config: {} });
+      (ctxBFo.client.getConfigValues as jest.Mock).mockRejectedValue(new Error('LOADING'));
+      await poll(ctxBFo);
+
+      expect((service as any).configSnapshot.get('conn-b')?.groupKey).toBe('replid:replid-fo');
+      expect(driftEvents()).toHaveLength(1); // no new alert
+    });
+
+    it('retains a key whose fetch fails while other keys succeed (partial CONFIG GET failure)', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-partial', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-partial', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+      expect(driftEvents()).toHaveLength(1);
+
+      // conn-b: maxmemory fetch fails this poll but appendonly succeeds. The
+      // drifted maxmemory must be retained from the prior snapshot (merge, not
+      // replace) so the mismatch does NOT vanish and re-fire.
+      const ctxBPartial = makeCtx('conn-b', { replid: 'replid-partial', config: { maxmemory: '2000000' } });
+      (ctxBPartial.client.getConfigValues as jest.Mock).mockImplementation((pattern: string) =>
+        pattern === 'maxmemory'
+          ? Promise.reject(new Error('blip'))
+          : Promise.resolve(pattern === 'appendonly' ? { appendonly: 'yes' } : {}),
+      );
+      await poll(ctxBPartial);
+
+      const snap = (service as any).configSnapshot.get('conn-b')?.config;
+      expect(snap.maxmemory).toBe('2000000'); // retained despite this poll's failure
+      expect(snap.appendonly).toBe('yes'); // freshly merged in
+      expect(driftEvents()).toHaveLength(1); // drift never spuriously re-fired
+    });
+
+    it('attributes the drift event to the drifting node (telemetry + source), not the poller/unknown', async () => {
+      (service as any).connectionRegistry.list.mockReturnValue([
+        { id: 'conn-a', name: 'A', host: 'host-a', port: 7001 },
+        { id: 'conn-b', name: 'B', host: 'host-b', port: 7002 },
+      ]);
+      (service as any).connectionRegistry.get.mockReturnValue({} as any);
+
+      const ctxA = makeCtx('conn-a', { replid: 'replid-attr', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-attr', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+
+      const event = driftEvents()[0];
+      const attributed =
+        event.connectionId === 'conn-a'
+          ? { host: 'host-a', port: 7001 }
+          : { host: 'host-b', port: 7002 };
+
+      // Prometheus labelled with the attributed node id (not undefined/unknown).
+      expect(prometheusService.incrementAnomalyEvent).toHaveBeenCalledWith(
+        expect.anything(),
+        MetricType.CONFIG_DRIFT,
+        expect.anything(),
+        event.connectionId,
+      );
+      // Stored event's source host/port reflect the attributed node, not the default.
+      const storedCall = storage.saveAnomalyEvent.mock.calls.find(
+        ([e]: any[]) => e.metricType === MetricType.CONFIG_DRIFT,
+      );
+      expect(storedCall?.[0].sourceHost).toBe(attributed.host);
+      expect(storedCall?.[0].sourcePort).toBe(attributed.port);
+    });
+
+    it('skips connections without CONFIG support and does not record a snapshot for them', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-nc', config: {}, hasConfig: false });
+      await poll(ctxA);
+      expect((service as any).configSnapshot.has('conn-a')).toBe(false);
+    });
+
+    it('drops a removed connection from the shared snapshot so it cannot linger as a phantom drift source', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-w', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-w', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+      expect((service as any).configSnapshot.has('conn-b')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-b');
+      expect((service as any).configSnapshot.has('conn-b')).toBe(false);
+    });
+  });
+
   // ─── Raft cluster health (Valkey Cluster V2) ───────────────────────────────
   describe('raft cluster health', () => {
     const clusterEnabledInfo = {

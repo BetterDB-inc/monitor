@@ -15,6 +15,7 @@ import {
   MultiConnectionPoller,
   ConnectionContext,
 } from '@app/common/services/multi-connection-poller';
+import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
@@ -25,7 +26,20 @@ import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
+import {
+  DEFAULT_CONFIG_DRIFT_KEYS,
+  ConfigDrift,
+  ConfigDriftNode,
+  detectConfigDrift,
+  configDriftSignature,
+} from './config-drift-detector';
 import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-detector';
+import { detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
+import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
+import {
+  detectHostnameStaleness,
+  hostnameStalenessSignature,
+} from './hostname-staleness-detector';
 import {
   detectReplicaSlotState,
   replicaSlotSignature,
@@ -160,6 +174,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // the alert once the persistence gate has fired.
   private stuckReplicaFirstSeen = new Map<string, Map<string, number>>();
   private activeStuckReplicas = new Map<string, Set<string>>();
+  // Hostname-staleness (valkey#304) state, same discipline as stuck-replica:
+  // `firstSeen` gates on persistence so a transient gossip-convergence window
+  // (a node just joined/restarted, or is mid-rollout of
+  // cluster-announce-hostname) doesn't alert, `active` dedupes once the gate
+  // has fired.
+  private hostnameStalenessFirstSeen = new Map<string, Map<string, number>>();
+  private activeHostnameStaleness = new Map<string, Set<string>>();
+  // Ghost-membership (valkey#1757) state, same discipline as stuck-replica:
+  // `firstSeen` gates on persistence so a transient re-MEET/handshake window
+  // doesn't alert, `active` dedupes the alert once the gate has fired.
+  private ghostMemberFirstSeen = new Map<string, Map<string, number>>();
+  private activeGhostMembers = new Map<string, Set<string>>();
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
@@ -246,6 +272,21 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       connectedSlaves: number; // connected_slaves
     }
   >();
+  // Shared cross-connection snapshot for config-drift detection
+  // (valkey-io/valkey#1193): each connection records its OWN curated config
+  // subset + replication-group key every poll; detectConfigDrift scans this
+  // map across ALL connections rather than fanning out live to sibling
+  // nodes. Grouped by `master_replid` — shared by a primary and its attached
+  // replicas (and, for a cluster shard, by that shard's primary + replicas).
+  private configSnapshot = new Map<
+    string,
+    { groupKey: string; name: string; config: Record<string, string> }
+  >();
+  // Global (not per-connection) dedupe: a drift finding is a property of the
+  // GROUP, not of whichever connection's poll happened to detect it.
+  // Recomputed from the full snapshot on every call, so it self-heals if a
+  // group member's snapshot lags a poll behind its peers.
+  private activeConfigDriftSignatures = new Set<string>();
   private readonly maxRecentEvents = 1000;
   private readonly maxRecentGroups = 100;
 
@@ -460,6 +501,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftNodeTimeoutRecheck.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
+    this.hostnameStalenessFirstSeen.delete(connectionId);
+    this.activeHostnameStaleness.delete(connectionId);
+    this.ghostMemberFirstSeen.delete(connectionId);
+    this.activeGhostMembers.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
@@ -489,6 +534,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.activeLargeReplyOffenders.delete(connectionId);
     this.largeReplyThresholdCache.delete(connectionId);
     this.largeReplyThresholdRecheck.delete(connectionId);
+    // Drop this connection's config snapshot so it can't linger as a phantom
+    // drift source (comparisons would otherwise keep "seeing" its last-known
+    // config forever). Signatures involving it self-heal on the next
+    // detectConfigDrift call, which rebuilds its node list from what remains.
+    this.configSnapshot.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -899,6 +949,25 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
                 });
             }
           }
+
+          // Lagging uncoordinated promotion (valkey#2587): in a standalone
+          // (cluster-mode-disabled) setup a REPLICAOF NO ONE just promoted this
+          // replica — warn if a sibling replica was further ahead, meaning its
+          // extra writes are lost and it must full-resync down to this node.
+          if (
+            info['cluster_enabled'] !== '1' &&
+            prev.role === 'replica' &&
+            snapshot.role === 'master'
+          ) {
+            // Compare the promoted node's CURRENT offset (snapshot.offset), not
+            // its last replica-poll offset: a coordinated FAILOVER catches the
+            // target fully up before promoting, so the prior-poll offset would
+            // false-positive on a clean failover even though no writes were lost.
+            // Group siblings by the FORMER master's replid (prev.replid) — the id
+            // co-replicas still share; snapshot.replid may be this node's own new
+            // id post-promotion. (valkey#2587 Bugbot: stale-offset false positive.)
+            await this.detectLaggingPromotion(ctx, timestamp, prev.replid, snapshot.offset);
+          }
         }
 
         // Don't record the transient empty snapshot taken mid-load; otherwise
@@ -985,9 +1054,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           );
         }
 
-        // Gossip-era topology detectors — two primaries per shard (#2261) and
-        // orphaned/stuck replicas (#2090). Under Raft, topology is consensus-
-        // managed, so these gossip-race detectors are skipped; Raft health is
+        // Gossip-era topology detectors — two primaries per shard (#2261),
+        // orphaned/stuck replicas (#2090), and stale/inconsistent hostname
+        // gossip (#304). Under Raft, topology is consensus-managed, so these
+        // gossip-race detectors are skipped; Raft health is
         // covered by detectRaftHealth above. Gated on `!isRaft` only, which
         // defaults to the last known mode — so a transient CLUSTER INFO failure
         // neither runs them on a known-Raft connection nor suppresses them on a
@@ -1018,6 +1088,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           if (nodes) {
             await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
             await this.detectStuckReplicas(ctx, timestamp, nodes);
+            await this.detectHostnameStaleness(ctx, timestamp, nodes, shards);
+            await this.detectGhostMembers(ctx, timestamp, nodes);
             await this.detectFailoverChurn(ctx, timestamp, nodes);
             // Replica migrating/importing markers are node-local — only the
             // queried node's own line carries them — so aggregate each replica's
@@ -1047,6 +1119,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // (valkey-io/valkey#3918): warns before the pool exhausts and operators
       // can no longer connect. State-based with hysteresis, not z-score.
       await this.detectClientSaturation(info, ctx, timestamp);
+
+      // Cross-node config drift (valkey-io/valkey#1193): CONFIG SET only ever
+      // applies to the single node it's sent to today, so nodes in the same
+      // replication group can silently drift on a critical setting (e.g. one
+      // primary/replica ends up with a different maxmemory-policy). Updates
+      // this connection's slice of the shared snapshot, then scans the whole
+      // snapshot for cross-node disagreement. State-based, not z-score.
+      await this.detectConfigDrift(info, ctx, timestamp);
 
       // Replication output-buffer pressure (valkey-io/valkey#3963): replica
       // omem approaching the slave COB limit, and the resync-loop signal once
@@ -1095,6 +1175,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private static readonly CLIENT_SATURATION_WARN = 0.8;
   private static readonly CLIENT_SATURATION_CRIT = 0.95;
   private static readonly SATURATION_RANK = { none: 0, warning: 1, critical: 2 } as const;
+
+  // Minimum replication-offset gap (bytes) for a lagging-promotion alert
+  // (valkey#2587). Sibling-replica offsets are compared same-cycle from the last
+  // poll snapshot; healthy co-replicas sit at near-identical offsets, so any real
+  // gap is meaningful. Kept as a single tunable knob so poll-skew noise (should
+  // it appear under heavy write load) can be dialed up without touching logic.
+  private static readonly LAGGING_PROMOTION_MIN_GAP_BYTES = 1;
 
   /**
    * Detect connected_clients approaching maxclients (valkey-io/valkey#3918).
@@ -1163,6 +1250,271 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // Advance the level last: on escalation only after addAnomaly resolved; on
     // steady/de-escalation immediately (the latter re-arms alerting on recovery).
     this.clientSaturationLevel.set(ctx.connectionId, level);
+  }
+
+  /**
+   * Curated CONFIG keys compared for cross-node drift (valkey-io/valkey#1193).
+   * Deliberately excludes node-specific keys that legitimately differ (bind,
+   * port, dir, replica-announce-ip/port, unixsocket, logfile, requirepass, …).
+   */
+  private static readonly CONFIG_DRIFT_KEYS = DEFAULT_CONFIG_DRIFT_KEYS;
+
+  /**
+   * Detects a curated CRITICAL config key (maxmemory, maxmemory-policy, …)
+   * disagreeing across nodes in the same replication group (valkey-io/
+   * valkey#1193): `CONFIG SET` only ever applies to the node it's sent to, so
+   * nodes can silently drift apart over time — a real source of incidents
+   * (eviction behaving differently per node, one node not persisting, …).
+   *
+   * This is a two-part, cross-connection detector built the "shared snapshot"
+   * way (no live fan-out to sibling nodes, so a hung peer can never stall this
+   * poll): first it refreshes THIS connection's own slice of the shared
+   * `configSnapshot` map — its curated config subset plus a replication-group
+   * key (`master_replid`, shared by a primary and its attached replicas, and
+   * — for a cluster shard — by that shard's primary and replicas). It then
+   * hands the FULL snapshot (every connection's last-known slice) to the pure
+   * `detectConfigDrift`, which does the actual grouping/comparison.
+   *
+   * Because every connection's poll calls this, the same global state may be
+   * recomputed several times per tick; that's intentional idempotent
+   * reconciliation, not redundant alerting — `activeConfigDriftSignatures` is
+   * a single dedupe set (not per-connection, since a drift is a property of
+   * the GROUP), so only a genuinely NEW mismatch pattern emits, and a
+   * resolved one is dropped so a later recurrence re-alerts.
+   */
+  private async detectConfigDrift(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    try {
+      const replid = info['master_replid'];
+      const roleStr = info['role'];
+      const isReplicating = roleStr === 'master' || roleStr === 'slave' || roleStr === 'replica';
+
+      if (!replid || !isReplicating) {
+        // Not (yet) part of a known replication group — drop any stale entry
+        // so it can't linger as a phantom drift source.
+        this.configSnapshot.delete(ctx.connectionId);
+      } else {
+        const capabilities = ctx.client.getCapabilities();
+        if (!capabilities.hasConfig) {
+          this.configSnapshot.delete(ctx.connectionId);
+        } else {
+          // Bounded to the curated allowlist (not CONFIG GET '*'): all calls
+          // race concurrently against this connection's OWN already-open
+          // client (no fan-out to sibling nodes). Use getConfigValues (which
+          // returns the parsed map) rather than getConfigValue (which collapses
+          // an empty value to null): a key set to the EMPTY string — e.g.
+          // `save ""` (RDB disabled) — must be recorded as "" and compared, not
+          // dropped as if unsupported, since an empty-vs-non-empty `save` is
+          // exactly the persistence drift we want to catch. A per-key failure
+          // (unsupported on this version, or a transient error) omits that key.
+          const entries = await Promise.all(
+            AnomalyService.CONFIG_DRIFT_KEYS.map(async (key) => {
+              try {
+                const cfg = await ctx.client.getConfigValues(key);
+                const value = cfg[key];
+                return value !== undefined ? ([key, value] as const) : null;
+              } catch {
+                return null;
+              }
+            }),
+          );
+          // Only touch the snapshot when we actually read at least one key this
+          // poll. An all-keys-failed poll must leave the snapshot ENTIRELY
+          // unchanged — including its groupKey: a failover often changes
+          // master_replid at the same time it triggers LOADING (which fails
+          // these reads), so rewriting groupKey from the current replid on a
+          // stale-config poll would move the node into a new replication group,
+          // clear the old drift signature, and re-fire the same mismatch as a
+          // brand-new alert.
+          const fetchedAny = entries.some((entry) => entry !== null);
+          if (fetchedAny) {
+            // MERGE freshly-read keys onto the last-known snapshot rather than
+            // replacing it, so a PARTIAL failure (some keys succeed, some fail)
+            // doesn't drop the keys that failed — a dropped drifted key would
+            // make the mismatch momentarily vanish and re-fire on recovery. A
+            // key that failed this poll retains its prior value.
+            const prior = this.configSnapshot.get(ctx.connectionId)?.config ?? {};
+            const config: Record<string, string> = { ...prior };
+            for (const entry of entries) {
+              if (entry) config[entry[0]] = entry[1];
+            }
+            this.configSnapshot.set(ctx.connectionId, {
+              groupKey: `replid:${replid}`,
+              name: ctx.connectionName,
+              config,
+            });
+          }
+        }
+      }
+
+      const nodes: ConfigDriftNode[] = Array.from(this.configSnapshot.entries()).map(
+        ([connectionId, snap]) => ({
+          connectionId,
+          name: snap.name,
+          groupKey: snap.groupKey,
+          config: snap.config,
+        }),
+      );
+      const drifts = detectConfigDrift(nodes, AnomalyService.CONFIG_DRIFT_KEYS);
+      const currentSignatures = new Set(drifts.map(configDriftSignature));
+
+      // This method runs from EVERY connection's poll and MultiConnectionPoller
+      // runs those polls concurrently, all mutating the shared
+      // activeConfigDriftSignatures set. Reconcile it SYNCHRONOUSLY here — with
+      // no await in between — so the check-and-claim is atomic per poll: a
+      // concurrent poll can neither double-emit the same new drift nor drop
+      // another poll's still-active signature. Snapshots persist across polls
+      // (a failed fetch keeps the last-known values, above), so every poll
+      // computes the same currentSignatures rather than a partial view.
+      const newDrifts: ConfigDrift[] = [];
+      for (const drift of drifts) {
+        const signature = configDriftSignature(drift);
+        if (this.activeConfigDriftSignatures.has(signature)) continue; // already claimed/alerted
+        this.activeConfigDriftSignatures.add(signature); // claim before the emit await
+        newDrifts.push(drift);
+      }
+      // Drop only signatures that are genuinely no longer drifting, so a
+      // resolved-then-recurring mismatch alerts again (targeted delete, not a
+      // whole-set replace that a concurrent poll's claim could be lost to).
+      for (const signature of this.activeConfigDriftSignatures) {
+        if (!currentSignatures.has(signature)) this.activeConfigDriftSignatures.delete(signature);
+      }
+
+      for (const drift of newDrifts) {
+        const signature = configDriftSignature(drift);
+
+        const valuesLabel = drift.values
+          .map((v) => `${v.name ?? v.connectionId} = ${v.value}`)
+          .join(', ');
+
+        const event: AnomalyEvent = {
+          id: `config-drift-${signature}-${timestamp}`,
+          timestamp,
+          metricType: MetricType.CONFIG_DRIFT,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          value: new Set(drift.values.map((v) => v.value)).size,
+          baseline: 1,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 1,
+          message:
+            `WARNING: Config key '${drift.key}' differs across nodes in the same replication ` +
+            `group: ${valuesLabel}. valkey-io/valkey#1193 — CONFIG SET only applies to the node ` +
+            `it's sent to, so this key must be reconciled on every node by hand until an ` +
+            `in-engine cluster-wide CONFIG SET exists.`,
+          resolved: false,
+          // Attributed to the first drifting node — NOT necessarily ctx, whose
+          // own poll may just be the one that happened to run this scan (this
+          // method runs from every connection's poll; see class doc above).
+          connectionId: drift.values[0].connectionId,
+        };
+        this.logger.warn(`Anomaly detected: ${event.message}`);
+        // Resolve the ATTRIBUTED node's own context (host/port/name) so
+        // Prometheus/OTLP labels and the stored sourceHost/sourcePort reflect
+        // the drifting node rather than defaulting to `unknown`/database.host.
+        // The attributed node is frequently NOT the connection whose poll ran
+        // this scan, so we must not pass the polling ctx. Falls back to the
+        // event's connectionId (storage-only) if the node isn't resolvable.
+        const attributedCtx = this.buildConnectionContext(drift.values[0].connectionId);
+        await this.addAnomaly(event, attributedCtx);
+      }
+    } catch (err) {
+      this.logger.debug(
+        `Failed to check config drift for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /**
+   * Builds a ConnectionContext for an arbitrary connection id from the registry,
+   * so an event attributed to a node OTHER than the polling connection (e.g. a
+   * config-drift member) carries that node's real host/port/name for telemetry
+   * and storage. Returns undefined if the connection is no longer registered or
+   * its client can't be resolved (a since-removed node) — the caller then falls
+   * back to storage-only attribution via the event's connectionId.
+   */
+  private buildConnectionContext(connectionId: string): ConnectionContext | undefined {
+    const info = this.connectionRegistry.list().find((c) => c.id === connectionId);
+    if (!info) return undefined;
+    let client: DatabasePort;
+    try {
+      client = this.connectionRegistry.get(connectionId);
+    } catch {
+      return undefined;
+    }
+    return {
+      connectionId,
+      connectionName: info.name,
+      client,
+      host: info.host,
+      port: info.port,
+    };
+  }
+
+  /**
+   * Emits a data-loss WARNING when a standalone node was just promoted to primary
+   * (REPLICAOF NO ONE) while a sibling replica of the same primary was further
+   * ahead in the replication stream (valkey-io/valkey#2587). Siblings are found
+   * from the last-poll replication snapshots by matching the master replication
+   * id; the byte gap is the data the ahead replica must discard on its forced
+   * full resync. `promotedOffset` is the node's CURRENT offset at promotion, so a
+   * coordinated FAILOVER (which fully catches the target up before promoting)
+   * shows the promoted node at/above its siblings and never fires. No-op when no
+   * sibling replica is visible to compare against.
+   */
+  private async detectLaggingPromotion(
+    ctx: ConnectionContext,
+    timestamp: number,
+    replid: string,
+    promotedOffset: number,
+  ): Promise<void> {
+    const peers: ReplPeer[] = [];
+    for (const [connId, snap] of this.prevReplSnapshot) {
+      if (connId === ctx.connectionId) continue;
+      if (snap.role !== 'replica') continue;
+      if (snap.replid !== replid) continue;
+      peers.push({ connectionId: connId, offset: snap.offset, role: 'slave' });
+    }
+
+    const finding = detectLaggingPromotion(
+      ctx.connectionId,
+      promotedOffset,
+      peers,
+      AnomalyService.LAGGING_PROMOTION_MIN_GAP_BYTES,
+    );
+    if (!finding) return;
+
+    const aheadName =
+      this.connectionRegistry.list().find((c) => c.id === finding.aheadId)?.name ??
+      finding.aheadId.substring(0, 8);
+
+    const event: AnomalyEvent = {
+      // Storage adapters (postgres) require UUID event ids.
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.LAGGING_PROMOTION,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: finding.lagBytes,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: 0,
+      message:
+        `WARNING: This node was promoted to primary while sibling replica '${aheadName}' was ` +
+        `${finding.lagBytes} bytes ahead in the replication stream (offset ${finding.aheadOffset} vs ` +
+        `${finding.promotedOffset}). An uncoordinated REPLICAOF NO ONE promotes a possibly-lagging ` +
+        `replica, so those writes are lost and the more up-to-date replica must full-resync down to ` +
+        `this node (valkey#2587). Prefer a coordinated FAILOVER, or promote the most up-to-date replica.`,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    await this.addAnomaly(event, ctx);
   }
 
   /**
@@ -2462,6 +2814,140 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     } catch (stuckErr) {
       this.logger.debug(
         `Failed to check stuck replicas for ${ctx.connectionName}: ${stuckErr instanceof Error ? stuckErr.message : stuckErr}`,
+      );
+    }
+  }
+
+  /**
+   * How long a hostname-staleness finding (valkey#304) must persist before it
+   * is alerted, to exclude the transient gossip-convergence window of a
+   * normal node join/restart or a `cluster-announce-hostname` rollout. A
+   * healthy convergence settles within roughly a cluster-node-timeout; a
+   * genuinely stuck/inconsistent node stays that way indefinitely.
+   */
+  private static readonly HOSTNAME_STALENESS_MIN_PERSIST_MS = 30_000;
+
+  /**
+   * Detects hostname info that is missing (while peers have one) or
+   * inconsistent between `CLUSTER NODES` and `CLUSTER SHARDS` for the same
+   * node (valkey-io/valkey#304). This typically self-heals once gossip
+   * converges — TLS-SNI clients and hostname-keyed routing can fail in the
+   * meantime — so we emit a WARNING only once the condition has persisted
+   * past the convergence grace window, deduped per (node, reason), and
+   * cleared on recovery so a resolved-then-recurring case alerts again.
+   */
+  private async detectHostnameStaleness(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+    shards: ClusterShard[] | undefined,
+  ): Promise<void> {
+    try {
+      await this.applyTopologyPersistenceGate({
+        ctx,
+        timestamp,
+        findings: detectHostnameStaleness(nodes, shards),
+        signatureOf: hostnameStalenessSignature,
+        firstSeenByConn: this.hostnameStalenessFirstSeen,
+        activeByConn: this.activeHostnameStaleness,
+        minPersistMs: AnomalyService.HOSTNAME_STALENESS_MIN_PERSIST_MS,
+        buildEvent: (f, signature) => {
+          const addr = this.clientAddress(f.address);
+          const message =
+            f.reason === 'missing_hostname'
+              ? `WARNING: Node ${addr} (${f.nodeId.substring(0, 8)}) has no announced hostname while other ` +
+                `nodes in the cluster view do — hostname gossip has not converged for this node ` +
+                `(valkey#304). TLS-SNI clients or hostname-keyed routing against this node may fail ` +
+                `until it propagates. This usually self-heals; investigate if it persists.`
+              : `WARNING: Node ${addr} (${f.nodeId.substring(0, 8)}) reports a different hostname in ` +
+                `CLUSTER NODES (${f.nodesHostname}) than in CLUSTER SHARDS (${f.shardsHostname}) — the two ` +
+                `views disagree about this node's hostname (valkey#304). TLS-SNI clients or hostname-keyed ` +
+                `routing may hit the wrong endpoint until this converges. This usually self-heals; ` +
+                `investigate if it persists.`;
+          return {
+            id: `${ctx.connectionId}-hostname-staleness-${signature}-${timestamp}`,
+            timestamp,
+            metricType: MetricType.HOSTNAME_STALENESS,
+            anomalyType: AnomalyType.SPIKE,
+            severity: AnomalySeverity.WARNING,
+            value: 1,
+            baseline: 0,
+            zScore: 0,
+            stdDev: 0,
+            threshold: 0,
+            message,
+            resolved: false,
+            connectionId: ctx.connectionId,
+          };
+        },
+      });
+    } catch (hostnameErr) {
+      this.logger.debug(
+        `Failed to check hostname staleness for ${ctx.connectionName}: ${hostnameErr instanceof Error ? hostnameErr.message : hostnameErr}`,
+      );
+    }
+  }
+
+  /**
+   * How long a ghost membership (valkey#1757) must persist before it is alerted,
+   * to exclude the transient re-MEET/handshake window of a normal node join or
+   * failover where an endpoint may briefly carry two ids. A real ghost — an old
+   * node-id peers never forgot after a reset — lingers indefinitely.
+   */
+  private static readonly GHOST_MEMBER_MIN_PERSIST_MS = 30_000;
+
+  /**
+   * Detects a ghost cluster member (valkey-io/valkey#1757) from this connection's
+   * `CLUSTER NODES` view: an endpoint claimed by a stale (`fail`/`fail?`/`noaddr`)
+   * node-id that peers never forgot after a `CLUSTER RESET`/restart, alongside the
+   * live id that now occupies it. Emits a WARNING once the ghost has persisted
+   * past the re-MEET grace window, dedupes per (endpoint, ids) signature, and
+   * clears state on recovery so a re-appearing ghost alerts again.
+   */
+  private async detectGhostMembers(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+  ): Promise<void> {
+    try {
+      await this.applyTopologyPersistenceGate({
+        ctx,
+        timestamp,
+        findings: detectGhostMembers(nodes),
+        signatureOf: ghostMemberSignature,
+        firstSeenByConn: this.ghostMemberFirstSeen,
+        activeByConn: this.activeGhostMembers,
+        minPersistMs: AnomalyService.GHOST_MEMBER_MIN_PERSIST_MS,
+        buildEvent: (g, signature) => {
+          const ghostLabel = g.ghostIds.map((id) => id.substring(0, 8)).join(', ');
+          const forgetCmds = g.ghostIds.map((id) => `CLUSTER FORGET ${id}`).join('; ');
+          const plural = g.ghostIds.length > 1;
+          return {
+            id: `${ctx.connectionId}-ghost-member-${signature}-${timestamp}`,
+            timestamp,
+            metricType: MetricType.GHOST_MEMBERSHIP,
+            anomalyType: AnomalyType.SPIKE,
+            severity: AnomalySeverity.WARNING,
+            value: g.ghostIds.length,
+            baseline: 0,
+            zScore: 0,
+            stdDev: 0,
+            threshold: 0,
+            message:
+              `WARNING: Endpoint ${g.endpoint} is now node ${g.liveId.substring(0, 8)}, but ` +
+              `stale node-id${plural ? 's' : ''} ${ghostLabel} still linger${plural ? '' : 's'} in the ` +
+              `cluster view. A CLUSTER RESET/restart does not make peers forget a node (valkey#1757), ` +
+              `so the old identity keeps re-joining and causing errors. Run \`${forgetCmds}\` on every ` +
+              `other node in the cluster — primaries AND replicas — to fully evict the ghost; any node ` +
+              `that still remembers it re-gossips it back after the 60s FORGET ban expires.`,
+            resolved: false,
+            connectionId: ctx.connectionId,
+          };
+        },
+      });
+    } catch (ghostErr) {
+      this.logger.debug(
+        `Failed to check ghost membership for ${ctx.connectionName}: ${ghostErr instanceof Error ? ghostErr.message : ghostErr}`,
       );
     }
   }
