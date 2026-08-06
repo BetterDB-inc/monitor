@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from '
 import { join } from 'path';
 import { Tier, Feature, TIER_FEATURES, EntitlementResponse, EntitlementRequest } from './types';
 import type { LicenseSource, LicenseTokenClaims } from './types';
-import type { VersionInfo } from '@betterdb/shared';
+import type { InstallMethod, VersionInfo } from '@betterdb/shared';
 import { TelemetryPort } from '@app/common/interfaces/telemetry-port.interface';
 import { verifyLicenseToken, claimsToEntitlement, LicenseTokenError } from './license-token.verifier';
 
@@ -80,6 +80,10 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   private latestVersion: string | null = null;
   private releaseUrl: string | null = null;
   private versionCheckedAt: number | null = null;
+  private installMethod: InstallMethod | null = null;
+
+  /** Full upgrade guide, surfaced in the update banner for every install method. */
+  private static readonly UPDATE_DOCS_URL = 'https://docs.betterdb.com/updating';
 
   constructor(
     private readonly config: ConfigService,
@@ -1204,6 +1208,7 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
    * Get full version info for API endpoint
    */
   getVersionInfo(): VersionInfo {
+    const installMethod = this.detectInstallMethod();
     return {
       current: this.currentVersion,
       latest: this.latestVersion,
@@ -1211,7 +1216,78 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       releaseUrl: this.releaseUrl,
       checkedAt: this.versionCheckedAt,
       versionCheckIntervalMs: this.versionCheckIntervalMs,
+      installMethod,
+      updateCommand: this.buildUpdateCommand(installMethod),
+      updateDocsUrl: LicenseService.UPDATE_DOCS_URL,
     };
+  }
+
+  /**
+   * Best-effort detection of how this instance was launched, so the update
+   * banner can offer the matching upgrade command.
+   *
+   * Container runtime wins over the package manager: a CLI started via npm
+   * *inside* a Docker image is upgraded by pulling a new image, not by
+   * `npm install -g`. Below that, npm/pnpm/yarn all advertise themselves in
+   * `npm_config_user_agent` ("<pm>/<ver> node/..."); npm 7+ additionally sets
+   * `npm_command=exec` for `npx`, which we surface as its own method because
+   * the upgrade command differs (re-run `npx …@latest`, no global install).
+   *
+   * Result is cached — the launch environment can't change at runtime.
+   */
+  private detectInstallMethod(): InstallMethod {
+    if (this.installMethod) return this.installMethod;
+
+    this.installMethod = this.resolveInstallMethod();
+    return this.installMethod;
+  }
+
+  private resolveInstallMethod(): InstallMethod {
+    const container = this.detectContainerRuntime();
+    if (container) return container; // 'kubernetes' | 'docker' | 'podman'
+
+    const userAgent = process.env.npm_config_user_agent || '';
+    const pm = userAgent.split('/')[0];
+
+    switch (pm) {
+      case 'npm':
+        // `npx` inherits npm's user agent; the exec command is what sets it apart.
+        return process.env.npm_command === 'exec' ? 'npx' : 'npm';
+      case 'pnpm':
+        return 'pnpm';
+      case 'yarn':
+        return 'yarn';
+      default:
+        return 'unknown';
+    }
+  }
+
+  /**
+   * The copy-paste upgrade command for a detected install method, or null when
+   * there's no single safe one-liner. Kubernetes and unknown installs are
+   * deployment-specific (image tag, deployment name, Helm values, a bare `git
+   * pull`, …) — guessing a command there risks handing the user something
+   * wrong, so we send them to the upgrade guide instead.
+   */
+  private buildUpdateCommand(method: InstallMethod): string | null {
+    switch (method) {
+      case 'docker':
+        return 'docker pull betterdb/monitor:latest';
+      case 'podman':
+        return 'podman pull betterdb/monitor:latest';
+      case 'npx':
+        return 'npx @betterdb/monitor@latest';
+      case 'npm':
+        return 'npm install -g @betterdb/monitor@latest';
+      case 'pnpm':
+        return 'pnpm add -g @betterdb/monitor@latest';
+      case 'yarn':
+        return 'yarn global add @betterdb/monitor@latest';
+      case 'kubernetes':
+      case 'unknown':
+      default:
+        return null;
+    }
   }
 
   /**
