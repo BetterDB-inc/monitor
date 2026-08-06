@@ -244,14 +244,33 @@ describe('LicenseService', () => {
         ['podman', 'podman pull betterdb/monitor:latest'],
         ['npx', 'npx @betterdb/monitor@latest'],
         ['npm', 'npm install -g @betterdb/monitor@latest'],
-        ['pnpm', 'pnpm add -g @betterdb/monitor@latest'],
-        ['yarn', 'yarn global add @betterdb/monitor@latest'],
+        // pnpm/yarn agents mean an ephemeral-runner launch, so we emit the
+        // re-run form rather than a global install.
+        ['pnpm', 'pnpm dlx @betterdb/monitor@latest'],
         ['kubernetes', null],
         ['unknown', null],
       ];
 
       it.each(cases)('maps %s to its upgrade command', (method, expected) => {
         expect((service as any).buildUpdateCommand(method)).toBe(expected);
+      });
+
+      it('uses `yarn dlx` for Berry (v2+) which dropped `yarn global`', () => {
+        (service as any).pmUserAgentVersion = '3.6.4';
+        expect((service as any).buildUpdateCommand('yarn')).toBe(
+          'yarn dlx @betterdb/monitor@latest',
+        );
+      });
+
+      it('uses `yarn global add` for Classic (v1) and unknown versions', () => {
+        (service as any).pmUserAgentVersion = '1.22.19';
+        expect((service as any).buildUpdateCommand('yarn')).toBe(
+          'yarn global add @betterdb/monitor@latest',
+        );
+        (service as any).pmUserAgentVersion = null;
+        expect((service as any).buildUpdateCommand('yarn')).toBe(
+          'yarn global add @betterdb/monitor@latest',
+        );
       });
     });
   });

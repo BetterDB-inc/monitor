@@ -81,6 +81,9 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
   private releaseUrl: string | null = null;
   private versionCheckedAt: number | null = null;
   private installMethod: InstallMethod | null = null;
+  // Version token from npm_config_user_agent ("<pm>/<ver> …"), captured during
+  // detection so the yarn upgrade command can branch on Classic (v1) vs Berry (v2+).
+  private pmUserAgentVersion: string | null = null;
 
   /** Full upgrade guide, surfaced in the update banner for every install method. */
   private static readonly UPDATE_DOCS_URL = 'https://docs.betterdb.com/updating';
@@ -1247,7 +1250,9 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     if (container) return container; // 'kubernetes' | 'docker' | 'podman'
 
     const userAgent = process.env.npm_config_user_agent || '';
-    const pm = userAgent.split('/')[0];
+    const [pm, rest] = userAgent.split('/');
+    // "<pm>/<ver> node/…" — keep just the version token for the yarn branch.
+    this.pmUserAgentVersion = rest ? rest.split(' ')[0] : null;
 
     switch (pm) {
       case 'npm':
@@ -1268,6 +1273,12 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
    * deployment-specific (image tag, deployment name, Helm values, a bare `git
    * pull`, …) — guessing a command there risks handing the user something
    * wrong, so we send them to the upgrade guide instead.
+   *
+   * For the package managers we emit the RE-RUN form (`npx`/`dlx`), not a
+   * global install: a globally-installed binary launched directly sets no
+   * npm_config_user_agent (→ 'unknown'), so a detected pnpm/yarn agent always
+   * means the CLI was launched via that manager's ephemeral runner. Yarn Berry
+   * (v2+) additionally dropped `yarn global`, so yarn branches on its version.
    */
   private buildUpdateCommand(method: InstallMethod): string | null {
     switch (method) {
@@ -1280,9 +1291,15 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
       case 'npm':
         return 'npm install -g @betterdb/monitor@latest';
       case 'pnpm':
-        return 'pnpm add -g @betterdb/monitor@latest';
-      case 'yarn':
-        return 'yarn global add @betterdb/monitor@latest';
+        return 'pnpm dlx @betterdb/monitor@latest';
+      case 'yarn': {
+        // `yarn dlx` is Berry-only; Classic (v1) has no dlx but does have
+        // `yarn global add`. Unknown version falls back to the Classic form.
+        const major = parseInt(this.pmUserAgentVersion ?? '', 10);
+        return major >= 2
+          ? 'yarn dlx @betterdb/monitor@latest'
+          : 'yarn global add @betterdb/monitor@latest';
+      }
       case 'kubernetes':
       case 'unknown':
       default:

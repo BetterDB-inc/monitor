@@ -74,26 +74,26 @@ podman pull betterdb/monitor:latest
 The CLI is published to npm as
 [`@betterdb/monitor`](https://www.npmjs.com/package/@betterdb/monitor).
 
-### npx (no install)
+### Ephemeral runners (npx / dlx)
 
-`npx` always resolves the latest published version, so re-running already picks
-up updates. Pin `@latest` to bypass any locally cached copy:
+If you launched the CLI with a runner, just re-run it with `@latest` — this is
+what the update banner suggests when it detects one. Pin `@latest` to bypass any
+locally cached copy:
 
 ```bash
-npx @betterdb/monitor@latest
+npx @betterdb/monitor@latest        # npm
+pnpm dlx @betterdb/monitor@latest   # pnpm
+yarn dlx @betterdb/monitor@latest   # Yarn Berry (v2+)
 ```
 
 ### Global install
 
+If you installed the CLI globally, upgrade it in place:
+
 ```bash
-# npm
-npm install -g @betterdb/monitor@latest
-
-# pnpm
-pnpm add -g @betterdb/monitor@latest
-
-# yarn
-yarn global add @betterdb/monitor@latest
+npm install -g @betterdb/monitor@latest    # npm
+pnpm add -g @betterdb/monitor@latest       # pnpm
+yarn global add @betterdb/monitor@latest   # Yarn Classic (v1) — Berry dropped `yarn global`, use `yarn dlx` above
 ```
 
 Your configuration and stored data live in `~/.betterdb` (or `BETTERDB_DATA_DIR`)
