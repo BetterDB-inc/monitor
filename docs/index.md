@@ -24,6 +24,7 @@ Open [http://localhost:3001](http://localhost:3001) to access the dashboard.
 ## Documentation
 
 - [Configuration Reference](configuration) — Environment variables, Docker setup, and runtime settings
+- [Updating](updating) — How to upgrade to the latest version for each install method (Docker, CLI, Kubernetes)
 - [Prometheus Metrics](prometheus-metrics) — Metrics reference, PromQL queries, and alerting rules
 - [Anomaly Detection](anomaly-detection) — Understanding detection patterns and tuning sensitivity
 - [Valkey Features](valkey-features) — Valkey-specific capabilities like COMMANDLOG and SLOT-STATS
