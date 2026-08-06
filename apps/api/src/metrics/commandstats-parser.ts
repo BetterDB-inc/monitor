@@ -9,7 +9,7 @@ export interface CommandStatsSample {
   failedCalls: number;
 }
 
-function toNumber(raw: string | undefined): number {
+export function toNumber(raw: string | undefined): number {
   if (raw === undefined) {
     return 0;
   }

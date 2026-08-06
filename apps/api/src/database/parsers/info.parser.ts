@@ -10,6 +10,9 @@ export class InfoParser {
       if (!trimmedLine || trimmedLine.startsWith('#')) {
         if (trimmedLine.startsWith('# ')) {
           currentSection = trimmedLine.substring(2).toLowerCase();
+          // '__proto__' would hit the Object.prototype setter instead of
+          // creating an own property.
+          if (currentSection === '__proto__') continue;
           result[currentSection] = {};
         }
         continue;
@@ -20,6 +23,7 @@ export class InfoParser {
 
       const key = trimmedLine.substring(0, colonIndex);
       const value = trimmedLine.substring(colonIndex + 1);
+      if (key === '__proto__' || currentSection === '__proto__') continue;
 
       if (typeof result[currentSection] === 'object' && result[currentSection] !== null) {
         (result[currentSection] as Record<string, string>)[key] = value;
@@ -65,7 +69,9 @@ export class InfoParser {
       const eq = pair.indexOf('=');
       if (eq === -1) continue;
       const key = pair.slice(0, eq).trim();
-      if (!key) continue;
+      // '__proto__' would hit the Object.prototype setter instead of
+      // creating an own property.
+      if (!key || key === '__proto__') continue;
       result[key] = pair.slice(eq + 1).trim();
     }
     return result;

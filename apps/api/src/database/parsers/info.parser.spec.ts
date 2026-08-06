@@ -54,3 +54,22 @@ describe('InfoParser.parseKvLine', () => {
     expect(InfoParser.parseKvLine('', ',')).toEqual({});
   });
 });
+
+describe('InfoParser prototype-pollution guards', () => {
+  it('parseKvLine drops __proto__ field names', () => {
+    const result = InfoParser.parseKvLine('__proto__=x,keys=5', ',');
+
+    expect(result).toEqual({ keys: '5' });
+    expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+  });
+
+  it('parse drops __proto__ section headers and keys', () => {
+    const result = InfoParser.parse(
+      '# __proto__\r\npolluted:1\r\n\r\n# Keyspace\r\n__proto__:x\r\ndb0:keys=1,expires=0,avg_ttl=0\r\n',
+    );
+
+    expect(result).toEqual({ keyspace: { db0: 'keys=1,expires=0,avg_ttl=0' } });
+    expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+    expect((Object.prototype as Record<string, unknown>).polluted).toBeUndefined();
+  });
+});

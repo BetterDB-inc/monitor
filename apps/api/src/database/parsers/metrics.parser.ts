@@ -1,5 +1,6 @@
 import {
   InfoResponse,
+  KeyspaceDbInfo,
   SlowLogEntry,
   CommandLogEntry,
   CommandLogType,
@@ -11,10 +12,96 @@ import {
   SlotStats,
 } from '../../common/types/metrics.types';
 import { InfoParser } from './info.parser';
+import { toNumber } from '../../metrics/commandstats-parser';
+
+/**
+ * Matches per-database keyspace keys (db0, db1, ...). Single definition of
+ * "what counts as a db entry" — consumers rely on parseInfoToTyped emitting
+ * typed objects for exactly these keys.
+ */
+export const KEYSPACE_DB_KEY = /^db\d+$/;
 
 export class MetricsParser {
   static parseInfoToTyped(info: Record<string, unknown>): InfoResponse {
-    return info as InfoResponse;
+    const result: Record<string, unknown> = { ...info };
+
+    if (info.keyspace) {
+      result.keyspace = this.parseKvSection(info.keyspace, (key) => KEYSPACE_DB_KEY.test(key), (fields) => {
+        const keys = Number(fields.keys);
+        // A db line without a numeric keys field is unparseable — keep the
+        // raw string so malformed input stays distinguishable from an empty
+        // database instead of masquerading as keys:0.
+        if (!Number.isFinite(keys)) return null;
+        const entry: KeyspaceDbInfo = {
+          keys,
+          expires: toNumber(fields.expires),
+          avg_ttl: toNumber(fields.avg_ttl),
+        };
+        // Preserve additional numeric fields (e.g. subexpiry on Redis 7.4+).
+        for (const [field, value] of Object.entries(fields)) {
+          if (field in entry) continue;
+          const n = Number(value);
+          if (Number.isFinite(n)) entry[field] = n;
+        }
+        return entry;
+      });
+    }
+
+    if (info.commandstats) {
+      result.commandstats = this.parseKvSection(info.commandstats, (key) => key.startsWith('cmdstat_'), (fields) => {
+        const calls = Number(fields.calls);
+        if (!Number.isFinite(calls)) return null;
+        const stat: {
+          calls: number;
+          usec: number;
+          usec_per_call: number;
+          rejected_calls?: number;
+          failed_calls?: number;
+        } = {
+          calls,
+          usec: toNumber(fields.usec),
+          usec_per_call: toNumber(fields.usec_per_call),
+        };
+        if (fields.rejected_calls !== undefined) stat.rejected_calls = toNumber(fields.rejected_calls);
+        if (fields.failed_calls !== undefined) stat.failed_calls = toNumber(fields.failed_calls);
+        return stat;
+      });
+    }
+
+    if (info.errorstats) {
+      result.errorstats = this.parseKvSection(info.errorstats, (key) => key.startsWith('errorstat_'), (fields) => {
+        const count = Number(fields.count);
+        return Number.isFinite(count) ? { count } : null;
+      });
+    }
+
+    return result as InfoResponse;
+  }
+
+  /**
+   * Converts a section's "k=v,k=v" string values (as produced by
+   * InfoParser.parse) into typed objects. Entries whose key doesn't match,
+   * whose value isn't a string, or that toTyped rejects (returns null) are
+   * passed through untouched, so the transform is idempotent and malformed
+   * lines survive as raw strings.
+   */
+  private static parseKvSection(
+    section: unknown,
+    keyMatches: (key: string) => boolean,
+    toTyped: (fields: Record<string, string>) => unknown | null,
+  ): unknown {
+    if (!section || typeof section !== 'object') return section;
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(section as Record<string, unknown>)) {
+      // Assigning this key would hit the Object.prototype setter instead of
+      // creating an own property.
+      if (key === '__proto__') continue;
+      out[key] =
+        keyMatches(key) && typeof val === 'string'
+          ? (toTyped(InfoParser.parseKvLine(val, ',')) ?? val)
+          : val;
+    }
+    return out;
   }
 
   static parseSlowLog(rawEntries: unknown[]): SlowLogEntry[] {

@@ -103,7 +103,11 @@ export interface InfoResponse {
     used_cpu_sys: string;
     used_cpu_user: string;
   };
-  keyspace?: Record<string, string>;
+  // String values are non-db or unparseable keyspace lines passed through raw.
+  keyspace?: Record<
+    string,
+    { keys: number; expires: number; avg_ttl: number; [field: string]: number } | string
+  >;
 }
 
 export interface SlowLogEntry {

@@ -452,3 +452,122 @@ id=2 addr=127.0.0.1:12346 name=test2 age=20 idle=10 flags=N db=1 sub=0 psub=0 mu
     });
   });
 });
+
+describe('MetricsParser.parseInfoToTyped', () => {
+  it('parses keyspace db lines into typed objects', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      keyspace: {
+        db0: 'keys=568,expires=310,avg_ttl=7510966104',
+        db2: 'keys=12,expires=0,avg_ttl=0',
+      },
+    });
+
+    expect(result.keyspace).toEqual({
+      db0: { keys: 568, expires: 310, avg_ttl: 7510966104 },
+      db2: { keys: 12, expires: 0, avg_ttl: 0 },
+    });
+  });
+
+  it('parses commandstats lines, including optional rejected/failed calls', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      commandstats: {
+        cmdstat_get: 'calls=100,usec=500,usec_per_call=5.00',
+        cmdstat_set: 'calls=10,usec=90,usec_per_call=9.00,rejected_calls=1,failed_calls=2',
+      },
+    });
+
+    expect(result.commandstats).toEqual({
+      cmdstat_get: { calls: 100, usec: 500, usec_per_call: 5 },
+      cmdstat_set: { calls: 10, usec: 90, usec_per_call: 9, rejected_calls: 1, failed_calls: 2 },
+    });
+  });
+
+  it('parses errorstats lines', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      errorstats: { errorstat_ERR: 'count=3', errorstat_WRONGTYPE: 'count=1' },
+    });
+
+    expect(result.errorstats).toEqual({
+      errorstat_ERR: { count: 3 },
+      errorstat_WRONGTYPE: { count: 1 },
+    });
+  });
+
+  it('leaves scalar sections untouched as strings', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      stats: { keyspace_hits: '42', keyspace_misses: '7' },
+      replication: { role: 'master' },
+      cluster: { cluster_enabled: '1' },
+    });
+
+    expect(result.stats?.keyspace_hits).toBe('42');
+    expect(result.replication?.role).toBe('master');
+    expect(result.cluster?.cluster_enabled).toBe('1');
+  });
+
+  it('passes through non-matching keys and non-string values (idempotent)', () => {
+    const once = MetricsParser.parseInfoToTyped({
+      keyspace: { db0: 'keys=5,expires=1,avg_ttl=0', unrelated: 'not-a-db-line' },
+    });
+    const twice = MetricsParser.parseInfoToTyped(once as unknown as Record<string, unknown>);
+
+    expect(once.keyspace).toEqual({
+      db0: { keys: 5, expires: 1, avg_ttl: 0 },
+      unrelated: 'not-a-db-line',
+    });
+    expect(twice).toEqual(once);
+  });
+
+  it('keeps malformed db lines as raw strings instead of fabricating zeros', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      keyspace: { db0: 'keys=oops,expires=1', db1: 'garbage', db2: 'keys=7' },
+    });
+
+    expect(result.keyspace).toEqual({
+      db0: 'keys=oops,expires=1',
+      db1: 'garbage',
+      db2: { keys: 7, expires: 0, avg_ttl: 0 },
+    });
+  });
+
+  it('preserves additional numeric keyspace fields such as subexpiry', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      keyspace: { db0: 'keys=1,expires=0,avg_ttl=0,subexpiry=5' },
+    });
+
+    expect(result.keyspace).toEqual({
+      db0: { keys: 1, expires: 0, avg_ttl: 0, subexpiry: 5 },
+    });
+  });
+
+  it('rejects non-finite commandstats and keeps the raw line', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      commandstats: {
+        cmdstat_get: 'calls=Infinity,usec=1,usec_per_call=1.00',
+        cmdstat_set: 'calls=2,usec=Infinity,usec_per_call=NaN',
+      },
+    });
+
+    expect(result.commandstats).toEqual({
+      cmdstat_get: 'calls=Infinity,usec=1,usec_per_call=1.00',
+      cmdstat_set: { calls: 2, usec: 0, usec_per_call: 0 },
+    });
+  });
+
+  it('drops __proto__ section keys instead of touching the prototype', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      keyspace: { db0: 'keys=1,expires=0,avg_ttl=0', ['__proto__']: 'keys=99' },
+    });
+
+    expect(Object.keys(result.keyspace as object)).toEqual(['db0']);
+    expect(Object.getPrototypeOf(result.keyspace)).toBe(Object.prototype);
+  });
+
+  it('omits sections that are absent from the input', () => {
+    const result = MetricsParser.parseInfoToTyped({ stats: { keyspace_hits: '1' } });
+
+    expect(result.keyspace).toBeUndefined();
+    expect(result.commandstats).toBeUndefined();
+    expect(result.errorstats).toBeUndefined();
+  });
+});

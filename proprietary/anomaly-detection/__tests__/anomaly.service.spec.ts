@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { AnomalyService } from '../anomaly.service';
+import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
 import { SlowLogAnalyticsService } from '@app/slowlog-analytics/slowlog-analytics.service';
@@ -991,7 +992,12 @@ describe('AnomalyService', () => {
           master_repl_offset: opts.offset ?? '5000',
           connected_slaves: opts.connectedSlaves ?? '1',
         },
-        keyspace: opts.db0 !== undefined ? { db0: opts.db0 } : {},
+        // Run the fixture line through the real parser so these mocks always
+        // match the shape getInfoParsed actually emits.
+        keyspace:
+          opts.db0 !== undefined
+            ? MetricsParser.parseInfoToTyped({ keyspace: { db0: opts.db0 } }).keyspace
+            : {},
       });
     }
 
@@ -1327,22 +1333,22 @@ describe('AnomalyService', () => {
   });
 
   // ─── Keyspace key counting (shape robustness) ────────────────────────────
-  // InfoParser emits each keyspace db as a raw string ("keys=123,..."), but the
-  // KeyspaceInfo type declares an object ({ keys, expires, avg_ttl }). The count
-  // must be read off the typed INFO response (not the stringified flat record,
-  // which would collapse an object to "[object Object]") and handle both shapes.
+  // parseInfoToTyped emits each keyspace db* entry as a { keys, expires,
+  // avg_ttl } object; strings only appear for non-db or unparseable lines. The
+  // count must be read off the typed INFO response (not the stringified flat
+  // record, which would collapse an object to "[object Object]").
   describe('sumKeyspaceKeys', () => {
     const sum = (infoResponse: unknown): number => (service as any).sumKeyspaceKeys(infoResponse);
 
-    it('sums the string shape emitted by the real parser', () => {
+    it('sums the typed object shape emitted by the real parser', () => {
       expect(
-        sum({
+        sum(MetricsParser.parseInfoToTyped({
           keyspace: { db0: 'keys=150,expires=5,avg_ttl=0', db1: 'keys=42,expires=0,avg_ttl=0' },
-        }),
+        })),
       ).toBe(192);
     });
 
-    it('sums the typed object shape declared by KeyspaceInfo', () => {
+    it('sums pre-typed object values', () => {
       expect(
         sum({
           keyspace: {
@@ -1353,10 +1359,10 @@ describe('AnomalyService', () => {
       ).toBe(192);
     });
 
-    it('ignores non-db keys and returns 0 for an empty or missing keyspace', () => {
+    it('ignores raw-string values and returns 0 for an empty or missing keyspace', () => {
       expect(sum({ keyspace: {} })).toBe(0);
       expect(sum({})).toBe(0);
-      expect(sum({ keyspace: { note: 'keys=999' } })).toBe(0);
+      expect(sum({ keyspace: { note: 'keys=999', db0: 'garbage' } })).toBe(0);
     });
   });
 

@@ -240,12 +240,19 @@ export interface ModulesInfo {
   [key: string]: unknown;
 }
 
+export interface KeyspaceDbInfo {
+  keys: number;
+  expires: number;
+  avg_ttl: number;
+  // Additional numeric fields some server versions emit (e.g. subexpiry on
+  // Redis 7.4+) are preserved by the parser.
+  [field: string]: number;
+}
+
 export interface KeyspaceInfo {
-  [dbKey: string]: {
-    keys: number;
-    expires: number;
-    avg_ttl: number;
-  };
+  // A string value means the line was not a parseable db entry (non-db* key
+  // or malformed) and was passed through raw.
+  [dbKey: string]: KeyspaceDbInfo | string;
 }
 
 export interface ClusterInfo {
@@ -254,19 +261,23 @@ export interface ClusterInfo {
 }
 
 export interface CommandStatsInfo {
-  [commandKey: string]: {
-    calls: number;
-    usec: number;
-    usec_per_call: number;
-    rejected_calls?: number;
-    failed_calls?: number;
-  };
+  // A string value means the line was not a parseable cmdstat entry and was
+  // passed through raw.
+  [commandKey: string]:
+    | {
+        calls: number;
+        usec: number;
+        usec_per_call: number;
+        rejected_calls?: number;
+        failed_calls?: number;
+      }
+    | string;
 }
 
 export interface ErrorStatsInfo {
-  [errorKey: string]: {
-    count: number;
-  };
+  // A string value means the line was not a parseable errorstat entry and was
+  // passed through raw.
+  [errorKey: string]: { count: number } | string;
 }
 
 export interface LatencyStatsInfo {
