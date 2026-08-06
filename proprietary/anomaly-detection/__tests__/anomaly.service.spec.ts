@@ -924,6 +924,29 @@ describe('AnomalyService', () => {
       expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(0);
     });
 
+    it('re-arms when logging is disabled with lingering entries, so re-enabling alerts again', async () => {
+      dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+
+      await poll();
+      expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(1);
+      expect((service as any).activeLargeReplyOffenders.get('conn-1')?.size).toBeGreaterThan(0);
+
+      // Logging disabled server-side (threshold -1) while cached entries linger:
+      // the armed offender must be cleared, not left suppressing future alerts.
+      (service as any).largeReplyThresholdCache.set('conn-1', -1);
+      (service as any).largeReplyThresholdRecheck.set('conn-1', 5); // avoid a re-fetch
+      await poll();
+      expect((service as any).activeLargeReplyOffenders.get('conn-1')?.size ?? 0).toBe(0);
+
+      // Re-enabled — the same command must alert again, not stay deduped.
+      (service as any).largeReplyThresholdCache.set('conn-1', 8192);
+      (service as any).largeReplyThresholdRecheck.set('conn-1', 5);
+      await poll();
+      expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(2);
+    });
+
     it('gracefully no-ops when CONFIG GET fails', async () => {
       dbClient.getConfigValue = jest.fn().mockRejectedValue(new Error('NOPERM'));
       const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));

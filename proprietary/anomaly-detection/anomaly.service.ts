@@ -1298,7 +1298,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
       // Threshold unknown (never successfully fetched) or negative (large-reply
       // logging disabled server-side) — nothing meaningful to compare against.
-      if (thresholdBytes === null || thresholdBytes < 0) return;
+      // Clear any armed offenders too (as the empty-cache path does): cached
+      // LARGE-REPLY entries can linger after logging is disabled, so without
+      // this the re-arm reconcile below is skipped and prior command signatures
+      // stay armed — suppressing recurrence alerts if logging is later
+      // re-enabled, until a COMMANDLOG RESET or connection cleanup.
+      if (thresholdBytes === null || thresholdBytes < 0) {
+        if ((this.activeLargeReplyOffenders.get(ctx.connectionId)?.size ?? 0) > 0) {
+          this.activeLargeReplyOffenders.set(ctx.connectionId, new Set());
+        }
+        return;
+      }
 
       const entries: LargeReplyEntry[] = cachedEntries.map((e) => {
         return {
