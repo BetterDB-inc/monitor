@@ -138,6 +138,7 @@ export interface EntitlementRequest {
   instanceId: string;
   eventType: 'license_check' | 'telemetry_ping';
   stats?: Record<string, any>;
+  telemetryEnabled?: boolean;
   // Telemetry-specific fields (for telemetry_ping)
   version?: string;
   platform?: string;
