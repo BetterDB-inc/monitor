@@ -8,7 +8,6 @@ import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   WEBHOOK_EVENTS_ENTERPRISE_SERVICE,
 } from '@betterdb/shared';
-import { InfoParser } from '../database/parsers/info.parser';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
@@ -993,24 +992,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const newDbLabels = new Set<string>();
 
     for (const [dbKey, dbInfo] of Object.entries(info.keyspace as Record<string, unknown>)) {
-      const dbNumber = dbKey;
-      newDbLabels.add(dbNumber);
+      // parseInfoToTyped emits typed objects for db* entries; anything still
+      // a string is a non-db or unparseable line.
+      if (!dbInfo || typeof dbInfo !== 'object') continue;
+      newDbLabels.add(dbKey);
 
-      if (typeof dbInfo === 'string') {
-        const fields = InfoParser.parseKvLine(dbInfo, ',');
-        const keys = parseInt(fields.keys) || 0;
-        const expires = parseInt(fields.expires) || 0;
-        const avgTtl = parseInt(fields.avg_ttl) || 0;
-
-        this.dbKeys.labels(connLabel, dbNumber).set(keys);
-        this.dbKeysExpiring.labels(connLabel, dbNumber).set(expires);
-        this.dbAvgTtlSeconds.labels(connLabel, dbNumber).set(avgTtl / 1000);
-      } else {
-        const parsedInfo = dbInfo as { keys: number; expires: number; avg_ttl: number };
-        this.dbKeys.labels(connLabel, dbNumber).set(parsedInfo.keys || 0);
-        this.dbKeysExpiring.labels(connLabel, dbNumber).set(parsedInfo.expires || 0);
-        this.dbAvgTtlSeconds.labels(connLabel, dbNumber).set((parsedInfo.avg_ttl || 0) / 1000);
-      }
+      const parsedInfo = dbInfo as { keys: number; expires: number; avg_ttl: number };
+      this.dbKeys.labels(connLabel, dbKey).set(parsedInfo.keys || 0);
+      this.dbKeysExpiring.labels(connLabel, dbKey).set(parsedInfo.expires || 0);
+      this.dbAvgTtlSeconds.labels(connLabel, dbKey).set((parsedInfo.avg_ttl || 0) / 1000);
     }
 
     // Remove stale db labels for this connection

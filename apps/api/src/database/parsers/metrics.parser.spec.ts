@@ -518,15 +518,49 @@ describe('MetricsParser.parseInfoToTyped', () => {
     expect(twice).toEqual(once);
   });
 
-  it('defaults malformed or missing fields to 0', () => {
+  it('keeps malformed db lines as raw strings instead of fabricating zeros', () => {
     const result = MetricsParser.parseInfoToTyped({
-      keyspace: { db0: 'keys=oops,expires=', db1: 'garbage' },
+      keyspace: { db0: 'keys=oops,expires=1', db1: 'garbage', db2: 'keys=7' },
     });
 
     expect(result.keyspace).toEqual({
-      db0: { keys: 0, expires: 0, avg_ttl: 0 },
-      db1: { keys: 0, expires: 0, avg_ttl: 0 },
+      db0: 'keys=oops,expires=1',
+      db1: 'garbage',
+      db2: { keys: 7, expires: 0, avg_ttl: 0 },
     });
+  });
+
+  it('preserves additional numeric keyspace fields such as subexpiry', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      keyspace: { db0: 'keys=1,expires=0,avg_ttl=0,subexpiry=5' },
+    });
+
+    expect(result.keyspace).toEqual({
+      db0: { keys: 1, expires: 0, avg_ttl: 0, subexpiry: 5 },
+    });
+  });
+
+  it('rejects non-finite commandstats and keeps the raw line', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      commandstats: {
+        cmdstat_get: 'calls=Infinity,usec=1,usec_per_call=1.00',
+        cmdstat_set: 'calls=2,usec=Infinity,usec_per_call=NaN',
+      },
+    });
+
+    expect(result.commandstats).toEqual({
+      cmdstat_get: 'calls=Infinity,usec=1,usec_per_call=1.00',
+      cmdstat_set: { calls: 2, usec: 0, usec_per_call: 0 },
+    });
+  });
+
+  it('drops __proto__ section keys instead of touching the prototype', () => {
+    const result = MetricsParser.parseInfoToTyped({
+      keyspace: { db0: 'keys=1,expires=0,avg_ttl=0', ['__proto__']: 'keys=99' },
+    });
+
+    expect(Object.keys(result.keyspace as object)).toEqual(['db0']);
+    expect(Object.getPrototypeOf(result.keyspace)).toBe(Object.prototype);
   });
 
   it('omits sections that are absent from the input', () => {

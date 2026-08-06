@@ -199,8 +199,10 @@ export class MetricsService {
     let keyspaceSize: number | null = null;
     if (keyspace) {
       keyspaceSize = 0;
-      for (const [key, val] of Object.entries(keyspace)) {
-        if (key.startsWith('db') && val && typeof val === 'object' && 'keys' in val) {
+      // parseInfoToTyped owns db-key matching: only db* entries are typed
+      // objects; non-db and unparseable lines stay raw strings.
+      for (const val of Object.values(keyspace)) {
+        if (val && typeof val === 'object' && 'keys' in val) {
           keyspaceSize += Number((val as { keys: number }).keys) || 0;
         }
       }
