@@ -1293,20 +1293,26 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
               }
             }),
           );
-          // MERGE freshly-read keys onto the last-known snapshot rather than
-          // replacing it, so a PARTIAL CONFIG GET failure (some keys succeed,
-          // some fail this poll) doesn't drop the keys that failed — dropping a
-          // drifted key from one node would make the mismatch momentarily vanish
-          // and then re-fire once that key's fetch recovers. A key that failed
-          // this poll simply retains its prior value; keys never seen stay
-          // absent. (An all-keys-failed poll therefore leaves the snapshot
-          // unchanged.)
-          const prior = this.configSnapshot.get(ctx.connectionId)?.config ?? {};
-          const config: Record<string, string> = { ...prior };
-          for (const entry of entries) {
-            if (entry) config[entry[0]] = entry[1];
-          }
-          if (Object.keys(config).length > 0) {
+          // Only touch the snapshot when we actually read at least one key this
+          // poll. An all-keys-failed poll must leave the snapshot ENTIRELY
+          // unchanged — including its groupKey: a failover often changes
+          // master_replid at the same time it triggers LOADING (which fails
+          // these reads), so rewriting groupKey from the current replid on a
+          // stale-config poll would move the node into a new replication group,
+          // clear the old drift signature, and re-fire the same mismatch as a
+          // brand-new alert.
+          const fetchedAny = entries.some((entry) => entry !== null);
+          if (fetchedAny) {
+            // MERGE freshly-read keys onto the last-known snapshot rather than
+            // replacing it, so a PARTIAL failure (some keys succeed, some fail)
+            // doesn't drop the keys that failed — a dropped drifted key would
+            // make the mismatch momentarily vanish and re-fire on recovery. A
+            // key that failed this poll retains its prior value.
+            const prior = this.configSnapshot.get(ctx.connectionId)?.config ?? {};
+            const config: Record<string, string> = { ...prior };
+            for (const entry of entries) {
+              if (entry) config[entry[0]] = entry[1];
+            }
             this.configSnapshot.set(ctx.connectionId, {
               groupKey: `replid:${replid}`,
               name: ctx.connectionName,

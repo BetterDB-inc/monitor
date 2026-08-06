@@ -2966,6 +2966,24 @@ describe('AnomalyService', () => {
       expect(driftEvents()).toHaveLength(1);
     });
 
+    it('does not move a node to a new group on an all-keys-failed poll (stale replid during failover)', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-fo', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-fo', config: { maxmemory: '2000000' } });
+      await poll(ctxA);
+      await poll(ctxB);
+      expect(driftEvents()).toHaveLength(1);
+
+      // conn-b's replid changes (failover) AND every config read fails (LOADING).
+      // The snapshot must keep its OLD groupKey rather than move conn-b onto
+      // replid-new with stale config, which would clear/re-fire the drift.
+      const ctxBFo = makeCtx('conn-b', { replid: 'replid-new', config: {} });
+      (ctxBFo.client.getConfigValues as jest.Mock).mockRejectedValue(new Error('LOADING'));
+      await poll(ctxBFo);
+
+      expect((service as any).configSnapshot.get('conn-b')?.groupKey).toBe('replid:replid-fo');
+      expect(driftEvents()).toHaveLength(1); // no new alert
+    });
+
     it('retains a key whose fetch fails while other keys succeed (partial CONFIG GET failure)', async () => {
       const ctxA = makeCtx('conn-a', { replid: 'replid-partial', config: { maxmemory: '1000000' } });
       const ctxB = makeCtx('conn-b', { replid: 'replid-partial', config: { maxmemory: '2000000' } });
