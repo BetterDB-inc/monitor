@@ -103,7 +103,7 @@ export interface InfoResponse {
     used_cpu_sys: string;
     used_cpu_user: string;
   };
-  keyspace?: Record<string, string>;
+  keyspace?: Record<string, { keys: number; expires: number; avg_ttl: number }>;
 }
 
 export interface SlowLogEntry {

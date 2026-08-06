@@ -194,8 +194,11 @@ export class MetricsService {
       replicationLag = lastIo >= 0 ? lastIo : null;
     }
 
-    let keyspaceSize = 0;
+    // null when the keyspace section is absent, so "no data" and "empty
+    // database" stay distinguishable downstream (issue #360).
+    let keyspaceSize: number | null = null;
     if (keyspace) {
+      keyspaceSize = 0;
       for (const [key, val] of Object.entries(keyspace)) {
         if (key.startsWith('db') && val && typeof val === 'object' && 'keys' in val) {
           keyspaceSize += Number((val as { keys: number }).keys) || 0;

@@ -14,7 +14,62 @@ import { InfoParser } from './info.parser';
 
 export class MetricsParser {
   static parseInfoToTyped(info: Record<string, unknown>): InfoResponse {
-    return info as InfoResponse;
+    const result: Record<string, unknown> = { ...info };
+
+    if (info.keyspace) {
+      result.keyspace = this.parseKvSection(info.keyspace, (key) => /^db\d+$/.test(key), (fields) => ({
+        keys: Number(fields.keys) || 0,
+        expires: Number(fields.expires) || 0,
+        avg_ttl: Number(fields.avg_ttl) || 0,
+      }));
+    }
+
+    if (info.commandstats) {
+      result.commandstats = this.parseKvSection(info.commandstats, (key) => key.startsWith('cmdstat_'), (fields) => {
+        const stat: {
+          calls: number;
+          usec: number;
+          usec_per_call: number;
+          rejected_calls?: number;
+          failed_calls?: number;
+        } = {
+          calls: Number(fields.calls) || 0,
+          usec: Number(fields.usec) || 0,
+          usec_per_call: Number(fields.usec_per_call) || 0,
+        };
+        if (fields.rejected_calls !== undefined) stat.rejected_calls = Number(fields.rejected_calls) || 0;
+        if (fields.failed_calls !== undefined) stat.failed_calls = Number(fields.failed_calls) || 0;
+        return stat;
+      });
+    }
+
+    if (info.errorstats) {
+      result.errorstats = this.parseKvSection(info.errorstats, (key) => key.startsWith('errorstat_'), (fields) => ({
+        count: Number(fields.count) || 0,
+      }));
+    }
+
+    return result as InfoResponse;
+  }
+
+  /**
+   * Converts a section's "k=v,k=v" string values (as produced by
+   * InfoParser.parse) into typed objects. Entries whose key doesn't match
+   * or whose value isn't a string are passed through untouched, so the
+   * transform is idempotent and safe on already-parsed input.
+   */
+  private static parseKvSection(
+    section: unknown,
+    keyMatches: (key: string) => boolean,
+    toTyped: (fields: Record<string, string>) => unknown,
+  ): unknown {
+    if (!section || typeof section !== 'object') return section;
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(section as Record<string, unknown>)) {
+      out[key] =
+        keyMatches(key) && typeof val === 'string' ? toTyped(InfoParser.parseKvLine(val, ',')) : val;
+    }
+    return out;
   }
 
   static parseSlowLog(rawEntries: unknown[]): SlowLogEntry[] {

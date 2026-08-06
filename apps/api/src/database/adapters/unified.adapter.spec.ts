@@ -54,3 +54,20 @@ describe('UnifiedDatabaseAdapter.getInfo — Redis 6 / KeyDB compatibility', () 
     expect(info).toHaveBeenCalledWith();
   });
 });
+
+describe('UnifiedDatabaseAdapter.getInfoParsed', () => {
+  it('parses raw INFO keyspace lines into typed objects (issue #360)', async () => {
+    const { adapter } = makeAdapter(
+      () =>
+        `# Stats\r\nkeyspace_hits:42\r\n\r\n# Keyspace\r\ndb0:keys=568,expires=310,avg_ttl=7510966104\r\n`,
+    );
+
+    const result = await adapter.getInfoParsed();
+
+    expect(result.keyspace).toEqual({
+      db0: { keys: 568, expires: 310, avg_ttl: 7510966104 },
+    });
+    // Scalar sections stay strings.
+    expect(result.stats?.keyspace_hits).toBe('42');
+  });
+});
