@@ -95,7 +95,7 @@
       "langsmith": ">=0.6.0",
       "path-to-regexp@8": ">=8.4.0 <9",
       "picomatch@4": ">=4.0.4 <5",
-      "postcss": ">=8.5.10",
+      "postcss": ">=8.5.18",
       "protobufjs": ">=7.5.8 <8",
       "@protobufjs/utf8": ">=1.1.1",
       "qs": ">=6.15.2",
