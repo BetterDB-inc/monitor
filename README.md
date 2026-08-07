@@ -3,6 +3,7 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/betterdb/monitor)](https://hub.docker.com/r/betterdb/monitor)
 [![Docker Image Version](https://img.shields.io/docker/v/betterdb/monitor?sort=semver&label=docker)](https://hub.docker.com/r/betterdb/monitor/tags)
 [![npm](https://img.shields.io/npm/v/%40betterdb%2Fmonitor?label=npm)](https://www.npmjs.com/package/@betterdb/monitor)
+[![npm downloads](https://img.shields.io/npm/dm/%40betterdb%2Fmonitor)](https://www.npmjs.com/package/@betterdb/monitor)
 [![API Tests](https://github.com/betterdb-inc/monitor/actions/workflows/api-tests.yml/badge.svg)](https://github.com/betterdb-inc/monitor/actions/workflows/api-tests.yml)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20Commercial-blue)](LICENSE)
 [![Valkey](https://img.shields.io/badge/Valkey-8.x%20native-6a5acd)](https://valkey.io)
