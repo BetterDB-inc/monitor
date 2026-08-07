@@ -75,7 +75,7 @@
       "flatted": ">=3.4.2",
       "hono": ">=4.12.21",
       "react-router": ">=7.15.0",
-      "shell-quote": ">=1.8.4",
+      "shell-quote": ">=1.9.0",
       "handlebars": ">=4.7.9",
       "minimatch@<4": ">=3.1.4 <4",
       "rollup": ">=4.59.0",
