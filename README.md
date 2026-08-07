@@ -41,8 +41,8 @@ Two image variants are published, both multi-arch (`linux/amd64`, `linux/arm64`)
 
 | Tag | What it is |
 |-----|------------|
-| `latest`, `X.Y.Z` | Full image, including the optional local-LLM AI Helper (bring your own Ollama; disabled by default) |
-| `latest-no-ai`, `X.Y.Z-no-ai` | Slim build without local-LLM dependencies - every monitoring feature included |
+| `latest`, `X.Y.Z-no-ai` | Default image - every monitoring feature included, without the dependencies for the experimental local-LLM AI Helper |
+| `X.Y.Z` | Adds the experimental AI Helper (bring your own Ollama; disabled by default via `AI_ENABLED`) |
 
 See [Docker Production Deployment](#docker-production-deployment) for persistent storage, custom ports, licensing, and air-gapped setups.
 
@@ -255,7 +255,7 @@ For the full flow, verification precedence, and key-rotation runbook see
 ### Docker Image Details
 
 - **Base Image**: `node:20-alpine`
-- **Compressed size**: ~360MB (`-no-ai` variant) / ~640MB (full image with local-LLM dependencies)
+- **Compressed size**: ~360MB (`latest` / `-no-ai`) / ~640MB (versioned image with the experimental AI Helper's local-LLM dependencies)
 - **Platforms**: `linux/amd64`, `linux/arm64`
 - **Contains**: Backend API + Frontend static files (served by Fastify)
 - **Excluded**: SQLite support (use PostgreSQL or Memory storage)
