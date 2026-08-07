@@ -87,7 +87,7 @@
       "diff@4": ">=4.0.4 <5",
       "dompurify": ">=3.4.0",
       "effect": ">=3.20.0",
-      "fast-uri": ">=3.1.2 <4",
+      "fast-uri": ">=3.1.5 <4",
       "fast-xml-builder": ">=1.1.7",
       "form-data@4": ">=4.0.6 <5",
       "@hono/node-server": ">=1.19.13 <2",
