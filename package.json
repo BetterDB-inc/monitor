@@ -68,6 +68,7 @@
     },
     "overrides": {
       "@fastify/middie": "9.1.0",
+      "adm-zip": ">=0.6.0 <0.7.0",
       "fastify": "^5.7.2",
       "glob": "10.5.0",
       "lodash": "4.18.0",
