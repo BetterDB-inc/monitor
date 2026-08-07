@@ -63,14 +63,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
-          # latest=false: the default latest=auto flavor would add a `latest` tag to
-          # this build too, overwriting the with-AI image pushed above.
-          flavor: |
-            latest=false
           tags: |
             type=semver,pattern={{version}}-no-ai
             type=raw,value=${{ steps.version.outputs.version }}-no-ai,enable=${{ github.event_name == 'workflow_dispatch' }}
-            type=raw,value=latest-no-ai,enable=${{ github.ref == format('refs/tags/v{0}', steps.version.outputs.version) }}
 
       - name: Build and push (with AI)
         id: push-with-ai
