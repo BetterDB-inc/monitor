@@ -34,6 +34,7 @@ overrides:
   protobufjs: '>=7.5.8 <8'
   '@protobufjs/utf8': '>=1.1.1'
   qs: '>=6.15.2'
+  seroval: '>=1.5.3 <1.6.0'
   serialize-javascript: '>=7.0.5'
   smol-toml: '>=1.6.1'
   uuid@<11.1.1: '>=11.1.1 <12'
@@ -8608,10 +8609,10 @@ packages:
     resolution: {integrity: sha512-EAHqADIQondwRZIdeW2I636zgsODzoBDwb3PT/+7TLDWyw1Dy/Xv7iGUIEXXav7usHDE9HVhOU61irI3EnyyHA==}
     engines: {node: '>=10'}
     peerDependencies:
-      seroval: ^1.0
+      seroval: '>=1.5.3 <1.6.0'
 
-  seroval@1.5.0:
-    resolution: {integrity: sha512-OE4cvmJ1uSPrKorFIH9/w/Qwuvi/IMcGbv5RKgcJ/zjA/IohDLU6SVaxFN9FwajbP7nsX0dQqMDes1whk3y+yw==}
+  seroval@1.5.6:
+    resolution: {integrity: sha512-rVQVWjjSvlINzaQPZH5JFqsqEsIWdTxY3iJZCnTL/5gQbXIRooVZKI60tVCkOVfzcRPejboxO2t0P89dg5mQaA==}
     engines: {node: '>=10'}
 
   serve-static@2.2.1:
@@ -18224,11 +18225,11 @@ snapshots:
 
   serialize-javascript@7.0.5: {}
 
-  seroval-plugins@1.5.0(seroval@1.5.0):
+  seroval-plugins@1.5.0(seroval@1.5.6):
     dependencies:
-      seroval: 1.5.0
+      seroval: 1.5.6
 
-  seroval@1.5.0: {}
+  seroval@1.5.6: {}
 
   serve-static@2.2.1:
     dependencies:
@@ -18395,8 +18396,8 @@ snapshots:
   solid-js@1.9.11:
     dependencies:
       csstype: 3.2.3
-      seroval: 1.5.0
-      seroval-plugins: 1.5.0(seroval@1.5.0)
+      seroval: 1.5.6
+      seroval-plugins: 1.5.0(seroval@1.5.6)
 
   sonic-boom@4.2.1:
     dependencies:
