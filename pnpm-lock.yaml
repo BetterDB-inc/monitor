@@ -30,6 +30,8 @@ overrides:
   form-data@4: '>=4.0.6 <5'
   '@hono/node-server': '>=1.19.13 <2'
   ip-address: '>=10.3.1'
+  js-yaml@3: '>=3.15.0 <4'
+  js-yaml@4: '>=4.3.0 <5'
   langsmith: '>=0.6.0'
   path-to-regexp@8: '>=8.4.0 <9'
   picomatch@4: '>=4.0.4 <5'
@@ -7162,12 +7164,12 @@ packages:
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
 
-  js-yaml@3.14.2:
-    resolution: {integrity: sha512-PMSmkqxr106Xa156c2M265Z+FTrPl+oxd/rgOQy2tijQeK5TxQ43psO1ZCwhVOSdnn+RzkzlRz/eY4BgJBYVpg==}
+  js-yaml@3.15.1:
+    resolution: {integrity: sha512-S99WuO3HlhO3XN41EtYUNl9zzXjoJx7QvmipxsJVxtCBT0YHEFy+iOJhjSvrmV12nYhWpZaM8lPHkJm0yUMbag==}
     hasBin: true
 
-  js-yaml@4.1.1:
-    resolution: {integrity: sha512-qQKT4zQxXl8lLwBtHMWwaTcGfFOZviOJet3Oy/xmGk2gZH677CJM9EvtfdSkgWcATZhj/55JZ0rmy3myCT5lsA==}
+  js-yaml@4.3.1:
+    resolution: {integrity: sha512-CY6crGq313MX8GkwvB7tzgp99vjQxY1++5y10/BKN/GUfHqWaOGQMNZkBvqSzsZKWk/ijwHlWzzkLulsGHhjWQ==}
     hasBin: true
 
   jsep@1.4.0:
@@ -10960,7 +10962,7 @@ snapshots:
       camelcase: 5.3.1
       find-up: 4.1.0
       get-package-type: 0.1.0
-      js-yaml: 3.14.2
+      js-yaml: 3.15.1
       resolve-from: 5.0.0
 
   '@istanbuljs/schema@0.1.3': {}
@@ -11350,7 +11352,7 @@ snapshots:
       form-data: 4.0.6
       hpagent: 1.2.0
       isomorphic-ws: 5.0.0(ws@8.21.1)
-      js-yaml: 4.1.1
+      js-yaml: 4.3.1
       jsonpath-plus: 10.3.0
       node-fetch: 2.7.0
       openid-client: 6.8.2
@@ -11408,7 +11410,7 @@ snapshots:
       '@langchain/openai': 1.3.1(@langchain/core@1.1.36(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.2.0(@opentelemetry/api@1.9.0))(openai@6.34.0(ws@8.21.1)(zod@4.3.6))(ws@8.21.1))(ws@8.21.1)
       '@langchain/textsplitters': 1.0.1(@langchain/core@1.1.36(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.2.0(@opentelemetry/api@1.9.0))(openai@6.34.0(ws@8.21.1)(zod@4.3.6))(ws@8.21.1))
       handlebars: 4.7.9
-      js-yaml: 4.1.1
+      js-yaml: 4.3.1
       jsonpointer: 5.0.1
       openapi-types: 12.1.3
       uuid: 11.1.1
@@ -11433,7 +11435,7 @@ snapshots:
       binary-extensions: 2.3.0
       flat: 5.0.2
       ibm-cloud-sdk-core: 5.4.5
-      js-yaml: 4.1.1
+      js-yaml: 4.3.1
       langsmith: 0.7.6(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.2.0(@opentelemetry/api@1.9.0))(openai@6.34.0(ws@8.21.1)(zod@4.3.6))(ws@8.21.1)
       math-expression-evaluator: 2.0.7
       openai: 6.34.0(ws@8.21.1)(zod@4.3.6)
@@ -11802,7 +11804,7 @@ snapshots:
       '@nestjs/common': 11.1.17(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/core': 11.1.18(@nestjs/common@11.1.17(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/mapped-types': 2.1.0(@nestjs/common@11.1.17(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2))(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)
-      js-yaml: 4.1.1
+      js-yaml: 4.3.1
       lodash: 4.18.0
       path-to-regexp: 8.4.2
       reflect-metadata: 0.2.2
@@ -14739,7 +14741,7 @@ snapshots:
   cosmiconfig@8.3.6(typescript@5.9.3):
     dependencies:
       import-fresh: 3.3.1
-      js-yaml: 4.1.1
+      js-yaml: 4.3.1
       parse-json: 5.2.0
       path-type: 4.0.0
     optionalDependencies:
@@ -14749,7 +14751,7 @@ snapshots:
     dependencies:
       env-paths: 2.2.1
       import-fresh: 3.3.1
-      js-yaml: 4.1.1
+      js-yaml: 4.3.1
       parse-json: 5.2.0
     optionalDependencies:
       typescript: 5.9.3
@@ -16760,12 +16762,12 @@ snapshots:
 
   js-tokens@4.0.0: {}
 
-  js-yaml@3.14.2:
+  js-yaml@3.15.1:
     dependencies:
       argparse: 1.0.10
       esprima: 4.0.1
 
-  js-yaml@4.1.1:
+  js-yaml@4.3.1:
     dependencies:
       argparse: 2.0.1
 
