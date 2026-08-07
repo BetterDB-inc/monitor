@@ -16,7 +16,7 @@ BetterDB persists what Valkey throws away - slowlogs, command patterns, client a
 
 BetterDB is built by [BetterDB Inc.](https://betterdb.com), a public benefit company operating under the [OCV Open Charter](https://github.com/OpenCoreVentures/ocv-public-benefit-company).
 
-![BetterDB Monitor - Command Log with per-command durations, clients, and pattern analysis](docs/assets/readme-hero.png)
+![BetterDB Monitor - Key Analytics with per-type key size distribution histograms](docs/assets/readme-hero.png)
 
 ## Quick Start (Docker)
 
