@@ -94,7 +94,7 @@ The tab is a thin consumer of three backend pieces:
 | Historical snapshots | `GET /vector-search/indexes/:name/snapshots` | Persisted to `vector_index_snapshots` every 30 s, retained 7 days |
 | Command workload | `GET /metrics/commandstats/:command/history` | `CommandstatsPollerService`, 15 s, persisted to `command_stats_samples`, retained 7 days |
 
-Prometheus scraping is supported via `/prometheus/metrics` with these gauges, labelled by `connection` and `index`:
+Prometheus scraping is supported via `/api/prometheus/metrics` with these gauges, labelled by `connection` and `index`:
 
 - `betterdb_vector_index_docs`
 - `betterdb_vector_index_memory_bytes`

@@ -321,7 +321,7 @@ DB_TYPE=redis
 Check detected capabilities:
 
 ```http
-GET /health
+GET /api/health
 ```
 
 **Response**:
@@ -508,7 +508,7 @@ docker run -d \
 
 2. **Verify functionality**:
 ```bash
-curl http://localhost:3001/health
+curl http://localhost:3001/api/health
 ```
 
 Expected output:
@@ -576,7 +576,7 @@ DB_HOST=your-valkey-host
 
 4. **Verify upgraded capabilities**:
 ```bash
-curl http://localhost:3001/health
+curl http://localhost:3001/api/health
 ```
 
 Expected output:
@@ -661,7 +661,7 @@ redis-cli REPLICAOF valkey-host 6379
 
 3. **Verify**:
 ```bash
-curl http://localhost:3001/health
+curl http://localhost:3001/api/health
 # Should show type: "redis"
 ```
 
@@ -790,7 +790,7 @@ DB_TYPE=auto          # auto, valkey, or redis
 
 ```bash
 # Check what's available
-curl http://localhost:3001/health | jq '.database.capabilities'
+curl http://localhost:3001/api/health | jq '.database.capabilities'
 ```
 
 ### Testing Valkey-Specific Features

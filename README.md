@@ -1,234 +1,135 @@
 # BetterDB Monitor
 
-A monorepo application for monitoring Valkey/Redis databases with a NestJS backend and React frontend.
+[![Docker Pulls](https://img.shields.io/docker/pulls/betterdb/monitor)](https://hub.docker.com/r/betterdb/monitor)
+[![Docker Image Version](https://img.shields.io/docker/v/betterdb/monitor?sort=semver&label=docker)](https://hub.docker.com/r/betterdb/monitor/tags)
+[![npm](https://img.shields.io/npm/v/%40betterdb%2Fmonitor?label=npm)](https://www.npmjs.com/package/@betterdb/monitor)
+[![npm downloads](https://img.shields.io/npm/dm/%40betterdb%2Fmonitor)](https://www.npmjs.com/package/@betterdb/monitor)
+[![API Tests](https://github.com/betterdb-inc/monitor/actions/workflows/api-tests.yml/badge.svg)](https://github.com/betterdb-inc/monitor/actions/workflows/api-tests.yml)
+[![License](https://img.shields.io/badge/license-MIT%20%2B%20Commercial-blue)](LICENSE)
+[![Valkey](https://img.shields.io/badge/Valkey-8.x%20native-6a5acd)](https://valkey.io)
+[![Redis](https://img.shields.io/badge/Redis-6%2B%20compatible-d82c20)](https://redis.io)
+
+**The monitoring layer that Valkey deserves.**
+
+BetterDB persists what Valkey throws away - slowlogs, command patterns, client activity, anomaly signals - so you can debug what happened at 3am, not just what's happening now. Built for Valkey 8.x with native support for COMMANDLOG, CLUSTER SLOT-STATS, and per-thread I/O metrics. Redis 6+ compatible for everything else.
 
 [Website](https://betterdb.com) | [Docker Hub](https://hub.docker.com/r/betterdb/monitor) | [npm](https://www.npmjs.com/package/@betterdb/monitor) | [Documentation](https://docs.betterdb.com) | [Blog](https://betterdb.com/blog)
 
 BetterDB is built by [BetterDB Inc.](https://betterdb.com), a public benefit company operating under the [OCV Open Charter](https://github.com/OpenCoreVentures/ocv-public-benefit-company).
 
-## Project Structure
+![BetterDB Monitor - Key Analytics with per-type key size distribution histograms](docs/assets/readme-hero.png)
 
-```
-betterdb-monitor/
-├── apps/
-│   ├── api/                 # NestJS backend (Fastify)
-│   └── web/                 # React frontend (Vite)
-├── packages/                # Published packages (see below)
-├── docs/                    # Documentation site (Jekyll)
-├── docker-compose.yml       # Local Valkey (port 6380) and Redis (port 6382) for testing
-└── package.json             # Workspace root
-```
+## Quick Start (Docker)
 
-## Packages
-
-This monorepo ships several standalone packages. See [`packages/`](packages/) for the full list.
-
-### Caching
-
-| Package | Language | Registry |
-|---|---|---|
-| [`@betterdb/semantic-cache`](packages/semantic-cache) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/semantic-cache) |
-| [`betterdb-semantic-cache`](packages/semantic-cache-py) | Python | [PyPI](https://pypi.org/project/betterdb-semantic-cache/) |
-| [`@betterdb/agent-cache`](packages/agent-cache) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/agent-cache) |
-| [`betterdb-agent-cache`](packages/agent-cache-py) | Python | [PyPI](https://pypi.org/project/betterdb-agent-cache/) |
-
-### Tools
-
-| Package | Language | Registry |
-|---|---|---|
-| [`@betterdb/monitor`](packages/cli) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/monitor) |
-| [`@betterdb/mcp`](packages/mcp) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/mcp) |
-| [`@betterdb/agent`](packages/agent) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/agent) |
-
-### Benchmarking
-
-| Package | Language | Description |
-|---|---|---|
-| [`cache-benchmark`](packages/cache-benchmark) | Python | Replay harness for benchmarking semantic caches against public datasets |
-
-## Tech Stack
-
-### Backend
-- **NestJS** with Fastify adapter
-- **iovalkey** for Valkey/Redis connections
-- TypeScript with strict mode
-- Runs on port **3001**
-
-### Frontend
-- **React** with TypeScript
-- **Vite** for build tooling
-- **TailwindCSS** for styling
-- **Recharts** for data visualization
-- Runs on port **5173**
-
-### Monorepo
-- **pnpm workspaces** for dependency management
-- **Turborepo** for build orchestration
-
-## Quick Start
-
-### Prerequisites
-- Node.js >= 20.0.0
-- pnpm >= 9.0.0
-- Docker (for local Valkey or Redis instances)
-
-### Installation
-
-1. Install dependencies:
 ```bash
-pnpm install
+docker run -d --name betterdb -p 3001:3001 betterdb/monitor:latest
 ```
 
-2. Copy environment variables:
+Point your browser to `http://localhost:3001`. To monitor a specific instance:
+
 ```bash
-cp .env.example .env
+docker run -d \
+  --name betterdb \
+  -p 3001:3001 \
+  -e DB_HOST=your-valkey-host \
+  -e DB_PORT=6379 \
+  -e DB_PASSWORD=your-password \
+  betterdb/monitor:latest
 ```
 
-3. Start local database instances (Valkey on 6380, Redis on 6382):
-```bash
-pnpm docker:up
-```
+Two image variants are published, both multi-arch (`linux/amd64`, `linux/arm64`):
 
-To connect to Redis instead of Valkey, update `.env`:
-```env
-DB_PORT=6382
-```
+| Tag | What it is |
+|-----|------------|
+| `latest`, `X.Y.Z-no-ai` | Default image - every monitoring feature included, without the dependencies for the experimental local-LLM AI Helper |
+| `X.Y.Z` | Adds the experimental AI Helper (bring your own Ollama; disabled by default via `AI_ENABLED`) |
 
-4. Start development servers:
-```bash
-pnpm dev
-```
+See [Docker Production Deployment](#docker-production-deployment) for persistent storage, custom ports, licensing, and air-gapped setups.
 
-The application will be available at:
-- Frontend: http://localhost:5173
-- Backend API: http://localhost:3001
+## Quick Start (CLI)
 
-### Individual Commands
-
-Run only the API:
-```bash
-pnpm dev:api
-```
-
-Run only the web frontend:
-```bash
-pnpm dev:web
-```
-
-Stop Docker containers:
-```bash
-pnpm docker:down
-```
-
-Build for production:
-```bash
-pnpm build
-```
-
-## CLI Installation (npx)
-
-The easiest way to run BetterDB Monitor without Docker:
+Run BetterDB Monitor without Docker:
 
 ```bash
 npx @betterdb/monitor
 ```
 
-On first run, an interactive setup wizard will guide you through configuration:
-- Database connection (host, port, credentials)
-- Storage backend (SQLite, PostgreSQL, or in-memory)
-- Server port and other settings
-
-Configuration is saved to `~/.betterdb/config.json`.
-
-### Global Installation
+On first run, an interactive setup wizard guides you through database connection, storage backend (SQLite, PostgreSQL, or in-memory), and server settings. Configuration is saved to `~/.betterdb/config.json`.
 
 ```bash
-npm install -g @betterdb/monitor
-betterdb
+npm install -g @betterdb/monitor   # global install
+betterdb --setup                   # re-run setup wizard
+betterdb --port 8080               # override server port
+betterdb --db-host 1.2.3.4         # override database host
+betterdb --help                    # all options
 ```
 
-### CLI Options
+Requires Node.js >= 20.0.0 and a Valkey or Redis instance to monitor. For SQLite storage, also `npm install -g better-sqlite3`.
 
-```bash
-betterdb --setup           # Re-run setup wizard, then start server
-betterdb --port 8080       # Override server port
-betterdb --db-host 1.2.3.4 # Override database host
-betterdb --help            # Show all options
-```
+## What You Get
 
-### SQLite Storage (Optional)
+### See everything, keep everything
 
-To use SQLite storage with the CLI, install `better-sqlite3`:
+- **Historical analytics** - query slowlogs, command patterns, client activity, and latency across any time range. The data that used to disappear after a log rotation.
+- **COMMANDLOG support** - Valkey 8.1+ exclusive. Large requests and large replies, not just the slow ones.
+- **MONITOR capture sessions** - record real traffic on demand: live tail, filter, replay, export to JSON/CSV, and cross-reference against connection history.
+- **Hot key tracking** - top keys by access frequency with rank movement over time. Key Analytics (Pro, free in early access) adds type, TTL, and size distributions from live sampling.
+- **Cluster visibility** - topology graphs, SLOT-STATS heatmaps, per-slot CPU and key distribution.
+- **CPU & I/O thread metrics** - per-thread visibility that no Redis tool can provide.
+- **Client analytics** - see exactly which service is responsible for what, attributed by client name and pattern.
+- **ACL audit trail** - track who accessed what, persisted for compliance and post-incident debugging.
 
-```bash
-npm install -g better-sqlite3
-```
+### Understand and act
 
-### Requirements
+- **Anomaly detection** (Pro, free in early access) - automatic baseline learning with correlated events and plain-English diagnoses. 20+ detectors, no manual thresholds.
+- **Capacity forecasting** - projected time-to-ceiling for memory, ops/sec, CPU, and fragmentation.
+- **Webhooks** - HMAC-signed alert deliveries with retries and a full delivery log.
+- **Live migration** - move between Redis and Valkey with a three-phase analysis, execution, and validation workflow.
 
-- Node.js >= 20.0.0
-- A Valkey or Redis instance to monitor
+### Built for the AI era
 
----
+- **Vector search observability** - FT.SEARCH ops/sec and latency with per-index health for [valkey-search](https://github.com/valkey-io/valkey-search) and RediSearch. See [docs/vector-ai](docs/vector-ai/README.md).
+- **Inference latency** - p50/p95/p99 per index, with SLA breach alerts (Pro, free in early access).
+- **Semantic cache intelligence** (Pro, free in early access) - hit-rate health, similarity-threshold recommendations, and an approve/reject proposal workflow. Agent memory observability included.
+- **AI traces** - OTLP span waterfalls from your AI application, correlated with the live Valkey state underneath each request.
+
+### Plugs into everything
+
+- **MCP server** - 60 tools for Claude Code, Cursor, or any MCP client via [`@betterdb/mcp`](packages/mcp).
+- **Prometheus endpoint** - 100+ `betterdb_*` metrics. See [docs/prometheus-metrics.md](docs/prometheus-metrics.md).
+- **OpenTelemetry** - mirror metrics and events to any OTLP backend.
+- **REST API** - everything in the UI is an API call, documented via OpenAPI.
+
+## Access Your Data Your Way
+
+| Interface | Details |
+|-----------|---------|
+| Web UI | `http://localhost:3001` |
+| MCP server | `npx @betterdb/mcp` (stdio) - create a token under Settings → MCP Tokens |
+| Prometheus | `http://localhost:3001/api/prometheus/metrics` |
+| REST API (OpenAPI) | `http://localhost:3001/docs` |
+| Health check | `http://localhost:3001/api/health` |
+
+> **Note**: In production builds (Docker, CLI) API routes are served under the `/api` prefix. In local development (`pnpm dev`) there is no prefix - e.g. `http://localhost:3001/health`.
+
+## Supported Databases
+
+| Database | Minimum Version | Supported Features |
+|----------|----------------|-------------------|
+| **Valkey** | 8.0+ | All features including COMMANDLOG (8.1+) and CLUSTER SLOT-STATS |
+| **Redis** | 6+ | All features except the Valkey-exclusive COMMANDLOG and CLUSTER SLOT-STATS |
+
+The backend uses a unified adapter over the wire-compatible `iovalkey` client and auto-detects Valkey vs Redis from the `INFO` response (`DB_TYPE=auto`). Capabilities like COMMANDLOG and SLOT-STATS are detected per version, and the UI gracefully degrades when a feature isn't available.
+
+Managed services are supported too - guides for AWS ElastiCache, MemoryDB, Redis Cloud, and Upstash live in [docs/providers](docs/providers/), and [`@betterdb/agent`](packages/agent) reaches VPC-only instances over an outbound WebSocket.
 
 ## Docker Production Deployment
 
-### Building the Docker Image
-
-```bash
-pnpm docker:build
-```
-
-For multi-arch builds (AMD64 + ARM64), first set up buildx:
-
-```bash
-docker buildx create --name mybuilder --use --bootstrap
-```
-
-Then build:
-
-```bash
-pnpm docker:build:multiarch
-```
-
-### Running the Docker Container
-
-The Docker image contains only the monitoring application (backend + frontend). It requires:
+The Docker image contains the monitoring application (backend + frontend). It requires:
 1. A Valkey/Redis instance to monitor
 2. A PostgreSQL instance for data persistence (or use memory storage)
 
-#### Basic Run (Memory Storage)
-
-```bash
-docker run -d \
-  --name betterdb-monitor \
-  -p 3001:3001 \
-  -e DB_HOST=your-valkey-host \
-  -e DB_PORT=6379 \
-  -e DB_PASSWORD=your-password \
-  -e STORAGE_TYPE=memory \
-  betterdb/monitor
-```
-
-#### Run on Custom Port
-
-You can run the application on any port by setting the `PORT` environment variable with `-e PORT=<port>`:
-
-```bash
-docker run -d \
-  --name betterdb-monitor \
-  -p 8080:8080 \
-  -e PORT=8080 \
-  -e DB_HOST=your-valkey-host \
-  -e DB_PORT=6379 \
-  -e DB_PASSWORD=your-password \
-  -e STORAGE_TYPE=memory \
-  betterdb/monitor
-```
-
-**Note**: When not using `--network host`, make sure the `-p` flag port mapping matches the `PORT` environment variable (e.g., `-p 8080:8080 -e PORT=8080`).
-
-#### Run with PostgreSQL Storage
+### Run with PostgreSQL Storage
 
 ```bash
 docker run -d \
@@ -242,7 +143,20 @@ docker run -d \
   betterdb/monitor
 ```
 
-#### Run with Host Network (Access localhost services)
+### Run on Custom Port
+
+Set the `PORT` environment variable and match the `-p` mapping:
+
+```bash
+docker run -d \
+  --name betterdb-monitor \
+  -p 8080:8080 \
+  -e PORT=8080 \
+  -e DB_HOST=your-valkey-host \
+  betterdb/monitor
+```
+
+### Run with Host Network (Access localhost services)
 
 If your Valkey and PostgreSQL are running on the same host:
 
@@ -255,22 +169,6 @@ docker run -d \
   -e DB_PASSWORD=devpassword \
   -e STORAGE_TYPE=postgres \
   -e STORAGE_URL=postgresql://dev:devpass@localhost:5432/postgres \
-  betterdb/monitor
-```
-
-#### Auto-Remove Previous Container
-
-To automatically remove any existing container with the same name:
-
-```bash
-docker rm -f betterdb-monitor 2>/dev/null; docker run -d \
-  --name betterdb-monitor \
-  -p 3001:3001 \
-  -e DB_HOST=your-valkey-host \
-  -e DB_PORT=6379 \
-  -e DB_PASSWORD=your-password \
-  -e STORAGE_TYPE=postgres \
-  -e STORAGE_URL=postgresql://user:pass@postgres-host:5432/dbname \
   betterdb/monitor
 ```
 
@@ -293,41 +191,44 @@ docker rm -f betterdb-monitor 2>/dev/null; docker run -d \
 | `BETTERDB_OFFLINE_LICENSE_FILE` | No | - | Path to a signed offline license `.jwt` for **air-gapped** hosts (see below) |
 | `BETTERDB_OFFLINE_LICENSE` | No | - | Offline license token as an inline JWT string |
 | `BETTERDB_DATA_DIR` | No | `/app/data` | Directory for persisted license state (mount a writable volume) |
+| `BETTERDB_TELEMETRY` | No | `true` | Set `false` to disable anonymous telemetry |
+
+Full reference, including AI, OTLP export, webhook tuning, and health-gate thresholds: [docs/configuration.md](docs/configuration.md).
 
 ### Licensing & Air-Gapped Support
 
 BetterDB Monitor unlocks Pro/Enterprise features in one of two ways, depending on
 whether the host has internet access:
 
-- **Online license key** — set `BETTERDB_LICENSE_KEY`. The monitor validates it
+- **Online license key** - set `BETTERDB_LICENSE_KEY`. The monitor validates it
   against `betterdb.com` and caches a locally-verified **signed token**, so your
   tier keeps working through short outages and restarts.
-- **Offline / air-gapped license token** — for hosts with **no internet access at
+- **Offline / air-gapped license token** - for hosts with **no internet access at
   all** (see below).
 
 #### How air-gapped licensing works
 
 Every entitlement is a **signed RS256 JWT**. The monitor verifies it **locally**
-against public keys embedded in the image — it never has to reach a license server
+against public keys embedded in the image - it never has to reach a license server
 to trust a token. So an air-gapped host can run paid tiers with zero connectivity:
 
 1. On an internet-connected machine, sign in at
    [betterdb.com/account/licenses](https://www.betterdb.com/account/licenses) and
    **download your offline license token** (`.jwt`, Pro/Enterprise). It contains no
-   secrets and can't be tampered with — any edit breaks the signature.
+   secrets and can't be tampered with - any edit breaks the signature.
 2. Transfer it to the air-gapped host however you like (USB, config management, a
    Docker/Kubernetes secret mount).
 3. Provide it via `BETTERDB_OFFLINE_LICENSE_FILE` (path), `BETTERDB_OFFLINE_LICENSE`
-   (inline string), or paste it in the UI under **Settings → License → “Air-gapped
-   environment? Activate an offline license.”**
+   (inline string), or paste it in the UI under **Settings → License → "Air-gapped
+   environment? Activate an offline license."**
 
 When an offline token is configured and **no** `BETTERDB_LICENSE_KEY` is set, the
-monitor makes **zero outbound requests** — license checks, telemetry, and update
+monitor makes **zero outbound requests** - license checks, telemetry, and update
 pings are all disabled. It runs the granted tier until the token expires (perpetual
 licenses re-download yearly), then reverts to Community.
 
 ```bash
-# fully offline — no network required
+# fully offline - no network required
 docker volume create betterdb-data
 docker run --rm -v betterdb-data:/d alpine chown 1001:1001 /d   # volume writable by UID 1001 (one-time)
 
@@ -344,266 +245,118 @@ Verify with `GET /api/license/status` → `source: offline-token`, `mode: offlin
 
 > **Persistence:** mount a writable volume at `/app/data` so the offline license and
 > the online outage-grace token survive restarts. The container runs as **UID 1001**,
-> so a freshly-created volume must be `chown`ed to it (shown above) — otherwise
+> so a freshly-created volume must be `chown`ed to it (shown above) - otherwise
 > persistence fails with `EACCES … license.jwt`.
 
 For the full flow, verification precedence, and key-rotation runbook see
 **[Offline & Air-Gapped Licenses](docs/offline-licenses.md)** and the
 **[Configuration reference](docs/configuration.md#license-configuration)**.
 
-### Accessing the Application
-
-Once running, access the web interface at:
-- **Web UI**: `http://localhost:3001`
-- **Health Check**: `http://localhost:3001/health`
-- **Prometheus Metrics**: `http://localhost:3001/prometheus/metrics`
-
 ### Docker Image Details
 
 - **Base Image**: `node:20-alpine`
-- **Size**: ~188MB (optimized, no build tools)
+- **Compressed size**: ~360MB (`latest` / `-no-ai`) / ~640MB (versioned image with the experimental AI Helper's local-LLM dependencies)
 - **Platforms**: `linux/amd64`, `linux/arm64`
 - **Contains**: Backend API + Frontend static files (served by Fastify)
 - **Excluded**: SQLite support (use PostgreSQL or Memory storage)
 
-### Checking Container Logs
+### Container Operations
 
 ```bash
-docker logs -f betterdb-monitor
+docker logs -f betterdb-monitor        # follow logs
+docker stop betterdb-monitor           # stop
+docker rm betterdb-monitor             # remove
 ```
 
-### Stopping the Container
+## Storage Backends
 
-```bash
-docker stop betterdb-monitor
-docker rm betterdb-monitor
-```
+BetterDB Monitor persists audit trail, analytics, captures, and anomaly data to one of three backends:
 
-## Features
-
-### Current Features
-- Database connection health monitoring
-- Auto-detection of Valkey vs Redis
-- Version detection
-- Capability detection (Command Log, Slot Stats)
-- Auto-refresh every 5 seconds
-- Full Redis 6.x and 7.x support (85-90% feature parity with Valkey)
-- Graceful degradation for Valkey-only features
-
-### Vector / AI
-
-For deployments running RediSearch or [`valkey-search`](https://github.com/valkey-io/valkey-search), BetterDB ships a dedicated **Vector / AI** tab that surfaces FT.SEARCH ops/sec and average latency over time alongside per-index health (docs, records, deleted docs, indexing failures, backfill progress). Stale Prometheus labels are reconciled when indexes are dropped, and the tab hides automatically when the Search module isn't available. See [`docs/vector-ai/`](docs/vector-ai/README.md) for the full walkthrough and screenshots.
-
-### Supported Database Versions
-
-| Database | Minimum Version | Supported Features |
-|----------|----------------|-------------------|
-| **Valkey** | 8.0+ | All features including COMMANDLOG and CLUSTER SLOT-STATS |
-| **Redis** | 6.0+ | All features except COMMANDLOG and CLUSTER SLOT-STATS |
-
-### Feature Compatibility Matrix
-
-| Feature | Command | Valkey | Redis |
-|---------|---------|--------|-------|
-| Server Info | `INFO` | Yes | Yes |
-| Health Check | `PING` | Yes | Yes |
-| Slowlog | `SLOWLOG` | Yes | Yes (2.2+) |
-| Client List | `CLIENT LIST` | Yes | Yes (2.4+) |
-| Latency Monitor | `LATENCY` | Yes | Yes (2.8+) |
-| Memory Stats | `MEMORY STATS` | Yes | Yes (4.0+) |
-| ACL Log | `ACL LOG` | Yes | Yes (6.0+) |
-| Command Log | `COMMANDLOG` | Yes (8.1+) | No (Valkey-only) |
-| Cluster Slot Stats | `CLUSTER SLOT-STATS` | Yes (8.0+) | No (Valkey-only) |
-
-### Architecture Highlights
-
-**Unified Adapter Pattern**: The backend uses a unified `UnifiedDatabaseAdapter` that works seamlessly with both Valkey and Redis through the wire-compatible `iovalkey` client library.
-
-**Auto-detection**: The application automatically detects whether it's connecting to Valkey or Redis by inspecting the `INFO` response.
-
-**Capability Detection**: Features like Command Log (Valkey 8.1+) and Slot Stats (Valkey 8.0+) are automatically detected based on database type and version. The UI gracefully degrades when connecting to Redis, showing only supported features.
-
-**Graceful Degradation**: When connected to Redis, Valkey-specific features return clear error messages indicating they're not supported, while all shared features work identically.
+| Backend | Use case | Notes |
+|---------|----------|-------|
+| `memory` | Testing, ephemeral environments | Default in Docker; all data lost on restart |
+| `postgres` | Production | `STORAGE_TYPE=postgres` + `STORAGE_URL=postgresql://user:pass@host:port/db` |
+| `sqlite` | Local development / CLI | Not included in Docker production images; `STORAGE_SQLITE_FILEPATH` optional |
 
 ## Prometheus Metrics
 
-Metrics are exposed at `GET /prometheus/metrics` in Prometheus text format.
+Metrics are exposed at `GET /api/prometheus/metrics` in Prometheus text format: ACL audit, client connections, slowlog/commandlog patterns, memory, throughput, keyspace, replication, cluster slot stats, and Node.js runtime metrics - all prefixed `betterdb_`.
 
-### ACL Audit Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `betterdb_acl_denied` | gauge | - | Total ACL denied events captured |
-| `betterdb_acl_denied_by_reason` | gauge | `reason` | ACL denied events by reason |
-| `betterdb_acl_denied_by_user` | gauge | `username` | ACL denied events by username |
-
-### Client Connection Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `betterdb_client_connections_current` | gauge | - | Current number of client connections |
-| `betterdb_client_connections_peak` | gauge | - | Peak connections in retention period |
-| `betterdb_client_connections_by_name` | gauge | `client_name` | Current connections by client name |
-| `betterdb_client_connections_by_user` | gauge | `user` | Current connections by ACL user |
-
-### Slowlog Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `betterdb_slowlog_pattern_count` | gauge | `pattern` | Number of slow queries per pattern |
-| `betterdb_slowlog_pattern_avg_duration_us` | gauge | `pattern` | Average duration in microseconds per pattern |
-| `betterdb_slowlog_pattern_percentage` | gauge | `pattern` | Percentage of slow queries per pattern |
-
-### COMMANDLOG Metrics (Valkey 8.1+)
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `betterdb_commandlog_large_request` | gauge | - | Total large request entries |
-| `betterdb_commandlog_large_reply` | gauge | - | Total large reply entries |
-| `betterdb_commandlog_large_request_by_pattern` | gauge | `pattern` | Large request count by command pattern |
-| `betterdb_commandlog_large_reply_by_pattern` | gauge | `pattern` | Large reply count by command pattern |
-
-### Node.js Process Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `betterdb_process_cpu_user_seconds_total` | counter | - | Total user CPU time spent in seconds |
-| `betterdb_process_cpu_system_seconds_total` | counter | - | Total system CPU time spent in seconds |
-| `betterdb_process_cpu_seconds_total` | counter | - | Total user and system CPU time spent in seconds |
-| `betterdb_process_start_time_seconds` | gauge | - | Start time of the process since unix epoch in seconds |
-| `betterdb_process_resident_memory_bytes` | gauge | - | Resident memory size in bytes |
-| `betterdb_process_virtual_memory_bytes` | gauge | - | Virtual memory size in bytes |
-| `betterdb_process_heap_bytes` | gauge | - | Process heap size in bytes |
-| `betterdb_process_open_fds` | gauge | - | Number of open file descriptors |
-| `betterdb_process_max_fds` | gauge | - | Maximum number of open file descriptors |
-
-### Node.js Event Loop Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `betterdb_nodejs_eventloop_lag_seconds` | gauge | - | Lag of event loop in seconds |
-| `betterdb_nodejs_eventloop_lag_min_seconds` | gauge | - | Minimum recorded event loop delay |
-| `betterdb_nodejs_eventloop_lag_max_seconds` | gauge | - | Maximum recorded event loop delay |
-| `betterdb_nodejs_eventloop_lag_mean_seconds` | gauge | - | Mean of recorded event loop delays |
-| `betterdb_nodejs_eventloop_lag_stddev_seconds` | gauge | - | Standard deviation of recorded event loop delays |
-| `betterdb_nodejs_eventloop_lag_p50_seconds` | gauge | - | 50th percentile of recorded event loop delays |
-| `betterdb_nodejs_eventloop_lag_p90_seconds` | gauge | - | 90th percentile of recorded event loop delays |
-| `betterdb_nodejs_eventloop_lag_p99_seconds` | gauge | - | 99th percentile of recorded event loop delays |
-
-### Node.js Runtime Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `betterdb_nodejs_active_resources` | gauge | `type` | Active resources keeping the event loop alive |
-| `betterdb_nodejs_active_resources_total` | gauge | - | Total number of active resources |
-| `betterdb_nodejs_active_handles` | gauge | `type` | Active libuv handles by type |
-| `betterdb_nodejs_active_handles_total` | gauge | - | Total number of active handles |
-| `betterdb_nodejs_active_requests` | gauge | `type` | Active libuv requests by type |
-| `betterdb_nodejs_active_requests_total` | gauge | - | Total number of active requests |
-| `betterdb_nodejs_version_info` | gauge | `version`, `major`, `minor`, `patch` | Node.js version info |
-
-### Node.js Heap Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `betterdb_nodejs_heap_size_total_bytes` | gauge | - | Process heap size from Node.js in bytes |
-| `betterdb_nodejs_heap_size_used_bytes` | gauge | - | Process heap size used from Node.js in bytes |
-| `betterdb_nodejs_external_memory_bytes` | gauge | - | Node.js external memory size in bytes |
-| `betterdb_nodejs_heap_space_size_total_bytes` | gauge | `space` | Process heap space size total in bytes |
-| `betterdb_nodejs_heap_space_size_used_bytes` | gauge | `space` | Process heap space size used in bytes |
-| `betterdb_nodejs_heap_space_size_available_bytes` | gauge | `space` | Process heap space size available in bytes |
-
-### Node.js GC Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `betterdb_nodejs_gc_duration_seconds` | histogram | `kind` | Garbage collection duration (major, minor, incremental, weakcb) |
-
-## Configuration
-
-### Database Connection (Valkey/Redis)
-
-Edit `.env` to configure the Valkey/Redis database connection:
-
-```env
-DB_HOST=localhost
-DB_PORT=6379
-DB_USERNAME=default
-DB_PASSWORD=devpassword
-DB_TYPE=auto  # 'valkey' | 'redis' | 'auto'
+```yaml
+scrape_configs:
+  - job_name: 'betterdb-monitor'
+    metrics_path: '/api/prometheus/metrics'
+    static_configs:
+      - targets: ['your-monitor-host:3001']
 ```
 
-### Storage Backend
-
-BetterDB Monitor supports multiple storage backends for persisting audit trail and client analytics data:
-
-#### SQLite (Local Development Only)
-```bash
-STORAGE_TYPE=sqlite
-STORAGE_SQLITE_FILEPATH=./data/audit.db  # Optional, defaults to this path
-```
-- **Use Case**: Local development
-- **Pros**: No external database required, simple setup
-- **Cons**: Not available in Docker production builds
-- **Data Location**: `apps/api/data/audit.db`
-
-#### PostgreSQL (Recommended for Production)
-```bash
-STORAGE_TYPE=postgres
-STORAGE_URL=postgresql://username:password@host:port/database
-```
-- **Use Case**: Production and local development
-- **Pros**: Full relational database, better for production workloads
-- **Cons**: Requires PostgreSQL instance
-- **Example**: `postgresql://dev:devpass@localhost:5432/postgres`
-
-#### Memory (Testing/Ephemeral)
-```bash
-STORAGE_TYPE=memory
-```
-- **Use Case**: Testing, ephemeral environments
-- **Pros**: No persistence required, fast
-- **Cons**: All data lost on restart
-
-### Running Locally with Different Storage Backends
-
-#### With SQLite:
-```bash
-STORAGE_TYPE=sqlite \
-DB_HOST=localhost \
-DB_PORT=6380 \
-DB_PASSWORD=devpassword \
-pnpm dev:api
-```
-
-#### With PostgreSQL:
-```bash
-# Start PostgreSQL (if using docker-compose)
-docker compose up -d postgres
-
-# Run API with PostgreSQL
-STORAGE_TYPE=postgres \
-STORAGE_URL=postgresql://betterdb:devpassword@localhost:5432/betterdb \
-DB_HOST=localhost \
-DB_PORT=6380 \
-DB_PASSWORD=devpassword \
-pnpm dev:api
-```
-
-#### With Memory:
-```bash
-STORAGE_TYPE=memory \
-DB_HOST=localhost \
-DB_PORT=6380 \
-DB_PASSWORD=devpassword \
-pnpm dev:api
-```
+Full metric reference: [docs/prometheus-metrics.md](docs/prometheus-metrics.md) and [docs/prometheus-integration.md](docs/prometheus-integration.md).
 
 ## Development
 
-### Adding New Features
+### Project Structure
 
-The codebase is structured to make it easy to add new monitoring features:
+```
+betterdb-monitor/
+├── apps/
+│   ├── api/                 # NestJS backend (Fastify)
+│   └── web/                 # React frontend (Vite)
+├── packages/                # Published packages (see below)
+├── docs/                    # Documentation site (Jekyll)
+├── docker-compose.yml       # Local Valkey (port 6380) and Redis (port 6382) for testing
+└── package.json             # Workspace root
+```
+
+### Packages
+
+This monorepo ships several standalone packages. See [`packages/`](packages/) for the full list.
+
+| Package | Language | Registry |
+|---|---|---|
+| [`@betterdb/monitor`](packages/cli) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/monitor) |
+| [`@betterdb/mcp`](packages/mcp) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/mcp) |
+| [`@betterdb/agent`](packages/agent) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/agent) |
+| [`@betterdb/semantic-cache`](packages/semantic-cache) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/semantic-cache) |
+| [`betterdb-semantic-cache`](packages/semantic-cache-py) | Python | [PyPI](https://pypi.org/project/betterdb-semantic-cache/) |
+| [`@betterdb/agent-cache`](packages/agent-cache) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/agent-cache) |
+| [`betterdb-agent-cache`](packages/agent-cache-py) | Python | [PyPI](https://pypi.org/project/betterdb-agent-cache/) |
+| [`cache-benchmark`](packages/cache-benchmark) | Python | Replay harness for benchmarking semantic caches |
+
+### Tech Stack
+
+- **Backend**: NestJS with Fastify adapter, `iovalkey` for Valkey/Redis connections, TypeScript strict mode. Port **3001**.
+- **Frontend**: React + TypeScript, Vite, TailwindCSS, Recharts. Dev server on port **5173**.
+- **Monorepo**: pnpm workspaces + Turborepo.
+
+### Local Setup
+
+Prerequisites: Node.js >= 20.0.0, pnpm >= 9.0.0, Docker.
+
+```bash
+pnpm install
+cp .env.example .env
+pnpm docker:dev        # local Valkey (6380) and Redis (6382)
+pnpm dev               # web on :5173, api on :3001
+```
+
+To connect to Redis instead of Valkey, set `DB_PORT=6382` in `.env`.
+
+```bash
+pnpm dev:api           # API only
+pnpm dev:web           # frontend only
+pnpm docker:dev:down   # stop local databases
+pnpm build             # production build
+pnpm test              # API tests
+```
+
+Docker image builds:
+
+```bash
+pnpm docker:build      # local build
+pnpm docker:publish    # multi-arch build & push (requires buildx)
+```
+
+### Adding New Features
 
 1. Add new endpoints in `apps/api/src/`
 2. Add corresponding API calls in `apps/web/src/api/`
@@ -611,11 +364,11 @@ The codebase is structured to make it easy to add new monitoring features:
 
 ### Code Style
 
-- TypeScript strict mode is enabled
-- Explicit return types required on functions
-- No `any` types allowed
+- TypeScript strict mode, explicit return types, no `any`
 - ESLint + Prettier configured
 
 ## License
 
-MIT
+- Content under `docs/` is licensed under CC BY-SA 4.0.
+- Content under `proprietary/` is covered by a commercial license (see `proprietary/LICENSE`). These features are free during early access.
+- Everything else is [MIT](LICENSE).

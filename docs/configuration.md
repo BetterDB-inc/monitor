@@ -429,8 +429,8 @@ outbound requests, telemetry disabled. Verify with `GET /api/license/status`
 Once running, access the web interface at:
 
 - **Web UI**: `http://localhost:3001` (or your custom port)
-- **Health Check**: `http://localhost:3001/health`
-- **Prometheus Metrics**: `http://localhost:3001/prometheus/metrics`
+- **Health Check**: `http://localhost:3001/api/health`
+- **Prometheus Metrics**: `http://localhost:3001/api/prometheus/metrics`
 
 ## HTTP Endpoints
 
@@ -439,7 +439,7 @@ Once running, access the web interface at:
 | `/` | Web UI dashboard |
 | `/health` | Health check endpoint |
 | `/api` | Swagger/OpenAPI documentation |
-| `/prometheus/metrics` | Prometheus metrics endpoint |
+| `/api/prometheus/metrics` | Prometheus metrics endpoint |
 
 All API endpoints are prefixed with `/api` when accessed through the web server.
 
@@ -525,7 +525,7 @@ All API endpoints are prefixed with `/api` when accessed through the web server.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/prometheus/metrics` | GET | Prometheus-formatted metrics for scraping |
+| `/api/prometheus/metrics` | GET | Prometheus-formatted metrics for scraping |
 
 ## Runtime Settings
 
