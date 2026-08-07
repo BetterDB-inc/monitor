@@ -5,7 +5,7 @@ nav_order: 3
 
 # Prometheus Metrics Reference
 
-Complete reference for all metrics exposed by BetterDB Monitor at the `/prometheus/metrics` endpoint.
+Complete reference for all metrics exposed by BetterDB Monitor at the `/api/prometheus/metrics` endpoint.
 
 ## Table of Contents
 
@@ -38,7 +38,7 @@ Complete reference for all metrics exposed by BetterDB Monitor at the `/promethe
 BetterDB Monitor exposes Prometheus-compatible metrics at:
 
 ```
-GET /prometheus/metrics
+GET /api/prometheus/metrics
 Content-Type: text/plain; version=0.0.4; charset=utf-8
 ```
 
@@ -367,7 +367,7 @@ scrape_configs:
   - job_name: 'betterdb'
     static_configs:
       - targets: ['localhost:3001']
-    metrics_path: '/prometheus/metrics'
+    metrics_path: '/api/prometheus/metrics'
     scrape_interval: 15s
     scrape_timeout: 10s
 ```
@@ -384,7 +384,7 @@ scrape_configs:
         - 'betterdb-staging:3001'
         labels:
           env: 'production'
-    metrics_path: '/prometheus/metrics'
+    metrics_path: '/api/prometheus/metrics'
     scrape_interval: 15s
 ```
 
@@ -403,7 +403,7 @@ scrape_configs:
         action: replace
         target_label: __address__
         replacement: '${1}:3001'
-    metrics_path: '/prometheus/metrics'
+    metrics_path: '/api/prometheus/metrics'
     scrape_interval: 15s
 ```
 
@@ -658,7 +658,7 @@ If cardinality becomes an issue, consider:
 
 ### High Scrape Duration
 
-If `/prometheus/metrics` takes >1s to respond:
+If `/api/prometheus/metrics` takes >1s to respond:
 - Reduce slowlog analysis sample size (default: 128 entries)
 - Reduce cluster slot stats limit (default: 100 slots)
 - Increase scrape timeout in Prometheus config

@@ -817,7 +817,7 @@ scrape_configs:
   - job_name: 'betterdb'
     static_configs:
       - targets: ['betterdb:3001']
-    metrics_path: '/prometheus/metrics'
+    metrics_path: '/api/prometheus/metrics'
     scrape_interval: 15s
 ```
 
@@ -916,7 +916,7 @@ Create alerts directly in Grafana:
 **Check**:
 1. Buffer readiness: `GET /api/anomaly/buffers` - All buffers should show `isReady: true`
 2. Polling active: Check Prometheus `betterdb_polls_total` is incrementing
-3. Database connectivity: `GET /health` should show database healthy
+3. Database connectivity: `GET /api/health` should show database healthy
 4. Actual variance: Your workload may be very stable (low stddev)
 
 **Solution**: Artificially create load to test:
@@ -947,13 +947,13 @@ redis-benchmark -h localhost -p 6379 -c 500 -n 100000
 
 **Check**:
 1. Prometheus summary interval: Default 30s, configurable via `ANOMALY_PROMETHEUS_INTERVAL_MS`
-2. Check `/prometheus/metrics` endpoint directly
+2. Check `/api/prometheus/metrics` endpoint directly
 3. Verify Prometheus scrape config and target health
 
 **Solution**:
 ```bash
 # Check metrics directly
-curl http://localhost:3001/prometheus/metrics | grep anomaly
+curl http://localhost:3001/api/prometheus/metrics | grep anomaly
 
 # Check Prometheus targets
 http://prometheus:9090/targets

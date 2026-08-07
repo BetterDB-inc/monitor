@@ -75,7 +75,7 @@ Common issues and solutions for BetterDB Monitor.
 
 ### Metrics endpoint returns empty
 
-**Symptoms:** `/prometheus/metrics` returns minimal data.
+**Symptoms:** `/api/prometheus/metrics` returns minimal data.
 
 **Solutions:**
 1. Wait for first poll cycle (metrics populate after ~5 seconds)

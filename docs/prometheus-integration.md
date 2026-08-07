@@ -1,6 +1,6 @@
 # Prometheus Integration
 
-BetterDB exports metrics at `/prometheus/metrics`.
+BetterDB exports metrics at `/api/prometheus/metrics`.
 
 ## Anomaly Metrics
 
@@ -23,7 +23,7 @@ scrape_configs:
   - job_name: 'betterdb'
     static_configs:
       - targets: ['localhost:3001']
-    metrics_path: '/prometheus/metrics'
+    metrics_path: '/api/prometheus/metrics'
     scrape_interval: 15s
 ```
 
