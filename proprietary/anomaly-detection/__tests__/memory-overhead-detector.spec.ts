@@ -1,4 +1,5 @@
 import {
+  INVALID_SAMPLE_NOTE_STREAK,
   MemoryOverheadInput,
   OVERHEAD_CRIT_FRACTION,
   OVERHEAD_WARN_FRACTION,
@@ -36,11 +37,15 @@ describe('evaluateMemoryOverhead', () => {
    */
   function input(over: Partial<MemoryOverheadInput> = {}): MemoryOverheadInput {
     const overheadBytes = over.usedMemoryOverhead ?? startup + 100 * MB;
+    const datasetBytes = over.usedMemoryDataset ?? 250 * MB;
     return {
-      usedMemory: 300 * MB,
+      // A consistent INFO sample reports used_memory = dataset + overhead;
+      // tests craft an INconsistent one by overriding usedMemory directly.
+      usedMemory: datasetBytes + overheadBytes,
       usedMemoryOverhead: overheadBytes,
       usedMemoryStartup: startup,
-      usedMemoryDataset: 250 * MB,
+      usedMemoryDataset: datasetBytes,
+      usedMemoryDatasetPerc: null,
       maxmemory: MAXMEMORY,
       maxmemoryPolicy: 'allkeys-lru',
       components: components({ clientsNormal: overheadBytes - startup }),
@@ -274,5 +279,138 @@ describe('evaluateMemoryOverhead', () => {
     );
     expect(again).not.toBeNull();
     expect(again!.level).toBe('warning');
+  });
+
+  describe('underflow guard (valkey#1373)', () => {
+    /**
+     * A sample caught mid-underflow: overhead momentarily exceeds used_memory,
+     * so used_memory_dataset (used - overhead) wrapped toward 2^64. Overhead is
+     * ALSO above the warn fraction, so without the guard this would fire.
+     */
+    function underflowedInput(over: Partial<MemoryOverheadInput> = {}): MemoryOverheadInput {
+      return input({
+        usedMemory: 300 * MB,
+        usedMemoryOverhead: startup + 0.35 * MAXMEMORY,
+        usedMemoryDataset: 2 ** 64 - 1 * MB,
+        usedMemoryDatasetPerc: 6148914691236517,
+        ...over,
+      });
+    }
+
+    it('skips a sample where used_memory_overhead exceeds used_memory', () => {
+      const state = createMemoryOverheadState();
+      const finding = evaluateMemoryOverhead(state, underflowedInput());
+      expect(finding).toBeNull();
+    });
+
+    it('skips a sample where used_memory_dataset is implausibly larger than used_memory', () => {
+      const state = createMemoryOverheadState();
+      // Only the dataset field is absurd: overhead (35% of maxmemory) would
+      // fire a WARNING on its own, and overhead <= used_memory.
+      const finding = evaluateMemoryOverhead(
+        state,
+        input({
+          usedMemory: 500 * MB,
+          usedMemoryOverhead: startup + 0.35 * MAXMEMORY,
+          usedMemoryDataset: 2 ** 64 - 350 * MB,
+        }),
+      );
+      expect(finding).toBeNull();
+    });
+
+    it('skips a sample where used_memory_dataset_perc exceeds 100', () => {
+      const state = createMemoryOverheadState();
+      const finding = evaluateMemoryOverhead(
+        state,
+        input({
+          usedMemory: 500 * MB,
+          usedMemoryOverhead: startup + 0.35 * MAXMEMORY,
+          usedMemoryDatasetPerc: 250.9,
+        }),
+      );
+      expect(finding).toBeNull();
+    });
+
+    it('processes a normal sample exactly as before (perc present and sane)', () => {
+      const state = createMemoryOverheadState();
+      const finding = evaluateMemoryOverhead(
+        state,
+        input({ usedMemoryOverhead: startup + 0.35 * MAXMEMORY, usedMemoryDatasetPerc: 60.2 }),
+      );
+      expect(finding).not.toBeNull();
+      expect(finding!.level).toBe('warning');
+    });
+
+    it('does not re-arm acknowledged hysteresis from an invalid sample', () => {
+      const state = createMemoryOverheadState();
+      const warn = evaluateMemoryOverhead(
+        state,
+        input({ usedMemoryOverhead: startup + 0.35 * MAXMEMORY }),
+      );
+      acknowledgeMemoryOverheadFinding(state, warn!);
+      // Poisoned sample whose garbage readings would otherwise compute a 'none'
+      // level and lower ackedLevel: overhead > used_memory but only 2.5% of
+      // maxmemory. The guard must leave the state untouched.
+      expect(
+        evaluateMemoryOverhead(
+          state,
+          underflowedInput({
+            usedMemory: 10 * MB,
+            usedMemoryOverhead: startup + 20 * MB,
+            timestamp: base + 5_000,
+          }),
+        ),
+      ).toBeNull();
+      // Steady WARNING after the glitch: still acknowledged, so still quiet.
+      expect(
+        evaluateMemoryOverhead(
+          state,
+          input({ usedMemoryOverhead: startup + 0.35 * MAXMEMORY, timestamp: base + 10_000 }),
+        ),
+      ).toBeNull();
+    });
+
+    it('surfaces a persistent inconsistency as a low-severity note after a run of invalid samples', () => {
+      const state = createMemoryOverheadState();
+      let note = null;
+      for (let i = 0; i < INVALID_SAMPLE_NOTE_STREAK; i++) {
+        note = evaluateMemoryOverhead(state, underflowedInput({ timestamp: base + i * 5_000 }));
+        if (i < INVALID_SAMPLE_NOTE_STREAK - 1) {
+          expect(note).toBeNull();
+        }
+      }
+      expect(note).not.toBeNull();
+      expect(note!.level).toBe('info');
+      expect(note!.message).toContain('valkey#1373');
+      // Unacknowledged: re-produced next poll so a failed emit retries.
+      const retry = evaluateMemoryOverhead(state, underflowedInput({ timestamp: base + 100_000 }));
+      expect(retry).not.toBeNull();
+      expect(retry!.level).toBe('info');
+      acknowledgeMemoryOverheadFinding(state, retry!);
+      // Acknowledged: the continuing run stays quiet.
+      expect(
+        evaluateMemoryOverhead(state, underflowedInput({ timestamp: base + 105_000 })),
+      ).toBeNull();
+    });
+
+    it('a valid sample resets the invalid streak (and the note can fire again on a new run)', () => {
+      const state = createMemoryOverheadState();
+      for (let i = 0; i < INVALID_SAMPLE_NOTE_STREAK - 1; i++) {
+        expect(
+          evaluateMemoryOverhead(state, underflowedInput({ timestamp: base + i * 5_000 })),
+        ).toBeNull();
+      }
+      // A healthy quiet sample interrupts the run.
+      expect(
+        evaluateMemoryOverhead(
+          state,
+          input({ usedMemoryOverhead: startup + 0.1 * MAXMEMORY, timestamp: base + 50_000 }),
+        ),
+      ).toBeNull();
+      // One more invalid sample is a streak of 1, not INVALID_SAMPLE_NOTE_STREAK.
+      expect(
+        evaluateMemoryOverhead(state, underflowedInput({ timestamp: base + 55_000 })),
+      ).toBeNull();
+    });
   });
 });
