@@ -153,6 +153,36 @@ describe('detectOrphanedSlotKeys', () => {
     expect(finding).toBeNull();
   });
 
+  it('suppresses the dbsize surplus while an import is in flight', () => {
+    // Mid-reshard, keys land in IMPORTING slots that SLOT-STATS cannot report
+    // yet (the slot is not assigned until the handoff completes) — the surplus
+    // is arriving data, not a leak.
+    const finding = detectOrphanedSlotKeys(
+      input({
+        slotStats: slotStats({ '100': 4000 }),
+        dbsize: 4000 + 10 * ORPHANED_DBSIZE_DELTA_MIN_KEYS,
+        importingSlots: [9000],
+      }),
+    );
+    expect(finding).toBeNull();
+  });
+
+  it('does not suppress the dbsize surplus for migrating slots (still assigned and counted)', () => {
+    // A slot migrating AWAY stays assigned to this node until the handoff, so
+    // its keys are reported by SLOT-STATS — an unexplained surplus alongside
+    // it is still a leak.
+    const finding = detectOrphanedSlotKeys(
+      input({
+        slotStats: slotStats({ '100': 4000, '300': 250 }),
+        dbsize: 4250 + ORPHANED_DBSIZE_DELTA_MIN_KEYS,
+        migratingSlots: [300],
+      }),
+    );
+    expect(finding).not.toBeNull();
+    expect(finding!.reason).toBe('dbsize_delta');
+    expect(finding!.totalOrphanedKeys).toBe(ORPHANED_DBSIZE_DELTA_MIN_KEYS);
+  });
+
   it('prefers the explicit per-slot evidence over the dbsize surplus when both exist', () => {
     const finding = detectOrphanedSlotKeys(
       input({

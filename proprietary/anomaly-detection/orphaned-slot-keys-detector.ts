@@ -121,8 +121,17 @@ export function detectOrphanedSlotKeys(
   // On a real server the explicit path stays empty: CLUSTER SLOT-STATS only
   // reports slots ASSIGNED to the node, so leaked keys are invisible to it.
   // They still count in dbsize — a persistent surplus of dbsize over every
-  // reported slot's keys (owned and in-flight alike) IS the leak. The floor
-  // absorbs the write-race noise between the DBSIZE and SLOT-STATS reads.
+  // reported slot's keys IS the leak. The floor absorbs the write-race noise
+  // between the DBSIZE and SLOT-STATS reads.
+  //
+  // Suppressed while any slot is IMPORTING: arriving keys inflate dbsize
+  // before their slot is assigned (and thus reported), so a live reshard
+  // looks exactly like a leak until the handoff completes. MIGRATING slots
+  // need no such suppression — a slot stays assigned (and counted) on this
+  // node until its handoff.
+  if (input.importingSlots.length > 0) {
+    return null;
+  }
   if (input.dbsize !== null) {
     const invisibleKeys = input.dbsize - totalReportedKeys;
     if (invisibleKeys >= ORPHANED_DBSIZE_DELTA_MIN_KEYS) {
