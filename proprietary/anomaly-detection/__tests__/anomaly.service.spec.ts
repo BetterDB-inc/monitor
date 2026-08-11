@@ -809,7 +809,15 @@ describe('AnomalyService', () => {
     it('clears large-reply pressure state maps', async () => {
       dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
       commandLogAnalytics.getCachedEntries.mockReturnValue([
-        { id: 1, timestamp: 1000, duration: 20000, command: ['GET', 'k'], clientAddress: '', clientName: '', type: 'large-reply' },
+        {
+          id: 1,
+          timestamp: 1000,
+          duration: 20000,
+          command: ['GET', 'k'],
+          clientAddress: '',
+          clientName: '',
+          type: 'large-reply',
+        },
       ]);
       await poll(); // populates state
 
@@ -854,7 +862,9 @@ describe('AnomalyService', () => {
 
     it('emits a WARNING once a command crosses the threshold enough times', async () => {
       dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
-      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      const entries = Array.from({ length: 5 }, (_, i) =>
+        largeReplyEntry(['GET', `k${i}`], 20000, i + 1),
+      );
       commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
 
       await poll();
@@ -869,7 +879,9 @@ describe('AnomalyService', () => {
 
     it('does not re-emit on a subsequent poll for the same offending command (dedupe)', async () => {
       dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
-      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      const entries = Array.from({ length: 5 }, (_, i) =>
+        largeReplyEntry(['GET', `k${i}`], 20000, i + 1),
+      );
       commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
 
       await poll();
@@ -880,7 +892,9 @@ describe('AnomalyService', () => {
 
     it('re-arms and alerts again once the offender clears then recurs', async () => {
       dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
-      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      const entries = Array.from({ length: 5 }, (_, i) =>
+        largeReplyEntry(['GET', `k${i}`], 20000, i + 1),
+      );
       commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
       await poll();
       expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(1);
@@ -907,7 +921,9 @@ describe('AnomalyService', () => {
 
     it('does not fire when replies are below the configured threshold', async () => {
       dbClient.getConfigValue = jest.fn().mockResolvedValue('20000');
-      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 8192, i + 1));
+      const entries = Array.from({ length: 5 }, (_, i) =>
+        largeReplyEntry(['GET', `k${i}`], 8192, i + 1),
+      );
       commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
 
       await poll();
@@ -917,7 +933,9 @@ describe('AnomalyService', () => {
 
     it('does not fire when large-reply logging is disabled (threshold -1)', async () => {
       dbClient.getConfigValue = jest.fn().mockResolvedValue('-1');
-      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      const entries = Array.from({ length: 5 }, (_, i) =>
+        largeReplyEntry(['GET', `k${i}`], 20000, i + 1),
+      );
       commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
 
       await poll();
@@ -927,7 +945,9 @@ describe('AnomalyService', () => {
 
     it('re-arms when logging is disabled with lingering entries, so re-enabling alerts again', async () => {
       dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
-      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      const entries = Array.from({ length: 5 }, (_, i) =>
+        largeReplyEntry(['GET', `k${i}`], 20000, i + 1),
+      );
       commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
 
       await poll();
@@ -950,7 +970,9 @@ describe('AnomalyService', () => {
 
     it('gracefully no-ops when CONFIG GET fails', async () => {
       dbClient.getConfigValue = jest.fn().mockRejectedValue(new Error('NOPERM'));
-      const entries = Array.from({ length: 5 }, (_, i) => largeReplyEntry(['GET', `k${i}`], 20000, i + 1));
+      const entries = Array.from({ length: 5 }, (_, i) =>
+        largeReplyEntry(['GET', `k${i}`], 20000, i + 1),
+      );
       commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
 
       await expect(poll()).resolves.not.toThrow();
@@ -1051,7 +1073,12 @@ describe('AnomalyService', () => {
       // (valkey#4078).
       webhookEventsProService.isEnabled.mockReturnValue(false);
 
-      mockReplInfo({ replid: 'replid-aaaa', uptime: '1000', offset: '5000', db0: 'keys=150,expires=0,avg_ttl=0' });
+      mockReplInfo({
+        replid: 'replid-aaaa',
+        uptime: '1000',
+        offset: '5000',
+        db0: 'keys=150,expires=0,avg_ttl=0',
+      });
       await poll();
       mockReplInfo({ replid: 'replid-bbbb', uptime: '5', offset: '0' }); // empty keyspace
       await poll();
@@ -1342,9 +1369,11 @@ describe('AnomalyService', () => {
 
     it('sums the typed object shape emitted by the real parser', () => {
       expect(
-        sum(MetricsParser.parseInfoToTyped({
-          keyspace: { db0: 'keys=150,expires=5,avg_ttl=0', db1: 'keys=42,expires=0,avg_ttl=0' },
-        })),
+        sum(
+          MetricsParser.parseInfoToTyped({
+            keyspace: { db0: 'keys=150,expires=5,avg_ttl=0', db1: 'keys=42,expires=0,avg_ttl=0' },
+          }),
+        ),
       ).toBe(192);
     });
 
@@ -2412,23 +2441,76 @@ describe('AnomalyService', () => {
     });
 
     const healthyNodes = [
-      { id: 'primA', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
-      { id: 'repB', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'primA', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+      {
+        id: 'primA',
+        address: '10.0.0.1:6379@16379',
+        flags: ['myself', 'master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [[0, 16383]],
+      },
+      {
+        id: 'repB',
+        address: '10.0.0.2:6380@16380',
+        flags: ['slave'],
+        master: 'primA',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+      },
     ];
 
     // valkey#1664: repB (a replica) wrongly reports slot 42 in importing state.
     const badReplicaNodes = [
-      { id: 'primA', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
-      { id: 'repB', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'primA', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [], importingSlots: [{ slot: 42, sourceNodeId: 'primA' }] },
+      {
+        id: 'primA',
+        address: '10.0.0.1:6379@16379',
+        flags: ['myself', 'master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [[0, 16383]],
+      },
+      {
+        id: 'repB',
+        address: '10.0.0.2:6380@16380',
+        flags: ['slave'],
+        master: 'primA',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+        importingSlots: [{ slot: 42, sourceNodeId: 'primA' }],
+      },
     ];
 
     const shards = [
-      { slots: [[0, 16383]], nodes: [ { id: 'primA', role: 'master' }, { id: 'repB', role: 'replica' } ] },
+      {
+        slots: [[0, 16383]],
+        nodes: [
+          { id: 'primA', role: 'master' },
+          { id: 'repB', role: 'replica' },
+        ],
+      },
     ];
     // CLUSTER SHARDS disagrees with CLUSTER NODES: repB is actually a master
     // (mid-promotion), so its slot state is legitimate and must not alert.
     const shardsRepBIsMaster = [
-      { slots: [[0, 16383]], nodes: [ { id: 'primA', role: 'replica' }, { id: 'repB', role: 'master' } ] },
+      {
+        slots: [[0, 16383]],
+        nodes: [
+          { id: 'primA', role: 'replica' },
+          { id: 'repB', role: 'master' },
+        ],
+      },
     ];
 
     const slotEvents = () =>
@@ -2634,8 +2716,28 @@ describe('AnomalyService', () => {
     it('fan-out trusts the node self-reported role, so a stale-promoted primary is not flagged', async () => {
       // The connected node's gossip view still calls bbbbbbbb a replica (stale).
       const primaryView = [
-        { id: 'aaaaaaaa', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 8191]] },
-        { id: 'bbbbbbbb', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'aaaaaaaa', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+        {
+          id: 'aaaaaaaa',
+          address: '10.0.0.1:6379@16379',
+          flags: ['myself', 'master'],
+          master: '',
+          pingSent: 0,
+          pongReceived: 0,
+          configEpoch: 1,
+          linkState: 'connected',
+          slots: [[0, 8191]],
+        },
+        {
+          id: 'bbbbbbbb',
+          address: '10.0.0.2:6380@16380',
+          flags: ['slave'],
+          master: 'aaaaaaaa',
+          pingSent: 0,
+          pongReceived: 0,
+          configEpoch: 1,
+          linkState: 'connected',
+          slots: [],
+        },
       ];
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(primaryView);
       dbClient.getClusterShards = jest.fn().mockResolvedValue([
@@ -2660,12 +2762,38 @@ describe('AnomalyService', () => {
 
     it('fan-out skips replicas flagged dead/unreachable (no wasted connect attempts)', async () => {
       const primaryView = [
-        { id: 'aaaaaaaa', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
-        { id: 'bbbbbbbb', address: '10.0.0.2:6380@16380', flags: ['slave', 'fail'], master: 'aaaaaaaa', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'disconnected', slots: [] },
+        {
+          id: 'aaaaaaaa',
+          address: '10.0.0.1:6379@16379',
+          flags: ['myself', 'master'],
+          master: '',
+          pingSent: 0,
+          pongReceived: 0,
+          configEpoch: 1,
+          linkState: 'connected',
+          slots: [[0, 16383]],
+        },
+        {
+          id: 'bbbbbbbb',
+          address: '10.0.0.2:6380@16380',
+          flags: ['slave', 'fail'],
+          master: 'aaaaaaaa',
+          pingSent: 0,
+          pongReceived: 0,
+          configEpoch: 1,
+          linkState: 'disconnected',
+          slots: [],
+        },
       ];
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(primaryView);
       dbClient.getClusterShards = jest.fn().mockResolvedValue([
-        { slots: [[0, 16383]], nodes: [{ id: 'aaaaaaaa', role: 'master' }, { id: 'bbbbbbbb', role: 'replica' }] },
+        {
+          slots: [[0, 16383]],
+          nodes: [
+            { id: 'aaaaaaaa', role: 'master' },
+            { id: 'bbbbbbbb', role: 'replica' },
+          ],
+        },
       ]);
       const getNodeConnection = jest.fn().mockResolvedValue({ call: jest.fn() });
       (service as any).clusterDiscovery = { getNodeConnection };
@@ -2681,12 +2809,38 @@ describe('AnomalyService', () => {
       // The connected node (primary) view lists the replica with NO migration
       // markers — they are node-local. Fan-out queries the replica directly.
       const primaryView = [
-        { id: 'aaaaaaaa', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
-        { id: 'bbbbbbbb', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'aaaaaaaa', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+        {
+          id: 'aaaaaaaa',
+          address: '10.0.0.1:6379@16379',
+          flags: ['myself', 'master'],
+          master: '',
+          pingSent: 0,
+          pongReceived: 0,
+          configEpoch: 1,
+          linkState: 'connected',
+          slots: [[0, 16383]],
+        },
+        {
+          id: 'bbbbbbbb',
+          address: '10.0.0.2:6380@16380',
+          flags: ['slave'],
+          master: 'aaaaaaaa',
+          pingSent: 0,
+          pongReceived: 0,
+          configEpoch: 1,
+          linkState: 'connected',
+          slots: [],
+        },
       ];
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(primaryView);
       dbClient.getClusterShards = jest.fn().mockResolvedValue([
-        { slots: [[0, 16383]], nodes: [{ id: 'aaaaaaaa', role: 'master' }, { id: 'bbbbbbbb', role: 'replica' }] },
+        {
+          slots: [[0, 16383]],
+          nodes: [
+            { id: 'aaaaaaaa', role: 'master' },
+            { id: 'bbbbbbbb', role: 'replica' },
+          ],
+        },
       ]);
 
       // The replica's OWN CLUSTER NODES reply carries the importing marker on its
@@ -2711,11 +2865,37 @@ describe('AnomalyService', () => {
     // Shared stuck-replica fan-out fixture: primary view lists bbbbbbbb as a plain
     // replica (no node-local markers); the replica's own line carries IMPORTING.
     const stuckPrimaryView = [
-      { id: 'aaaaaaaa', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], master: '', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [[0, 16383]] },
-      { id: 'bbbbbbbb', address: '10.0.0.2:6380@16380', flags: ['slave'], master: 'aaaaaaaa', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] },
+      {
+        id: 'aaaaaaaa',
+        address: '10.0.0.1:6379@16379',
+        flags: ['myself', 'master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [[0, 16383]],
+      },
+      {
+        id: 'bbbbbbbb',
+        address: '10.0.0.2:6380@16380',
+        flags: ['slave'],
+        master: 'aaaaaaaa',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+      },
     ];
     const stuckShards = [
-      { slots: [[0, 16383]], nodes: [{ id: 'aaaaaaaa', role: 'master' }, { id: 'bbbbbbbb', role: 'replica' }] },
+      {
+        slots: [[0, 16383]],
+        nodes: [
+          { id: 'aaaaaaaa', role: 'master' },
+          { id: 'bbbbbbbb', role: 'replica' },
+        ],
+      },
     ];
     const stuckReplicaSelfView =
       'aaaaaaaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\n' +
@@ -2765,9 +2945,7 @@ describe('AnomalyService', () => {
       // E1 is evicted from the 1000-cap in-memory ring but is still unresolved in
       // the storage-backed feed.
       (service as any).recentAnomalies = [];
-      storage.getAnomalyEvents = jest
-        .fn()
-        .mockResolvedValue([{ id: eventId, resolved: false }]);
+      storage.getAnomalyEvents = jest.fn().mockResolvedValue([{ id: eventId, resolved: false }]);
 
       // Still stuck next poll: the dedupe must consult storage and reuse E1, not
       // emit a duplicate WARNING alongside the still-open stored row.
@@ -2778,6 +2956,134 @@ describe('AnomalyService', () => {
       );
       // No duplicate replica-slot event was emitted.
       expect(slotEvents()).toHaveLength(0);
+    });
+  });
+
+  // ─── Orphaned slot keys detection (valkey-io/valkey#539) ───────────────────
+  describe('orphaned slot keys detection (valkey#539)', () => {
+    const clusterInfoResponse = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    // Single primary owning 0-100; SLOT-STATS reports only owned slot 50
+    // (400 keys) while DBSIZE says 900 — a 500-key surplus no reported slot
+    // accounts for (the real-server valkey#539 shape).
+    const primaryNodes = [
+      {
+        id: 'primA',
+        address: '10.0.0.1:6379@16379',
+        flags: ['myself', 'master'],
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [[0, 100]],
+      },
+    ];
+
+    const ownedSlotStats = {
+      '50': { key_count: 400, expires_count: 0, total_reads: 0, total_writes: 0 },
+    };
+
+    let now: number;
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(primaryNodes);
+      dbClient.getCapabilities = jest
+        .fn()
+        .mockReturnValue({ hasClusterSlotStats: true } as ReturnType<
+          DatabasePort['getCapabilities']
+        >);
+      dbClient.getClusterSlotStats = jest.fn().mockResolvedValue(ownedSlotStats);
+      dbClient.getDbSize = jest.fn().mockResolvedValue(900);
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const orphanEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.ORPHANED_SLOT_KEYS);
+
+    it('emits a WARNING once a dbsize surplus persists past the grace window', async () => {
+      await poll();
+      expect(orphanEvents()).toHaveLength(0);
+
+      now += 31_000;
+      await poll();
+
+      const events = orphanEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('539');
+    });
+
+    it('treats a failed DBSIZE as an observation gap, not recovery (no duplicate after blip)', async () => {
+      await poll();
+      now += 31_000;
+      await poll(); // fires
+      expect(orphanEvents()).toHaveLength(1);
+
+      now += 5_000;
+      (dbClient.getDbSize as jest.Mock).mockRejectedValue(new Error('DBSIZE failed'));
+      await poll(); // observation gap — must not read as recovery
+
+      (dbClient.getDbSize as jest.Mock).mockResolvedValue(900);
+      now += 5_000;
+      await poll(); // leak still present, must stay deduped
+      now += 31_000;
+      await poll(); // and must not re-fire after a fresh grace window either
+
+      expect(orphanEvents()).toHaveLength(1);
+    });
+
+    it('preserves the persistence clock across a DBSIZE blip', async () => {
+      await poll(); // t0: surplus observed, grace starts
+
+      now += 5_000;
+      (dbClient.getDbSize as jest.Mock).mockRejectedValue(new Error('DBSIZE failed'));
+      await poll(); // gap — must not reset the clock
+
+      (dbClient.getDbSize as jest.Mock).mockResolvedValue(900);
+      now += 26_000; // t0 + 31s
+      await poll();
+
+      expect(orphanEvents()).toHaveLength(1);
+    });
+
+    it('re-alerts when the surplus genuinely clears and later recurs', async () => {
+      await poll();
+      now += 31_000;
+      await poll(); // fires (1)
+
+      (dbClient.getDbSize as jest.Mock).mockResolvedValue(400);
+      now += 5_000;
+      await poll(); // genuine recovery → clears grace + dedupe
+
+      (dbClient.getDbSize as jest.Mock).mockResolvedValue(900);
+      now += 5_000;
+      await poll(); // recurs, fresh grace window → no alert yet
+      now += 31_000;
+      await poll(); // persisted again → fires (2)
+
+      expect(orphanEvents()).toHaveLength(2);
     });
   });
 
@@ -2836,7 +3142,11 @@ describe('AnomalyService', () => {
     const infoWith = (evicted: string, memClients = '1048576') => ({
       server: { role: 'master' },
       clients: { connected_clients: '10', blocked_clients: '0' },
-      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1', mem_clients_normal: memClients },
+      memory: {
+        used_memory: '1000000',
+        allocator_frag_ratio: '1.1',
+        mem_clients_normal: memClients,
+      },
       stats: {
         instantaneous_ops_per_sec: '100',
         instantaneous_input_kbps: '50',
@@ -3056,8 +3366,14 @@ describe('AnomalyService', () => {
     });
 
     it('does not alert across different groups even when values differ', async () => {
-      const ctxA = makeCtx('conn-a', { replid: 'replid-group-1', config: { maxmemory: '1000000' } });
-      const ctxB = makeCtx('conn-b', { replid: 'replid-group-2', config: { maxmemory: '2000000' } });
+      const ctxA = makeCtx('conn-a', {
+        replid: 'replid-group-1',
+        config: { maxmemory: '1000000' },
+      });
+      const ctxB = makeCtx('conn-b', {
+        replid: 'replid-group-2',
+        config: { maxmemory: '2000000' },
+      });
       await poll(ctxA);
       await poll(ctxB);
       expect(driftEvents()).toHaveLength(0);
@@ -3121,11 +3437,16 @@ describe('AnomalyService', () => {
 
       // conn-b hits a transient CONFIG GET failure → must NOT wipe its snapshot
       // (which would drop the drift and re-fire it once fetches recover).
-      const ctxBFail = makeCtx('conn-b', { replid: 'replid-blip', config: { maxmemory: '2000000' } });
+      const ctxBFail = makeCtx('conn-b', {
+        replid: 'replid-blip',
+        config: { maxmemory: '2000000' },
+      });
       (ctxBFail.client.getConfigValues as jest.Mock).mockRejectedValue(new Error('LOADING'));
       await poll(ctxBFail);
 
-      expect((service as any).configSnapshot.get('conn-b')?.config).toEqual({ maxmemory: '2000000' });
+      expect((service as any).configSnapshot.get('conn-b')?.config).toEqual({
+        maxmemory: '2000000',
+      });
       // Still exactly one alert — the drift never spuriously cleared/re-fired.
       expect(driftEvents()).toHaveLength(1);
     });
@@ -3149,8 +3470,14 @@ describe('AnomalyService', () => {
     });
 
     it('retains a key whose fetch fails while other keys succeed (partial CONFIG GET failure)', async () => {
-      const ctxA = makeCtx('conn-a', { replid: 'replid-partial', config: { maxmemory: '1000000' } });
-      const ctxB = makeCtx('conn-b', { replid: 'replid-partial', config: { maxmemory: '2000000' } });
+      const ctxA = makeCtx('conn-a', {
+        replid: 'replid-partial',
+        config: { maxmemory: '1000000' },
+      });
+      const ctxB = makeCtx('conn-b', {
+        replid: 'replid-partial',
+        config: { maxmemory: '2000000' },
+      });
       await poll(ctxA);
       await poll(ctxB);
       expect(driftEvents()).toHaveLength(1);
@@ -3158,7 +3485,10 @@ describe('AnomalyService', () => {
       // conn-b: maxmemory fetch fails this poll but appendonly succeeds. The
       // drifted maxmemory must be retained from the prior snapshot (merge, not
       // replace) so the mismatch does NOT vanish and re-fire.
-      const ctxBPartial = makeCtx('conn-b', { replid: 'replid-partial', config: { maxmemory: '2000000' } });
+      const ctxBPartial = makeCtx('conn-b', {
+        replid: 'replid-partial',
+        config: { maxmemory: '2000000' },
+      });
       (ctxBPartial.client.getConfigValues as jest.Mock).mockImplementation((pattern: string) =>
         pattern === 'maxmemory'
           ? Promise.reject(new Error('blip'))
@@ -3777,9 +4107,7 @@ describe('AnomalyService', () => {
     });
 
     const churnEvents = () => {
-      return service
-        .getRecentEvents()
-        .filter((e) => e.metricType === MetricType.FAILOVER_CHURN);
+      return service.getRecentEvents().filter((e) => e.metricType === MetricType.FAILOVER_CHURN);
     };
 
     const setShard = (epoch: number, ownerId: string) => {
