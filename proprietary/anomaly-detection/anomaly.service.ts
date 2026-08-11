@@ -1082,50 +1082,56 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // defaults to the last known mode — so a transient CLUSTER INFO failure
         // neither runs them on a known-Raft connection nor suppresses them on a
         // gossip cluster (where they must keep running through the blip).
-        if (!isRaft) {
-          // Fetch the topology ONCE for all gossip-era detectors (was multiple
-          // independent CLUSTER NODES calls per poll), and CLUSTER SHARDS
-          // concurrently (optional refinement — never rejects). A CLUSTER NODES
-          // failure is a single observation gap: skip the detectors this poll
-          // WITHOUT clearing the WARNING detectors' dedupe/grace state (so a
-          // transient blip can't re-fire a duplicate), while preserving the
-          // duplicate-primary detector's deliberate re-alert-after-gap behavior.
-          // For failover churn the skip also carries the window state — churn
-          // evidence must survive a probe blip or a flapping shard could never
-          // accumulate enough observations to fire.
-          const shardsPromise = this.safeGetClusterShards(ctx);
-          let nodes: ClusterNode[] | undefined;
-          try {
-            nodes = await ctx.client.getClusterNodes();
-          } catch (topologyErr) {
-            this.activeTopologyConflicts.delete(ctx.connectionId);
-            this.logger.debug(
-              `Failed to fetch cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
-            );
-          }
-          const shards = await shardsPromise;
+        // Fetch the topology ONCE for the gossip-era detectors below AND the
+        // topology-agnostic orphaned-slot-keys detector (which runs under Raft
+        // too). CLUSTER SHARDS is fetched concurrently, gossip mode only
+        // (optional refinement — never rejects). A CLUSTER NODES failure is a
+        // single observation gap: skip the detectors this poll WITHOUT
+        // clearing the WARNING detectors' dedupe/grace state (so a transient
+        // blip can't re-fire a duplicate), while preserving the
+        // duplicate-primary detector's deliberate re-alert-after-gap behavior.
+        // For failover churn the skip also carries the window state — churn
+        // evidence must survive a probe blip or a flapping shard could never
+        // accumulate enough observations to fire.
+        const shardsPromise = isRaft ? undefined : this.safeGetClusterShards(ctx);
+        let nodes: ClusterNode[] | undefined;
+        try {
+          nodes = await ctx.client.getClusterNodes();
+        } catch (topologyErr) {
+          this.activeTopologyConflicts.delete(ctx.connectionId);
+          this.logger.debug(
+            `Failed to fetch cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
+          );
+        }
+        const shards = await shardsPromise;
 
-          if (nodes) {
-            await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
-            await this.detectStuckReplicas(ctx, timestamp, nodes);
-            await this.detectHostnameStaleness(ctx, timestamp, nodes, shards);
-            await this.detectGhostMembers(ctx, timestamp, nodes);
-            await this.detectFailoverChurn(ctx, timestamp, nodes);
-            // Replica migrating/importing markers are node-local — only the
-            // queried node's own line carries them — so aggregate each replica's
-            // self-view before detecting (falls back to `nodes` without fan-out).
-            const perNodeView = await this.gatherReplicaSlotView(nodes, ctx);
-            await this.detectReplicaSlotState(
-              ctx,
-              timestamp,
-              perNodeView.nodes,
-              shards,
-              perNodeView.unreachableIds,
-            );
-            // Orphaned keys in unowned slots after a persistence load
-            // (valkey#539): unreachable data silently holding memory.
-            await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
-          }
+        // Gossip-race detectors only: under Raft, topology is consensus-managed.
+        if (!isRaft && nodes) {
+          await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
+          await this.detectStuckReplicas(ctx, timestamp, nodes);
+          await this.detectHostnameStaleness(ctx, timestamp, nodes, shards);
+          await this.detectGhostMembers(ctx, timestamp, nodes);
+          await this.detectFailoverChurn(ctx, timestamp, nodes);
+          // Replica migrating/importing markers are node-local — only the
+          // queried node's own line carries them — so aggregate each replica's
+          // self-view before detecting (falls back to `nodes` without fan-out).
+          const perNodeView = await this.gatherReplicaSlotView(nodes, ctx);
+          await this.detectReplicaSlotState(
+            ctx,
+            timestamp,
+            perNodeView.nodes,
+            shards,
+            perNodeView.unreachableIds,
+          );
+        }
+
+        if (nodes) {
+          // Orphaned keys in unowned slots after a persistence load
+          // (valkey#539): unreachable data silently holding memory. NOT a
+          // gossip race — the engine loads persistence files the same way
+          // under Raft, and CLUSTER NODES / SLOT-STATS remain available — so
+          // it runs in BOTH topology modes.
+          await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
         }
       }
 

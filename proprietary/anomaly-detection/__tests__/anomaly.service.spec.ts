@@ -3035,6 +3035,17 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('539');
     });
 
+    it('fires under Raft (Cluster V2) too — a persistence-load leak is not a gossip race', async () => {
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({
+        cluster_state: 'ok',
+        cluster_raft_role: 'leader',
+      });
+      await poll();
+      now += 31_000;
+      await poll();
+      expect(orphanEvents()).toHaveLength(1);
+    });
+
     it('treats a failed DBSIZE as an observation gap, not recovery (no duplicate after blip)', async () => {
       await poll();
       now += 31_000;
@@ -3613,10 +3624,16 @@ describe('AnomalyService', () => {
 
     it('skips the gossip topology detectors in raft mode', async () => {
       dbClient.getClusterInfo = jest.fn().mockResolvedValue(raftInfo());
+      dbClient.getClusterShards = jest.fn();
       await poll();
-      // detectDuplicatePrimaries / detectStuckReplicas both call getClusterNodes;
-      // under Raft they must be skipped.
-      expect(dbClient.getClusterNodes).not.toHaveBeenCalled();
+      // CLUSTER NODES is still fetched once (the topology-agnostic orphan
+      // detector runs under Raft too), but CLUSTER SHARDS — fetched solely for
+      // the gossip-era detectors — must not be, and no gossip topology events
+      // may surface.
+      expect(dbClient.getClusterShards).not.toHaveBeenCalled();
+      expect(
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY),
+      ).toHaveLength(0);
     });
 
     it('runs the gossip detectors in gossip mode (no raft fields)', async () => {
@@ -3634,12 +3651,16 @@ describe('AnomalyService', () => {
       dbClient.getClusterInfo = jest
         .fn()
         .mockResolvedValue(raftInfo({ cluster_raft_role: 'leader' }));
+      dbClient.getClusterShards = jest.fn();
       await poll(); // establishes Raft mode
-      expect(dbClient.getClusterNodes).not.toHaveBeenCalled();
+      expect(dbClient.getClusterShards).not.toHaveBeenCalled();
 
       (dbClient.getClusterInfo as jest.Mock).mockRejectedValue(new Error('CLUSTERDOWN'));
       await poll(); // CLUSTER INFO throws — must stay Raft, skip gossip detectors
-      expect(dbClient.getClusterNodes).not.toHaveBeenCalled();
+      expect(dbClient.getClusterShards).not.toHaveBeenCalled();
+      expect(
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY),
+      ).toHaveLength(0);
     });
 
     it('emits CRITICAL when the node keeps seeking a leader with no commit progress', async () => {
@@ -4188,8 +4209,11 @@ describe('AnomalyService', () => {
         cluster_raft_leader: 'x',
       });
       dbClient.getConfigValue = jest.fn().mockResolvedValue('15000');
+      dbClient.getClusterShards = jest.fn();
       await poll();
-      expect(dbClient.getClusterNodes).not.toHaveBeenCalled();
+      // Topology may still be fetched (orphan detection runs under Raft), but
+      // the gossip-only SHARDS fetch and churn detection itself must not run.
+      expect(dbClient.getClusterShards).not.toHaveBeenCalled();
       expect(churnEvents()).toHaveLength(0);
     });
 
