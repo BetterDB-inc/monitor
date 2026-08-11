@@ -31,6 +31,8 @@ export enum MetricType {
   CPU_UTILIZATION = 'cpu_utilization',
   REPLICATION_ROLE = 'replication_role',
   CLUSTER_STATE = 'cluster_state',
+  /** Replica looping on full resync that never completes — link down through repeated attempts (valkey#1836) — state-based. */
+  RESYNC_LOOP = 'resync_loop',
   /** Replica wrongly reporting slot migrating/importing/owned state (valkey#1664) — state-based. */
   REPLICA_SLOT_STATE = 'replica_slot_state',
   /** Ghost membership: a stale node-id lingering at an endpoint peers never forgot after a reset (valkey#1757) — state-based. */
@@ -62,6 +64,7 @@ export enum MetricType {
 export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Set([
   MetricType.REPLICATION_ROLE,
   MetricType.CLUSTER_STATE,
+  MetricType.RESYNC_LOOP,
   MetricType.REPLICA_SLOT_STATE,
   MetricType.GHOST_MEMBERSHIP,
   MetricType.LAGGING_PROMOTION,

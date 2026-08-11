@@ -33,13 +33,18 @@ import {
   detectConfigDrift,
   configDriftSignature,
 } from './config-drift-detector';
-import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-detector';
+import {
+  RESYNC_LOOP_MIN_CYCLES,
+  ResyncLoopState,
+  acknowledgeResyncLoopFinding,
+  createResyncLoopState,
+  detectStuckReplicas,
+  evaluateResyncLoop,
+  stuckReplicaSignature,
+} from './stuck-replica-detector';
 import { detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
 import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
-import {
-  detectHostnameStaleness,
-  hostnameStalenessSignature,
-} from './hostname-staleness-detector';
+import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
 import {
   detectReplicaSlotState,
   replicaSlotSignature,
@@ -174,6 +179,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // the alert once the persistence gate has fired.
   private stuckReplicaFirstSeen = new Map<string, Map<string, number>>();
   private activeStuckReplicas = new Map<string, Set<string>>();
+  // Full-resync failure loop (valkey#1836): per-connection window/cycle state
+  // folded from INFO replication on the polled replica itself.
+  private resyncLoopState = new Map<string, ResyncLoopState>();
   // Hostname-staleness (valkey#304) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient gossip-convergence window
   // (a node just joined/restarted, or is mid-rollout of
@@ -501,6 +509,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.raftNodeTimeoutRecheck.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
+    this.resyncLoopState.delete(connectionId);
     this.hostnameStalenessFirstSeen.delete(connectionId);
     this.activeHostnameStaleness.delete(connectionId);
     this.ghostMemberFirstSeen.delete(connectionId);
@@ -731,14 +740,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
         if (!buffers.has(MetricType.EVICTED_CLIENTS)) {
           buffers.set(MetricType.EVICTED_CLIENTS, new MetricBuffer(MetricType.EVICTED_CLIENTS));
-          detectors.set(MetricType.EVICTED_CLIENTS, new SpikeDetector(MetricType.EVICTED_CLIENTS, {
-            warningZScore: 1.5,
-            criticalZScore: 2.5,
-            warningThreshold: 1,
-            criticalThreshold: 10,
-            consecutiveRequired: 1,
-            cooldownMs: 30000,
-          }));
+          detectors.set(
+            MetricType.EVICTED_CLIENTS,
+            new SpikeDetector(MetricType.EVICTED_CLIENTS, {
+              warningZScore: 1.5,
+              criticalZScore: 2.5,
+              warningThreshold: 1,
+              criticalThreshold: 10,
+              consecutiveRequired: 1,
+              cooldownMs: 30000,
+            }),
+          );
         }
 
         const evictedBuffer = buffers.get(MetricType.EVICTED_CLIENTS)!;
@@ -1128,6 +1140,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // omem approaching the slave COB limit, and the resync-loop signal once
       // an overflow already forced a full sync. State-based with hysteresis.
       await this.detectCobPressure(info, ctx, timestamp);
+
+      // Full-resync failure loop (valkey-io/valkey#1836): this replica's link
+      // held down through repeated full-sync attempts that never complete —
+      // the replica-side complement of the COB detector above. State-based.
+      await this.detectResyncLoop(info, ctx, timestamp);
 
       // Non-dataset memory overhead (valkey-io/valkey#1792): operational
       // overhead (client buffers, repl backlog/buffers, AOF buffer, scripts,
@@ -1558,8 +1575,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       baseline: LOAD_WARN_FRACTION * 100,
       zScore: 0,
       stdDev: 0,
-      threshold:
-        (finding.level === 'critical' ? LOAD_CRIT_FRACTION : LOAD_WARN_FRACTION) * 100,
+      threshold: (finding.level === 'critical' ? LOAD_CRIT_FRACTION : LOAD_WARN_FRACTION) * 100,
       message: finding.message,
       resolved: false,
       connectionId: ctx.connectionId,
@@ -1601,10 +1617,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * offender set (recovery, or threshold raised past its replies) clears its
    * signature so a later recurrence alerts again.
    */
-  private async detectLargeReplyPressure(
-    ctx: ConnectionContext,
-    timestamp: number,
-  ): Promise<void> {
+  private async detectLargeReplyPressure(ctx: ConnectionContext, timestamp: number): Promise<void> {
     try {
       const cachedEntries = this.commandLogAnalytics.getCachedEntries(
         'large-reply',
@@ -2020,8 +2033,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       return;
     }
 
-    const state =
-      this.memoryOverheadState.get(ctx.connectionId) ?? createMemoryOverheadState();
+    const state = this.memoryOverheadState.get(ctx.connectionId) ?? createMemoryOverheadState();
     this.memoryOverheadState.set(ctx.connectionId, state);
 
     const finding = evaluateMemoryOverhead(state, {
@@ -2815,6 +2827,52 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   }
 
   /**
+   * Full-resync failure loop (valkey-io/valkey#1836): the polled replica's
+   * master link held down through repeated full-sync attempts that never
+   * complete. The pure evaluator owns the window/cycle discipline (so a normal
+   * first sync of a large dataset stays silent) and the emit-retry contract:
+   * the finding is re-produced until acknowledged, and acknowledged only AFTER
+   * a successful emit so a failed emit retries next poll.
+   */
+  private async detectResyncLoop(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    const state = this.resyncLoopState.get(ctx.connectionId) ?? createResyncLoopState();
+    this.resyncLoopState.set(ctx.connectionId, state);
+
+    const finding = evaluateResyncLoop(state, {
+      role: info.role ?? '',
+      masterLinkStatus: info.master_link_status ?? null,
+      masterLinkDownSinceSeconds: this.parseNumber(info.master_link_down_since_seconds),
+      masterSyncInProgress: info.master_sync_in_progress === '1',
+      syncFull: this.parseNumber(info.sync_full),
+      timestamp,
+    });
+    if (finding === null) return;
+
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.RESYNC_LOOP,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: finding.failedCycles,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: RESYNC_LOOP_MIN_CYCLES,
+      message: finding.message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    await this.addAnomaly(event, ctx);
+    acknowledgeResyncLoopFinding(state);
+  }
+
+  /**
    * How long a hostname-staleness finding (valkey#304) must persist before it
    * is alerted, to exclude the transient gossip-convergence window of a
    * normal node join/restart or a `cluster-announce-hostname` rollout. A
@@ -3029,9 +3087,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * Fetch `CLUSTER SHARDS`, degrading to `undefined` (never throwing) if the
    * command is unsupported or the call fails — it is an optional refinement.
    */
-  private async safeGetClusterShards(
-    ctx: ConnectionContext,
-  ): Promise<ClusterShard[] | undefined> {
+  private async safeGetClusterShards(ctx: ConnectionContext): Promise<ClusterShard[] | undefined> {
     try {
       return await ctx.client.getClusterShards();
     } catch (err) {
