@@ -2847,7 +2847,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       masterLinkStatus: info.master_link_status ?? null,
       masterLinkDownSinceSeconds: this.parseNumber(info.master_link_down_since_seconds),
       masterSyncInProgress: info.master_sync_in_progress === '1',
-      syncFull: this.parseNumber(info.sync_full),
       timestamp,
     });
     if (finding === null) return;

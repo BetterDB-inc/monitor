@@ -171,10 +171,14 @@ describe('evaluateResyncLoop', () => {
       masterLinkStatus: 'down',
       masterLinkDownSinceSeconds: 30,
       masterSyncInProgress: true,
-      syncFull: 0,
       timestamp: base,
       ...over,
     };
+  }
+
+  /** In-progress on even polls, off on odd: each odd poll ends a failed attempt. */
+  function togglingSync(pollIndex: number): boolean {
+    return pollIndex % 2 === 0;
   }
 
   /** Polls until past the minimum window, `mutate` shaping each poll's input. */
@@ -200,19 +204,20 @@ describe('evaluateResyncLoop', () => {
   it('stays silent through a healthy first full sync of a large dataset', () => {
     const state = createResyncLoopState();
     // Link held down for the whole window while ONE sync attempt keeps
-    // transferring: sync counter never moves, sync stays in progress.
+    // transferring: in-progress never falls back to 0, so no attempt ever
+    // "ended without the link coming up".
     const finding = pollThroughWindow(state, () => {
-      return { syncFull: 5, masterSyncInProgress: true };
+      return { masterSyncInProgress: true };
     });
     expect(finding).toBeNull();
   });
 
-  it('fires after at least two failed full-sync cycles across the minimum window', () => {
+  it('fires after at least two failed full-sync attempts across the minimum window', () => {
     const state = createResyncLoopState();
-    // sync_full climbs on every 10th poll: repeated full-sync attempts while
-    // the link never reaches up.
+    // Sync repeatedly starts and dies: in-progress toggles 1 → 0 while the
+    // link never reaches up.
     const finding = pollThroughWindow(state, (i) => {
-      return { syncFull: 5 + Math.floor(i / 10) };
+      return { masterSyncInProgress: togglingSync(i) };
     });
     expect(finding).not.toBeNull();
     expect(finding!.failedCycles).toBeGreaterThanOrEqual(RESYNC_LOOP_MIN_CYCLES);
@@ -221,9 +226,17 @@ describe('evaluateResyncLoop', () => {
     expect(finding!.message).toContain('full');
   });
 
-  it('stays silent before the minimum window even with enough failed cycles', () => {
+  it("accepts the newer 'replica' role as well as legacy 'slave'", () => {
     const state = createResyncLoopState();
-    // Three rapid failed cycles inside the first four polls — still within the
+    const finding = pollThroughWindow(state, (i) => {
+      return { role: 'replica', masterSyncInProgress: togglingSync(i) };
+    });
+    expect(finding).not.toBeNull();
+  });
+
+  it('stays silent before the minimum window even with enough failed attempts', () => {
+    const state = createResyncLoopState();
+    // Two failed attempts inside the first four polls — still within the
     // window, so nothing may fire yet.
     for (let i = 0; i <= 4; i++) {
       const finding = evaluateResyncLoop(
@@ -231,28 +244,17 @@ describe('evaluateResyncLoop', () => {
         replInput({
           timestamp: base + i * POLL_MS,
           masterLinkDownSinceSeconds: 30 + (i * POLL_MS) / 1000,
-          syncFull: 5 + i,
+          masterSyncInProgress: togglingSync(i),
         }),
       );
       expect(finding).toBeNull();
     }
   });
 
-  it('counts a failed cycle from a sync-in-progress toggle when sync_full never moves', () => {
-    const state = createResyncLoopState();
-    // The counter is flat (leaf replica), but sync repeatedly starts and dies:
-    // in-progress toggles 1 → 0 while the link stays down.
-    const finding = pollThroughWindow(state, (i) => {
-      return { syncFull: 5, masterSyncInProgress: i % 2 === 0 };
-    });
-    expect(finding).not.toBeNull();
-    expect(finding!.failedCycles).toBeGreaterThanOrEqual(RESYNC_LOOP_MIN_CYCLES);
-  });
-
   it('clears on recovery and needs a fresh window + cycles to alert again', () => {
     const state = createResyncLoopState();
     const firstLoop = pollThroughWindow(state, (i) => {
-      return { syncFull: 5 + i };
+      return { masterSyncInProgress: togglingSync(i) };
     });
     expect(firstLoop).not.toBeNull();
     acknowledgeResyncLoopFinding(state);
@@ -266,40 +268,31 @@ describe('evaluateResyncLoop', () => {
           masterLinkStatus: 'up',
           masterLinkDownSinceSeconds: null,
           masterSyncInProgress: false,
-          syncFull: 40,
           timestamp: recoveredAt,
         }),
       ),
     ).toBeNull();
 
-    // A new loop must earn the window again: cycles right away, but silent
-    // until the fresh window has elapsed...
-    expect(
-      evaluateResyncLoop(
-        state,
-        replInput({
-          syncFull: 41,
-          masterLinkDownSinceSeconds: 10,
-          timestamp: recoveredAt + POLL_MS,
-        }),
-      ),
-    ).toBeNull();
-    expect(
-      evaluateResyncLoop(
-        state,
-        replInput({
-          syncFull: 42,
-          masterLinkDownSinceSeconds: 20,
-          timestamp: recoveredAt + 2 * POLL_MS,
-        }),
-      ),
-    ).toBeNull();
+    // A new loop must earn the window again: two failed attempts right away,
+    // but silent until the fresh window has elapsed...
+    for (let i = 1; i <= 4; i++) {
+      expect(
+        evaluateResyncLoop(
+          state,
+          replInput({
+            masterLinkDownSinceSeconds: i * 10,
+            masterSyncInProgress: togglingSync(i + 1),
+            timestamp: recoveredAt + i * POLL_MS,
+          }),
+        ),
+      ).toBeNull();
+    }
     // ...and then it alerts again (recovery re-armed the alert).
     const secondLoop = evaluateResyncLoop(
       state,
       replInput({
-        syncFull: 43,
-        masterLinkDownSinceSeconds: 20 + RESYNC_LOOP_MIN_WINDOW_MS / 1000,
+        masterLinkDownSinceSeconds: 10 + RESYNC_LOOP_MIN_WINDOW_MS / 1000,
+        masterSyncInProgress: false,
         timestamp: recoveredAt + POLL_MS + RESYNC_LOOP_MIN_WINDOW_MS,
       }),
     );
@@ -309,7 +302,7 @@ describe('evaluateResyncLoop', () => {
   it('keeps returning the finding until acknowledged, then stays quiet while the loop persists', () => {
     const state = createResyncLoopState();
     const finding = pollThroughWindow(state, (i) => {
-      return { syncFull: 5 + i };
+      return { masterSyncInProgress: togglingSync(i) };
     });
     expect(finding).not.toBeNull();
     // Unacknowledged (emit failed): re-produced next poll.
@@ -318,7 +311,7 @@ describe('evaluateResyncLoop', () => {
       replInput({
         timestamp: base + 2_000_000,
         masterLinkDownSinceSeconds: 2_100,
-        syncFull: 100,
+        masterSyncInProgress: false,
       }),
     );
     expect(retry).not.toBeNull();
@@ -330,7 +323,7 @@ describe('evaluateResyncLoop', () => {
         replInput({
           timestamp: base + 2_010_000,
           masterLinkDownSinceSeconds: 2_110,
-          syncFull: 101,
+          masterSyncInProgress: false,
         }),
       ),
     ).toBeNull();
@@ -339,7 +332,10 @@ describe('evaluateResyncLoop', () => {
   it('resets when the instance is not a replica', () => {
     const state = createResyncLoopState();
     for (let i = 0; i <= 4; i++) {
-      evaluateResyncLoop(state, replInput({ timestamp: base + i * POLL_MS, syncFull: 5 + i }));
+      evaluateResyncLoop(
+        state,
+        replInput({ timestamp: base + i * POLL_MS, masterSyncInProgress: togglingSync(i) }),
+      );
     }
     // Promotion (or a non-replica connection): clears everything.
     expect(
@@ -349,14 +345,17 @@ describe('evaluateResyncLoop', () => {
           role: 'master',
           masterLinkStatus: null,
           masterLinkDownSinceSeconds: null,
-          syncFull: 10,
+          masterSyncInProgress: false,
           timestamp: base + 5 * POLL_MS,
         }),
       ),
     ).toBeNull();
-    // Back to replica with cycles but a fresh window: silent.
+    // Back to replica with failed attempts but a fresh window: silent.
     const afterReset = pollThroughWindow(state, (i) => {
-      return { syncFull: 20 + i, timestamp: base + 1_000_000 + i * POLL_MS };
+      return {
+        masterSyncInProgress: togglingSync(i),
+        timestamp: base + 1_000_000 + i * POLL_MS,
+      };
     });
     // Fires only because the FRESH window fully elapsed again.
     expect(afterReset).not.toBeNull();
@@ -374,7 +373,7 @@ describe('evaluateResyncLoop', () => {
           // A successful reconnect midway resets the server-side down counter:
           // the link DID reach up, so this is not a never-completing loop.
           masterLinkDownSinceSeconds: i < polls - 1 ? 30 + i * 10 : 5,
-          syncFull: 5 + i,
+          masterSyncInProgress: togglingSync(i),
         }),
       );
     }

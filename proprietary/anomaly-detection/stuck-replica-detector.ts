@@ -104,8 +104,8 @@ export function stuckReplicaSignature(s: StuckReplica): string {
  * and retries forever. `master_link_status` never leaves `down`, so the replica
  * serves stale data indefinitely while looking "merely syncing" at any single
  * glance. Unlike the CLUSTER NODES snapshot detector above, this one folds INFO
- * replication/stats fields from the polled replica itself across polls, so it
- * works in standalone and cluster mode alike.
+ * replication fields from the polled replica itself across polls, so it works
+ * in standalone and cluster mode alike.
  */
 
 /** Minimum continuous link-down window before the loop signature may fire. */
@@ -127,8 +127,6 @@ export interface ResyncLoopInput {
   masterLinkDownSinceSeconds: number | null;
   /** INFO replication `master_sync_in_progress` as a boolean. */
   masterSyncInProgress: boolean;
-  /** INFO stats `sync_full` (lifetime counter); null when absent. */
-  syncFull: number | null;
   timestamp: number;
 }
 
@@ -137,8 +135,6 @@ export interface ResyncLoopState {
   downWindowStart: number | null;
   /** Last observed master_link_down_since_seconds, for the monotonicity check. */
   lastDownSinceSeconds: number | null;
-  /** Last observed sync_full, for delta computation. */
-  lastSyncFull: number | null;
   /** Whether the previous poll reported a sync in progress. */
   syncWasInProgress: boolean;
   /** Failed full-sync cycles observed in the current window. */
@@ -159,7 +155,6 @@ export function createResyncLoopState(): ResyncLoopState {
   return {
     downWindowStart: null,
     lastDownSinceSeconds: null,
-    lastSyncFull: null,
     syncWasInProgress: false,
     failedCycles: 0,
     alerted: false,
@@ -169,7 +164,6 @@ export function createResyncLoopState(): ResyncLoopState {
 function resetResyncLoopState(state: ResyncLoopState): void {
   state.downWindowStart = null;
   state.lastDownSinceSeconds = null;
-  state.lastSyncFull = null;
   state.syncWasInProgress = false;
   state.failedCycles = 0;
   state.alerted = false;
@@ -187,7 +181,8 @@ export function evaluateResyncLoop(
   state: ResyncLoopState,
   input: ResyncLoopInput,
 ): ResyncLoopFinding | null {
-  const linkDown = input.role === 'slave' && input.masterLinkStatus === 'down';
+  const isReplicaRole = input.role === 'slave' || input.role === 'replica';
+  const linkDown = isReplicaRole === true && input.masterLinkStatus === 'down';
   if (linkDown === false) {
     // Link up, promoted to primary, or not a replica at all: whatever loop was
     // in flight has ended. Clear so a future loop earns the window afresh.
@@ -212,23 +207,16 @@ export function evaluateResyncLoop(
     state.downWindowStart = input.timestamp;
   }
 
-  // A failed cycle is a NEW full-sync attempt while the link stayed down:
-  // preferably the sync_full counter moving; where it doesn't move on the
-  // replica, a sync-in-progress flag falling back to 0 with the link still
-  // down (the attempt ended, yet the link never came up).
-  let cycleIncrement = 0;
-  if (
-    state.lastSyncFull !== null &&
-    input.syncFull !== null &&
-    input.syncFull > state.lastSyncFull
-  ) {
-    cycleIncrement = input.syncFull - state.lastSyncFull;
-  } else if (state.syncWasInProgress === true && input.masterSyncInProgress === false) {
-    cycleIncrement = 1;
-  }
-  state.failedCycles += cycleIncrement;
-  if (input.syncFull !== null) {
-    state.lastSyncFull = input.syncFull;
+  // A failed cycle is a sync attempt that ENDED while the link stayed down:
+  // master_sync_in_progress falling back to 0 without the link reaching up.
+  // Deliberately NOT counted from INFO stats sync_full — that counter tracks
+  // full syncs this node SERVED as a primary (outbound), so on the replica's
+  // own inbound loop it never moves, and on an intermediate replica it moves
+  // for downstream reconnects, which would fake failed cycles during a
+  // perfectly healthy long first sync.
+  const attemptEnded = state.syncWasInProgress === true && input.masterSyncInProgress === false;
+  if (attemptEnded === true) {
+    state.failedCycles += 1;
   }
   state.syncWasInProgress = input.masterSyncInProgress;
 
