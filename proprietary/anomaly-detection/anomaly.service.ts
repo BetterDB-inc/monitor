@@ -2933,6 +2933,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       if (ctx.client.getCapabilities().hasClusterSlotStats === false) {
         return;
       }
+      // A slot import in flight is an OBSERVATION GAP, not a clean poll:
+      // arriving keys inflate dbsize before their slot is assigned/reported,
+      // so leak and reshard traffic are indistinguishable. Skip WITHOUT
+      // touching the persistence gate (same contract as a failed SLOT-STATS
+      // read) so a brief import neither resets the 30s clock nor resolves an
+      // already-alerted leak into a post-import duplicate WARNING.
+      if ((self.importingSlots ?? []).length > 0) {
+        return;
+      }
 
       // DBSIZE is read BEFORE SLOT-STATS on purpose: keys written between the
       // two reads then inflate the SLOT-STATS side, biasing the surplus signal

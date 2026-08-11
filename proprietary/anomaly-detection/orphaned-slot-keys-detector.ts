@@ -126,7 +126,10 @@ export function detectOrphanedSlotKeys(
   //
   // Suppressed while any slot is IMPORTING: arriving keys inflate dbsize
   // before their slot is assigned (and thus reported), so a live reshard
-  // looks exactly like a leak until the handoff completes. MIGRATING slots
+  // looks exactly like a leak until the handoff completes. NB the caller must
+  // treat an import in flight as an OBSERVATION GAP (skip its persistence
+  // gate entirely, as AnomalyService does) — feeding this null into the gate
+  // would read as recovery and flap an already-alerted leak. MIGRATING slots
   // need no such suppression — a slot stays assigned (and counted) on this
   // node until its handoff.
   if (input.importingSlots.length > 0) {
