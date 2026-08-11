@@ -1,6 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
-import { ConfigHazardFinding, evaluateAclAofHazard } from './config-hazard';
+import {
+  ConfigHazardFinding,
+  evaluateAclAofHazard,
+  evaluateAppendfsyncHazard,
+} from './config-hazard';
 
 interface CachedFindings {
   findings: ConfigHazardFinding[];
@@ -24,6 +28,9 @@ interface ProbeClientLike {
 export class ConfigHazardService {
   private readonly logger = new Logger(ConfigHazardService.name);
   private readonly cache = new Map<string, CachedFindings>();
+  // Per-connection aof_delayed_fsync trend across probes: how many consecutive
+  // probes the counter rose, feeding the appendfsync hazard's escalation.
+  private readonly delayedFsyncTrend = new Map<string, { last: number; streak: number }>();
   private static readonly CACHE_TTL_MS = 60_000;
 
   constructor(private readonly connectionRegistry: ConnectionRegistry) {}
@@ -67,6 +74,7 @@ export class ConfigHazardService {
     }
 
     if (appendonly !== 'yes') {
+      this.delayedFsyncTrend.delete(connectionId);
       return [];
     }
 
@@ -87,10 +95,106 @@ export class ConfigHazardService {
       aclGetUserResult = 'denied';
     }
 
-    const finding = evaluateAclAofHazard({ appendonly, version, aclGetUserResult });
-    if (finding === null) {
-      return [];
+    const findings: ConfigHazardFinding[] = [];
+    const aclFinding = evaluateAclAofHazard({ appendonly, version, aclGetUserResult });
+    if (aclFinding !== null) {
+      findings.push(aclFinding);
     }
-    return [finding];
+
+    const fsyncFinding = await this.probeAppendfsync(connectionId, client, appendonly);
+    if (fsyncFinding !== null) {
+      findings.push(fsyncFinding);
+    }
+    return findings;
+  }
+
+  /**
+   * AOF fsync-policy hazard (valkey#3515). Symptom probes are best-effort: a
+   * failed INFO or LATENCY read degrades to config-only evaluation (the
+   * low-severity advisory) rather than suppressing the finding or the poll.
+   */
+  private async probeAppendfsync(
+    connectionId: string,
+    client: ProbeClientLike,
+    appendonly: string | null,
+  ): Promise<ConfigHazardFinding | null> {
+    let appendfsync: string | null;
+    try {
+      appendfsync = await client.getConfigValue('appendfsync');
+    } catch (err) {
+      this.logger.debug(
+        `CONFIG GET appendfsync failed for ${connectionId}: ${(err as Error).message}`,
+      );
+      return null;
+    }
+    if (appendfsync !== 'always' && appendfsync !== 'everysec') {
+      this.delayedFsyncTrend.delete(connectionId);
+      return null;
+    }
+
+    let aofDelayedFsync: number | null = null;
+    let aofLastWriteStatus: string | null = null;
+    try {
+      const raw = await client.call('INFO', ['persistence']);
+      if (typeof raw === 'string') {
+        const fields = this.parseInfoFields(raw);
+        const delayed = parseInt(fields['aof_delayed_fsync'] ?? '', 10);
+        if (Number.isFinite(delayed)) {
+          aofDelayedFsync = delayed;
+        }
+        aofLastWriteStatus = fields['aof_last_write_status'] ?? null;
+      }
+    } catch (err) {
+      this.logger.debug(`INFO persistence failed for ${connectionId}: ${(err as Error).message}`);
+    }
+
+    let delayedFsyncRisingStreak = 0;
+    if (aofDelayedFsync !== null) {
+      const prev = this.delayedFsyncTrend.get(connectionId);
+      if (prev !== undefined && aofDelayedFsync > prev.last) {
+        delayedFsyncRisingStreak = prev.streak + 1;
+      }
+      this.delayedFsyncTrend.set(connectionId, {
+        last: aofDelayedFsync,
+        streak: delayedFsyncRisingStreak,
+      });
+    }
+
+    let latencyEvents: string[] = [];
+    try {
+      const raw = await client.call('LATENCY', ['LATEST']);
+      if (Array.isArray(raw)) {
+        latencyEvents = raw
+          .map((entry) => {
+            return Array.isArray(entry) && typeof entry[0] === 'string' ? entry[0] : null;
+          })
+          .filter((event): event is string => {
+            return event !== null;
+          });
+      }
+    } catch (err) {
+      this.logger.debug(`LATENCY LATEST failed for ${connectionId}: ${(err as Error).message}`);
+    }
+
+    return evaluateAppendfsyncHazard({
+      appendonly,
+      appendfsync,
+      aofDelayedFsync,
+      delayedFsyncRisingStreak,
+      aofLastWriteStatus,
+      latencyEvents,
+    });
+  }
+
+  private parseInfoFields(raw: string): Record<string, string> {
+    const fields: Record<string, string> = {};
+    for (const line of raw.split(/\r?\n/)) {
+      const sep = line.indexOf(':');
+      if (sep <= 0) {
+        continue;
+      }
+      fields[line.slice(0, sep)] = line.slice(sep + 1).trim();
+    }
+    return fields;
   }
 }

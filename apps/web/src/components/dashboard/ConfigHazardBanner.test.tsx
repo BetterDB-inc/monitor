@@ -41,4 +41,30 @@ describe('ConfigHazardBanner', () => {
     expect(screen.getByText('Configuration could not be verified')).toBeInTheDocument();
     expect(screen.queryByText('Hazardous server configuration')).not.toBeInTheDocument();
   });
+
+  it('presents an advisory finding as a low-key advisory, not a confirmed hazard', () => {
+    const advisory: ConfigHazardFinding = {
+      id: 'appendfsync-always-blocking',
+      severity: 'info',
+      status: 'advisory',
+      message:
+        'appendfsync=always fsyncs on the main thread for every write — a known latency risk (valkey#3515).',
+    };
+    render(<ConfigHazardBanner hazards={[advisory]} />);
+    expect(screen.getByText('Configuration advisory')).toBeInTheDocument();
+    expect(screen.getByText(/valkey#3515/)).toBeInTheDocument();
+    expect(screen.queryByText('Hazardous server configuration')).not.toBeInTheDocument();
+  });
+
+  it('renders an escalated appendfsync hazard as a confirmed hazard', () => {
+    const escalated: ConfigHazardFinding = {
+      id: 'appendfsync-always-blocking',
+      severity: 'warning',
+      status: 'hazard',
+      message:
+        'appendfsync=always is blocking the main thread on this instance: aof_delayed_fsync is rising (now 42).',
+    };
+    render(<ConfigHazardBanner hazards={[escalated]} />);
+    expect(screen.getByText('Hazardous server configuration')).toBeInTheDocument();
+  });
 });

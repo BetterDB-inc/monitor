@@ -1,4 +1,9 @@
-import { evaluateAclAofHazard, ConfigHazardInput } from '../config-hazard';
+import {
+  AppendfsyncHazardInput,
+  ConfigHazardInput,
+  evaluateAclAofHazard,
+  evaluateAppendfsyncHazard,
+} from '../config-hazard';
 
 // ACL GETUSER shapes mirror acl-checker.ts: RESP2 flat pair array or RESP3 record.
 const resp3User = (flags: string[], commands: string, keys: string, channels: string) => ({
@@ -127,5 +132,90 @@ describe('evaluateAclAofHazard', () => {
   it('still evaluates when the version is unknown', () => {
     const finding = evaluateAclAofHazard(input({ version: null }));
     expect(finding?.status).toBe('hazard');
+  });
+});
+
+describe('evaluateAppendfsyncHazard', () => {
+  const fsyncInput = (over: Partial<AppendfsyncHazardInput>): AppendfsyncHazardInput => {
+    return {
+      appendonly: 'yes',
+      appendfsync: 'always',
+      aofDelayedFsync: 0,
+      delayedFsyncRisingStreak: 0,
+      aofLastWriteStatus: 'ok',
+      latencyEvents: [],
+      ...over,
+    };
+  };
+
+  it('returns null when AOF is off, even with appendfsync=always', () => {
+    expect(evaluateAppendfsyncHazard(fsyncInput({ appendonly: 'no' }))).toBeNull();
+    expect(evaluateAppendfsyncHazard(fsyncInput({ appendonly: null }))).toBeNull();
+  });
+
+  it('raises a low-severity advisory for always with no symptoms', () => {
+    const finding = evaluateAppendfsyncHazard(fsyncInput({}));
+    expect(finding).not.toBeNull();
+    expect(finding?.id).toBe('appendfsync-always-blocking');
+    expect(finding?.severity).toBe('info');
+    expect(finding?.status).toBe('advisory');
+    expect(finding?.message).toContain('appendfsync=always');
+    expect(finding?.message).toContain('everysec');
+    expect(finding?.message).toContain('valkey#3515');
+  });
+
+  it('escalates to a warning hazard when aof_delayed_fsync is rising', () => {
+    const finding = evaluateAppendfsyncHazard(
+      fsyncInput({ aofDelayedFsync: 42, delayedFsyncRisingStreak: 1 }),
+    );
+    expect(finding?.severity).toBe('warning');
+    expect(finding?.status).toBe('hazard');
+    expect(finding?.message).toContain('aof_delayed_fsync');
+    expect(finding?.message).toContain('42');
+  });
+
+  it('escalates when the aof-fsync-always LATENCY event is present', () => {
+    const finding = evaluateAppendfsyncHazard(
+      fsyncInput({ latencyEvents: ['aof-fsync-always', 'command'] }),
+    );
+    expect(finding?.severity).toBe('warning');
+    expect(finding?.status).toBe('hazard');
+    expect(finding?.message).toContain('aof-fsync-always');
+  });
+
+  it('escalates when aof_last_write_status is not ok', () => {
+    const finding = evaluateAppendfsyncHazard(fsyncInput({ aofLastWriteStatus: 'err' }));
+    expect(finding?.severity).toBe('warning');
+    expect(finding?.status).toBe('hazard');
+    expect(finding?.message).toContain('aof_last_write_status');
+  });
+
+  it('stays silent for a healthy everysec', () => {
+    expect(evaluateAppendfsyncHazard(fsyncInput({ appendfsync: 'everysec' }))).toBeNull();
+  });
+
+  it('stays silent for everysec on a single delayed-fsync rise', () => {
+    expect(
+      evaluateAppendfsyncHazard(
+        fsyncInput({ appendfsync: 'everysec', aofDelayedFsync: 7, delayedFsyncRisingStreak: 1 }),
+      ),
+    ).toBeNull();
+  });
+
+  it('flags everysec when aof_delayed_fsync climbs steadily', () => {
+    const finding = evaluateAppendfsyncHazard(
+      fsyncInput({ appendfsync: 'everysec', aofDelayedFsync: 9, delayedFsyncRisingStreak: 2 }),
+    );
+    expect(finding).not.toBeNull();
+    expect(finding?.id).toBe('appendfsync-everysec-backlog');
+    expect(finding?.severity).toBe('warning');
+    expect(finding?.status).toBe('hazard');
+    expect(finding?.message).toContain('aof_delayed_fsync');
+    expect(finding?.message).toContain('9');
+  });
+
+  it('returns null for no/unknown appendfsync values', () => {
+    expect(evaluateAppendfsyncHazard(fsyncInput({ appendfsync: 'no' }))).toBeNull();
+    expect(evaluateAppendfsyncHazard(fsyncInput({ appendfsync: null }))).toBeNull();
   });
 });
