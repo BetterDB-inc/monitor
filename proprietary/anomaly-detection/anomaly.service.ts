@@ -28,10 +28,12 @@ import { Correlator } from './correlator';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import {
   DEFAULT_CONFIG_DRIFT_KEYS,
+  ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS,
   ConfigDrift,
   ConfigDriftNode,
   detectConfigDrift,
   configDriftSignature,
+  isEncodingThresholdKey,
 } from './config-drift-detector';
 import {
   RESYNC_LOOP_MIN_CYCLES,
@@ -1270,7 +1272,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * Deliberately excludes node-specific keys that legitimately differ (bind,
    * port, dir, replica-announce-ip/port, unixsocket, logfile, requirepass, …).
    */
-  private static readonly CONFIG_DRIFT_KEYS = DEFAULT_CONFIG_DRIFT_KEYS;
+  private static readonly CONFIG_DRIFT_KEYS = [
+    ...DEFAULT_CONFIG_DRIFT_KEYS,
+    ...ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS,
+  ];
 
   /**
    * Detects a curated CRITICAL config key (maxmemory, maxmemory-policy, …)
@@ -1403,6 +1408,20 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           .map((v) => `${v.name ?? v.connectionId} = ${v.value}`)
           .join(', ');
 
+        // Encoding-threshold keys get their own rationale: the drift's harm is
+        // not different runtime behavior but silent re-encoding on load.
+        const message = isEncodingThresholdKey(drift.key)
+          ? `WARNING: Encoding-threshold config '${drift.key}' differs across nodes in the ` +
+            `same replication group: ${valuesLabel}. The same data re-encodes when loaded ` +
+            `under different thresholds (e.g. listpack promoted to hashtable/skiplist), so ` +
+            `an RDB reload, restore, or clone onto the divergent node can silently occupy ` +
+            `far more memory than the source (valkey-io/valkey#3479). Align this value on ` +
+            `every node in the group.`
+          : `WARNING: Config key '${drift.key}' differs across nodes in the same replication ` +
+            `group: ${valuesLabel}. valkey-io/valkey#1193 — CONFIG SET only applies to the node ` +
+            `it's sent to, so this key must be reconciled on every node by hand until an ` +
+            `in-engine cluster-wide CONFIG SET exists.`;
+
         const event: AnomalyEvent = {
           id: `config-drift-${signature}-${timestamp}`,
           timestamp,
@@ -1414,11 +1433,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           zScore: 0,
           stdDev: 0,
           threshold: 1,
-          message:
-            `WARNING: Config key '${drift.key}' differs across nodes in the same replication ` +
-            `group: ${valuesLabel}. valkey-io/valkey#1193 — CONFIG SET only applies to the node ` +
-            `it's sent to, so this key must be reconciled on every node by hand until an ` +
-            `in-engine cluster-wide CONFIG SET exists.`,
+          message,
           resolved: false,
           // Attributed to the first drifting node — NOT necessarily ctx, whose
           // own poll may just be the one that happened to run this scan (this
