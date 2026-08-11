@@ -165,6 +165,13 @@ ENV STORAGE_TYPE=memory
 COPY --from=redisshake-builder /out/redis-shake /usr/local/bin/redis-shake
 RUN chmod +x /usr/local/bin/redis-shake
 
+# Make /app writable by the runtime user so features that create new paths under
+# it at runtime work - notably RedisShake's default relative `data` dir (it is
+# spawned with cwd=/app) and sqlite/license files. This chowns only the /app
+# directory node plus a pre-created data dir (non-recursive), so it does NOT
+# duplicate node_modules the way `chown -R /app` did.
+RUN mkdir -p /app/data && chown betterdb:nodejs /app /app/data
+
 # Drop to the non-root user (created above) for the runtime process.
 USER betterdb
 
