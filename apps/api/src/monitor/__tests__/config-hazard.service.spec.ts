@@ -176,12 +176,21 @@ describe('ConfigHazardService', () => {
       expect(findings[0].message).toContain('9');
     });
 
-    it('escalates on an aof-fsync-always LATENCY event', async () => {
+    it('escalates on a recent aof-fsync-always LATENCY event', async () => {
       setupFsyncClient({ latency: [['aof-fsync-always', 1_700_000_000, 12, 40]] });
       const findings = await service.getHazards('conn-1');
       expect(findings).toHaveLength(1);
       expect(findings[0].status).toBe('hazard');
       expect(findings[0].message).toContain('aof-fsync-always');
+    });
+
+    it('does not escalate on a stale LATENCY event from a long-past spike', async () => {
+      // LATENCY LATEST entries persist until LATENCY RESET; a spike from an
+      // hour ago is history, not evidence the main thread is blocking now.
+      setupFsyncClient({ latency: [['aof-fsync-always', 1_700_000_000 - 3_600, 12, 40]] });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].status).toBe('advisory');
     });
 
     it('keeps the advisory when the LATENCY probe fails', async () => {

@@ -152,7 +152,11 @@ export interface AppendfsyncHazardInput {
   delayedFsyncRisingStreak: number;
   /** INFO persistence `aof_last_write_status`, or null when absent. */
   aofLastWriteStatus: string | null;
-  /** Event names from LATENCY LATEST (empty when unsupported or clean). */
+  /**
+   * Event names from LATENCY LATEST whose latest spike is RECENT
+   * (caller-filtered): entries persist until LATENCY RESET, so a stale spike
+   * must not read as current blocking evidence. Empty when unsupported/clean.
+   */
   latencyEvents: readonly string[];
 }
 

@@ -32,6 +32,9 @@ export class ConfigHazardService {
   // probes the counter rose, feeding the appendfsync hazard's escalation.
   private readonly delayedFsyncTrend = new Map<string, { last: number; streak: number }>();
   private static readonly CACHE_TTL_MS = 60_000;
+  // LATENCY LATEST entries persist until LATENCY RESET, so only a spike this
+  // recent counts as evidence that fsync is blocking the main thread NOW.
+  private static readonly LATENCY_EVENT_FRESHNESS_S = 300;
 
   constructor(private readonly connectionRegistry: ConnectionRegistry) {}
 
@@ -164,9 +167,19 @@ export class ConfigHazardService {
     try {
       const raw = await client.call('LATENCY', ['LATEST']);
       if (Array.isArray(raw)) {
+        const nowSeconds = Math.floor(Date.now() / 1000);
         latencyEvents = raw
           .map((entry) => {
-            return Array.isArray(entry) && typeof entry[0] === 'string' ? entry[0] : null;
+            if (Array.isArray(entry) === false) {
+              return null;
+            }
+            const [event, spikeAtSeconds] = entry as unknown[];
+            if (typeof event !== 'string' || typeof spikeAtSeconds !== 'number') {
+              return null;
+            }
+            const isFresh =
+              nowSeconds - spikeAtSeconds <= ConfigHazardService.LATENCY_EVENT_FRESHNESS_S;
+            return isFresh === true ? event : null;
           })
           .filter((event): event is string => {
             return event !== null;
