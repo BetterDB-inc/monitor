@@ -2934,6 +2934,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         return;
       }
 
+      // DBSIZE is read BEFORE SLOT-STATS on purpose: keys written between the
+      // two reads then inflate the SLOT-STATS side, biasing the surplus signal
+      // NEGATIVE under insert load — a false positive needs a genuine surplus.
+      let dbsize: number | null;
+      try {
+        dbsize = await ctx.client.getDbSize();
+      } catch {
+        dbsize = null;
+      }
+
       let slotStats: SlotStats;
       try {
         slotStats = await ctx.client.getClusterSlotStats('key-count', 16384);
@@ -2942,13 +2952,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           `CLUSTER SLOT-STATS failed for ${ctx.connectionName}: ${statsErr instanceof Error ? statsErr.message : statsErr}`,
         );
         return;
-      }
-
-      let dbsize: number | null;
-      try {
-        dbsize = await ctx.client.getDbSize();
-      } catch {
-        dbsize = null;
       }
 
       const finding = detectOrphanedSlotKeys({
@@ -2975,18 +2978,28 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         minPersistMs: AnomalyService.ORPHANED_SLOT_KEYS_MIN_PERSIST_MS,
         metricType: MetricType.ORPHANED_SLOT_KEYS,
         buildEvent: (f, signature) => {
-          const listed = f.orphanedSlots.slice(0, AnomalyService.ORPHANED_SLOT_MESSAGE_LIMIT);
-          const slotsLabel = listed
-            .map((entry) => {
-              return `${entry.slot} (${entry.keyCount} keys)`;
-            })
-            .join(', ');
-          const moreCount = f.orphanedSlots.length - listed.length;
-          const moreClause = moreCount > 0 ? ` and ${moreCount} more slots` : '';
-          const corroboration =
-            f.dbsizeDelta !== null
-              ? ` dbsize exceeds the keys in owned slots by ${f.dbsizeDelta}, corroborating the leak.`
-              : '';
+          let evidence: string;
+          if (f.reason === 'slot_stats') {
+            const listed = f.orphanedSlots.slice(0, AnomalyService.ORPHANED_SLOT_MESSAGE_LIMIT);
+            const slotsLabel = listed
+              .map((entry) => {
+                return `${entry.slot} (${entry.keyCount} keys)`;
+              })
+              .join(', ');
+            const moreCount = f.orphanedSlots.length - listed.length;
+            const moreClause = moreCount > 0 ? ` and ${moreCount} more slots` : '';
+            const corroboration =
+              f.dbsizeDelta !== null
+                ? ` dbsize exceeds the keys in owned slots by ${f.dbsizeDelta}, corroborating the leak.`
+                : '';
+            evidence = `slot ${slotsLabel}${moreClause}.${corroboration}`;
+          } else {
+            evidence =
+              `dbsize persistently exceeds every key CLUSTER SLOT-STATS can account for by ` +
+              `${f.totalOrphanedKeys} keys (SLOT-STATS only reports slots assigned to the node, ` +
+              `so leaked slots are invisible to it — locate them with CLUSTER COUNTKEYSINSLOT ` +
+              `on slots outside this node's ranges).`;
+          }
           return {
             id: `${ctx.connectionId}-orphaned-slots-${signature}-${timestamp}`,
             timestamp,
@@ -3000,12 +3013,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             threshold: 0,
             message:
               `WARNING: ${f.totalOrphanedKeys} keys live in hash slots this node does NOT own: ` +
-              `slot ${slotsLabel}${moreClause}. They were loaded from a persistence file scoped ` +
-              `wider than the node's current slot ownership (valkey#539) — clients are routed to ` +
-              `the slots' actual owners, so these keys are unreachable and only consume memory.` +
-              `${corroboration} Remediation: delete the keys in unowned slots (or reload from a ` +
-              `correctly scoped persistence file); until upstream ships automatic cleanup they ` +
-              `will never expire from routing.`,
+              `${evidence} They were loaded from a persistence file scoped wider than the ` +
+              `node's current slot ownership (valkey#539) — clients are routed to the slots' ` +
+              `actual owners, so these keys are unreachable and only consume memory. ` +
+              `Remediation: delete the keys in unowned slots (or reload from a correctly scoped ` +
+              `persistence file); until upstream ships automatic cleanup they will never expire ` +
+              `from routing.`,
             resolved: false,
             connectionId: ctx.connectionId,
           };
