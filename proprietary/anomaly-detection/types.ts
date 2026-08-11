@@ -35,6 +35,8 @@ export enum MetricType {
   RESYNC_LOOP = 'resync_loop',
   /** Replica wrongly reporting slot migrating/importing/owned state (valkey#1664) — state-based. */
   REPLICA_SLOT_STATE = 'replica_slot_state',
+  /** Keys stored in hash slots the node does not own after a persistence load — unreachable, memory-leaking (valkey#539) — state-based. */
+  ORPHANED_SLOT_KEYS = 'orphaned_slot_keys',
   /** Ghost membership: a stale node-id lingering at an endpoint peers never forgot after a reset (valkey#1757) — state-based. */
   GHOST_MEMBERSHIP = 'ghost_membership',
   /** Uncoordinated standalone promotion (REPLICAOF NO ONE) of a lagging replica → data loss (valkey#2587) — state-based. */
@@ -66,6 +68,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.CLUSTER_STATE,
   MetricType.RESYNC_LOOP,
   MetricType.REPLICA_SLOT_STATE,
+  MetricType.ORPHANED_SLOT_KEYS,
   MetricType.GHOST_MEMBERSHIP,
   MetricType.LAGGING_PROMOTION,
   MetricType.DATASET_KEYS,

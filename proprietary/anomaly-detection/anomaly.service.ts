@@ -42,6 +42,11 @@ import {
   evaluateResyncLoop,
   stuckReplicaSignature,
 } from './stuck-replica-detector';
+import {
+  OrphanedSlotKeysFinding,
+  detectOrphanedSlotKeys,
+  orphanedSlotKeysSignature,
+} from './orphaned-slot-keys-detector';
 import { detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
 import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
@@ -53,7 +58,7 @@ import {
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
-import { ClusterNode, ClusterShard } from '@app/common/types/metrics.types';
+import { ClusterNode, ClusterShard, SlotStats } from '@app/common/types/metrics.types';
 import {
   FAILOVER_CHURN_MIN_CHANGES,
   FailoverChurnStateMap,
@@ -202,6 +207,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // signature -> emitted event id, so a recovered condition can resolve exactly
   // its own event (clearing the activeOnly banner) instead of all of them.
   private replicaSlotEventIds = new Map<string, Map<string, string>>();
+  // Orphaned-slot-keys (valkey#539) state, same discipline as stuck-replica:
+  // `firstSeen` gates on persistence so a reshard window whose in-flight
+  // markers fell between polls doesn't alert, `active` dedupes once fired.
+  private orphanedSlotFirstSeen = new Map<string, Map<string, number>>();
+  private activeOrphanedSlots = new Map<string, Set<string>>();
   // Per-connection per-shard failover-churn windows (valkey#3996, gossip mode).
   private failoverChurnState = new Map<string, FailoverChurnStateMap>();
   // Replication output-buffer pressure (valkey#3963): per-connection replica
@@ -517,6 +527,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
+    this.orphanedSlotFirstSeen.delete(connectionId);
+    this.activeOrphanedSlots.delete(connectionId);
     this.failoverChurnState.delete(connectionId);
     this.forkMemoryState.delete(connectionId);
     this.forkMemLastChanges.delete(connectionId);
@@ -1110,6 +1122,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
               shards,
               perNodeView.unreachableIds,
             );
+            // Orphaned keys in unowned slots after a persistence load
+            // (valkey#539): unreachable data silently holding memory.
+            await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
           }
         }
       }
@@ -2879,6 +2894,128 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
     acknowledgeResyncLoopFinding(state);
+  }
+
+  /**
+   * How long the same orphaned-slot set must persist before alerting. The
+   * in-flight migrating/importing markers already exclude an observed reshard;
+   * this gate additionally covers a reshard whose transient markers fell
+   * between two polls. Genuine valkey#539 orphans persist indefinitely.
+   */
+  private static readonly ORPHANED_SLOT_KEYS_MIN_PERSIST_MS = 30_000;
+
+  /** How many orphaned slots to list individually in the event message. */
+  private static readonly ORPHANED_SLOT_MESSAGE_LIMIT = 8;
+
+  /**
+   * Orphaned keys in unowned cluster slots (valkey-io/valkey#539): after
+   * loading a persistence file that predates a slot migration (or a warm-up
+   * from a shared RDB), a node holds keys in slots it does not own — routed
+   * clients can never reach them, yet they count in dbsize and hold memory.
+   * Reads CLUSTER SLOT-STATS (capability-gated) plus DBSIZE for corroboration
+   * against the node's own slot ownership from the already-fetched topology.
+   * A failed SLOT-STATS read is an observation gap: the poll is skipped
+   * WITHOUT resolving active findings, so a probe blip cannot flap the alert.
+   */
+  private async detectOrphanedSlotKeys(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+  ): Promise<void> {
+    try {
+      const self = nodes.find((node) => {
+        return node.flags.includes('myself');
+      });
+      const isClusterPrimary = self !== undefined && self.flags.includes('master');
+      if (self === undefined || isClusterPrimary === false) {
+        return;
+      }
+      if (ctx.client.getCapabilities().hasClusterSlotStats === false) {
+        return;
+      }
+
+      let slotStats: SlotStats;
+      try {
+        slotStats = await ctx.client.getClusterSlotStats('key-count', 16384);
+      } catch (statsErr) {
+        this.logger.debug(
+          `CLUSTER SLOT-STATS failed for ${ctx.connectionName}: ${statsErr instanceof Error ? statsErr.message : statsErr}`,
+        );
+        return;
+      }
+
+      let dbsize: number | null;
+      try {
+        dbsize = await ctx.client.getDbSize();
+      } catch {
+        dbsize = null;
+      }
+
+      const finding = detectOrphanedSlotKeys({
+        clusterEnabled: true,
+        isClusterPrimary,
+        ownedSlots: self.slots,
+        migratingSlots: (self.migratingSlots ?? []).map((entry) => {
+          return entry.slot;
+        }),
+        importingSlots: (self.importingSlots ?? []).map((entry) => {
+          return entry.slot;
+        }),
+        slotStats,
+        dbsize,
+      });
+
+      await this.applyTopologyPersistenceGate<OrphanedSlotKeysFinding>({
+        ctx,
+        timestamp,
+        findings: finding !== null ? [finding] : [],
+        signatureOf: orphanedSlotKeysSignature,
+        firstSeenByConn: this.orphanedSlotFirstSeen,
+        activeByConn: this.activeOrphanedSlots,
+        minPersistMs: AnomalyService.ORPHANED_SLOT_KEYS_MIN_PERSIST_MS,
+        metricType: MetricType.ORPHANED_SLOT_KEYS,
+        buildEvent: (f, signature) => {
+          const listed = f.orphanedSlots.slice(0, AnomalyService.ORPHANED_SLOT_MESSAGE_LIMIT);
+          const slotsLabel = listed
+            .map((entry) => {
+              return `${entry.slot} (${entry.keyCount} keys)`;
+            })
+            .join(', ');
+          const moreCount = f.orphanedSlots.length - listed.length;
+          const moreClause = moreCount > 0 ? ` and ${moreCount} more slots` : '';
+          const corroboration =
+            f.dbsizeDelta !== null
+              ? ` dbsize exceeds the keys in owned slots by ${f.dbsizeDelta}, corroborating the leak.`
+              : '';
+          return {
+            id: `${ctx.connectionId}-orphaned-slots-${signature}-${timestamp}`,
+            timestamp,
+            metricType: MetricType.ORPHANED_SLOT_KEYS,
+            anomalyType: AnomalyType.SPIKE,
+            severity: AnomalySeverity.WARNING,
+            value: f.totalOrphanedKeys,
+            baseline: 0,
+            zScore: 0,
+            stdDev: 0,
+            threshold: 0,
+            message:
+              `WARNING: ${f.totalOrphanedKeys} keys live in hash slots this node does NOT own: ` +
+              `slot ${slotsLabel}${moreClause}. They were loaded from a persistence file scoped ` +
+              `wider than the node's current slot ownership (valkey#539) — clients are routed to ` +
+              `the slots' actual owners, so these keys are unreachable and only consume memory.` +
+              `${corroboration} Remediation: delete the keys in unowned slots (or reload from a ` +
+              `correctly scoped persistence file); until upstream ships automatic cleanup they ` +
+              `will never expire from routing.`,
+            resolved: false,
+            connectionId: ctx.connectionId,
+          };
+        },
+      });
+    } catch (orphanErr) {
+      this.logger.debug(
+        `Failed to check orphaned slot keys for ${ctx.connectionName}: ${orphanErr instanceof Error ? orphanErr.message : orphanErr}`,
+      );
+    }
   }
 
   /**
