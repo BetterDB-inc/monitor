@@ -101,41 +101,49 @@ RUN apk upgrade --no-cache && \
 
 WORKDIR /app
 
+# Create the non-root runtime user up front (Docker Scout compliance) so the
+# COPY --chown instructions below can set ownership as files are written. This
+# avoids a trailing `chown -R /app`, which would duplicate the entire ~550MB
+# node_modules into a second layer just to change ownership bits.
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 --ingroup nodejs betterdb
+
 # Set APP_VERSION from build argument (re-declares the global ARG for this stage)
 ARG APP_VERSION
 ENV APP_VERSION=$APP_VERSION
 
 # Copy pre-built node_modules from builder (includes native modules already compiled)
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/apps/api/node_modules ./apps/api/node_modules
-COPY --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/node_modules ./node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/apps/api/node_modules ./apps/api/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
 
 # Copy package files for module resolution
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY apps/api/package.json ./apps/api/
-COPY packages/shared/package.json ./packages/shared/
+COPY --chown=betterdb:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --chown=betterdb:nodejs apps/api/package.json ./apps/api/
+COPY --chown=betterdb:nodejs packages/shared/package.json ./packages/shared/
 
 # Copy built backend
-COPY --from=builder /app/apps/api/dist ./apps/api/dist
+COPY --chown=betterdb:nodejs --from=builder /app/apps/api/dist ./apps/api/dist
 
 # Copy built frontend to be served by backend
-COPY --from=builder /app/apps/web/dist ./apps/api/public
+COPY --chown=betterdb:nodejs --from=builder /app/apps/web/dist ./apps/api/public
 
 # Copy shared package dist
-COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/dist ./packages/shared/dist
 
 # Copy the agent-memory dependency chain that api imports at runtime. valkey-search-kit
 # has no production deps, so it needs no node_modules.
-COPY --from=builder /app/packages/agent-memory/package.json ./packages/agent-memory/
-COPY --from=builder /app/packages/agent-memory/dist ./packages/agent-memory/dist
-COPY --from=builder /app/packages/agent-memory/node_modules ./packages/agent-memory/node_modules
-COPY --from=builder /app/packages/agent-cache/package.json ./packages/agent-cache/
-COPY --from=builder /app/packages/agent-cache/dist ./packages/agent-cache/dist
-COPY --from=builder /app/packages/agent-cache/node_modules ./packages/agent-cache/node_modules
-COPY --from=builder /app/packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
-COPY --from=builder /app/packages/valkey-search-kit/dist ./packages/valkey-search-kit/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/package.json ./packages/agent-memory/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/dist ./packages/agent-memory/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/node_modules ./packages/agent-memory/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/package.json ./packages/agent-cache/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/dist ./packages/agent-cache/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/node_modules ./packages/agent-cache/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/dist ./packages/valkey-search-kit/dist
 
-# Create symlink for @proprietary path alias to work at runtime
+# Create symlink for @proprietary path alias to work at runtime. Created as root
+# (read-only at runtime); the app user only needs to traverse/read these symlinks.
 RUN mkdir -p /app/node_modules/@proprietary && \
     ln -s /app/apps/api/dist/proprietary/* /app/node_modules/@proprietary/
 
@@ -156,13 +164,7 @@ ENV STORAGE_TYPE=memory
 COPY --from=redisshake-builder /out/redis-shake /usr/local/bin/redis-shake
 RUN chmod +x /usr/local/bin/redis-shake
 
-# Create non-root user for security (Docker Scout compliance)
-RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 --ingroup nodejs betterdb
-
-# Change ownership of app directory
-RUN chown -R betterdb:nodejs /app
-
+# Drop to the non-root user (created above) for the runtime process.
 USER betterdb
 
 # Expose port (can be overridden with -e PORT=<port> at runtime)
