@@ -1,6 +1,7 @@
 import { SlotStats } from '@app/common/types/metrics.types';
 import {
   ORPHANED_DBSIZE_DELTA_MIN_KEYS,
+  ORPHANED_SIGNATURE_MAX_LENGTH,
   OrphanedSlotKeysInput,
   detectOrphanedSlotKeys,
   orphanedSlotKeysSignature,
@@ -219,6 +220,38 @@ describe('orphanedSlotKeysSignature', () => {
   it('changes when the orphaned slot set changes', () => {
     const a = detectOrphanedSlotKeys(input({ slotStats: slotStats({ '9000': 25 }) }));
     const b = detectOrphanedSlotKeys(input({ slotStats: slotStats({ '9000': 25, '12000': 5 }) }));
+    expect(orphanedSlotKeysSignature(a!)).not.toBe(orphanedSlotKeysSignature(b!));
+  });
+
+  it('compresses contiguous orphaned slots into ranges', () => {
+    const finding = detectOrphanedSlotKeys(
+      input({ slotStats: slotStats({ '9000': 5, '9001': 5, '9002': 5, '12000': 5 }) }),
+    );
+    expect(orphanedSlotKeysSignature(finding!)).toBe('9000-9002,12000');
+  });
+
+  it('stays bounded for a large incompressible orphaned slot set', () => {
+    const wide: Record<string, number> = {};
+    for (let slot = 6000; slot < 16000; slot += 2) {
+      wide[String(slot)] = 1;
+    }
+    const finding = detectOrphanedSlotKeys(input({ slotStats: slotStats(wide), dbsize: null }));
+    expect(finding!.orphanedSlots.length).toBe(5000);
+    expect(orphanedSlotKeysSignature(finding!).length).toBeLessThanOrEqual(
+      ORPHANED_SIGNATURE_MAX_LENGTH,
+    );
+  });
+
+  it('distinguishes large orphaned slot sets that differ', () => {
+    const wide = (offset: number): Record<string, number> => {
+      const entries: Record<string, number> = {};
+      for (let slot = 6000 + offset; slot < 16000; slot += 2) {
+        entries[String(slot)] = 1;
+      }
+      return entries;
+    };
+    const a = detectOrphanedSlotKeys(input({ slotStats: slotStats(wide(0)), dbsize: null }));
+    const b = detectOrphanedSlotKeys(input({ slotStats: slotStats(wide(1)), dbsize: null }));
     expect(orphanedSlotKeysSignature(a!)).not.toBe(orphanedSlotKeysSignature(b!));
   });
 

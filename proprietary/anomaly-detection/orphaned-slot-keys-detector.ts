@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { SlotStats } from '@app/common/types/metrics.types';
 
 /**
@@ -150,20 +151,55 @@ export function detectOrphanedSlotKeys(
   return null;
 }
 
+export const ORPHANED_SIGNATURE_MAX_LENGTH = 64;
+
+/** Compress an ascending slot list into `a-b,c` range notation (injective on sets). */
+function formatSlotRanges(slots: number[]): string {
+  const parts: string[] = [];
+  let start: number | null = null;
+  let end = 0;
+  for (const slot of slots) {
+    if (start === null) {
+      start = slot;
+      end = slot;
+      continue;
+    }
+    if (slot === end + 1) {
+      end = slot;
+      continue;
+    }
+    parts.push(start === end ? `${start}` : `${start}-${end}`);
+    start = slot;
+    end = slot;
+  }
+  if (start !== null) {
+    parts.push(start === end ? `${start}` : `${start}-${end}`);
+  }
+  return parts.join(',');
+}
+
 /**
  * Stable signature for dedupe across polls. Explicit findings key on the
  * orphaned slot SET, not the counts — the same leaked slots re-counted
  * (expiries, deletions) are the same condition, while a different set of
- * orphaned slots is a new observation. The dbsize-surplus signal has no slot
- * ids, so it keys on a constant: the surplus fluctuating does not re-alert.
+ * orphaned slots is a new observation. The signature is embedded in the
+ * emitted event id, so it must stay BOUNDED even when a persistence file
+ * predating a range migration orphans thousands of slots: the set is
+ * range-compressed for readability and digested past
+ * ORPHANED_SIGNATURE_MAX_LENGTH. The dbsize-surplus signal has no slot ids,
+ * so it keys on a constant: the surplus fluctuating does not re-alert.
  */
 export function orphanedSlotKeysSignature(finding: OrphanedSlotKeysFinding): string {
   if (finding.reason === 'dbsize_delta') {
     return 'dbsize-delta';
   }
-  return finding.orphanedSlots
-    .map((entry) => {
+  const ranges = formatSlotRanges(
+    finding.orphanedSlots.map((entry) => {
       return entry.slot;
-    })
-    .join(',');
+    }),
+  );
+  if (ranges.length <= ORPHANED_SIGNATURE_MAX_LENGTH) {
+    return ranges;
+  }
+  return createHash('sha1').update(ranges).digest('hex');
 }
