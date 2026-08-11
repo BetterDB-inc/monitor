@@ -2946,11 +2946,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // DBSIZE is read BEFORE SLOT-STATS on purpose: keys written between the
       // two reads then inflate the SLOT-STATS side, biasing the surplus signal
       // NEGATIVE under insert load — a false positive needs a genuine surplus.
-      let dbsize: number | null;
+      // A failed read is an OBSERVATION GAP like the import/SLOT-STATS cases:
+      // without dbsize only the (real-server-inert) explicit path could fire,
+      // so running the gate would read the blind poll as recovery.
+      let dbsize: number;
       try {
         dbsize = await ctx.client.getDbSize();
-      } catch {
-        dbsize = null;
+      } catch (dbsizeErr) {
+        this.logger.debug(
+          `DBSIZE failed for ${ctx.connectionName}: ${dbsizeErr instanceof Error ? dbsizeErr.message : dbsizeErr}`,
+        );
+        return;
       }
 
       let slotStats: SlotStats;
