@@ -6,7 +6,7 @@ ARG APP_VERSION=0.1.1
 # ============================================
 # Build Stage
 # ============================================
-FROM node:25-alpine AS builder
+FROM node:26-alpine AS builder
 
 # Install build dependencies for native modules (hnswlib-node) and npm (for corepack)
 RUN apk add --no-cache python3 make g++ npm
@@ -82,13 +82,14 @@ RUN apk add --no-cache git
 WORKDIR /build
 RUN git clone --depth 1 --branch "v${REDISSHAKE_VERSION}" https://github.com/tair-opensource/RedisShake.git . && \
     test "$(git rev-parse HEAD)" = "${REDISSHAKE_COMMIT}" && \
+    go get golang.org/x/text@v0.39.0 && \
     CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" \
         go build -trimpath -ldflags "-s -w" -o /out/redis-shake ./cmd/redis-shake
 
 # ============================================
 # Production Stage
 # ============================================
-FROM node:25-alpine AS production
+FROM node:26-alpine AS production
 
 # Apply the latest Alpine security patches and drop the npm CLI bundled in the base
 # image. This image runs via `node` directly (deps are installed with pnpm at build
