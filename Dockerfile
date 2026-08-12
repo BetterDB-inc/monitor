@@ -6,7 +6,7 @@ ARG APP_VERSION=0.1.1
 # ============================================
 # Build Stage
 # ============================================
-FROM node:25-alpine AS builder
+FROM node:26-alpine AS builder
 
 # Install build dependencies for native modules (hnswlib-node) and npm (for corepack)
 RUN apk add --no-cache python3 make g++ npm
@@ -66,52 +66,98 @@ ENV VITE_REGISTRATION_URL=$VITE_REGISTRATION_URL
 RUN pnpm --filter "api..." --filter "web..." build
 
 # ============================================
+# RedisShake Build Stage
+# ============================================
+# Build the migration binary from source with a current Go toolchain so the
+# embedded Go standard library is patched. The official prebuilt releases are
+# compiled with Go 1.21.13 (EOL), whose stdlib carries dozens of CVEs (incl.
+# criticals) that `apk upgrade` cannot fix - they are baked into the static
+# binary, not provided by an Alpine package.
+#
+# --platform=$BUILDPLATFORM pins this stage to the native build host so `go build`
+# cross-compiles (via GOARCH below) instead of running the toolchain under QEMU on
+# the arm64 leg - QEMU is 5-10x slower and a known source of spurious SIGSEGV.
+#
+# The `go get golang.org/x/text@v0.39.0` step raises x/text to clear the Go CVE wall
+# (v4.6.1's go.mod pins the vulnerable 0.14.0). Two caveats it introduces:
+#   - It mutates go.mod/go.sum AFTER the commit tamper-check, so the shipped binary
+#     is a v4.6.1 + x/text-0.39.0 combination upstream never released; an SBOM audit
+#     against RedisShake v4.6.1 will show that single dependency delta.
+#   - `go get pkg@exact-version` also DOWNGRADES. Once a future REDISSHAKE_VERSION's
+#     go.mod already requires x/text >= 0.39.0, remove that line - otherwise it
+#     silently pins x/text back down on the version bump.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS redisshake-builder
+ARG TARGETARCH
+ARG REDISSHAKE_VERSION=4.6.1
+# v4.6.1 is a lightweight tag -> pin its exact release commit for tamper-evidence.
+ARG REDISSHAKE_COMMIT=a2a7e4e46d15708b6ab203e1c10a108aa405a638
+RUN apk add --no-cache git
+WORKDIR /build
+RUN git clone --depth 1 --branch "v${REDISSHAKE_VERSION}" https://github.com/tair-opensource/RedisShake.git . && \
+    test "$(git rev-parse HEAD)" = "${REDISSHAKE_COMMIT}" && \
+    go get golang.org/x/text@v0.39.0 && \
+    CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" \
+        go build -trimpath -ldflags "-s -w -X main.Version=v${REDISSHAKE_VERSION} -X main.GitCommit=${REDISSHAKE_COMMIT}" -o /out/redis-shake ./cmd/redis-shake
+
+# ============================================
 # Production Stage
 # ============================================
-FROM node:25-alpine AS production
+FROM node:26-alpine AS production
 
-# Install wget for healthcheck and tar (>=7.5.4) for security fix
-# Upgrade all packages to get latest security patches (including Go stdlib in binaries)
-RUN apk add --no-cache wget tar>=7.5.4 && \
-    apk upgrade --no-cache
+# Apply the latest Alpine security patches and drop the npm CLI bundled in the base
+# image. This image runs via `node` directly (deps are installed with pnpm at build
+# time), so npm is unused at runtime and only contributes CVEs from its own vendored
+# dependencies. No extra packages are installed: the healthcheck uses the busybox
+# wget already in the base image, and busybox already provides tar - avoiding the
+# full wget and GNU tar packages, both of which currently ship unfixable CVEs.
+RUN apk upgrade --no-cache && \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 WORKDIR /app
+
+# Create the non-root runtime user up front (Docker Scout compliance) so the
+# COPY --chown instructions below can set ownership as files are written. This
+# avoids a trailing `chown -R /app`, which would duplicate the entire ~550MB
+# node_modules into a second layer just to change ownership bits.
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 --ingroup nodejs betterdb
 
 # Set APP_VERSION from build argument (re-declares the global ARG for this stage)
 ARG APP_VERSION
 ENV APP_VERSION=$APP_VERSION
 
 # Copy pre-built node_modules from builder (includes native modules already compiled)
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/apps/api/node_modules ./apps/api/node_modules
-COPY --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/node_modules ./node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/apps/api/node_modules ./apps/api/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
 
 # Copy package files for module resolution
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY apps/api/package.json ./apps/api/
-COPY packages/shared/package.json ./packages/shared/
+COPY --chown=betterdb:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --chown=betterdb:nodejs apps/api/package.json ./apps/api/
+COPY --chown=betterdb:nodejs packages/shared/package.json ./packages/shared/
 
 # Copy built backend
-COPY --from=builder /app/apps/api/dist ./apps/api/dist
+COPY --chown=betterdb:nodejs --from=builder /app/apps/api/dist ./apps/api/dist
 
 # Copy built frontend to be served by backend
-COPY --from=builder /app/apps/web/dist ./apps/api/public
+COPY --chown=betterdb:nodejs --from=builder /app/apps/web/dist ./apps/api/public
 
 # Copy shared package dist
-COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/dist ./packages/shared/dist
 
 # Copy the agent-memory dependency chain that api imports at runtime. valkey-search-kit
 # has no production deps, so it needs no node_modules.
-COPY --from=builder /app/packages/agent-memory/package.json ./packages/agent-memory/
-COPY --from=builder /app/packages/agent-memory/dist ./packages/agent-memory/dist
-COPY --from=builder /app/packages/agent-memory/node_modules ./packages/agent-memory/node_modules
-COPY --from=builder /app/packages/agent-cache/package.json ./packages/agent-cache/
-COPY --from=builder /app/packages/agent-cache/dist ./packages/agent-cache/dist
-COPY --from=builder /app/packages/agent-cache/node_modules ./packages/agent-cache/node_modules
-COPY --from=builder /app/packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
-COPY --from=builder /app/packages/valkey-search-kit/dist ./packages/valkey-search-kit/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/package.json ./packages/agent-memory/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/dist ./packages/agent-memory/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/node_modules ./packages/agent-memory/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/package.json ./packages/agent-cache/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/dist ./packages/agent-cache/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/node_modules ./packages/agent-cache/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/dist ./packages/valkey-search-kit/dist
 
-# Create symlink for @proprietary path alias to work at runtime
+# Create symlink for @proprietary path alias to work at runtime. Created as root
+# (read-only at runtime); the app user only needs to traverse/read these symlinks.
 RUN mkdir -p /app/node_modules/@proprietary && \
     ln -s /app/apps/api/dist/proprietary/* /app/node_modules/@proprietary/
 
@@ -126,34 +172,31 @@ ENV NODE_ENV=production
 ENV PORT=3001
 ENV STORAGE_TYPE=memory
 
-# Install RedisShake binary for migration execution (with checksum verification)
-ARG TARGETARCH
-ARG REDISSHAKE_VERSION=4.6.0
-RUN REDISSHAKE_SHA256_AMD64="6ccab1ff2ba3c200950f8ada811f0c6fe6e2f5e6bd3b8e92b4d9444dc0aff4df" && \
-    REDISSHAKE_SHA256_ARM64="653298efa83ef3d495ae2ec21b40c773f36eb15e507f8b3f2931660509d09690" && \
-    if [ "${TARGETARCH}" = "amd64" ]; then EXPECTED_SHA256="${REDISSHAKE_SHA256_AMD64}"; else EXPECTED_SHA256="${REDISSHAKE_SHA256_ARM64}"; fi && \
-    wget -qO /tmp/redis-shake.tar.gz "https://github.com/tair-opensource/RedisShake/releases/download/v${REDISSHAKE_VERSION}/redis-shake-v${REDISSHAKE_VERSION}-linux-${TARGETARCH}.tar.gz" && \
-    echo "${EXPECTED_SHA256}  /tmp/redis-shake.tar.gz" | sha256sum -c - && \
-    tar -xzf /tmp/redis-shake.tar.gz --strip-components=0 -C /usr/local/bin ./redis-shake && \
-    chmod +x /usr/local/bin/redis-shake && \
-    rm /tmp/redis-shake.tar.gz
+# Install RedisShake binary for migration execution. Built from source in the
+# redisshake-builder stage with a current Go toolchain so the embedded Go stdlib
+# is patched (the upstream prebuilt release ships an EOL Go 1.21.13 runtime).
+COPY --chmod=755 --from=redisshake-builder /out/redis-shake /usr/local/bin/redis-shake
 
-# Create non-root user for security (Docker Scout compliance)
-RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 --ingroup nodejs betterdb
+# Make /app writable by the runtime user so features that create new paths under
+# it at runtime work - notably RedisShake's default relative `data` dir (it is
+# spawned with cwd=/app) and sqlite/license files. This chowns only the /app
+# directory node plus a pre-created data dir (non-recursive), so it does NOT
+# duplicate node_modules the way `chown -R /app` did.
+RUN mkdir -p /app/data && chown betterdb:nodejs /app /app/data
 
-# Change ownership of app directory
-RUN chown -R betterdb:nodejs /app
-
+# Drop to the non-root user (created above) for the runtime process.
 USER betterdb
 
 # Expose port (can be overridden with -e PORT=<port> at runtime)
 # Note: EXPOSE is documentation only - actual port binding happens via -p flag
 EXPOSE 3001
 
-# Health check - uses PORT environment variable
+# Health check - uses PORT (default 3001). Uses the busybox wget already in the base
+# image (--spider exits 0 on HTTP 200, non-zero otherwise). Avoids both a full wget
+# package and node's interpreter cold-start, which can exceed the timeout under the
+# CPU pressure of a running migration.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/api/health || exit 1
+  CMD wget -T 2 -q --spider "http://127.0.0.1:${PORT:-3001}/api/health" || exit 1
 
 # Start the server
 CMD ["node", "apps/api/dist/apps/api/src/main.js"]
