@@ -96,15 +96,20 @@ export function MigrationPage() {
 
   // Scroll target for validation section
   const validationRef = useRef<HTMLDivElement>(null);
+  // Sentinel at the very bottom of the page — used to scroll down to the freshly
+  // rendered panel (validation/execution) so its controls are immediately in view.
+  const bottomRef = useRef<HTMLDivElement>(null);
 
   // Issue 15: history
   const [history, setHistory] = useState<MigrationAnalysisResult[]>([]);
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
 
-  // Scroll to validation section when it appears
+  // When validation starts, scroll to the bottom of the page so the validation
+  // panel and its controls are in view immediately (rather than landing at the top
+  // of the freshly re-rendered report and having to scroll down).
   useEffect(() => {
     if (phase === 'validating') {
-      validationRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
   }, [phase]);
 
@@ -564,6 +569,9 @@ export function MigrationPage() {
           </div>
         </div>
       )}
+
+      {/* Scroll sentinel — the page scrolls here when validation starts */}
+      <div ref={bottomRef} aria-hidden="true" />
     </div>
   );
 }

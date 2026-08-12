@@ -51,6 +51,18 @@ export class MigrationExecutionService {
     const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
     const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
 
+    // Server-side functions use engine-specific globals (e.g. Valkey's `server`) and
+    // fail to load on a different fork. When source and target are different engines,
+    // exclude functions from the RedisShake stream so the key data still migrates.
+    const sourceDbType = sourceAdapter.getCapabilities().dbType;
+    const targetDbType = targetAdapter.getCapabilities().dbType;
+    const excludeFunctions = sourceDbType !== targetDbType;
+    if (excludeFunctions) {
+      this.logger.log(
+        `Execution: source (${sourceDbType}) and target (${targetDbType}) are different engines — excluding functions from migration`,
+      );
+    }
+
     // 3.5. If emptyDbBeforeSync requested, flush every target master now.
     // RedisShake's own empty_db_before_sync only flushes the seed node in cluster
     // mode, leaving other masters intact. We handle it here instead.
@@ -127,8 +139,9 @@ export class MigrationExecutionService {
             req.syncReaderOptions ?? {},
             targetIsCluster,
             rsOptions,
+            excludeFunctions,
           )
-        : buildScanReaderToml(sourceConfig, targetConfig, clusterEnabled, targetIsCluster, rsOptions);
+        : buildScanReaderToml(sourceConfig, targetConfig, clusterEnabled, targetIsCluster, rsOptions, excludeFunctions);
       const tomlPath = join(os.tmpdir(), `${id}.toml`);
       writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
       job.tomlPath = tomlPath;
@@ -195,7 +208,7 @@ export class MigrationExecutionService {
         }
       } else if (statusAfterExit !== 'cancelled') {
         job.status = 'failed';
-        job.error = `RedisShake exited with code ${code}`;
+        job.error = this.explainRedisShakeFailure(code, job.logs);
       }
     } catch (err: unknown) {
       if ((job.status as string) !== 'cancelled') {
@@ -219,6 +232,24 @@ export class MigrationExecutionService {
       job.tomlPath = null;
       job.pidPath = null;
     }
+  }
+
+  /**
+   * Turn a non-zero RedisShake exit into an actionable message. Scans the recent
+   * log tail for well-known failure signatures so the UI can tell the user what to
+   * do next, instead of a bare "exited with code N".
+   */
+  private explainRedisShakeFailure(code: number | null, logs: string[]): string {
+    const recent = logs.slice(-80).join('\n');
+    if (/BUSYKEY/i.test(recent)) {
+      return (
+        'Migration failed: the target already contains one or more of the keys being ' +
+        'migrated (BUSYKEY). RedisShake will not overwrite existing keys. Enable the ' +
+        '"Flush target before migration" option to clear the target first, or point the ' +
+        'migration at an empty target, then run it again.'
+      );
+    }
+    return `RedisShake exited with code ${code}`;
   }
 
   // ── Command-based mode ──

@@ -33,6 +33,21 @@ function validateHost(host: string): string {
   return host;
 }
 
+/**
+ * When source and target are different engines (e.g. Valkey -> Redis), server-side
+ * function libraries must not be replicated: they use engine-specific globals (such
+ * as Valkey's `server`) and fail to load on the other fork, aborting the migration.
+ * Blocking the FUNCTION command drops FUNCTION LOAD/RESTORE from the stream so the
+ * key data still migrates. Returns an empty string (no filter) when not excluding.
+ */
+function buildFilterSection(excludeFunctions: boolean): string {
+  if (!excludeFunctions) return '';
+  return `[filter]
+block_command = ["function"]
+
+`;
+}
+
 function formatAddress(host: string, port: number): string {
   // Bare IPv6 addresses must be wrapped in brackets for Go's net.Dial
   // e.g. "::1" → "[::1]:6379"
@@ -48,6 +63,7 @@ export function buildScanReaderToml(
   sourceIsCluster: boolean,
   targetIsCluster: boolean = false,
   rsOptions: RedisShakeOptions = {},
+  excludeFunctions: boolean = false,
 ): string {
   const srcHost = validateHost(source.host);
   const srcPort = validatePort(source.port);
@@ -81,7 +97,7 @@ username = "${escapeTomlString(tgtUsername)}"
 password = "${escapeTomlString(tgtPassword)}"
 tls = ${target.tls ? 'true' : 'false'}
 
-[advanced]
+${buildFilterSection(excludeFunctions)}[advanced]
 log_level = "info"
 pipeline_count_limit = 256
 try_diskless = ${rsOptions.tryDiskless ? 'true' : 'false'}
@@ -97,6 +113,7 @@ export function buildSyncReaderToml(
   options: SyncReaderOptions = {},
   targetIsCluster: boolean = false,
   rsOptions: RedisShakeOptions = {},
+  excludeFunctions: boolean = false,
 ): string {
   const srcHost = validateHost(source.host);
   const srcPort = validatePort(source.port);
@@ -129,7 +146,7 @@ username = "${escapeTomlString(tgtUsername)}"
 password = "${escapeTomlString(tgtPassword)}"
 tls = ${target.tls ? 'true' : 'false'}
 
-[advanced]
+${buildFilterSection(excludeFunctions)}[advanced]
 log_level = "info"
 pipeline_count_limit = 256
 try_diskless = ${rsOptions.tryDiskless ? 'true' : 'false'}

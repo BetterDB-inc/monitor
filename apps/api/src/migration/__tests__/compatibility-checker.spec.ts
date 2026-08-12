@@ -209,6 +209,22 @@ describe('compatibility-checker', () => {
       expect(dirIssue!.severity).toBe('blocking');
     });
 
+    it('should warn that functions are not migrated across engines (Redis→Valkey)', () => {
+      const source = makeMeta({ dbType: 'redis', capabilities: { dbType: 'redis', version: '7.2.0' } as DatabaseCapabilities });
+      const target = makeMeta({ dbType: 'valkey' });
+      const issues = checkCompatibility(source, target, false);
+      const fnIssue = issues.find(i => i.category === 'functions');
+      expect(fnIssue).toBeDefined();
+      expect(fnIssue!.severity).toBe('warning');
+    });
+
+    it('should NOT warn about functions when source and target are the same engine', () => {
+      const source = makeMeta({ dbType: 'valkey' });
+      const target = makeMeta({ dbType: 'valkey' });
+      const issues = checkCompatibility(source, target, false);
+      expect(issues.find(i => i.category === 'functions')).toBeUndefined();
+    });
+
     it('should return eviction policy mismatch warning', () => {
       const source = makeMeta({ maxmemoryPolicy: 'noeviction' });
       const target = makeMeta({ maxmemoryPolicy: 'allkeys-lru' });

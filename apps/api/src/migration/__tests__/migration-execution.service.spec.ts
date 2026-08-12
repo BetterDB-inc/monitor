@@ -32,9 +32,10 @@ jest.mock('../execution/command-migration-worker', () => ({
   runCommandMigration: jest.fn().mockResolvedValue(undefined),
 }));
 
-function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; targetClusterEnabled?: boolean }) {
+function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; targetClusterEnabled?: boolean; targetDbType?: 'valkey' | 'redis' }) {
   const sourceCluster = overrides?.sourceClusterEnabled ?? false;
   const targetCluster = overrides?.targetClusterEnabled ?? false;
+  const targetDbType = overrides?.targetDbType ?? 'valkey';
 
   const mockSourceAdapter = {
     getCapabilities: jest.fn().mockReturnValue({ dbType: 'valkey', version: '8.1.0' }),
@@ -42,7 +43,7 @@ function createMockRegistry(overrides?: { sourceClusterEnabled?: boolean; target
     getClient: jest.fn().mockReturnValue({ quit: jest.fn() }),
   };
   const mockTargetAdapter = {
-    getCapabilities: jest.fn().mockReturnValue({ dbType: 'valkey', version: '8.1.0' }),
+    getCapabilities: jest.fn().mockReturnValue({ dbType: targetDbType, version: '8.1.0' }),
     getInfo: jest.fn().mockResolvedValue({ cluster: { cluster_enabled: targetCluster ? '1' : '0' } }),
     getClient: jest.fn().mockReturnValue({ quit: jest.fn() }),
   };
@@ -192,7 +193,26 @@ describe('MigrationExecutionService', () => {
         { preferReplica: true },
         expect.any(Boolean),
         {},
+        false, // excludeFunctions — source and target are both valkey in this mock
       );
+    });
+
+    it('excludes functions when source and target are different engines', async () => {
+      const { buildScanReaderToml } = require('../execution/toml-builder');
+      (buildScanReaderToml as jest.Mock).mockClear();
+
+      const crossForkRegistry = createMockRegistry({ targetDbType: 'redis' });
+      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+
+      await crossForkService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake',
+      });
+
+      // buildScanReaderToml's last arg (excludeFunctions) must be true for valkey→redis
+      const call = (buildScanReaderToml as jest.Mock).mock.calls.at(-1)!;
+      expect(call[call.length - 1]).toBe(true);
     });
   });
 

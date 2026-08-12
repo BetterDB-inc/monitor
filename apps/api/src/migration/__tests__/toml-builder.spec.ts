@@ -332,3 +332,28 @@ describe('buildSyncReaderToml', () => {
     expect(toml).not.toContain('[scan_reader]');
   });
 });
+
+describe('function filtering (cross-fork)', () => {
+  const source = makeConfig();
+  const target = makeConfig({ port: 6380 });
+
+  it('does not add a [filter] block by default (same engine)', () => {
+    expect(buildScanReaderToml(source, target, false)).not.toContain('[filter]');
+    expect(buildSyncReaderToml(source, target, false)).not.toContain('[filter]');
+  });
+
+  it('blocks the FUNCTION command in scan mode when excludeFunctions is set', () => {
+    const toml = buildScanReaderToml(source, target, false, false, {}, true);
+    expect(toml).toContain('[filter]');
+    expect(toml).toContain('block_command = ["function"]');
+    // filter must precede the [advanced] section for valid ordering
+    expect(toml.indexOf('[filter]')).toBeLessThan(toml.indexOf('[advanced]'));
+  });
+
+  it('blocks the FUNCTION command in sync mode when excludeFunctions is set', () => {
+    const toml = buildSyncReaderToml(source, target, false, {}, false, {}, true);
+    expect(toml).toContain('[filter]');
+    expect(toml).toContain('block_command = ["function"]');
+    expect(toml.indexOf('[filter]')).toBeLessThan(toml.indexOf('[advanced]'));
+  });
+});

@@ -125,6 +125,20 @@ export function checkCompatibility(
     });
   }
 
+  // 1b. Cross-fork functions are not migrated
+  if (source.dbType !== target.dbType) {
+    issues.push({
+      severity: 'warning',
+      category: 'functions',
+      title: 'Functions not migrated across engines',
+      detail:
+        `Source (${source.dbType}) and target (${target.dbType}) are different engines. ` +
+        'Server-side function libraries use engine-specific globals and would fail to load ' +
+        'on the target, so they are automatically excluded from the migration. Migrate ' +
+        'between the same engine to carry functions over.',
+    });
+  }
+
   // 2. HFE unsupported on target
   if (hfeDetected) {
     const targetSupportsHfe =
