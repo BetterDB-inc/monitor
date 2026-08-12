@@ -73,7 +73,20 @@ RUN pnpm --filter "api..." --filter "web..." build
 # compiled with Go 1.21.13 (EOL), whose stdlib carries dozens of CVEs (incl.
 # criticals) that `apk upgrade` cannot fix - they are baked into the static
 # binary, not provided by an Alpine package.
-FROM golang:1.26-alpine AS redisshake-builder
+#
+# --platform=$BUILDPLATFORM pins this stage to the native build host so `go build`
+# cross-compiles (via GOARCH below) instead of running the toolchain under QEMU on
+# the arm64 leg - QEMU is 5-10x slower and a known source of spurious SIGSEGV.
+#
+# The `go get golang.org/x/text@v0.39.0` step raises x/text to clear the Go CVE wall
+# (v4.6.1's go.mod pins the vulnerable 0.14.0). Two caveats it introduces:
+#   - It mutates go.mod/go.sum AFTER the commit tamper-check, so the shipped binary
+#     is a v4.6.1 + x/text-0.39.0 combination upstream never released; an SBOM audit
+#     against RedisShake v4.6.1 will show that single dependency delta.
+#   - `go get pkg@exact-version` also DOWNGRADES. Once a future REDISSHAKE_VERSION's
+#     go.mod already requires x/text >= 0.39.0, remove that line - otherwise it
+#     silently pins x/text back down on the version bump.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS redisshake-builder
 ARG TARGETARCH
 ARG REDISSHAKE_VERSION=4.6.1
 # v4.6.1 is a lightweight tag -> pin its exact release commit for tamper-evidence.
@@ -84,7 +97,7 @@ RUN git clone --depth 1 --branch "v${REDISSHAKE_VERSION}" https://github.com/tai
     test "$(git rev-parse HEAD)" = "${REDISSHAKE_COMMIT}" && \
     go get golang.org/x/text@v0.39.0 && \
     CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" \
-        go build -trimpath -ldflags "-s -w" -o /out/redis-shake ./cmd/redis-shake
+        go build -trimpath -ldflags "-s -w -X main.Version=v${REDISSHAKE_VERSION} -X main.GitCommit=${REDISSHAKE_COMMIT}" -o /out/redis-shake ./cmd/redis-shake
 
 # ============================================
 # Production Stage
@@ -94,9 +107,9 @@ FROM node:26-alpine AS production
 # Apply the latest Alpine security patches and drop the npm CLI bundled in the base
 # image. This image runs via `node` directly (deps are installed with pnpm at build
 # time), so npm is unused at runtime and only contributes CVEs from its own vendored
-# dependencies. No extra packages are installed: the healthcheck uses `node` (below)
-# instead of wget, and busybox already provides tar - avoiding the full wget and GNU
-# tar packages, both of which currently ship unfixable CVEs.
+# dependencies. No extra packages are installed: the healthcheck uses the busybox
+# wget already in the base image, and busybox already provides tar - avoiding the
+# full wget and GNU tar packages, both of which currently ship unfixable CVEs.
 RUN apk upgrade --no-cache && \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
@@ -162,8 +175,7 @@ ENV STORAGE_TYPE=memory
 # Install RedisShake binary for migration execution. Built from source in the
 # redisshake-builder stage with a current Go toolchain so the embedded Go stdlib
 # is patched (the upstream prebuilt release ships an EOL Go 1.21.13 runtime).
-COPY --from=redisshake-builder /out/redis-shake /usr/local/bin/redis-shake
-RUN chmod +x /usr/local/bin/redis-shake
+COPY --chmod=755 --from=redisshake-builder /out/redis-shake /usr/local/bin/redis-shake
 
 # Make /app writable by the runtime user so features that create new paths under
 # it at runtime work - notably RedisShake's default relative `data` dir (it is
@@ -179,10 +191,12 @@ USER betterdb
 # Note: EXPOSE is documentation only - actual port binding happens via -p flag
 EXPOSE 3001
 
-# Health check - uses PORT environment variable. Uses node (always present) rather
-# than wget so the image needs no extra wget package.
+# Health check - uses PORT (default 3001). Uses the busybox wget already in the base
+# image (--spider exits 0 on HTTP 200, non-zero otherwise). Avoids both a full wget
+# package and node's interpreter cold-start, which can exceed the timeout under the
+# CPU pressure of a running migration.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3001)+'/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+  CMD wget -T 2 -q --spider "http://127.0.0.1:${PORT:-3001}/api/health" || exit 1
 
 # Start the server
 CMD ["node", "apps/api/dist/apps/api/src/main.js"]
