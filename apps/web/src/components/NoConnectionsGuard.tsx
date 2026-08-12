@@ -362,6 +362,27 @@ function DockerQuickStart({
   const [copied, setCopied] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // `localhost` points at the monitor's own container when it runs in Docker,
+  // so a one-click "connect to local" against it fails. Ask the API where the
+  // host actually is (host.docker.internal when containerized, an explicit
+  // DB_HOST if set, else 127.0.0.1); fall back to localhost if the probe fails.
+  const [localHost, setLocalHost] = useState('localhost');
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchApi<{ host: string }>('/system/connect-defaults')
+      .then((defaults) => {
+        if (!cancelled && defaults?.host) {
+          setLocalHost(defaults.host);
+        }
+      })
+      .catch(() => {
+        // Keep the localhost fallback — a bare-metal install is correct anyway.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function handleCopy() {
     try {
@@ -381,17 +402,17 @@ function DockerQuickStart({
         method: 'POST',
         body: JSON.stringify({
           name: 'Local Valkey',
-          host: 'localhost',
+          host: localHost,
           port: 6379,
           dbIndex: 0,
           tls: false,
           setAsDefault: true,
         }),
       });
-      capture('quick_connect_succeeded', { source: 'empty_state_localhost' });
+      capture('quick_connect_succeeded', { source: 'empty_state_localhost', host: localHost });
       await onConnected();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not reach localhost:6379');
+      setError(err instanceof Error ? err.message : `Could not reach ${localHost}:6379`);
     } finally {
       setConnecting(false);
     }
@@ -409,7 +430,7 @@ function DockerQuickStart({
         disabled={connecting}
         className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 cursor-pointer"
       >
-        {connecting ? 'Connecting…' : 'Connect localhost:6379 →'}
+        {connecting ? 'Connecting…' : `Connect ${localHost}:6379 →`}
       </button>
       {error && (
         <p className="mt-2.5 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">
