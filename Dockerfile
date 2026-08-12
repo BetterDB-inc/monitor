@@ -242,53 +242,6 @@ CMD ["node", "apps/api/dist/apps/api/src/main.js"]
 # ------------------------------------------------------------------
 
 # ============================================
-# Production target: WITH AI features (default image)
-# Build with: --target production
-# ============================================
-FROM runtime-base AS production
-
-# node_modules straight from builder (includes AI packages + native modules)
-COPY --chown=betterdb:nodejs --from=builder /app/node_modules ./node_modules
-COPY --chown=betterdb:nodejs --from=builder /app/apps/api/node_modules ./apps/api/node_modules
-COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
-
-# Package files for module resolution
-COPY --chown=betterdb:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY --chown=betterdb:nodejs apps/api/package.json ./apps/api/
-COPY --chown=betterdb:nodejs packages/shared/package.json ./packages/shared/
-
-# Built backend (includes the AI proprietary module), frontend, and shared dist
-COPY --chown=betterdb:nodejs --from=builder /app/apps/api/dist ./apps/api/dist
-COPY --chown=betterdb:nodejs --from=builder /app/apps/web/dist ./apps/api/public
-COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/dist ./packages/shared/dist
-
-# agent-memory dependency chain that api imports at runtime. valkey-search-kit has
-# no production deps, so it needs no node_modules.
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/package.json ./packages/agent-memory/
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/dist ./packages/agent-memory/dist
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/node_modules ./packages/agent-memory/node_modules
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/package.json ./packages/agent-cache/
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/dist ./packages/agent-cache/dist
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/node_modules ./packages/agent-cache/node_modules
-COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
-COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/dist ./packages/valkey-search-kit/dist
-
-# Create symlink for @proprietary path alias to work at runtime. Created as root
-# (read-only at runtime); the app user only needs to traverse/read these symlinks.
-RUN mkdir -p /app/node_modules/@proprietary && \
-    ln -s /app/apps/api/dist/proprietary/* /app/node_modules/@proprietary/
-
-# Make /app writable by the runtime user so features that create new paths under
-# it at runtime work - notably RedisShake's default relative `data` dir (it is
-# spawned with cwd=/app) and sqlite/license files. This chowns only the /app
-# directory node plus a pre-created data dir (non-recursive), so it does NOT
-# duplicate node_modules the way `chown -R /app` did.
-RUN mkdir -p /app/data && chown betterdb:nodejs /app /app/data
-
-# Drop to the non-root user (created in runtime-base) for the runtime process.
-USER betterdb
-
-# ============================================
 # Production target: WITHOUT AI features (no-ai image)
 # Build with: --target production-no-ai
 # ============================================
@@ -337,7 +290,55 @@ ENV DB_USERNAME=default
 ENV AI_ENABLED=false
 ENV NODE_PATH=/app/node_modules
 
-# Make /app writable by the runtime user (see the production target above).
+# Make /app writable by the runtime user (see the production target below).
+RUN mkdir -p /app/data && chown betterdb:nodejs /app /app/data
+
+# Drop to the non-root user (created in runtime-base) for the runtime process.
+USER betterdb
+
+# ============================================
+# Production target: WITH AI features (default image)
+# Build with: --target production (or a bare `docker build`, since this is the
+# last stage and therefore Docker's default target).
+# ============================================
+FROM runtime-base AS production
+
+# node_modules straight from builder (includes AI packages + native modules)
+COPY --chown=betterdb:nodejs --from=builder /app/node_modules ./node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/apps/api/node_modules ./apps/api/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
+
+# Package files for module resolution
+COPY --chown=betterdb:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --chown=betterdb:nodejs apps/api/package.json ./apps/api/
+COPY --chown=betterdb:nodejs packages/shared/package.json ./packages/shared/
+
+# Built backend (includes the AI proprietary module), frontend, and shared dist
+COPY --chown=betterdb:nodejs --from=builder /app/apps/api/dist ./apps/api/dist
+COPY --chown=betterdb:nodejs --from=builder /app/apps/web/dist ./apps/api/public
+COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/dist ./packages/shared/dist
+
+# agent-memory dependency chain that api imports at runtime. valkey-search-kit has
+# no production deps, so it needs no node_modules.
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/package.json ./packages/agent-memory/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/dist ./packages/agent-memory/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/node_modules ./packages/agent-memory/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/package.json ./packages/agent-cache/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/dist ./packages/agent-cache/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/node_modules ./packages/agent-cache/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/dist ./packages/valkey-search-kit/dist
+
+# Create symlink for @proprietary path alias to work at runtime. Created as root
+# (read-only at runtime); the app user only needs to traverse/read these symlinks.
+RUN mkdir -p /app/node_modules/@proprietary && \
+    ln -s /app/apps/api/dist/proprietary/* /app/node_modules/@proprietary/
+
+# Make /app writable by the runtime user so features that create new paths under
+# it at runtime work - notably RedisShake's default relative `data` dir (it is
+# spawned with cwd=/app) and sqlite/license files. This chowns only the /app
+# directory node plus a pre-created data dir (non-recursive), so it does NOT
+# duplicate node_modules the way `chown -R /app` did.
 RUN mkdir -p /app/data && chown betterdb:nodejs /app /app/data
 
 # Drop to the non-root user (created in runtime-base) for the runtime process.
