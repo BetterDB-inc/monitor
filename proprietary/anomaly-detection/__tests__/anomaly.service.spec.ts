@@ -3033,6 +3033,14 @@ describe('AnomalyService', () => {
     const driftEvents = () =>
       service.getRecentEvents().filter((e) => e.metricType === MetricType.CONFIG_DRIFT);
 
+    // The curated allowlist is re-read only once per CONFIG_DRIFT_RECHECK_POLLS
+    // polls. Tests that simulate observing a LATER config value (many minutes
+    // apart in the field, adjacent polls here) must expire that countdown, or
+    // the poll legitimately serves the cached snapshot.
+    const expireConfigRecheck = (connectionId: string) => {
+      (service as any).configDriftRecheck.set(connectionId, 0);
+    };
+
     it('emits a WARNING when two same-group nodes disagree on a curated key', async () => {
       const ctxA = makeCtx('conn-a', { replid: 'replid-x', config: { maxmemory: '1000000' } });
       const ctxB = makeCtx('conn-b', { replid: 'replid-x', config: { maxmemory: '2000000' } });
@@ -3082,6 +3090,51 @@ describe('AnomalyService', () => {
       expect(driftEvents()).toHaveLength(1);
     });
 
+    it('re-reads the allowlist once per recheck window, not on every poll', async () => {
+      const ctxA = makeCtx('conn-a', {
+        replid: 'replid-throttle',
+        config: { maxmemory: '1000000' },
+      });
+      const configGet = ctxA.client.getConfigValues as jest.Mock;
+
+      await poll(ctxA);
+      const afterFirstPoll = configGet.mock.calls.length;
+      expect(afterFirstPoll).toBeGreaterThan(0);
+
+      // Subsequent polls inside the window must not spend a single CONFIG GET.
+      await poll(ctxA);
+      await poll(ctxA);
+      expect(configGet.mock.calls.length).toBe(afterFirstPoll);
+    });
+
+    it('still evaluates drift every poll while a peer fetch is throttled', async () => {
+      // conn-a caches on its first poll; a peer registered afterwards must
+      // still surface the mismatch against that cached snapshot immediately.
+      const ctxA = makeCtx('conn-a', { replid: 'replid-cached', config: { maxmemory: '1000000' } });
+      await poll(ctxA);
+      await poll(ctxA);
+
+      const ctxB = makeCtx('conn-b', { replid: 'replid-cached', config: { maxmemory: '2000000' } });
+      await poll(ctxB);
+
+      expect(driftEvents()).toHaveLength(1);
+    });
+
+    it('re-reads immediately when the replid changes rather than serving the cache', async () => {
+      await poll(makeCtx('conn-a', { replid: 'replid-before', config: { maxmemory: '1000000' } }));
+
+      // A failover moves the node to a new group: groupKey may only be rewritten
+      // together with a fresh read, so the countdown must not suppress this one.
+      const ctxAfter = makeCtx('conn-a', {
+        replid: 'replid-after',
+        config: { maxmemory: '1000000' },
+      });
+      await poll(ctxAfter);
+
+      expect((ctxAfter.client.getConfigValues as jest.Mock).mock.calls.length).toBeGreaterThan(0);
+      expect((service as any).configSnapshot.get('conn-a')?.groupKey).toBe('replid:replid-after');
+    });
+
     it('re-arms after convergence and re-fires on a new mismatch', async () => {
       const ctxA = makeCtx('conn-a', { replid: 'replid-z', config: { maxmemory: '1000000' } });
       await poll(ctxA);
@@ -3090,11 +3143,13 @@ describe('AnomalyService', () => {
 
       // Converges — re-polling both while equal must clear the active signature.
       await poll(ctxA);
+      expireConfigRecheck('conn-b');
       await poll(makeCtx('conn-b', { replid: 'replid-z', config: { maxmemory: '1000000' } }));
       expect(driftEvents()).toHaveLength(1); // still just the one from before, no new alert
 
       // Diverges again with a DIFFERENT value — must re-fire, not stay suppressed.
       await poll(ctxA);
+      expireConfigRecheck('conn-b');
       await poll(makeCtx('conn-b', { replid: 'replid-z', config: { maxmemory: '3000000' } }));
       expect(driftEvents()).toHaveLength(2);
     });
@@ -3164,6 +3219,7 @@ describe('AnomalyService', () => {
           ? Promise.reject(new Error('blip'))
           : Promise.resolve(pattern === 'appendonly' ? { appendonly: 'yes' } : {}),
       );
+      expireConfigRecheck('conn-b');
       await poll(ctxBPartial);
 
       const snap = (service as any).configSnapshot.get('conn-b')?.config;
