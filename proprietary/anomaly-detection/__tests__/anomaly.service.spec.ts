@@ -3079,6 +3079,37 @@ describe('AnomalyService', () => {
       expect(orphanEvents()).toHaveLength(1);
     });
 
+    it('reads DBSIZE on both sides of SLOT-STATS', async () => {
+      await poll();
+      expect((dbClient.getDbSize as jest.Mock).mock.calls).toHaveLength(2);
+    });
+
+    it('does not fire on a draining keyspace whose dbsize falls between the reads', async () => {
+      // A TTL cache draining under lazy+active expiry: keys counted by the
+      // first DBSIZE are gone by the SLOT-STATS read. Taking the low-water
+      // DBSIZE removes the positive bias — a single pre-read would leave a
+      // 100-key surplus every poll and confirm a leak on a healthy cache.
+      dbClient.getClusterSlotStats = jest.fn().mockResolvedValue({
+        '50': { key_count: 900, expires_count: 0, total_reads: 0, total_writes: 0 },
+      });
+      const bracketed = [1_000, 850];
+      let readIndex = 0;
+      (dbClient.getDbSize as jest.Mock).mockImplementation(() => {
+        const value = bracketed[readIndex % bracketed.length];
+        readIndex += 1;
+        return Promise.resolve(value);
+      });
+
+      const naiveSurplus = 1_000 - 900;
+      expect(naiveSurplus).toBeGreaterThanOrEqual(100);
+
+      await poll();
+      now += 31_000;
+      await poll();
+
+      expect(orphanEvents()).toHaveLength(0);
+    });
+
     it('re-alerts when the surplus genuinely clears and later recurs', async () => {
       await poll();
       now += 31_000;

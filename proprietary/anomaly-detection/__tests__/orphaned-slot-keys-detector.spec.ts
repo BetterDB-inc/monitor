@@ -1,7 +1,6 @@
 import { SlotStats } from '@app/common/types/metrics.types';
 import {
   ORPHANED_DBSIZE_DELTA_MIN_KEYS,
-  ORPHANED_SIGNATURE_MAX_LENGTH,
   OrphanedSlotKeysInput,
   detectOrphanedSlotKeys,
   orphanedSlotKeysSignature,
@@ -19,8 +18,6 @@ function input(over: Partial<OrphanedSlotKeysInput> = {}): OrphanedSlotKeysInput
   return {
     clusterEnabled: true,
     isClusterPrimary: true,
-    ownedSlots: [[0, 5460]],
-    migratingSlots: [],
     importingSlots: [],
     slotStats: slotStats({ '100': 50, '2000': 10 }),
     dbsize: 60,
@@ -29,240 +26,125 @@ function input(over: Partial<OrphanedSlotKeysInput> = {}): OrphanedSlotKeysInput
 }
 
 describe('detectOrphanedSlotKeys', () => {
-  it('flags keyed slots outside the owned ranges with per-slot counts and a total', () => {
-    // Node owns 0-5460 but holds keys in 9000 and 12000 — the valkey#539
-    // post-migration persistence-load leak: unreachable, memory-consuming keys.
+  it('fires on a dbsize surplus over every slot SLOT-STATS reports', () => {
+    // The valkey#539 leak as it actually presents: SLOT-STATS reports only the
+    // node's assigned slots, so the leaked keys show up purely as dbsize
+    // counting more than every reported slot accounts for.
     const finding = detectOrphanedSlotKeys(
       input({
-        slotStats: slotStats({ '100': 50, '9000': 25, '12000': 5 }),
-        dbsize: 80,
+        slotStats: slotStats({ '100': 50, '2000': 10 }),
+        dbsize: 60 + ORPHANED_DBSIZE_DELTA_MIN_KEYS,
       }),
     );
     expect(finding).not.toBeNull();
-    expect(finding!.orphanedSlots).toEqual([
-      { slot: 9000, keyCount: 25 },
-      { slot: 12000, keyCount: 5 },
-    ]);
-    expect(finding!.totalOrphanedKeys).toBe(30);
+    expect(finding?.totalOrphanedKeys).toBe(ORPHANED_DBSIZE_DELTA_MIN_KEYS);
   });
 
-  it('stays silent when every keyed slot is inside an owned range', () => {
+  it('stays silent when dbsize matches the counted keys', () => {
+    expect(detectOrphanedSlotKeys(input({ dbsize: 60 }))).toBeNull();
+  });
+
+  it('stays silent on a surplus below the floor', () => {
     const finding = detectOrphanedSlotKeys(
-      input({
-        ownedSlots: [
-          [0, 5460],
-          [10000, 12000],
-        ],
-        slotStats: slotStats({ '0': 3, '5460': 7, '11000': 2 }),
-      }),
+      input({ dbsize: 60 + ORPHANED_DBSIZE_DELTA_MIN_KEYS - 1 }),
     );
     expect(finding).toBeNull();
   });
 
-  it('suppresses an unowned keyed slot that is currently importing (in-flight reshard)', () => {
-    const finding = detectOrphanedSlotKeys(
-      input({
-        slotStats: slotStats({ '9000': 25 }),
-        importingSlots: [9000],
-      }),
-    );
-    expect(finding).toBeNull();
+  it('stays silent when dbsize is unavailable', () => {
+    expect(detectOrphanedSlotKeys(input({ dbsize: null }))).toBeNull();
   });
 
-  it('suppresses a keyed slot that is currently migrating away', () => {
+  it('suppresses the surplus while an import is in flight', () => {
+    // Arriving keys inflate dbsize before their slot is assigned and reported,
+    // so a live reshard is indistinguishable from a leak.
     const finding = detectOrphanedSlotKeys(
-      input({
-        ownedSlots: [[0, 5460]],
-        slotStats: slotStats({ '9000': 25 }),
-        migratingSlots: [9000],
-      }),
+      input({ dbsize: 60 + ORPHANED_DBSIZE_DELTA_MIN_KEYS, importingSlots: [9000] }),
     );
     expect(finding).toBeNull();
   });
 
   it('is a no-op outside cluster mode', () => {
     const finding = detectOrphanedSlotKeys(
-      input({ clusterEnabled: false, slotStats: slotStats({ '9000': 25 }) }),
+      input({ clusterEnabled: false, dbsize: 60 + ORPHANED_DBSIZE_DELTA_MIN_KEYS }),
     );
     expect(finding).toBeNull();
   });
 
   it('is a no-op on replicas (ownership is evaluated on primaries only)', () => {
     const finding = detectOrphanedSlotKeys(
-      input({ isClusterPrimary: false, slotStats: slotStats({ '9000': 25 }) }),
+      input({ isClusterPrimary: false, dbsize: 60 + ORPHANED_DBSIZE_DELTA_MIN_KEYS }),
     );
     expect(finding).toBeNull();
   });
 
-  it('ignores unowned slots with zero keys', () => {
-    const finding = detectOrphanedSlotKeys(input({ slotStats: slotStats({ '9000': 0 }) }));
-    expect(finding).toBeNull();
-  });
-
-  it('corroborates against dbsize: the delta beyond owned-slot keys', () => {
-    // Owned slots hold 50 keys, dbsize is 80 → 30 keys live outside owned
-    // slots, matching the orphaned total.
+  it('ignores reported slots with zero keys', () => {
     const finding = detectOrphanedSlotKeys(
-      input({
-        slotStats: slotStats({ '100': 50, '9000': 30 }),
-        dbsize: 80,
-      }),
-    );
-    expect(finding!.dbsizeDelta).toBe(30);
-  });
-
-  it('reports a null dbsize delta when dbsize is unavailable', () => {
-    const finding = detectOrphanedSlotKeys(
-      input({ slotStats: slotStats({ '9000': 30 }), dbsize: null }),
-    );
-    expect(finding!.dbsizeDelta).toBeNull();
-  });
-
-  // CLUSTER SLOT-STATS only reports slots ASSIGNED to the node, so on a real
-  // server the leaked slots never appear in slotStats — the dbsize surplus over
-  // the counted keys is the only visible signal (valkey#539).
-  it('fires on a dbsize surplus when SLOT-STATS reports owned slots only', () => {
-    const finding = detectOrphanedSlotKeys(
-      input({
-        slotStats: slotStats({ '100': 4000 }),
-        dbsize: 4000 + ORPHANED_DBSIZE_DELTA_MIN_KEYS,
-      }),
-    );
-    expect(finding).not.toBeNull();
-    expect(finding!.reason).toBe('dbsize_delta');
-    expect(finding!.orphanedSlots).toEqual([]);
-    expect(finding!.totalOrphanedKeys).toBe(ORPHANED_DBSIZE_DELTA_MIN_KEYS);
-    expect(finding!.dbsizeDelta).toBe(ORPHANED_DBSIZE_DELTA_MIN_KEYS);
-  });
-
-  it('stays silent on a dbsize surplus below the write-race floor', () => {
-    // A handful of keys written between the two reads is measurement noise,
-    // not a leak.
-    const finding = detectOrphanedSlotKeys(
-      input({
-        slotStats: slotStats({ '100': 4000 }),
-        dbsize: 4000 + ORPHANED_DBSIZE_DELTA_MIN_KEYS - 1,
-      }),
+      input({ slotStats: slotStats({ '100': 50, '2000': 10, '3000': 0 }), dbsize: 60 }),
     );
     expect(finding).toBeNull();
   });
 
-  it('stays silent when dbsize matches the counted keys', () => {
-    const finding = detectOrphanedSlotKeys(
-      input({ slotStats: slotStats({ '100': 4000 }), dbsize: 4000 }),
-    );
-    expect(finding).toBeNull();
-  });
+  // ── Churn cannot manufacture a surplus ────────────────────────────────────
+  // The caller passes the LOWEST dbsize seen either side of the SLOT-STATS
+  // read. With owned-slot keys O and leaked keys L, the surplus is
+  // min(O(t0), O(t2)) + L - O(t1) — at most L for any monotone change in O.
+  describe('conservatism under concurrent churn (low-water dbsize)', () => {
+    it('does not fire on a delete/expiry-heavy keyspace with no leak', () => {
+      // A TTL cache draining: 10_000 keys at the first dbsize read, 9_000 by
+      // the SLOT-STATS read, 8_500 by the second. The naive single-read form
+      // would report a 1_000-key surplus every poll on a healthy cache.
+      const naiveSurplus = 10_000 - 9_000;
+      expect(naiveSurplus).toBeGreaterThan(ORPHANED_DBSIZE_DELTA_MIN_KEYS);
 
-  it('suppresses the dbsize surplus while an import is in flight', () => {
-    // Mid-reshard, keys land in IMPORTING slots that SLOT-STATS cannot report
-    // yet (the slot is not assigned until the handoff completes) — the surplus
-    // is arriving data, not a leak.
-    const finding = detectOrphanedSlotKeys(
-      input({
-        slotStats: slotStats({ '100': 4000 }),
-        dbsize: 4000 + 10 * ORPHANED_DBSIZE_DELTA_MIN_KEYS,
-        importingSlots: [9000],
-      }),
-    );
-    expect(finding).toBeNull();
-  });
+      const finding = detectOrphanedSlotKeys(
+        input({
+          slotStats: slotStats({ '100': 9_000 }),
+          dbsize: Math.min(10_000, 8_500),
+        }),
+      );
+      expect(finding).toBeNull();
+    });
 
-  it('does not suppress the dbsize surplus for migrating slots (still assigned and counted)', () => {
-    // A slot migrating AWAY stays assigned to this node until the handoff, so
-    // its keys are reported by SLOT-STATS — an unexplained surplus alongside
-    // it is still a leak.
-    const finding = detectOrphanedSlotKeys(
-      input({
-        slotStats: slotStats({ '100': 4000, '300': 250 }),
-        dbsize: 4250 + ORPHANED_DBSIZE_DELTA_MIN_KEYS,
-        migratingSlots: [300],
-      }),
-    );
-    expect(finding).not.toBeNull();
-    expect(finding!.reason).toBe('dbsize_delta');
-    expect(finding!.totalOrphanedKeys).toBe(ORPHANED_DBSIZE_DELTA_MIN_KEYS);
-  });
+    it('does not fire on an insert-heavy keyspace with no leak', () => {
+      const finding = detectOrphanedSlotKeys(
+        input({
+          slotStats: slotStats({ '100': 9_000 }),
+          dbsize: Math.min(8_000, 10_000),
+        }),
+      );
+      expect(finding).toBeNull();
+    });
 
-  it('prefers the explicit per-slot evidence over the dbsize surplus when both exist', () => {
-    const finding = detectOrphanedSlotKeys(
-      input({
-        slotStats: slotStats({ '100': 4000, '9000': 500 }),
-        dbsize: 5000,
-      }),
-    );
-    expect(finding!.reason).toBe('slot_stats');
-    expect(finding!.orphanedSlots).toEqual([{ slot: 9000, keyCount: 500 }]);
-  });
+    it('still reports a genuine leak while the keyspace drains around it', () => {
+      // 500 leaked keys, invisible to SLOT-STATS, while owned keys fall
+      // 10_000 → 9_800 → 9_600 across the three reads.
+      const leaked = 500;
+      const finding = detectOrphanedSlotKeys(
+        input({
+          slotStats: slotStats({ '100': 9_800 }),
+          dbsize: Math.min(10_000 + leaked, 9_600 + leaked),
+        }),
+      );
+      expect(finding).not.toBeNull();
+      // Conservative: never more than the true leak.
+      expect(finding?.totalOrphanedKeys).toBeLessThanOrEqual(leaked);
+    });
 
-  it('counts unowned keys reported by SLOT-STATS as already accounted for in the surplus', () => {
-    // Every local key is either in an owned slot (4000) or the reported
-    // unowned slot (500) — dbsize holds no FURTHER invisible keys, so the
-    // delta reflects only what the explicit path already reports.
-    const finding = detectOrphanedSlotKeys(
-      input({
-        slotStats: slotStats({ '100': 4000, '9000': 500 }),
-        dbsize: 4500,
-      }),
-    );
-    expect(finding!.reason).toBe('slot_stats');
-    expect(finding!.dbsizeDelta).toBe(500);
+    it('reports the leak exactly on a steady keyspace', () => {
+      const leaked = 640;
+      const finding = detectOrphanedSlotKeys(
+        input({ slotStats: slotStats({ '100': 9_000 }), dbsize: 9_000 + leaked }),
+      );
+      expect(finding?.totalOrphanedKeys).toBe(leaked);
+    });
   });
 });
 
 describe('orphanedSlotKeysSignature', () => {
-  it('is stable while the same slots stay orphaned, regardless of key counts', () => {
-    const a = detectOrphanedSlotKeys(input({ slotStats: slotStats({ '9000': 25, '12000': 5 }) }));
-    const b = detectOrphanedSlotKeys(input({ slotStats: slotStats({ '9000': 999, '12000': 1 }) }));
-    expect(orphanedSlotKeysSignature(a!)).toBe(orphanedSlotKeysSignature(b!));
-  });
-
-  it('changes when the orphaned slot set changes', () => {
-    const a = detectOrphanedSlotKeys(input({ slotStats: slotStats({ '9000': 25 }) }));
-    const b = detectOrphanedSlotKeys(input({ slotStats: slotStats({ '9000': 25, '12000': 5 }) }));
-    expect(orphanedSlotKeysSignature(a!)).not.toBe(orphanedSlotKeysSignature(b!));
-  });
-
-  it('compresses contiguous orphaned slots into ranges', () => {
-    const finding = detectOrphanedSlotKeys(
-      input({ slotStats: slotStats({ '9000': 5, '9001': 5, '9002': 5, '12000': 5 }) }),
+  it('is stable while the surplus fluctuates, so a leak alerts once', () => {
+    expect(orphanedSlotKeysSignature({ totalOrphanedKeys: 500 })).toBe(
+      orphanedSlotKeysSignature({ totalOrphanedKeys: 512 }),
     );
-    expect(orphanedSlotKeysSignature(finding!)).toBe('9000-9002,12000');
-  });
-
-  it('stays bounded for a large incompressible orphaned slot set', () => {
-    const wide: Record<string, number> = {};
-    for (let slot = 6000; slot < 16000; slot += 2) {
-      wide[String(slot)] = 1;
-    }
-    const finding = detectOrphanedSlotKeys(input({ slotStats: slotStats(wide), dbsize: null }));
-    expect(finding!.orphanedSlots.length).toBe(5000);
-    expect(orphanedSlotKeysSignature(finding!).length).toBeLessThanOrEqual(
-      ORPHANED_SIGNATURE_MAX_LENGTH,
-    );
-  });
-
-  it('distinguishes large orphaned slot sets that differ', () => {
-    const wide = (offset: number): Record<string, number> => {
-      const entries: Record<string, number> = {};
-      for (let slot = 6000 + offset; slot < 16000; slot += 2) {
-        entries[String(slot)] = 1;
-      }
-      return entries;
-    };
-    const a = detectOrphanedSlotKeys(input({ slotStats: slotStats(wide(0)), dbsize: null }));
-    const b = detectOrphanedSlotKeys(input({ slotStats: slotStats(wide(1)), dbsize: null }));
-    expect(orphanedSlotKeysSignature(a!)).not.toBe(orphanedSlotKeysSignature(b!));
-  });
-
-  it('is stable for the dbsize-surplus signal while the surplus fluctuates', () => {
-    const a = detectOrphanedSlotKeys(
-      input({ slotStats: slotStats({ '100': 4000 }), dbsize: 4000 + 500 }),
-    );
-    const b = detectOrphanedSlotKeys(
-      input({ slotStats: slotStats({ '100': 4000 }), dbsize: 4000 + 900 }),
-    );
-    expect(orphanedSlotKeysSignature(a!)).toBe(orphanedSlotKeysSignature(b!));
-    expect(orphanedSlotKeysSignature(a!)).not.toBe('');
   });
 });

@@ -2910,9 +2910,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    */
   private static readonly ORPHANED_SLOT_KEYS_MIN_PERSIST_MS = 30_000;
 
-  /** How many orphaned slots to list individually in the event message. */
-  private static readonly ORPHANED_SLOT_MESSAGE_LIMIT = 8;
-
   /**
    * Orphaned keys in unowned cluster slots (valkey-io/valkey#539): after
    * loading a persistence file that predates a slot migration (or a warm-up
@@ -2949,15 +2946,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         return;
       }
 
-      // DBSIZE is read BEFORE SLOT-STATS on purpose: keys written between the
-      // two reads then inflate the SLOT-STATS side, biasing the surplus signal
-      // NEGATIVE under insert load — a false positive needs a genuine surplus.
+      // DBSIZE is read on BOTH sides of SLOT-STATS and the LOWER value is used.
+      // The two commands are separate round trips, so the keyspace moves
+      // between them; a single read before SLOT-STATS is biased positive by
+      // deletes (a key counted by DBSIZE but expired before the stats read
+      // reads as leaked), which on a high-churn TTL cache recurs every poll and
+      // would sail through the persistence gate. The low-water mark makes the
+      // surplus at most the true leak for any monotone change in the keyspace.
       // A failed read is an OBSERVATION GAP like the import/SLOT-STATS cases:
-      // without dbsize only the (real-server-inert) explicit path could fire,
-      // so running the gate would read the blind poll as recovery.
-      let dbsize: number;
+      // with no dbsize there is no signal at all, so running the gate would
+      // read the blind poll as recovery.
+      let dbsizeBefore: number;
       try {
-        dbsize = await ctx.client.getDbSize();
+        dbsizeBefore = await ctx.client.getDbSize();
       } catch (dbsizeErr) {
         this.logger.debug(
           `DBSIZE failed for ${ctx.connectionName}: ${dbsizeErr instanceof Error ? dbsizeErr.message : dbsizeErr}`,
@@ -2975,18 +2976,24 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         return;
       }
 
+      let dbsizeAfter: number;
+      try {
+        dbsizeAfter = await ctx.client.getDbSize();
+      } catch (dbsizeErr) {
+        this.logger.debug(
+          `DBSIZE re-read failed for ${ctx.connectionName}: ${dbsizeErr instanceof Error ? dbsizeErr.message : dbsizeErr}`,
+        );
+        return;
+      }
+
       const finding = detectOrphanedSlotKeys({
         clusterEnabled: true,
         isClusterPrimary,
-        ownedSlots: self.slots,
-        migratingSlots: (self.migratingSlots ?? []).map((entry) => {
-          return entry.slot;
-        }),
         importingSlots: (self.importingSlots ?? []).map((entry) => {
           return entry.slot;
         }),
         slotStats,
-        dbsize,
+        dbsize: Math.min(dbsizeBefore, dbsizeAfter),
       });
 
       await this.applyTopologyPersistenceGate<OrphanedSlotKeysFinding>({
@@ -2999,28 +3006,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         minPersistMs: AnomalyService.ORPHANED_SLOT_KEYS_MIN_PERSIST_MS,
         metricType: MetricType.ORPHANED_SLOT_KEYS,
         buildEvent: (f, signature) => {
-          let evidence: string;
-          if (f.reason === 'slot_stats') {
-            const listed = f.orphanedSlots.slice(0, AnomalyService.ORPHANED_SLOT_MESSAGE_LIMIT);
-            const slotsLabel = listed
-              .map((entry) => {
-                return `${entry.slot} (${entry.keyCount} keys)`;
-              })
-              .join(', ');
-            const moreCount = f.orphanedSlots.length - listed.length;
-            const moreClause = moreCount > 0 ? ` and ${moreCount} more slots` : '';
-            const corroboration =
-              f.dbsizeDelta !== null
-                ? ` dbsize exceeds the keys in owned slots by ${f.dbsizeDelta}, corroborating the leak.`
-                : '';
-            evidence = `slot ${slotsLabel}${moreClause}.${corroboration}`;
-          } else {
-            evidence =
-              `dbsize persistently exceeds every key CLUSTER SLOT-STATS can account for by ` +
-              `${f.totalOrphanedKeys} keys (SLOT-STATS only reports slots assigned to the node, ` +
-              `so leaked slots are invisible to it — locate them with CLUSTER COUNTKEYSINSLOT ` +
-              `on slots outside this node's ranges).`;
-          }
+          const evidence =
+            `dbsize persistently exceeds every key CLUSTER SLOT-STATS can account for by ` +
+            `${f.totalOrphanedKeys} keys (SLOT-STATS only reports slots assigned to the node, ` +
+            `so leaked slots are invisible to it — locate them with CLUSTER COUNTKEYSINSLOT ` +
+            `on slots outside this node's ranges).`;
           return {
             id: `${ctx.connectionId}-orphaned-slots-${signature}-${timestamp}`,
             timestamp,
