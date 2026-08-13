@@ -44,6 +44,11 @@ import {
   evaluateResyncLoop,
   stuckReplicaSignature,
 } from './stuck-replica-detector';
+import {
+  OrphanedSlotKeysFinding,
+  detectOrphanedSlotKeys,
+  orphanedSlotKeysSignature,
+} from './orphaned-slot-keys-detector';
 import { detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
 import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
@@ -55,7 +60,7 @@ import {
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
-import { ClusterNode, ClusterShard } from '@app/common/types/metrics.types';
+import { ClusterNode, ClusterShard, SlotStats } from '@app/common/types/metrics.types';
 import {
   FAILOVER_CHURN_MIN_CHANGES,
   FailoverChurnStateMap,
@@ -199,11 +204,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
+  // Last timestamp the (expensive) orphaned-slot probe actually ran per
+  // connection — see ORPHANED_SLOT_KEYS_PROBE_INTERVAL_MS.
+  private orphanedSlotLastProbe = new Map<string, number>();
   private replicaSlotFirstSeen = new Map<string, Map<string, number>>();
   private activeReplicaSlotAnomalies = new Map<string, Set<string>>();
   // signature -> emitted event id, so a recovered condition can resolve exactly
   // its own event (clearing the activeOnly banner) instead of all of them.
   private replicaSlotEventIds = new Map<string, Map<string, string>>();
+  // Orphaned-slot-keys (valkey#539) state, same discipline as stuck-replica:
+  // `firstSeen` gates on persistence so a reshard window whose in-flight
+  // markers fell between polls doesn't alert, `active` dedupes once fired.
+  private orphanedSlotFirstSeen = new Map<string, Map<string, number>>();
+  private activeOrphanedSlots = new Map<string, Set<string>>();
   // Per-connection per-shard failover-churn windows (valkey#3996, gossip mode).
   private failoverChurnState = new Map<string, FailoverChurnStateMap>();
   // Replication output-buffer pressure (valkey#3963): per-connection replica
@@ -523,6 +536,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
+    this.orphanedSlotLastProbe.delete(connectionId);
+    this.orphanedSlotFirstSeen.delete(connectionId);
+    this.activeOrphanedSlots.delete(connectionId);
     this.failoverChurnState.delete(connectionId);
     this.forkMemoryState.delete(connectionId);
     this.forkMemLastChanges.delete(connectionId);
@@ -1077,47 +1093,56 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // defaults to the last known mode — so a transient CLUSTER INFO failure
         // neither runs them on a known-Raft connection nor suppresses them on a
         // gossip cluster (where they must keep running through the blip).
-        if (!isRaft) {
-          // Fetch the topology ONCE for all gossip-era detectors (was multiple
-          // independent CLUSTER NODES calls per poll), and CLUSTER SHARDS
-          // concurrently (optional refinement — never rejects). A CLUSTER NODES
-          // failure is a single observation gap: skip the detectors this poll
-          // WITHOUT clearing the WARNING detectors' dedupe/grace state (so a
-          // transient blip can't re-fire a duplicate), while preserving the
-          // duplicate-primary detector's deliberate re-alert-after-gap behavior.
-          // For failover churn the skip also carries the window state — churn
-          // evidence must survive a probe blip or a flapping shard could never
-          // accumulate enough observations to fire.
-          const shardsPromise = this.safeGetClusterShards(ctx);
-          let nodes: ClusterNode[] | undefined;
-          try {
-            nodes = await ctx.client.getClusterNodes();
-          } catch (topologyErr) {
-            this.activeTopologyConflicts.delete(ctx.connectionId);
-            this.logger.debug(
-              `Failed to fetch cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
-            );
-          }
-          const shards = await shardsPromise;
+        // Fetch the topology ONCE for the gossip-era detectors below AND the
+        // topology-agnostic orphaned-slot-keys detector (which runs under Raft
+        // too). CLUSTER SHARDS is fetched concurrently, gossip mode only
+        // (optional refinement — never rejects). A CLUSTER NODES failure is a
+        // single observation gap: skip the detectors this poll WITHOUT
+        // clearing the WARNING detectors' dedupe/grace state (so a transient
+        // blip can't re-fire a duplicate), while preserving the
+        // duplicate-primary detector's deliberate re-alert-after-gap behavior.
+        // For failover churn the skip also carries the window state — churn
+        // evidence must survive a probe blip or a flapping shard could never
+        // accumulate enough observations to fire.
+        const shardsPromise = isRaft ? undefined : this.safeGetClusterShards(ctx);
+        let nodes: ClusterNode[] | undefined;
+        try {
+          nodes = await ctx.client.getClusterNodes();
+        } catch (topologyErr) {
+          this.activeTopologyConflicts.delete(ctx.connectionId);
+          this.logger.debug(
+            `Failed to fetch cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
+          );
+        }
+        const shards = await shardsPromise;
 
-          if (nodes) {
-            await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
-            await this.detectStuckReplicas(ctx, timestamp, nodes);
-            await this.detectHostnameStaleness(ctx, timestamp, nodes, shards);
-            await this.detectGhostMembers(ctx, timestamp, nodes);
-            await this.detectFailoverChurn(ctx, timestamp, nodes);
-            // Replica migrating/importing markers are node-local — only the
-            // queried node's own line carries them — so aggregate each replica's
-            // self-view before detecting (falls back to `nodes` without fan-out).
-            const perNodeView = await this.gatherReplicaSlotView(nodes, ctx);
-            await this.detectReplicaSlotState(
-              ctx,
-              timestamp,
-              perNodeView.nodes,
-              shards,
-              perNodeView.unreachableIds,
-            );
-          }
+        // Gossip-race detectors only: under Raft, topology is consensus-managed.
+        if (!isRaft && nodes) {
+          await this.detectDuplicatePrimaries(ctx, timestamp, nodes);
+          await this.detectStuckReplicas(ctx, timestamp, nodes);
+          await this.detectHostnameStaleness(ctx, timestamp, nodes, shards);
+          await this.detectGhostMembers(ctx, timestamp, nodes);
+          await this.detectFailoverChurn(ctx, timestamp, nodes);
+          // Replica migrating/importing markers are node-local — only the
+          // queried node's own line carries them — so aggregate each replica's
+          // self-view before detecting (falls back to `nodes` without fan-out).
+          const perNodeView = await this.gatherReplicaSlotView(nodes, ctx);
+          await this.detectReplicaSlotState(
+            ctx,
+            timestamp,
+            perNodeView.nodes,
+            shards,
+            perNodeView.unreachableIds,
+          );
+        }
+
+        if (nodes) {
+          // Orphaned keys in unowned slots after a persistence load
+          // (valkey#539): unreachable data silently holding memory. NOT a
+          // gossip race — the engine loads persistence files the same way
+          // under Raft, and CLUSTER NODES / SLOT-STATS remain available — so
+          // it runs in BOTH topology modes.
+          await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
         }
       }
 
@@ -2938,6 +2963,167 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
     acknowledgeResyncLoopFinding(state);
+  }
+
+  /**
+   * How long the same orphaned-slot set must persist before alerting. The
+   * in-flight migrating/importing markers already exclude an observed reshard;
+   * this gate additionally covers a reshard whose transient markers fell
+   * between two polls. Genuine valkey#539 orphans persist indefinitely.
+   */
+  private static readonly ORPHANED_SLOT_KEYS_MIN_PERSIST_MS = 30_000;
+
+  /**
+   * Minimum wall-clock spacing between orphaned-slot probes. The probe costs
+   * two DBSIZEs plus a CLUSTER SLOT-STATS whose reply carries every one of the
+   * node's slots, and ANOMALY_POLL_INTERVAL_MS defaults to 1s — far too often
+   * for a leak that, once a persistence file has been loaded, is permanent.
+   * Spaced at half the persistence window so two probes still bracket it.
+   */
+  private static readonly ORPHANED_SLOT_KEYS_PROBE_INTERVAL_MS = 15_000;
+
+  /**
+   * Orphaned keys in unowned cluster slots (valkey-io/valkey#539): after
+   * loading a persistence file that predates a slot migration (or a warm-up
+   * from a shared RDB), a node holds keys in slots it does not own — routed
+   * clients can never reach them, yet they count in dbsize and hold memory.
+   * Reads CLUSTER SLOT-STATS (capability-gated) plus DBSIZE for corroboration
+   * against the node's own slot ownership from the already-fetched topology.
+   * A failed SLOT-STATS read is an observation gap: the poll is skipped
+   * WITHOUT resolving active findings, so a probe blip cannot flap the alert.
+   */
+  private async detectOrphanedSlotKeys(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+  ): Promise<void> {
+    try {
+      const self = nodes.find((node) => {
+        return node.flags.includes('myself');
+      });
+      const isClusterPrimary = self !== undefined && self.flags.includes('master');
+      if (self === undefined || isClusterPrimary === false) {
+        return;
+      }
+      if (ctx.client.getCapabilities().hasClusterSlotStats === false) {
+        return;
+      }
+      // A slot import in flight is an OBSERVATION GAP, not a clean poll:
+      // arriving keys inflate dbsize before their slot is assigned/reported,
+      // so leak and reshard traffic are indistinguishable. Skip WITHOUT
+      // touching the persistence gate (same contract as a failed SLOT-STATS
+      // read) so a brief import neither resets the 30s clock nor resolves an
+      // already-alerted leak into a post-import duplicate WARNING.
+      if ((self.importingSlots ?? []).length > 0) {
+        return;
+      }
+
+      // Throttled like every other gap above: a skipped poll must NOT reach
+      // the persistence gate, or the cheap polls between probes would read as
+      // recovery and flap an alerted leak.
+      const lastProbe = this.orphanedSlotLastProbe.get(ctx.connectionId);
+      const dueForProbe =
+        lastProbe === undefined ||
+        timestamp - lastProbe >= AnomalyService.ORPHANED_SLOT_KEYS_PROBE_INTERVAL_MS;
+      if (dueForProbe === false) {
+        return;
+      }
+      this.orphanedSlotLastProbe.set(ctx.connectionId, timestamp);
+
+      // DBSIZE is read on BOTH sides of SLOT-STATS and the LOWER value is used.
+      // The two commands are separate round trips, so the keyspace moves
+      // between them; a single read before SLOT-STATS is biased positive by
+      // deletes (a key counted by DBSIZE but expired before the stats read
+      // reads as leaked), which on a high-churn TTL cache recurs every poll and
+      // would sail through the persistence gate. The low-water mark makes the
+      // surplus at most the true leak for any monotone change in the keyspace.
+      // A failed read is an OBSERVATION GAP like the import/SLOT-STATS cases:
+      // with no dbsize there is no signal at all, so running the gate would
+      // read the blind poll as recovery.
+      let dbsizeBefore: number;
+      try {
+        dbsizeBefore = await ctx.client.getDbSize();
+      } catch (dbsizeErr) {
+        this.logger.debug(
+          `DBSIZE failed for ${ctx.connectionName}: ${dbsizeErr instanceof Error ? dbsizeErr.message : dbsizeErr}`,
+        );
+        return;
+      }
+
+      let slotStats: SlotStats;
+      try {
+        slotStats = await ctx.client.getClusterSlotStats('key-count', 16384);
+      } catch (statsErr) {
+        this.logger.debug(
+          `CLUSTER SLOT-STATS failed for ${ctx.connectionName}: ${statsErr instanceof Error ? statsErr.message : statsErr}`,
+        );
+        return;
+      }
+
+      let dbsizeAfter: number;
+      try {
+        dbsizeAfter = await ctx.client.getDbSize();
+      } catch (dbsizeErr) {
+        this.logger.debug(
+          `DBSIZE re-read failed for ${ctx.connectionName}: ${dbsizeErr instanceof Error ? dbsizeErr.message : dbsizeErr}`,
+        );
+        return;
+      }
+
+      const finding = detectOrphanedSlotKeys({
+        clusterEnabled: true,
+        isClusterPrimary,
+        importingSlots: (self.importingSlots ?? []).map((entry) => {
+          return entry.slot;
+        }),
+        slotStats,
+        dbsize: Math.min(dbsizeBefore, dbsizeAfter),
+      });
+
+      await this.applyTopologyPersistenceGate<OrphanedSlotKeysFinding>({
+        ctx,
+        timestamp,
+        findings: finding !== null ? [finding] : [],
+        signatureOf: orphanedSlotKeysSignature,
+        firstSeenByConn: this.orphanedSlotFirstSeen,
+        activeByConn: this.activeOrphanedSlots,
+        minPersistMs: AnomalyService.ORPHANED_SLOT_KEYS_MIN_PERSIST_MS,
+        metricType: MetricType.ORPHANED_SLOT_KEYS,
+        buildEvent: (f, signature) => {
+          const evidence =
+            `dbsize persistently exceeds every key CLUSTER SLOT-STATS can account for by ` +
+            `${f.totalOrphanedKeys} keys (SLOT-STATS only reports slots assigned to the node, ` +
+            `so leaked slots are invisible to it — locate them with CLUSTER COUNTKEYSINSLOT ` +
+            `on slots outside this node's ranges).`;
+          return {
+            id: `${ctx.connectionId}-orphaned-slots-${signature}-${timestamp}`,
+            timestamp,
+            metricType: MetricType.ORPHANED_SLOT_KEYS,
+            anomalyType: AnomalyType.SPIKE,
+            severity: AnomalySeverity.WARNING,
+            value: f.totalOrphanedKeys,
+            baseline: 0,
+            zScore: 0,
+            stdDev: 0,
+            threshold: 0,
+            message:
+              `WARNING: ${f.totalOrphanedKeys} keys live in hash slots this node does NOT own: ` +
+              `${evidence} They were loaded from a persistence file scoped wider than the ` +
+              `node's current slot ownership (valkey#539) — clients are routed to the slots' ` +
+              `actual owners, so these keys are unreachable and only consume memory. ` +
+              `Remediation: delete the keys in unowned slots (or reload from a correctly scoped ` +
+              `persistence file); until upstream ships automatic cleanup they will never expire ` +
+              `from routing.`,
+            resolved: false,
+            connectionId: ctx.connectionId,
+          };
+        },
+      });
+    } catch (orphanErr) {
+      this.logger.debug(
+        `Failed to check orphaned slot keys for ${ctx.connectionName}: ${orphanErr instanceof Error ? orphanErr.message : orphanErr}`,
+      );
+    }
   }
 
   /**

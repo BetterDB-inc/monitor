@@ -132,6 +132,7 @@ const METRIC_LABELS: Record<string, string> = {
   raft_health: 'Raft Health',
   replica_slot_state: 'Replica Slot State',
   resync_loop: 'Replica Resync Loop',
+  orphaned_slot_keys: 'Orphaned Slot Keys',
   failover_churn: 'Failover Churn',
   repl_buffer_pressure: 'Replica Buffer Pressure',
   memory_overhead: 'Memory Overhead',
