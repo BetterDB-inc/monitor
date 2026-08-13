@@ -1,6 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
-import { ConfigHazardFinding, evaluateAclAofHazard } from './config-hazard';
+import {
+  ConfigHazardFinding,
+  evaluateAclAofHazard,
+  evaluateAppendfsyncHazard,
+} from './config-hazard';
 
 interface CachedFindings {
   findings: ConfigHazardFinding[];
@@ -24,7 +28,13 @@ interface ProbeClientLike {
 export class ConfigHazardService {
   private readonly logger = new Logger(ConfigHazardService.name);
   private readonly cache = new Map<string, CachedFindings>();
+  // Per-connection aof_delayed_fsync trend across probes: how many consecutive
+  // probes the counter rose, feeding the appendfsync hazard's escalation.
+  private readonly delayedFsyncTrend = new Map<string, { last: number; streak: number }>();
   private static readonly CACHE_TTL_MS = 60_000;
+  // LATENCY LATEST entries persist until LATENCY RESET, so only a spike this
+  // recent counts as evidence that fsync is blocking the main thread NOW.
+  private static readonly LATENCY_EVENT_FRESHNESS_S = 300;
 
   constructor(private readonly connectionRegistry: ConnectionRegistry) {}
 
@@ -67,6 +77,7 @@ export class ConfigHazardService {
     }
 
     if (appendonly !== 'yes') {
+      this.delayedFsyncTrend.delete(connectionId);
       return [];
     }
 
@@ -87,10 +98,146 @@ export class ConfigHazardService {
       aclGetUserResult = 'denied';
     }
 
-    const finding = evaluateAclAofHazard({ appendonly, version, aclGetUserResult });
-    if (finding === null) {
-      return [];
+    const findings: ConfigHazardFinding[] = [];
+    const aclFinding = evaluateAclAofHazard({ appendonly, version, aclGetUserResult });
+    if (aclFinding !== null) {
+      findings.push(aclFinding);
     }
-    return [finding];
+
+    const fsyncFinding = await this.probeAppendfsync(connectionId, client, appendonly);
+    if (fsyncFinding !== null) {
+      findings.push(fsyncFinding);
+    }
+    return findings;
+  }
+
+  /**
+   * Seconds on the MONITORED server's clock. LATENCY LATEST timestamps each
+   * spike with the server's own `time(NULL)`, so comparing those against the
+   * monitor host's `Date.now()` makes the freshness window wrong in BOTH
+   * directions under clock skew: a stale spike can read as fresh, and a genuine
+   * one can be suppressed. Anchoring both sides to the server removes skew from
+   * the comparison entirely.
+   *
+   * Falls back to the local clock when TIME is unavailable — no worse than
+   * comparing against the local clock unconditionally, which is what this
+   * replaces.
+   */
+  private async readServerTimeSeconds(
+    connectionId: string,
+    client: ProbeClientLike,
+  ): Promise<number> {
+    try {
+      const raw = await client.call('TIME', []);
+      if (Array.isArray(raw) && raw.length > 0) {
+        const seconds = parseInt(String(raw[0]), 10);
+        if (Number.isFinite(seconds)) {
+          return seconds;
+        }
+      }
+    } catch (err) {
+      this.logger.debug(`TIME failed for ${connectionId}: ${(err as Error).message}`);
+    }
+    return Math.floor(Date.now() / 1000);
+  }
+
+  /**
+   * AOF fsync-policy hazard (valkey#3515). Symptom probes are best-effort: a
+   * failed INFO or LATENCY read degrades to config-only evaluation (the
+   * low-severity advisory) rather than suppressing the finding or the poll.
+   */
+  private async probeAppendfsync(
+    connectionId: string,
+    client: ProbeClientLike,
+    appendonly: string | null,
+  ): Promise<ConfigHazardFinding | null> {
+    let appendfsync: string | null;
+    try {
+      appendfsync = await client.getConfigValue('appendfsync');
+    } catch (err) {
+      this.logger.debug(
+        `CONFIG GET appendfsync failed for ${connectionId}: ${(err as Error).message}`,
+      );
+      return null;
+    }
+    if (appendfsync !== 'always' && appendfsync !== 'everysec') {
+      this.delayedFsyncTrend.delete(connectionId);
+      return null;
+    }
+
+    let aofDelayedFsync: number | null = null;
+    let aofLastWriteStatus: string | null = null;
+    try {
+      const raw = await client.call('INFO', ['persistence']);
+      if (typeof raw === 'string') {
+        const fields = this.parseInfoFields(raw);
+        const delayed = parseInt(fields['aof_delayed_fsync'] ?? '', 10);
+        if (Number.isFinite(delayed)) {
+          aofDelayedFsync = delayed;
+        }
+        aofLastWriteStatus = fields['aof_last_write_status'] ?? null;
+      }
+    } catch (err) {
+      this.logger.debug(`INFO persistence failed for ${connectionId}: ${(err as Error).message}`);
+    }
+
+    let delayedFsyncRisingStreak = 0;
+    if (aofDelayedFsync !== null) {
+      const prev = this.delayedFsyncTrend.get(connectionId);
+      if (prev !== undefined && aofDelayedFsync > prev.last) {
+        delayedFsyncRisingStreak = prev.streak + 1;
+      }
+      this.delayedFsyncTrend.set(connectionId, {
+        last: aofDelayedFsync,
+        streak: delayedFsyncRisingStreak,
+      });
+    }
+
+    let latencyEvents: string[] = [];
+    try {
+      const nowSeconds = await this.readServerTimeSeconds(connectionId, client);
+      const raw = await client.call('LATENCY', ['LATEST']);
+      if (Array.isArray(raw)) {
+        latencyEvents = raw
+          .map((entry) => {
+            if (Array.isArray(entry) === false) {
+              return null;
+            }
+            const [event, spikeAtSeconds] = entry as unknown[];
+            if (typeof event !== 'string' || typeof spikeAtSeconds !== 'number') {
+              return null;
+            }
+            const isFresh =
+              nowSeconds - spikeAtSeconds <= ConfigHazardService.LATENCY_EVENT_FRESHNESS_S;
+            return isFresh === true ? event : null;
+          })
+          .filter((event): event is string => {
+            return event !== null;
+          });
+      }
+    } catch (err) {
+      this.logger.debug(`LATENCY LATEST failed for ${connectionId}: ${(err as Error).message}`);
+    }
+
+    return evaluateAppendfsyncHazard({
+      appendonly,
+      appendfsync,
+      aofDelayedFsync,
+      delayedFsyncRisingStreak,
+      aofLastWriteStatus,
+      latencyEvents,
+    });
+  }
+
+  private parseInfoFields(raw: string): Record<string, string> {
+    const fields: Record<string, string> = {};
+    for (const line of raw.split(/\r?\n/)) {
+      const sep = line.indexOf(':');
+      if (sep <= 0) {
+        continue;
+      }
+      fields[line.slice(0, sep)] = line.slice(sep + 1).trim();
+    }
+    return fields;
   }
 }

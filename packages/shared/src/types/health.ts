@@ -73,12 +73,16 @@ export interface LicenseWarmupStatus {
   tier: string;
 }
 
-/** Advisory finding for a hazardous static server configuration (e.g. valkey#3983). */
+/** Advisory finding for a hazardous static server configuration (e.g. valkey#3983, valkey#3515). */
 export interface ConfigHazardFinding {
-  id: 'default-user-aof-data-loss';
-  severity: 'warning';
-  /** 'hazard' = dangerous config confirmed; 'unverified' = could not inspect the ACL to rule it out. */
-  status: 'hazard' | 'unverified';
+  id: 'default-user-aof-data-loss' | 'appendfsync-always-blocking' | 'appendfsync-everysec-backlog';
+  severity: 'info' | 'warning';
+  /**
+   * 'hazard' = dangerous config confirmed (symptoms observed where applicable);
+   * 'unverified' = could not inspect the server state to rule the hazard out;
+   * 'advisory' = risky config present but no symptom observed yet.
+   */
+  status: 'hazard' | 'unverified' | 'advisory';
   message: string;
 }
 

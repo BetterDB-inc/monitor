@@ -31,6 +31,12 @@ describe('ConfigHazardService', () => {
     (Date.now as jest.Mock).mockRestore();
   });
 
+  function appendonlyProbeCount(): number {
+    return client.getConfigValue.mock.calls.filter((args: string[]) => {
+      return args[0] === 'appendonly';
+    }).length;
+  }
+
   it('returns the hazard finding for a hazardous config', async () => {
     const findings = await service.getHazards('conn-1');
     expect(findings).toHaveLength(1);
@@ -55,20 +61,20 @@ describe('ConfigHazardService', () => {
   it('serves from the cache within the TTL', async () => {
     await service.getHazards('conn-1');
     await service.getHazards('conn-1');
-    expect(client.getConfigValue).toHaveBeenCalledTimes(1);
+    expect(appendonlyProbeCount()).toBe(1);
   });
 
   it('re-probes after the TTL expires', async () => {
     await service.getHazards('conn-1');
     now += 61_000;
     await service.getHazards('conn-1');
-    expect(client.getConfigValue).toHaveBeenCalledTimes(2);
+    expect(appendonlyProbeCount()).toBe(2);
   });
 
   it('caches per connection, not globally', async () => {
     await service.getHazards('conn-1');
     await service.getHazards('conn-2');
-    expect(client.getConfigValue).toHaveBeenCalledTimes(2);
+    expect(appendonlyProbeCount()).toBe(2);
   });
 
   it('returns no findings when the appendonly config cannot be read', async () => {
@@ -108,5 +114,162 @@ describe('ConfigHazardService', () => {
     await service.getHazards('conn-1');
     const findings = await service.getHazards('conn-1');
     expect(findings).toHaveLength(1);
+  });
+
+  describe('appendfsync hazard probing', () => {
+    const onDefaultUser = { flags: ['on'], commands: '+@all', keys: '~*', channels: '&*' };
+
+    function setupFsyncClient(
+      opts: {
+        appendfsync?: string;
+        delayed?: number;
+        writeStatus?: string;
+        latency?: unknown;
+        // Skew of the MONITORED server's clock relative to the monitor host,
+        // in seconds. LATENCY spike timestamps come from the server clock.
+        serverClockSkewS?: number;
+      } = {},
+    ): void {
+      client.getConfigValue.mockImplementation((param: string) => {
+        if (param === 'appendonly') {
+          return Promise.resolve('yes');
+        }
+        if (param === 'appendfsync') {
+          return Promise.resolve(opts.appendfsync ?? 'always');
+        }
+        return Promise.resolve(null);
+      });
+      client.call.mockImplementation((cmd: string) => {
+        if (cmd === 'ACL') {
+          return Promise.resolve(onDefaultUser);
+        }
+        if (cmd === 'INFO') {
+          return Promise.resolve(
+            `# Persistence\r\naof_enabled:1\r\naof_delayed_fsync:${opts.delayed ?? 0}\r\n` +
+              `aof_last_write_status:${opts.writeStatus ?? 'ok'}\r\n`,
+          );
+        }
+        if (cmd === 'TIME') {
+          const serverSeconds = Math.floor(now / 1000) + (opts.serverClockSkewS ?? 0);
+          return Promise.resolve([String(serverSeconds), '0']);
+        }
+        if (cmd === 'LATENCY') {
+          if (opts.latency instanceof Error) {
+            return Promise.reject(opts.latency);
+          }
+          return Promise.resolve(opts.latency ?? []);
+        }
+        return Promise.resolve(null);
+      });
+    }
+
+    it('returns the low-severity advisory for always with no symptoms', async () => {
+      setupFsyncClient();
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].id).toBe('appendfsync-always-blocking');
+      expect(findings[0].status).toBe('advisory');
+      expect(findings[0].severity).toBe('info');
+    });
+
+    it('does not escalate always when aof_delayed_fsync rises across probes', async () => {
+      // Belt-and-braces against the engine contract: under always the counter
+      // cannot rise at all, so a rise must not be treated as blocking evidence.
+      setupFsyncClient({ delayed: 5 });
+      await service.getHazards('conn-1');
+      now += 61_000;
+      setupFsyncClient({ delayed: 9 });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].status).toBe('advisory');
+    });
+
+    it('honours a recent spike when the server clock lags the monitor host', async () => {
+      // Server an hour behind: a spike 10s ago on the SERVER reads as an
+      // hour old against the host clock and would be wrongly suppressed.
+      const serverClockSkewS = -3_600;
+      setupFsyncClient({
+        serverClockSkewS,
+        latency: [['aof-fsync-always', 1_700_000_000 + serverClockSkewS - 10, 12, 40]],
+      });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].status).toBe('hazard');
+    });
+
+    it('suppresses a stale spike when the server clock leads the monitor host', async () => {
+      // Server an hour ahead: a spike an hour old on the SERVER lines up with
+      // the host's "now" and would be wrongly read as current evidence.
+      const serverClockSkewS = 3_600;
+      setupFsyncClient({
+        serverClockSkewS,
+        latency: [['aof-fsync-always', 1_700_000_000, 12, 40]],
+      });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].status).toBe('advisory');
+    });
+
+    it('escalates on a recent aof-fsync-always LATENCY event', async () => {
+      setupFsyncClient({ latency: [['aof-fsync-always', 1_700_000_000, 12, 40]] });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].status).toBe('hazard');
+      expect(findings[0].message).toContain('aof-fsync-always');
+    });
+
+    it('does not escalate on a stale LATENCY event from a long-past spike', async () => {
+      // LATENCY LATEST entries persist until LATENCY RESET; a spike from an
+      // hour ago is history, not evidence the main thread is blocking now.
+      setupFsyncClient({ latency: [['aof-fsync-always', 1_700_000_000 - 3_600, 12, 40]] });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].status).toBe('advisory');
+    });
+
+    it('keeps the advisory when the LATENCY probe fails', async () => {
+      setupFsyncClient({ latency: new Error('ERR unknown command') });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].status).toBe('advisory');
+    });
+
+    it('stays quiet for a healthy everysec', async () => {
+      setupFsyncClient({ appendfsync: 'everysec' });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(0);
+    });
+
+    it('flags everysec only after two consecutive rising probes', async () => {
+      setupFsyncClient({ appendfsync: 'everysec', delayed: 1 });
+      await service.getHazards('conn-1');
+      now += 61_000;
+      setupFsyncClient({ appendfsync: 'everysec', delayed: 3 });
+      const second = await service.getHazards('conn-1');
+      expect(second).toHaveLength(0);
+      now += 61_000;
+      setupFsyncClient({ appendfsync: 'everysec', delayed: 6 });
+      const third = await service.getHazards('conn-1');
+      expect(third).toHaveLength(1);
+      expect(third[0].id).toBe('appendfsync-everysec-backlog');
+    });
+
+    it('reports both the ACL hazard and the appendfsync advisory together', async () => {
+      setupFsyncClient();
+      client.call.mockImplementation((cmd: string) => {
+        if (cmd === 'ACL') {
+          return Promise.resolve(offDefaultUser);
+        }
+        if (cmd === 'INFO') {
+          return Promise.resolve('# Persistence\r\naof_delayed_fsync:0\r\n');
+        }
+        return Promise.resolve([]);
+      });
+      const findings = await service.getHazards('conn-1');
+      expect(findings.map((f) => f.id).sort()).toEqual([
+        'appendfsync-always-blocking',
+        'default-user-aof-data-loss',
+      ]);
+    });
   });
 });
