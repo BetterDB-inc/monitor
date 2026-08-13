@@ -13,6 +13,7 @@ export interface ExecutionJob {
   keysSkipped: number;
   totalKeys: number;
   logs: string[];          // rolling, capped at MAX_LOG_LINES = 500
+  notices: string[];       // durable job-level notices, never evicted by the log cap
   progress: number | null;
   syncStage: SyncStage;
   process: ChildProcess | null;   // redis_shake mode only

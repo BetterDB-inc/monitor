@@ -106,6 +106,7 @@ export class MigrationExecutionService {
       keysSkipped: 0,
       totalKeys: 0,
       logs: [],
+      notices: [],
       progress: null,
       syncStage: null,
       process: null,
@@ -124,17 +125,19 @@ export class MigrationExecutionService {
       // Server-side functions use engine-specific globals (e.g. Valkey's `server`)
       // and fail to load on a different fork. When they'd be dropped for this
       // direction (Valkey -> Redis) exclude them from the RedisShake stream so the
-      // key data still migrates, and surface the exclusion in the job log — the
+      // key data still migrates, and surface the exclusion as a job notice — the
       // exclusion is otherwise invisible and the user would only discover missing
-      // functions from later FCALL errors. Only the RedisShake modes filter, so
-      // this is computed here rather than for command mode.
+      // functions from later FCALL errors. Recorded as a notice (not a log line) so
+      // the rolling 500-line log cap can't evict it once progress output fills up.
+      // Only the RedisShake modes filter, so this is computed here rather than for
+      // command mode.
       const sourceDbType = sourceAdapter.getCapabilities().dbType;
       const targetDbType = targetAdapter.getCapabilities().dbType;
       const excludeFunctions = shouldExcludeFunctions(sourceDbType, targetDbType);
       if (excludeFunctions) {
         const notice = `Cross-engine migration (${sourceDbType} → ${targetDbType}): server-side functions are excluded and will not be transferred to the target.`;
         this.logger.log(`Execution ${id}: ${notice}`);
-        job.logs.push(notice);
+        job.notices.push(notice);
       }
 
       const tomlContent = mode === 'redis_shake_sync'
@@ -362,7 +365,9 @@ export class MigrationExecutionService {
       bytesTransferred: job.bytesTransferred,
       keysSkipped: job.keysSkipped,
       totalKeys: job.totalKeys ?? undefined,
-      logs: [...job.logs],
+      // Notices are prepended so durable job-level messages (e.g. the cross-engine
+      // functions exclusion) always reach the viewer even after the log cap rolls.
+      logs: [...job.notices, ...job.logs],
       progress: job.progress,
       syncStage: job.syncStage,
     };

@@ -216,6 +216,41 @@ describe('MigrationExecutionService', () => {
       const call = (buildScanReaderToml as jest.Mock).mock.calls.at(-1)!;
       expect(call[2]).toEqual(expect.objectContaining({ excludeFunctions: true }));
     });
+
+    it('surfaces the cross-engine functions-exclusion notice in the execution result', async () => {
+      const crossForkRegistry = createMockRegistry({ targetDbType: 'redis' });
+      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+
+      const { id } = await crossForkService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake',
+      });
+
+      const result = crossForkService.getExecution(id);
+      expect(result!.logs.some(l => /functions are excluded/i.test(l))).toBe(true);
+    });
+
+    it('keeps the exclusion notice even after the log cap rolls over', async () => {
+      const crossForkRegistry = createMockRegistry({ targetDbType: 'redis' });
+      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+
+      const { id } = await crossForkService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake',
+      });
+
+      // Simulate a long run flooding the rolling log buffer past its cap.
+      const job = (crossForkService as any).jobs.get(id);
+      for (let i = 0; i < 600; i++) {
+        job.logs.push(`progress line ${i}`);
+        if (job.logs.length > 500) job.logs.shift();
+      }
+
+      const result = crossForkService.getExecution(id);
+      expect(result!.logs.some(l => /functions are excluded/i.test(l))).toBe(true);
+    });
   });
 
   describe('stopExecution', () => {
