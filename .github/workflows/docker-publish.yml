@@ -53,6 +53,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
+          # `latest` must never track the AI image; the no-ai step owns it.
+          # Without this, latest=auto would auto-add `latest` here on a semver tag.
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}

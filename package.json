@@ -26,6 +26,7 @@
     "docker:publish": "docker buildx build --build-arg APP_VERSION=$(node -p 'require(`./package.json`).version') --target production-no-ai --platform linux/amd64,linux/arm64 -t betterdb/monitor:latest --push .",
     "docker:publish:ai": "docker buildx build --build-arg APP_VERSION=$(node -p 'require(`./package.json`).version') --target production --platform linux/amd64,linux/arm64 -t betterdb/monitor:ai --push .",
     "docker:run": "docker run -p 3001:3001 --env-file .env betterdb/monitor",
+    "docker:run:ai": "docker run -p 3001:3001 --env-file .env betterdb/monitor:ai",
     "docker:dev": "docker compose up -d",
     "docker:dev:down": "docker compose down",
     "docker:probe-test": "docker compose -f docker-compose.probe-test.yml up -d",
