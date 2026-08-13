@@ -36,10 +36,7 @@ import {
 import { detectStuckReplicas, stuckReplicaSignature } from './stuck-replica-detector';
 import { detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
 import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
-import {
-  detectHostnameStaleness,
-  hostnameStalenessSignature,
-} from './hostname-staleness-detector';
+import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
 import {
   detectReplicaSlotState,
   replicaSlotSignature,
@@ -731,14 +728,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
         if (!buffers.has(MetricType.EVICTED_CLIENTS)) {
           buffers.set(MetricType.EVICTED_CLIENTS, new MetricBuffer(MetricType.EVICTED_CLIENTS));
-          detectors.set(MetricType.EVICTED_CLIENTS, new SpikeDetector(MetricType.EVICTED_CLIENTS, {
-            warningZScore: 1.5,
-            criticalZScore: 2.5,
-            warningThreshold: 1,
-            criticalThreshold: 10,
-            consecutiveRequired: 1,
-            cooldownMs: 30000,
-          }));
+          detectors.set(
+            MetricType.EVICTED_CLIENTS,
+            new SpikeDetector(MetricType.EVICTED_CLIENTS, {
+              warningZScore: 1.5,
+              criticalZScore: 2.5,
+              warningThreshold: 1,
+              criticalThreshold: 10,
+              consecutiveRequired: 1,
+              cooldownMs: 30000,
+            }),
+          );
         }
 
         const evictedBuffer = buffers.get(MetricType.EVICTED_CLIENTS)!;
@@ -1558,8 +1558,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       baseline: LOAD_WARN_FRACTION * 100,
       zScore: 0,
       stdDev: 0,
-      threshold:
-        (finding.level === 'critical' ? LOAD_CRIT_FRACTION : LOAD_WARN_FRACTION) * 100,
+      threshold: (finding.level === 'critical' ? LOAD_CRIT_FRACTION : LOAD_WARN_FRACTION) * 100,
       message: finding.message,
       resolved: false,
       connectionId: ctx.connectionId,
@@ -1601,10 +1600,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * offender set (recovery, or threshold raised past its replies) clears its
    * signature so a later recurrence alerts again.
    */
-  private async detectLargeReplyPressure(
-    ctx: ConnectionContext,
-    timestamp: number,
-  ): Promise<void> {
+  private async detectLargeReplyPressure(ctx: ConnectionContext, timestamp: number): Promise<void> {
     try {
       const cachedEntries = this.commandLogAnalytics.getCachedEntries(
         'large-reply',
@@ -2020,8 +2016,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       return;
     }
 
-    const state =
-      this.memoryOverheadState.get(ctx.connectionId) ?? createMemoryOverheadState();
+    const state = this.memoryOverheadState.get(ctx.connectionId) ?? createMemoryOverheadState();
     this.memoryOverheadState.set(ctx.connectionId, state);
 
     const finding = evaluateMemoryOverhead(state, {
@@ -2029,6 +2024,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       usedMemoryOverhead,
       usedMemoryStartup,
       usedMemoryDataset: this.parseNumber(info.used_memory_dataset) ?? 0,
+      usedMemoryDatasetPerc: this.parseNumber(info.used_memory_dataset_perc),
       maxmemory,
       maxmemoryPolicy: info.maxmemory_policy ?? 'noeviction',
       components: {
@@ -2048,13 +2044,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     if (finding === null) return;
 
-    const isCritical = finding.level === 'critical';
+    let severity = AnomalySeverity.INFO;
+    if (finding.level === 'critical') {
+      severity = AnomalySeverity.CRITICAL;
+    } else if (finding.level === 'warning') {
+      severity = AnomalySeverity.WARNING;
+    }
     const event: AnomalyEvent = {
       id: randomUUID(),
       timestamp,
       metricType: MetricType.MEMORY_OVERHEAD,
       anomalyType: AnomalyType.SPIKE,
-      severity: isCritical ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      severity,
       value: finding.overheadBytes,
       baseline: maxmemory,
       zScore: 0,
@@ -2066,7 +2067,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       resolved: false,
       connectionId: ctx.connectionId,
     };
-    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    if (severity === AnomalySeverity.INFO) {
+      this.logger.log(`Advisory for ${ctx.connectionName}: ${event.message}`);
+    } else {
+      this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    }
     // Await the emit so a failure propagates; advance ackedLevel only AFTER a
     // successful emit so a failed escalation is retried next poll.
     await this.addAnomaly(event, ctx);
@@ -3029,9 +3034,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * Fetch `CLUSTER SHARDS`, degrading to `undefined` (never throwing) if the
    * command is unsupported or the call fails — it is an optional refinement.
    */
-  private async safeGetClusterShards(
-    ctx: ConnectionContext,
-  ): Promise<ClusterShard[] | undefined> {
+  private async safeGetClusterShards(ctx: ConnectionContext): Promise<ClusterShard[] | undefined> {
     try {
       return await ctx.client.getClusterShards();
     } catch (err) {
