@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import { lookup } from 'dns';
 import { promisify } from 'util';
 
@@ -82,23 +82,76 @@ const defaultCanResolveHost: HostResolver = async (host) => {
 };
 
 /**
- * Like resolveDefaultDbHost, but verifies host.docker.internal actually
- * resolves before recommending it. Under `--network host` the container shares
- * the host's network namespace, so `127.0.0.1` already reaches the host's
- * services, but Docker does NOT inject `host.docker.internal` — offering it
- * would hand the UI a name that fails with ENOTFOUND. When the probe can't
- * resolve it, fall back to loopback (the correct target under host networking).
- * The probe is injectable so the precedence stays unit-testable.
+ * Whether the container shares the host's network namespace (`--network host`).
+ * A bridged container has its own netns and sees only `lo`/`eth0`; a
+ * host-networked one sees the host's docker bridges (`docker0`, `br-*`). This
+ * is the signal that distinguishes the two `host.docker.internal`-unresolvable
+ * cases, which need OPPOSITE hosts (loopback vs. the bridge gateway).
+ */
+const defaultIsHostNetwork = (): boolean => {
+  try {
+    return readdirSync('/sys/class/net').some((n) => n === 'docker0' || n.startsWith('br-'));
+  } catch {
+    return false;
+  }
+};
+
+/** IPv4 of PID-visible default route (the host, on a bridge network), or null. */
+const defaultGetDefaultGateway = (): string | null => {
+  try {
+    // /proc/net/route: default route has Destination 00000000; Gateway is a
+    // little-endian hex IPv4 (e.g. 010011AC -> 172.17.0.1).
+    for (const line of readFileSync('/proc/net/route', 'utf8').split('\n').slice(1)) {
+      const f = line.trim().split(/\s+/);
+      if (f.length > 2 && f[1] === '00000000' && /^[0-9A-Fa-f]{8}$/.test(f[2]) && f[2] !== '00000000') {
+        const octets = f[2].match(/../g)!.reverse().map((h) => parseInt(h, 16));
+        return octets.join('.');
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+};
+
+export interface HostProbeDeps {
+  canResolveHost: HostResolver;
+  isHostNetwork: () => boolean;
+  getDefaultGateway: () => string | null;
+}
+
+/**
+ * Like resolveDefaultDbHost, but resolves the containerized `host.docker.internal`
+ * default to something that actually reaches the host, since that name only
+ * resolves on Docker Desktop or with `--add-host=host.docker.internal:host-gateway`.
+ * When it does NOT resolve, a failed lookup is ambiguous, so we disambiguate:
+ *   - `--network host` (shared netns): the host is at `127.0.0.1`.
+ *   - default/custom bridge (the README's primary `docker run`): the host is
+ *     the default gateway (e.g. 172.17.0.1); `127.0.0.1` would be the container.
+ * Loopback is the last resort when neither signal is available. All probes are
+ * injectable so the precedence stays unit-testable.
  */
 export async function resolveDefaultDbHostChecked(
   input: { dbHost?: string | null; containerized: boolean },
-  canResolveHost: HostResolver = defaultCanResolveHost,
+  deps: Partial<HostProbeDeps> = {},
 ): Promise<DefaultDbHost> {
+  const canResolveHost = deps.canResolveHost ?? defaultCanResolveHost;
+  const isHostNetwork = deps.isHostNetwork ?? defaultIsHostNetwork;
+  const getDefaultGateway = deps.getDefaultGateway ?? defaultGetDefaultGateway;
+
   const resolved = resolveDefaultDbHost(input);
-  if (resolved.source === 'docker' && !(await canResolveHost(resolved.host))) {
+  if (resolved.source !== 'docker' || (await canResolveHost(resolved.host))) {
+    return resolved;
+  }
+  // host.docker.internal is unreachable — pick the right host for the netmode.
+  if (isHostNetwork()) {
     return { host: '127.0.0.1', source: 'local' };
   }
-  return resolved;
+  const gateway = getDefaultGateway();
+  if (gateway) {
+    return { host: gateway, source: 'docker' };
+  }
+  return { host: '127.0.0.1', source: 'local' };
 }
 
 interface ContainerProbeDeps {

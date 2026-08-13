@@ -22,9 +22,10 @@ export class SystemController {
    * machine). The frontend uses `host`/`port` for the "connect to local
    * instance" button so that a default install (a containerized monitor)
    * reaches the host's database instead of failing. `host.docker.internal` is
-   * verified to resolve before it's offered, so a `--network host` container
-   * falls back to loopback instead of an unreachable name. See runtime.util
-   * for the precedence.
+   * verified to resolve before it's offered; when it can't, the host is
+   * resolved from the container's network mode (loopback under `--network
+   * host`, the bridge gateway on a default bridge). See runtime.util for the
+   * precedence.
    */
   @Get('connect-defaults')
   async getConnectDefaults(): Promise<DefaultDbHost & { containerized: boolean; port: number }> {

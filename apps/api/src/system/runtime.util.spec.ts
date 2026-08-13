@@ -81,26 +81,63 @@ describe('resolveDefaultDbPort', () => {
 describe('resolveDefaultDbHostChecked', () => {
   const resolves = () => Promise.resolve(true);
   const doesNotResolve = () => Promise.resolve(false);
+  // Defaults for the unresolvable branch: bare bridge with a gateway present.
+  const bridge = {
+    isHostNetwork: () => false,
+    getDefaultGateway: () => '172.17.0.1',
+  };
 
-  it('offers host.docker.internal when it resolves', async () => {
+  it('offers host.docker.internal when it resolves (Docker Desktop / --add-host)', async () => {
     await expect(
-      resolveDefaultDbHostChecked({ dbHost: undefined, containerized: true }, resolves),
+      resolveDefaultDbHostChecked(
+        { dbHost: undefined, containerized: true },
+        { canResolveHost: resolves, ...bridge },
+      ),
     ).resolves.toEqual({ host: 'host.docker.internal', source: 'docker' });
   });
 
-  it('falls back to loopback when host.docker.internal does not resolve (--network host)', async () => {
+  it('uses loopback when host.docker.internal is unresolvable under --network host', async () => {
     await expect(
-      resolveDefaultDbHostChecked({ dbHost: undefined, containerized: true }, doesNotResolve),
+      resolveDefaultDbHostChecked(
+        { dbHost: undefined, containerized: true },
+        { canResolveHost: doesNotResolve, isHostNetwork: () => true, getDefaultGateway: () => null },
+      ),
+    ).resolves.toEqual({ host: '127.0.0.1', source: 'local' });
+  });
+
+  it('uses the bridge gateway when host.docker.internal is unresolvable on a bridge', async () => {
+    // The README's primary `docker run` (default bridge, no --add-host): the
+    // host is the gateway, and 127.0.0.1 would wrongly be the container itself.
+    await expect(
+      resolveDefaultDbHostChecked(
+        { dbHost: undefined, containerized: true },
+        { canResolveHost: doesNotResolve, ...bridge },
+      ),
+    ).resolves.toEqual({ host: '172.17.0.1', source: 'docker' });
+  });
+
+  it('falls back to loopback when neither the name resolves nor a gateway is found', async () => {
+    await expect(
+      resolveDefaultDbHostChecked(
+        { dbHost: undefined, containerized: true },
+        { canResolveHost: doesNotResolve, isHostNetwork: () => false, getDefaultGateway: () => null },
+      ),
     ).resolves.toEqual({ host: '127.0.0.1', source: 'local' });
   });
 
   it('never probes for a non-docker result', async () => {
     const probe = jest.fn(resolves);
     await expect(
-      resolveDefaultDbHostChecked({ dbHost: 'valkey.internal', containerized: true }, probe),
+      resolveDefaultDbHostChecked(
+        { dbHost: 'valkey.internal', containerized: true },
+        { canResolveHost: probe, ...bridge },
+      ),
     ).resolves.toEqual({ host: 'valkey.internal', source: 'env' });
     await expect(
-      resolveDefaultDbHostChecked({ dbHost: undefined, containerized: false }, probe),
+      resolveDefaultDbHostChecked(
+        { dbHost: undefined, containerized: false },
+        { canResolveHost: probe, ...bridge },
+      ),
     ).resolves.toEqual({ host: '127.0.0.1', source: 'local' });
     expect(probe).not.toHaveBeenCalled();
   });
