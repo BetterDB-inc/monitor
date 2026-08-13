@@ -1,4 +1,8 @@
 import { existsSync, readFileSync } from 'fs';
+import { lookup } from 'dns';
+import { promisify } from 'util';
+
+const dnsLookup = promisify(lookup);
 
 export type DefaultDbHostSource = 'env' | 'docker' | 'local';
 
@@ -6,6 +10,12 @@ export interface DefaultDbHost {
   host: string;
   source: DefaultDbHostSource;
 }
+
+/** Valkey/Redis default port, used whenever DB_PORT is unset or unparseable. */
+const DEFAULT_DB_PORT = 6379;
+
+/** How long to wait for the host.docker.internal DNS probe before giving up. */
+const HOST_RESOLVE_TIMEOUT_MS = 500;
 
 /** Loopback / "this machine" hosts that carry no cross-host intent. */
 function isLoopbackHost(host: string): boolean {
@@ -45,6 +55,50 @@ export function resolveDefaultDbHost(input: {
     return { host: 'host.docker.internal', source: 'docker' };
   }
   return { host: '127.0.0.1', source: 'local' };
+}
+
+/** DB_PORT the operator set, validated. Falls back to the Valkey default. */
+export function resolveDefaultDbPort(dbPort?: string | null): number {
+  const n = Number(dbPort?.trim());
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : DEFAULT_DB_PORT;
+}
+
+/** Can this hostname be resolved from the API process? Never throws. */
+export type HostResolver = (host: string) => Promise<boolean>;
+
+const defaultCanResolveHost: HostResolver = async (host) => {
+  try {
+    await Promise.race([
+      dnsLookup(host),
+      new Promise<never>((_, reject) => {
+        const t = setTimeout(() => reject(new Error('dns-timeout')), HOST_RESOLVE_TIMEOUT_MS);
+        t.unref?.();
+      }),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Like resolveDefaultDbHost, but verifies host.docker.internal actually
+ * resolves before recommending it. Under `--network host` the container shares
+ * the host's network namespace, so `127.0.0.1` already reaches the host's
+ * services, but Docker does NOT inject `host.docker.internal` — offering it
+ * would hand the UI a name that fails with ENOTFOUND. When the probe can't
+ * resolve it, fall back to loopback (the correct target under host networking).
+ * The probe is injectable so the precedence stays unit-testable.
+ */
+export async function resolveDefaultDbHostChecked(
+  input: { dbHost?: string | null; containerized: boolean },
+  canResolveHost: HostResolver = defaultCanResolveHost,
+): Promise<DefaultDbHost> {
+  const resolved = resolveDefaultDbHost(input);
+  if (resolved.source === 'docker' && !(await canResolveHost(resolved.host))) {
+    return { host: '127.0.0.1', source: 'local' };
+  }
+  return resolved;
 }
 
 interface ContainerProbeDeps {

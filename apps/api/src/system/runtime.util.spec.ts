@@ -1,4 +1,9 @@
-import { isContainerized, resolveDefaultDbHost } from './runtime.util';
+import {
+  isContainerized,
+  resolveDefaultDbHost,
+  resolveDefaultDbHostChecked,
+  resolveDefaultDbPort,
+} from './runtime.util';
 
 describe('resolveDefaultDbHost', () => {
   it('prefers an explicit DB_HOST over everything', () => {
@@ -55,6 +60,49 @@ describe('resolveDefaultDbHost', () => {
       host: '127.0.0.1',
       source: 'local',
     });
+  });
+});
+
+describe('resolveDefaultDbPort', () => {
+  it('honors a valid DB_PORT', () => {
+    expect(resolveDefaultDbPort('6380')).toBe(6380);
+    expect(resolveDefaultDbPort('  6380  ')).toBe(6380);
+    expect(resolveDefaultDbPort('1')).toBe(1);
+    expect(resolveDefaultDbPort('65535')).toBe(65535);
+  });
+
+  it('falls back to 6379 for unset or out-of-range values', () => {
+    for (const bad of [undefined, null, '', '   ', 'abc', '0', '-1', '70000', '6379.5']) {
+      expect(resolveDefaultDbPort(bad)).toBe(6379);
+    }
+  });
+});
+
+describe('resolveDefaultDbHostChecked', () => {
+  const resolves = () => Promise.resolve(true);
+  const doesNotResolve = () => Promise.resolve(false);
+
+  it('offers host.docker.internal when it resolves', async () => {
+    await expect(
+      resolveDefaultDbHostChecked({ dbHost: undefined, containerized: true }, resolves),
+    ).resolves.toEqual({ host: 'host.docker.internal', source: 'docker' });
+  });
+
+  it('falls back to loopback when host.docker.internal does not resolve (--network host)', async () => {
+    await expect(
+      resolveDefaultDbHostChecked({ dbHost: undefined, containerized: true }, doesNotResolve),
+    ).resolves.toEqual({ host: '127.0.0.1', source: 'local' });
+  });
+
+  it('never probes for a non-docker result', async () => {
+    const probe = jest.fn(resolves);
+    await expect(
+      resolveDefaultDbHostChecked({ dbHost: 'valkey.internal', containerized: true }, probe),
+    ).resolves.toEqual({ host: 'valkey.internal', source: 'env' });
+    await expect(
+      resolveDefaultDbHostChecked({ dbHost: undefined, containerized: false }, probe),
+    ).resolves.toEqual({ host: '127.0.0.1', source: 'local' });
+    expect(probe).not.toHaveBeenCalled();
   });
 });
 

@@ -367,17 +367,29 @@ function DockerQuickStart({
   // host actually is (host.docker.internal when containerized, an explicit
   // DB_HOST if set, else 127.0.0.1); fall back to localhost if the probe fails.
   const [localHost, setLocalHost] = useState('localhost');
+  const [localPort, setLocalPort] = useState(6379);
+  // Classification the endpoint returns ('env' | 'docker' | 'local'). Sent to
+  // telemetry instead of the resolved host, which may be an internal DB_HOST.
+  const [hostSource, setHostSource] = useState<string | null>(null);
+  // Gate the button until the probe settles: before it does, `localHost` is a
+  // placeholder, and a click would POST `localhost` as the default connection —
+  // the exact failure this component fixes.
+  const [probeSettled, setProbeSettled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    fetchApi<{ host: string }>('/system/connect-defaults')
+    fetchApi<{ host: string; port?: number; source?: string }>('/system/connect-defaults')
       .then((defaults) => {
-        if (!cancelled && defaults?.host) {
-          setLocalHost(defaults.host);
-        }
+        if (cancelled) return;
+        if (defaults?.host) setLocalHost(defaults.host);
+        if (typeof defaults?.port === 'number') setLocalPort(defaults.port);
+        if (defaults?.source) setHostSource(defaults.source);
       })
       .catch(() => {
         // Keep the localhost fallback — a bare-metal install is correct anyway.
+      })
+      .finally(() => {
+        if (!cancelled) setProbeSettled(true);
       });
     return () => {
       cancelled = true;
@@ -403,16 +415,21 @@ function DockerQuickStart({
         body: JSON.stringify({
           name: 'Local Valkey',
           host: localHost,
-          port: 6379,
+          port: localPort,
           dbIndex: 0,
           tls: false,
           setAsDefault: true,
         }),
       });
-      capture('quick_connect_succeeded', { source: 'empty_state_localhost', host: localHost });
+      // Send the host classification, not the resolved hostname — the latter can
+      // be a verbatim internal DB_HOST we must not leak to telemetry.
+      capture('quick_connect_succeeded', {
+        source: 'empty_state_localhost',
+        hostSource: hostSource ?? 'local',
+      });
       await onConnected();
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Could not reach ${localHost}:6379`);
+      setError(err instanceof Error ? err.message : `Could not reach ${localHost}:${localPort}`);
     } finally {
       setConnecting(false);
     }
@@ -427,10 +444,14 @@ function DockerQuickStart({
       <button
         type="button"
         onClick={handleConnectLocalhost}
-        disabled={connecting}
+        disabled={connecting || !probeSettled}
         className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 cursor-pointer"
       >
-        {connecting ? 'Connecting…' : `Connect ${localHost}:6379 →`}
+        {!probeSettled
+          ? 'Preparing…'
+          : connecting
+            ? 'Connecting…'
+            : `Connect ${localHost}:${localPort} →`}
       </button>
       {error && (
         <p className="mt-2.5 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">

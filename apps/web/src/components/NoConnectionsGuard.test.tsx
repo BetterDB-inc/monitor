@@ -46,7 +46,7 @@ const DEFAULT_CONNECT_DEFAULTS = { host: 'localhost', source: 'local', container
  */
 function installFetch(
   opts: {
-    connectDefaults?: { host: string; source?: string; containerized?: boolean };
+    connectDefaults?: { host: string; source?: string; containerized?: boolean; port?: number };
     onConnections?: () => Promise<unknown>;
   } = {},
 ) {
@@ -263,17 +263,77 @@ describe('NoConnectionsGuard - quick connect', () => {
     });
   });
 
-  it('falls back to localhost when the connect-defaults probe fails', async () => {
+  it('honors the DB_PORT the endpoint returns for the local connection', async () => {
+    installFetch({
+      connectDefaults: { host: 'db.internal', source: 'env', containerized: true, port: 6380 },
+      onConnections: () => Promise.resolve({ id: 'conn-env' }),
+    });
+    renderAt('/');
+
+    // Label and POST body both carry the resolved port, not a hardcoded 6379.
+    fireEvent.click(await screen.findByRole('button', { name: /connect db\.internal:6380/i }));
+
+    await waitFor(() => {
+      expect(fetchApi).toHaveBeenCalledWith('/connections', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Local Valkey',
+          host: 'db.internal',
+          port: 6380,
+          dbIndex: 0,
+          tls: false,
+          setAsDefault: true,
+        }),
+      });
+    });
+  });
+
+  it('reports the host classification to telemetry, not the resolved hostname', async () => {
+    installFetch({
+      connectDefaults: {
+        host: 'valkey.prod.corp.internal',
+        source: 'env',
+        containerized: true,
+        port: 6379,
+      },
+      onConnections: () => Promise.resolve({ id: 'conn-env' }),
+    });
+    renderAt('/');
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /connect valkey\.prod\.corp\.internal:6379/i }),
+    );
+    await waitFor(() => expect(mockRefreshConnections).toHaveBeenCalled());
+
+    const call = mockCapture.mock.calls.find(([event]) => event === 'quick_connect_succeeded');
+    expect(call?.[1]).toMatchObject({ source: 'empty_state_localhost', hostSource: 'env' });
+    // The internal hostname must never reach telemetry.
+    expect(JSON.stringify(call?.[1])).not.toContain('valkey.prod.corp.internal');
+  });
+
+  it('gates the button until the probe settles, then falls back to localhost', async () => {
+    let rejectProbe: (err: Error) => void = () => {};
     vi.mocked(fetchApi).mockImplementation((path: string) => {
       if (path === '/system/connect-defaults') {
-        return Promise.reject(new Error('offline'));
+        return new Promise((_, reject) => {
+          rejectProbe = reject;
+        });
       }
       return Promise.resolve({ id: 'conn-local' });
     });
     renderAt('/');
 
-    fireEvent.click(await screen.findByRole('button', { name: /connect localhost:6379/i }));
+    // While the probe is in flight the button is disabled — a click must not
+    // POST the placeholder `localhost` as the default connection.
+    const preparing = await screen.findByRole('button', { name: /preparing/i });
+    expect(preparing).toBeDisabled();
+    fireEvent.click(preparing);
+    expect(fetchApi).not.toHaveBeenCalledWith('/connections', expect.anything());
 
+    // Probe rejects → fall back to localhost and enable the button.
+    rejectProbe(new Error('offline'));
+
+    fireEvent.click(await screen.findByRole('button', { name: /connect localhost:6379/i }));
     await waitFor(() => {
       expect(fetchApi).toHaveBeenCalledWith(
         '/connections',
