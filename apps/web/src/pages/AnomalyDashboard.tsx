@@ -8,10 +8,7 @@ import { metricsApi } from '../api/metrics';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { Button } from '../components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
-import {
-  CaptureOnNextModal,
-  type CaptureOnNextContext,
-} from './anomalies/capture-on-next-modal';
+import { CaptureOnNextModal, type CaptureOnNextContext } from './anomalies/capture-on-next-modal';
 import { DataLossAlertBanner } from '../components/anomalies/DataLossAlertBanner';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
@@ -87,8 +84,18 @@ interface MetricBaselineBuffer {
 }
 
 const SEVERITY_CONFIG = {
-  critical: { color: 'text-destructive', bg: 'bg-destructive/10', border: 'border-destructive', icon: AlertCircle },
-  warning: { color: 'text-yellow-500', bg: 'bg-yellow-500/10', border: 'border-yellow-500', icon: AlertTriangle },
+  critical: {
+    color: 'text-destructive',
+    bg: 'bg-destructive/10',
+    border: 'border-destructive',
+    icon: AlertCircle,
+  },
+  warning: {
+    color: 'text-yellow-500',
+    bg: 'bg-yellow-500/10',
+    border: 'border-yellow-500',
+    icon: AlertTriangle,
+  },
   info: { color: 'text-primary', bg: 'bg-primary/10', border: 'border-primary', icon: Info },
 };
 
@@ -124,6 +131,7 @@ const METRIC_LABELS: Record<string, string> = {
   evicted_clients: 'Client Evictions',
   raft_health: 'Raft Health',
   replica_slot_state: 'Replica Slot State',
+  resync_loop: 'Replica Resync Loop',
   failover_churn: 'Failover Churn',
   repl_buffer_pressure: 'Replica Buffer Pressure',
   memory_overhead: 'Memory Overhead',
@@ -135,7 +143,11 @@ const METRIC_LABELS: Record<string, string> = {
 };
 
 function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return new Date(ts).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 function formatValue(value: number, metric: string): string {
@@ -259,7 +271,7 @@ export function AnomalyDashboard() {
   });
 
   const toggleGroup = (id: string) => {
-    setExpandedGroups(prev => {
+    setExpandedGroups((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -269,10 +281,11 @@ export function AnomalyDashboard() {
 
   // Timeline data for chart
   const timelineData = useMemo(() => {
-    const effectiveRangeMs = startTime != null
-      // eslint-disable-next-line react-hooks/purity
-      ? (endTime ?? Date.now()) - startTime
-      : 24 * 3_600_000;
+    const effectiveRangeMs =
+      startTime != null
+        ? // eslint-disable-next-line react-hooks/purity
+          (endTime ?? Date.now()) - startTime
+        : 24 * 3_600_000;
     if (!events?.length || effectiveRangeMs <= 0) return [];
 
     const bucketSize = effectiveRangeMs / 60; // 60 buckets
@@ -318,7 +331,9 @@ export function AnomalyDashboard() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Total Anomalies</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              Total Anomalies
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold">{summary?.totalEvents ?? 0}</div>
@@ -334,7 +349,9 @@ export function AnomalyDashboard() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-destructive">{summary?.bySeverity?.critical ?? 0}</div>
+            <div className="text-3xl font-bold text-destructive">
+              {summary?.bySeverity?.critical ?? 0}
+            </div>
             <p className="text-xs text-muted-foreground mt-1">require attention</p>
           </CardContent>
         </Card>
@@ -347,7 +364,9 @@ export function AnomalyDashboard() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-yellow-500">{summary?.bySeverity?.warning ?? 0}</div>
+            <div className="text-3xl font-bold text-yellow-500">
+              {summary?.bySeverity?.warning ?? 0}
+            </div>
             <p className="text-xs text-muted-foreground mt-1">above normal</p>
           </CardContent>
         </Card>
@@ -381,9 +400,30 @@ export function AnomalyDashboard() {
                   <XAxis dataKey="time" tick={{ fontSize: 10 }} />
                   <YAxis tick={{ fontSize: 10 }} />
                   <Tooltip />
-                  <Area type="monotone" dataKey="critical" stackId="1" stroke="var(--destructive)" fill="var(--destructive)" fillOpacity={0.6} />
-                  <Area type="monotone" dataKey="warning" stackId="1" stroke="var(--chart-warning)" fill="var(--chart-warning)" fillOpacity={0.6} />
-                  <Area type="monotone" dataKey="info" stackId="1" stroke="var(--chart-info)" fill="var(--chart-info)" fillOpacity={0.6} />
+                  <Area
+                    type="monotone"
+                    dataKey="critical"
+                    stackId="1"
+                    stroke="var(--destructive)"
+                    fill="var(--destructive)"
+                    fillOpacity={0.6}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="warning"
+                    stackId="1"
+                    stroke="var(--chart-warning)"
+                    fill="var(--chart-warning)"
+                    fillOpacity={0.6}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="info"
+                    stackId="1"
+                    stroke="var(--chart-info)"
+                    fill="var(--chart-info)"
+                    fillOpacity={0.6}
+                  />
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
@@ -426,7 +466,7 @@ export function AnomalyDashboard() {
         </CardHeader>
         <CardContent className="space-y-4">
           {groups?.length ? (
-            groups.map(group => {
+            groups.map((group) => {
               const isExpanded = expandedGroups.has(group.correlationId);
               const config = SEVERITY_CONFIG[group.severity];
               const patternConfig = PATTERN_CONFIG[group.pattern] || PATTERN_CONFIG.unknown;
@@ -450,17 +490,24 @@ export function AnomalyDashboard() {
                         <div>
                           <div className="flex items-center gap-2">
                             <h3 className="font-semibold">{patternConfig.label}</h3>
-                            <span className={`px-2 py-0.5 rounded text-xs font-medium ${config.bg} ${config.color}`}>
+                            <span
+                              className={`px-2 py-0.5 rounded text-xs font-medium ${config.bg} ${config.color}`}
+                            >
                               {group.severity.toUpperCase()}
                             </span>
                           </div>
                           <p className="text-sm text-muted-foreground">
-                            {formatTime(group.timestamp)} · {group.anomalies.length} related anomalies
+                            {formatTime(group.timestamp)} · {group.anomalies.length} related
+                            anomalies
                           </p>
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
+                        {isExpanded ? (
+                          <ChevronDown className="w-5 h-5" />
+                        ) : (
+                          <ChevronRight className="w-5 h-5" />
+                        )}
                       </div>
                     </div>
                   </div>
@@ -478,7 +525,7 @@ export function AnomalyDashboard() {
                       <div>
                         <h4 className="text-sm font-semibold mb-2">Affected Metrics</h4>
                         <div className="grid gap-2">
-                          {group.anomalies.map(anomaly => (
+                          {group.anomalies.map((anomaly) => (
                             <div
                               key={anomaly.id}
                               className="flex items-center justify-between p-2 bg-muted/30 rounded text-sm"
@@ -489,13 +536,16 @@ export function AnomalyDashboard() {
                                 ) : (
                                   <TrendingDown className="w-4 h-4 text-primary" />
                                 )}
-                                <span className="font-medium">{METRIC_LABELS[anomaly.metricType] || anomaly.metricType}</span>
+                                <span className="font-medium">
+                                  {METRIC_LABELS[anomaly.metricType] || anomaly.metricType}
+                                </span>
                               </div>
                               <div className="flex items-center gap-4 text-muted-foreground">
                                 <span>
                                   {formatValue(anomaly.value, anomaly.metricType)}
                                   <span className="text-xs ml-1">
-                                    ({anomaly.zScore > 0 ? '+' : ''}{anomaly.zScore.toFixed(1)}σ)
+                                    ({anomaly.zScore > 0 ? '+' : ''}
+                                    {anomaly.zScore.toFixed(1)}σ)
                                   </span>
                                 </span>
                                 <span className="text-xs">
@@ -554,7 +604,7 @@ export function AnomalyDashboard() {
         <CardContent>
           {events?.length ? (
             <div className="space-y-2 max-h-[400px] overflow-y-auto">
-              {events.slice(0, 50).map(event => {
+              {events.slice(0, 50).map((event) => {
                 const config = SEVERITY_CONFIG[event.severity];
                 const SeverityIcon = config.icon;
 
@@ -567,14 +617,19 @@ export function AnomalyDashboard() {
                       <SeverityIcon className={`w-4 h-4 ${config.color}`} />
                       <div>
                         <p className="text-sm font-medium">{event.message}</p>
-                        <p className="text-xs text-muted-foreground">{formatTime(event.timestamp)}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {formatTime(event.timestamp)}
+                        </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
                       <div className="text-right">
-                        <p className="text-sm font-mono">{formatValue(event.value, event.metricType)}</p>
+                        <p className="text-sm font-mono">
+                          {formatValue(event.value, event.metricType)}
+                        </p>
                         <p className="text-xs text-muted-foreground">
-                          {event.zScore > 0 ? '+' : ''}{event.zScore.toFixed(1)}σ from baseline
+                          {event.zScore > 0 ? '+' : ''}
+                          {event.zScore.toFixed(1)}σ from baseline
                         </p>
                       </div>
                       {captureActionEnabled && (
@@ -617,7 +672,9 @@ export function AnomalyDashboard() {
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 text-sm">
               {buffers.map((buffer) => (
                 <div key={buffer.metricType} className="p-2 bg-muted/30 rounded">
-                  <p className="font-medium truncate">{METRIC_LABELS[buffer.metricType] || buffer.metricType}</p>
+                  <p className="font-medium truncate">
+                    {METRIC_LABELS[buffer.metricType] || buffer.metricType}
+                  </p>
                   <p className="text-muted-foreground">
                     μ: {formatValue(buffer.mean, buffer.metricType)}
                   </p>

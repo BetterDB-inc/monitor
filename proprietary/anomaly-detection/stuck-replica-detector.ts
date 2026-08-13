@@ -53,8 +53,7 @@ function isReplica(node: ClusterNode): boolean {
 /** A primary is healthy (a valid replication target) if master-flagged and not dead. */
 function isHealthyPrimary(node: ClusterNode): boolean {
   return (
-    node.flags.includes('master') &&
-    !DEAD_PRIMARY_FLAGS.some((flag) => node.flags.includes(flag))
+    node.flags.includes('master') && !DEAD_PRIMARY_FLAGS.some((flag) => node.flags.includes(flag))
   );
 }
 
@@ -96,4 +95,163 @@ export function detectStuckReplicas(nodes: ClusterNode[]): StuckReplica[] {
  */
 export function stuckReplicaSignature(s: StuckReplica): string {
   return `${s.replicaId}|${s.primaryId}`;
+}
+
+/**
+ * Full-resync failure loop (valkey-io/valkey#1836): a replica that connects,
+ * starts a full sync, fails to complete it (transferred RDB unloadable — disk
+ * errors, corruption, permissions, out-of-space — or the transfer itself dying)
+ * and retries forever. `master_link_status` never leaves `down`, so the replica
+ * serves stale data indefinitely while looking "merely syncing" at any single
+ * glance. Unlike the CLUSTER NODES snapshot detector above, this one folds INFO
+ * replication fields from the polled replica itself across polls, so it works
+ * in standalone and cluster mode alike.
+ */
+
+/** Minimum continuous link-down window before the loop signature may fire. */
+export const RESYNC_LOOP_MIN_WINDOW_MS = 300_000;
+/**
+ * Failed full-sync cycles required within the window. A normal first sync of a
+ * large dataset legitimately holds the link down for a long time but is ONE
+ * attempt that is still progressing; a loop is the same attempt dying and
+ * restarting.
+ */
+export const RESYNC_LOOP_MIN_CYCLES = 2;
+
+export interface ResyncLoopInput {
+  /** INFO replication `role`. */
+  role: string;
+  /** INFO replication `master_link_status`; null when the field is absent. */
+  masterLinkStatus: string | null;
+  /** INFO replication `master_link_down_since_seconds`; null when absent. */
+  masterLinkDownSinceSeconds: number | null;
+  /** INFO replication `master_sync_in_progress` as a boolean. */
+  masterSyncInProgress: boolean;
+  timestamp: number;
+}
+
+export interface ResyncLoopState {
+  /** First poll timestamp of the current continuous link-down window. */
+  downWindowStart: number | null;
+  /** Last observed master_link_down_since_seconds, for the monotonicity check. */
+  lastDownSinceSeconds: number | null;
+  /** Whether the previous poll reported a sync in progress. */
+  syncWasInProgress: boolean;
+  /** Failed full-sync cycles observed in the current window. */
+  failedCycles: number;
+  /** Whether the current loop was already alerted (emit acknowledged). */
+  alerted: boolean;
+}
+
+export interface ResyncLoopFinding {
+  /** How long the link has been continuously down, in seconds. */
+  downSeconds: number;
+  failedCycles: number;
+  message: string;
+  timestamp: number;
+}
+
+export function createResyncLoopState(): ResyncLoopState {
+  return {
+    downWindowStart: null,
+    lastDownSinceSeconds: null,
+    syncWasInProgress: false,
+    failedCycles: 0,
+    alerted: false,
+  };
+}
+
+function resetResyncLoopState(state: ResyncLoopState): void {
+  state.downWindowStart = null;
+  state.lastDownSinceSeconds = null;
+  state.syncWasInProgress = false;
+  state.failedCycles = 0;
+  state.alerted = false;
+}
+
+/**
+ * Folds one poll of INFO replication/stats fields into the connection state and
+ * returns a finding to emit, or null. Mutates `state`. The returned finding
+ * keeps being produced every poll until `acknowledgeResyncLoopFinding` is
+ * called, so a failed emit retries next poll; recovery (link up, promotion, or
+ * a demonstrated brief `up` between polls) clears everything so a later loop
+ * alerts again.
+ */
+export function evaluateResyncLoop(
+  state: ResyncLoopState,
+  input: ResyncLoopInput,
+): ResyncLoopFinding | null {
+  const isReplicaRole = input.role === 'slave' || input.role === 'replica';
+  const linkDown = isReplicaRole === true && input.masterLinkStatus === 'down';
+  if (linkDown === false) {
+    // Link up, promoted to primary, or not a replica at all: whatever loop was
+    // in flight has ended. Clear so a future loop earns the window afresh.
+    resetResyncLoopState(state);
+    return null;
+  }
+
+  // A drop in the server-side down counter means the link reached `up` between
+  // polls (a sync DID complete) and went down again afterwards — by definition
+  // not a never-completing loop. Restart the window from here.
+  const downCounterDropped =
+    state.lastDownSinceSeconds !== null &&
+    input.masterLinkDownSinceSeconds !== null &&
+    input.masterLinkDownSinceSeconds < state.lastDownSinceSeconds;
+  if (downCounterDropped === true) {
+    resetResyncLoopState(state);
+  }
+  if (input.masterLinkDownSinceSeconds !== null) {
+    state.lastDownSinceSeconds = input.masterLinkDownSinceSeconds;
+  }
+  if (state.downWindowStart === null) {
+    state.downWindowStart = input.timestamp;
+  }
+
+  // A failed cycle is a sync attempt that ENDED while the link stayed down:
+  // master_sync_in_progress falling back to 0 without the link reaching up.
+  // Deliberately NOT counted from INFO stats sync_full — that counter tracks
+  // full syncs this node SERVED as a primary (outbound), so on the replica's
+  // own inbound loop it never moves, and on an intermediate replica it moves
+  // for downstream reconnects, which would fake failed cycles during a
+  // perfectly healthy long first sync.
+  const attemptEnded = state.syncWasInProgress === true && input.masterSyncInProgress === false;
+  if (attemptEnded === true) {
+    state.failedCycles += 1;
+  }
+  state.syncWasInProgress = input.masterSyncInProgress;
+
+  const windowElapsed = input.timestamp - state.downWindowStart >= RESYNC_LOOP_MIN_WINDOW_MS;
+  if (
+    windowElapsed === false ||
+    state.failedCycles < RESYNC_LOOP_MIN_CYCLES ||
+    state.alerted === true
+  ) {
+    return null;
+  }
+
+  const downSeconds =
+    input.masterLinkDownSinceSeconds ??
+    Math.round((input.timestamp - state.downWindowStart) / 1000);
+
+  return {
+    downSeconds,
+    failedCycles: state.failedCycles,
+    message:
+      `WARNING: Replica has been unable to sync with its primary for ${downSeconds}s: ` +
+      `master_link_status has stayed down through ${state.failedCycles} full-sync attempts ` +
+      `that never completed — the replica is looping on full resync and serving stale data ` +
+      `(valkey#1836). Check primary reachability and authentication, replica disk space and ` +
+      `permissions, and RDB integrity on the replica side (a corrupted transfer, e.g. by a ` +
+      `filesystem layer or antivirus, reproduces exactly this signature).`,
+    timestamp: input.timestamp,
+  };
+}
+
+/**
+ * Marks the current loop as alerted after a successful emit, so a persisting
+ * loop alerts once (not every poll). A failed emit (caller doesn't acknowledge)
+ * re-produces the finding next poll; recovery clears the flag.
+ */
+export function acknowledgeResyncLoopFinding(state: ResyncLoopState): void {
+  state.alerted = true;
 }
