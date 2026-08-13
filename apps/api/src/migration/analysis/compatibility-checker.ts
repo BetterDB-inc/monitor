@@ -1,5 +1,6 @@
 import type { Incompatibility } from '@betterdb/shared';
 import type { DatabaseCapabilities } from '../../common/interfaces/database-port.interface';
+import { shouldExcludeFunctions } from '../fork-compat';
 
 export interface InstanceMeta {
   dbType: 'valkey' | 'redis';
@@ -111,6 +112,7 @@ export function checkCompatibility(
   source: InstanceMeta,
   target: InstanceMeta,
   hfeDetected: boolean,
+  sourceHasFunctions: boolean = false,
 ): Incompatibility[] {
   const issues: Incompatibility[] = [];
 
@@ -125,17 +127,22 @@ export function checkCompatibility(
     });
   }
 
-  // 1b. Cross-fork functions are not migrated
-  if (source.dbType !== target.dbType) {
+  // 1b. Cross-fork functions cannot be carried over. Only fires when the source
+  // actually has function libraries AND the direction is one where they'd be
+  // dropped (Valkey -> Redis) — see shouldExcludeFunctions. Redis -> Valkey
+  // libraries load fine on the target, so no warning there; a clean instance with
+  // no functions never trips this and keeps its "no issues found" report.
+  if (sourceHasFunctions && shouldExcludeFunctions(source.dbType, target.dbType)) {
     issues.push({
       severity: 'warning',
       category: 'functions',
-      title: 'Functions not migrated across engines',
+      title: 'Functions not migrated to Redis',
       detail:
-        `Source (${source.dbType}) and target (${target.dbType}) are different engines. ` +
-        'Server-side function libraries use engine-specific globals and would fail to load ' +
-        'on the target, so they are automatically excluded from the migration. Migrate ' +
-        'between the same engine to carry functions over.',
+        `Source (${source.dbType}) has server-side function libraries, but the target ` +
+        `(${target.dbType}) is a different engine. Valkey libraries register against the ` +
+        'engine-specific `server` global, which Redis does not expose, so they would fail to ' +
+        'load on the target and are excluded from the migration. Key data still migrates — ' +
+        'recreate the functions on the target manually if you need them.',
     });
   }
 

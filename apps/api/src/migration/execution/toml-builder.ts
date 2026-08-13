@@ -1,5 +1,20 @@
 import type { DatabaseConnectionConfig, RedisShakeOptions, SyncReaderOptions } from '@betterdb/shared';
 
+/**
+ * Options for the RedisShake TOML builders. Passed as a single object rather than
+ * positional flags so that the several booleans (`sourceIsCluster`,
+ * `targetIsCluster`, `excludeFunctions`) can't be silently transposed at a call
+ * site — each is named and each is optional with a safe default.
+ */
+export interface RedisShakeTomlOptions {
+  sourceIsCluster: boolean;
+  targetIsCluster?: boolean;
+  excludeFunctions?: boolean;
+  rsOptions?: RedisShakeOptions;
+  /** sync_reader only; ignored by the scan_reader builder. */
+  syncReaderOptions?: SyncReaderOptions;
+}
+
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHAR_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
 
@@ -39,11 +54,19 @@ function validateHost(host: string): string {
  * as Valkey's `server`) and fail to load on the other fork, aborting the migration.
  * Blocking the FUNCTION command drops FUNCTION LOAD/RESTORE from the stream so the
  * key data still migrates. Returns an empty string (no filter) when not excluding.
+ *
+ * RedisShake (4.6.x) matches `block_command` case-sensitively against the uppercased,
+ * container-expanded command name — `FUNCTION` is expanded to `<CMD>-<SUBCMD>`, so the
+ * RDB restore path emits `FUNCTION-LOAD` / `FUNCTION-RESTORE`. A bare lowercase
+ * `"function"` matches nothing and silently forwards the library, so the entries must
+ * be the fully-qualified upper-case forms.
  */
 function buildFilterSection(excludeFunctions: boolean): string {
-  if (!excludeFunctions) return '';
+  if (excludeFunctions === false) {
+    return '';
+  }
   return `[filter]
-block_command = ["function"]
+block_command = ["FUNCTION-LOAD", "FUNCTION-RESTORE", "FUNCTION-DELETE", "FUNCTION-FLUSH"]
 
 `;
 }
@@ -60,11 +83,13 @@ function formatAddress(host: string, port: number): string {
 export function buildScanReaderToml(
   source: DatabaseConnectionConfig,
   target: DatabaseConnectionConfig,
-  sourceIsCluster: boolean,
-  targetIsCluster: boolean = false,
-  rsOptions: RedisShakeOptions = {},
-  excludeFunctions: boolean = false,
+  opts: RedisShakeTomlOptions,
 ): string {
+  const sourceIsCluster = opts.sourceIsCluster;
+  const targetIsCluster = opts.targetIsCluster ?? false;
+  const rsOptions = opts.rsOptions ?? {};
+  const excludeFunctions = opts.excludeFunctions ?? false;
+
   const srcHost = validateHost(source.host);
   const srcPort = validatePort(source.port);
   const tgtHost = validateHost(target.host);
@@ -109,12 +134,14 @@ try_diskless = ${rsOptions.tryDiskless ? 'true' : 'false'}
 export function buildSyncReaderToml(
   source: DatabaseConnectionConfig,
   target: DatabaseConnectionConfig,
-  sourceIsCluster: boolean,
-  options: SyncReaderOptions = {},
-  targetIsCluster: boolean = false,
-  rsOptions: RedisShakeOptions = {},
-  excludeFunctions: boolean = false,
+  opts: RedisShakeTomlOptions,
 ): string {
+  const sourceIsCluster = opts.sourceIsCluster;
+  const options = opts.syncReaderOptions ?? {};
+  const targetIsCluster = opts.targetIsCluster ?? false;
+  const rsOptions = opts.rsOptions ?? {};
+  const excludeFunctions = opts.excludeFunctions ?? false;
+
   const srcHost = validateHost(source.host);
   const srcPort = validatePort(source.port);
   const tgtHost = validateHost(target.host);
@@ -129,7 +156,7 @@ export function buildSyncReaderToml(
 
   // Note: sync_reader emits `cluster = ...` always (unlike scan_reader where it's conditional).
   // RedisShake auto-discovers cluster masters and runs PSYNC against each when cluster = true.
-  let toml = `[sync_reader]
+  const toml = `[sync_reader]
 cluster = ${sourceIsCluster ? 'true' : 'false'}
 address = "${escapeTomlString(formatAddress(srcHost, srcPort))}"
 username = "${escapeTomlString(srcUsername)}"

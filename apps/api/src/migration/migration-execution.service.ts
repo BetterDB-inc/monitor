@@ -10,8 +10,9 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
-import { parseLogLine } from './execution/log-parser';
+import { parseLogLine, classifyRedisShakeFailure } from './execution/log-parser';
 import { runCommandMigration } from './execution/command-migration-worker';
+import { shouldExcludeFunctions } from './fork-compat';
 
 @Injectable()
 export class MigrationExecutionService {
@@ -50,18 +51,6 @@ export class MigrationExecutionService {
     const targetInfo = await targetAdapter.getInfo(['cluster']);
     const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
     const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
-
-    // Server-side functions use engine-specific globals (e.g. Valkey's `server`) and
-    // fail to load on a different fork. When source and target are different engines,
-    // exclude functions from the RedisShake stream so the key data still migrates.
-    const sourceDbType = sourceAdapter.getCapabilities().dbType;
-    const targetDbType = targetAdapter.getCapabilities().dbType;
-    const excludeFunctions = sourceDbType !== targetDbType;
-    if (excludeFunctions) {
-      this.logger.log(
-        `Execution: source (${sourceDbType}) and target (${targetDbType}) are different engines — excluding functions from migration`,
-      );
-    }
 
     // 3.5. If emptyDbBeforeSync requested, flush every target master now.
     // RedisShake's own empty_db_before_sync only flushes the seed node in cluster
@@ -131,17 +120,37 @@ export class MigrationExecutionService {
     // 7. Fire and forget based on mode
     if (mode === 'redis_shake' || mode === 'redis_shake_sync') {
       const rsOptions = req.redisShakeOptions ?? {};
+
+      // Server-side functions use engine-specific globals (e.g. Valkey's `server`)
+      // and fail to load on a different fork. When they'd be dropped for this
+      // direction (Valkey -> Redis) exclude them from the RedisShake stream so the
+      // key data still migrates, and surface the exclusion in the job log — the
+      // exclusion is otherwise invisible and the user would only discover missing
+      // functions from later FCALL errors. Only the RedisShake modes filter, so
+      // this is computed here rather than for command mode.
+      const sourceDbType = sourceAdapter.getCapabilities().dbType;
+      const targetDbType = targetAdapter.getCapabilities().dbType;
+      const excludeFunctions = shouldExcludeFunctions(sourceDbType, targetDbType);
+      if (excludeFunctions) {
+        const notice = `Cross-engine migration (${sourceDbType} → ${targetDbType}): server-side functions are excluded and will not be transferred to the target.`;
+        this.logger.log(`Execution ${id}: ${notice}`);
+        job.logs.push(notice);
+      }
+
       const tomlContent = mode === 'redis_shake_sync'
-        ? buildSyncReaderToml(
-            sourceConfig,
-            targetConfig,
-            clusterEnabled,
-            req.syncReaderOptions ?? {},
+        ? buildSyncReaderToml(sourceConfig, targetConfig, {
+            sourceIsCluster: clusterEnabled,
+            syncReaderOptions: req.syncReaderOptions ?? {},
             targetIsCluster,
             rsOptions,
             excludeFunctions,
-          )
-        : buildScanReaderToml(sourceConfig, targetConfig, clusterEnabled, targetIsCluster, rsOptions, excludeFunctions);
+          })
+        : buildScanReaderToml(sourceConfig, targetConfig, {
+            sourceIsCluster: clusterEnabled,
+            targetIsCluster,
+            rsOptions,
+            excludeFunctions,
+          });
       const tomlPath = join(os.tmpdir(), `${id}.toml`);
       writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
       job.tomlPath = tomlPath;
@@ -175,27 +184,61 @@ export class MigrationExecutionService {
         job.pidPath = pidPath;
       } catch { /* non-fatal — orphan detection is best-effort */ }
 
-      const handleData = (chunk: Buffer) => {
-        const lines = chunk.toString().split('\n');
-        for (const line of lines) {
-          if (!line) continue;
-          job.logs.push(sanitizeLogLine(line));
-          if (job.logs.length > this.MAX_LOG_LINES) {
-            job.logs.shift();
-          }
-          const parsed = parseLogLine(line);
-          if (parsed.keysTransferred !== null) job.keysTransferred = parsed.keysTransferred;
-          if (parsed.bytesTransferred !== null) job.bytesTransferred = parsed.bytesTransferred;
-          if (parsed.progress !== null) job.progress = parsed.progress;
-          if (parsed.syncStage !== null && job.mode === 'redis_shake_sync') job.syncStage = parsed.syncStage;
+      const processLine = (line: string) => {
+        if (line.length === 0) {
+          return;
         }
+        job.logs.push(sanitizeLogLine(line));
+        if (job.logs.length > this.MAX_LOG_LINES) {
+          job.logs.shift();
+        }
+        const parsed = parseLogLine(line);
+        if (parsed.keysTransferred !== null) job.keysTransferred = parsed.keysTransferred;
+        if (parsed.bytesTransferred !== null) job.bytesTransferred = parsed.bytesTransferred;
+        if (parsed.progress !== null) job.progress = parsed.progress;
+        if (parsed.syncStage !== null && job.mode === 'redis_shake_sync') job.syncStage = parsed.syncStage;
       };
 
-      proc.stdout.on('data', handleData);
-      proc.stderr.on('data', handleData);
+      // Each stream gets its own carry-over buffer: a chunk boundary can split a
+      // line — and thus a token like BUSYKEY — across two 'data' events, so we emit
+      // only complete lines and hold the trailing partial until the next chunk or
+      // the final flush at 'close'.
+      const makeStreamHandler = () => {
+        let buffer = '';
+        const onData = (chunk: Buffer) => {
+          buffer += chunk.toString();
+          const parts = buffer.split('\n');
+          buffer = parts.pop() ?? '';
+          for (const line of parts) {
+            processLine(line);
+          }
+        };
+        const flush = () => {
+          if (buffer.length > 0) {
+            processLine(buffer);
+            buffer = '';
+          }
+        };
+        return { onData, flush };
+      };
 
+      const stdoutHandler = makeStreamHandler();
+      const stderrHandler = makeStreamHandler();
+      proc.stdout.on('data', stdoutHandler.onData);
+      proc.stderr.on('data', stderrHandler.onData);
+
+      // Resolve on 'close', not 'exit'. 'exit' can fire before the stdio pipes have
+      // drained, and RedisShake writes its fatal BUSYKEY line (via log.Panicf) last —
+      // classifying on 'exit' would race the very log we depend on. 'exit' only
+      // captures the code; 'close' flushes the buffers and resolves.
       const code = await new Promise<number>((resolve, reject) => {
-        proc.on('exit', (exitCode) => resolve(exitCode ?? 1));
+        let exitCode = 1;
+        proc.on('exit', (c) => { exitCode = c ?? 1; });
+        proc.on('close', () => {
+          stdoutHandler.flush();
+          stderrHandler.flush();
+          resolve(exitCode);
+        });
         proc.on('error', reject);
       });
 
@@ -208,7 +251,7 @@ export class MigrationExecutionService {
         }
       } else if (statusAfterExit !== 'cancelled') {
         job.status = 'failed';
-        job.error = this.explainRedisShakeFailure(code, job.logs);
+        job.error = classifyRedisShakeFailure(code, job.logs).message;
       }
     } catch (err: unknown) {
       if ((job.status as string) !== 'cancelled') {
@@ -232,24 +275,6 @@ export class MigrationExecutionService {
       job.tomlPath = null;
       job.pidPath = null;
     }
-  }
-
-  /**
-   * Turn a non-zero RedisShake exit into an actionable message. Scans the recent
-   * log tail for well-known failure signatures so the UI can tell the user what to
-   * do next, instead of a bare "exited with code N".
-   */
-  private explainRedisShakeFailure(code: number | null, logs: string[]): string {
-    const recent = logs.slice(-80).join('\n');
-    if (/BUSYKEY/i.test(recent)) {
-      return (
-        'Migration failed: the target already contains one or more of the keys being ' +
-        'migrated (BUSYKEY). RedisShake will not overwrite existing keys. Enable the ' +
-        '"Flush target before migration" option to clear the target first, or point the ' +
-        'migration at an empty target, then run it again.'
-      );
-    }
-    return `RedisShake exited with code ${code}`;
   }
 
   // ── Command-based mode ──

@@ -1,4 +1,4 @@
-import { parseLogLine } from '../execution/log-parser';
+import { parseLogLine, classifyRedisShakeFailure } from '../execution/log-parser';
 
 describe('parseLogLine — sync_reader stage detection', () => {
   it('returns null syncStage for unrelated lines', () => {
@@ -90,5 +90,37 @@ describe('parseLogLine — scan_reader behavior preserved', () => {
     expect(result.bytesTransferred).toBeNull();
     expect(result.progress).toBeNull();
     expect(result.syncStage).toBeNull();
+  });
+});
+
+describe('classifyRedisShakeFailure', () => {
+  it('detects BUSYKEY anywhere in the buffer and returns the BUSYKEY code', () => {
+    const logs = [
+      'start syncing',
+      'panic: BUSYKEY Target key name already exists.',
+    ];
+    const result = classifyRedisShakeFailure(1, logs);
+    expect(result.code).toBe('BUSYKEY');
+    expect(result.message).toMatch(/flush the target/i);
+  });
+
+  it('is case-insensitive on the BUSYKEY token', () => {
+    expect(classifyRedisShakeFailure(1, ['busykey seen']).code).toBe('BUSYKEY');
+  });
+
+  it('appends the exit code to the BUSYKEY message', () => {
+    expect(classifyRedisShakeFailure(2, ['BUSYKEY']).message).toContain('(exit code 2)');
+  });
+
+  it('handles a null exit code without printing "null"', () => {
+    const result = classifyRedisShakeFailure(null, ['BUSYKEY']);
+    expect(result.message).toContain('(exit code unknown)');
+    expect(result.message).not.toContain('null');
+  });
+
+  it('falls back to UNKNOWN with the exit code when no signature matches', () => {
+    const result = classifyRedisShakeFailure(3, ['some unrelated failure']);
+    expect(result.code).toBe('UNKNOWN');
+    expect(result.message).toBe('RedisShake exited with code 3');
   });
 });

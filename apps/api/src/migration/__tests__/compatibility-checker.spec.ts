@@ -209,19 +209,33 @@ describe('compatibility-checker', () => {
       expect(dirIssue!.severity).toBe('blocking');
     });
 
-    it('should warn that functions are not migrated across engines (Redis→Valkey)', () => {
-      const source = makeMeta({ dbType: 'redis', capabilities: { dbType: 'redis', version: '7.2.0' } as DatabaseCapabilities });
-      const target = makeMeta({ dbType: 'valkey' });
-      const issues = checkCompatibility(source, target, false);
+    it('should warn that functions are not migrated Valkey→Redis when the source has functions', () => {
+      const source = makeMeta({ dbType: 'valkey' });
+      const target = makeMeta({ dbType: 'redis', capabilities: { dbType: 'redis', version: '7.2.0' } as DatabaseCapabilities });
+      const issues = checkCompatibility(source, target, false, true);
       const fnIssue = issues.find(i => i.category === 'functions');
       expect(fnIssue).toBeDefined();
       expect(fnIssue!.severity).toBe('warning');
     });
 
+    it('should NOT warn about functions Valkey→Redis when the source has no functions', () => {
+      const source = makeMeta({ dbType: 'valkey' });
+      const target = makeMeta({ dbType: 'redis', capabilities: { dbType: 'redis', version: '7.2.0' } as DatabaseCapabilities });
+      const issues = checkCompatibility(source, target, false, false);
+      expect(issues.find(i => i.category === 'functions')).toBeUndefined();
+    });
+
+    it('should NOT warn about functions Redis→Valkey — Redis libraries load fine on Valkey', () => {
+      const source = makeMeta({ dbType: 'redis', capabilities: { dbType: 'redis', version: '7.2.0' } as DatabaseCapabilities });
+      const target = makeMeta({ dbType: 'valkey' });
+      const issues = checkCompatibility(source, target, false, true);
+      expect(issues.find(i => i.category === 'functions')).toBeUndefined();
+    });
+
     it('should NOT warn about functions when source and target are the same engine', () => {
       const source = makeMeta({ dbType: 'valkey' });
       const target = makeMeta({ dbType: 'valkey' });
-      const issues = checkCompatibility(source, target, false);
+      const issues = checkCompatibility(source, target, false, true);
       expect(issues.find(i => i.category === 'functions')).toBeUndefined();
     });
 

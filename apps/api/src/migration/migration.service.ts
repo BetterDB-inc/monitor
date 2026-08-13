@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import Valkey from 'iovalkey';
 import type { MigrationAnalysisRequest, MigrationAnalysisResult, StartAnalysisResponse, DataTypeBreakdown, DataTypeCount, TtlDistribution } from '@betterdb/shared';
@@ -401,6 +401,17 @@ export class MigrationService {
         sourceAclUsers = result ?? [];
       } catch { /* ignore - ACL not supported or no permission */ }
 
+      // Detect whether the source actually has server-side function libraries.
+      // The cross-engine "functions not migrated" warning only makes sense when
+      // there is something to lose — without this check a plain instance with no
+      // functions would still bump warningCount and never report a clean run.
+      let sourceHasFunctions = false;
+      try {
+        const sourceClient = adapter.getClient();
+        const fnResult = await sourceClient.call('FUNCTION', 'LIST') as unknown[];
+        sourceHasFunctions = Array.isArray(fnResult) && fnResult.length > 0;
+      } catch { /* ignore - FUNCTION not supported or no permission */ }
+
       // Fetch RDB save config from both instances for reliable persistence detection
       let sourceRdbSaveConfig: string | undefined;
       let targetRdbSaveConfig: string | undefined;
@@ -437,7 +448,7 @@ export class MigrationService {
         targetMeta.modules = parseModuleList(moduleResult);
       } catch { /* ignore */ }
 
-      const incompatibilities = checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false);
+      const incompatibilities = checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false, sourceHasFunctions);
       job.result.incompatibilities = incompatibilities;
       job.result.blockingCount = incompatibilities.filter(i => i.severity === 'blocking').length;
       job.result.warningCount = incompatibilities.filter(i => i.severity === 'warning').length;

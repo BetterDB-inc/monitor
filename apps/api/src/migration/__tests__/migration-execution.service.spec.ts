@@ -15,7 +15,9 @@ jest.mock('child_process', () => ({
     stdout: { on: jest.fn() },
     stderr: { on: jest.fn() },
     on: jest.fn().mockImplementation((event: string, cb: (code: number) => void) => {
+      // runRedisShake captures the code on 'exit' but resolves on 'close'
       if (event === 'exit') setTimeout(() => cb(0), 10);
+      if (event === 'close') setTimeout(() => cb(0), 20);
     }),
     kill: jest.fn(),
     pid: 12345,
@@ -189,11 +191,11 @@ describe('MigrationExecutionService', () => {
       expect(buildSyncReaderToml).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
-        expect.anything(),
-        { preferReplica: true },
-        expect.any(Boolean),
-        {},
-        false, // excludeFunctions — source and target are both valkey in this mock
+        expect.objectContaining({
+          syncReaderOptions: { preferReplica: true },
+          // source and target are both valkey in this mock, so functions are kept
+          excludeFunctions: false,
+        }),
       );
     });
 
@@ -210,9 +212,9 @@ describe('MigrationExecutionService', () => {
         mode: 'redis_shake',
       });
 
-      // buildScanReaderToml's last arg (excludeFunctions) must be true for valkey→redis
+      // buildScanReaderToml's options object must carry excludeFunctions: true for valkey→redis
       const call = (buildScanReaderToml as jest.Mock).mock.calls.at(-1)!;
-      expect(call[call.length - 1]).toBe(true);
+      expect(call[2]).toEqual(expect.objectContaining({ excludeFunctions: true }));
     });
   });
 

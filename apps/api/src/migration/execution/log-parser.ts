@@ -72,6 +72,40 @@ function detectSyncStage(line: string): SyncStage | null {
   return null;
 }
 
+export type RedisShakeFailureCode = 'BUSYKEY' | 'UNKNOWN';
+
+export interface RedisShakeFailure {
+  code: RedisShakeFailureCode;
+  /** Human-readable, actionable explanation for the UI. */
+  message: string;
+}
+
+/**
+ * Classify a non-zero RedisShake exit into an actionable failure. Scans the full
+ * retained log buffer (not a fixed tail) for well-known failure signatures — the
+ * fatal line RedisShake writes via `log.Panicf` is its last output, so a short
+ * tail can miss it. Returns a structured `{ code }` alongside the message so the
+ * web layer can key its own remediation copy off the code instead of matching on
+ * prose or a hard-coded control label.
+ */
+export function classifyRedisShakeFailure(exitCode: number | null, logs: string[]): RedisShakeFailure {
+  const haystack = logs.join('\n');
+  const codeSuffix = exitCode === null ? 'unknown' : String(exitCode);
+
+  if (/BUSYKEY/i.test(haystack)) {
+    return {
+      code: 'BUSYKEY',
+      message:
+        'Migration failed: the target already contains one or more of the keys being ' +
+        'migrated (BUSYKEY). RedisShake will not overwrite existing keys. Enable the option ' +
+        'to flush the target before migration, or point the migration at an empty target, ' +
+        `then run it again. (exit code ${codeSuffix})`,
+    };
+  }
+
+  return { code: 'UNKNOWN', message: `RedisShake exited with code ${codeSuffix}` };
+}
+
 export function parseLogLine(line: string): ParsedLogLine {
   const syncStage = detectSyncStage(line);
 
