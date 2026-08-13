@@ -164,14 +164,16 @@ describe('evaluateAppendfsyncHazard', () => {
     expect(finding?.message).toContain('valkey#3515');
   });
 
-  it('escalates to a warning hazard when aof_delayed_fsync is rising', () => {
+  it('does not escalate always on a rising aof_delayed_fsync', () => {
+    // The engine only increments aof_delayed_fsync in the everysec branch of
+    // flushAppendOnlyFile(); under always the fsync is inline, so the counter
+    // cannot move. Escalating on it here would be an unreachable path.
     const finding = evaluateAppendfsyncHazard(
-      fsyncInput({ aofDelayedFsync: 42, delayedFsyncRisingStreak: 1 }),
+      fsyncInput({ aofDelayedFsync: 42, delayedFsyncRisingStreak: 3 }),
     );
-    expect(finding?.severity).toBe('warning');
-    expect(finding?.status).toBe('hazard');
-    expect(finding?.message).toContain('aof_delayed_fsync');
-    expect(finding?.message).toContain('42');
+    expect(finding?.severity).toBe('info');
+    expect(finding?.status).toBe('advisory');
+    expect(finding?.message).not.toContain('aof_delayed_fsync');
   });
 
   it('escalates when the aof-fsync-always LATENCY event is present', () => {

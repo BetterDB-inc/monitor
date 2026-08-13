@@ -146,9 +146,15 @@ export interface AppendfsyncHazardInput {
   appendonly: string | null;
   /** Value of `CONFIG GET appendfsync` (`always`/`everysec`/`no`), or null when unavailable. */
   appendfsync: string | null;
-  /** INFO persistence `aof_delayed_fsync`, or null when absent. */
+  /**
+   * INFO persistence `aof_delayed_fsync`, or null when absent. Only meaningful
+   * under `everysec` — the engine never increments it under `always`.
+   */
   aofDelayedFsync: number | null;
-  /** Consecutive probes on which aof_delayed_fsync rose (service-computed across probes). */
+  /**
+   * Consecutive probes on which aof_delayed_fsync rose (service-computed across
+   * probes). Evaluated for `everysec` only, for the same reason.
+   */
   delayedFsyncRisingStreak: number;
   /** INFO persistence `aof_last_write_status`, or null when absent. */
   aofLastWriteStatus: string | null;
@@ -171,11 +177,13 @@ const ALWAYS_ADVICE =
  * AOF fsync-policy hazard (valkey#3515): with `appendfsync always` the fsync
  * happens on the main thread inside the write path, so a slow or contended
  * disk stalls command processing directly. The config alone is a low-severity
- * advisory; observed symptoms (aof_delayed_fsync rising across probes, an
- * aof-* LATENCY event, or a failing AOF write status) escalate it to a
- * confirmed hazard. `everysec` is flagged only when aof_delayed_fsync climbs
- * across at least two consecutive probes — the once-per-second background
- * fsync itself backing up — never on config alone.
+ * advisory; observed symptoms (an aof-* LATENCY event or a failing AOF write
+ * status) escalate it to a confirmed hazard — NOT aof_delayed_fsync, which the
+ * engine only increments under `everysec`.
+ *
+ * `everysec` is flagged only when aof_delayed_fsync climbs across at least two
+ * consecutive probes — the once-per-second background fsync itself backing up
+ * — never on config alone.
  */
 export function evaluateAppendfsyncHazard(
   input: AppendfsyncHazardInput,
@@ -185,10 +193,11 @@ export function evaluateAppendfsyncHazard(
   }
 
   if (input.appendfsync === 'always') {
+    // NOTE: aof_delayed_fsync is deliberately NOT a symptom here. The engine
+    // only increments it in the everysec branch of flushAppendOnlyFile() —
+    // under `always` the fsync is inline in the write path, so the counter
+    // never moves and any escalation keyed on it would be unreachable.
     const symptoms: string[] = [];
-    if (input.delayedFsyncRisingStreak >= 1 && input.aofDelayedFsync !== null) {
-      symptoms.push(`aof_delayed_fsync is rising (now ${input.aofDelayedFsync})`);
-    }
     if (input.aofLastWriteStatus !== null && input.aofLastWriteStatus !== 'ok') {
       symptoms.push(`aof_last_write_status=${input.aofLastWriteStatus}`);
     }

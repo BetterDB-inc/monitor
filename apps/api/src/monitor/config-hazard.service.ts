@@ -112,6 +112,36 @@ export class ConfigHazardService {
   }
 
   /**
+   * Seconds on the MONITORED server's clock. LATENCY LATEST timestamps each
+   * spike with the server's own `time(NULL)`, so comparing those against the
+   * monitor host's `Date.now()` makes the freshness window wrong in BOTH
+   * directions under clock skew: a stale spike can read as fresh, and a genuine
+   * one can be suppressed. Anchoring both sides to the server removes skew from
+   * the comparison entirely.
+   *
+   * Falls back to the local clock when TIME is unavailable — no worse than
+   * comparing against the local clock unconditionally, which is what this
+   * replaces.
+   */
+  private async readServerTimeSeconds(
+    connectionId: string,
+    client: ProbeClientLike,
+  ): Promise<number> {
+    try {
+      const raw = await client.call('TIME', []);
+      if (Array.isArray(raw) && raw.length > 0) {
+        const seconds = parseInt(String(raw[0]), 10);
+        if (Number.isFinite(seconds)) {
+          return seconds;
+        }
+      }
+    } catch (err) {
+      this.logger.debug(`TIME failed for ${connectionId}: ${(err as Error).message}`);
+    }
+    return Math.floor(Date.now() / 1000);
+  }
+
+  /**
    * AOF fsync-policy hazard (valkey#3515). Symptom probes are best-effort: a
    * failed INFO or LATENCY read degrades to config-only evaluation (the
    * low-severity advisory) rather than suppressing the finding or the poll.
@@ -165,9 +195,9 @@ export class ConfigHazardService {
 
     let latencyEvents: string[] = [];
     try {
+      const nowSeconds = await this.readServerTimeSeconds(connectionId, client);
       const raw = await client.call('LATENCY', ['LATEST']);
       if (Array.isArray(raw)) {
-        const nowSeconds = Math.floor(Date.now() / 1000);
         latencyEvents = raw
           .map((entry) => {
             if (Array.isArray(entry) === false) {

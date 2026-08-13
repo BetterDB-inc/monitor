@@ -125,6 +125,9 @@ describe('ConfigHazardService', () => {
         delayed?: number;
         writeStatus?: string;
         latency?: unknown;
+        // Skew of the MONITORED server's clock relative to the monitor host,
+        // in seconds. LATENCY spike timestamps come from the server clock.
+        serverClockSkewS?: number;
       } = {},
     ): void {
       client.getConfigValue.mockImplementation((param: string) => {
@@ -146,6 +149,10 @@ describe('ConfigHazardService', () => {
               `aof_last_write_status:${opts.writeStatus ?? 'ok'}\r\n`,
           );
         }
+        if (cmd === 'TIME') {
+          const serverSeconds = Math.floor(now / 1000) + (opts.serverClockSkewS ?? 0);
+          return Promise.resolve([String(serverSeconds), '0']);
+        }
         if (cmd === 'LATENCY') {
           if (opts.latency instanceof Error) {
             return Promise.reject(opts.latency);
@@ -165,15 +172,42 @@ describe('ConfigHazardService', () => {
       expect(findings[0].severity).toBe('info');
     });
 
-    it('escalates when aof_delayed_fsync rises across consecutive probes', async () => {
+    it('does not escalate always when aof_delayed_fsync rises across probes', async () => {
+      // Belt-and-braces against the engine contract: under always the counter
+      // cannot rise at all, so a rise must not be treated as blocking evidence.
       setupFsyncClient({ delayed: 5 });
       await service.getHazards('conn-1');
       now += 61_000;
       setupFsyncClient({ delayed: 9 });
       const findings = await service.getHazards('conn-1');
       expect(findings).toHaveLength(1);
+      expect(findings[0].status).toBe('advisory');
+    });
+
+    it('honours a recent spike when the server clock lags the monitor host', async () => {
+      // Server an hour behind: a spike 10s ago on the SERVER reads as an
+      // hour old against the host clock and would be wrongly suppressed.
+      const serverClockSkewS = -3_600;
+      setupFsyncClient({
+        serverClockSkewS,
+        latency: [['aof-fsync-always', 1_700_000_000 + serverClockSkewS - 10, 12, 40]],
+      });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
       expect(findings[0].status).toBe('hazard');
-      expect(findings[0].message).toContain('9');
+    });
+
+    it('suppresses a stale spike when the server clock leads the monitor host', async () => {
+      // Server an hour ahead: a spike an hour old on the SERVER lines up with
+      // the host's "now" and would be wrongly read as current evidence.
+      const serverClockSkewS = 3_600;
+      setupFsyncClient({
+        serverClockSkewS,
+        latency: [['aof-fsync-always', 1_700_000_000, 12, 40]],
+      });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].status).toBe('advisory');
     });
 
     it('escalates on a recent aof-fsync-always LATENCY event', async () => {
