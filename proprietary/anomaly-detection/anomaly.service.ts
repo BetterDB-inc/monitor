@@ -28,10 +28,12 @@ import { Correlator } from './correlator';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import {
   DEFAULT_CONFIG_DRIFT_KEYS,
+  ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS,
   ConfigDrift,
   ConfigDriftNode,
   detectConfigDrift,
   configDriftSignature,
+  isEncodingThresholdKey,
 } from './config-drift-detector';
 import {
   RESYNC_LOOP_MIN_CYCLES,
@@ -290,6 +292,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     string,
     { groupKey: string; name: string; config: Record<string, string> }
   >();
+  // Per-connection countdown gating how often the curated config allowlist is
+  // actually re-read (see refreshConfigSnapshot). Same discipline as
+  // cobLimitRecheck/largeReplyThresholdRecheck.
+  private configDriftRecheck = new Map<string, number>();
   // Global (not per-connection) dedupe: a drift finding is a property of the
   // GROUP, not of whichever connection's poll happened to detect it.
   // Recomputed from the full snapshot on every call, so it self-heals if a
@@ -548,6 +554,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // config forever). Signatures involving it self-heal on the next
     // detectConfigDrift call, which rebuilds its node list from what remains.
     this.configSnapshot.delete(connectionId);
+    this.configDriftRecheck.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -1270,7 +1277,94 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * Deliberately excludes node-specific keys that legitimately differ (bind,
    * port, dir, replica-announce-ip/port, unixsocket, logfile, requirepass, …).
    */
-  private static readonly CONFIG_DRIFT_KEYS = DEFAULT_CONFIG_DRIFT_KEYS;
+  private static readonly CONFIG_DRIFT_KEYS = [
+    ...DEFAULT_CONFIG_DRIFT_KEYS,
+    ...ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS,
+  ];
+
+  /**
+   * Polls to skip before re-reading the config-drift allowlist. Mirrors
+   * COB_LIMIT_RECHECK_POLLS / LARGE_REPLY_THRESHOLD_RECHECK_POLLS: these keys
+   * only change when an operator deliberately changes them, so re-reading the
+   * whole allowlist every poll spends a CONFIG GET per key on a signal that
+   * moves on a scale of days.
+   */
+  private static readonly CONFIG_DRIFT_RECHECK_POLLS = 60;
+
+  /**
+   * Reads this connection's curated config subset into `configSnapshot`, on a
+   * slow recheck countdown so the allowlist costs its CONFIG GETs once every
+   * CONFIG_DRIFT_RECHECK_POLLS polls instead of on every poll. Drift is still
+   * EVALUATED every poll — only the fetch is throttled, so a newly-registered
+   * peer still surfaces an existing mismatch on its first poll.
+   *
+   * A replid change (failover) forces an immediate re-read rather than reusing
+   * the cache: groupKey must never be rewritten without a matching fresh config
+   * read, for the reason spelled out on `fetchedAny` below.
+   */
+  private async refreshConfigSnapshot(ctx: ConnectionContext, replid: string): Promise<void> {
+    const groupKey = `replid:${replid}`;
+    const cached = this.configSnapshot.get(ctx.connectionId);
+    const countdown = this.configDriftRecheck.get(ctx.connectionId) ?? 0;
+    const cacheUsable = cached !== undefined && cached.groupKey === groupKey;
+
+    if (cacheUsable && countdown > 0) {
+      this.configDriftRecheck.set(ctx.connectionId, countdown - 1);
+      return;
+    }
+
+    // Bounded to the curated allowlist (not CONFIG GET '*'): all calls
+    // race concurrently against this connection's OWN already-open
+    // client (no fan-out to sibling nodes). Use getConfigValues (which
+    // returns the parsed map) rather than getConfigValue (which collapses
+    // an empty value to null): a key set to the EMPTY string — e.g.
+    // `save ""` (RDB disabled) — must be recorded as "" and compared, not
+    // dropped as if unsupported, since an empty-vs-non-empty `save` is
+    // exactly the persistence drift we want to catch. A per-key failure
+    // (unsupported on this version, or a transient error) omits that key.
+    const entries = await Promise.all(
+      AnomalyService.CONFIG_DRIFT_KEYS.map(async (key) => {
+        try {
+          const cfg = await ctx.client.getConfigValues(key);
+          const value = cfg[key];
+          return value !== undefined ? ([key, value] as const) : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    // Only touch the snapshot when we actually read at least one key this
+    // poll. An all-keys-failed poll must leave the snapshot ENTIRELY
+    // unchanged — including its groupKey: a failover often changes
+    // master_replid at the same time it triggers LOADING (which fails
+    // these reads), so rewriting groupKey from the current replid on a
+    // stale-config poll would move the node into a new replication group,
+    // clear the old drift signature, and re-fire the same mismatch as a
+    // brand-new alert. It also leaves the countdown at 0 so the next poll
+    // retries rather than caching a gap for a full recheck window.
+    const fetchedAny = entries.some((entry) => entry !== null);
+    if (fetchedAny === false) {
+      return;
+    }
+
+    // MERGE freshly-read keys onto the last-known snapshot rather than
+    // replacing it, so a PARTIAL failure (some keys succeed, some fail)
+    // doesn't drop the keys that failed — a dropped drifted key would
+    // make the mismatch momentarily vanish and re-fire on recovery. A
+    // key that failed this poll retains its prior value.
+    const config: Record<string, string> = { ...(cached?.config ?? {}) };
+    for (const entry of entries) {
+      if (entry) {
+        config[entry[0]] = entry[1];
+      }
+    }
+    this.configSnapshot.set(ctx.connectionId, {
+      groupKey,
+      name: ctx.connectionName,
+      config,
+    });
+    this.configDriftRecheck.set(ctx.connectionId, AnomalyService.CONFIG_DRIFT_RECHECK_POLLS);
+  }
 
   /**
    * Detects a curated CRITICAL config key (maxmemory, maxmemory-policy, …)
@@ -1314,52 +1408,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         if (!capabilities.hasConfig) {
           this.configSnapshot.delete(ctx.connectionId);
         } else {
-          // Bounded to the curated allowlist (not CONFIG GET '*'): all calls
-          // race concurrently against this connection's OWN already-open
-          // client (no fan-out to sibling nodes). Use getConfigValues (which
-          // returns the parsed map) rather than getConfigValue (which collapses
-          // an empty value to null): a key set to the EMPTY string — e.g.
-          // `save ""` (RDB disabled) — must be recorded as "" and compared, not
-          // dropped as if unsupported, since an empty-vs-non-empty `save` is
-          // exactly the persistence drift we want to catch. A per-key failure
-          // (unsupported on this version, or a transient error) omits that key.
-          const entries = await Promise.all(
-            AnomalyService.CONFIG_DRIFT_KEYS.map(async (key) => {
-              try {
-                const cfg = await ctx.client.getConfigValues(key);
-                const value = cfg[key];
-                return value !== undefined ? ([key, value] as const) : null;
-              } catch {
-                return null;
-              }
-            }),
-          );
-          // Only touch the snapshot when we actually read at least one key this
-          // poll. An all-keys-failed poll must leave the snapshot ENTIRELY
-          // unchanged — including its groupKey: a failover often changes
-          // master_replid at the same time it triggers LOADING (which fails
-          // these reads), so rewriting groupKey from the current replid on a
-          // stale-config poll would move the node into a new replication group,
-          // clear the old drift signature, and re-fire the same mismatch as a
-          // brand-new alert.
-          const fetchedAny = entries.some((entry) => entry !== null);
-          if (fetchedAny) {
-            // MERGE freshly-read keys onto the last-known snapshot rather than
-            // replacing it, so a PARTIAL failure (some keys succeed, some fail)
-            // doesn't drop the keys that failed — a dropped drifted key would
-            // make the mismatch momentarily vanish and re-fire on recovery. A
-            // key that failed this poll retains its prior value.
-            const prior = this.configSnapshot.get(ctx.connectionId)?.config ?? {};
-            const config: Record<string, string> = { ...prior };
-            for (const entry of entries) {
-              if (entry) config[entry[0]] = entry[1];
-            }
-            this.configSnapshot.set(ctx.connectionId, {
-              groupKey: `replid:${replid}`,
-              name: ctx.connectionName,
-              config,
-            });
-          }
+          await this.refreshConfigSnapshot(ctx, replid);
         }
       }
 
@@ -1403,6 +1452,20 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           .map((v) => `${v.name ?? v.connectionId} = ${v.value}`)
           .join(', ');
 
+        // Encoding-threshold keys get their own rationale: the drift's harm is
+        // not different runtime behavior but silent re-encoding on load.
+        const message = isEncodingThresholdKey(drift.key)
+          ? `WARNING: Encoding-threshold config '${drift.key}' differs across nodes in the ` +
+            `same replication group: ${valuesLabel}. The same data re-encodes when loaded ` +
+            `under different thresholds (e.g. listpack promoted to hashtable/skiplist), so ` +
+            `an RDB reload, restore, or clone onto the divergent node can silently occupy ` +
+            `far more memory than the source (valkey-io/valkey#3479). Align this value on ` +
+            `every node in the group.`
+          : `WARNING: Config key '${drift.key}' differs across nodes in the same replication ` +
+            `group: ${valuesLabel}. valkey-io/valkey#1193 — CONFIG SET only applies to the node ` +
+            `it's sent to, so this key must be reconciled on every node by hand until an ` +
+            `in-engine cluster-wide CONFIG SET exists.`;
+
         const event: AnomalyEvent = {
           id: `config-drift-${signature}-${timestamp}`,
           timestamp,
@@ -1414,11 +1477,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           zScore: 0,
           stdDev: 0,
           threshold: 1,
-          message:
-            `WARNING: Config key '${drift.key}' differs across nodes in the same replication ` +
-            `group: ${valuesLabel}. valkey-io/valkey#1193 — CONFIG SET only applies to the node ` +
-            `it's sent to, so this key must be reconciled on every node by hand until an ` +
-            `in-engine cluster-wide CONFIG SET exists.`,
+          message,
           resolved: false,
           // Attributed to the first drifting node — NOT necessarily ctx, whose
           // own poll may just be the one that happened to run this scan (this

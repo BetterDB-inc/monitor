@@ -1,20 +1,34 @@
 import {
   ConfigDriftNode,
   DEFAULT_CONFIG_DRIFT_KEYS,
+  ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS,
   configDriftSignature,
   detectConfigDrift,
+  isEncodingThresholdKey,
 } from '../config-drift-detector';
 
 /** Build a minimal ConfigDriftNode for tests. */
-function node(partial: Partial<ConfigDriftNode> & Pick<ConfigDriftNode, 'connectionId' | 'groupKey' | 'config'>): ConfigDriftNode {
+function node(
+  partial: Partial<ConfigDriftNode> & Pick<ConfigDriftNode, 'connectionId' | 'groupKey' | 'config'>,
+): ConfigDriftNode {
   return { ...partial };
 }
 
 describe('detectConfigDrift', () => {
   it('flags two same-group nodes that disagree on maxmemory', () => {
     const nodes = [
-      node({ connectionId: 'c1', name: 'primary', groupKey: 'replid:aaaa', config: { maxmemory: '1000000' } }),
-      node({ connectionId: 'c2', name: 'replica-1', groupKey: 'replid:aaaa', config: { maxmemory: '2000000' } }),
+      node({
+        connectionId: 'c1',
+        name: 'primary',
+        groupKey: 'replid:aaaa',
+        config: { maxmemory: '1000000' },
+      }),
+      node({
+        connectionId: 'c2',
+        name: 'replica-1',
+        groupKey: 'replid:aaaa',
+        config: { maxmemory: '2000000' },
+      }),
     ];
 
     const drifts = detectConfigDrift(nodes, DEFAULT_CONFIG_DRIFT_KEYS);
@@ -56,8 +70,16 @@ describe('detectConfigDrift', () => {
 
   it('reports nothing when all nodes in a group agree', () => {
     const nodes = [
-      node({ connectionId: 'c1', groupKey: 'replid:cccc', config: { maxmemory: '1000000', appendonly: 'yes' } }),
-      node({ connectionId: 'c2', groupKey: 'replid:cccc', config: { maxmemory: '1000000', appendonly: 'yes' } }),
+      node({
+        connectionId: 'c1',
+        groupKey: 'replid:cccc',
+        config: { maxmemory: '1000000', appendonly: 'yes' },
+      }),
+      node({
+        connectionId: 'c2',
+        groupKey: 'replid:cccc',
+        config: { maxmemory: '1000000', appendonly: 'yes' },
+      }),
     ];
     expect(detectConfigDrift(nodes, DEFAULT_CONFIG_DRIFT_KEYS)).toHaveLength(0);
   });
@@ -71,7 +93,9 @@ describe('detectConfigDrift', () => {
   });
 
   it('reports nothing when only a single node of a group is monitored', () => {
-    const nodes = [node({ connectionId: 'c1', groupKey: 'replid:lonely', config: { maxmemory: '1000000' } })];
+    const nodes = [
+      node({ connectionId: 'c1', groupKey: 'replid:lonely', config: { maxmemory: '1000000' } }),
+    ];
     expect(detectConfigDrift(nodes, DEFAULT_CONFIG_DRIFT_KEYS)).toHaveLength(0);
   });
 
@@ -116,7 +140,11 @@ describe('detectConfigDrift', () => {
 
   it('does not compare a key that only one node in the group reported', () => {
     const nodes = [
-      node({ connectionId: 'c1', groupKey: 'replid:ffff', config: { maxmemory: '1000000', timeout: '0' } }),
+      node({
+        connectionId: 'c1',
+        groupKey: 'replid:ffff',
+        config: { maxmemory: '1000000', timeout: '0' },
+      }),
       node({ connectionId: 'c2', groupKey: 'replid:ffff', config: { maxmemory: '1000000' } }), // no 'timeout'
     ];
     expect(detectConfigDrift(nodes, DEFAULT_CONFIG_DRIFT_KEYS)).toHaveLength(0);
@@ -126,7 +154,13 @@ describe('detectConfigDrift', () => {
 describe('configDriftSignature', () => {
   function makeDrift(values: Array<{ connectionId: string; value: string }>) {
     return detectConfigDrift(
-      values.map((v) => node({ connectionId: v.connectionId, groupKey: 'replid:sig', config: { maxmemory: v.value } })),
+      values.map((v) =>
+        node({
+          connectionId: v.connectionId,
+          groupKey: 'replid:sig',
+          config: { maxmemory: v.value },
+        }),
+      ),
       ['maxmemory'],
     )[0];
   }
@@ -171,5 +205,71 @@ describe('configDriftSignature', () => {
       ['maxmemory'],
     )[0];
     expect(configDriftSignature(groupA)).not.toBe(configDriftSignature(groupB));
+  });
+});
+
+describe('encoding-threshold drift (valkey#3479)', () => {
+  function shard(configs: Array<Record<string, string>>): ConfigDriftNode[] {
+    return configs.map((config, i) => {
+      return {
+        connectionId: `c${i + 1}`,
+        name: i === 0 ? 'primary' : `replica-${i}`,
+        groupKey: 'replid:shard-a',
+        config,
+      };
+    });
+  }
+
+  it('flags a shard whose nodes disagree on hash-max-listpack-entries', () => {
+    const nodes = shard([
+      { 'hash-max-listpack-entries': '128', 'hash-max-listpack-value': '64' },
+      { 'hash-max-listpack-entries': '512', 'hash-max-listpack-value': '64' },
+    ]);
+    const drifts = detectConfigDrift(nodes, ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS);
+    expect(drifts).toHaveLength(1);
+    expect(drifts[0].key).toBe('hash-max-listpack-entries');
+    expect(drifts[0].values.map((v) => v.value).sort()).toEqual(['128', '512']);
+  });
+
+  it('stays silent when encoding thresholds match across the shard', () => {
+    const config = {
+      'hash-max-listpack-entries': '128',
+      'list-max-listpack-size': '128',
+      'set-max-intset-entries': '512',
+      'zset-max-listpack-entries': '128',
+    };
+    const drifts = detectConfigDrift(
+      shard([{ ...config }, { ...config }, { ...config }]),
+      ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS,
+    );
+    expect(drifts).toEqual([]);
+  });
+
+  it('excludes a node that did not report a key instead of treating it as drifted', () => {
+    // c3 failed its CONFIG GET for the zset key (older version / transient
+    // error): the two nodes that DID report it agree, so no drift.
+    const drifts = detectConfigDrift(
+      shard([{ 'zset-max-listpack-entries': '128' }, { 'zset-max-listpack-entries': '128' }, {}]),
+      ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS,
+    );
+    expect(drifts).toEqual([]);
+  });
+
+  it('classifies every encoding-threshold key for the re-encoding rationale', () => {
+    for (const key of ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS) {
+      expect(isEncodingThresholdKey(key)).toBe(true);
+    }
+    for (const key of DEFAULT_CONFIG_DRIFT_KEYS) {
+      expect(isEncodingThresholdKey(key)).toBe(false);
+    }
+  });
+
+  it('covers all four collection types whose encodings the thresholds control', () => {
+    const covered = new Set(
+      ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS.map((key) => {
+        return key.split('-')[0];
+      }),
+    );
+    expect(Array.from(covered).sort()).toEqual(['hash', 'list', 'set', 'zset']);
   });
 });

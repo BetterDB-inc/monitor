@@ -66,6 +66,36 @@ export const DEFAULT_CONFIG_DRIFT_KEYS: readonly string[] = [
 ];
 
 /**
+ * Encoding-threshold configs (valkey-io/valkey#3479): each controls when a
+ * collection is stored in its compact encoding (listpack/intset) versus the
+ * expanded one (hashtable/quicklist/skiplist). They must match across a
+ * replication group because a node loading the same keys under different
+ * thresholds silently RE-ENCODES them — an RDB restore/clone onto a divergent
+ * node can bloat memory well past what the source needed. Kept as a labeled
+ * subgroup (not merged into DEFAULT_CONFIG_DRIFT_KEYS) so the advisory can
+ * explain that specific consequence.
+ */
+export const ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS: readonly string[] = [
+  'hash-max-listpack-entries',
+  'hash-max-listpack-value',
+  'list-max-listpack-size',
+  'set-max-intset-entries',
+  'set-max-listpack-entries',
+  'set-max-listpack-value',
+  'zset-max-listpack-entries',
+  'zset-max-listpack-value',
+];
+
+const ENCODING_THRESHOLD_KEY_SET: ReadonlySet<string> = new Set(
+  ENCODING_THRESHOLD_CONFIG_DRIFT_KEYS,
+);
+
+/** Whether a drifted key belongs to the encoding-threshold subgroup. */
+export function isEncodingThresholdKey(key: string): boolean {
+  return ENCODING_THRESHOLD_KEY_SET.has(key);
+}
+
+/**
  * Groups `nodes` by `groupKey` and, for each curated key, compares the value
  * reported by every node in the group. A key is reported as drifted when at
  * least two nodes in the group know the key AND disagree on its value.
