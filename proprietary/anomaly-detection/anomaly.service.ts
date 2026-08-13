@@ -202,6 +202,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
+  // Last timestamp the (expensive) orphaned-slot probe actually ran per
+  // connection — see ORPHANED_SLOT_KEYS_PROBE_INTERVAL_MS.
+  private orphanedSlotLastProbe = new Map<string, number>();
   private replicaSlotFirstSeen = new Map<string, Map<string, number>>();
   private activeReplicaSlotAnomalies = new Map<string, Set<string>>();
   // signature -> emitted event id, so a recovered condition can resolve exactly
@@ -527,6 +530,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
+    this.orphanedSlotLastProbe.delete(connectionId);
     this.orphanedSlotFirstSeen.delete(connectionId);
     this.activeOrphanedSlots.delete(connectionId);
     this.failoverChurnState.delete(connectionId);
@@ -2911,6 +2915,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private static readonly ORPHANED_SLOT_KEYS_MIN_PERSIST_MS = 30_000;
 
   /**
+   * Minimum wall-clock spacing between orphaned-slot probes. The probe costs
+   * two DBSIZEs plus a CLUSTER SLOT-STATS whose reply carries every one of the
+   * node's slots, and ANOMALY_POLL_INTERVAL_MS defaults to 1s — far too often
+   * for a leak that, once a persistence file has been loaded, is permanent.
+   * Spaced at half the persistence window so two probes still bracket it.
+   */
+  private static readonly ORPHANED_SLOT_KEYS_PROBE_INTERVAL_MS = 15_000;
+
+  /**
    * Orphaned keys in unowned cluster slots (valkey-io/valkey#539): after
    * loading a persistence file that predates a slot migration (or a warm-up
    * from a shared RDB), a node holds keys in slots it does not own — routed
@@ -2945,6 +2958,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       if ((self.importingSlots ?? []).length > 0) {
         return;
       }
+
+      // Throttled like every other gap above: a skipped poll must NOT reach
+      // the persistence gate, or the cheap polls between probes would read as
+      // recovery and flap an alerted leak.
+      const lastProbe = this.orphanedSlotLastProbe.get(ctx.connectionId);
+      const dueForProbe =
+        lastProbe === undefined ||
+        timestamp - lastProbe >= AnomalyService.ORPHANED_SLOT_KEYS_PROBE_INTERVAL_MS;
+      if (dueForProbe === false) {
+        return;
+      }
+      this.orphanedSlotLastProbe.set(ctx.connectionId, timestamp);
 
       // DBSIZE is read on BOTH sides of SLOT-STATS and the LOWER value is used.
       // The two commands are separate round trips, so the keyspace moves

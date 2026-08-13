@@ -3052,12 +3052,12 @@ describe('AnomalyService', () => {
       await poll(); // fires
       expect(orphanEvents()).toHaveLength(1);
 
-      now += 5_000;
+      now += 16_000;
       (dbClient.getDbSize as jest.Mock).mockRejectedValue(new Error('DBSIZE failed'));
       await poll(); // observation gap — must not read as recovery
 
       (dbClient.getDbSize as jest.Mock).mockResolvedValue(900);
-      now += 5_000;
+      now += 16_000;
       await poll(); // leak still present, must stay deduped
       now += 31_000;
       await poll(); // and must not re-fire after a fresh grace window either
@@ -3068,14 +3068,33 @@ describe('AnomalyService', () => {
     it('preserves the persistence clock across a DBSIZE blip', async () => {
       await poll(); // t0: surplus observed, grace starts
 
-      now += 5_000;
+      now += 16_000;
       (dbClient.getDbSize as jest.Mock).mockRejectedValue(new Error('DBSIZE failed'));
       await poll(); // gap — must not reset the clock
 
       (dbClient.getDbSize as jest.Mock).mockResolvedValue(900);
-      now += 26_000; // t0 + 31s
+      now += 16_000; // t0 + 32s
       await poll();
 
+      expect(orphanEvents()).toHaveLength(1);
+    });
+
+    it('probes at most once per probe interval, and skipping is a gap not recovery', async () => {
+      await poll();
+      now += 31_000;
+      await poll(); // fires
+      expect(orphanEvents()).toHaveLength(1);
+
+      const statsCalls = (dbClient.getClusterSlotStats as jest.Mock).mock.calls.length;
+      now += 1_000;
+      await poll();
+      now += 1_000;
+      await poll();
+      // Cheap polls inside the interval issue no SLOT-STATS/DBSIZE at all...
+      expect((dbClient.getClusterSlotStats as jest.Mock).mock.calls).toHaveLength(statsCalls);
+      // ...and must not resolve the active finding into a re-alert later.
+      now += 31_000;
+      await poll();
       expect(orphanEvents()).toHaveLength(1);
     });
 
@@ -3116,11 +3135,11 @@ describe('AnomalyService', () => {
       await poll(); // fires (1)
 
       (dbClient.getDbSize as jest.Mock).mockResolvedValue(400);
-      now += 5_000;
+      now += 16_000;
       await poll(); // genuine recovery → clears grace + dedupe
 
       (dbClient.getDbSize as jest.Mock).mockResolvedValue(900);
-      now += 5_000;
+      now += 16_000;
       await poll(); // recurs, fresh grace window → no alert yet
       now += 31_000;
       await poll(); // persisted again → fires (2)
