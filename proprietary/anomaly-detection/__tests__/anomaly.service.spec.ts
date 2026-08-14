@@ -4916,7 +4916,9 @@ describe('AnomalyService', () => {
       });
     };
 
-    async function pollWith(nodes: ClusterNode[], stepMs = 10_000): Promise<void> {
+    // Steps of 31s so a two-poll absence also clears the 60s FORGET blacklist
+    // window the detector gates on.
+    async function pollWith(nodes: ClusterNode[], stepMs = 31_000): Promise<void> {
       now += stepMs;
       (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
       await poll();

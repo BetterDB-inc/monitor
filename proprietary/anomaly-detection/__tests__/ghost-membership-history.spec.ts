@@ -28,15 +28,16 @@ describe('GhostMembershipHistory', () => {
     now = 1_700_000_000_000;
   });
 
-  /** Advance the clock and fold one observation in. */
-  function observe(nodes: ClusterNode[], stepMs = 10_000) {
+  /** Advance the clock and fold one observation in. Default step keeps a
+   * two-poll absence just past the 60s FORGET blacklist window. */
+  function observe(nodes: ClusterNode[], stepMs = 31_000) {
     now += stepMs;
     return history.observe(nodes, now);
   }
 
   it('fires when a departed id returns live after the minimum absence', () => {
     observe([A, B, C]);
-    const departedAt = now + 10_000;
+    const departedAt = now + 31_000;
     observe([A, B]); // C removed by CLUSTER FORGET
     observe([A, B]);
     const findings = observe([A, B, C]);
@@ -125,6 +126,25 @@ describe('GhostMembershipHistory', () => {
     observe([A, B]);
     observe([A, B]);
     expect(observe([A, B, C])).toHaveLength(1);
+  });
+
+  it('stays silent when the id returns faster than the FORGET blacklist window', () => {
+    // Two polls of absence, but only ~2s of wall clock: a node cannot rejoin
+    // inside the blacklist, so this is ordinary churn, not a self-reintroduction.
+    observe([A, B, C]);
+    observe([A, B], 1_000);
+    observe([A, B], 1_000);
+    expect(observe([A, B, C], 1_000)).toEqual([]);
+  });
+
+  it('fires once the absence exceeds both the poll count and the blacklist window', () => {
+    observe([A, B, C]);
+    observe([A, B], 1_000);
+    observe([A, B], 1_000);
+    const findings = observe([A, B, C], 90_000);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].nodeId).toBe('nodeC');
   });
 
   it('no-ops for a standalone single-node view', () => {

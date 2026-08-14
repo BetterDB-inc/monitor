@@ -51,10 +51,24 @@ interface DepartedEntry {
 
 /**
  * Consecutive polls an id must be absent from the membership set before its
- * return counts as a self-reintroduction. Two polls rather than one so a single
+ * return can count as a self-reintroduction. Two rather than one so a single
  * truncated or mid-gossip `CLUSTER NODES` reply cannot manufacture a departure.
  */
 const MIN_ABSENT_POLLS = 2;
+
+/**
+ * Wall-clock absence required on top of the poll count, sized to the `CLUSTER
+ * FORGET` blacklist window (~`cluster-node-timeout`, 60s by default).
+ *
+ * The poll count alone is not a meaningful gate: the anomaly loop polls once a
+ * second by default, so two polls is two seconds — far inside the window a
+ * forgotten node must sit out before it can rejoin at all. Anything that returns
+ * faster than the blacklist is definitionally NOT a post-FORGET rejoin; it is
+ * ordinary churn, such as the polled node re-learning its peers by gossip after
+ * a local `CLUSTER RESET`. Alerting on that would tell the operator to FORGET a
+ * node nobody removed.
+ */
+const MIN_ABSENT_MS = 60_000;
 
 /**
  * How long a departed id is remembered. Past this, the removal is treated as
@@ -129,8 +143,11 @@ export class GhostMembershipHistory {
       this.present.add(node.id);
 
       // A return inside the minimum window is churn, not a FORGET — the id never
-      // convincingly left. Absorb it silently.
+      // convincingly left, or it came back faster than the blacklist allows.
       if (entry.absentPolls < MIN_ABSENT_POLLS) {
+        continue;
+      }
+      if (timestamp - entry.departedAt < MIN_ABSENT_MS) {
         continue;
       }
 
