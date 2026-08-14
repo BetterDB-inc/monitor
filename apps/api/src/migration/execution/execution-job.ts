@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'child_process';
-import type { ExecutionJobStatus, ExecutionMode, SyncStage } from '@betterdb/shared';
+import type { ExecutionJobStatus, ExecutionMode, SyncStage, ExecutionFailureCode } from '@betterdb/shared';
 
 export interface ExecutionJob {
   id: string;
@@ -8,6 +8,7 @@ export interface ExecutionJob {
   startedAt: number;
   completedAt?: number;
   error?: string;
+  failureCode?: ExecutionFailureCode;   // set when status === 'failed' and classified
   keysTransferred: number;
   bytesTransferred: number;
   keysSkipped: number;

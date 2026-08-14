@@ -12,7 +12,7 @@ import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
 import { parseLogLine, classifyRedisShakeFailure } from './execution/log-parser';
 import { runCommandMigration } from './execution/command-migration-worker';
-import { shouldExcludeFunctions } from './fork-compat';
+import { shouldExcludeFunctions, probeSourceFunctions } from './fork-compat';
 
 @Injectable()
 export class MigrationExecutionService {
@@ -125,19 +125,24 @@ export class MigrationExecutionService {
       // Server-side functions use engine-specific globals (e.g. Valkey's `server`)
       // and fail to load on a different fork. When they'd be dropped for this
       // direction (Valkey -> Redis) exclude them from the RedisShake stream so the
-      // key data still migrates, and surface the exclusion as a job notice — the
-      // exclusion is otherwise invisible and the user would only discover missing
-      // functions from later FCALL errors. Recorded as a notice (not a log line) so
-      // the rolling 500-line log cap can't evict it once progress output fills up.
-      // Only the RedisShake modes filter, so this is computed here rather than for
-      // command mode.
+      // key data still migrates. Only the RedisShake modes filter, so this is
+      // computed here rather than for command mode.
       const sourceDbType = sourceAdapter.getCapabilities().dbType;
       const targetDbType = targetAdapter.getCapabilities().dbType;
       const excludeFunctions = shouldExcludeFunctions(sourceDbType, targetDbType);
       if (excludeFunctions) {
-        const notice = `Cross-engine migration (${sourceDbType} → ${targetDbType}): server-side functions are excluded and will not be transferred to the target.`;
-        this.logger.log(`Execution ${id}: ${notice}`);
-        job.notices.push(notice);
+        // Surface the exclusion as a durable job notice — otherwise it's invisible
+        // and the user only discovers missing functions from later FCALL errors.
+        // Gate it on the source actually having (or maybe having) functions, so a
+        // clean instance that just saw a warning-free analysis doesn't get a scary
+        // "functions excluded" message about functions it never had. The filter is
+        // written regardless, so 'unknown' (probe failed) still warrants the notice.
+        const presence = await probeSourceFunctions(sourceAdapter.getClient());
+        if (presence !== 'absent') {
+          const notice = `Cross-engine migration (${sourceDbType} → ${targetDbType}): server-side functions are excluded and will not be transferred to the target.`;
+          this.logger.log(`Execution ${id}: ${notice}`);
+          job.notices.push(notice);
+        }
       }
 
       const tomlContent = mode === 'redis_shake_sync'
@@ -202,14 +207,22 @@ export class MigrationExecutionService {
         if (parsed.syncStage !== null && job.mode === 'redis_shake_sync') job.syncStage = parsed.syncStage;
       };
 
+      // Decode both pipes as UTF-8 at the stream level so a multi-byte sequence
+      // straddling a chunk boundary is reassembled by Node rather than turning into
+      // replacement characters — the line-level carry-over below only handles
+      // newline splits, not mid-character splits. With an encoding set, 'data'
+      // delivers strings.
+      proc.stdout.setEncoding('utf8');
+      proc.stderr.setEncoding('utf8');
+
       // Each stream gets its own carry-over buffer: a chunk boundary can split a
       // line — and thus a token like BUSYKEY — across two 'data' events, so we emit
       // only complete lines and hold the trailing partial until the next chunk or
       // the final flush at 'close'.
       const makeStreamHandler = () => {
         let buffer = '';
-        const onData = (chunk: Buffer) => {
-          buffer += chunk.toString();
+        const onData = (chunk: string) => {
+          buffer += chunk;
           const parts = buffer.split('\n');
           buffer = parts.pop() ?? '';
           for (const line of parts) {
@@ -253,8 +266,10 @@ export class MigrationExecutionService {
           job.progress = 100;
         }
       } else if (statusAfterExit !== 'cancelled') {
+        const failure = classifyRedisShakeFailure(code, job.logs);
         job.status = 'failed';
-        job.error = classifyRedisShakeFailure(code, job.logs).message;
+        job.error = failure.message;
+        job.failureCode = failure.code;
       }
     } catch (err: unknown) {
       if ((job.status as string) !== 'cancelled') {
@@ -361,13 +376,18 @@ export class MigrationExecutionService {
       startedAt: job.startedAt,
       completedAt: job.completedAt,
       error: job.error,
+      failureCode: job.failureCode,
       keysTransferred: job.keysTransferred,
       bytesTransferred: job.bytesTransferred,
       keysSkipped: job.keysSkipped,
       totalKeys: job.totalKeys ?? undefined,
-      // Notices are prepended so durable job-level messages (e.g. the cross-engine
-      // functions exclusion) always reach the viewer even after the log cap rolls.
-      logs: [...job.notices, ...job.logs],
+      logs: [...job.logs],
+      // Durable job-level notices travel in their own field, not merged into `logs`.
+      // Merging put them at index 0 of a >500-line array that the viewer then renders
+      // via logs.slice(-500) — silently evicting the notice — and the autoscrolling
+      // pane scrolled it out of view regardless. The web layer renders these as a
+      // persistent banner above the log pane instead.
+      notices: [...job.notices],
       progress: job.progress,
       syncStage: job.syncStage,
     };

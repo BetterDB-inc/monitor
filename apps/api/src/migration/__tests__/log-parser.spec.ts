@@ -94,7 +94,7 @@ describe('parseLogLine — scan_reader behavior preserved', () => {
 });
 
 describe('classifyRedisShakeFailure', () => {
-  it('detects BUSYKEY anywhere in the buffer and returns the BUSYKEY code', () => {
+  it('detects BUSYKEY on the fatal (panic) line and returns the BUSYKEY code', () => {
     const logs = [
       'start syncing',
       'panic: BUSYKEY Target key name already exists.',
@@ -102,6 +102,25 @@ describe('classifyRedisShakeFailure', () => {
     const result = classifyRedisShakeFailure(1, logs);
     expect(result.code).toBe('BUSYKEY');
     expect(result.message).toMatch(/flush the target/i);
+  });
+
+  it('does not misattribute a mid-stream non-fatal BUSYKEY when a different error is fatal', () => {
+    // RedisShake logs per-key BUSYKEY errors mid-stream without aborting; the run
+    // then dies of something unrelated. Classifying off the whole buffer would send
+    // the user to flush their target for a failure that flushing won't fix.
+    const logs = [
+      'writing key foo',
+      'ERR BUSYKEY target key name is busy', // non-fatal, mid-stream
+      'writing key bar',
+      'panic: OOM command not allowed when used memory > maxmemory', // the real cause
+    ];
+    const result = classifyRedisShakeFailure(1, logs);
+    expect(result.code).toBe('UNKNOWN');
+  });
+
+  it('uses the last non-empty line when no explicit panic/FATAL marker is present', () => {
+    const logs = ['some progress', 'BUSYKEY on final line', ''];
+    expect(classifyRedisShakeFailure(1, logs).code).toBe('BUSYKEY');
   });
 
   it('is case-insensitive on the BUSYKEY token', () => {

@@ -19,3 +19,30 @@ export type EngineType = 'valkey' | 'redis';
 export function shouldExcludeFunctions(sourceDbType: EngineType, targetDbType: EngineType): boolean {
   return sourceDbType === 'valkey' && targetDbType === 'redis';
 }
+
+/**
+ * Whether the source holds server-side function libraries.
+ *
+ * - 'present': `FUNCTION LIST` returned at least one library.
+ * - 'absent':  `FUNCTION LIST` returned an empty list — definitively no functions.
+ * - 'unknown': the probe threw (ACL user without `function|list`, a cluster node
+ *   that can't route the command, a connection error, …). This is distinct from
+ *   'absent': we could not determine presence, so callers must NOT treat it as "no
+ *   functions" — the executor still writes the filter and would drop libraries that
+ *   may well exist, so we err toward warning the user.
+ */
+export type FunctionPresence = 'present' | 'absent' | 'unknown';
+
+/** Minimal client surface needed to probe functions (satisfied by the iovalkey client). */
+export interface FunctionProbeClient {
+  call(command: string, ...args: string[]): Promise<unknown>;
+}
+
+export async function probeSourceFunctions(client: FunctionProbeClient): Promise<FunctionPresence> {
+  try {
+    const result = await client.call('FUNCTION', 'LIST');
+    return Array.isArray(result) && result.length > 0 ? 'present' : 'absent';
+  } catch {
+    return 'unknown';
+  }
+}

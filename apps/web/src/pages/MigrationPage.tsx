@@ -101,13 +101,14 @@ export function MigrationPage() {
   const [history, setHistory] = useState<MigrationAnalysisResult[]>([]);
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
 
-  // When validation starts, scroll the validation panel fully into view aligned to
-  // the bottom of the viewport, so its controls/results are visible immediately
-  // (rather than landing at the top of the freshly re-rendered report). Targeting
-  // the panel — not the page end — avoids overshooting into the Past Analyses list.
+  // When validation starts, scroll the validation panel into view with the minimum
+  // movement needed ('nearest'), keeping its top — header and controls — anchored.
+  // 'end' aligned the panel's bottom to the viewport bottom, which pushed the header
+  // above the fold for any panel taller than the viewport (and, since the effect
+  // never re-runs, everything rendered afterwards grew off-screen below it).
   useEffect(() => {
     if (phase === 'validating') {
-      validationRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      validationRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   }, [phase]);
 

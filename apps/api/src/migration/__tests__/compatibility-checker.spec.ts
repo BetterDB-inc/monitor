@@ -225,17 +225,31 @@ describe('compatibility-checker', () => {
       expect(issues.find(i => i.category === 'functions')).toBeUndefined();
     });
 
-    it('should NOT warn about functions Redis→Valkey — Redis libraries load fine on Valkey', () => {
+    it('should warn that Redis→Valkey functions need Sync mode — scan/command modes drop them', () => {
+      // Redis libraries load fine on Valkey, but only the Sync (PSYNC/RDB) transport
+      // carries them; scan and command modes migrate keys only.
       const source = makeMeta({ dbType: 'redis', capabilities: { dbType: 'redis', version: '7.2.0' } as DatabaseCapabilities });
       const target = makeMeta({ dbType: 'valkey' });
       const issues = checkCompatibility(source, target, false, true);
-      expect(issues.find(i => i.category === 'functions')).toBeUndefined();
+      const fnIssue = issues.find(i => i.category === 'functions');
+      expect(fnIssue).toBeDefined();
+      expect(fnIssue!.severity).toBe('warning');
+      expect(fnIssue!.title).toMatch(/sync mode/i);
     });
 
-    it('should NOT warn about functions when source and target are the same engine', () => {
+    it('should warn that same-engine functions need Sync mode — scan/command modes drop them', () => {
       const source = makeMeta({ dbType: 'valkey' });
       const target = makeMeta({ dbType: 'valkey' });
       const issues = checkCompatibility(source, target, false, true);
+      const fnIssue = issues.find(i => i.category === 'functions');
+      expect(fnIssue).toBeDefined();
+      expect(fnIssue!.title).toMatch(/sync mode/i);
+    });
+
+    it('should NOT warn about functions when the same-engine source has none', () => {
+      const source = makeMeta({ dbType: 'valkey' });
+      const target = makeMeta({ dbType: 'valkey' });
+      const issues = checkCompatibility(source, target, false, false);
       expect(issues.find(i => i.category === 'functions')).toBeUndefined();
     });
 

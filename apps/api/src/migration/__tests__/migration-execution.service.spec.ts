@@ -12,8 +12,8 @@ jest.mock('../execution/toml-builder', () => ({
 
 jest.mock('child_process', () => ({
   spawn: jest.fn().mockReturnValue({
-    stdout: { on: jest.fn() },
-    stderr: { on: jest.fn() },
+    stdout: { on: jest.fn(), setEncoding: jest.fn() },
+    stderr: { on: jest.fn(), setEncoding: jest.fn() },
     on: jest.fn().mockImplementation((event: string, cb: (code: number) => void) => {
       // runRedisShake captures the code on 'exit' but resolves on 'close'
       if (event === 'exit') setTimeout(() => cb(0), 10);
@@ -228,7 +228,7 @@ describe('MigrationExecutionService', () => {
       });
 
       const result = crossForkService.getExecution(id);
-      expect(result!.logs.some(l => /functions are excluded/i.test(l))).toBe(true);
+      expect(result!.notices!.some(n => /functions are excluded/i.test(n))).toBe(true);
     });
 
     it('keeps the exclusion notice even after the log cap rolls over', async () => {
@@ -249,7 +249,29 @@ describe('MigrationExecutionService', () => {
       }
 
       const result = crossForkService.getExecution(id);
-      expect(result!.logs.some(l => /functions are excluded/i.test(l))).toBe(true);
+      // The notice lives in its own field, never in the rolling (and now-overflowed) logs.
+      expect(result!.notices!.some(n => /functions are excluded/i.test(n))).toBe(true);
+      expect(result!.logs.some(l => /functions are excluded/i.test(l))).toBe(false);
+    });
+
+    it('omits the exclusion notice when the source has no functions', async () => {
+      // A clean instance that just saw a warning-free analysis must not then get a
+      // scary "functions excluded" notice about functions it never had.
+      const crossForkRegistry = createMockRegistry({ targetDbType: 'redis' });
+      crossForkRegistry.mockSourceAdapter.getClient = jest.fn().mockReturnValue({
+        call: jest.fn().mockResolvedValue([]), // FUNCTION LIST -> empty
+        quit: jest.fn(),
+      });
+      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+
+      const { id } = await crossForkService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake',
+      });
+
+      const result = crossForkService.getExecution(id);
+      expect(result!.notices ?? []).toHaveLength(0);
     });
   });
 

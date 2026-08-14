@@ -190,7 +190,7 @@ export function ExecutionPanel({ executionId, onStopped }: Props) {
       )}
 
       {/* Log viewer */}
-      <ExecutionLogViewer logs={execution.logs} />
+      <ExecutionLogViewer logs={execution.logs} notices={execution.notices} />
     </div>
   );
 }

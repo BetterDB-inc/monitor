@@ -9,6 +9,7 @@ import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
+import { probeSourceFunctions } from './fork-compat';
 
 @Injectable()
 export class MigrationService {
@@ -401,16 +402,15 @@ export class MigrationService {
         sourceAclUsers = result ?? [];
       } catch { /* ignore - ACL not supported or no permission */ }
 
-      // Detect whether the source actually has server-side function libraries.
-      // The cross-engine "functions not migrated" warning only makes sense when
-      // there is something to lose — without this check a plain instance with no
-      // functions would still bump warningCount and never report a clean run.
-      let sourceHasFunctions = false;
-      try {
-        const sourceClient = adapter.getClient();
-        const fnResult = await sourceClient.call('FUNCTION', 'LIST') as unknown[];
-        sourceHasFunctions = Array.isArray(fnResult) && fnResult.length > 0;
-      } catch { /* ignore - FUNCTION not supported or no permission */ }
+      // Detect whether the source holds server-side function libraries. The
+      // "functions not migrated" warning only makes sense when there's something to
+      // lose — a plain instance with none keeps its clean report. But a probe that
+      // *throws* (ACL user without `function|list`, an unroutable cluster command)
+      // must not be read as "no functions": we couldn't determine, and the executor
+      // will still drop any libraries that exist, so we treat 'unknown' as
+      // maybe-present and warn rather than silently green-light.
+      const functionPresence = await probeSourceFunctions(adapter.getClient());
+      const sourceHasFunctions = functionPresence !== 'absent';
 
       // Fetch RDB save config from both instances for reliable persistence detection
       let sourceRdbSaveConfig: string | undefined;

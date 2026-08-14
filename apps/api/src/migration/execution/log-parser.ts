@@ -1,4 +1,4 @@
-import type { SyncStage } from '@betterdb/shared';
+import type { SyncStage, ExecutionFailureCode } from '@betterdb/shared';
 
 export interface ParsedLogLine {
   keysTransferred: number | null;
@@ -72,7 +72,7 @@ function detectSyncStage(line: string): SyncStage | null {
   return null;
 }
 
-export type RedisShakeFailureCode = 'BUSYKEY' | 'UNKNOWN';
+export type RedisShakeFailureCode = ExecutionFailureCode;
 
 export interface RedisShakeFailure {
   code: RedisShakeFailureCode;
@@ -81,18 +81,40 @@ export interface RedisShakeFailure {
 }
 
 /**
- * Classify a non-zero RedisShake exit into an actionable failure. Scans the full
- * retained log buffer (not a fixed tail) for well-known failure signatures — the
- * fatal line RedisShake writes via `log.Panicf` is its last output, so a short
- * tail can miss it. Returns a structured `{ code }` alongside the message so the
- * web layer can key its own remediation copy off the code instead of matching on
- * prose or a hard-coded control label.
+ * The line that actually aborted the run. RedisShake terminates via `log.Panicf`,
+ * which emits a `panic:`/`FATAL` line as (or near) its final output, so the fatal
+ * cause is the last such marker — or, absent one, the last non-empty line. We
+ * classify off this line rather than the whole buffer: RedisShake logs per-key
+ * `BUSYKEY` errors mid-stream without aborting, so a full-buffer scan would report
+ * the flush-the-target remedy for a run that in fact died of something else
+ * (target OOM, connection reset, disk full) — sending the user to destroy their
+ * target for an unrelated failure.
+ */
+function findFatalLine(logs: string[]): string | null {
+  const nonEmpty = logs.map((line) => line.trim()).filter((line) => line.length > 0);
+  if (nonEmpty.length === 0) {
+    return null;
+  }
+  for (let i = nonEmpty.length - 1; i >= 0; i--) {
+    if (/panic:|\bFATAL\b|\bPANIC\b/i.test(nonEmpty[i])) {
+      return nonEmpty[i];
+    }
+  }
+  return nonEmpty[nonEmpty.length - 1];
+}
+
+/**
+ * Classify a non-zero RedisShake exit into an actionable failure, keyed off the
+ * fatal line (see `findFatalLine`) rather than the whole buffer. Returns a
+ * structured `{ code }` alongside the message so the web layer can key its own
+ * remediation copy off the code instead of matching on prose or a hard-coded
+ * control label.
  */
 export function classifyRedisShakeFailure(exitCode: number | null, logs: string[]): RedisShakeFailure {
-  const haystack = logs.join('\n');
+  const fatalLine = findFatalLine(logs);
   const codeSuffix = exitCode === null ? 'unknown' : String(exitCode);
 
-  if (/BUSYKEY/i.test(haystack)) {
+  if (fatalLine !== null && /BUSYKEY/i.test(fatalLine)) {
     return {
       code: 'BUSYKEY',
       message:

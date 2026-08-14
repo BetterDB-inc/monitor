@@ -158,6 +158,13 @@ export interface MigrationExecutionRequest {
   redisShakeOptions?: RedisShakeOptions;
 }
 
+/**
+ * Machine-readable classification of an execution failure. Lets the web layer key
+ * its own remediation copy off the code instead of matching on the prose `error`.
+ * 'UNKNOWN' covers any failure without a recognised signature.
+ */
+export type ExecutionFailureCode = 'BUSYKEY' | 'UNKNOWN';
+
 export interface MigrationExecutionResult {
   id: string;
   status: ExecutionJobStatus;
@@ -165,12 +172,17 @@ export interface MigrationExecutionResult {
   startedAt: number;
   completedAt?: number;
   error?: string;
+  /** Set when status === 'failed' and the cause was classified. */
+  failureCode?: ExecutionFailureCode;
   keysTransferred?: number;
   bytesTransferred?: number;
   keysSkipped?: number;
   totalKeys?: number;
   // Rolling log buffer — last 500 lines.
   logs: string[];
+  // Durable job-level notices (e.g. cross-engine function exclusion). Rendered as a
+  // banner above the log pane, so they survive the log cap and the pane's autoscroll.
+  notices?: string[];
   // Parsed progress 0–100, best-effort. null if unparseable.
   progress: number | null;
   /** Only populated for redis_shake_sync mode; null otherwise. */
