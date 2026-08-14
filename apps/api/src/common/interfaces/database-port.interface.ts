@@ -19,6 +19,7 @@ import {
   VectorSearchResult,
   TextSearchResult,
   ProfileResult,
+  SentinelNodeInfo,
 } from '../types/metrics.types';
 import type { KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 
@@ -47,7 +48,12 @@ export interface DatabasePort {
   getInfo(sections?: string[]): Promise<Record<string, unknown>>;
   getCapabilities(): DatabaseCapabilities;
   getInfoParsed(sections?: string[]): Promise<InfoResponse>;
-  getSlowLog(count?: number, excludeClientName?: string, startTime?: number, endTime?: number): Promise<SlowLogEntry[]>;
+  getSlowLog(
+    count?: number,
+    excludeClientName?: string,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<SlowLogEntry[]>;
   getSlowLogLength(): Promise<number>;
   resetSlowLog(): Promise<void>;
   getCommandLog(count?: number, type?: CommandLogType): Promise<CommandLogEntry[]>;
@@ -71,6 +77,9 @@ export interface DatabasePort {
   getClusterInfo(): Promise<Record<string, string>>;
   getClusterNodes(): Promise<ClusterNode[]>;
   getClusterShards(): Promise<ClusterShard[]>;
+  getSentinelMasters(): Promise<SentinelNodeInfo[]>;
+  getSentinelReplicas(masterName: string): Promise<SentinelNodeInfo[]>;
+  getSentinelPeers(masterName: string): Promise<SentinelNodeInfo[]>;
   getClusterSlotStats(orderBy?: 'key-count' | 'cpu-usec', limit?: number): Promise<SlotStats>;
   getConfigValue(parameter: string): Promise<string | null>;
   getConfigValues(pattern: string): Promise<ConfigGetResponse>;
@@ -80,8 +89,19 @@ export interface DatabasePort {
   getVectorIndexList(): Promise<string[]>;
   getVectorIndexInfo(indexName: string): Promise<VectorIndexInfo>;
   getHashFieldBuffer(key: string, field: string): Promise<Buffer | null>;
-  vectorSearch(indexName: string, vectorFieldName: string, queryVector: Buffer, k: number, filter?: string): Promise<VectorSearchResult[]>;
-  textSearch(indexName: string, query: string, offset?: number, limit?: number): Promise<TextSearchResult>;
+  vectorSearch(
+    indexName: string,
+    vectorFieldName: string,
+    queryVector: Buffer,
+    k: number,
+    filter?: string,
+  ): Promise<VectorSearchResult[]>;
+  textSearch(
+    indexName: string,
+    query: string,
+    offset?: number,
+    limit?: number,
+  ): Promise<TextSearchResult>;
   getTagValues(indexName: string, fieldName: string): Promise<string[]>;
   getSearchConfig(pattern?: string): Promise<Record<string, string>>;
   profileSearch(indexName: string, query: string, limited?: boolean): Promise<ProfileResult>;

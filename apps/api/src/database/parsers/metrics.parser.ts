@@ -10,6 +10,7 @@ import {
   ClusterShard,
   ClusterShardNode,
   SlotStats,
+  SentinelNodeInfo,
 } from '../../common/types/metrics.types';
 import { InfoParser } from './info.parser';
 import { toNumber } from '../../metrics/commandstats-parser';
@@ -26,53 +27,66 @@ export class MetricsParser {
     const result: Record<string, unknown> = { ...info };
 
     if (info.keyspace) {
-      result.keyspace = this.parseKvSection(info.keyspace, (key) => KEYSPACE_DB_KEY.test(key), (fields) => {
-        const keys = Number(fields.keys);
-        // A db line without a numeric keys field is unparseable — keep the
-        // raw string so malformed input stays distinguishable from an empty
-        // database instead of masquerading as keys:0.
-        if (!Number.isFinite(keys)) return null;
-        const entry: KeyspaceDbInfo = {
-          keys,
-          expires: toNumber(fields.expires),
-          avg_ttl: toNumber(fields.avg_ttl),
-        };
-        // Preserve additional numeric fields (e.g. subexpiry on Redis 7.4+).
-        for (const [field, value] of Object.entries(fields)) {
-          if (field in entry) continue;
-          const n = Number(value);
-          if (Number.isFinite(n)) entry[field] = n;
-        }
-        return entry;
-      });
+      result.keyspace = this.parseKvSection(
+        info.keyspace,
+        (key) => KEYSPACE_DB_KEY.test(key),
+        (fields) => {
+          const keys = Number(fields.keys);
+          // A db line without a numeric keys field is unparseable — keep the
+          // raw string so malformed input stays distinguishable from an empty
+          // database instead of masquerading as keys:0.
+          if (!Number.isFinite(keys)) return null;
+          const entry: KeyspaceDbInfo = {
+            keys,
+            expires: toNumber(fields.expires),
+            avg_ttl: toNumber(fields.avg_ttl),
+          };
+          // Preserve additional numeric fields (e.g. subexpiry on Redis 7.4+).
+          for (const [field, value] of Object.entries(fields)) {
+            if (field in entry) continue;
+            const n = Number(value);
+            if (Number.isFinite(n)) entry[field] = n;
+          }
+          return entry;
+        },
+      );
     }
 
     if (info.commandstats) {
-      result.commandstats = this.parseKvSection(info.commandstats, (key) => key.startsWith('cmdstat_'), (fields) => {
-        const calls = Number(fields.calls);
-        if (!Number.isFinite(calls)) return null;
-        const stat: {
-          calls: number;
-          usec: number;
-          usec_per_call: number;
-          rejected_calls?: number;
-          failed_calls?: number;
-        } = {
-          calls,
-          usec: toNumber(fields.usec),
-          usec_per_call: toNumber(fields.usec_per_call),
-        };
-        if (fields.rejected_calls !== undefined) stat.rejected_calls = toNumber(fields.rejected_calls);
-        if (fields.failed_calls !== undefined) stat.failed_calls = toNumber(fields.failed_calls);
-        return stat;
-      });
+      result.commandstats = this.parseKvSection(
+        info.commandstats,
+        (key) => key.startsWith('cmdstat_'),
+        (fields) => {
+          const calls = Number(fields.calls);
+          if (!Number.isFinite(calls)) return null;
+          const stat: {
+            calls: number;
+            usec: number;
+            usec_per_call: number;
+            rejected_calls?: number;
+            failed_calls?: number;
+          } = {
+            calls,
+            usec: toNumber(fields.usec),
+            usec_per_call: toNumber(fields.usec_per_call),
+          };
+          if (fields.rejected_calls !== undefined)
+            stat.rejected_calls = toNumber(fields.rejected_calls);
+          if (fields.failed_calls !== undefined) stat.failed_calls = toNumber(fields.failed_calls);
+          return stat;
+        },
+      );
     }
 
     if (info.errorstats) {
-      result.errorstats = this.parseKvSection(info.errorstats, (key) => key.startsWith('errorstat_'), (fields) => {
-        const count = Number(fields.count);
-        return Number.isFinite(count) ? { count } : null;
-      });
+      result.errorstats = this.parseKvSection(
+        info.errorstats,
+        (key) => key.startsWith('errorstat_'),
+        (fields) => {
+          const count = Number(fields.count);
+          return Number.isFinite(count) ? { count } : null;
+        },
+      );
     }
 
     return result as InfoResponse;
@@ -357,6 +371,57 @@ export class MetricsParser {
    * array) and `nodes` (an array of per-node maps carrying id/role/health/etc.).
    * Malformed or role-less entries are skipped defensively.
    */
+  /**
+   * Parses a `SENTINEL MASTERS` / `SENTINEL REPLICAS <master>` /
+   * `SENTINEL SENTINELS <master>` reply: an array of flat field/value lists.
+   *
+   * Entries without a usable `ip` are dropped — an endpoint is the whole point
+   * of this view, and a node we cannot address is not something the drift
+   * detector can reason about.
+   */
+  static parseSentinelNodes(raw: unknown[]): SentinelNodeInfo[] {
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+
+    const nodes: SentinelNodeInfo[] = [];
+    for (const entry of raw) {
+      const map = MetricsParser.flatReplyToMap(entry);
+      if (!map) {
+        continue;
+      }
+
+      const fields: Record<string, string> = {};
+      for (const [key, value] of map) {
+        if (typeof value === 'string' || typeof value === 'number') {
+          fields[key] = String(value);
+        }
+      }
+
+      const ip = fields['ip'];
+      if (!ip) {
+        continue;
+      }
+
+      const masterPort = Number(fields['master-port']);
+      nodes.push({
+        name: fields['name'] ?? '',
+        ip,
+        port: Number(fields['port']) || 0,
+        runid: fields['runid'] ?? '',
+        flags: (fields['flags'] ?? '')
+          .split(',')
+          .map((flag) => flag.trim())
+          .filter(Boolean),
+        masterHost: fields['master-host'],
+        masterPort: isNaN(masterPort) ? undefined : masterPort,
+        fields,
+      });
+    }
+
+    return nodes;
+  }
+
   static parseClusterShards(raw: unknown[]): ClusterShard[] {
     if (!Array.isArray(raw)) return [];
     const shards: ClusterShard[] = [];

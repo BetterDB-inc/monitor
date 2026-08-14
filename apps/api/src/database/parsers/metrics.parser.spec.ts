@@ -80,7 +80,10 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
 
       const nodes = MetricsParser.parseClusterNodes(multipleRanges);
 
-      expect(nodes[0].slots).toEqual([[0, 5460], [10923, 16383]]);
+      expect(nodes[0].slots).toEqual([
+        [0, 5460],
+        [10923, 16383],
+      ]);
     });
 
     it('should parse single slot numbers', () => {
@@ -88,7 +91,11 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
 
       const nodes = MetricsParser.parseClusterNodes(singleSlot);
 
-      expect(nodes[0].slots).toEqual([[100, 100], [200, 200], [300, 300]]);
+      expect(nodes[0].slots).toEqual([
+        [100, 100],
+        [200, 200],
+        [300, 300],
+      ]);
     });
 
     it('should handle migrating slot notation', () => {
@@ -128,7 +135,7 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
       expect(nodes[0].migratingSlots).toBeDefined();
       expect(nodes[0].migratingSlots!.length).toBeGreaterThanOrEqual(1);
       // Should find at least one migration
-      const slots = nodes[0].migratingSlots!.map(m => m.slot);
+      const slots = nodes[0].migratingSlots!.map((m) => m.slot);
       expect(slots).toContain(100);
     });
 
@@ -301,15 +308,62 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
         [0, 5460],
         'nodes',
         [
-          ['id', 'primA', 'port', 6379, 'ip', '10.0.0.1', 'endpoint', '10.0.0.1', 'role', 'master', 'replication-offset', 1000, 'health', 'online'],
-          ['id', 'repB', 'port', 6380, 'ip', '10.0.0.2', 'endpoint', '10.0.0.2', 'role', 'replica', 'replication-offset', 990, 'health', 'online'],
+          [
+            'id',
+            'primA',
+            'port',
+            6379,
+            'ip',
+            '10.0.0.1',
+            'endpoint',
+            '10.0.0.1',
+            'role',
+            'master',
+            'replication-offset',
+            1000,
+            'health',
+            'online',
+          ],
+          [
+            'id',
+            'repB',
+            'port',
+            6380,
+            'ip',
+            '10.0.0.2',
+            'endpoint',
+            '10.0.0.2',
+            'role',
+            'replica',
+            'replication-offset',
+            990,
+            'health',
+            'online',
+          ],
         ],
       ],
       [
         'slots',
         [5461, 16383],
         'nodes',
-        [['id', 'primC', 'port', 6381, 'ip', '10.0.0.3', 'endpoint', '10.0.0.3', 'role', 'master', 'replication-offset', 2000, 'health', 'online']],
+        [
+          [
+            'id',
+            'primC',
+            'port',
+            6381,
+            'ip',
+            '10.0.0.3',
+            'endpoint',
+            '10.0.0.3',
+            'role',
+            'master',
+            'replication-offset',
+            2000,
+            'health',
+            'online',
+          ],
+        ],
       ],
     ];
 
@@ -339,7 +393,22 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
           'slots',
           [0, 16383],
           'nodes',
-          [['id', 'primA', 'port', 6379, 'ip', '10.0.0.1', 'endpoint', '10.0.0.1', 'hostname', 'node-a.example.com', 'role', 'master']],
+          [
+            [
+              'id',
+              'primA',
+              'port',
+              6379,
+              'ip',
+              '10.0.0.1',
+              'endpoint',
+              '10.0.0.1',
+              'hostname',
+              'node-a.example.com',
+              'role',
+              'master',
+            ],
+          ],
         ],
       ];
       const shards = MetricsParser.parseClusterShards(reply);
@@ -377,7 +446,14 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
           ['slots', [0, 16383]],
           [
             'nodes',
-            [new Map<string, unknown>([['id', 'primA'], ['role', 'master'], ['endpoint', '10.0.0.1'], ['port', 6379]])],
+            [
+              new Map<string, unknown>([
+                ['id', 'primA'],
+                ['role', 'master'],
+                ['endpoint', '10.0.0.1'],
+                ['port', 6379],
+              ]),
+            ],
           ],
         ]),
       ];
@@ -389,7 +465,15 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
 
     it('skips node entries with no id and defaults an unknown role', () => {
       const reply = [
-        ['slots', [0, 1], 'nodes', [['port', 6379, 'role', 'master'], ['id', 'x']]],
+        [
+          'slots',
+          [0, 1],
+          'nodes',
+          [
+            ['port', 6379, 'role', 'master'],
+            ['id', 'x'],
+          ],
+        ],
       ];
       const shards = MetricsParser.parseClusterShards(reply);
       expect(shards[0].nodes).toHaveLength(1);
@@ -569,5 +653,103 @@ describe('MetricsParser.parseInfoToTyped', () => {
     expect(result.keyspace).toBeUndefined();
     expect(result.commandstats).toBeUndefined();
     expect(result.errorstats).toBeUndefined();
+  });
+});
+
+describe('MetricsParser - Sentinel', () => {
+  /** A SENTINEL MASTERS / REPLICAS entry as RESP2 returns it: a flat field/value list. */
+  function flatEntry(fields: Record<string, string>): string[] {
+    return Object.entries(fields).flat();
+  }
+
+  const masterEntry = flatEntry({
+    name: 'mymaster',
+    ip: '10.0.0.10',
+    port: '6379',
+    runid: 'a1b2c3',
+    flags: 'master',
+    'num-slaves': '2',
+    quorum: '2',
+  });
+
+  const replicaEntry = flatEntry({
+    name: '10.0.0.11:6379',
+    ip: '10.0.0.11',
+    port: '6379',
+    runid: 'd4e5f6',
+    flags: 'slave',
+    'master-host': 'valkey-0.valkey-headless',
+    'master-port': '6379',
+    'slave-repl-offset': '12345',
+  });
+
+  describe('parseSentinelNodes', () => {
+    it('parses a masters reply', () => {
+      const [master] = MetricsParser.parseSentinelNodes([masterEntry]);
+
+      expect(master.name).toBe('mymaster');
+      expect(master.ip).toBe('10.0.0.10');
+      expect(master.port).toBe(6379);
+      expect(master.runid).toBe('a1b2c3');
+      expect(master.flags).toEqual(['master']);
+    });
+
+    it('parses a replica reply including its configured master', () => {
+      const [replica] = MetricsParser.parseSentinelNodes([replicaEntry]);
+
+      expect(replica.ip).toBe('10.0.0.11');
+      expect(replica.masterHost).toBe('valkey-0.valkey-headless');
+      expect(replica.masterPort).toBe(6379);
+    });
+
+    it('splits comma-separated flags', () => {
+      const entry = flatEntry({
+        ip: '10.0.0.11',
+        port: '6379',
+        flags: 's_down,slave,disconnected',
+      });
+
+      expect(MetricsParser.parseSentinelNodes([entry])[0].flags).toEqual([
+        's_down',
+        'slave',
+        'disconnected',
+      ]);
+    });
+
+    it('keeps unmodelled fields rather than dropping them', () => {
+      const [replica] = MetricsParser.parseSentinelNodes([replicaEntry]);
+
+      expect(replica.fields['slave-repl-offset']).toBe('12345');
+    });
+
+    it('reads a RESP3 map reply as well as a flat array', () => {
+      const asMap = new Map<string, string>([
+        ['name', 'mymaster'],
+        ['ip', '10.0.0.10'],
+        ['port', '6379'],
+        ['flags', 'master'],
+      ]);
+
+      const [master] = MetricsParser.parseSentinelNodes([asMap]);
+      expect(master.ip).toBe('10.0.0.10');
+      expect(master.port).toBe(6379);
+    });
+
+    it('drops an entry with no usable ip', () => {
+      const entry = flatEntry({ name: 'mymaster', port: '6379', flags: 'master' });
+
+      expect(MetricsParser.parseSentinelNodes([entry])).toEqual([]);
+    });
+
+    it('returns an empty list for an empty or non-array reply', () => {
+      expect(MetricsParser.parseSentinelNodes([])).toEqual([]);
+      expect(MetricsParser.parseSentinelNodes(null as unknown as unknown[])).toEqual([]);
+    });
+
+    it('leaves masterPort undefined when the field is absent', () => {
+      const entry = flatEntry({ name: 'x', ip: '10.0.0.11', port: '6379', flags: 'slave' });
+
+      expect(MetricsParser.parseSentinelNodes([entry])[0].masterPort).toBeUndefined();
+    });
   });
 });

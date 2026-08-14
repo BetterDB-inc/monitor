@@ -23,6 +23,7 @@ import type {
   ReplicaInfo,
   ClusterNode,
   ClusterShard,
+  SentinelNodeInfo,
   SlotStats,
   ConfigGetResponse,
   VectorIndexInfo,
@@ -418,6 +419,21 @@ export class AgentDatabaseAdapter implements DatabasePort {
   async getClusterShards(): Promise<ClusterShard[]> {
     const raw = await this.sendCommand('CLUSTER', ['SHARDS']);
     return MetricsParser.parseClusterShards(raw as unknown[]);
+  }
+
+  async getSentinelMasters(): Promise<SentinelNodeInfo[]> {
+    const raw = await this.sendCommand('SENTINEL', ['MASTERS']);
+    return MetricsParser.parseSentinelNodes(raw as unknown[]);
+  }
+
+  async getSentinelReplicas(masterName: string): Promise<SentinelNodeInfo[]> {
+    const raw = await this.sendCommand('SENTINEL', ['REPLICAS', masterName]);
+    return MetricsParser.parseSentinelNodes(raw as unknown[]);
+  }
+
+  async getSentinelPeers(masterName: string): Promise<SentinelNodeInfo[]> {
+    const raw = await this.sendCommand('SENTINEL', ['SENTINELS', masterName]);
+    return MetricsParser.parseSentinelNodes(raw as unknown[]);
   }
 
   async getClusterSlotStats(
