@@ -9,6 +9,7 @@ import { CommandLogAnalyticsService } from '@app/commandlog-analytics/commandlog
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
+import { ClusterNode } from '@app/common/types/metrics.types';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
@@ -4634,6 +4635,190 @@ describe('AnomalyService', () => {
       (service as any).onConnectionRemoved('conn-1');
       expect((service as any).controlPlaneState.has('conn-1')).toBe(false);
       expect((service as any).cpSatLastConnectedSlaves.has('conn-1')).toBe(false);
+    });
+  });
+
+  // ─── ghost membership: endpoint-identity faults (valkey#1757, valkey#2768) ──
+
+  describe('ghost membership — endpoint identity', () => {
+    const clusterInfoResponse = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    function gnode(id: string, address: string, flags: string[], master = ''): ClusterNode {
+      return {
+        id,
+        address,
+        flags,
+        master,
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+      };
+    }
+
+    let now: number;
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const ghostEvents = () => {
+      return service.getRecentEvents().filter((e) => {
+        return e.metricType === MetricType.GHOST_MEMBERSHIP;
+      });
+    };
+
+    /** Poll twice across the 30s grace window so a persistent finding alerts. */
+    async function pollPastGate(): Promise<void> {
+      await poll();
+      now += 31_000;
+      await poll();
+    }
+
+    it('emits CRITICAL for a node whose address flipped to loopback among routable peers', async () => {
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue([
+          gnode('flippedAAAA', '127.0.0.1:6379@16379', ['master']),
+          gnode('routableBBB', '10.0.0.2:6379@16379', ['myself', 'master']),
+          gnode('routableCCC', '10.0.0.3:6379@16379', ['master']),
+        ]);
+
+      await pollPastGate();
+
+      const events = ghostEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('2768');
+      expect(events[0].message).toContain('cluster-announce-ip');
+      expect(events[0].message).toContain('flipped');
+    });
+
+    it('emits WARNING for two live ids colliding on one routable endpoint', async () => {
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue([
+          gnode('liveAAAAAAA', '10.0.0.1:6379@16379', ['master']),
+          gnode('liveBBBBBBB', '10.0.0.1:6379@16379', ['master']),
+          gnode('otherCCCCCC', '10.0.0.2:6379@16379', ['myself', 'master']),
+        ]);
+
+      await pollPastGate();
+
+      const events = ghostEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('claimed by 2 live cluster nodes');
+      expect(events[0].message).toContain('Do NOT run CLUSTER FORGET');
+    });
+
+    it('escalates a collision to CRITICAL when a node is replicating from itself', async () => {
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue([
+          gnode('liveAAAAAAA', '10.0.0.1:6379@16379', ['master']),
+          gnode('liveBBBBBBB', '10.0.0.1:6379@16379', ['slave'], 'liveBBBBBBB'),
+          gnode('otherCCCCCC', '10.0.0.2:6379@16379', ['myself', 'master']),
+        ]);
+
+      await pollPastGate();
+
+      const events = ghostEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('replica of');
+    });
+
+    it('still emits the unchanged stale-twin WARNING with FORGET advice', async () => {
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue([
+          gnode('oldGhostIdd', '10.0.0.1:6379@16379', ['master', 'fail']),
+          gnode('newLiveIddd', '10.0.0.1:6379@16379', ['master']),
+          gnode('otherCCCCCC', '10.0.0.2:6379@16379', ['myself', 'master']),
+        ]);
+
+      await pollPastGate();
+
+      const events = ghostEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('CLUSTER FORGET oldGhostIdd');
+      expect(events[0].message).toContain('1757');
+    });
+
+    it('suppresses a single-poll transient inside the grace window', async () => {
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue([
+          gnode('flippedAAAA', '127.0.0.1:6379@16379', ['master']),
+          gnode('routableBBB', '10.0.0.2:6379@16379', ['myself', 'master']),
+        ]);
+      await poll();
+      expect(ghostEvents()).toHaveLength(0);
+
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue([
+          gnode('flippedAAAA', '10.0.0.1:6379@16379', ['master']),
+          gnode('routableBBB', '10.0.0.2:6379@16379', ['myself', 'master']),
+        ]);
+      now += 31_000;
+      await poll();
+
+      expect(ghostEvents()).toHaveLength(0);
+    });
+
+    it('stays silent on an all-loopback local cluster', async () => {
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue([
+          gnode('localAAAAAA', '127.0.0.1:7000@17000', ['myself', 'master']),
+          gnode('localBBBBBB', '127.0.0.1:7001@17001', ['master']),
+          gnode('localCCCCCC', '127.0.0.1:7002@17002', ['slave'], 'localBBBBBB'),
+        ]);
+
+      await pollPastGate();
+
+      expect(ghostEvents()).toHaveLength(0);
+    });
+
+    it('clears ghost state on connection removal', async () => {
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue([
+          gnode('flippedAAAA', '127.0.0.1:6379@16379', ['master']),
+          gnode('routableBBB', '10.0.0.2:6379@16379', ['myself', 'master']),
+        ]);
+      await pollPastGate();
+      expect((service as any).ghostMemberFirstSeen.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).ghostMemberFirstSeen.has('conn-1')).toBe(false);
+      expect((service as any).activeGhostMembers.has('conn-1')).toBe(false);
     });
   });
 });
