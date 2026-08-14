@@ -1525,7 +1525,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         : ` against user '${users}'`;
 
     return {
-      id: `${ctx.connectionId}-auth-failure-${source.clientAddress}-${timestamp}`,
+      id: randomUUID(),
       timestamp,
       metricType: MetricType.AUTH_FAILURE_BURST,
       anomalyType: AnomalyType.SPIKE,
