@@ -1664,7 +1664,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * store and webhook payloads.
    */
   private buildAclDriftEvent(timestamp: number, drift: AclDrift): AnomalyEvent {
-    const signature = aclDriftSignature(drift);
     const nodeLabel = drift.nodes
       .map((node) => {
         return `${node.name ?? node.connectionId} = ${node.digest}`;
@@ -1674,7 +1673,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       drift.usernames.length > 0 ? drift.usernames.join(', ') : 'no individually-named user';
 
     return {
-      id: `acl-drift-${signature}-${timestamp}`,
+      id: randomUUID(),
       timestamp,
       metricType: MetricType.ACL_DRIFT,
       anomalyType: AnomalyType.SPIKE,
@@ -1704,7 +1703,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   ): AnomalyEvent {
     const current = this.aclSnapshot.get(ctx.connectionId)?.digest ?? 'unknown';
     return {
-      id: `${ctx.connectionId}-acl-reload-${current}-${timestamp}`,
+      id: randomUUID(),
       timestamp,
       metricType: MetricType.ACL_DRIFT,
       anomalyType: AnomalyType.SPIKE,
