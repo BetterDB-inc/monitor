@@ -161,7 +161,8 @@ describe('detectSentinelDrift', () => {
     const reasons = detectSentinelDrift(HOSTNAME_MASTER, replicas)
       .map((f) => f.reason)
       .sort();
-    expect(reasons).toEqual(['ip_for_hostname', 'self_replication']);
+    // Its own endpoint drifted, it follows a raw IP, and that IP is itself.
+    expect(reasons).toEqual(['ip_for_hostname', 'self_replication', 'stale_master_pointer']);
   });
 
   it('handles a master with no replicas', () => {
@@ -182,10 +183,9 @@ describe('sentinelDriftSignature', () => {
       }),
     ];
 
-    const signatures = new Set(
-      detectSentinelDrift(HOSTNAME_MASTER, replicas).map(sentinelDriftSignature),
-    );
-    expect(signatures.size).toBe(2);
+    const findings = detectSentinelDrift(HOSTNAME_MASTER, replicas);
+    const signatures = new Set(findings.map(sentinelDriftSignature));
+    expect(signatures.size).toBe(findings.length);
   });
 
   it('is stable across repeated evaluation', () => {
@@ -203,5 +203,65 @@ describe('sentinelDriftSignature', () => {
     const first = detectSentinelDrift(HOSTNAME_MASTER, replicas).map(sentinelDriftSignature);
     const second = detectSentinelDrift(HOSTNAME_MASTER, replicas).map(sentinelDriftSignature);
     expect(first).toEqual(second);
+  });
+});
+
+describe('detectSentinelDrift — stale master pointer', () => {
+  it('flags a replica pointed at a raw IP among hostname peers', () => {
+    const replicas = [
+      hostnameReplica('valkey-1.valkey-headless'),
+      node({
+        name: 'valkey-2.valkey-headless:6379',
+        ip: 'valkey-2.valkey-headless',
+        flags: ['slave'],
+        masterHost: '10.244.3.1',
+        masterPort: 6379,
+      }),
+    ];
+
+    const findings = detectSentinelDrift(HOSTNAME_MASTER, replicas);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      reason: 'stale_master_pointer',
+      endpoint: '10.244.3.1:6379',
+      nodeName: 'valkey-2.valkey-headless:6379',
+    });
+  });
+
+  it('stays silent when the master pointer is a hostname', () => {
+    expect(
+      detectSentinelDrift(HOSTNAME_MASTER, [hostnameReplica('valkey-1.valkey-headless')]),
+    ).toEqual([]);
+  });
+
+  it('stays silent in an all-IP deployment, where a raw pointer is expected', () => {
+    const master = node({ ip: '10.0.0.10', flags: ['master'] });
+    const replicas = [
+      node({
+        name: '10.0.0.11:6379',
+        ip: '10.0.0.11',
+        flags: ['slave'],
+        masterHost: '10.0.0.10',
+        masterPort: 6379,
+      }),
+    ];
+
+    expect(detectSentinelDrift(master, replicas)).toEqual([]);
+  });
+});
+
+describe('detectSentinelDrift — self-replication needs a comparable port', () => {
+  it('stays silent when master-port is absent, since host alone proves nothing', () => {
+    const replicas = [
+      node({
+        name: 'valkey-1.valkey-headless:6379',
+        ip: 'valkey-1.valkey-headless',
+        flags: ['slave'],
+        masterHost: 'valkey-1.valkey-headless',
+      }),
+    ];
+
+    const reasons = detectSentinelDrift(HOSTNAME_MASTER, replicas).map((f) => f.reason);
+    expect(reasons).not.toContain('self_replication');
   });
 });

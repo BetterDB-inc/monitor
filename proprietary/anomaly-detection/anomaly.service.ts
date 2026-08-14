@@ -1552,14 +1552,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     try {
       const masters = await ctx.client.getSentinelMasters();
       const findings: SentinelDrift[] = [];
+      const unreadMasters = new Set<string>();
       for (const master of masters) {
         // A per-master failure (the master was just removed, or Sentinel is
-        // mid-failover) skips that master rather than losing the whole view —
-        // dropping every finding would read as recovery and clear the gate.
+        // mid-failover) skips that master rather than losing the whole view.
         try {
           const replicas = await ctx.client.getSentinelReplicas(master.name);
           findings.push(...detectSentinelDrift(master, replicas));
         } catch (replicaErr) {
+          unreadMasters.add(master.name);
           this.logger.debug(
             `Failed to read Sentinel replicas for ${master.name} on ${ctx.connectionName}: ${replicaErr instanceof Error ? replicaErr.message : replicaErr}`,
           );
@@ -1574,6 +1575,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         firstSeenByConn: this.sentinelDriftFirstSeen,
         activeByConn: this.activeSentinelDrifts,
         minPersistMs: AnomalyService.SENTINEL_DRIFT_MIN_PERSIST_MS,
+        // Skipping a master is an observation GAP, not recovery. Without this the
+        // gate would read its absent findings as resolved, clear their grace
+        // window and drop them from `active` — so an intermittent replica-read
+        // error during a failover could restart the 60s clock indefinitely, or
+        // re-emit a finding that had already alerted. On a single-master Sentinel
+        // one failed read empties the view entirely.
+        preserveSignature: (signature) => {
+          // Signature shape is `reason|masterName|nodeName|endpoint`.
+          return unreadMasters.has(signature.split('|')[1] ?? '');
+        },
         buildEvent: (drift, signature) => {
           return this.buildSentinelDriftEvent(ctx, timestamp, drift, signature);
         },
@@ -1591,6 +1602,30 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     drift: SentinelDrift,
     signature: string,
   ): AnomalyEvent {
+    if (drift.reason === 'stale_master_pointer') {
+      return {
+        id: `${ctx.connectionId}-sentinel-drift-${signature}-${timestamp}`,
+        timestamp,
+        metricType: MetricType.SENTINEL_ENDPOINT_DRIFT,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 0,
+        zScore: 0,
+        stdDev: 0,
+        threshold: 0,
+        message:
+          `WARNING: Sentinel has replica ${drift.nodeName} of monitored master ` +
+          `'${drift.masterName}' pointed at the raw address ${drift.endpoint}, while the group ` +
+          `is otherwise announced by hostname (e.g. ${drift.expectedStyle}). That address is what ` +
+          `a REPLICAOF is aimed at, so once the primary's pod or host is rescheduled the replica ` +
+          `follows a dead endpoint and silently stops replicating (valkey#2158). Announce the ` +
+          `primary by hostname consistently and reconcile the Sentinel config.`,
+        resolved: false,
+        connectionId: ctx.connectionId,
+      };
+    }
+
     const message =
       drift.reason === 'self_replication'
         ? `CRITICAL: Sentinel has ${drift.nodeName} (monitored master '${drift.masterName}') ` +

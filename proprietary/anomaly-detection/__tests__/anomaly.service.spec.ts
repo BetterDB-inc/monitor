@@ -5686,6 +5686,32 @@ describe('AnomalyService', () => {
       expect(sentinelEvents()).toHaveLength(1);
     });
 
+    it('does not read a failed replica fetch as recovery for that master', async () => {
+      (dbClient.getSentinelReplicas as jest.Mock).mockResolvedValue([
+        healthyReplica,
+        driftedReplica,
+      ]);
+      await pollPastGate();
+      expect(sentinelEvents()).toHaveLength(1);
+
+      // The replica read now fails for a few polls. The drift is unobserved, not
+      // resolved — treating it as recovery would clear the gate and re-alert.
+      (dbClient.getSentinelReplicas as jest.Mock).mockRejectedValue(new Error('mid-failover'));
+      for (let i = 0; i < 3; i++) {
+        now += 61_000;
+        await poll();
+      }
+
+      (dbClient.getSentinelReplicas as jest.Mock).mockResolvedValue([
+        healthyReplica,
+        driftedReplica,
+      ]);
+      now += 61_000;
+      await poll();
+
+      expect(sentinelEvents()).toHaveLength(1);
+    });
+
     it('survives a Sentinel command failure without breaking the poll', async () => {
       dbClient.getSentinelMasters = jest.fn().mockRejectedValue(new Error('unknown command'));
 

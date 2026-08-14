@@ -26,10 +26,7 @@ import { SentinelNodeInfo } from '@app/common/types/metrics.types';
  * without it.
  */
 
-export type SentinelDriftReason =
-  | 'ip_for_hostname'
-  | 'stale_master_pointer'
-  | 'self_replication';
+export type SentinelDriftReason = 'ip_for_hostname' | 'stale_master_pointer' | 'self_replication';
 
 export interface SentinelDrift {
   reason: SentinelDriftReason;
