@@ -455,3 +455,41 @@ describe('ghostMemberSignature — stability under churn', () => {
     expect(during).toBe(before);
   });
 });
+
+describe('detectGhostMembers — loopback census robustness', () => {
+  it('keeps firing while a routable peer is temporarily PFAIL', () => {
+    // 3-node cluster, one flipped. A peer going fail must not tie the census and
+    // silence a CRITICAL that is still true.
+    const nodes = [
+      node({ id: 'flipped', flags: ['master'], address: '127.0.0.1:6379@16379' }),
+      node({ id: 'ok-a', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'ok-b', flags: ['master', 'fail?'], address: '10.0.0.3:6379@16379' }),
+    ];
+    const findings = detectGhostMembers(nodes);
+    expect(findings.map((f) => f.reason)).toContain('loopback_flip');
+  });
+
+  it('counts a shared loopback endpoint once, so a collision stays CRITICAL', () => {
+    // Two ids on one loopback address is still ONE bad endpoint. Counting them
+    // as two would tip the census and demote this to a plain collision.
+    const nodes = [
+      node({ id: 'flip-a', flags: ['master'], address: '127.0.0.1:6379@16379' }),
+      node({ id: 'flip-b', flags: ['master'], address: '127.0.0.1:6379@16379' }),
+      node({ id: 'ok-a', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'ok-b', flags: ['master'], address: '10.0.0.3:6379@16379' }),
+    ];
+    const findings = detectGhostMembers(nodes);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].reason).toBe('loopback_flip');
+  });
+
+  it('still needs a live routable peer, not just a dead record', () => {
+    const nodes = [
+      node({ id: 'a', flags: ['myself', 'master'], address: '127.0.0.1:7000@17000' }),
+      node({ id: 'b', flags: ['master'], address: '127.0.0.1:7001@17001' }),
+      node({ id: 'stale', flags: ['master', 'noaddr'], address: '10.0.0.9:6379@16379' }),
+      node({ id: 'stale2', flags: ['master', 'fail'], address: '10.0.0.8:6379@16379' }),
+    ];
+    expect(detectGhostMembers(nodes)).toEqual([]);
+  });
+});

@@ -209,33 +209,42 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
   // A loopback endpoint is only suspicious when it is the ODD ONE OUT: the fault
   // is one node losing its address announcement while its peers keep theirs.
   //
-  // Two things this guards against. Ghost ids are excluded, so a single dead
-  // `fail`/`noaddr` record carrying a routable address cannot make an otherwise
-  // all-loopback dev cluster look mixed. And routable members must OUTNUMBER
-  // loopback ones, so a mostly-local cluster that gains one routable node does
-  // not report every healthy loopback node as flipped. A tie is ambiguous —
-  // neither side is clearly the anomaly — and stays silent.
+  // The census counts distinct ENDPOINTS, not nodes, so two ids colliding on one
+  // loopback address count once — otherwise a collision would inflate the
+  // loopback side and demote a CRITICAL flip to a plain WARNING collision.
   //
-  // Only ESTABLISHED members are counted. A handshaking twin appearing on the
-  // flipped endpoint during a re-MEET would otherwise tip the balance and make an
-  // ongoing CRITICAL vanish for the duration of the handshake.
-  const liveHosts = nodes
-    .filter((n) => {
-      return isEstablished(n);
-    })
-    .map((n) => {
-      return canonicalEndpoint(n.address);
-    })
-    .filter((endpoint) => {
-      return endpoint !== '';
-    })
-    .map((endpoint) => {
-      return endpointHost(endpoint);
-    });
-  const loopbackHosts = liveHosts.filter((host) => {
-    return isLoopbackHost(host);
-  }).length;
-  const loopbackIsOddOneOut = liveHosts.length - loopbackHosts > loopbackHosts;
+  // Membership is counted regardless of flags, so a peer that is briefly PFAIL or
+  // restarting does not drop out of the tally and silence an ongoing flip. To
+  // still exclude the case of one long-dead routable record making an all-loopback
+  // dev cluster look mixed, at least one ESTABLISHED routable member is required.
+  const endpointsByHost = new Map<string, boolean>();
+  for (const n of nodes) {
+    const nodeEndpoint = canonicalEndpoint(n.address);
+    if (!nodeEndpoint) {
+      continue;
+    }
+    endpointsByHost.set(nodeEndpoint, isLoopbackHost(endpointHost(nodeEndpoint)));
+  }
+  let loopbackEndpoints = 0;
+  let routableEndpoints = 0;
+  for (const isLoopback of endpointsByHost.values()) {
+    if (isLoopback) {
+      loopbackEndpoints += 1;
+    } else {
+      routableEndpoints += 1;
+    }
+  }
+  const hasEstablishedRoutablePeer = nodes.some((n) => {
+    if (!isEstablished(n)) {
+      return false;
+    }
+    const nodeEndpoint = canonicalEndpoint(n.address);
+    if (!nodeEndpoint) {
+      return false;
+    }
+    return !isLoopbackHost(endpointHost(nodeEndpoint));
+  });
+  const loopbackIsOddOneOut = hasEstablishedRoutablePeer && routableEndpoints > loopbackEndpoints;
 
   const selfReplicatingAmong = (ids: string[]): string[] => {
     return ids
