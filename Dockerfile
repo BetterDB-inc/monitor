@@ -327,6 +327,7 @@ COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/dist
 # as root (read-only at runtime); the app user only needs to read these symlinks.
 RUN mkdir -p /app/node_modules/@proprietary && \
     for dir in /app/apps/api/dist/proprietary/*/; do \
+        [ -d "$dir" ] || continue; \
         ln -s "$dir" /app/node_modules/@proprietary/; \
     done
 
