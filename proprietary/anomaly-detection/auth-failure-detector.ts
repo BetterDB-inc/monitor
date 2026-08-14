@@ -35,8 +35,14 @@ import { StoredAclEntry } from '@betterdb/shared';
  * it was created, which may be long before the window; and on a restart or a
  * newly-added connection the audit poller stores every entry currently in the
  * ring with `capturedAt` set to now, backfilling hours-old failures into what
- * looks like the present. Both are handled by windowing on the entry's OWN
- * timestamps and counting only the growth actually observed inside the window.
+ * looks like the present.
+ *
+ * The store makes this sharper still: `saveAclEntries` UPSERTS on
+ * (timestamp_created, username, object, reason, …), so one logical entry is
+ * exactly one row whose `count` is rewritten in place. There is no row history to
+ * difference. In-window activity is therefore tracked the same way every other
+ * cumulative counter in this service is: remember each entry's count from the
+ * previous scan and accumulate the per-scan GROWTH across the window.
  *
  * ## A limit worth knowing
  *
@@ -87,10 +93,21 @@ export interface AuthFailureSource {
 export interface AuthFailureState {
   /** Client IP → epoch ms of the last alert, for the per-address cooldown. */
   lastAlertedAt: Map<string, number>;
+  /** Entry key → its `count` at the previous scan. */
+  lastCount: Map<string, number>;
+  /** Entry key → the per-scan growth still inside the window. */
+  deltas: Map<string, DeltaSample[]>;
+  /** Entry key → when it was last present in the store, for pruning. */
+  lastSeenAt: Map<string, number>;
 }
 
 export function createAuthFailureState(): AuthFailureState {
-  return { lastAlertedAt: new Map() };
+  return {
+    lastAlertedAt: new Map(),
+    lastCount: new Map(),
+    deltas: new Map(),
+    lastSeenAt: new Map(),
+  };
 }
 
 /**
@@ -131,70 +148,93 @@ function entryKey(entry: StoredAclEntry): string {
   return [entry.timestampCreated, entry.username, entry.reason, entry.object].join('|');
 }
 
-/** One logical entry, collapsed from however many rows the poller stored for it. */
-interface CollapsedEntry {
-  /** The most recently stored row, whose `client-info` is the latest client seen. */
-  latest: StoredAclEntry;
-  /** Failures attributable to the window — see `collapse` for how this is derived. */
-  windowCount: number;
+/** Per-scan growth of one entry, kept only as long as the window needs it. */
+interface DeltaSample {
+  at: number;
+  delta: number;
 }
 
 /**
- * Collapses the rows of each logical entry and works out how much of its count
- * belongs inside the window.
+ * Folds one scan of the audit store into the state and returns each entry's
+ * failures within the window.
  *
- * An entry CREATED inside the window contributes its whole count: every one of
- * its failures happened in the window. An older entry contributes only the growth
- * we actually observed across the rows stored in the window — its earlier total
- * accrued before the window opened and is not ours to report. An entry with no
- * activity in the window at all contributes nothing, which is what keeps a
- * restart backfill (every ring entry re-stored with `capturedAt` = now) from
- * reading as a fresh burst.
+ * The first sighting of an entry sets a baseline rather than counting: an entry
+ * created before the window opened has a lifetime total that is not ours to
+ * report, and a restart backfill is exactly that case for every entry in the
+ * ring. An entry created INSIDE the window is different — all of its failures are
+ * recent, so its whole count lands at once.
  */
-function collapse(entries: StoredAclEntry[], windowStartMs: number): CollapsedEntry[] {
-  const groups = new Map<string, StoredAclEntry[]>();
+function accumulate(
+  state: AuthFailureState,
+  entries: StoredAclEntry[],
+  now: number,
+  windowMs: number,
+): Array<{ entry: StoredAclEntry; windowCount: number }> {
+  const windowStart = now - windowMs;
+  const results: Array<{ entry: StoredAclEntry; windowCount: number }> = [];
+
   for (const entry of entries) {
     const key = entryKey(entry);
-    const group = groups.get(key) ?? [];
-    group.push(entry);
-    groups.set(key, group);
-  }
+    const count = Number.isFinite(entry.count) ? entry.count : 0;
+    const previous = state.lastCount.get(key);
 
-  const collapsed: CollapsedEntry[] = [];
-  for (const group of groups.values()) {
-    const active = group.filter((entry) => {
-      return entry.timestampLastUpdated >= windowStartMs;
+    let delta: number;
+    if (previous === undefined) {
+      delta = entry.timestampCreated >= windowStart ? count : 0;
+    } else {
+      // max(0, …) absorbs an ACL LOG RESET or a ring eviction that restarts the
+      // entry at a lower count.
+      delta = Math.max(0, count - previous);
+    }
+    state.lastCount.set(key, count);
+    state.lastSeenAt.set(key, now);
+
+    const samples = state.deltas.get(key) ?? [];
+    if (delta > 0) {
+      samples.push({ at: now, delta });
+    }
+    const inWindow = samples.filter((sample) => {
+      return sample.at > windowStart;
     });
-    if (active.length === 0) {
-      continue;
+    if (inWindow.length > 0) {
+      state.deltas.set(key, inWindow);
+    } else {
+      state.deltas.delete(key);
     }
 
-    const counts = active.map((entry) => {
-      return Number.isFinite(entry.count) ? entry.count : 0;
-    });
-    const maxCount = Math.max(...counts);
-    const latest = active.reduce((newest, entry) => {
-      return entry.timestampLastUpdated >= newest.timestampLastUpdated ? entry : newest;
-    });
-
-    const bornInWindow = latest.timestampCreated >= windowStartMs;
-    const windowCount = bornInWindow ? maxCount : maxCount - Math.min(...counts);
-    if (windowCount <= 0) {
-      continue;
+    const windowCount = inWindow.reduce((total, sample) => {
+      return total + sample.delta;
+    }, 0);
+    if (windowCount > 0) {
+      results.push({ entry, windowCount });
     }
-    collapsed.push({ latest, windowCount });
   }
 
-  return collapsed;
+  return results;
+}
+
+/** Drops per-entry bookkeeping for entries that have fallen out of the ring. */
+function pruneState(state: AuthFailureState, now: number, windowMs: number): void {
+  const cutoff = now - windowMs * 4;
+  for (const [key, seenAt] of state.lastSeenAt) {
+    if (seenAt > cutoff) {
+      continue;
+    }
+    state.lastSeenAt.delete(key);
+    state.lastCount.delete(key);
+    state.deltas.delete(key);
+  }
 }
 
 /**
- * Collapses stored rows into per-client-IP totals and returns the addresses over
- * the failure threshold, worst first. Pure: the caller supplies the window.
+ * Folds one scan into the state and returns the client addresses over the
+ * failure threshold within the window, worst first.
  */
-export function detectAuthFailureBursts(
+export function observeAuthFailures(
+  state: AuthFailureState,
   entries: StoredAclEntry[],
-  windowStartMs: number,
+  now: number,
+  windowMs: number = AUTH_FAILURE_WINDOW_MS,
   minCount: number = AUTH_FAILURE_MIN_COUNT,
 ): AuthFailureSource[] {
   const byAddress = new Map<
@@ -208,7 +248,7 @@ export function detectAuthFailureBursts(
     }
   >();
 
-  for (const { latest: entry, windowCount } of collapse(entries, windowStartMs)) {
+  for (const { entry, windowCount } of accumulate(state, entries, now, windowMs)) {
     const address = clientAddressFrom(entry.clientInfo);
     if (address === '') {
       continue;
@@ -254,6 +294,8 @@ export function detectAuthFailureBursts(
       lastSeenAt: bucket.lastSeenAt,
     });
   }
+
+  pruneState(state, now, windowMs);
 
   return sources.sort((a, b) => {
     return b.authFailures - a.authFailures;

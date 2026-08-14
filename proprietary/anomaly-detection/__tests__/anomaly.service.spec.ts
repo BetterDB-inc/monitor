@@ -5120,6 +5120,7 @@ describe('AnomalyService', () => {
     };
 
     it('emits a WARNING naming the offending client address', async () => {
+      // Created inside the window, so its whole count is recent.
       storage.getAclEntries.mockResolvedValue([aclRow()]);
       await poll();
 
@@ -5128,6 +5129,21 @@ describe('AnomalyService', () => {
       expect(events[0].severity).toBe(AnomalySeverity.WARNING);
       expect(events[0].message).toContain('203.0.113.9');
       expect(events[0].value).toBe(20);
+    });
+
+    it('accumulates growth on an entry that predates the window', async () => {
+      const old = 1_700_000_000_000 - 60 * 60 * 1000;
+      storage.getAclEntries.mockResolvedValue([aclRow({ count: 100, timestampCreated: old })]);
+      await poll();
+      expect(authEvents()).toEqual([]);
+
+      now += 31_000;
+      storage.getAclEntries.mockResolvedValue([aclRow({ count: 118, timestampCreated: old })]);
+      await poll();
+
+      const events = authEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].value).toBe(18);
     });
 
     it('never leaks key names or raw client-info into the event', async () => {
@@ -5143,16 +5159,25 @@ describe('AnomalyService', () => {
       expect(event.message).not.toContain('fd=8');
     });
 
-    it('queries the audit store windowed in seconds, not milliseconds', async () => {
+    it('does not filter the audit query on captured_at', async () => {
       storage.getAclEntries.mockResolvedValue([]);
       await poll();
 
-      expect(storage.getAclEntries).toHaveBeenCalledWith(
-        expect.objectContaining({
-          connectionId: 'conn-1',
-          startTime: Math.floor((now - 5 * 60 * 1000) / 1000),
-        }),
-      );
+      // The store upserts one row per logical entry, so an entry under active
+      // attack keeps its original captured_at while its count climbs. Filtering
+      // on it would hide exactly the entries that matter.
+      const [options] = storage.getAclEntries.mock.calls[0];
+      expect(options).toEqual({ connectionId: 'conn-1', limit: 2000 });
+    });
+
+    it('baselines an unseen entry rather than alerting on its lifetime count', async () => {
+      // Created hours ago: its 400 failures are not this window's.
+      storage.getAclEntries.mockResolvedValue([
+        aclRow({ count: 400, timestampCreated: 1_700_000_000_000 - 4 * 60 * 60 * 1000 }),
+      ]);
+      await poll();
+
+      expect(authEvents()).toEqual([]);
     });
 
     it('throttles the store scan rather than querying on every poll', async () => {

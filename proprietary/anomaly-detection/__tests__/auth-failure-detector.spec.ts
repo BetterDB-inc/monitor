@@ -1,9 +1,11 @@
 import { StoredAclEntry } from '@betterdb/shared';
 import {
   AUTH_FAILURE_ALERT_COOLDOWN_MS,
+  AUTH_FAILURE_WINDOW_MS,
+  AuthFailureState,
   clientAddressFrom,
   createAuthFailureState,
-  detectAuthFailureBursts,
+  observeAuthFailures,
   takeAlertable,
 } from '../auth-failure-detector';
 
@@ -34,9 +36,26 @@ function entry(partial: Partial<StoredAclEntry> = {}): StoredAclEntry {
   };
 }
 
-/** detectAuthFailureBursts against the standard 5-minute window. */
+/**
+ * One scan against a fresh state. The store upserts one row per logical entry,
+ * so a first sighting only baselines an entry created before the window — tests
+ * that need growth must scan twice (see `scanTwice`).
+ */
 function burst(entries: StoredAclEntry[], minCount?: number) {
-  return detectAuthFailureBursts(entries, WINDOW_START, minCount);
+  return observeAuthFailures(
+    createAuthFailureState(),
+    entries,
+    NOW,
+    AUTH_FAILURE_WINDOW_MS,
+    minCount,
+  );
+}
+
+/** Two scans a minute apart, returning the second scan's sources. */
+function scanTwice(first: StoredAclEntry[], second: StoredAclEntry[], minCount?: number) {
+  const state = createAuthFailureState();
+  observeAuthFailures(state, first, NOW - 60_000, AUTH_FAILURE_WINDOW_MS, minCount);
+  return observeAuthFailures(state, second, NOW, AUTH_FAILURE_WINDOW_MS, minCount);
 }
 
 describe('clientAddressFrom', () => {
@@ -80,33 +99,69 @@ describe('detectAuthFailureBursts', () => {
     expect(burst(entries)).toEqual([]);
   });
 
-  it('collapses the repeated rows of one growing entry instead of summing them', () => {
-    // The audit poller re-stores an entry every time its cumulative count grows.
+  it('counts an entry created inside the window in full on first sighting', () => {
     const created = NOW - 60_000;
-    const rows = [3, 7, 15].map((count) => {
-      return entry({ count, timestampCreated: created, timestampLastUpdated: created + count });
-    });
+    const rows = [entry({ count: 15, timestampCreated: created, timestampLastUpdated: created })];
 
     const [source] = burst(rows);
     expect(source.authFailures).toBe(15);
   });
 
-  it('still collapses when the server rewrote client-info between updates', () => {
-    // The server replaces an entry's client-info on every update, so the source
-    // port differs between rows of the SAME logical entry. Keying on client-info
-    // would split them apart and sum 3 + 7 + 15 into 25.
-    const created = NOW - 60_000;
-    const rows = [3, 7, 15].map((count, i) => {
-      return entry({
-        count,
-        timestampCreated: created,
-        timestampLastUpdated: created + count,
-        clientInfo: `id=${i} addr=203.0.113.9:${51000 + i * 7} fd=${i}`,
-      });
-    });
+  it('accumulates growth of a long-lived entry across scans', () => {
+    // The store upserts one row per entry, so the count is rewritten in place.
+    // Only the growth we observe belongs to the window.
+    const created = NOW - 60 * 60 * 1000;
+    const before = [
+      entry({ count: 40, timestampCreated: created, timestampLastUpdated: NOW - 60_000 }),
+    ];
+    const after = [entry({ count: 55, timestampCreated: created, timestampLastUpdated: NOW })];
 
-    const [source] = burst(rows);
+    const [source] = scanTwice(before, after, 10);
     expect(source.authFailures).toBe(15);
+  });
+
+  it('keeps accumulating a sustained attack across several scans', () => {
+    // Four failures per scan is under the threshold on its own; over the window
+    // it is a burst. A per-scan delta alone would never fire.
+    const created = NOW - 60 * 60 * 1000;
+    const state = createAuthFailureState();
+    let last: ReturnType<typeof observeAuthFailures> = [];
+    for (let scan = 0; scan <= 4; scan++) {
+      last = observeAuthFailures(
+        state,
+        [entry({ count: 100 + scan * 4, timestampCreated: created, timestampLastUpdated: NOW })],
+        NOW - 120_000 + scan * 30_000,
+        AUTH_FAILURE_WINDOW_MS,
+        10,
+      );
+    }
+    expect(last[0].authFailures).toBe(16);
+  });
+
+  it('baselines rather than counting when an old entry is first seen', () => {
+    // A restart re-saves every ring entry; their lifetime totals are not ours.
+    const created = NOW - 4 * 60 * 60 * 1000;
+    const rows = [entry({ count: 500, timestampCreated: created, timestampLastUpdated: created })];
+
+    expect(burst(rows)).toEqual([]);
+  });
+
+  it('absorbs an ACL LOG RESET without producing a negative delta', () => {
+    const created = NOW - 60 * 60 * 1000;
+    const before = [entry({ count: 500, timestampCreated: created })];
+    const after = [entry({ count: 2, timestampCreated: created })];
+
+    expect(scanTwice(before, after, 1)).toEqual([]);
+  });
+
+  it('prunes bookkeeping for entries that fall out of the ring', () => {
+    const state: AuthFailureState = createAuthFailureState();
+    observeAuthFailures(state, [entry({ count: 5 })], NOW, AUTH_FAILURE_WINDOW_MS);
+    expect(state.lastCount.size).toBe(1);
+
+    observeAuthFailures(state, [], NOW + AUTH_FAILURE_WINDOW_MS * 5, AUTH_FAILURE_WINDOW_MS);
+    expect(state.lastCount.size).toBe(0);
+    expect(state.deltas.size).toBe(0);
   });
 
   it('ignores entries whose activity predates the window', () => {
@@ -123,21 +178,6 @@ describe('detectAuthFailureBursts', () => {
     ];
 
     expect(burst(rows)).toEqual([]);
-  });
-
-  it('counts only the growth observed in-window for an entry born earlier', () => {
-    const old = NOW - 60 * 60 * 1000;
-    const rows = [40, 47, 55].map((count, i) => {
-      return entry({
-        count,
-        timestampCreated: old,
-        timestampLastUpdated: NOW - 120_000 + i * 1_000,
-      });
-    });
-
-    // 55 total, but only 15 of them accrued while we were watching this window.
-    const [source] = burst(rows, 10);
-    expect(source.authFailures).toBe(15);
   });
 
   it('keeps genuinely distinct entries from the same address separate', () => {

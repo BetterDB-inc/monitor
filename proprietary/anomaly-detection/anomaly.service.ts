@@ -67,7 +67,7 @@ import {
   AuthFailureSource,
   AuthFailureState,
   createAuthFailureState,
-  detectAuthFailureBursts,
+  observeAuthFailures,
   takeAlertable,
 } from './auth-failure-detector';
 import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
@@ -1456,28 +1456,31 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.authFailureLastScan.set(ctx.connectionId, timestamp);
 
     try {
-      // Two different windows, on purpose. `captured_at` (SECONDS) is only a
-      // cheap prefilter on when the audit poller SAVED a row; it says nothing
-      // about when the failures happened, and on a restart every ring entry is
-      // re-saved with `captured_at` = now. The authoritative window is the
-      // entry's own millisecond timestamps, applied inside the detector.
-      const windowStartMs = timestamp - AUTH_FAILURE_WINDOW_MS;
+      // No time filter on the query. `captured_at` records when the poller last
+      // SAVED a row, and the store upserts one row per logical entry, so an entry
+      // under active attack keeps its original `captured_at` while its count
+      // climbs — filtering on it would hide exactly the entries that matter. The
+      // detector windows on observed growth instead.
       const entries = await this.storage.getAclEntries({
         connectionId: ctx.connectionId,
-        startTime: Math.floor(windowStartMs / 1000),
         limit: AUTH_FAILURE_QUERY_LIMIT,
       });
-      if (entries.length === 0) {
-        return;
-      }
-
       let state = this.authFailureState.get(ctx.connectionId);
       if (state === undefined) {
         state = createAuthFailureState();
         this.authFailureState.set(ctx.connectionId, state);
       }
+      if (entries.length === 0) {
+        return;
+      }
 
-      const sources = detectAuthFailureBursts(entries, windowStartMs, AUTH_FAILURE_MIN_COUNT);
+      const sources = observeAuthFailures(
+        state,
+        entries,
+        timestamp,
+        AUTH_FAILURE_WINDOW_MS,
+        AUTH_FAILURE_MIN_COUNT,
+      );
       for (const source of takeAlertable(state, sources, timestamp)) {
         const event = this.buildAuthFailureEvent(ctx, timestamp, source);
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
