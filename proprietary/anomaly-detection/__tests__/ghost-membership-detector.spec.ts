@@ -493,3 +493,28 @@ describe('detectGhostMembers — loopback census robustness', () => {
     expect(detectGhostMembers(nodes)).toEqual([]);
   });
 });
+
+describe('detectGhostMembers — census ignores stale records', () => {
+  it('does not let leftover dead routable ids make local nodes look flipped', () => {
+    const nodes = [
+      node({ id: 'a', flags: ['myself', 'master'], address: '127.0.0.1:7000@17000' }),
+      node({ id: 'b', flags: ['master'], address: '127.0.0.1:7001@17001' }),
+      node({ id: 'dead-1', flags: ['master', 'fail'], address: '10.0.0.5:6379@16379' }),
+      node({ id: 'dead-2', flags: ['master', 'fail'], address: '10.0.0.6:6379@16379' }),
+      node({ id: 'dead-3', flags: ['master', 'noaddr'], address: '10.0.0.7:6379@16379' }),
+    ];
+    expect(detectGhostMembers(nodes)).toEqual([]);
+  });
+
+  it('does not let leftover dead loopback ids mask a real flip', () => {
+    const nodes = [
+      node({ id: 'flipped', flags: ['master'], address: '127.0.0.1:6379@16379' }),
+      node({ id: 'ok-a', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'ok-b', flags: ['master'], address: '10.0.0.3:6379@16379' }),
+      node({ id: 'dead-a', flags: ['master', 'fail'], address: '127.0.0.1:7001@17001' }),
+      node({ id: 'dead-b', flags: ['master', 'noaddr'], address: '127.0.0.1:7002@17002' }),
+    ];
+    const findings = detectGhostMembers(nodes);
+    expect(findings.map((f) => f.reason)).toContain('loopback_flip');
+  });
+});

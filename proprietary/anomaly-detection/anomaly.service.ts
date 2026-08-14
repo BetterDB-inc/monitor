@@ -3231,7 +3231,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         buildEvent: (g, signature) => {
           const { severity, value, message } = this.describeGhostFinding(g);
           return {
-            id: `${ctx.connectionId}-ghost-member-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.GHOST_MEMBERSHIP,
             anomalyType: AnomalyType.SPIKE,

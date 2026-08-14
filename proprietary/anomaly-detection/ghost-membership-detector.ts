@@ -93,6 +93,18 @@ function isGhost(node: ClusterNode): boolean {
 }
 
 /**
+ * Whether a node's address is evidence of how this cluster addresses itself.
+ *
+ * A `fail?` (PFAIL) node is a real member that one node currently cannot reach —
+ * its address is still meaningful, and excluding it would let a brief peer outage
+ * tip the census and silence an ongoing flip. A `fail` (agreed FAIL) or `noaddr`
+ * line is a stale identity whose address says nothing about the live cluster.
+ */
+function countsForCensus(node: ClusterNode): boolean {
+  return !node.flags.includes('fail') && !node.flags.includes('noaddr');
+}
+
+/**
  * A node that has completed the join handshake. Handshaking ids are live but not
  * yet established, so they never count toward an endpoint *collision* — a node
  * re-MEETing an endpoint it is about to occupy is the normal rejoin path, not two
@@ -213,38 +225,32 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
   // loopback address count once — otherwise a collision would inflate the
   // loopback side and demote a CRITICAL flip to a plain WARNING collision.
   //
-  // Membership is counted regardless of flags, so a peer that is briefly PFAIL or
-  // restarting does not drop out of the tally and silence an ongoing flip. To
-  // still exclude the case of one long-dead routable record making an all-loopback
-  // dev cluster look mixed, at least one ESTABLISHED routable member is required.
-  const endpointsByHost = new Map<string, boolean>();
+  // Only addresses that describe the LIVE cluster are counted (see
+  // `countsForCensus`): a stale `fail`/`noaddr` record's address is not evidence
+  // of anything, while a `fail?` peer is a real member that happens to be
+  // unreachable right now and must keep its vote — otherwise a brief peer outage
+  // would tie the census and silence an ongoing flip.
+  const censusEndpoints = new Map<string, boolean>();
   for (const n of nodes) {
+    if (!countsForCensus(n)) {
+      continue;
+    }
     const nodeEndpoint = canonicalEndpoint(n.address);
     if (!nodeEndpoint) {
       continue;
     }
-    endpointsByHost.set(nodeEndpoint, isLoopbackHost(endpointHost(nodeEndpoint)));
+    censusEndpoints.set(nodeEndpoint, isLoopbackHost(endpointHost(nodeEndpoint)));
   }
   let loopbackEndpoints = 0;
   let routableEndpoints = 0;
-  for (const isLoopback of endpointsByHost.values()) {
+  for (const isLoopback of censusEndpoints.values()) {
     if (isLoopback) {
       loopbackEndpoints += 1;
     } else {
       routableEndpoints += 1;
     }
   }
-  const hasEstablishedRoutablePeer = nodes.some((n) => {
-    if (!isEstablished(n)) {
-      return false;
-    }
-    const nodeEndpoint = canonicalEndpoint(n.address);
-    if (!nodeEndpoint) {
-      return false;
-    }
-    return !isLoopbackHost(endpointHost(nodeEndpoint));
-  });
-  const loopbackIsOddOneOut = hasEstablishedRoutablePeer && routableEndpoints > loopbackEndpoints;
+  const loopbackIsOddOneOut = routableEndpoints > 0 && routableEndpoints > loopbackEndpoints;
 
   const selfReplicatingAmong = (ids: string[]): string[] => {
     return ids
