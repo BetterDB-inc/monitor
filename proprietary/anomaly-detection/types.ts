@@ -60,6 +60,8 @@ export enum MetricType {
   CONFIG_DRIFT = 'config_drift',
   /** ACL ruleset digest differs across nodes in the same replication group, or changed unexpectedly on one node (valkey#4355) — state-based. */
   ACL_DRIFT = 'acl_drift',
+  /** Sentinel carries a replica/master under a raw IP where the group announces hostnames, or a node replicating from itself (valkey#2158) — state-based. */
+  SENTINEL_ENDPOINT_DRIFT = 'sentinel_endpoint_drift',
 }
 
 /**
@@ -88,6 +90,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.CLIENT_LOCKOUT_RISK,
   MetricType.AUTH_FAILURE_BURST,
   MetricType.ACL_DRIFT,
+  MetricType.SENTINEL_ENDPOINT_DRIFT,
   MetricType.EVICTED_CLIENTS,
   MetricType.RAFT_HEALTH,
   MetricType.FAILOVER_CHURN,

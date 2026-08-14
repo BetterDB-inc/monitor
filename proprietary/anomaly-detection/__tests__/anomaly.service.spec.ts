@@ -9,7 +9,7 @@ import { CommandLogAnalyticsService } from '@app/commandlog-analytics/commandlog
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
-import { ClusterNode } from '@app/common/types/metrics.types';
+import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest } from '../acl-drift-detector';
 import {
   MetricType,
@@ -5515,6 +5515,193 @@ describe('AnomalyService', () => {
       expect((service as any).aclDriftRecheck.has('conn-1')).toBe(false);
       expect((service as any).aclUnverified.has('conn-1')).toBe(false);
       expect((service as any).aclDeniedUntil.has('conn-1')).toBe(false);
+    });
+  });
+
+  // ─── Sentinel endpoint drift (valkey#2158) ─────────────────────────────────
+
+  describe('Sentinel endpoint drift', () => {
+    function sentinelNode(partial: Partial<SentinelNodeInfo> = {}): SentinelNodeInfo {
+      return {
+        name: 'mymaster',
+        ip: 'valkey-0.valkey-headless',
+        port: 6379,
+        runid: 'r1',
+        flags: ['master'],
+        fields: {},
+        ...partial,
+      };
+    }
+
+    function sentinelInfo(mode = 'sentinel') {
+      return {
+        server: { role: 'master', redis_mode: mode },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+      };
+    }
+
+    const driftedReplica = sentinelNode({
+      name: '10.244.3.7:6379',
+      ip: '10.244.3.7',
+      flags: ['slave'],
+      masterHost: 'valkey-0.valkey-headless',
+      masterPort: 6379,
+    });
+
+    const healthyReplica = sentinelNode({
+      name: 'valkey-1.valkey-headless:6379',
+      ip: 'valkey-1.valkey-headless',
+      flags: ['slave'],
+      masterHost: 'valkey-0.valkey-headless',
+      masterPort: 6379,
+    });
+
+    let now: number;
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(sentinelInfo());
+      dbClient.getSentinelMasters = jest.fn().mockResolvedValue([sentinelNode()]);
+      dbClient.getSentinelReplicas = jest.fn().mockResolvedValue([healthyReplica]);
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const sentinelEvents = () => {
+      return service.getRecentEvents().filter((e) => {
+        return e.metricType === MetricType.SENTINEL_ENDPOINT_DRIFT;
+      });
+    };
+
+    /** Two probes either side of the 60s persistence gate. */
+    async function pollPastGate(): Promise<void> {
+      await poll();
+      now += 61_000;
+      await poll();
+    }
+
+    it('emits a WARNING once an IP-for-hostname entry persists past the gate', async () => {
+      (dbClient.getSentinelReplicas as jest.Mock).mockResolvedValue([
+        healthyReplica,
+        driftedReplica,
+      ]);
+
+      await poll();
+      expect(sentinelEvents()).toHaveLength(0);
+
+      now += 61_000;
+      await poll();
+
+      const events = sentinelEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('10.244.3.7:6379');
+      expect(events[0].message).toContain('2158');
+    });
+
+    it('stays silent for a hostname-consistent Sentinel view', async () => {
+      await pollPastGate();
+      expect(sentinelEvents()).toEqual([]);
+    });
+
+    it('emits CRITICAL for a node configured as a replica of itself', async () => {
+      (dbClient.getSentinelReplicas as jest.Mock).mockResolvedValue([
+        sentinelNode({
+          name: 'valkey-1.valkey-headless:6379',
+          ip: 'valkey-1.valkey-headless',
+          flags: ['slave'],
+          masterHost: 'valkey-1.valkey-headless',
+          masterPort: 6379,
+        }),
+      ]);
+
+      await pollPastGate();
+
+      const events = sentinelEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].message).toContain('replica of itself');
+    });
+
+    it('suppresses a transient post-failover entry that reconverges inside the gate', async () => {
+      (dbClient.getSentinelReplicas as jest.Mock).mockResolvedValue([
+        healthyReplica,
+        driftedReplica,
+      ]);
+      await poll();
+
+      (dbClient.getSentinelReplicas as jest.Mock).mockResolvedValue([healthyReplica]);
+      now += 61_000;
+      await poll();
+
+      expect(sentinelEvents()).toEqual([]);
+    });
+
+    it('never issues a SENTINEL command on a non-Sentinel connection', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(sentinelInfo('standalone'));
+
+      await pollPastGate();
+
+      expect(dbClient.getSentinelMasters).not.toHaveBeenCalled();
+      expect(sentinelEvents()).toEqual([]);
+    });
+
+    it('throttles the Sentinel probe rather than running it every poll', async () => {
+      await poll();
+      await poll();
+      await poll();
+      expect(dbClient.getSentinelMasters).toHaveBeenCalledTimes(1);
+
+      now += 16_000;
+      await poll();
+      expect(dbClient.getSentinelMasters).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the rest of the view when one master read fails', async () => {
+      dbClient.getSentinelMasters = jest
+        .fn()
+        .mockResolvedValue([sentinelNode(), sentinelNode({ name: 'other' })]);
+      (dbClient.getSentinelReplicas as jest.Mock).mockImplementation((name: string) => {
+        if (name === 'other') {
+          return Promise.reject(new Error('unknown master'));
+        }
+        return Promise.resolve([healthyReplica, driftedReplica]);
+      });
+
+      await pollPastGate();
+
+      expect(sentinelEvents()).toHaveLength(1);
+    });
+
+    it('survives a Sentinel command failure without breaking the poll', async () => {
+      dbClient.getSentinelMasters = jest.fn().mockRejectedValue(new Error('unknown command'));
+
+      await expect(poll()).resolves.not.toThrow();
+      expect(sentinelEvents()).toEqual([]);
+    });
+
+    it('clears Sentinel state on connection removal', async () => {
+      await poll();
+      expect((service as any).sentinelLastProbe.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).sentinelLastProbe.has('conn-1')).toBe(false);
+      expect((service as any).sentinelDriftFirstSeen.has('conn-1')).toBe(false);
+      expect((service as any).activeSentinelDrifts.has('conn-1')).toBe(false);
     });
   });
 });

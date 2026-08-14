@@ -61,6 +61,11 @@ import {
   evaluateClientLockout,
 } from './client-lockout-detector';
 import {
+  SentinelDrift,
+  detectSentinelDrift,
+  sentinelDriftSignature,
+} from './sentinel-drift-detector';
+import {
   AclDrift,
   AclDriftNode,
   aclDriftSignature,
@@ -254,6 +259,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private aclUnverified = new Set<string>();
   // Earliest timestamp at which a denied ACL LIST may be retried, per connection.
   private aclDeniedUntil = new Map<string, number>();
+  // Sentinel endpoint drift (valkey#2158) state: persistence gate + dedupe, plus
+  // the last time the Sentinel view was probed for this connection.
+  private sentinelDriftFirstSeen = new Map<string, Map<string, number>>();
+  private activeSentinelDrifts = new Map<string, Set<string>>();
+  private sentinelLastProbe = new Map<string, number>();
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
@@ -594,6 +604,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.aclDriftRecheck.delete(connectionId);
     this.aclUnverified.delete(connectionId);
     this.aclDeniedUntil.delete(connectionId);
+    this.sentinelDriftFirstSeen.delete(connectionId);
+    this.activeSentinelDrifts.delete(connectionId);
+    this.sentinelLastProbe.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
@@ -1240,6 +1253,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // config drift — no fan-out, so a hung peer cannot stall this poll.
       await this.detectAclDrift(info, ctx, timestamp);
 
+      // Sentinel endpoint drift (valkey-io/valkey#2158): a replica carried under
+      // an ephemeral pod IP where the group announces hostnames, or a node
+      // configured as a replica of itself. Sentinel deployments only.
+      await this.detectSentinelDrift(ctx, timestamp, info);
+
       // Cross-node config drift (valkey-io/valkey#1193): CONFIG SET only ever
       // applies to the single node it's sent to today, so nodes in the same
       // replication group can silently drift on a critical setting (e.g. one
@@ -1484,6 +1502,123 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         `\`maxmemory-clients\`), hunt the connection leak or storm behind the climb, or — where ` +
         `available — reserve admin capacity with \`priority-net-sources\`/\`priority-maxclients\` ` +
         `so the control plane keeps a way in.`,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+  }
+
+  /**
+   * How often the Sentinel view is probed. Each probe costs a `SENTINEL MASTERS`
+   * plus one `SENTINEL REPLICAS` per monitored master, and Sentinel topology
+   * changes on failover timescales, not per second.
+   */
+  private static readonly SENTINEL_PROBE_INTERVAL_MS = 15_000;
+
+  /**
+   * How long Sentinel endpoint drift must persist before it is alerted. Gossip
+   * and failover reconvergence legitimately shuffle recorded addresses for a
+   * short window and then settle; genuine drift does not.
+   */
+  private static readonly SENTINEL_DRIFT_MIN_PERSIST_MS = 60_000;
+
+  /**
+   * Sentinel endpoint drift (valkey-io/valkey#2158): Sentinel records a node's
+   * *resolved* address rather than its configured hostname, so in Kubernetes an
+   * ephemeral pod IP replaces the stable announced hostname — and once the pod is
+   * rescheduled, Sentinel and every client it steers point at a dead address. The
+   * same issue also reports a node ending up as a replica of itself.
+   *
+   * Sentinel deployments only: gated on `redis_mode:sentinel`, so a cluster or
+   * plain standalone connection never issues a SENTINEL command.
+   */
+  private async detectSentinelDrift(
+    ctx: ConnectionContext,
+    timestamp: number,
+    info: Record<string, string>,
+  ): Promise<void> {
+    if (info['redis_mode'] !== 'sentinel') {
+      return;
+    }
+
+    const lastProbe = this.sentinelLastProbe.get(ctx.connectionId);
+    if (
+      lastProbe !== undefined &&
+      timestamp - lastProbe < AnomalyService.SENTINEL_PROBE_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.sentinelLastProbe.set(ctx.connectionId, timestamp);
+
+    try {
+      const masters = await ctx.client.getSentinelMasters();
+      const findings: SentinelDrift[] = [];
+      for (const master of masters) {
+        // A per-master failure (the master was just removed, or Sentinel is
+        // mid-failover) skips that master rather than losing the whole view —
+        // dropping every finding would read as recovery and clear the gate.
+        try {
+          const replicas = await ctx.client.getSentinelReplicas(master.name);
+          findings.push(...detectSentinelDrift(master, replicas));
+        } catch (replicaErr) {
+          this.logger.debug(
+            `Failed to read Sentinel replicas for ${master.name} on ${ctx.connectionName}: ${replicaErr instanceof Error ? replicaErr.message : replicaErr}`,
+          );
+        }
+      }
+
+      await this.applyTopologyPersistenceGate({
+        ctx,
+        timestamp,
+        findings,
+        signatureOf: sentinelDriftSignature,
+        firstSeenByConn: this.sentinelDriftFirstSeen,
+        activeByConn: this.activeSentinelDrifts,
+        minPersistMs: AnomalyService.SENTINEL_DRIFT_MIN_PERSIST_MS,
+        buildEvent: (drift, signature) => {
+          return this.buildSentinelDriftEvent(ctx, timestamp, drift, signature);
+        },
+      });
+    } catch (sentinelErr) {
+      this.logger.debug(
+        `Failed to check Sentinel topology for ${ctx.connectionName}: ${sentinelErr instanceof Error ? sentinelErr.message : sentinelErr}`,
+      );
+    }
+  }
+
+  private buildSentinelDriftEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    drift: SentinelDrift,
+    signature: string,
+  ): AnomalyEvent {
+    const message =
+      drift.reason === 'self_replication'
+        ? `CRITICAL: Sentinel has ${drift.nodeName} (monitored master '${drift.masterName}') ` +
+          `configured as a replica of itself at ${drift.endpoint}. It can never receive data ` +
+          `from a real primary, so it silently serves a frozen dataset and is a broken failover ` +
+          `target (valkey#2158). Re-point it with REPLICAOF at the real primary and reconcile ` +
+          `the Sentinel config.`
+        : `WARNING: Sentinel records ${drift.role} ${drift.nodeName} of monitored master ` +
+          `'${drift.masterName}' under the raw address ${drift.endpoint}, while the rest of the ` +
+          `group is announced by hostname (e.g. ${drift.expectedStyle}). Sentinel stores the ` +
+          `resolved address rather than the configured hostname (valkey#2158), so this entry ` +
+          `goes stale the moment the pod or host is rescheduled — clients and failover would ` +
+          `then be steered at a dead address. Set \`replica-announce-ip\` (or enable hostname ` +
+          `announcement) consistently across the group and reconcile the Sentinel config.`;
+
+    return {
+      id: `${ctx.connectionId}-sentinel-drift-${signature}-${timestamp}`,
+      timestamp,
+      metricType: MetricType.SENTINEL_ENDPOINT_DRIFT,
+      anomalyType: AnomalyType.SPIKE,
+      severity:
+        drift.reason === 'self_replication' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      value: 1,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: 0,
+      message,
       resolved: false,
       connectionId: ctx.connectionId,
     };
