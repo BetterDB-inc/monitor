@@ -56,6 +56,7 @@ import {
   ClientLockoutState,
   LOCKOUT_MIN_STREAK,
   LOCKOUT_UTILIZATION_PCT,
+  commitClientLockoutLevel,
   createClientLockoutState,
   evaluateClientLockout,
 } from './client-lockout-detector';
@@ -1354,7 +1355,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     const event = this.buildClientLockoutEvent(ctx, timestamp, finding);
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    // Await the emit, then record the escalation. A failed emit leaves the
+    // hysteresis armed so the next poll retries instead of going quiet.
     await this.addAnomaly(event, ctx);
+    commitClientLockoutLevel(state, finding.level);
   }
 
   private buildClientLockoutEvent(

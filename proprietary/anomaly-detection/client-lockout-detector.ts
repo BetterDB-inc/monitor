@@ -79,12 +79,24 @@ export function createClientLockoutState(): ClientLockoutState {
 /**
  * Folds one poll into the state and returns a finding only when the risk level
  * ESCALATES (none→warning, none/warning→critical). A steady or improving state
- * stays quiet and re-arms alerting once it falls back to `none`, so a server
- * parked just over the threshold does not alert every poll.
+ * stays quiet, so a server parked just over the threshold does not alert every
+ * poll.
+ *
+ * Only a FULL recovery to `none` re-arms alerting. A partial de-escalation keeps
+ * the high-water mark, because a client retrying against a full `maxclients`
+ * refuses intermittently: critical → (a poll with no new refusals) → critical
+ * would otherwise read as a fresh escalation and alert every other poll forever.
  *
  * An unreadable ceiling (`maxclients` absent or ≤ 0) is treated as an
- * observation gap: the streak is left untouched rather than reset, so a missing
- * sample mid-climb cannot silently disarm the warning.
+ * observation gap: the streak is left untouched rather than reset, and the
+ * `rejected_connections` baseline is NOT advanced, so refusals that happen
+ * during the gap still surface in the next readable poll's delta instead of
+ * being silently consumed.
+ *
+ * The escalated level is deliberately NOT committed here — the caller commits it
+ * with `commitClientLockoutLevel` once the emit has actually succeeded, so a
+ * failed emit is retried on the next poll rather than being swallowed by the
+ * hysteresis. This mirrors `detectClientSaturation`.
  */
 export function evaluateClientLockout(
   state: ClientLockoutState,
@@ -97,12 +109,16 @@ export function evaluateClientLockout(
     rejectedConnections === null || state.lastRejected === null
       ? 0
       : Math.max(0, rejectedConnections - state.lastRejected);
-  if (rejectedConnections !== null) {
-    state.lastRejected = rejectedConnections;
-  }
 
+  // Baseline advanced only once the sample is actually usable. Advancing it
+  // before the guard below would consume a rise in refusals that occurred while
+  // the ceiling was unreadable, and the live-refusal signal for that episode
+  // would be lost.
   if (connectedClients === null || maxClients === null || maxClients <= 0) {
     return null;
+  }
+  if (rejectedConnections !== null) {
+    state.lastRejected = rejectedConnections;
   }
 
   const previousConnected = state.lastConnected;
@@ -124,7 +140,9 @@ export function evaluateClientLockout(
   }
 
   const escalated = LEVEL_RANK[level] > LEVEL_RANK[state.level];
-  state.level = level;
+  if (level === 'none') {
+    state.level = 'none';
+  }
 
   if (!escalated || level === 'none') {
     return null;
@@ -140,4 +158,13 @@ export function evaluateClientLockout(
     rising: previousConnected !== null && connectedClients > previousConnected,
     streak: state.highUtilStreak,
   };
+}
+
+/**
+ * Records an escalation as delivered. Called by the emitter AFTER the event has
+ * been successfully published, so a failed publish leaves the hysteresis armed
+ * and the next poll retries.
+ */
+export function commitClientLockoutLevel(state: ClientLockoutState, level: LockoutLevel): void {
+  state.level = level;
 }

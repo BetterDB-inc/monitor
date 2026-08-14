@@ -2,6 +2,7 @@ import {
   ClientLockoutInput,
   ClientLockoutState,
   LOCKOUT_MIN_STREAK,
+  commitClientLockoutLevel,
   createClientLockoutState,
   evaluateClientLockout,
 } from '../client-lockout-detector';
@@ -22,6 +23,15 @@ describe('evaluateClientLockout', () => {
   beforeEach(() => {
     state = createClientLockoutState();
   });
+
+  /** Evaluate and, as the service does, record the level once the emit succeeds. */
+  function evaluateAndCommit(current: ClientLockoutState, next: ClientLockoutInput) {
+    const finding = evaluateClientLockout(current, next);
+    if (finding !== null) {
+      commitClientLockoutLevel(current, finding.level);
+    }
+    return finding;
+  }
 
   it('fires a WARNING once utilization stays above the threshold for the full streak', () => {
     const high = input({ connectedClients: 900 });
@@ -64,27 +74,71 @@ describe('evaluateClientLockout', () => {
     for (let poll = 0; poll < LOCKOUT_MIN_STREAK - 1; poll++) {
       evaluateClientLockout(state, high);
     }
-    expect(evaluateClientLockout(state, high)?.level).toBe('warning');
+    expect(evaluateAndCommit(state, high)?.level).toBe('warning');
 
     const refusing = input({ connectedClients: 900, rejectedConnections: 12 });
-    expect(evaluateClientLockout(state, refusing)?.level).toBe('critical');
+    expect(evaluateAndCommit(state, refusing)?.level).toBe('critical');
     expect(
-      evaluateClientLockout(state, input({ connectedClients: 900, rejectedConnections: 30 })),
+      evaluateAndCommit(state, input({ connectedClients: 900, rejectedConnections: 30 })),
     ).toBeNull();
   });
 
   it('re-arms after recovery so a recurrence alerts again', () => {
     const high = input({ connectedClients: 900 });
     for (let poll = 0; poll < LOCKOUT_MIN_STREAK; poll++) {
+      evaluateAndCommit(state, high);
+    }
+
+    evaluateAndCommit(state, input({ connectedClients: 100 }));
+
+    for (let poll = 0; poll < LOCKOUT_MIN_STREAK - 1; poll++) {
+      expect(evaluateAndCommit(state, high)).toBeNull();
+    }
+    expect(evaluateAndCommit(state, high)?.level).toBe('warning');
+  });
+
+  it('does not re-alert when refusals come and go against a full ceiling', () => {
+    const at = (rejected: number) => {
+      return input({ connectedClients: 1000, rejectedConnections: rejected });
+    };
+    evaluateAndCommit(state, at(0));
+    expect(evaluateAndCommit(state, at(5))?.level).toBe('critical');
+
+    // Refusals pause for a poll, then resume. The pressure never went away, so
+    // this is one ongoing episode, not three.
+    expect(evaluateAndCommit(state, at(5))).toBeNull();
+    expect(evaluateAndCommit(state, at(9))).toBeNull();
+    expect(evaluateAndCommit(state, at(9))).toBeNull();
+    expect(evaluateAndCommit(state, at(14))).toBeNull();
+  });
+
+  it('retries the escalation when the emit failed and nothing was committed', () => {
+    const high = input({ connectedClients: 900 });
+    for (let poll = 0; poll < LOCKOUT_MIN_STREAK - 1; poll++) {
       evaluateClientLockout(state, high);
     }
 
-    evaluateClientLockout(state, input({ connectedClients: 100 }));
-
-    for (let poll = 0; poll < LOCKOUT_MIN_STREAK - 1; poll++) {
-      expect(evaluateClientLockout(state, high)).toBeNull();
-    }
+    // Emit throws: evaluate returned a finding, but the level was never committed.
     expect(evaluateClientLockout(state, high)?.level).toBe('warning');
+    expect(state.level).toBe('none');
+
+    expect(evaluateAndCommit(state, high)?.level).toBe('warning');
+  });
+
+  it('surfaces refusals that happened while the ceiling was unreadable', () => {
+    evaluateAndCommit(state, input({ connectedClients: 100, rejectedConnections: 4 }));
+
+    // maxclients unreadable for a poll, during which refusals climb.
+    expect(
+      evaluateAndCommit(state, input({ maxClients: null, rejectedConnections: 40 })),
+    ).toBeNull();
+
+    const finding = evaluateAndCommit(
+      state,
+      input({ connectedClients: 100, rejectedConnections: 40 }),
+    );
+    expect(finding?.level).toBe('critical');
+    expect(finding?.rejectedDelta).toBe(36);
   });
 
   it('degrades gracefully when maxclients is zero or unreadable', () => {
