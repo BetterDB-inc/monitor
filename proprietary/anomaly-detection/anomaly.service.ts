@@ -51,6 +51,14 @@ import {
 } from './orphaned-slot-keys-detector';
 import { GhostMember, detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
 import { ForgetRejoin, GhostMembershipHistory } from './ghost-membership-history';
+import {
+  ClientLockoutFinding,
+  ClientLockoutState,
+  LOCKOUT_MIN_STREAK,
+  LOCKOUT_UTILIZATION_PCT,
+  createClientLockoutState,
+  evaluateClientLockout,
+} from './client-lockout-detector';
 import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
 import {
@@ -206,6 +214,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // membership history, the only way to see a FORGET-then-rejoin — no single
   // snapshot distinguishes a resurrected node from an ordinary member.
   private ghostHistories = new Map<string, GhostMembershipHistory>();
+  // Connection-exhaustion / admin-lockout (valkey#3944) state: streak + last
+  // level + last counters, one entry per connection.
+  private clientLockoutState = new Map<string, ClientLockoutState>();
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
@@ -539,6 +550,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.ghostMemberFirstSeen.delete(connectionId);
     this.activeGhostMembers.delete(connectionId);
     this.ghostHistories.delete(connectionId);
+    this.clientLockoutState.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
@@ -1167,6 +1179,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // can no longer connect. State-based with hysteresis, not z-score.
       await this.detectClientSaturation(info, ctx, timestamp);
 
+      // Connection-exhaustion / admin-lockout risk (valkey-io/valkey#3944):
+      // sustained pressure on the maxclients ceiling, escalated the moment
+      // connections are actually being refused. Complements the saturation
+      // signal above by pairing utilization with live refusals.
+      await this.detectClientLockoutRisk(info, ctx, timestamp);
+
       // Cross-node config drift (valkey-io/valkey#1193): CONFIG SET only ever
       // applies to the single node it's sent to today, so nodes in the same
       // replication group can silently drift on a critical setting (e.g. one
@@ -1302,6 +1320,86 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // Advance the level last: on escalation only after addAnomaly resolved; on
     // steady/de-escalation immediately (the latter re-arms alerting on recovery).
     this.clientSaturationLevel.set(ctx.connectionId, level);
+  }
+
+  /**
+   * Connection-exhaustion / admin-lockout risk (valkey-io/valkey#3944). Distinct
+   * from the saturation signal above: this one requires the pressure to be
+   * SUSTAINED, and escalates to CRITICAL the moment `rejected_connections`
+   * actually moves — the difference between "headroom is nearly gone" and
+   * "connections, including yours, are being refused right now".
+   *
+   * Emits on escalation only; the detector owns the streak and hysteresis.
+   */
+  private async detectClientLockoutRisk(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    let state = this.clientLockoutState.get(ctx.connectionId);
+    if (state === undefined) {
+      state = createClientLockoutState();
+      this.clientLockoutState.set(ctx.connectionId, state);
+    }
+
+    const finding = evaluateClientLockout(state, {
+      connectedClients: this.parseNumber(info.connected_clients),
+      maxClients: this.parseNumber(info.maxclients),
+      rejectedConnections: this.parseNumber(info.rejected_connections),
+      blockedClients: this.parseNumber(info.blocked_clients),
+    });
+    if (finding === null) {
+      return;
+    }
+
+    const event = this.buildClientLockoutEvent(ctx, timestamp, finding);
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    await this.addAnomaly(event, ctx);
+  }
+
+  private buildClientLockoutEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    finding: ClientLockoutFinding,
+  ): AnomalyEvent {
+    const pct = finding.utilizationPct.toFixed(1);
+    const critical = finding.level === 'critical';
+    const blocked =
+      finding.blockedClients !== null && finding.blockedClients > 0
+        ? ` ${finding.blockedClients} client(s) are blocked, holding their slots.`
+        : '';
+    const trend = finding.rising ? ' The pool is still climbing.' : '';
+
+    const headline = critical
+      ? `CRITICAL: ${finding.connectedClients}/${finding.maxClients} clients (${pct}% of ` +
+        `maxclients) and ${finding.rejectedDelta} new connection(s) refused since the last ` +
+        `poll — the instance is turning connections away right now, including admin and ` +
+        `control-plane sessions.`
+      : `WARNING: Client connections have held at or above ${LOCKOUT_UTILIZATION_PCT}% of ` +
+        `maxclients for ${finding.streak} consecutive polls (now ${finding.connectedClients}/` +
+        `${finding.maxClients}, ${pct}%). Once the ceiling is reached, new connections — ` +
+        `including your own admin session — are refused, leaving the instance hard to inspect ` +
+        `or rescue.`;
+
+    return {
+      id: `${ctx.connectionId}-client-lockout-${finding.level}-${timestamp}`,
+      timestamp,
+      metricType: MetricType.CLIENT_LOCKOUT_RISK,
+      anomalyType: AnomalyType.SPIKE,
+      severity: critical ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      value: finding.connectedClients,
+      baseline: finding.maxClients,
+      zScore: 0,
+      stdDev: 0,
+      threshold: Math.floor((finding.maxClients * LOCKOUT_UTILIZATION_PCT) / 100),
+      message:
+        `${headline}${blocked}${trend} Raise \`maxclients\` (bounded by the OS \`ulimit -n\` and ` +
+        `\`maxmemory-clients\`), hunt the connection leak or storm behind the climb, or — where ` +
+        `available — reserve admin capacity with \`priority-net-sources\`/\`priority-maxclients\` ` +
+        `so the control plane keeps a way in.`,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
   }
 
   /**
