@@ -204,7 +204,13 @@ export function detectSentinelDrift(
     findings.push({
       reason: 'stale_master_pointer',
       masterName,
-      endpoint: `${replica.masterHost}:${replica.masterPort ?? master.port}`,
+      // Port omitted when Sentinel did not report one, rather than borrowing the
+      // master's — an invented port in the message and the signature would be
+      // worse than an honest host-only endpoint.
+      endpoint:
+        replica.masterPort === undefined
+          ? replica.masterHost
+          : `${replica.masterHost}:${replica.masterPort}`,
       nodeName: replica.name,
       role: 'replica',
       expectedStyle,
