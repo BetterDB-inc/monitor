@@ -4,7 +4,7 @@
 ARG APP_VERSION=0.1.1
 
 # ============================================
-# Build Stage
+# Build Stage (shared by both image variants)
 # ============================================
 FROM node:26-alpine AS builder
 
@@ -28,7 +28,8 @@ COPY packages/agent-memory/package.json ./packages/agent-memory/
 COPY packages/agent-cache/package.json ./packages/agent-cache/
 COPY packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
 
-# Install dependencies (excluding entitlement workspace)
+# Install dependencies (excluding entitlement workspace). Includes devDeps needed
+# for the build; the no-ai variant strips them again in the cleanup stage below.
 RUN pnpm install --frozen-lockfile --filter '!@app/entitlement'
 
 # Copy source code (excluding entitlement app)
@@ -66,7 +67,7 @@ ENV VITE_REGISTRATION_URL=$VITE_REGISTRATION_URL
 RUN pnpm --filter "api..." --filter "web..." build
 
 # ============================================
-# RedisShake Build Stage
+# RedisShake Build Stage (shared by both variants)
 # ============================================
 # Build the migration binary from source with a current Go toolchain so the
 # embedded Go standard library is patched. The official prebuilt releases are
@@ -100,9 +101,87 @@ RUN git clone --depth 1 --branch "v${REDISSHAKE_VERSION}" https://github.com/tai
         go build -trimpath -ldflags "-s -w -X main.Version=v${REDISSHAKE_VERSION} -X main.GitCommit=${REDISSHAKE_COMMIT}" -o /out/redis-shake ./cmd/redis-shake
 
 # ============================================
-# Production Stage
+# Cleanup Stage - strip AI deps + devDeps (no-ai variant only)
 # ============================================
-FROM node:26-alpine AS production
+FROM node:26-alpine AS cleanup
+
+WORKDIR /app
+
+# Copy node_modules from builder
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/apps/api/node_modules ./apps/api/node_modules
+COPY --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
+
+# Remove AI dependencies, devDependencies, and build tools (~150MB+ savings)
+# AI packages are only needed when AI_ENABLED=true
+# DevDependencies are only needed during build, not runtime
+# Must remove from BOTH top-level symlinks AND .pnpm store (where pnpm keeps actual files)
+RUN rm -rf \
+    # AI-related top-level symlinks
+    node_modules/@lancedb \
+    node_modules/@langchain \
+    node_modules/langchain \
+    node_modules/hnswlib-node \
+    node_modules/better-sqlite3 \
+    node_modules/apache-arrow \
+    node_modules/@apache-arrow \
+    node_modules/ollama \
+    node_modules/@huggingface \
+    node_modules/openai \
+    node_modules/js-tiktoken \
+    apps/api/node_modules/@lancedb \
+    apps/api/node_modules/@langchain \
+    apps/api/node_modules/langchain \
+    apps/api/node_modules/hnswlib-node \
+    apps/api/node_modules/better-sqlite3 \
+    apps/api/node_modules/apache-arrow \
+    apps/api/node_modules/@apache-arrow \
+    apps/api/node_modules/ollama \
+    apps/api/node_modules/@huggingface \
+    apps/api/node_modules/openai \
+    apps/api/node_modules/js-tiktoken \
+    # pnpm store - AI packages + devDependencies (actual files)
+    && find node_modules/.pnpm -maxdepth 1 -type d \( \
+        -name '@lancedb*' -o \
+        -name '@langchain*' -o \
+        -name 'langchain@*' -o \
+        -name 'hnswlib-node@*' -o \
+        -name 'better-sqlite3@*' -o \
+        -name 'apache-arrow@*' -o \
+        -name '@apache-arrow*' -o \
+        -name 'ollama@*' -o \
+        -name '@huggingface*' -o \
+        -name 'vectordb@*' -o \
+        -name '@napi-rs*' -o \
+        -name 'openai@*' -o \
+        -name 'js-tiktoken@*' -o \
+        -name 'typescript@*' -o \
+        -name 'turbo-*' -o \
+        -name '@types+*' -o \
+        -name 'prettier@*' -o \
+        -name 'eslint@*' -o \
+        -name '@typescript-eslint*' -o \
+        -name 'jest@*' -o \
+        -name 'ts-jest@*' -o \
+        -name '@nestjs+cli@*' -o \
+        -name '@nestjs+schematics@*' -o \
+        -name '@nestjs+testing@*' -o \
+        -name 'webpack@*' -o \
+        -name '@esbuild*' -o \
+        -name 'playwright*' \
+    \) -exec rm -rf {} + 2>/dev/null || true
+
+# Copy dist files and remove the AI module
+COPY --from=builder /app/apps/api/dist ./apps/api/dist
+RUN rm -rf /app/apps/api/dist/proprietary/ai
+
+# ============================================
+# Runtime Base - scaffolding shared by both production variants
+# ============================================
+# Everything that does not depend on the app payload lives here so the two terminal
+# targets below differ only in which node_modules/dist they copy (builder vs cleanup)
+# and a handful of env defaults.
+FROM node:26-alpine AS runtime-base
 
 # Apply the latest Alpine security patches and drop the npm CLI bundled in the base
 # image. This image runs via `node` directly (deps are installed with pnpm at build
@@ -116,50 +195,20 @@ RUN apk upgrade --no-cache && \
 WORKDIR /app
 
 # Create the non-root runtime user up front (Docker Scout compliance) so the
-# COPY --chown instructions below can set ownership as files are written. This
-# avoids a trailing `chown -R /app`, which would duplicate the entire ~550MB
-# node_modules into a second layer just to change ownership bits.
+# COPY --chown instructions in the terminal stages can set ownership as files are
+# written. This avoids a trailing `chown -R /app`, which would duplicate the entire
+# ~550MB node_modules into a second layer just to change ownership bits.
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 --ingroup nodejs betterdb
+
+# Install RedisShake binary for migration execution. Built from source in the
+# redisshake-builder stage with a current Go toolchain so the embedded Go stdlib
+# is patched (the upstream prebuilt release ships an EOL Go 1.21.13 runtime).
+COPY --chmod=755 --from=redisshake-builder /out/redis-shake /usr/local/bin/redis-shake
 
 # Set APP_VERSION from build argument (re-declares the global ARG for this stage)
 ARG APP_VERSION
 ENV APP_VERSION=$APP_VERSION
-
-# Copy pre-built node_modules from builder (includes native modules already compiled)
-COPY --chown=betterdb:nodejs --from=builder /app/node_modules ./node_modules
-COPY --chown=betterdb:nodejs --from=builder /app/apps/api/node_modules ./apps/api/node_modules
-COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
-
-# Copy package files for module resolution
-COPY --chown=betterdb:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY --chown=betterdb:nodejs apps/api/package.json ./apps/api/
-COPY --chown=betterdb:nodejs packages/shared/package.json ./packages/shared/
-
-# Copy built backend
-COPY --chown=betterdb:nodejs --from=builder /app/apps/api/dist ./apps/api/dist
-
-# Copy built frontend to be served by backend
-COPY --chown=betterdb:nodejs --from=builder /app/apps/web/dist ./apps/api/public
-
-# Copy shared package dist
-COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/dist ./packages/shared/dist
-
-# Copy the agent-memory dependency chain that api imports at runtime. valkey-search-kit
-# has no production deps, so it needs no node_modules.
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/package.json ./packages/agent-memory/
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/dist ./packages/agent-memory/dist
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/node_modules ./packages/agent-memory/node_modules
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/package.json ./packages/agent-cache/
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/dist ./packages/agent-cache/dist
-COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/node_modules ./packages/agent-cache/node_modules
-COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
-COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/dist ./packages/valkey-search-kit/dist
-
-# Create symlink for @proprietary path alias to work at runtime. Created as root
-# (read-only at runtime); the app user only needs to traverse/read these symlinks.
-RUN mkdir -p /app/node_modules/@proprietary && \
-    ln -s /app/apps/api/dist/proprietary/* /app/node_modules/@proprietary/
 
 # PostHog telemetry (backend, runtime)
 ARG POSTHOG_API_KEY
@@ -167,25 +216,10 @@ ARG POSTHOG_HOST=https://eu.i.posthog.com
 ENV POSTHOG_API_KEY=$POSTHOG_API_KEY
 ENV POSTHOG_HOST=$POSTHOG_HOST
 
-# Set environment defaults (only non-database config)
+# Environment defaults common to both variants
 ENV NODE_ENV=production
 ENV PORT=3001
 ENV STORAGE_TYPE=memory
-
-# Install RedisShake binary for migration execution. Built from source in the
-# redisshake-builder stage with a current Go toolchain so the embedded Go stdlib
-# is patched (the upstream prebuilt release ships an EOL Go 1.21.13 runtime).
-COPY --chmod=755 --from=redisshake-builder /out/redis-shake /usr/local/bin/redis-shake
-
-# Make /app writable by the runtime user so features that create new paths under
-# it at runtime work - notably RedisShake's default relative `data` dir (it is
-# spawned with cwd=/app) and sqlite/license files. This chowns only the /app
-# directory node plus a pre-created data dir (non-recursive), so it does NOT
-# duplicate node_modules the way `chown -R /app` did.
-RUN mkdir -p /app/data && chown betterdb:nodejs /app /app/data
-
-# Drop to the non-root user (created above) for the runtime process.
-USER betterdb
 
 # Expose port (can be overridden with -e PORT=<port> at runtime)
 # Note: EXPOSE is documentation only - actual port binding happens via -p flag
@@ -200,3 +234,114 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Start the server
 CMD ["node", "apps/api/dist/apps/api/src/main.js"]
+
+# ------------------------------------------------------------------
+# Shared payload copy is expressed twice (once per terminal target)
+# because the node_modules/api-dist source differs (builder vs cleanup).
+# Everything else is inherited from runtime-base.
+# ------------------------------------------------------------------
+
+# ============================================
+# Production target: WITH AI features (the `<version>` / AI image)
+# Build with: --target production (required - this is NOT the default stage)
+# ============================================
+FROM runtime-base AS production
+
+# node_modules straight from builder (includes AI packages + native modules)
+COPY --chown=betterdb:nodejs --from=builder /app/node_modules ./node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/apps/api/node_modules ./apps/api/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
+
+# Package files for module resolution
+COPY --chown=betterdb:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --chown=betterdb:nodejs apps/api/package.json ./apps/api/
+COPY --chown=betterdb:nodejs packages/shared/package.json ./packages/shared/
+
+# Built backend (includes the AI proprietary module), frontend, and shared dist
+COPY --chown=betterdb:nodejs --from=builder /app/apps/api/dist ./apps/api/dist
+COPY --chown=betterdb:nodejs --from=builder /app/apps/web/dist ./apps/api/public
+COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/dist ./packages/shared/dist
+
+# agent-memory dependency chain that api imports at runtime. valkey-search-kit has
+# no production deps, so it needs no node_modules.
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/package.json ./packages/agent-memory/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/dist ./packages/agent-memory/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/node_modules ./packages/agent-memory/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/package.json ./packages/agent-cache/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/dist ./packages/agent-cache/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/node_modules ./packages/agent-cache/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/dist ./packages/valkey-search-kit/dist
+
+# Create symlink for @proprietary path alias to work at runtime. Created as root
+# (read-only at runtime); the app user only needs to traverse/read these symlinks.
+RUN mkdir -p /app/node_modules/@proprietary && \
+    ln -s /app/apps/api/dist/proprietary/* /app/node_modules/@proprietary/
+
+# Make /app writable by the runtime user so features that create new paths under
+# it at runtime work - notably RedisShake's default relative `data` dir (it is
+# spawned with cwd=/app) and sqlite/license files. This chowns only the /app
+# directory node plus a pre-created data dir (non-recursive), so it does NOT
+# duplicate node_modules the way `chown -R /app` did.
+RUN mkdir -p /app/data && chown betterdb:nodejs /app /app/data
+
+# Drop to the non-root user (created in runtime-base) for the runtime process.
+USER betterdb
+
+# ============================================
+# Production target: WITHOUT AI features (the `latest` / no-ai image)
+# Build with: --target production-no-ai, OR a bare `docker build` with no
+# --target: this is the LAST stage, so it is Docker's default target. Keep it
+# last - `latest` on Docker Hub tracks this no-ai image (see docker-publish.yml).
+# ============================================
+FROM runtime-base AS production-no-ai
+
+# CLEANED node_modules from the cleanup stage (AI packages + devDeps stripped)
+COPY --chown=betterdb:nodejs --from=cleanup /app/node_modules ./node_modules
+COPY --chown=betterdb:nodejs --from=cleanup /app/apps/api/node_modules ./apps/api/node_modules
+COPY --chown=betterdb:nodejs --from=cleanup /app/packages/shared/node_modules ./packages/shared/node_modules
+
+# Package files for module resolution
+COPY --chown=betterdb:nodejs package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --chown=betterdb:nodejs apps/api/package.json ./apps/api/
+COPY --chown=betterdb:nodejs packages/shared/package.json ./packages/shared/
+
+# Built backend from cleanup (AI module already removed); frontend + shared dist
+# come straight from builder (identical to the AI image).
+COPY --chown=betterdb:nodejs --from=cleanup /app/apps/api/dist ./apps/api/dist
+COPY --chown=betterdb:nodejs --from=builder /app/apps/web/dist ./apps/api/public
+COPY --chown=betterdb:nodejs --from=builder /app/packages/shared/dist ./packages/shared/dist
+
+# agent-memory dependency chain that api imports at runtime. valkey-search-kit has
+# no dependencies so it carries no node_modules of its own.
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/package.json ./packages/agent-memory/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/dist ./packages/agent-memory/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-memory/node_modules ./packages/agent-memory/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/package.json ./packages/agent-cache/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/dist ./packages/agent-cache/dist
+COPY --chown=betterdb:nodejs --from=builder /app/packages/agent-cache/node_modules ./packages/agent-cache/node_modules
+COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/package.json ./packages/valkey-search-kit/
+COPY --chown=betterdb:nodejs --from=builder /app/packages/valkey-search-kit/dist ./packages/valkey-search-kit/dist
+
+# Create symlink for @proprietary path alias (ai module already excluded). Created
+# as root (read-only at runtime); the app user only needs to read these symlinks.
+RUN mkdir -p /app/node_modules/@proprietary && \
+    for dir in /app/apps/api/dist/proprietary/*/; do \
+        [ -d "$dir" ] || continue; \
+        ln -s "$dir" /app/node_modules/@proprietary/; \
+    done
+
+# no-ai runtime env: database defaults, AI disabled, and NODE_PATH for workspace
+# module resolution.
+ENV DB_HOST=localhost
+ENV DB_PORT=6379
+ENV DB_TYPE=auto
+ENV DB_USERNAME=default
+ENV AI_ENABLED=false
+ENV NODE_PATH=/app/node_modules
+
+# Make /app writable by the runtime user (see the production target above).
+RUN mkdir -p /app/data && chown betterdb:nodejs /app /app/data
+
+# Drop to the non-root user (created in runtime-base) for the runtime process.
+USER betterdb
