@@ -1386,7 +1386,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         `or rescue.`;
 
     return {
-      id: `${ctx.connectionId}-client-lockout-${finding.level}-${timestamp}`,
+      id: randomUUID(),
       timestamp,
       metricType: MetricType.CLIENT_LOCKOUT_RISK,
       anomalyType: AnomalyType.SPIKE,
