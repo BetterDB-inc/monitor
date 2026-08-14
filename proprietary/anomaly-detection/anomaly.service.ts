@@ -1470,9 +1470,6 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         state = createAuthFailureState();
         this.authFailureState.set(ctx.connectionId, state);
       }
-      if (entries.length === 0) {
-        return;
-      }
 
       const sources = observeAuthFailures(
         state,

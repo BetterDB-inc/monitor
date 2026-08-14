@@ -85,9 +85,6 @@ export interface AuthFailureSource {
   usernames: string[];
   /** Every ACL LOG reason seen from this address in the window, with counts. */
   reasonBreakdown: Record<string, number>;
-  /** Epoch seconds of the earliest and latest capture in the window. */
-  firstSeenAt: number;
-  lastSeenAt: number;
 }
 
 export interface AuthFailureState {
@@ -243,8 +240,6 @@ export function observeAuthFailures(
       authFailures: number;
       usernames: Map<string, number>;
       reasonBreakdown: Record<string, number>;
-      firstSeenAt: number;
-      lastSeenAt: number;
     }
   >();
 
@@ -258,8 +253,6 @@ export function observeAuthFailures(
       authFailures: 0,
       usernames: new Map<string, number>(),
       reasonBreakdown: {},
-      firstSeenAt: entry.capturedAt,
-      lastSeenAt: entry.capturedAt,
     };
 
     const count = windowCount;
@@ -268,8 +261,6 @@ export function observeAuthFailures(
       bucket.authFailures += count;
       bucket.usernames.set(entry.username, (bucket.usernames.get(entry.username) ?? 0) + count);
     }
-    bucket.firstSeenAt = Math.min(bucket.firstSeenAt, entry.capturedAt);
-    bucket.lastSeenAt = Math.max(bucket.lastSeenAt, entry.capturedAt);
 
     byAddress.set(address, bucket);
   }
@@ -290,8 +281,6 @@ export function observeAuthFailures(
           return username;
         }),
       reasonBreakdown: bucket.reasonBreakdown,
-      firstSeenAt: bucket.firstSeenAt,
-      lastSeenAt: bucket.lastSeenAt,
     });
   }
 
