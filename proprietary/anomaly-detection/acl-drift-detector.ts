@@ -68,9 +68,46 @@ export interface AclDrift {
   nodes: AclDriftNodeDigest[];
 }
 
+/**
+ * Splits an `ACL LIST` line into tokens, keeping a selector `(...)` together as
+ * ONE token.
+ *
+ * Selectors (Redis 7+/Valkey) render with spaces inside the parentheses —
+ * `(%R~key2 +set)` — so a plain whitespace split fragments them into `(%R~key2`
+ * and `+set)`. Sorting those fragments mixes them with the user's top-level
+ * rules, and two servers rendering the same selector in a different position
+ * digest differently: a false ACL_DRIFT on every deployment that uses selectors.
+ */
+function tokenizeAclLine(line: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let depth = 0;
+
+  for (const char of line ?? '') {
+    if (char === '(') {
+      depth += 1;
+    }
+    if (char === ')' && depth > 0) {
+      depth -= 1;
+    }
+    if (/\s/.test(char) && depth === 0) {
+      if (current !== '') {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current !== '') {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
 /** Username and normalized rule text of one `ACL LIST` line. */
 export function parseAclLine(line: string): { username: string; rules: string[] } | null {
-  const tokens = (line ?? '').trim().split(/\s+/).filter(Boolean);
+  const tokens = tokenizeAclLine(line);
   if (tokens.length < 2 || tokens[0].toLowerCase() !== 'user') {
     return null;
   }

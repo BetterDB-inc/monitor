@@ -1476,6 +1476,22 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private static readonly ACL_DENIED_BACKOFF_MS = 5 * 60_000;
 
   /**
+   * Whether an `ACL LIST` failure is a permissions/support problem rather than a
+   * transient one. Only these earn the long backoff: they will not resolve on
+   * their own, whereas a LOADING or timeout will.
+   */
+  private static isAclPermissionError(message: string): boolean {
+    const normalized = message.toUpperCase();
+    return (
+      normalized.includes('NOPERM') ||
+      normalized.includes('WRONGPASS') ||
+      normalized.includes('NOAUTH') ||
+      normalized.includes('UNKNOWN COMMAND') ||
+      normalized.includes('UNKNOWN SUBCOMMAND')
+    );
+  }
+
+  /**
    * Reads this connection's ACL fingerprint into `aclSnapshot`, on the same slow
    * recheck countdown as the config snapshot. Returns the previous digest when
    * the ruleset changed this poll, so the caller can confirm a reload.
@@ -1516,13 +1532,24 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     try {
       aclList = await ctx.client.getAclList();
     } catch (aclErr) {
-      // No ACL read permission (or the command is unavailable): the consistency
-      // check cannot run for this node. Say so once rather than failing the poll
-      // or, worse, silently reporting a group as consistent that we cannot see.
+      const message = aclErr instanceof Error ? aclErr.message : String(aclErr);
+
+      // A transient failure (LOADING during a failover, a timeout) says nothing
+      // about our permissions. Keep the last-known slice and retry on the normal
+      // cadence, as refreshConfigSnapshot does — dropping it would clear active
+      // drift and re-alert it as new once the node came back.
+      if (!AnomalyService.isAclPermissionError(message)) {
+        this.logger.debug(`ACL LIST failed for ${ctx.connectionName}: ${message}`);
+        return null;
+      }
+
+      // No ACL read permission: the consistency check cannot run for this node.
+      // Say so once rather than failing the poll or, worse, silently reporting a
+      // group as consistent that we cannot see.
       if (!this.aclUnverified.has(ctx.connectionId)) {
         this.aclUnverified.add(ctx.connectionId);
         this.logger.warn(
-          `ACL drift check unverified for ${ctx.connectionName}: ${aclErr instanceof Error ? aclErr.message : aclErr}. ` +
+          `ACL drift check unverified for ${ctx.connectionName}: ${message}. ` +
             `Grant the monitoring user permission to run ACL LIST to enable ACL consistency checks.`,
         );
       }

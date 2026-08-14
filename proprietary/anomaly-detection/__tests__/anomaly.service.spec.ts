@@ -5387,6 +5387,23 @@ describe('AnomalyService', () => {
       expect(dbClient.getAclList).toHaveBeenCalledTimes(2);
     });
 
+    it('keeps the last-known slice when the ACL read fails transiently', async () => {
+      await poll();
+      expect((service as any).aclSnapshot.has('conn-1')).toBe(true);
+
+      // LOADING during a failover says nothing about our permissions. Dropping
+      // the slice would clear active drift and re-alert it as new on recovery.
+      (dbClient.getAclList as jest.Mock).mockRejectedValue(
+        new Error('LOADING Valkey is loading the dataset in memory'),
+      );
+      (service as any).aclDriftRecheck.set('conn-1', 0);
+      await poll();
+
+      expect((service as any).aclSnapshot.has('conn-1')).toBe(true);
+      expect((service as any).aclDeniedUntil.has('conn-1')).toBe(false);
+      expect((service as any).aclUnverified.has('conn-1')).toBe(false);
+    });
+
     it('resumes normal cadence once the ACL read succeeds again', async () => {
       (dbClient.getAclList as jest.Mock).mockRejectedValue(new Error('NOPERM'));
       await poll();

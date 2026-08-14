@@ -207,3 +207,36 @@ describe('aclDriftSignature', () => {
     expect(aclDriftSignature(drift)).toContain('replid:abc');
   });
 });
+
+describe('parseAclLine — selectors', () => {
+  const WITH_SELECTOR = 'user alice on #a3b1 ~key1 +get (%R~key2 +set +get)';
+
+  it('keeps a selector together instead of splitting it on spaces', () => {
+    expect(parseAclLine(WITH_SELECTOR)).toEqual({
+      username: 'alice',
+      rules: ['on', '#a3b1', '~key1', '+get', '(%R~key2 +set +get)'],
+    });
+  });
+
+  it('digests a selector identically wherever it appears in the line', () => {
+    const reordered = 'user alice on (%R~key2 +set +get) #a3b1 +get ~key1';
+    expect(nodeAclDigest([WITH_SELECTOR]).digest).toBe(nodeAclDigest([reordered]).digest);
+  });
+
+  it('still distinguishes a genuinely different selector', () => {
+    const wider = 'user alice on #a3b1 ~key1 +get (%RW~key2 +set +get)';
+    expect(nodeAclDigest([WITH_SELECTOR]).digest).not.toBe(nodeAclDigest([wider]).digest);
+  });
+
+  it('does not report drift between peers that render selectors in a different order', () => {
+    const reordered = 'user alice on (%R~key2 +set +get) #a3b1 +get ~key1';
+    const nodes = [nodeFrom('conn-a', [WITH_SELECTOR]), nodeFrom('conn-b', [reordered])];
+
+    expect(detectAclDrift(nodes)).toEqual([]);
+  });
+
+  it('handles multiple selectors on one line', () => {
+    const two = 'user bob on ~a +get (%R~x +get) (%W~y +set)';
+    expect(parseAclLine(two)?.rules).toEqual(['on', '~a', '+get', '(%R~x +get)', '(%W~y +set)']);
+  });
+});
