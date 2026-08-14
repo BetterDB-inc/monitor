@@ -252,6 +252,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // Connections whose ACL read is currently denied — reported once, then held so
   // an unreadable ACL surface doesn't alert every poll.
   private aclUnverified = new Set<string>();
+  // Earliest timestamp at which a denied ACL LIST may be retried, per connection.
+  private aclDeniedUntil = new Map<string, number>();
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
@@ -591,6 +593,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.aclSnapshot.delete(connectionId);
     this.aclDriftRecheck.delete(connectionId);
     this.aclUnverified.delete(connectionId);
+    this.aclDeniedUntil.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
@@ -1466,19 +1469,39 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private static readonly ACL_DRIFT_RECHECK_POLLS = 60;
 
   /**
+   * How long a denied `ACL LIST` is left alone before retrying. Missing `+acl`
+   * on the monitoring user is a configuration decision, so retrying on the poll
+   * cadence would hammer the server and pollute its own ACL LOG for nothing.
+   */
+  private static readonly ACL_DENIED_BACKOFF_MS = 5 * 60_000;
+
+  /**
    * Reads this connection's ACL fingerprint into `aclSnapshot`, on the same slow
    * recheck countdown as the config snapshot. Returns the previous digest when
    * the ruleset changed this poll, so the caller can confirm a reload.
    *
-   * A denied or failed `ACL LIST` leaves the snapshot ENTIRELY unchanged —
-   * including its groupKey. Rewriting the group from the current replid on a
-   * failed read would move the node into a new group, clear the old drift
-   * signature, and re-fire the same mismatch as a brand-new alert.
+   * A denied or failed `ACL LIST` DROPS this connection's slice. Keeping a stale
+   * slice would be worse than useless: the group would be reported as consistent
+   * on the strength of a reading we can no longer take. The node simply stops
+   * participating in the comparison until the read succeeds again.
+   *
+   * A denial also opens a backoff window. The monitoring user lacking `+acl` is a
+   * permanent misconfiguration, not a transient error, and without the window
+   * every poll would re-issue a NOPERM `ACL LIST` — once a second by default.
+   * Each denial writes an ACL LOG entry and bumps `acl_access_denied_cmd`, which
+   * this very service then reports as ACL denials: a monitor manufacturing the
+   * anomalies it alerts on.
    */
   private async refreshAclSnapshot(
     ctx: ConnectionContext,
     replid: string,
+    timestamp: number,
   ): Promise<{ previousDigest: string | null } | null> {
+    const deniedUntil = this.aclDeniedUntil.get(ctx.connectionId);
+    if (deniedUntil !== undefined && timestamp < deniedUntil) {
+      return null;
+    }
+
     const groupKey = `replid:${replid}`;
     const cached = this.aclSnapshot.get(ctx.connectionId);
     const countdown = this.aclDriftRecheck.get(ctx.connectionId) ?? 0;
@@ -1504,10 +1527,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         );
       }
       this.aclSnapshot.delete(ctx.connectionId);
+      this.aclDeniedUntil.set(ctx.connectionId, timestamp + AnomalyService.ACL_DENIED_BACKOFF_MS);
       return null;
     }
 
     this.aclUnverified.delete(ctx.connectionId);
+    this.aclDeniedUntil.delete(ctx.connectionId);
 
     const { digest, userDigests } = nodeAclDigest(aclList);
     const previousDigest = cacheUsable && cached.digest !== digest ? cached.digest : null;
@@ -1550,7 +1575,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       if (!replid || !isReplicating) {
         this.aclSnapshot.delete(ctx.connectionId);
       } else {
-        const refreshed = await this.refreshAclSnapshot(ctx, replid);
+        const refreshed = await this.refreshAclSnapshot(ctx, replid, timestamp);
         if (refreshed?.previousDigest) {
           await this.addAnomaly(
             this.buildAclReloadEvent(ctx, timestamp, refreshed.previousDigest),

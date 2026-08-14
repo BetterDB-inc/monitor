@@ -5252,9 +5252,17 @@ describe('AnomalyService', () => {
       };
     }
 
+    let now: number;
+
     beforeEach(() => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(replInfo());
       dbClient.getAclList = jest.fn().mockResolvedValue([DEFAULT_LINE, APP_LINE]);
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
     });
 
     const driftEvents = () => {
@@ -5360,6 +5368,37 @@ describe('AnomalyService', () => {
       expect((service as any).aclSnapshot.has('conn-1')).toBe(false);
     });
 
+    it('backs off instead of re-issuing a denied ACL LIST every poll', async () => {
+      (dbClient.getAclList as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+
+      await poll();
+      expect(dbClient.getAclList).toHaveBeenCalledTimes(1);
+
+      // Without a backoff this would issue one NOPERM ACL LIST per poll, each
+      // writing an ACL LOG entry this same service then reports.
+      for (let i = 0; i < 5; i++) {
+        now += 1_000;
+        await poll();
+      }
+      expect(dbClient.getAclList).toHaveBeenCalledTimes(1);
+
+      now += 5 * 60_000 + 1;
+      await poll();
+      expect(dbClient.getAclList).toHaveBeenCalledTimes(2);
+    });
+
+    it('resumes normal cadence once the ACL read succeeds again', async () => {
+      (dbClient.getAclList as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+      await poll();
+
+      (dbClient.getAclList as jest.Mock).mockResolvedValue([DEFAULT_LINE, APP_LINE]);
+      now += 5 * 60_000 + 1;
+      await poll();
+
+      expect((service as any).aclDeniedUntil.has('conn-1')).toBe(false);
+      expect((service as any).aclSnapshot.has('conn-1')).toBe(true);
+    });
+
     it('clears ACL state on connection removal', async () => {
       await poll();
       expect((service as any).aclSnapshot.has('conn-1')).toBe(true);
@@ -5369,6 +5408,7 @@ describe('AnomalyService', () => {
       expect((service as any).aclSnapshot.has('conn-1')).toBe(false);
       expect((service as any).aclDriftRecheck.has('conn-1')).toBe(false);
       expect((service as any).aclUnverified.has('conn-1')).toBe(false);
+      expect((service as any).aclDeniedUntil.has('conn-1')).toBe(false);
     });
   });
 });
