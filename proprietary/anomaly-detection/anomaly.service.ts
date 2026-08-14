@@ -1585,8 +1585,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           // Signature shape is `reason|masterName|nodeName|endpoint`.
           return unreadMasters.has(signature.split('|')[1] ?? '');
         },
-        buildEvent: (drift, signature) => {
-          return this.buildSentinelDriftEvent(ctx, timestamp, drift, signature);
+        buildEvent: (drift) => {
+          return this.buildSentinelDriftEvent(ctx, timestamp, drift);
         },
       });
     } catch (sentinelErr) {
@@ -1600,11 +1600,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     ctx: ConnectionContext,
     timestamp: number,
     drift: SentinelDrift,
-    signature: string,
   ): AnomalyEvent {
     if (drift.reason === 'stale_master_pointer') {
       return {
-        id: `${ctx.connectionId}-sentinel-drift-${signature}-${timestamp}`,
+        id: randomUUID(),
         timestamp,
         metricType: MetricType.SENTINEL_ENDPOINT_DRIFT,
         anomalyType: AnomalyType.SPIKE,
@@ -1642,7 +1641,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           `announcement) consistently across the group and reconcile the Sentinel config.`;
 
     return {
-      id: `${ctx.connectionId}-sentinel-drift-${signature}-${timestamp}`,
+      id: randomUUID(),
       timestamp,
       metricType: MetricType.SENTINEL_ENDPOINT_DRIFT,
       anomalyType: AnomalyType.SPIKE,

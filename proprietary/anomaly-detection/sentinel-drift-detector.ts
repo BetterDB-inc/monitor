@@ -88,16 +88,21 @@ function endpointOf(node: SentinelNodeInfo): string {
 }
 
 /**
- * True when this group is clearly using hostname announcement somewhere: either a
- * member is carried under a hostname, or a replica is configured to follow one.
+ * True when Sentinel itself is recording members under hostnames.
+ *
+ * Only Sentinel's OWN `ip` field counts. `master-host` is the replica's
+ * `REPLICAOF` target as reported by its INFO, not an address Sentinel resolved —
+ * an ordinary IP-based Sentinel whose replicas were pointed at the primary by DNS
+ * carries a hostname there, and treating that as announcement would classify the
+ * whole deployment as mixed and alert every member.
+ *
+ * The cost of the narrower signal is that a group where EVERY address has already
+ * drifted to a raw IP is indistinguishable from one that never used hostnames.
+ * Silence is the right answer there: nothing in the view says otherwise.
  */
 function hostnamesInUse(master: SentinelNodeInfo, replicas: SentinelNodeInfo[]): boolean {
-  const members = [master, ...replicas];
-  for (const member of members) {
+  for (const member of [master, ...replicas]) {
     if (isHostname(member.ip)) {
-      return true;
-    }
-    if (member.masterHost !== undefined && isHostname(member.masterHost)) {
       return true;
     }
   }
@@ -109,9 +114,6 @@ function sampleHostname(master: SentinelNodeInfo, replicas: SentinelNodeInfo[]):
   for (const member of [master, ...replicas]) {
     if (isHostname(member.ip)) {
       return member.ip;
-    }
-    if (member.masterHost !== undefined && isHostname(member.masterHost)) {
-      return member.masterHost;
     }
   }
   return '';

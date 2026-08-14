@@ -99,7 +99,11 @@ describe('detectSentinelDrift', () => {
     expect(findings[0].role).toBe('master');
   });
 
-  it('detects hostname usage from master-host alone, when every ip has drifted', () => {
+  it('stays silent when every ip has drifted, since nothing says hostnames were used', () => {
+    // master-host is the replica's REPLICAOF target from INFO, not an address
+    // Sentinel resolved, so a DNS-based replicaof is not evidence of
+    // announcement. A fully-drifted group is indistinguishable from one that
+    // never used hostnames — silence is the honest answer.
     const master = node({ name: 'mymaster', ip: '10.244.3.1', flags: ['master'] });
     const replicas = [
       node({
@@ -111,8 +115,7 @@ describe('detectSentinelDrift', () => {
       }),
     ];
 
-    const findings = detectSentinelDrift(master, replicas);
-    expect(findings.map((f) => f.endpoint).sort()).toEqual(['10.244.3.1:6379', '10.244.3.7:6379']);
+    expect(detectSentinelDrift(master, replicas)).toEqual([]);
   });
 
   it('flags a replica configured to follow itself', () => {
