@@ -4856,4 +4856,133 @@ describe('AnomalyService', () => {
       expect((service as any).activeGhostMembers.has('conn-1')).toBe(false);
     });
   });
+
+  // ─── ghost membership Layer 2: forget-rejoin (valkey#2788) ─────────────────
+
+  describe('ghost membership — forget rejoin', () => {
+    const clusterInfoResponse = {
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        cluster_enabled: '1',
+      },
+    };
+
+    function rnode(id: string, address: string, flags: string[]): ClusterNode {
+      return {
+        id,
+        address,
+        flags,
+        master: '',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+      };
+    }
+
+    const nodeA = rnode('primaryAAAA', '10.0.0.1:6379@16379', ['myself', 'master']);
+    const nodeB = rnode('primaryBBBB', '10.0.0.2:6379@16379', ['master']);
+    const nodeC = rnode('removedCCCC', '10.0.0.3:6379@16379', ['master']);
+
+    let now: number;
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(clusterInfoResponse);
+      dbClient.getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue([nodeA, nodeB, nodeC]);
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const rejoinEvents = () => {
+      return service.getRecentEvents().filter((e) => {
+        return (
+          e.metricType === MetricType.GHOST_MEMBERSHIP && e.message.includes('reintroduced itself')
+        );
+      });
+    };
+
+    async function pollWith(nodes: ClusterNode[], stepMs = 10_000): Promise<void> {
+      now += stepMs;
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(nodes);
+      await poll();
+    }
+
+    it('emits a WARNING when a forgotten node reintroduces itself', async () => {
+      await pollWith([nodeA, nodeB, nodeC]);
+      await pollWith([nodeA, nodeB]);
+      await pollWith([nodeA, nodeB]);
+      await pollWith([nodeA, nodeB, nodeC]);
+
+      const events = rejoinEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('2788');
+      expect(events[0].message).toContain('CLUSTER FORGET removedCCCC');
+      expect(events[0].message).toContain('EVERY remaining node');
+    });
+
+    it('stays silent for a node that only flapped without leaving the view', async () => {
+      await pollWith([nodeA, nodeB, nodeC]);
+      await pollWith([
+        nodeA,
+        nodeB,
+        rnode('removedCCCC', '10.0.0.3:6379@16379', ['master', 'fail']),
+      ]);
+      await pollWith([
+        nodeA,
+        nodeB,
+        rnode('removedCCCC', '10.0.0.3:6379@16379', ['master', 'fail']),
+      ]);
+      await pollWith([nodeA, nodeB, nodeC]);
+
+      expect(rejoinEvents()).toEqual([]);
+    });
+
+    it('stays silent for a genuinely new node joining the cluster', async () => {
+      await pollWith([nodeA, nodeB]);
+      await pollWith([nodeA, nodeB]);
+      await pollWith([nodeA, nodeB, nodeC]);
+
+      expect(rejoinEvents()).toEqual([]);
+    });
+
+    it('does not treat a failed CLUSTER NODES fetch as a mass departure', async () => {
+      await pollWith([nodeA, nodeB, nodeC]);
+
+      now += 10_000;
+      (dbClient.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTER NODES failed'));
+      await poll();
+      now += 10_000;
+      (dbClient.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTER NODES failed'));
+      await poll();
+
+      await pollWith([nodeA, nodeB, nodeC]);
+
+      expect(rejoinEvents()).toEqual([]);
+    });
+
+    it('clears membership history on connection removal', async () => {
+      await pollWith([nodeA, nodeB, nodeC]);
+      expect((service as any).ghostHistories.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).ghostHistories.has('conn-1')).toBe(false);
+    });
+  });
 });
