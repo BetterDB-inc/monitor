@@ -141,6 +141,7 @@ const METRIC_LABELS: Record<string, string> = {
   load_saturation: 'Load Saturation',
   fork_memory_risk: 'Fork Memory Risk',
   config_drift: 'Config Drift',
+  acl_drift: 'ACL Drift',
   hostname_staleness: 'Hostname Staleness',
   large_reply_pressure: 'Large-Reply Pressure',
   ghost_membership: 'Ghost Membership',

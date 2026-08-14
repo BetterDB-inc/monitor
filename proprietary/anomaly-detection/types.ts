@@ -58,6 +58,8 @@ export enum MetricType {
   SLOWLOG_COUNT = 'slowlog_count',
   /** A curated critical config key (maxmemory, maxmemory-policy, ...) differs across nodes in the same replication group (valkey#1193) — state-based. */
   CONFIG_DRIFT = 'config_drift',
+  /** ACL ruleset digest differs across nodes in the same replication group, or changed unexpectedly on one node (valkey#4355) — state-based. */
+  ACL_DRIFT = 'acl_drift',
 }
 
 /**
@@ -85,6 +87,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.CLIENT_SATURATION,
   MetricType.CLIENT_LOCKOUT_RISK,
   MetricType.AUTH_FAILURE_BURST,
+  MetricType.ACL_DRIFT,
   MetricType.EVICTED_CLIENTS,
   MetricType.RAFT_HEALTH,
   MetricType.FAILOVER_CHURN,

@@ -61,6 +61,13 @@ import {
   evaluateClientLockout,
 } from './client-lockout-detector';
 import {
+  AclDrift,
+  AclDriftNode,
+  aclDriftSignature,
+  detectAclDrift,
+  nodeAclDigest,
+} from './acl-drift-detector';
+import {
   AUTH_FAILURE_MIN_COUNT,
   AUTH_FAILURE_QUERY_LIMIT,
   AUTH_FAILURE_WINDOW_MS,
@@ -232,6 +239,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // last time the audit-store window was scanned for this connection.
   private authFailureState = new Map<string, AuthFailureState>();
   private authFailureLastScan = new Map<string, number>();
+  // ACL drift (valkey#4355): this connection's last-known ACL fingerprint, the
+  // shared snapshot the cross-node comparison runs over. Same "shared snapshot,
+  // no fan-out" shape as configSnapshot.
+  private aclSnapshot = new Map<
+    string,
+    { groupKey: string; name?: string; digest: string; userDigests: Record<string, string> }
+  >();
+  private aclDriftRecheck = new Map<string, number>();
+  // Group-level dedupe (a drift is a property of the GROUP, not a connection).
+  private activeAclDriftSignatures = new Set<string>();
+  // Connections whose ACL read is currently denied — reported once, then held so
+  // an unreadable ACL surface doesn't alert every poll.
+  private aclUnverified = new Set<string>();
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
@@ -568,6 +588,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.clientLockoutState.delete(connectionId);
     this.authFailureState.delete(connectionId);
     this.authFailureLastScan.delete(connectionId);
+    this.aclSnapshot.delete(connectionId);
+    this.aclDriftRecheck.delete(connectionId);
+    this.aclUnverified.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
@@ -1208,6 +1231,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // polling ACL LOG a second time.
       await this.detectAuthFailureBurst(ctx, timestamp);
 
+      // Cross-node ACL drift + live-reload confirmation (valkey-io/valkey#4355):
+      // one node in a replication group serving a different ruleset than its
+      // peers, or a node whose ruleset changed. Same shared-snapshot shape as
+      // config drift — no fan-out, so a hung peer cannot stall this poll.
+      await this.detectAclDrift(info, ctx, timestamp);
+
       // Cross-node config drift (valkey-io/valkey#1193): CONFIG SET only ever
       // applies to the single node it's sent to today, so nodes in the same
       // replication group can silently drift on a critical setting (e.g. one
@@ -1423,6 +1452,221 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         `\`maxmemory-clients\`), hunt the connection leak or storm behind the climb, or — where ` +
         `available — reserve admin capacity with \`priority-net-sources\`/\`priority-maxclients\` ` +
         `so the control plane keeps a way in.`,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+  }
+
+  /**
+   * Polls between `ACL LIST` reads. ACLs change only when an operator (or their
+   * controller) changes them, so re-reading every poll would spend a command per
+   * second on a signal that moves on a scale of days. Drift is still EVALUATED
+   * every poll — only the fetch is throttled.
+   */
+  private static readonly ACL_DRIFT_RECHECK_POLLS = 60;
+
+  /**
+   * Reads this connection's ACL fingerprint into `aclSnapshot`, on the same slow
+   * recheck countdown as the config snapshot. Returns the previous digest when
+   * the ruleset changed this poll, so the caller can confirm a reload.
+   *
+   * A denied or failed `ACL LIST` leaves the snapshot ENTIRELY unchanged —
+   * including its groupKey. Rewriting the group from the current replid on a
+   * failed read would move the node into a new group, clear the old drift
+   * signature, and re-fire the same mismatch as a brand-new alert.
+   */
+  private async refreshAclSnapshot(
+    ctx: ConnectionContext,
+    replid: string,
+  ): Promise<{ previousDigest: string | null } | null> {
+    const groupKey = `replid:${replid}`;
+    const cached = this.aclSnapshot.get(ctx.connectionId);
+    const countdown = this.aclDriftRecheck.get(ctx.connectionId) ?? 0;
+    const cacheUsable = cached !== undefined && cached.groupKey === groupKey;
+
+    if (cacheUsable && countdown > 0) {
+      this.aclDriftRecheck.set(ctx.connectionId, countdown - 1);
+      return { previousDigest: null };
+    }
+
+    let aclList: string[];
+    try {
+      aclList = await ctx.client.getAclList();
+    } catch (aclErr) {
+      // No ACL read permission (or the command is unavailable): the consistency
+      // check cannot run for this node. Say so once rather than failing the poll
+      // or, worse, silently reporting a group as consistent that we cannot see.
+      if (!this.aclUnverified.has(ctx.connectionId)) {
+        this.aclUnverified.add(ctx.connectionId);
+        this.logger.warn(
+          `ACL drift check unverified for ${ctx.connectionName}: ${aclErr instanceof Error ? aclErr.message : aclErr}. ` +
+            `Grant the monitoring user permission to run ACL LIST to enable ACL consistency checks.`,
+        );
+      }
+      this.aclSnapshot.delete(ctx.connectionId);
+      return null;
+    }
+
+    this.aclUnverified.delete(ctx.connectionId);
+
+    const { digest, userDigests } = nodeAclDigest(aclList);
+    const previousDigest = cacheUsable && cached.digest !== digest ? cached.digest : null;
+
+    this.aclSnapshot.set(ctx.connectionId, {
+      groupKey,
+      name: ctx.connectionName,
+      digest,
+      userDigests,
+    });
+    this.aclDriftRecheck.set(ctx.connectionId, AnomalyService.ACL_DRIFT_RECHECK_POLLS);
+    return { previousDigest };
+  }
+
+  /**
+   * ACL drift and live-reload confirmation (valkey-io/valkey#4355).
+   *
+   * Two findings share one metric because they answer the same operator
+   * question — "is this node serving the ruleset I think it is?":
+   *
+   *  - **Cross-node drift** (WARNING): nodes in one replication group disagree.
+   *    One node is enforcing different authorization than its peers, which shows
+   *    up as auth failures the moment a failover moves traffic to it.
+   *  - **Reload confirmation** (INFO): a single node's digest changed. Expected
+   *    right after an `ACL LOAD`; unexplained otherwise, and worth a look.
+   *
+   * Built the same "shared snapshot" way as config drift: no live fan-out to
+   * sibling nodes, so a hung peer can never stall this poll.
+   */
+  private async detectAclDrift(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    try {
+      const replid = info['master_replid'];
+      const roleStr = info['role'];
+      const isReplicating = roleStr === 'master' || roleStr === 'slave' || roleStr === 'replica';
+
+      if (!replid || !isReplicating) {
+        this.aclSnapshot.delete(ctx.connectionId);
+      } else {
+        const refreshed = await this.refreshAclSnapshot(ctx, replid);
+        if (refreshed?.previousDigest) {
+          await this.addAnomaly(
+            this.buildAclReloadEvent(ctx, timestamp, refreshed.previousDigest),
+            ctx,
+          );
+        }
+      }
+
+      const nodes: AclDriftNode[] = Array.from(this.aclSnapshot.entries()).map(
+        ([connectionId, snap]) => {
+          return {
+            connectionId,
+            name: snap.name,
+            groupKey: snap.groupKey,
+            digest: snap.digest,
+            userDigests: snap.userDigests,
+          };
+        },
+      );
+      const drifts = detectAclDrift(nodes);
+      const currentSignatures = new Set(drifts.map(aclDriftSignature));
+
+      // Reconciled SYNCHRONOUSLY (no await inside) for the same reason as config
+      // drift: this runs from EVERY connection's poll, those polls run
+      // concurrently, and they share activeAclDriftSignatures.
+      const newDrifts: AclDrift[] = [];
+      for (const drift of drifts) {
+        const signature = aclDriftSignature(drift);
+        if (this.activeAclDriftSignatures.has(signature)) {
+          continue;
+        }
+        this.activeAclDriftSignatures.add(signature);
+        newDrifts.push(drift);
+      }
+      for (const signature of this.activeAclDriftSignatures) {
+        if (!currentSignatures.has(signature)) {
+          this.activeAclDriftSignatures.delete(signature);
+        }
+      }
+
+      for (const drift of newDrifts) {
+        const event = this.buildAclDriftEvent(timestamp, drift);
+        this.logger.warn(`Anomaly detected: ${event.message}`);
+        // Attributed to the first node of the group, which is frequently NOT the
+        // connection whose poll ran this scan.
+        const attributedCtx = this.buildConnectionContext(drift.nodes[0].connectionId);
+        await this.addAnomaly(event, attributedCtx);
+      }
+    } catch (err) {
+      this.logger.debug(
+        `Failed to check ACL drift for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /**
+   * Cross-node ACL disagreement. Carries usernames and digests only — never rule
+   * bodies, which would put key patterns and password hashes into the anomaly
+   * store and webhook payloads.
+   */
+  private buildAclDriftEvent(timestamp: number, drift: AclDrift): AnomalyEvent {
+    const signature = aclDriftSignature(drift);
+    const nodeLabel = drift.nodes
+      .map((node) => {
+        return `${node.name ?? node.connectionId} = ${node.digest}`;
+      })
+      .join(', ');
+    const userLabel =
+      drift.usernames.length > 0 ? drift.usernames.join(', ') : 'no individually-named user';
+
+    return {
+      id: `acl-drift-${signature}-${timestamp}`,
+      timestamp,
+      metricType: MetricType.ACL_DRIFT,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: drift.nodes.length,
+      baseline: 1,
+      zScore: 0,
+      stdDev: 0,
+      threshold: 1,
+      message:
+        `WARNING: Nodes in the same replication group are serving different ACL rulesets ` +
+        `(${nodeLabel}). Users that differ: ${userLabel}. An ACL LOAD or CONFIG-managed push ` +
+        `applies per node, so one node can quietly keep an older ruleset (valkey#4355) — the ` +
+        `divergence only surfaces as auth failures once a failover moves traffic to it. ` +
+        `Re-run \`ACL LOAD\` on the lagging node, or reconcile its ACL file, then confirm the ` +
+        `digests match.`,
+      resolved: false,
+      connectionId: drift.nodes[0].connectionId,
+    };
+  }
+
+  /** Single-node ACL revision change — the reload-confirmation half of #4355. */
+  private buildAclReloadEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    previousDigest: string,
+  ): AnomalyEvent {
+    const current = this.aclSnapshot.get(ctx.connectionId)?.digest ?? 'unknown';
+    return {
+      id: `${ctx.connectionId}-acl-reload-${current}-${timestamp}`,
+      timestamp,
+      metricType: MetricType.ACL_DRIFT,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.INFO,
+      value: 1,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: 0,
+      message:
+        `INFO: The ACL ruleset on this node changed (digest ${previousDigest} → ${current}). ` +
+        `Expected right after an ACL LOAD or an ACL SETUSER; if nobody pushed a change, the ` +
+        `node adopted a ruleset you did not intend. Compare the digest against the group's ` +
+        `other nodes to confirm the whole group converged.`,
       resolved: false,
       connectionId: ctx.connectionId,
     };

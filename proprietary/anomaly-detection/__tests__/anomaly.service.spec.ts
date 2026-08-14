@@ -10,6 +10,7 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode } from '@app/common/types/metrics.types';
+import { nodeAclDigest } from '../acl-drift-detector';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
@@ -94,6 +95,7 @@ describe('AnomalyService', () => {
           acl_access_denied_auth: '0',
         },
       }),
+      getAclList: jest.fn().mockResolvedValue([]),
     };
 
     mockCtx = {
@@ -5222,6 +5224,151 @@ describe('AnomalyService', () => {
 
       expect((service as any).authFailureState.has('conn-1')).toBe(false);
       expect((service as any).authFailureLastScan.has('conn-1')).toBe(false);
+    });
+  });
+
+  // ─── ACL drift / reload confirmation (valkey#4355) ─────────────────────────
+
+  describe('ACL drift', () => {
+    const DEFAULT_LINE = 'user default on nopass ~* &* +@all';
+    const APP_LINE = 'user app on #a3b1 ~cache:* +@read';
+    const APP_LINE_WIDER = 'user app on #a3b1 ~cache:* ~secret:* +@read';
+
+    function replInfo(replid = 'shared-replid') {
+      return {
+        server: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+        replication: { role: 'master', master_replid: replid },
+      };
+    }
+
+    beforeEach(() => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(replInfo());
+      dbClient.getAclList = jest.fn().mockResolvedValue([DEFAULT_LINE, APP_LINE]);
+    });
+
+    const driftEvents = () => {
+      return service.getRecentEvents().filter((e) => {
+        return e.metricType === MetricType.ACL_DRIFT;
+      });
+    };
+
+    /** Seed a second connection's slice of the shared snapshot. */
+    function seedPeer(connectionId: string, lines: string[], replid = 'shared-replid'): void {
+      const { digest, userDigests } = nodeAclDigest(lines);
+      (service as any).aclSnapshot.set(connectionId, {
+        groupKey: `replid:${replid}`,
+        name: connectionId,
+        digest,
+        userDigests,
+      });
+    }
+
+    it('stays silent when the group agrees', async () => {
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE]);
+      await poll();
+      expect(driftEvents()).toEqual([]);
+    });
+
+    it('emits a WARNING naming the differing user when a peer diverges', async () => {
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
+      await poll();
+
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('app');
+      expect(events[0].message).toContain('4355');
+    });
+
+    it('never puts rule material into the event', async () => {
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
+      await poll();
+
+      const [event] = driftEvents();
+      expect(event.message).not.toContain('secret:*');
+      expect(event.message).not.toContain('#a3b1');
+      expect(event.message).not.toContain('+@all');
+    });
+
+    it('dedupes a persistent drift and re-alerts when the pattern changes', async () => {
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
+      await poll();
+      await poll();
+      expect(driftEvents()).toHaveLength(1);
+
+      seedPeer('conn-peer', [DEFAULT_LINE]);
+      await poll();
+      expect(driftEvents()).toHaveLength(2);
+    });
+
+    it('does not compare nodes in different replication groups', async () => {
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER], 'other-replid');
+      await poll();
+      expect(driftEvents()).toEqual([]);
+    });
+
+    it('emits an INFO reload confirmation when this node adopts a new ruleset', async () => {
+      await poll();
+      expect(driftEvents()).toEqual([]);
+
+      (dbClient.getAclList as jest.Mock).mockResolvedValue([DEFAULT_LINE, APP_LINE_WIDER]);
+      // Exhaust the recheck countdown so the next read actually happens.
+      (service as any).aclDriftRecheck.set('conn-1', 0);
+      await poll();
+
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.INFO);
+      expect(events[0].message).toContain('ACL ruleset on this node changed');
+    });
+
+    it('throttles ACL LIST rather than reading it every poll', async () => {
+      await poll();
+      await poll();
+      await poll();
+      expect(dbClient.getAclList).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports unverified once and drops the node when the ACL read is denied', async () => {
+      (dbClient.getAclList as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+      await expect(poll()).resolves.not.toThrow();
+
+      expect((service as any).aclUnverified.has('conn-1')).toBe(true);
+      expect((service as any).aclSnapshot.has('conn-1')).toBe(false);
+      expect(driftEvents()).toEqual([]);
+    });
+
+    it('does not report a group as consistent using a stale slice after a denial', async () => {
+      await poll();
+      expect((service as any).aclSnapshot.has('conn-1')).toBe(true);
+
+      (dbClient.getAclList as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+      (service as any).aclDriftRecheck.set('conn-1', 0);
+      await poll();
+
+      expect((service as any).aclSnapshot.has('conn-1')).toBe(false);
+    });
+
+    it('clears ACL state on connection removal', async () => {
+      await poll();
+      expect((service as any).aclSnapshot.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).aclSnapshot.has('conn-1')).toBe(false);
+      expect((service as any).aclDriftRecheck.has('conn-1')).toBe(false);
+      expect((service as any).aclUnverified.has('conn-1')).toBe(false);
     });
   });
 });
