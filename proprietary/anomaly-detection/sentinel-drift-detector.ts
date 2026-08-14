@@ -62,6 +62,27 @@ export function isIpLiteral(host: string): boolean {
   return IPV4.test(value);
 }
 
+/**
+ * Whether a value is a usable HOSTNAME, as opposed to an IP literal or a
+ * placeholder.
+ *
+ * Sentinel writes `?` when it does not yet know a replica's primary — the node
+ * has not been INFOed, or is unreachable. Treating that as a hostname would
+ * classify an entirely IP-based deployment as "announcing hostnames" and alert
+ * every one of its members: precisely the false positive the mixed-group
+ * guardrail exists to prevent. A real hostname contains at least one letter.
+ */
+function isHostname(value: string): boolean {
+  const trimmed = (value ?? '').trim();
+  if (trimmed === '' || trimmed === '?') {
+    return false;
+  }
+  if (isIpLiteral(trimmed)) {
+    return false;
+  }
+  return /[a-z]/i.test(trimmed);
+}
+
 function endpointOf(node: SentinelNodeInfo): string {
   return `${node.ip}:${node.port}`;
 }
@@ -73,14 +94,10 @@ function endpointOf(node: SentinelNodeInfo): string {
 function hostnamesInUse(master: SentinelNodeInfo, replicas: SentinelNodeInfo[]): boolean {
   const members = [master, ...replicas];
   for (const member of members) {
-    if (member.ip !== '' && !isIpLiteral(member.ip)) {
+    if (isHostname(member.ip)) {
       return true;
     }
-    if (
-      member.masterHost !== undefined &&
-      member.masterHost !== '' &&
-      !isIpLiteral(member.masterHost)
-    ) {
+    if (member.masterHost !== undefined && isHostname(member.masterHost)) {
       return true;
     }
   }
@@ -90,14 +107,10 @@ function hostnamesInUse(master: SentinelNodeInfo, replicas: SentinelNodeInfo[]):
 /** The first hostname visible in the group, used to show the expected shape. */
 function sampleHostname(master: SentinelNodeInfo, replicas: SentinelNodeInfo[]): string {
   for (const member of [master, ...replicas]) {
-    if (member.ip !== '' && !isIpLiteral(member.ip)) {
+    if (isHostname(member.ip)) {
       return member.ip;
     }
-    if (
-      member.masterHost !== undefined &&
-      member.masterHost !== '' &&
-      !isIpLiteral(member.masterHost)
-    ) {
+    if (member.masterHost !== undefined && isHostname(member.masterHost)) {
       return member.masterHost;
     }
   }

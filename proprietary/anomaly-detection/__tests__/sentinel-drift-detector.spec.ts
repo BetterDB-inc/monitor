@@ -265,3 +265,46 @@ describe('detectSentinelDrift — self-replication needs a comparable port', () 
     expect(reasons).not.toContain('self_replication');
   });
 });
+
+describe('detectSentinelDrift — unknown-primary placeholder', () => {
+  it('does not read Sentinel\'s "?" placeholder as hostname announcement', () => {
+    // Sentinel writes ? when a replica's primary is not yet known. Counting it as
+    // a hostname would classify an all-IP deployment as mixed and alert every
+    // member of it.
+    const master = node({ ip: '10.0.0.10', flags: ['master'] });
+    const replicas = [
+      node({
+        name: '10.0.0.11:6379',
+        ip: '10.0.0.11',
+        flags: ['slave'],
+        masterHost: '?',
+        masterPort: 0,
+      }),
+      node({
+        name: '10.0.0.12:6379',
+        ip: '10.0.0.12',
+        flags: ['slave'],
+        masterHost: '10.0.0.10',
+        masterPort: 6379,
+      }),
+    ];
+
+    expect(detectSentinelDrift(master, replicas)).toEqual([]);
+  });
+
+  it('still fires when a real hostname is present alongside a placeholder', () => {
+    const replicas = [
+      hostnameReplica('valkey-1.valkey-headless'),
+      node({
+        name: '10.244.3.7:6379',
+        ip: '10.244.3.7',
+        flags: ['slave'],
+        masterHost: '?',
+        masterPort: 0,
+      }),
+    ];
+
+    const findings = detectSentinelDrift(HOSTNAME_MASTER, replicas);
+    expect(findings.map((f) => f.reason)).toEqual(['ip_for_hostname']);
+  });
+});
