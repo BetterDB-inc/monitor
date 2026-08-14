@@ -3385,7 +3385,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const stillJoining = rejoin.flags.includes('handshake') ? ' (still handshaking)' : '';
 
     return {
-      id: `${ctx.connectionId}-ghost-forget-rejoin-${rejoin.nodeId}-${timestamp}`,
+      id: randomUUID(),
       timestamp,
       metricType: MetricType.GHOST_MEMBERSHIP,
       anomalyType: AnomalyType.SPIKE,

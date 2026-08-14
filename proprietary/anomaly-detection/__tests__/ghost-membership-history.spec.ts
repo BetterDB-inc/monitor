@@ -147,6 +147,22 @@ describe('GhostMembershipHistory', () => {
     expect(findings[0].nodeId).toBe('nodeC');
   });
 
+  it('treats a wiped view as a local CLUSTER RESET, not a mass FORGET', () => {
+    // A CLUSTER RESET on the polled node drops every peer at once. Re-learning
+    // them by gossip must not emit a forget-rejoin per peer.
+    observe([A, B, C]);
+    observe([A]);
+    observe([A]);
+    expect(observe([A, B, C], 90_000)).toEqual([]);
+  });
+
+  it('still reports a single removal from an otherwise intact view', () => {
+    observe([A, B, C]);
+    observe([A, B]);
+    observe([A, B]);
+    expect(observe([A, B, C], 90_000)).toHaveLength(1);
+  });
+
   it('no-ops for a standalone single-node view', () => {
     expect(observe([A])).toEqual([]);
     expect(observe([A])).toEqual([]);

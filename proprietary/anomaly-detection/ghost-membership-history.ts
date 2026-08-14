@@ -161,12 +161,32 @@ export class GhostMembershipHistory {
       });
     }
 
+    const departing: string[] = [];
     for (const nodeId of this.present) {
       if (seenThisPoll.has(nodeId)) {
         continue;
       }
+      departing.push(nodeId);
+    }
+
+    // A `CLUSTER RESET` on the node we poll wipes its whole view at once, so every
+    // peer appears to depart simultaneously. Recording those as individual
+    // FORGETs would emit a warning per peer as they are re-learned — each telling
+    // the operator to FORGET a node nobody removed. A real scale-down removes one
+    // node at a time from a view that otherwise stays intact, so a collapse to
+    // (at most) ourselves is read as a view reset: departures are discarded and
+    // the history rebuilt from the new baseline.
+    const viewReset = departing.length >= 2 && seenThisPoll.size <= 1;
+
+    for (const nodeId of departing) {
       this.present.delete(nodeId);
+      if (viewReset) {
+        continue;
+      }
       this.departed.set(nodeId, { departedAt: timestamp, absentPolls: 1 });
+    }
+    if (viewReset) {
+      this.departed.clear();
     }
 
     this.evictStaleDepartures(timestamp);
