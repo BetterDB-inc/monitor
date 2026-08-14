@@ -24,10 +24,13 @@ export function shouldExcludeFunctions(sourceDbType: EngineType, targetDbType: E
  * Whether the source holds server-side function libraries.
  *
  * - 'present': `FUNCTION LIST` returned at least one library.
- * - 'absent':  `FUNCTION LIST` returned an empty list — definitively no functions.
- * - 'unknown': the probe threw (ACL user without `function|list`, a cluster node
- *   that can't route the command, a connection error, …). This is distinct from
- *   'absent': we could not determine presence, so callers must NOT treat it as "no
+ * - 'absent':  `FUNCTION LIST` returned an empty list, OR the engine doesn't
+ *   implement the FUNCTION command at all (Redis < 7.0 replies "unknown command").
+ *   Either way there are definitively no function libraries, so a clean older
+ *   instance still reports no compatibility issues.
+ * - 'unknown': the probe threw for an indeterminate reason (ACL user without
+ *   `function|list`, a cluster node that can't route the command, a connection
+ *   error, …). We could not determine presence, so callers must NOT treat it as "no
  *   functions" — the executor still writes the filter and would drop libraries that
  *   may well exist, so we err toward warning the user.
  */
@@ -42,7 +45,14 @@ export async function probeSourceFunctions(client: FunctionProbeClient): Promise
   try {
     const result = await client.call('FUNCTION', 'LIST');
     return Array.isArray(result) && result.length > 0 ? 'present' : 'absent';
-  } catch {
+  } catch (err) {
+    // "unknown command" means the engine has no FUNCTION feature (Redis < 7.0), so
+    // there are provably no function libraries — that's 'absent', not indeterminate.
+    // Everything else (permissions, routing, connectivity) stays 'unknown'.
+    const message = err instanceof Error ? err.message : String(err);
+    if (/unknown command/i.test(message)) {
+      return 'absent';
+    }
     return 'unknown';
   }
 }

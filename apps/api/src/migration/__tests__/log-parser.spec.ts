@@ -123,6 +123,23 @@ describe('classifyRedisShakeFailure', () => {
     expect(classifyRedisShakeFailure(1, logs).code).toBe('BUSYKEY');
   });
 
+  it('detects BUSYKEY through the Go panic stack dump that follows the message', () => {
+    // log.Panicf raises a real panic, so Go appends a goroutine stack trace whose
+    // frames (e.g. runtime/panic.go) must not be mistaken for the abort cause.
+    const logs = [
+      'syncing rdb',
+      'panic: BUSYKEY Target key name already exists.',
+      '',
+      'goroutine 1 [running]:',
+      'main.(*Runner).sync(0xc0000b2000)',
+      '\t/app/redis-shake/internal/runner.go:142 +0x3f5',
+      'panic({0x1234567, 0xc0000a0010})',
+      '\t/usr/local/go/src/runtime/panic.go:789 +0x132',
+      'exit status 2',
+    ];
+    expect(classifyRedisShakeFailure(2, logs).code).toBe('BUSYKEY');
+  });
+
   it('is case-insensitive on the BUSYKEY token', () => {
     expect(classifyRedisShakeFailure(1, ['busykey seen']).code).toBe('BUSYKEY');
   });

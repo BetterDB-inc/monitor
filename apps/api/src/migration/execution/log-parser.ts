@@ -91,16 +91,25 @@ export interface RedisShakeFailure {
  * target for an unrelated failure.
  */
 function findFatalLine(logs: string[]): string | null {
-  const nonEmpty = logs.map((line) => line.trim()).filter((line) => line.length > 0);
-  if (nonEmpty.length === 0) {
+  // `log.Panicf` raises a real Go panic, so after the `panic: <message>` header Go
+  // appends a goroutine stack dump — frames like
+  // "/usr/local/go/src/runtime/panic.go:789 +0x47" and "panic({0x…})". Those frames
+  // are not the cause, so we match on the definitive markers only: the `panic:`
+  // header (colon — "panic.go" / "panic({…})" don't have it), a bracketed [PANIC]
+  // logger tag, or a standalone FATAL. We also drop Go source frames (`.go:<line>`)
+  // so the fallback never returns a bare file path as the cause.
+  const candidates = logs
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !/\.go:\d+/.test(line));
+  if (candidates.length === 0) {
     return null;
   }
-  for (let i = nonEmpty.length - 1; i >= 0; i--) {
-    if (/panic:|\bFATAL\b|\bPANIC\b/i.test(nonEmpty[i])) {
-      return nonEmpty[i];
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    if (/panic:|\[PANIC\]|\bFATAL\b/i.test(candidates[i])) {
+      return candidates[i];
     }
   }
-  return nonEmpty[nonEmpty.length - 1];
+  return candidates[candidates.length - 1];
 }
 
 /**
