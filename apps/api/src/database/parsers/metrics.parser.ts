@@ -366,12 +366,6 @@ export class MetricsParser {
   }
 
   /**
-   * Parse a `CLUSTER SHARDS` reply into `ClusterShard[]`. The reply is an array
-   * of shards, each a map with `slots` (a flat `[start, end, start, end, ...]`
-   * array) and `nodes` (an array of per-node maps carrying id/role/health/etc.).
-   * Malformed or role-less entries are skipped defensively.
-   */
-  /**
    * Parses a `SENTINEL MASTERS` / `SENTINEL REPLICAS <master>` /
    * `SENTINEL SENTINELS <master>` reply: an array of flat field/value lists.
    *
@@ -422,6 +416,12 @@ export class MetricsParser {
     return nodes;
   }
 
+  /**
+   * Parse a `CLUSTER SHARDS` reply into `ClusterShard[]`. The reply is an array
+   * of shards, each a map with `slots` (a flat `[start, end, start, end, ...]`
+   * array) and `nodes` (an array of per-node maps carrying id/role/health/etc.).
+   * Malformed or role-less entries are skipped defensively.
+   */
   static parseClusterShards(raw: unknown[]): ClusterShard[] {
     if (!Array.isArray(raw)) return [];
     const shards: ClusterShard[] = [];

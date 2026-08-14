@@ -3,13 +3,17 @@
  * Used by the cloud agent and CLI safe mode.
  */
 export const ALLOWED_COMMANDS: ReadonlySet<string> = new Set([
-  'PING', 'INFO', 'DBSIZE',
-  'SLOWLOG', 'COMMANDLOG',
+  'PING',
+  'INFO',
+  'DBSIZE',
+  'SLOWLOG',
+  'COMMANDLOG',
   'LATENCY',
   'CLIENT',
   'ACL',
   'CONFIG',
   'CLUSTER',
+  'SENTINEL',
   'MEMORY',
   'COMMAND',
   'ROLE',
@@ -30,6 +34,8 @@ export const ALLOWED_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> 
   COMMANDLOG: new Set(['GET', 'LEN', 'RESET']),
   LATENCY: new Set(['LATEST', 'HISTORY', 'HISTOGRAM', 'RESET', 'DOCTOR']),
   CLUSTER: new Set(['INFO', 'SLOTS', 'SLOT-STATS', 'NODES']),
+  // Read-only topology views used by the Sentinel drift detector.
+  SENTINEL: new Set(['MASTERS', 'REPLICAS', 'SENTINELS']),
   MEMORY: new Set(['DOCTOR', 'STATS']),
   COMMAND: new Set(['COUNT', 'DOCS']),
   FT: new Set(['_LIST', 'INFO', 'SEARCH']),
@@ -40,12 +46,23 @@ export const ALLOWED_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> 
  * These block the connection, stream indefinitely, or are dangerous.
  */
 export const BLOCKED_COMMANDS: ReadonlySet<string> = new Set([
-  'SUBSCRIBE', 'PSUBSCRIBE', 'SSUBSCRIBE',
-  'BLPOP', 'BRPOP', 'BRPOPLPUSH', 'BLMOVE', 'BLMPOP',
-  'BZPOPMIN', 'BZPOPMAX', 'BZMPOP',
-  'XREAD', 'XREADGROUP',
-  'WAIT', 'WAITAOF',
-  'MONITOR', 'DEBUG',
+  'SUBSCRIBE',
+  'PSUBSCRIBE',
+  'SSUBSCRIBE',
+  'BLPOP',
+  'BRPOP',
+  'BRPOPLPUSH',
+  'BLMOVE',
+  'BLMPOP',
+  'BZPOPMIN',
+  'BZPOPMAX',
+  'BZMPOP',
+  'XREAD',
+  'XREADGROUP',
+  'WAIT',
+  'WAITAOF',
+  'MONITOR',
+  'DEBUG',
 ]);
 
 /**
