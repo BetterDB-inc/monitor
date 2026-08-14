@@ -45,6 +45,7 @@ describe('AnomalyService', () => {
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
       resolveAnomaly: jest.fn().mockResolvedValue(true),
+      getAclEntries: jest.fn().mockResolvedValue([]),
       initialize: jest.fn().mockResolvedValue(undefined),
       close: jest.fn().mockResolvedValue(undefined),
       isReady: jest.fn().mockReturnValue(true),
@@ -5074,6 +5075,127 @@ describe('AnomalyService', () => {
       (service as any).onConnectionRemoved('conn-1');
 
       expect((service as any).clientLockoutState.has('conn-1')).toBe(false);
+    });
+  });
+
+  // ─── auth-failure burst from the audit store (valkey#334) ──────────────────
+
+  describe('auth failure burst', () => {
+    function aclRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 0,
+        count: 20,
+        reason: 'auth',
+        context: 'toplevel',
+        object: 'AUTH',
+        username: 'default',
+        ageSeconds: 1,
+        clientInfo: 'id=7 addr=203.0.113.9:51234 laddr=10.0.0.1:6379 fd=8 name=',
+        timestampCreated: 1_000,
+        timestampLastUpdated: 1_000,
+        capturedAt: 1_700_000_000,
+        sourceHost: '10.0.0.1',
+        sourcePort: 6379,
+        connectionId: 'conn-1',
+        ...overrides,
+      };
+    }
+
+    let now: number;
+
+    beforeEach(() => {
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const authEvents = () => {
+      return service.getRecentEvents().filter((e) => {
+        return e.metricType === MetricType.AUTH_FAILURE_BURST;
+      });
+    };
+
+    it('emits a WARNING naming the offending client address', async () => {
+      storage.getAclEntries.mockResolvedValue([aclRow()]);
+      await poll();
+
+      const events = authEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('203.0.113.9');
+      expect(events[0].value).toBe(20);
+    });
+
+    it('never leaks key names or raw client-info into the event', async () => {
+      storage.getAclEntries.mockResolvedValue([
+        aclRow({ reason: 'key', count: 5, object: 'secret:customer:pii' }),
+        aclRow({ timestampCreated: 2_000, count: 20 }),
+      ]);
+      await poll();
+
+      const [event] = authEvents();
+      expect(event.message).not.toContain('secret:customer:pii');
+      expect(event.message).not.toContain('laddr=');
+      expect(event.message).not.toContain('fd=8');
+    });
+
+    it('queries the audit store windowed in seconds, not milliseconds', async () => {
+      storage.getAclEntries.mockResolvedValue([]);
+      await poll();
+
+      expect(storage.getAclEntries).toHaveBeenCalledWith(
+        expect.objectContaining({
+          connectionId: 'conn-1',
+          startTime: Math.floor((now - 5 * 60 * 1000) / 1000),
+        }),
+      );
+    });
+
+    it('throttles the store scan rather than querying on every poll', async () => {
+      storage.getAclEntries.mockResolvedValue([]);
+      await poll();
+      await poll();
+      await poll();
+      expect(storage.getAclEntries).toHaveBeenCalledTimes(1);
+
+      now += 31_000;
+      await poll();
+      expect(storage.getAclEntries).toHaveBeenCalledTimes(2);
+    });
+
+    it('stays silent when the audit store has nothing (ACL LOG unavailable or audit off)', async () => {
+      storage.getAclEntries.mockResolvedValue([]);
+      await poll();
+      expect(authEvents()).toEqual([]);
+    });
+
+    it('does not re-alert the same address on the next scan', async () => {
+      storage.getAclEntries.mockResolvedValue([aclRow()]);
+      await poll();
+      now += 31_000;
+      await poll();
+
+      expect(authEvents()).toHaveLength(1);
+    });
+
+    it('survives a storage failure without breaking the poll', async () => {
+      storage.getAclEntries.mockRejectedValue(new Error('storage down'));
+      await expect(poll()).resolves.not.toThrow();
+      expect(authEvents()).toEqual([]);
+    });
+
+    it('clears auth-failure state on connection removal', async () => {
+      storage.getAclEntries.mockResolvedValue([aclRow()]);
+      await poll();
+      expect((service as any).authFailureState.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).authFailureState.has('conn-1')).toBe(false);
+      expect((service as any).authFailureLastScan.has('conn-1')).toBe(false);
     });
   });
 });

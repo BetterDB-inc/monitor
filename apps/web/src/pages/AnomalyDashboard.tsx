@@ -119,6 +119,7 @@ const METRIC_LABELS: Record<string, string> = {
   output_kbps: 'Output KB/s',
   slowlog_last_id: 'Slow Queries',
   acl_denied: 'ACL Denied',
+  auth_failure_burst: 'Auth Failure Burst',
   evicted_keys: 'Evictions',
   blocked_clients: 'Blocked',
   keyspace_misses: 'Cache Misses',
