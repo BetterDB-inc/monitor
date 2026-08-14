@@ -5091,8 +5091,9 @@ describe('AnomalyService', () => {
         username: 'default',
         ageSeconds: 1,
         clientInfo: 'id=7 addr=203.0.113.9:51234 laddr=10.0.0.1:6379 fd=8 name=',
-        timestampCreated: 1_000,
-        timestampLastUpdated: 1_000,
+        // Inside the 5-minute window, in ms, relative to the mocked clock.
+        timestampCreated: 1_700_000_000_000 - 60_000,
+        timestampLastUpdated: 1_700_000_000_000 - 30_000,
         capturedAt: 1_700_000_000,
         sourceHost: '10.0.0.1',
         sourcePort: 6379,
@@ -5132,7 +5133,7 @@ describe('AnomalyService', () => {
     it('never leaks key names or raw client-info into the event', async () => {
       storage.getAclEntries.mockResolvedValue([
         aclRow({ reason: 'key', count: 5, object: 'secret:customer:pii' }),
-        aclRow({ timestampCreated: 2_000, count: 20 }),
+        aclRow({ timestampCreated: 1_700_000_000_000 - 90_000, count: 20 }),
       ]);
       await poll();
 

@@ -1456,11 +1456,15 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.authFailureLastScan.set(ctx.connectionId, timestamp);
 
     try {
-      // The audit store windows on `captured_at`, which is stored in SECONDS.
-      const windowStart = Math.floor((timestamp - AUTH_FAILURE_WINDOW_MS) / 1000);
+      // Two different windows, on purpose. `captured_at` (SECONDS) is only a
+      // cheap prefilter on when the audit poller SAVED a row; it says nothing
+      // about when the failures happened, and on a restart every ring entry is
+      // re-saved with `captured_at` = now. The authoritative window is the
+      // entry's own millisecond timestamps, applied inside the detector.
+      const windowStartMs = timestamp - AUTH_FAILURE_WINDOW_MS;
       const entries = await this.storage.getAclEntries({
         connectionId: ctx.connectionId,
-        startTime: windowStart,
+        startTime: Math.floor(windowStartMs / 1000),
         limit: AUTH_FAILURE_QUERY_LIMIT,
       });
       if (entries.length === 0) {
@@ -1473,7 +1477,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         this.authFailureState.set(ctx.connectionId, state);
       }
 
-      const sources = detectAuthFailureBursts(entries, AUTH_FAILURE_MIN_COUNT);
+      const sources = detectAuthFailureBursts(entries, windowStartMs, AUTH_FAILURE_MIN_COUNT);
       for (const source of takeAlertable(state, sources, timestamp)) {
         const event = this.buildAuthFailureEvent(ctx, timestamp, source);
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
@@ -1529,8 +1533,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       stdDev: 0,
       threshold: AUTH_FAILURE_MIN_COUNT,
       message:
-        `WARNING: ${source.authFailures} authentication failures from ${source.clientAddress} in ` +
-        `the last ${windowMinutes} minutes${usernameNote}.${alsoDenied} Identify the client behind ` +
+        `WARNING: ${source.authFailures} authentication failures recorded against ` +
+        `${source.clientAddress} in the last ${windowMinutes} minutes${usernameNote}.${alsoDenied} ` +
+        `ACL LOG groups failures by user and reason rather than by client, so treat the address as ` +
+        `the client recorded on those failures. Identify the client behind ` +
         `that address; if it is not yours, restrict reachability (\`bind\`, firewall, security ` +
         `group) before anything else, and rotate any credential it may have guessed. If it IS ` +
         `yours, it is running with stale credentials and will keep retrying.`,

@@ -14,19 +14,38 @@ import { StoredAclEntry } from '@betterdb/shared';
  * dedupes it, and persists it, so this advisory reads the audit store instead —
  * one fetch of a signal, not two.
  *
- * ## Two traps this module exists to avoid
+ ## Three traps this module exists to avoid
  *
  * **Cumulative counts.** An `ACL LOG` entry is an aggregate: repeated failures
- * from the same client for the same reason bump one entry's `count` and its
+ * for the same user and reason bump one entry's `count` and its
  * `timestamp-last-updated`. The audit poller stores a NEW row whenever that
  * timestamp advances, so the same logical entry lands several times with a
  * growing cumulative count. Summing rows would multiply the real figure — the
- * rows for one entry must collapse to their maximum first.
+ * rows for one entry must collapse to their maximum first. Note the entry
+ * identity deliberately EXCLUDES `client-info`: the server overwrites that field
+ * on every update of a matched entry, so keying on it would split one entry's
+ * rows apart and reintroduce the very multiplication this guards against.
  *
  * **Ephemeral source ports.** Every connection attempt arrives from a different
  * source port, so `addr=1.2.3.4:53124` is unique per attempt. Aggregating on the
  * raw `addr` would put every failure in its own bucket and never cross a
  * threshold. The port is stripped and only the client IP is used as the key.
+ *
+ * **Lifetime counts are not window counts.** `count` is the entry's total since
+ * it was created, which may be long before the window; and on a restart or a
+ * newly-added connection the audit poller stores every entry currently in the
+ * ring with `capturedAt` set to now, backfilling hours-old failures into what
+ * looks like the present. Both are handled by windowing on the entry's OWN
+ * timestamps and counting only the growth actually observed inside the window.
+ *
+ * ## A limit worth knowing
+ *
+ * The server groups ACL LOG entries by reason/context/object/username and does
+ * NOT compare client addresses, so one entry's count can in principle span
+ * several clients while `client-info` reflects only the most recent one. The
+ * address is therefore reported as the client recorded against those failures,
+ * not as a proven sole origin. It is the best attribution `ACL LOG` supports —
+ * and far better than the aggregate counter, which has none at all.
  */
 
 /** Rolling window over which failures from one address are accumulated. */
@@ -100,32 +119,84 @@ export function clientAddressFrom(clientInfo: string): string {
 
 /**
  * Identity of one logical `ACL LOG` entry across the several rows the audit
- * poller stores as its count grows. `timestampCreated` is stable for the life of
- * an entry; pairing it with the user, client and reason makes collisions between
- * genuinely distinct entries implausible.
+ * poller stores as its count grows.
+ *
+ * These are exactly the fields the server itself matches on when deciding
+ * whether a new failure joins an existing entry or starts a new one, plus the
+ * creation timestamp. `client-info` is deliberately absent: the server replaces
+ * it on every update, so including it would make our key FINER than the server's
+ * own grouping and split one entry's rows into several.
  */
 function entryKey(entry: StoredAclEntry): string {
-  return [entry.timestampCreated, entry.username, entry.clientInfo, entry.reason].join('|');
+  return [entry.timestampCreated, entry.username, entry.reason, entry.object].join('|');
+}
+
+/** One logical entry, collapsed from however many rows the poller stored for it. */
+interface CollapsedEntry {
+  /** The most recently stored row, whose `client-info` is the latest client seen. */
+  latest: StoredAclEntry;
+  /** Failures attributable to the window — see `collapse` for how this is derived. */
+  windowCount: number;
+}
+
+/**
+ * Collapses the rows of each logical entry and works out how much of its count
+ * belongs inside the window.
+ *
+ * An entry CREATED inside the window contributes its whole count: every one of
+ * its failures happened in the window. An older entry contributes only the growth
+ * we actually observed across the rows stored in the window — its earlier total
+ * accrued before the window opened and is not ours to report. An entry with no
+ * activity in the window at all contributes nothing, which is what keeps a
+ * restart backfill (every ring entry re-stored with `capturedAt` = now) from
+ * reading as a fresh burst.
+ */
+function collapse(entries: StoredAclEntry[], windowStartMs: number): CollapsedEntry[] {
+  const groups = new Map<string, StoredAclEntry[]>();
+  for (const entry of entries) {
+    const key = entryKey(entry);
+    const group = groups.get(key) ?? [];
+    group.push(entry);
+    groups.set(key, group);
+  }
+
+  const collapsed: CollapsedEntry[] = [];
+  for (const group of groups.values()) {
+    const active = group.filter((entry) => {
+      return entry.timestampLastUpdated >= windowStartMs;
+    });
+    if (active.length === 0) {
+      continue;
+    }
+
+    const counts = active.map((entry) => {
+      return Number.isFinite(entry.count) ? entry.count : 0;
+    });
+    const maxCount = Math.max(...counts);
+    const latest = active.reduce((newest, entry) => {
+      return entry.timestampLastUpdated >= newest.timestampLastUpdated ? entry : newest;
+    });
+
+    const bornInWindow = latest.timestampCreated >= windowStartMs;
+    const windowCount = bornInWindow ? maxCount : maxCount - Math.min(...counts);
+    if (windowCount <= 0) {
+      continue;
+    }
+    collapsed.push({ latest, windowCount });
+  }
+
+  return collapsed;
 }
 
 /**
  * Collapses stored rows into per-client-IP totals and returns the addresses over
- * the failure threshold, worst first. Pure: all windowing is the caller's job.
+ * the failure threshold, worst first. Pure: the caller supplies the window.
  */
 export function detectAuthFailureBursts(
   entries: StoredAclEntry[],
+  windowStartMs: number,
   minCount: number = AUTH_FAILURE_MIN_COUNT,
 ): AuthFailureSource[] {
-  // Collapse the repeated rows of one logical entry to its highest count.
-  const byEntry = new Map<string, StoredAclEntry>();
-  for (const entry of entries) {
-    const key = entryKey(entry);
-    const existing = byEntry.get(key);
-    if (existing === undefined || entry.count > existing.count) {
-      byEntry.set(key, entry);
-    }
-  }
-
   const byAddress = new Map<
     string,
     {
@@ -137,7 +208,7 @@ export function detectAuthFailureBursts(
     }
   >();
 
-  for (const entry of byEntry.values()) {
+  for (const { latest: entry, windowCount } of collapse(entries, windowStartMs)) {
     const address = clientAddressFrom(entry.clientInfo);
     if (address === '') {
       continue;
@@ -151,7 +222,7 @@ export function detectAuthFailureBursts(
       lastSeenAt: entry.capturedAt,
     };
 
-    const count = Number.isFinite(entry.count) ? entry.count : 0;
+    const count = windowCount;
     bucket.reasonBreakdown[entry.reason] = (bucket.reasonBreakdown[entry.reason] ?? 0) + count;
     if (entry.reason === AUTH_REASON) {
       bucket.authFailures += count;
