@@ -84,13 +84,18 @@ const defaultCanResolveHost: HostResolver = async (host) => {
 /**
  * Whether the container shares the host's network namespace (`--network host`).
  * A bridged container has its own netns and sees only `lo`/`eth0`; a
- * host-networked one sees the host's docker bridges (`docker0`, `br-*`). This
- * is the signal that distinguishes the two `host.docker.internal`-unresolvable
- * cases, which need OPPOSITE hosts (loopback vs. the bridge gateway).
+ * host-networked one sees the host's container bridges. This is the signal that
+ * distinguishes the two `host.docker.internal`-unresolvable cases, which need
+ * OPPOSITE hosts (loopback vs. the bridge gateway). We match the bridge names
+ * both runtimes create: Docker's `docker0`/`br-*` and Podman's
+ * `podman0`/`cni-podman0` (and other `cni-*` bridges). A bridged container
+ * never sees any of these, so a match reliably means host networking.
  */
 const defaultIsHostNetwork = (): boolean => {
   try {
-    return readdirSync('/sys/class/net').some((n) => n === 'docker0' || n.startsWith('br-'));
+    return readdirSync('/sys/class/net').some(
+      (n) => n === 'docker0' || n === 'podman0' || n.startsWith('br-') || n.startsWith('cni-'),
+    );
   } catch {
     return false;
   }
@@ -103,8 +108,16 @@ const defaultGetDefaultGateway = (): string | null => {
     // little-endian hex IPv4 (e.g. 010011AC -> 172.17.0.1).
     for (const line of readFileSync('/proc/net/route', 'utf8').split('\n').slice(1)) {
       const f = line.trim().split(/\s+/);
-      if (f.length > 2 && f[1] === '00000000' && /^[0-9A-Fa-f]{8}$/.test(f[2]) && f[2] !== '00000000') {
-        const octets = f[2].match(/../g)!.reverse().map((h) => parseInt(h, 16));
+      if (
+        f.length > 2 &&
+        f[1] === '00000000' &&
+        /^[0-9A-Fa-f]{8}$/.test(f[2]) &&
+        f[2] !== '00000000'
+      ) {
+        const octets = f[2]
+          .match(/../g)!
+          .reverse()
+          .map((h) => parseInt(h, 16));
         return octets.join('.');
       }
     }
@@ -114,10 +127,21 @@ const defaultGetDefaultGateway = (): string | null => {
   return null;
 };
 
+/**
+ * Is the process on an actual Docker/Podman runtime (as opposed to generic
+ * containerization like Kubernetes/ECS/Fargate)? Only these leave a filesystem
+ * marker AND have a default-route gateway that is the operator's host. On a CNI
+ * platform the default route is the pod/task gateway (e.g. 10.244.0.1), which is
+ * NOT where a database lives, so the gateway fallback must not fire there.
+ */
+const defaultHasDockerRuntime = (): boolean =>
+  existsSync('/.dockerenv') || existsSync('/run/.containerenv');
+
 export interface HostProbeDeps {
   canResolveHost: HostResolver;
   isHostNetwork: () => boolean;
   getDefaultGateway: () => string | null;
+  hasDockerRuntime: () => boolean;
 }
 
 /**
@@ -128,6 +152,9 @@ export interface HostProbeDeps {
  *   - `--network host` (shared netns): the host is at `127.0.0.1`.
  *   - default/custom bridge (the README's primary `docker run`): the host is
  *     the default gateway (e.g. 172.17.0.1); `127.0.0.1` would be the container.
+ *     This only holds on a real Docker/Podman bridge, so it is gated on the
+ *     runtime marker — on Kubernetes/ECS/Fargate the default route is the CNI
+ *     gateway, not the host, and we fall back to loopback instead.
  * Loopback is the last resort when neither signal is available. All probes are
  * injectable so the precedence stays unit-testable.
  */
@@ -138,6 +165,7 @@ export async function resolveDefaultDbHostChecked(
   const canResolveHost = deps.canResolveHost ?? defaultCanResolveHost;
   const isHostNetwork = deps.isHostNetwork ?? defaultIsHostNetwork;
   const getDefaultGateway = deps.getDefaultGateway ?? defaultGetDefaultGateway;
+  const hasDockerRuntime = deps.hasDockerRuntime ?? defaultHasDockerRuntime;
 
   const resolved = resolveDefaultDbHost(input);
   if (resolved.source !== 'docker' || (await canResolveHost(resolved.host))) {
@@ -147,7 +175,9 @@ export async function resolveDefaultDbHostChecked(
   if (isHostNetwork()) {
     return { host: '127.0.0.1', source: 'local' };
   }
-  const gateway = getDefaultGateway();
+  // The default-route gateway is the host only on a real Docker/Podman bridge;
+  // on a CNI platform it is the pod/task gateway, so require the runtime marker.
+  const gateway = hasDockerRuntime() ? getDefaultGateway() : null;
   if (gateway) {
     return { host: gateway, source: 'docker' };
   }

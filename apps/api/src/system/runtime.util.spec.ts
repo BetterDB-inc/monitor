@@ -81,10 +81,11 @@ describe('resolveDefaultDbPort', () => {
 describe('resolveDefaultDbHostChecked', () => {
   const resolves = () => Promise.resolve(true);
   const doesNotResolve = () => Promise.resolve(false);
-  // Defaults for the unresolvable branch: bare bridge with a gateway present.
+  // Defaults for the unresolvable branch: bare Docker bridge with a gateway.
   const bridge = {
     isHostNetwork: () => false,
     getDefaultGateway: () => '172.17.0.1',
+    hasDockerRuntime: () => true,
   };
 
   it('offers host.docker.internal when it resolves (Docker Desktop / --add-host)', async () => {
@@ -100,7 +101,11 @@ describe('resolveDefaultDbHostChecked', () => {
     await expect(
       resolveDefaultDbHostChecked(
         { dbHost: undefined, containerized: true },
-        { canResolveHost: doesNotResolve, isHostNetwork: () => true, getDefaultGateway: () => null },
+        {
+          canResolveHost: doesNotResolve,
+          isHostNetwork: () => true,
+          getDefaultGateway: () => null,
+        },
       ),
     ).resolves.toEqual({ host: '127.0.0.1', source: 'local' });
   });
@@ -120,7 +125,28 @@ describe('resolveDefaultDbHostChecked', () => {
     await expect(
       resolveDefaultDbHostChecked(
         { dbHost: undefined, containerized: true },
-        { canResolveHost: doesNotResolve, isHostNetwork: () => false, getDefaultGateway: () => null },
+        {
+          canResolveHost: doesNotResolve,
+          isHostNetwork: () => false,
+          getDefaultGateway: () => null,
+          hasDockerRuntime: () => true,
+        },
+      ),
+    ).resolves.toEqual({ host: '127.0.0.1', source: 'local' });
+  });
+
+  it('ignores the default gateway on a non-Docker runtime (Kubernetes/ECS/Fargate)', async () => {
+    // isContainerized is true via KUBERNETES_SERVICE_HOST, but the default route
+    // is the CNI gateway, not the operator's host, so it must not be offered.
+    await expect(
+      resolveDefaultDbHostChecked(
+        { dbHost: undefined, containerized: true },
+        {
+          canResolveHost: doesNotResolve,
+          isHostNetwork: () => false,
+          getDefaultGateway: () => '10.244.0.1',
+          hasDockerRuntime: () => false,
+        },
       ),
     ).resolves.toEqual({ host: '127.0.0.1', source: 'local' });
   });

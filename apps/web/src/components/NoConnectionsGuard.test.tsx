@@ -67,7 +67,7 @@ function renderAt(path: string) {
       <NoConnectionsGuard>
         <div data-testid="page-content">content</div>
       </NoConnectionsGuard>
-    </MemoryRouter>
+    </MemoryRouter>,
   );
 }
 
@@ -94,7 +94,9 @@ describe('NoConnectionsGuard - empty state', () => {
 
   it('shows contextual copy on feature routes', () => {
     renderAt('/slowlog');
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Find your slowest queries.');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
+      'Find your slowest queries.',
+    );
     expect(screen.getByText(/surfaces the commands slowing it down/i)).toBeInTheDocument();
   });
 
@@ -114,11 +116,9 @@ describe('NoConnectionsGuard - empty state', () => {
 
   it('links to the connection troubleshooting guide', () => {
     renderAt('/');
-    expect(
-      screen.getByRole('link', { name: /connection troubleshooting guide/i })
-    ).toHaveAttribute(
+    expect(screen.getByRole('link', { name: /connection troubleshooting guide/i })).toHaveAttribute(
       'href',
-      'https://docs.betterdb.com/troubleshooting.html#connection-issues'
+      'https://docs.betterdb.com/troubleshooting.html#connection-issues',
     );
   });
 });
@@ -160,7 +160,7 @@ describe('NoConnectionsGuard - quick connect', () => {
     });
     expect(mockCapture).toHaveBeenCalledWith(
       'quick_connect_succeeded',
-      expect.objectContaining({ source: 'empty_state' })
+      expect.objectContaining({ source: 'empty_state' }),
     );
   });
 
@@ -265,7 +265,7 @@ describe('NoConnectionsGuard - quick connect', () => {
 
   it('honors the DB_PORT the endpoint returns for the local connection', async () => {
     installFetch({
-      connectDefaults: { host: 'db.internal', source: 'env', containerized: true, port: 6380 },
+      connectDefaults: { host: 'db.internal', source: 'docker', containerized: true, port: 6380 },
       onConnections: () => Promise.resolve({ id: 'conn-env' }),
     });
     renderAt('/');
@@ -288,7 +288,7 @@ describe('NoConnectionsGuard - quick connect', () => {
     });
   });
 
-  it('reports the host classification to telemetry, not the resolved hostname', async () => {
+  it('hides the one-click connect for an env-configured host and points to the manual form', async () => {
     installFetch({
       connectDefaults: {
         host: 'valkey.prod.corp.internal',
@@ -300,15 +300,14 @@ describe('NoConnectionsGuard - quick connect', () => {
     });
     renderAt('/');
 
-    fireEvent.click(
-      await screen.findByRole('button', { name: /connect valkey\.prod\.corp\.internal:6379/i }),
-    );
-    await waitFor(() => expect(mockRefreshConnections).toHaveBeenCalled());
-
-    const call = mockCapture.mock.calls.find(([event]) => event === 'quick_connect_succeeded');
-    expect(call?.[1]).toMatchObject({ source: 'empty_state_localhost', hostSource: 'env' });
-    // The internal hostname must never reach telemetry.
-    expect(JSON.stringify(call?.[1])).not.toContain('valkey.prod.corp.internal');
+    // The env host's credentials and TLS live server-side and can't be carried
+    // client-side, so a one-click connect would strip them and fail. We offer
+    // the manual form instead and never render the internal hostname as a
+    // connect target (nor leak it to telemetry, since no POST is made).
+    await screen.findByText(/configured from your environment/i);
+    expect(screen.queryByRole('button', { name: /connect \S+:\d+/i })).toBeNull();
+    expect(screen.queryByText('valkey.prod.corp.internal')).toBeNull();
+    expect(fetchApi).not.toHaveBeenCalledWith('/connections', expect.anything());
   });
 
   it('gates the button until the probe settles, then falls back to localhost', async () => {
