@@ -68,6 +68,14 @@ export interface GhostMember {
    * itself. Corroborates the address-mis-discovery fault. Sorted.
    */
   selfReplicatingIds: string[];
+  /**
+   * The subset of ids the signature is built from: established members only,
+   * never a still-handshaking twin. A re-MEET churning through `handshake` on the
+   * same endpoint would otherwise rewrite the signature every poll, dropping the
+   * finding out of the persistence map and restarting its grace window — which
+   * would delay or suppress an alert that is continuously present. Sorted.
+   */
+  stableIds: string[];
 }
 
 /**
@@ -139,10 +147,16 @@ export function isLoopbackHost(host: string): boolean {
  * id already flagged fail).
  */
 function preferredOccupant(live: ClusterNode[]): ClusterNode {
-  const established = live.find((n) => {
+  // Sorted first: CLUSTER NODES ordering is not guaranteed stable between polls,
+  // and the occupant id feeds the signature — picking by input order would let an
+  // identical snapshot produce a different signature and restart the grace window.
+  const sorted = [...live].sort((a, b) => {
+    return a.id.localeCompare(b.id);
+  });
+  const established = sorted.find((n) => {
     return isEstablished(n);
   });
-  return established ?? live[0];
+  return established ?? sorted[0];
 }
 
 function sortedDistinctIds(nodes: ClusterNode[]): string[] {
@@ -192,15 +206,36 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
       }),
   );
 
-  // A loopback endpoint is only suspicious when the cluster otherwise uses
-  // routable addresses. An all-loopback view is a local dev cluster.
-  const hasRoutablePeer = nodes.some((n) => {
-    const endpoint = canonicalEndpoint(n.address);
-    if (!endpoint) {
-      return false;
-    }
-    return !isLoopbackHost(endpointHost(endpoint));
-  });
+  // A loopback endpoint is only suspicious when it is the ODD ONE OUT: the fault
+  // is one node losing its address announcement while its peers keep theirs.
+  //
+  // Two things this guards against. Ghost ids are excluded, so a single dead
+  // `fail`/`noaddr` record carrying a routable address cannot make an otherwise
+  // all-loopback dev cluster look mixed. And routable members must OUTNUMBER
+  // loopback ones, so a mostly-local cluster that gains one routable node does
+  // not report every healthy loopback node as flipped. A tie is ambiguous —
+  // neither side is clearly the anomaly — and stays silent.
+  //
+  // Only ESTABLISHED members are counted. A handshaking twin appearing on the
+  // flipped endpoint during a re-MEET would otherwise tip the balance and make an
+  // ongoing CRITICAL vanish for the duration of the handshake.
+  const liveHosts = nodes
+    .filter((n) => {
+      return isEstablished(n);
+    })
+    .map((n) => {
+      return canonicalEndpoint(n.address);
+    })
+    .filter((endpoint) => {
+      return endpoint !== '';
+    })
+    .map((endpoint) => {
+      return endpointHost(endpoint);
+    });
+  const loopbackHosts = liveHosts.filter((host) => {
+    return isLoopbackHost(host);
+  }).length;
+  const loopbackIsOddOneOut = liveHosts.length - loopbackHosts > loopbackHosts;
 
   const selfReplicatingAmong = (ids: string[]): string[] => {
     return ids
@@ -223,11 +258,12 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
     });
 
     const isLoopbackFlip =
-      hasRoutablePeer && isLoopbackHost(endpointHost(endpoint)) && live.length > 0;
+      loopbackIsOddOneOut && isLoopbackHost(endpointHost(endpoint)) && live.length > 0;
 
     if (isLoopbackFlip) {
       const occupant = preferredOccupant(live);
       const collidingIds = sortedDistinctIds(live);
+      const establishedIds = sortedDistinctIds(established);
       findings.push({
         reason: 'loopback_flip',
         endpoint,
@@ -235,6 +271,7 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
         liveId: occupant.id,
         liveFlags: occupant.flags,
         collidingIds,
+        stableIds: establishedIds.length > 0 ? establishedIds : [occupant.id],
         selfReplicatingIds: selfReplicatingAmong(collidingIds),
       });
     } else if (sortedDistinctIds(established).length >= 2) {
@@ -247,6 +284,7 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
         liveId: occupant.id,
         liveFlags: occupant.flags,
         collidingIds,
+        stableIds: collidingIds,
         selfReplicatingIds: selfReplicatingAmong(collidingIds),
       });
     }
@@ -272,6 +310,7 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
       liveId: occupant.id,
       liveFlags: occupant.flags,
       collidingIds: [],
+      stableIds: [occupant.id, ...ghostIds].sort(),
       selfReplicatingIds: selfReplicatingAmong([occupant.id, ...ghostIds]),
     });
   }
@@ -286,6 +325,5 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
  * cannot dedupe each other out.
  */
 export function ghostMemberSignature(g: GhostMember): string {
-  const ids = g.reason === 'stale_twin' ? [g.liveId, ...g.ghostIds] : g.collidingIds;
-  return `${g.reason}|${g.endpoint}|${[...ids].sort().join(',')}`;
+  return `${g.reason}|${g.endpoint}|${[...g.stableIds].sort().join(',')}`;
 }

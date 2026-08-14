@@ -147,7 +147,7 @@ const METRIC_LABELS: Record<string, string> = {
   cluster_topology: 'Cluster Topology',
   persistence_child: 'Persistence Child',
   cpu_utilization: 'CPU Utilization',
-  slowlog_count: 'Slow Queries',
+  slowlog_count: 'Slow Queries (legacy)',
 };
 
 function formatTime(ts: number): string {

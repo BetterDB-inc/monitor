@@ -292,6 +292,7 @@ describe('detectGhostMembers — loopback address flip (valkey#2768)', () => {
     const v6 = detectGhostMembers([
       node({ id: 'flipped', flags: ['master'], address: '::1:6379@16379' }),
       node({ id: 'ok', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'ok2', flags: ['master'], address: '10.0.0.3:6379@16379' }),
     ]);
     expect(v6).toHaveLength(1);
     expect(v6[0].reason).toBe('loopback_flip');
@@ -299,6 +300,7 @@ describe('detectGhostMembers — loopback address flip (valkey#2768)', () => {
     const named = detectGhostMembers([
       node({ id: 'flipped', flags: ['master'], address: 'localhost:6379@16379' }),
       node({ id: 'ok', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'ok2', flags: ['master'], address: '10.0.0.3:6379@16379' }),
     ]);
     expect(named).toHaveLength(1);
     expect(named[0].reason).toBe('loopback_flip');
@@ -318,6 +320,8 @@ describe('detectGhostMembers — loopback address flip (valkey#2768)', () => {
       node({ id: 'flip-a', flags: ['master'], address: '127.0.0.1:6379@16379' }),
       node({ id: 'flip-b', flags: ['master'], address: '127.0.0.1:6379@16379' }),
       node({ id: 'ok', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'ok2', flags: ['master'], address: '10.0.0.3:6379@16379' }),
+      node({ id: 'ok3', flags: ['master'], address: '10.0.0.4:6379@16379' }),
     ];
     const findings = detectGhostMembers(nodes);
     expect(findings).toHaveLength(1);
@@ -329,6 +333,7 @@ describe('detectGhostMembers — loopback address flip (valkey#2768)', () => {
     const nodes = [
       node({ id: 'dead', flags: ['master', 'fail'], address: '127.0.0.1:6379@16379' }),
       node({ id: 'ok', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'ok2', flags: ['master'], address: '10.0.0.3:6379@16379' }),
     ];
     expect(detectGhostMembers(nodes)).toEqual([]);
   });
@@ -370,5 +375,83 @@ describe('ghostMemberSignature — reason discrimination', () => {
       }),
     );
     expect(signatures.size).toBe(findings.length);
+  });
+});
+
+describe('detectGhostMembers — loopback guard precision', () => {
+  it('ignores a DEAD routable record when deciding the cluster is routable', () => {
+    // A single fail/noaddr id carrying a routable address must not make an
+    // all-loopback local cluster look like a mixed deployment.
+    const nodes = [
+      node({ id: 'a', flags: ['myself', 'master'], address: '127.0.0.1:7000@17000' }),
+      node({ id: 'b', flags: ['master'], address: '127.0.0.1:7001@17001' }),
+      node({ id: 'c', flags: ['master'], address: '127.0.0.1:7002@17002' }),
+      node({ id: 'stale', flags: ['master', 'noaddr'], address: '10.0.0.9:6379@16379' }),
+    ];
+    expect(detectGhostMembers(nodes)).toEqual([]);
+  });
+
+  it('stays silent when loopback nodes are the MAJORITY and one peer is routable', () => {
+    const nodes = [
+      node({ id: 'a', flags: ['myself', 'master'], address: '127.0.0.1:7000@17000' }),
+      node({ id: 'b', flags: ['master'], address: '127.0.0.1:7001@17001' }),
+      node({ id: 'c', flags: ['master'], address: '127.0.0.1:7002@17002' }),
+      node({ id: 'lan', flags: ['master'], address: '192.168.1.50:6379@16379' }),
+    ];
+    expect(detectGhostMembers(nodes)).toEqual([]);
+  });
+
+  it('stays silent on an even split, where neither side is clearly the anomaly', () => {
+    const nodes = [
+      node({ id: 'a', flags: ['myself', 'master'], address: '127.0.0.1:7000@17000' }),
+      node({ id: 'b', flags: ['master'], address: '10.0.0.2:6379@16379' }),
+    ];
+    expect(detectGhostMembers(nodes)).toEqual([]);
+  });
+
+  it('fires once routable peers outnumber the loopback node', () => {
+    const nodes = [
+      node({ id: 'flipped', flags: ['master'], address: '127.0.0.1:6379@16379' }),
+      node({ id: 'ok-a', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'ok-b', flags: ['master'], address: '10.0.0.3:6379@16379' }),
+    ];
+    const findings = detectGhostMembers(nodes);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].reason).toBe('loopback_flip');
+  });
+});
+
+describe('ghostMemberSignature — stability under churn', () => {
+  it('is unchanged when the node list is reordered', () => {
+    const nodes = [
+      node({ id: 'ghost', flags: ['master', 'fail'], address: '10.0.0.1:6379@16379' }),
+      node({ id: 'live-a', flags: ['master'], address: '10.0.0.1:6379@16379' }),
+      node({ id: 'live-b', flags: ['master'], address: '10.0.0.1:6379@16379' }),
+      node({ id: 'other', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+    ];
+    const forward = detectGhostMembers(nodes).map(ghostMemberSignature).sort();
+    const reversed = detectGhostMembers([...nodes].reverse())
+      .map(ghostMemberSignature)
+      .sort();
+    expect(forward).toEqual(reversed);
+  });
+
+  it('survives a transient handshaking twin on a flipped loopback endpoint', () => {
+    const base = [
+      node({ id: 'flipped', flags: ['master'], address: '127.0.0.1:6379@16379' }),
+      node({ id: 'ok-a', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'ok-b', flags: ['master'], address: '10.0.0.3:6379@16379' }),
+    ];
+    const before = ghostMemberSignature(detectGhostMembers(base)[0]);
+
+    // A re-MEET adds a handshaking line on the same endpoint for a poll or two.
+    const during = ghostMemberSignature(
+      detectGhostMembers([
+        ...base,
+        node({ id: 'rejoining', flags: ['handshake'], address: '127.0.0.1:6379@16379' }),
+      ])[0],
+    );
+
+    expect(during).toBe(before);
   });
 });
