@@ -12,7 +12,8 @@ import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
 import { parseLogLine, classifyRedisShakeFailure } from './execution/log-parser';
 import { runCommandMigration } from './execution/command-migration-worker';
-import { shouldExcludeFunctions, probeSourceFunctions } from './fork-compat';
+import { shouldExcludeFunctions } from './fork-compat';
+import { probeSourceFunctionsClusterAware } from './function-presence';
 
 @Injectable()
 export class MigrationExecutionService {
@@ -137,7 +138,9 @@ export class MigrationExecutionService {
         // clean instance that just saw a warning-free analysis doesn't get a scary
         // "functions excluded" message about functions it never had. The filter is
         // written regardless, so 'unknown' (probe failed) still warrants the notice.
-        const presence = await probeSourceFunctions(sourceAdapter.getClient());
+        // Cluster-aware: FUNCTION LIST is node-local, so a clustered source is probed
+        // per master, matching the analysis warning.
+        const presence = await probeSourceFunctionsClusterAware(sourceAdapter, sourceConfig, clusterEnabled);
         if (presence !== 'absent') {
           const notice = `Cross-engine migration (${sourceDbType} → ${targetDbType}): server-side functions are excluded and will not be transferred to the target.`;
           this.logger.log(`Execution ${id}: ${notice}`);

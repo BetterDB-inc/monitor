@@ -9,7 +9,7 @@ import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
-import { probeSourceFunctions } from './fork-compat';
+import { probeSourceFunctions, aggregateFunctionPresence } from './fork-compat';
 
 @Injectable()
 export class MigrationService {
@@ -409,7 +409,14 @@ export class MigrationService {
       // must not be read as "no functions": we couldn't determine, and the executor
       // will still drop any libraries that exist, so we treat 'unknown' as
       // maybe-present and warn rather than silently green-light.
-      const functionPresence = await probeSourceFunctions(adapter.getClient());
+      //
+      // FUNCTION LIST is node-local, so on a cluster we probe every master —
+      // scanClients already holds one connection per master (or the seed when
+      // standalone) — and aggregate, so a library on any master is not missed.
+      const functionPresences = await Promise.all(
+        scanClients.map((client) => probeSourceFunctions(client)),
+      );
+      const functionPresence = aggregateFunctionPresence(functionPresences);
       const sourceHasFunctions = functionPresence !== 'absent';
 
       // Fetch RDB save config from both instances for reliable persistence detection

@@ -56,3 +56,25 @@ export async function probeSourceFunctions(client: FunctionProbeClient): Promise
     return 'unknown';
   }
 }
+
+/**
+ * Combine per-node probe results into a single verdict. `FUNCTION LIST` is
+ * node-local on a Redis Cluster, so a library on one master is invisible to a
+ * probe of another — the source verdict must consider every master:
+ *   - 'present' if ANY node reports a library (it exists somewhere and would be dropped);
+ *   - else 'unknown' if ANY node was indeterminate (we might be missing one that has libraries);
+ *   - else 'absent' (every node answered, none had functions).
+ * An empty list (couldn't enumerate nodes) is 'unknown' — we can't claim absence.
+ */
+export function aggregateFunctionPresence(results: FunctionPresence[]): FunctionPresence {
+  if (results.length === 0) {
+    return 'unknown';
+  }
+  if (results.some((r) => r === 'present')) {
+    return 'present';
+  }
+  if (results.some((r) => r === 'unknown')) {
+    return 'unknown';
+  }
+  return 'absent';
+}

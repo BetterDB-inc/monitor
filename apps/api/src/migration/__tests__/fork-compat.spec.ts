@@ -1,4 +1,4 @@
-import { shouldExcludeFunctions, probeSourceFunctions } from '../fork-compat';
+import { shouldExcludeFunctions, probeSourceFunctions, aggregateFunctionPresence } from '../fork-compat';
 
 describe('shouldExcludeFunctions', () => {
   it('excludes only for Valkey -> Redis', () => {
@@ -43,5 +43,27 @@ describe('probeSourceFunctions', () => {
       throw new Error('Connection is closed.');
     });
     expect(await probeSourceFunctions(client)).toBe('unknown');
+  });
+});
+
+describe('aggregateFunctionPresence', () => {
+  it("is 'present' if ANY node reports a library (node-local FUNCTION LIST)", () => {
+    // The whole point: a library on the second master is invisible to a probe of the
+    // first, so one 'present' wins.
+    expect(aggregateFunctionPresence(['absent', 'present'])).toBe('present');
+    expect(aggregateFunctionPresence(['present', 'unknown'])).toBe('present');
+  });
+
+  it("is 'unknown' when none are present but any node was indeterminate", () => {
+    expect(aggregateFunctionPresence(['absent', 'unknown'])).toBe('unknown');
+    expect(aggregateFunctionPresence(['unknown', 'unknown'])).toBe('unknown');
+  });
+
+  it("is 'absent' only when every node answered with no functions", () => {
+    expect(aggregateFunctionPresence(['absent', 'absent'])).toBe('absent');
+  });
+
+  it("is 'unknown' for an empty result set — can't claim absence", () => {
+    expect(aggregateFunctionPresence([])).toBe('unknown');
   });
 });
