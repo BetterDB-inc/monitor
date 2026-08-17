@@ -99,8 +99,16 @@ function isGhost(node: ClusterNode): boolean {
  * its address is still meaningful, and excluding it would let a brief peer outage
  * tip the census and silence an ongoing flip. A `fail` (agreed FAIL) or `noaddr`
  * line is a stale identity whose address says nothing about the live cluster.
+ *
+ * A `handshake` line is excluded: the id has not joined yet, so the address we
+ * are MEETing it at is our own proposal rather than something the cluster has
+ * agreed on. Counting it would let a pair of stuck handshakes outvote the only
+ * established member and report that member as the odd one out.
  */
 function countsForCensus(node: ClusterNode): boolean {
+  if (node.flags.includes('handshake')) {
+    return false;
+  }
   return !node.flags.includes('fail') && !node.flags.includes('noaddr');
 }
 

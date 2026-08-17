@@ -419,6 +419,26 @@ describe('detectGhostMembers — loopback guard precision', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].reason).toBe('loopback_flip');
   });
+
+  it('does not let handshaking ids outvote the only established member', () => {
+    const nodes = [
+      node({ id: 'settled', flags: ['myself', 'master'], address: '127.0.0.1:6379@16379' }),
+      node({ id: 'joining-a', flags: ['handshake'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'joining-b', flags: ['handshake'], address: '10.0.0.3:6379@16379' }),
+    ];
+    expect(detectGhostMembers(nodes)).toEqual([]);
+  });
+
+  it('still counts an unreachable peer, so a brief outage cannot silence a flip', () => {
+    const nodes = [
+      node({ id: 'flipped', flags: ['master'], address: '127.0.0.1:6379@16379' }),
+      node({ id: 'ok-a', flags: ['myself', 'master'], address: '10.0.0.2:6379@16379' }),
+      node({ id: 'pfail', flags: ['master', 'fail?'], address: '10.0.0.3:6379@16379' }),
+    ];
+    const findings = detectGhostMembers(nodes);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].reason).toBe('loopback_flip');
+  });
 });
 
 describe('ghostMemberSignature — stability under churn', () => {
