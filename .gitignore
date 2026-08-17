@@ -36,6 +36,9 @@ proprietary/lancedb/
 # Misc
 .DS_Store
 *.pem
+# Public half of generated signing keypairs (e.g. license-signing-*.pub); the
+# public key is embedded in code by kid, never read from the repo root.
+*.pub
 
 # Debug
 npm-debug.log*
