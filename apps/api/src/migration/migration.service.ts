@@ -413,8 +413,13 @@ export class MigrationService {
       // FUNCTION LIST is node-local, so on a cluster we probe every master —
       // scanClients already holds one connection per master (or the seed when
       // standalone) — and aggregate, so a library on any master is not missed.
+      // If cluster discovery produced no master clients, fall back to the seed so a
+      // clean instance is still probed (and so this matches
+      // probeSourceFunctionsClusterAware, which the executor uses) rather than
+      // aggregating an empty list to 'unknown' and always warning.
+      const functionProbeClients = scanClients.length > 0 ? scanClients : [adapter.getClient()];
       const functionPresences = await Promise.all(
-        scanClients.map((client) => probeSourceFunctions(client)),
+        functionProbeClients.map((client) => probeSourceFunctions(client)),
       );
       const functionPresence = aggregateFunctionPresence(functionPresences);
       const sourceHasFunctions = functionPresence !== 'absent';
