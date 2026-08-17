@@ -186,8 +186,11 @@ describe('GhostMembershipHistory', () => {
       return node({ id: `node${i}`, flags: ['master'], address: `10.1.0.${i % 250}:6379@16379` });
     });
     observe(many);
-    observe([A]);
 
-    expect(history.departedCount()).toBeLessThanOrEqual(512);
+    // Two survivors, not one: a collapse to a single id reads as a view reset,
+    // which discards every departure and would leave the ceiling untested.
+    observe(many.slice(0, 2));
+
+    expect(history.departedCount()).toBe(512);
   });
 });
