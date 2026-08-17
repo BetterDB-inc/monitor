@@ -115,12 +115,29 @@ export function parseAclLine(line: string): { username: string; rules: string[] 
 }
 
 /**
+ * Canonical form of one rule token. A selector renders as `(...)` with its own
+ * space-separated rules inside; those are as order-insensitive as the top-level
+ * list, so they are sorted too. Without this, `(~k1 +get)` and `(+get ~k1)` —
+ * the same grant — digest differently and read as drift.
+ */
+function normalizeAclRule(rule: string): string {
+  if (!rule.startsWith('(') || !rule.endsWith(')')) {
+    return rule;
+  }
+  const inner = rule.slice(1, -1);
+  const parts = inner.split(/\s+/).filter((part) => {
+    return part !== '';
+  });
+  return `(${parts.sort().join(' ')})`;
+}
+
+/**
  * Per-user digest: sha256 over the username and its lexicographically sorted
  * rules, truncated. Sorting makes it independent of the order the server happens
- * to render rules in.
+ * to render rules in, at the top level and inside each selector.
  */
 export function aclUserDigest(username: string, rules: string[]): string {
-  const normalized = [...rules].sort().join(' ');
+  const normalized = rules.map(normalizeAclRule).sort().join(' ');
   return createHash('sha256')
     .update(`${username}\n${normalized}`)
     .digest('hex')

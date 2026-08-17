@@ -57,6 +57,18 @@ describe('aclUserDigest', () => {
     expect(before).not.toBe(after);
   });
 
+  it('is independent of rule ordering INSIDE a selector', () => {
+    const a = aclUserDigest('app', ['on', '(%R~key2 +get +set)']);
+    const b = aclUserDigest('app', ['on', '(+set %R~key2 +get)']);
+    expect(a).toBe(b);
+  });
+
+  it('still separates selectors that grant different things', () => {
+    const read = aclUserDigest('app', ['on', '(%R~key2 +get)']);
+    const write = aclUserDigest('app', ['on', '(%W~key2 +get)']);
+    expect(read).not.toBe(write);
+  });
+
   it('is case-sensitive, since key and channel patterns are', () => {
     expect(aclUserDigest('app', ['~Cache:*'])).not.toBe(aclUserDigest('app', ['~cache:*']));
   });
