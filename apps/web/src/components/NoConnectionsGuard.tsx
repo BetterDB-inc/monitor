@@ -134,6 +134,10 @@ const PROVIDERS: { name: string; slug: string }[] = [
 
 const DOCKER_COMMAND = 'docker run -d -p 6379:6379 valkey/valkey';
 
+// Upper bound for the connect-defaults probe. fetchApi has no built-in timeout,
+// so without this a hung request would gate the CTA on "Preparing…" forever.
+const CONNECT_DEFAULTS_TIMEOUT_MS = 4000;
+
 function ProviderGuidesInfo() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -195,8 +199,8 @@ function ProviderGuidesInfo() {
               className="font-medium text-foreground underline underline-offset-2 hover:text-primary transition-colors"
             >
               email us
-            </a>
-            {' '}or{' '}
+            </a>{' '}
+            or{' '}
             <a
               href="https://github.com/BetterDB-inc/monitor/issues/new"
               target="_blank"
@@ -204,8 +208,8 @@ function ProviderGuidesInfo() {
               className="font-medium text-foreground underline underline-offset-2 hover:text-primary transition-colors"
             >
               open a GitHub issue
-            </a>
-            {' '}and we'll help.
+            </a>{' '}
+            and we'll help.
           </p>
         </div>
       )}
@@ -221,7 +225,7 @@ interface OpenAddConnectionOptions {
 
 function openAddConnectionDialog(options?: OpenAddConnectionOptions) {
   window.dispatchEvent(
-    new CustomEvent('betterdb:open-add-connection', options ? { detail: options } : undefined)
+    new CustomEvent('betterdb:open-add-connection', options ? { detail: options } : undefined),
   );
 }
 
@@ -281,7 +285,9 @@ function QuickConnect({ isCloudDomain, onConnected, capture }: QuickConnectProps
       return;
     }
     if (isCloudDomain && isLocalhostHost(result.value.host)) {
-      setError('localhost is not reachable from the cloud. Please provide a publicly accessible host.');
+      setError(
+        'localhost is not reachable from the cloud. Please provide a publicly accessible host.',
+      );
       return;
     }
     await saveConnection(result.value);
@@ -293,9 +299,7 @@ function QuickConnect({ isCloudDomain, onConnected, capture }: QuickConnectProps
         <label htmlFor="quick-connect-url" className="text-sm font-semibold text-foreground">
           Quick connect
         </label>
-        <span className="text-xs text-muted-foreground">
-          paste a connection URL · ~30 seconds
-        </span>
+        <span className="text-xs text-muted-foreground">paste a connection URL · ~30 seconds</span>
       </div>
       <form onSubmit={handleSubmit} className="flex gap-2.5">
         <input
@@ -343,10 +347,20 @@ function QuickConnect({ isCloudDomain, onConnected, capture }: QuickConnectProps
           aria-hidden="true"
           className="flex-shrink-0 mt-[2px]"
         >
-          <rect x="2.5" y="6" width="9" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
+          <rect
+            x="2.5"
+            y="6"
+            width="9"
+            height="6"
+            rx="1.5"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          />
           <path d="M4.5 6V4.5a2.5 2.5 0 0 1 5 0V6" stroke="currentColor" strokeWidth="1.5" />
         </svg>
-        Monitoring runs read-only commands like INFO, SLOWLOG, and CLIENT LIST - your data is never modified unless you explicitly enable it as an option and do it through the CLI at the bottom.
+        Monitoring runs read-only commands like INFO, SLOWLOG, and CLIENT LIST - your data is never
+        modified unless you explicitly enable it as an option and do it through the CLI at the
+        bottom.
       </p>
     </div>
   );
@@ -362,6 +376,62 @@ function DockerQuickStart({
   const [copied, setCopied] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // `localhost` points at the monitor's own container when it runs in Docker,
+  // so a one-click "connect to local" against it fails. Ask the API where the
+  // host actually is (host.docker.internal when containerized, an explicit
+  // DB_HOST if set, else 127.0.0.1); fall back to localhost if the probe fails.
+  const [localHost, setLocalHost] = useState('localhost');
+  const [localPort, setLocalPort] = useState(6379);
+  // Classification the endpoint returns ('env' | 'docker' | 'local'). Sent to
+  // telemetry instead of the resolved host, which may be an internal DB_HOST.
+  // Also gates the one-click button: an 'env' host is the operator's configured
+  // database, whose credentials and TLS live server-side and can't be carried
+  // here — a one-click connect would strip them and fail on any secured
+  // instance, so we route that case to the manual form instead.
+  const [hostSource, setHostSource] = useState<string | null>(null);
+  // Gate the button until the probe settles: before it does, `localHost` is a
+  // placeholder, and a click would POST `localhost` as the default connection —
+  // the exact failure this component fixes.
+  const [probeSettled, setProbeSettled] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    // Abort a hung request so the button can't stay stuck on "Preparing…"; the
+    // localhost fallback is a safe floor when the probe never answers.
+    const timeout = setTimeout(() => controller.abort(), CONNECT_DEFAULTS_TIMEOUT_MS);
+    fetchApi<{ host: string; port?: number; source?: string }>('/system/connect-defaults', {
+      signal: controller.signal,
+    })
+      .then((defaults) => {
+        if (cancelled) {
+          return;
+        }
+        if (defaults?.host) {
+          setLocalHost(defaults.host);
+        }
+        if (typeof defaults?.port === 'number') {
+          setLocalPort(defaults.port);
+        }
+        if (defaults?.source) {
+          setHostSource(defaults.source);
+        }
+      })
+      .catch(() => {
+        // Keep the localhost fallback — a bare-metal install is correct anyway.
+      })
+      .finally(() => {
+        clearTimeout(timeout);
+        if (!cancelled) {
+          setProbeSettled(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearTimeout(timeout);
+    };
+  }, []);
 
   async function handleCopy() {
     try {
@@ -381,39 +451,69 @@ function DockerQuickStart({
         method: 'POST',
         body: JSON.stringify({
           name: 'Local Valkey',
-          host: 'localhost',
-          port: 6379,
+          host: localHost,
+          port: localPort,
           dbIndex: 0,
           tls: false,
           setAsDefault: true,
         }),
       });
-      capture('quick_connect_succeeded', { source: 'empty_state_localhost' });
+      // Send the host classification, not the resolved hostname — the latter can
+      // be a verbatim internal DB_HOST we must not leak to telemetry.
+      capture('quick_connect_succeeded', {
+        source: 'empty_state_localhost',
+        hostSource: hostSource ?? 'local',
+      });
       await onConnected();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not reach localhost:6379');
+      setError(err instanceof Error ? err.message : `Could not reach ${localHost}:${localPort}`);
     } finally {
       setConnecting(false);
     }
   }
 
+  // Only offer the one-click connect for hosts we can fully reconstruct here.
+  // An 'env' host needs server-side credentials/TLS we can't send, so we hide
+  // the button (leaving the manual form) rather than POST a doomed connection.
+  const canOneClickConnect = hostSource !== 'env';
+
   return (
     <div className="rounded-xl border border-border bg-card/60 p-5 text-left">
       <p className="text-sm font-semibold mb-1">Running Valkey or Redis locally?</p>
-      <p className="text-xs text-muted-foreground mb-3">
-        Connect to the default local instance in one click:
-      </p>
-      <button
-        type="button"
-        onClick={handleConnectLocalhost}
-        disabled={connecting}
-        className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 cursor-pointer"
-      >
-        {connecting ? 'Connecting…' : 'Connect localhost:6379 →'}
-      </button>
-      {error && (
-        <p className="mt-2.5 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">
-          {error}
+      {canOneClickConnect ? (
+        <>
+          <p className="text-xs text-muted-foreground mb-3">
+            Connect to the default local instance in one click:
+          </p>
+          <button
+            type="button"
+            onClick={handleConnectLocalhost}
+            disabled={connecting || !probeSettled}
+            className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 cursor-pointer"
+          >
+            {!probeSettled
+              ? 'Preparing…'
+              : connecting
+                ? 'Connecting…'
+                : `Connect ${localHost}:${localPort} →`}
+          </button>
+          {error && (
+            <p className="mt-2.5 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">
+              {error}
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="text-xs text-muted-foreground mb-3">
+          A database is configured from your environment. Add it with its credentials using{' '}
+          <button
+            type="button"
+            onClick={() => openAddConnectionDialog()}
+            className="font-medium underline underline-offset-2 hover:no-underline cursor-pointer"
+          >
+            Add connection manually
+          </button>
+          .
         </p>
       )}
       <p className="mt-4 mb-2 text-xs text-muted-foreground">
@@ -523,8 +623,7 @@ export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): React
   const location = useLocation();
 
   const isCloudDomain =
-    typeof window !== 'undefined' &&
-    window.location.hostname.endsWith('.app.betterdb.com');
+    typeof window !== 'undefined' && window.location.hostname.endsWith('.app.betterdb.com');
 
   if (loading) {
     return (
@@ -545,9 +644,7 @@ export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): React
           <p className="text-muted-foreground mb-6">
             Failed to load database connections. Please check your configuration and try again.
           </p>
-          <p className="text-sm text-muted-foreground font-mono bg-muted p-3 rounded">
-            {error}
-          </p>
+          <p className="text-sm text-muted-foreground font-mono bg-muted p-3 rounded">{error}</p>
         </div>
       </div>
     );

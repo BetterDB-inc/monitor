@@ -1,6 +1,12 @@
 import { Controller, Get, Inject, Optional, Req } from '@nestjs/common';
 import { FastifyRequest } from 'fastify';
 import { TelemetryPort } from '../common/interfaces/telemetry-port.interface';
+import {
+  DefaultDbHost,
+  isContainerized,
+  resolveDefaultDbHostChecked,
+  resolveDefaultDbPort,
+} from './runtime.util';
 
 @Controller('system')
 export class SystemController {
@@ -8,6 +14,29 @@ export class SystemController {
     @Inject('TELEMETRY_CLIENT') @Optional()
     private readonly telemetry: TelemetryPort | null,
   ) {}
+
+  /**
+   * Host to pre-fill for a one-click LOCAL connection, resolved for how the
+   * monitor is actually running: `localhost` is wrong when the monitor is
+   * itself containerized (it points at the container, not the operator's
+   * machine). The frontend uses `host`/`port` for the "connect to local
+   * instance" button so that a default install (a containerized monitor)
+   * reaches the host's database instead of failing. `host.docker.internal` is
+   * verified to resolve before it's offered; when it can't, the host is
+   * resolved from the container's network mode (loopback under `--network
+   * host`, the bridge gateway on a default bridge). See runtime.util for the
+   * precedence.
+   */
+  @Get('connect-defaults')
+  async getConnectDefaults(): Promise<DefaultDbHost & { containerized: boolean; port: number }> {
+    const containerized = isContainerized();
+    const resolved = await resolveDefaultDbHostChecked({
+      dbHost: process.env.DB_HOST,
+      containerized,
+    });
+    const port = resolveDefaultDbPort(process.env.DB_PORT);
+    return { ...resolved, containerized, port };
+  }
 
   @Get('demo')
   getDemoState(@Req() req: FastifyRequest): { demo: boolean } {

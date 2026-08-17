@@ -37,13 +37,37 @@ vi.mock('../api/client', () => ({
 import { NoConnectionsGuard } from './NoConnectionsGuard';
 import { fetchApi } from '../api/client';
 
+const DEFAULT_CONNECT_DEFAULTS = { host: 'localhost', source: 'local', containerized: false };
+
+/**
+ * Route the mocked fetchApi by path. DockerQuickStart probes
+ * `/system/connect-defaults` on mount, so every render needs that to resolve;
+ * tests override the `/connections` POST result via `onConnections`.
+ */
+function installFetch(
+  opts: {
+    connectDefaults?: { host: string; source?: string; containerized?: boolean; port?: number };
+    onConnections?: () => Promise<unknown>;
+  } = {},
+) {
+  vi.mocked(fetchApi).mockImplementation((path: string) => {
+    if (path === '/system/connect-defaults') {
+      return Promise.resolve(opts.connectDefaults ?? DEFAULT_CONNECT_DEFAULTS);
+    }
+    if (path === '/connections' && opts.onConnections) {
+      return opts.onConnections();
+    }
+    return Promise.resolve(undefined);
+  });
+}
+
 function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <NoConnectionsGuard>
         <div data-testid="page-content">content</div>
       </NoConnectionsGuard>
-    </MemoryRouter>
+    </MemoryRouter>,
   );
 }
 
@@ -53,6 +77,7 @@ describe('NoConnectionsGuard - empty state', () => {
     connectionState.hasNoConnections = true;
     connectionState.loading = false;
     connectionState.error = null;
+    installFetch();
   });
 
   it('renders children when connections exist', () => {
@@ -69,7 +94,9 @@ describe('NoConnectionsGuard - empty state', () => {
 
   it('shows contextual copy on feature routes', () => {
     renderAt('/slowlog');
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Find your slowest queries.');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
+      'Find your slowest queries.',
+    );
     expect(screen.getByText(/surfaces the commands slowing it down/i)).toBeInTheDocument();
   });
 
@@ -89,11 +116,9 @@ describe('NoConnectionsGuard - empty state', () => {
 
   it('links to the connection troubleshooting guide', () => {
     renderAt('/');
-    expect(
-      screen.getByRole('link', { name: /connection troubleshooting guide/i })
-    ).toHaveAttribute(
+    expect(screen.getByRole('link', { name: /connection troubleshooting guide/i })).toHaveAttribute(
       'href',
-      'https://docs.betterdb.com/troubleshooting.html#connection-issues'
+      'https://docs.betterdb.com/troubleshooting.html#connection-issues',
     );
   });
 });
@@ -104,10 +129,11 @@ describe('NoConnectionsGuard - quick connect', () => {
     connectionState.hasNoConnections = true;
     connectionState.loading = false;
     connectionState.error = null;
+    installFetch();
   });
 
   it('creates a connection from a pasted URL and refreshes', async () => {
-    vi.mocked(fetchApi).mockResolvedValueOnce({ id: 'conn-1' });
+    installFetch({ onConnections: () => Promise.resolve({ id: 'conn-1' }) });
     renderAt('/');
 
     fireEvent.change(screen.getByLabelText(/quick connect/i), {
@@ -134,7 +160,7 @@ describe('NoConnectionsGuard - quick connect', () => {
     });
     expect(mockCapture).toHaveBeenCalledWith(
       'quick_connect_succeeded',
-      expect.objectContaining({ source: 'empty_state' })
+      expect.objectContaining({ source: 'empty_state' }),
     );
   });
 
@@ -147,11 +173,12 @@ describe('NoConnectionsGuard - quick connect', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
 
     expect(screen.getByText(/REST endpoints/i)).toBeInTheDocument();
-    expect(fetchApi).not.toHaveBeenCalled();
+    // The mount-time connect-defaults probe may run, but no connection is created.
+    expect(fetchApi).not.toHaveBeenCalledWith('/connections', expect.anything());
   });
 
   it('offers the full form prefilled when the connection fails', async () => {
-    vi.mocked(fetchApi).mockRejectedValueOnce(new Error('Connection refused'));
+    installFetch({ onConnections: () => Promise.reject(new Error('Connection refused')) });
     const eventListener = vi.fn();
     window.addEventListener('betterdb:open-add-connection', eventListener);
 
@@ -181,11 +208,15 @@ describe('NoConnectionsGuard - quick connect', () => {
     window.removeEventListener('betterdb:open-add-connection', eventListener);
   });
 
-  it('connects to localhost via the Docker quick start', async () => {
-    vi.mocked(fetchApi).mockResolvedValueOnce({ id: 'conn-local' });
+  it('connects to the resolved local host via the Docker quick start', async () => {
+    installFetch({
+      connectDefaults: { host: '127.0.0.1', source: 'local', containerized: false },
+      onConnections: () => Promise.resolve({ id: 'conn-local' }),
+    });
     renderAt('/');
 
-    fireEvent.click(screen.getByRole('button', { name: /connect localhost:6379/i }));
+    // The button label reflects the host the API resolved.
+    fireEvent.click(await screen.findByRole('button', { name: /connect 127\.0\.0\.1:6379/i }));
 
     await waitFor(() => {
       expect(mockRefreshConnections).toHaveBeenCalled();
@@ -195,12 +226,118 @@ describe('NoConnectionsGuard - quick connect', () => {
       method: 'POST',
       body: JSON.stringify({
         name: 'Local Valkey',
-        host: 'localhost',
+        host: '127.0.0.1',
         port: 6379,
         dbIndex: 0,
         tls: false,
         setAsDefault: true,
       }),
+    });
+  });
+
+  it('targets host.docker.internal when the monitor is itself containerized', async () => {
+    installFetch({
+      connectDefaults: { host: 'host.docker.internal', source: 'docker', containerized: true },
+      onConnections: () => Promise.resolve({ id: 'conn-docker' }),
+    });
+    renderAt('/');
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /connect host\.docker\.internal:6379/i }),
+    );
+
+    await waitFor(() => {
+      expect(mockRefreshConnections).toHaveBeenCalled();
+    });
+
+    expect(fetchApi).toHaveBeenCalledWith('/connections', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Local Valkey',
+        host: 'host.docker.internal',
+        port: 6379,
+        dbIndex: 0,
+        tls: false,
+        setAsDefault: true,
+      }),
+    });
+  });
+
+  it('honors the DB_PORT the endpoint returns for the local connection', async () => {
+    installFetch({
+      connectDefaults: { host: 'db.internal', source: 'docker', containerized: true, port: 6380 },
+      onConnections: () => Promise.resolve({ id: 'conn-env' }),
+    });
+    renderAt('/');
+
+    // Label and POST body both carry the resolved port, not a hardcoded 6379.
+    fireEvent.click(await screen.findByRole('button', { name: /connect db\.internal:6380/i }));
+
+    await waitFor(() => {
+      expect(fetchApi).toHaveBeenCalledWith('/connections', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Local Valkey',
+          host: 'db.internal',
+          port: 6380,
+          dbIndex: 0,
+          tls: false,
+          setAsDefault: true,
+        }),
+      });
+    });
+  });
+
+  it('hides the one-click connect for an env-configured host and points to the manual form', async () => {
+    installFetch({
+      connectDefaults: {
+        host: 'valkey.prod.corp.internal',
+        source: 'env',
+        containerized: true,
+        port: 6379,
+      },
+      onConnections: () => Promise.resolve({ id: 'conn-env' }),
+    });
+    renderAt('/');
+
+    // The env host's credentials and TLS live server-side and can't be carried
+    // client-side, so a one-click connect would strip them and fail. We offer
+    // the manual form instead and never render the internal hostname as a
+    // connect target (nor leak it to telemetry, since no POST is made).
+    await screen.findByText(/configured from your environment/i);
+    expect(screen.queryByRole('button', { name: /connect \S+:\d+/i })).toBeNull();
+    expect(screen.queryByText('valkey.prod.corp.internal')).toBeNull();
+    expect(fetchApi).not.toHaveBeenCalledWith('/connections', expect.anything());
+  });
+
+  it('gates the button until the probe settles, then falls back to localhost', async () => {
+    let rejectProbe: (err: Error) => void = () => {};
+    vi.mocked(fetchApi).mockImplementation((path: string) => {
+      if (path === '/system/connect-defaults') {
+        return new Promise((_, reject) => {
+          rejectProbe = reject;
+        });
+      }
+      return Promise.resolve({ id: 'conn-local' });
+    });
+    renderAt('/');
+
+    // While the probe is in flight the button is disabled — a click must not
+    // POST the placeholder `localhost` as the default connection.
+    const preparing = await screen.findByRole('button', { name: /preparing/i });
+    expect(preparing).toBeDisabled();
+    fireEvent.click(preparing);
+    expect(fetchApi).not.toHaveBeenCalledWith('/connections', expect.anything());
+
+    // Probe rejects → fall back to localhost and enable the button.
+    rejectProbe(new Error('offline'));
+
+    fireEvent.click(await screen.findByRole('button', { name: /connect localhost:6379/i }));
+    await waitFor(() => {
+      expect(fetchApi).toHaveBeenCalledWith(
+        '/connections',
+        expect.objectContaining({ body: expect.stringContaining('"host":"localhost"') }),
+      );
     });
   });
 });

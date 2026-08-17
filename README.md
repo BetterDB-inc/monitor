@@ -37,6 +37,14 @@ docker run -d \
   betterdb/monitor:latest
 ```
 
+> **Connecting to a database on your host machine?** Inside the container
+> `localhost` is the container itself, not your host — so use
+> `host.docker.internal` as the database host. On **Docker Desktop
+> (macOS/Windows)** it works out of the box; on **Linux** add
+> `--add-host=host.docker.internal:host-gateway` to the `docker run` command so
+> the name resolves. The dashboard's one-click "connect to local instance"
+> button auto-detects this and pre-fills the right host for you.
+
 Two image variants are published, both multi-arch (`linux/amd64`, `linux/arm64`):
 
 | Tag | What it is |
