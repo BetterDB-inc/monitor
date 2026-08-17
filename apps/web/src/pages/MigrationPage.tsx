@@ -4,6 +4,7 @@ import { Feature } from '@betterdb/shared';
 import { fetchApi } from '../api/client';
 import { useLicense } from '../hooks/useLicense';
 import { AnalysisForm } from '../components/migration/AnalysisForm';
+import { StepRail } from '../components/migration/StepRail';
 import { AnalysisProgressBar } from '../components/migration/AnalysisProgressBar';
 import { MigrationReport } from '../components/migration/MigrationReport';
 import { ExportBar } from '../components/migration/ExportBar';
@@ -34,40 +35,6 @@ function LockIcon() {
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
       <path fillRule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clipRule="evenodd" />
     </svg>
-  );
-}
-
-const STEPS = ['Configure', 'Analyse', 'Migrate'] as const;
-
-function StepIndicator({ phase, onBack }: { phase: Phase; onBack?: () => void }) {
-  const current = stepIndex(phase);
-  return (
-    <nav className="flex items-center gap-2 text-sm mb-2">
-      {onBack && (
-        <button
-          onClick={onBack}
-          className="px-3 py-1 text-sm border rounded-md hover:bg-muted mr-2"
-        >
-          &larr; Change configuration
-        </button>
-      )}
-      {STEPS.map((label, i) => (
-        <span key={label} className="flex items-center gap-2">
-          {i > 0 && <span className="text-muted-foreground">&rarr;</span>}
-          <span
-            className={
-              i === current
-                ? 'font-semibold text-primary'
-                : i < current
-                  ? 'text-muted-foreground'
-                  : 'text-muted-foreground/50'
-            }
-          >
-            {i + 1}. {label}
-          </span>
-        </span>
-      ))}
-    </nav>
   );
 }
 
@@ -194,9 +161,8 @@ export function MigrationPage() {
         </p>
       </div>
 
-      {/* Issue 3: Step indicator */}
-      <StepIndicator
-        phase={phase}
+      <StepRail
+        currentStep={stepIndex(phase)}
         onBack={phase !== 'idle' && phase !== 'analyzing' ? () => resetToIdle() : undefined}
       />
 
