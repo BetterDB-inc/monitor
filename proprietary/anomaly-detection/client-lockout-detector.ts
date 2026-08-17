@@ -46,6 +46,12 @@ export interface ClientLockoutState {
   level: LockoutLevel;
   /** Previous poll's lifetime `rejected_connections`, for the per-poll delta. */
   lastRejected: number | null;
+  /**
+   * Reading staged by a poll that produced an escalation, applied by
+   * `commitClientLockoutLevel`. Holding it back keeps the refusal delta intact
+   * for the retry when an emit fails.
+   */
+  pendingRejected: number | null;
   /** Previous poll's `connected_clients`, to tell a climb from a plateau. */
   lastConnected: number | null;
 }
@@ -73,7 +79,13 @@ export interface ClientLockoutFinding {
 }
 
 export function createClientLockoutState(): ClientLockoutState {
-  return { highUtilStreak: 0, level: 'none', lastRejected: null, lastConnected: null };
+  return {
+    highUtilStreak: 0,
+    level: 'none',
+    lastRejected: null,
+    lastConnected: null,
+    pendingRejected: null,
+  };
 }
 
 /**
@@ -117,9 +129,7 @@ export function evaluateClientLockout(
   if (connectedClients === null || maxClients === null || maxClients <= 0) {
     return null;
   }
-  if (rejectedConnections !== null) {
-    state.lastRejected = rejectedConnections;
-  }
+  const nextRejected = rejectedConnections === null ? state.lastRejected : rejectedConnections;
 
   const previousConnected = state.lastConnected;
   state.lastConnected = connectedClients;
@@ -145,8 +155,17 @@ export function evaluateClientLockout(
   }
 
   if (!escalated || level === 'none') {
+    // No escalation to deliver, so nothing can fail to emit: the baseline is
+    // safe to advance immediately.
+    state.lastRejected = nextRejected;
     return null;
   }
+
+  // An escalation is being handed to the caller. Advancing the baseline here
+  // would consume the refusal delta that drove it, so a failed emit would retry
+  // against a counter that no longer shows any new refusals and would silently
+  // downgrade to WARNING. Stage it for the commit instead.
+  state.pendingRejected = nextRejected;
 
   return {
     level,
@@ -167,4 +186,9 @@ export function evaluateClientLockout(
  */
 export function commitClientLockoutLevel(state: ClientLockoutState, level: LockoutLevel): void {
   state.level = level;
+  if (state.pendingRejected === null) {
+    return;
+  }
+  state.lastRejected = state.pendingRejected;
+  state.pendingRejected = null;
 }

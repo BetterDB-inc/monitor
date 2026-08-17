@@ -188,4 +188,21 @@ describe('evaluateClientLockout', () => {
     }
     expect(flatFinding?.rising).toBe(false);
   });
+
+  it('retries a CRITICAL whose emit failed, without needing fresh refusals', () => {
+    // Baseline the refusal counter.
+    expect(evaluateClientLockout(state, input({ rejectedConnections: 10 }))).toBeNull();
+
+    // Refusals rise: CRITICAL, but the caller never commits (emit failed).
+    const first = evaluateClientLockout(state, input({ rejectedConnections: 25 }));
+    expect(first?.level).toBe('critical');
+
+    // Same counter next poll — no NEW refusals. The escalation must still stand.
+    const retry = evaluateClientLockout(state, input({ rejectedConnections: 25 }));
+    expect(retry?.level).toBe('critical');
+
+    // Once it lands, the baseline advances and a flat counter goes quiet.
+    commitClientLockoutLevel(state, 'critical');
+    expect(evaluateClientLockout(state, input({ rejectedConnections: 25 }))).toBeNull();
+  });
 });
