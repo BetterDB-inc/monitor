@@ -2,15 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { HowItWorks } from '../HowItWorks';
 
-function stepFor(title: string): HTMLElement {
-  const heading = screen.getByText(title);
-  const step = heading.closest('[class*="items-start"]');
-  if (step === null) {
-    throw new Error(`No step container found for ${title}`);
-  }
-  return step as HTMLElement;
-}
-
 describe('HowItWorks', () => {
   it('always explains all three steps', () => {
     render(<HowItWorks currentStep={2} />);
@@ -20,20 +11,31 @@ describe('HowItWorks', () => {
     expect(screen.getByText('Migrate')).toBeInTheDocument();
   });
 
+  it('illustrates each step only on the opening screen', () => {
+    const { container, rerender } = render(<HowItWorks currentStep={0} />);
+    expect(container.querySelectorAll('svg')).toHaveLength(3);
+
+    rerender(<HowItWorks currentStep={1} />);
+    expect(container.querySelectorAll('svg')).toHaveLength(0);
+  });
+
   it('marks only the current step', () => {
     render(<HowItWorks currentStep={1} />);
 
-    expect(stepFor('Configure')).not.toHaveAttribute('aria-current');
-    expect(stepFor('Analyse')).toHaveAttribute('aria-current', 'step');
-    expect(stepFor('Migrate')).not.toHaveAttribute('aria-current');
+    const steps = screen.getAllByRole('listitem');
+    expect(steps).toHaveLength(3);
+    expect(steps[0]).not.toHaveAttribute('aria-current');
+    expect(steps[1]).toHaveAttribute('aria-current', 'step');
+    expect(steps[2]).not.toHaveAttribute('aria-current');
   });
 
   it('moves the marker as the migration progresses', () => {
     const { rerender } = render(<HowItWorks currentStep={0} />);
-    expect(stepFor('Configure')).toHaveAttribute('aria-current', 'step');
+    expect(screen.getAllByRole('listitem')[0]).toHaveAttribute('aria-current', 'step');
 
     rerender(<HowItWorks currentStep={2} />);
-    expect(stepFor('Configure')).not.toHaveAttribute('aria-current');
-    expect(stepFor('Migrate')).toHaveAttribute('aria-current', 'step');
+    const steps = screen.getAllByRole('listitem');
+    expect(steps[0]).not.toHaveAttribute('aria-current');
+    expect(steps[2]).toHaveAttribute('aria-current', 'step');
   });
 });
