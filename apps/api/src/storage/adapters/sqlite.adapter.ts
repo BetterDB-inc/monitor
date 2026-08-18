@@ -373,6 +373,7 @@ export class SqliteAdapter implements StoragePort {
       DO UPDATE SET
         count = excluded.count,
         age_seconds = excluded.age_seconds,
+        client_info = excluded.client_info,
         timestamp_last_updated = excluded.timestamp_last_updated,
         captured_at = excluded.captured_at
     `);

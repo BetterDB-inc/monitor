@@ -161,6 +161,7 @@ export class MemoryAdapter implements StoragePort {
           ...this.aclEntries[existingIndex],
           count: entry.count,
           ageSeconds: entry.ageSeconds,
+          clientInfo: entry.clientInfo,
           timestampLastUpdated: entry.timestampLastUpdated,
           capturedAt: entry.capturedAt,
         };
