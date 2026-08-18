@@ -174,6 +174,33 @@ describe('AnalysisForm', () => {
     expect(names[3]).toMatch(/prod-cache-eu|analytics-cache/);
   });
 
+  it('clears the target back to an empty slot', async () => {
+    setConnections([SOURCE, TARGET], SOURCE);
+    renderForm();
+
+    await pickTarget('valkey-prod-01');
+    expect(await screen.findByText('valkey-prod-01')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /clear target/i }));
+
+    expect(screen.queryByText('valkey-prod-01')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /select target/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /start analysis/i })).toBeDisabled();
+  });
+
+  it('clears the source even when it was pre-filled', () => {
+    setConnections([SOURCE, TARGET], SOURCE);
+    renderForm();
+
+    expect(screen.getByText('prod-cache-eu')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /clear source/i }));
+
+    expect(screen.queryByText('prod-cache-eu')).not.toBeInTheDocument();
+    expect(screen.queryByText(/current connection/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /select source/i })).toBeInTheDocument();
+  });
+
   it('blocks a plan that involves an agent-backed instance', async () => {
     const agent = conn({ id: 'agent', name: 'edge-agent-us', connectionType: 'agent' });
     setConnections([SOURCE, agent], agent);

@@ -14,6 +14,8 @@ export interface MigrationPlanContextValue {
   scanSampleSize: number;
   chooseSource: (connectionId: string) => void;
   chooseTarget: (connectionId: string) => void;
+  clearSource: () => void;
+  clearTarget: () => void;
   setScanSampleSize: (size: number) => void;
 }
 
@@ -47,6 +49,14 @@ export function useMigrationPlanState(): MigrationPlanContextValue {
     setTargetId(connectionId);
   };
 
+  const clearSource = () => {
+    setSourceId(null);
+  };
+
+  const clearTarget = () => {
+    setTargetId(null);
+  };
+
   return {
     sourceId,
     targetId,
@@ -54,6 +64,8 @@ export function useMigrationPlanState(): MigrationPlanContextValue {
     scanSampleSize,
     chooseSource,
     chooseTarget,
+    clearSource,
+    clearTarget,
     setScanSampleSize,
   };
 }

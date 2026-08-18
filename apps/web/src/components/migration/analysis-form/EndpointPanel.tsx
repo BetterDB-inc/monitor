@@ -1,3 +1,4 @@
+import { X } from 'lucide-react';
 import type { Connection } from '../../../hooks/useConnection';
 import { Button } from '../../ui/button';
 import { EngineBadge } from './EngineBadge';
@@ -12,6 +13,7 @@ interface Props {
   offlineCount: number;
   agentCount: number;
   onChoose: () => void;
+  onClear: () => void;
 }
 
 const ROLE_LABEL: Record<EndpointRole, string> = {
@@ -42,6 +44,7 @@ export function EndpointPanel({
   offlineCount,
   agentCount,
   onChoose,
+  onClear,
 }: Props) {
   if (connection === null) {
     return (
@@ -64,9 +67,20 @@ export function EndpointPanel({
 
   return (
     <div className="flex min-h-[11rem] flex-col gap-3 rounded-xl border bg-card p-5">
-      <span className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
-        {ROLE_LABEL[role]}
-      </span>
+      <div className="flex items-start justify-between gap-2">
+        <span className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
+          {ROLE_LABEL[role]}
+        </span>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="-mt-1.5 -mr-1.5 text-muted-foreground"
+          onClick={onClear}
+          aria-label={`Clear ${role}`}
+        >
+          <X aria-hidden="true" />
+        </Button>
+      </div>
 
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xl font-semibold tracking-tight">{connection.name}</span>

@@ -34,6 +34,8 @@ export function AnalysisForm({ onStart }: Props) {
     scanSampleSize,
     chooseSource,
     chooseTarget,
+    clearSource,
+    clearTarget,
     setScanSampleSize,
   } = useMigrationPlan();
   const [picking, setPicking] = useState<EndpointRole | null>(null);
@@ -125,6 +127,7 @@ export function AnalysisForm({ onStart }: Props) {
           onChoose={() => {
             setPicking('source');
           }}
+          onClear={clearSource}
         />
         <MigrationPath direction={direction} />
         <EndpointPanel
@@ -137,6 +140,7 @@ export function AnalysisForm({ onStart }: Props) {
           onChoose={() => {
             setPicking('target');
           }}
+          onClear={clearTarget}
         />
       </div>
 
