@@ -94,7 +94,7 @@ export function EndpointPanel({
         {connection.connectionType === 'agent' ? ' · via agent' : ' · direct'}
       </span>
 
-      <Button variant="link" size="sm" className="mt-auto self-start px-0" onClick={onChoose}>
+      <Button variant="outline" size="sm" className="mt-auto self-start" onClick={onChoose}>
         Change {role}
       </Button>
     </div>
