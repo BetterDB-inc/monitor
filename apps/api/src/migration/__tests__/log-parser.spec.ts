@@ -1,4 +1,14 @@
-import { parseLogLine, classifyRedisShakeFailure } from '../execution/log-parser';
+import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from '../execution/log-parser';
+
+describe('stripAnsi', () => {
+  it('removes CSI colour codes, including a wrapped level token', () => {
+    expect(stripAnsi('\x1b[1m\x1b[31mERR\x1b[0m done')).toBe('ERR done');
+    expect(stripAnsi('\x1b[90m2026-01-01\x1b[0m INF start')).toBe('2026-01-01 INF start');
+  });
+  it('is a no-op on plain text', () => {
+    expect(stripAnsi('plain line')).toBe('plain line');
+  });
+});
 
 describe('parseLogLine — sync_reader stage detection', () => {
   it('returns null syncStage for unrelated lines', () => {
@@ -94,50 +104,47 @@ describe('parseLogLine — scan_reader behavior preserved', () => {
 });
 
 describe('classifyRedisShakeFailure', () => {
-  it('detects BUSYKEY on the fatal (panic) line and returns the BUSYKEY code', () => {
+  it('detects BUSYKEY on the real v4.6.1 fatal ERR line (log.Panicf: zerolog ERR + os.Exit)', () => {
+    // Actual shape RedisShake v4.6.1 produces: an `ERR` zerolog line carrying the
+    // BUSYKEY reply, followed by Panicf's appended call frame (`…/*.go:NN -> fn()`).
+    // No Go panic, no stack dump. The frame line is dropped; the ERR line classifies.
     const logs = [
-      'start syncing',
-      'panic: BUSYKEY Target key name already exists.',
+      '2026-08-18 10:00:00 INF [src-0] start syncing rdb. path=[/tmp/dump.rdb]',
+      '2026-08-18 10:00:01 ERR [src-0] redisStandaloneWriter received BUSYKEY reply. cmd=[RESTORE mykey 0 ...]',
+      '\t\t\tRedisShake/internal/writer/redis_standalone_writer.go:168 -> processReply()',
     ];
     const result = classifyRedisShakeFailure(1, logs);
     expect(result.code).toBe('BUSYKEY');
     expect(result.message).toMatch(/flush the target/i);
   });
 
-  it('does not misattribute a mid-stream non-fatal BUSYKEY when a different error is fatal', () => {
-    // RedisShake logs per-key BUSYKEY errors mid-stream without aborting; the run
-    // then dies of something unrelated. Classifying off the whole buffer would send
-    // the user to flush their target for a failure that flushing won't fix.
+  it('keys off the last ERR line, so an earlier error is not misattributed as BUSYKEY', () => {
+    // Defensive: if two ERR lines appear, the fatal one is last (it precedes os.Exit).
+    // A BUSYKEY earlier in the buffer must not override a different final cause.
     const logs = [
-      'writing key foo',
-      'ERR BUSYKEY target key name is busy', // non-fatal, mid-stream
-      'writing key bar',
-      'panic: OOM command not allowed when used memory > maxmemory', // the real cause
+      '2026-08-18 10:00:00 ERR [src-0] transient reply BUSYKEY on key foo',
+      '2026-08-18 10:00:05 INF [src-0] retrying',
+      '2026-08-18 10:00:10 ERR [src-0] OOM command not allowed when used memory > maxmemory',
     ];
-    const result = classifyRedisShakeFailure(1, logs);
-    expect(result.code).toBe('UNKNOWN');
+    expect(classifyRedisShakeFailure(1, logs).code).toBe('UNKNOWN');
   });
 
-  it('uses the last non-empty line when no explicit panic/FATAL marker is present', () => {
+  it('uses the last non-empty line when no ERR/panic/FATAL marker is present', () => {
     const logs = ['some progress', 'BUSYKEY on final line', ''];
     expect(classifyRedisShakeFailure(1, logs).code).toBe('BUSYKEY');
   });
 
-  it('detects BUSYKEY through the Go panic stack dump that follows the message', () => {
-    // log.Panicf raises a real panic, so Go appends a goroutine stack trace whose
-    // frames (e.g. runtime/panic.go) must not be mistaken for the abort cause.
-    const logs = [
-      'syncing rdb',
-      'panic: BUSYKEY Target key name already exists.',
-      '',
-      'goroutine 1 [running]:',
-      'main.(*Runner).sync(0xc0000b2000)',
-      '\t/app/redis-shake/internal/runner.go:142 +0x3f5',
-      'panic({0x1234567, 0xc0000a0010})',
-      '\t/usr/local/go/src/runtime/panic.go:789 +0x132',
-      'exit status 2',
+  it('classifies BUSYKEY from real ANSI-coloured RedisShake output', () => {
+    // Exactly what v4.6.x emits on a BUSYKEY abort: an ANSI-wrapped ERR level token
+    // (so `\bERR\b` fails until stripped), then the appended .go and .s call frames.
+    // `\x1b` escapes reproduce the colour codes the binary actually writes.
+    const raw = [
+      '\x1b[90m2026-08-18 18:06:52\x1b[0m \x1b[1m\x1b[31mERR\x1b[0m [writer_127.0.0.1_6402] redisStandaloneWriter received BUSYKEY reply. cmd=[RESTORE foo 0 ...]',
+      '\t\t\tRedisShake/internal/writer/redis_standalone_writer.go:158 -> (*redisStandaloneWriter).processReply()',
+      '\t\t\truntime/asm_amd64.s:1650 -> goexit()',
     ];
-    expect(classifyRedisShakeFailure(2, logs).code).toBe('BUSYKEY');
+    const logs = raw.map(stripAnsi); // mirrors processLine's per-line handling
+    expect(classifyRedisShakeFailure(1, logs).code).toBe('BUSYKEY');
   });
 
   it('is case-insensitive on the BUSYKEY token', () => {

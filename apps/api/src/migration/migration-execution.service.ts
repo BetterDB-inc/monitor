@@ -10,7 +10,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
-import { parseLogLine, classifyRedisShakeFailure } from './execution/log-parser';
+import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/log-parser';
 import { runCommandMigration } from './execution/command-migration-worker';
 import { shouldExcludeFunctions } from './fork-compat';
 import { probeSourceFunctionsClusterAware } from './function-presence';
@@ -195,7 +195,10 @@ export class MigrationExecutionService {
         job.pidPath = pidPath;
       } catch { /* non-fatal — orphan detection is best-effort */ }
 
-      const processLine = (line: string) => {
+      const processLine = (rawLine: string) => {
+        // Strip ANSI first: RedisShake colourises output, and the codes otherwise
+        // break the log viewer, progress parsing, and failure classification alike.
+        const line = stripAnsi(rawLine);
         if (line.length === 0) {
           return;
         }

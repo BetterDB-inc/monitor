@@ -134,14 +134,15 @@ export function MigrationPage() {
     setShowConfirmDialog(true);
   };
 
-  // Issue 4: actual API call after user confirms
-  const handleConfirmMigration = async () => {
+  // Start (or re-start) execution. `forceEmptyDb` forces a target flush regardless of
+  // the checkbox — used by the BUSYKEY "Flush target & retry" affordance.
+  const startMigrationExecution = async (forceEmptyDb: boolean) => {
     if (!job?.sourceConnectionId || !job?.targetConnectionId) return;
     setMigrationStarting(true);
     try {
       const rsOptions: RedisShakeOptions = {};
       if (tryDiskless) rsOptions.tryDiskless = true;
-      if (emptyDbBeforeSync) rsOptions.emptyDbBeforeSync = true;
+      if (emptyDbBeforeSync || forceEmptyDb) rsOptions.emptyDbBeforeSync = true;
       const hasRsOptions = Object.keys(rsOptions).length > 0;
 
       const result = await fetchApi<{ id: string }>('/migration/execution', {
@@ -157,6 +158,7 @@ export function MigrationPage() {
         }),
       });
       setShowConfirmDialog(false);
+      setExecutionResult(null);
       setExecutionId(result.id);
       setPhase('executing');
     } catch (err: unknown) {
@@ -167,6 +169,11 @@ export function MigrationPage() {
       setMigrationStarting(false);
     }
   };
+
+  // Issue 4: actual API call after user confirms
+  const handleConfirmMigration = () => startMigrationExecution(false);
+  // Re-run after a BUSYKEY failure, flushing the target first.
+  const handleRetryWithFlush = () => startMigrationExecution(true);
 
   const handleStartValidation = async () => {
     if (!job?.sourceConnectionId || !job?.targetConnectionId) return;
@@ -362,6 +369,7 @@ export function MigrationPage() {
           <MigrationReport job={job} />
           <ExecutionPanel
             executionId={executionId}
+            onRetryFlush={handleRetryWithFlush}
             onStopped={async () => {
               try {
                 const result = await fetchApi<MigrationExecutionResult>(`/migration/execution/${executionId}`);
@@ -378,6 +386,7 @@ export function MigrationPage() {
           <MigrationReport job={job} />
           <ExecutionPanel
             executionId={executionId}
+            onRetryFlush={handleRetryWithFlush}
             onStopped={() => {/* already stopped */ }}
           />
 

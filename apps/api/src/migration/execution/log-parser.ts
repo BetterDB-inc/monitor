@@ -1,5 +1,17 @@
 import type { SyncStage, ExecutionFailureCode } from '@betterdb/shared';
 
+// RedisShake colourises its output: the level token arrives as e.g.
+// `\x1b[1m\x1b[31mERR\x1b[0m`. Left in place, those codes wreck both the log
+// viewer (a plain <div>, so they render as garbage) and any matching — a `\bERR\b`
+// probe fails because the `m` from `[31m` sits right before `E`. Strip all CSI
+// sequences before storing, parsing, or classifying a line.
+// eslint-disable-next-line no-control-regex
+const ANSI_CSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+
+export function stripAnsi(line: string): string {
+  return line.replace(ANSI_CSI, '');
+}
+
 export interface ParsedLogLine {
   keysTransferred: number | null;
   bytesTransferred: number | null;
@@ -81,31 +93,30 @@ export interface RedisShakeFailure {
 }
 
 /**
- * The line that actually aborted the run. RedisShake terminates via `log.Panicf`,
- * which emits a `panic:`/`FATAL` line as (or near) its final output, so the fatal
- * cause is the last such marker — or, absent one, the last non-empty line. We
- * classify off this line rather than the whole buffer: RedisShake logs per-key
- * `BUSYKEY` errors mid-stream without aborting, so a full-buffer scan would report
- * the flush-the-target remedy for a run that in fact died of something else
- * (target OOM, connection reset, disk full) — sending the user to destroy their
- * target for an unrelated failure.
+ * The line that actually aborted the run. We classify off this line rather than the
+ * whole buffer so we key remediation off the real cause, not incidental noise.
+ *
+ * RedisShake v4.6.x aborts via `log.Panicf`, which — despite the name — does NOT
+ * raise a Go panic. It emits a single zerolog `Error()` line (ConsoleWriter level
+ * token `ERR`) with the message plus its own call frames appended as
+ * `…/foo.go:NN -> func()`, then calls `os.Exit(1)`. So the fatal line is an `ERR`
+ * line, and it's the last real output. `ERR` is therefore the primary marker;
+ * `panic:` / `[PANIC]` / `FATAL` are kept as defensive fallbacks for a genuine Go
+ * runtime panic or a differently-configured logger.
  */
 function findFatalLine(logs: string[]): string | null {
-  // `log.Panicf` raises a real Go panic, so after the `panic: <message>` header Go
-  // appends a goroutine stack dump — frames like
-  // "/usr/local/go/src/runtime/panic.go:789 +0x47" and "panic({0x…})". Those frames
-  // are not the cause, so we match on the definitive markers only: the `panic:`
-  // header (colon — "panic.go" / "panic({…})" don't have it), a bracketed [PANIC]
-  // logger tag, or a standalone FATAL. We also drop Go source frames (`.go:<line>`)
-  // so the fallback never returns a bare file path as the cause.
+  // Drop the call frames Panicf appends and a real panic's stack — both Go source
+  // (".go:168 -> processReply()") and the assembly tail ("runtime/asm_amd64.s:1650
+  // -> goexit()"). They aren't the cause, and dropping them keeps the fallback from
+  // returning a bare frame.
   const candidates = logs
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !/\.go:\d+/.test(line));
+    .filter((line) => line.length > 0 && !/\.(go|s):\d+/.test(line));
   if (candidates.length === 0) {
     return null;
   }
   for (let i = candidates.length - 1; i >= 0; i--) {
-    if (/panic:|\[PANIC\]|\bFATAL\b/i.test(candidates[i])) {
+    if (/\bERR\b|panic:|\[PANIC\]|\bFATAL\b/i.test(candidates[i])) {
       return candidates[i];
     }
   }

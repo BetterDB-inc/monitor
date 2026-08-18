@@ -10,6 +10,7 @@ import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
 import { probeSourceFunctions, aggregateFunctionPresence } from './fork-compat';
+import { parseNodeAddress } from './function-presence';
 
 @Injectable()
 export class MigrationService {
@@ -164,15 +165,8 @@ export class MigrationService {
         clusterMasterCount = masters.length;
 
         for (const master of masters) {
-          // Parse address: 'host:port@clusterport' (host may be IPv6)
-          const addrPart = master.address?.split('@')[0] ?? '';
-          const lastColon = addrPart.lastIndexOf(':');
-          let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
-          const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
-          // Strip IPv6 brackets — iovalkey expects bare addresses
-          if (host.startsWith('[') && host.endsWith(']')) {
-            host = host.slice(1, -1);
-          }
+          // Parse 'host:port@clusterport' (IPv6-aware) via the shared helper.
+          const { host, port } = parseNodeAddress(master.address);
           if (!host || isNaN(port)) continue;
 
           const client = new Valkey({

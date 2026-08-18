@@ -26,7 +26,7 @@ interface ClusterProbeConfig {
 }
 
 /** Parse a cluster-bus address ("host:port@bus", IPv6-aware) into host/port. */
-function parseNodeAddress(address: string | undefined): { host: string; port: number } {
+export function parseNodeAddress(address: string | undefined): { host: string; port: number } {
   const addrPart = address?.split('@')[0] ?? '';
   const lastColon = addrPart.lastIndexOf(':');
   let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
