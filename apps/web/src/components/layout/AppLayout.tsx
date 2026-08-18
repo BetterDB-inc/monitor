@@ -27,6 +27,7 @@ import { ClusterDashboard } from '../../pages/ClusterDashboard';
 import { Settings } from '../../pages/Settings';
 import { Webhooks } from '../../pages/Webhooks';
 import { MigrationPage } from '../../pages/MigrationPage';
+import { MigrationPlanProvider } from '../migration/MigrationPlanProvider';
 import { VectorSearch } from '../../pages/VectorSearch';
 import { VectorAi } from '../../pages/VectorAi';
 import { InferenceLatency } from '../../pages/InferenceLatency';
@@ -237,7 +238,9 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                 path="/migration"
                 element={
                   <NoConnectionsGuard>
-                    <MigrationPage />
+                    <MigrationPlanProvider>
+                      <MigrationPage />
+                    </MigrationPlanProvider>
                   </NoConnectionsGuard>
                 }
               />

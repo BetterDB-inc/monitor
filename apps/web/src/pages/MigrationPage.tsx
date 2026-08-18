@@ -5,6 +5,7 @@ import { fetchApi } from '../api/client';
 import { useLicense } from '../hooks/useLicense';
 import { AnalysisForm } from '../components/migration/AnalysisForm';
 import { StepRail } from '../components/migration/StepRail';
+import { HowItWorks } from '../components/migration/analysis-form/HowItWorks';
 import { AnalysisProgressBar } from '../components/migration/AnalysisProgressBar';
 import { MigrationReport } from '../components/migration/MigrationReport';
 import { ExportBar } from '../components/migration/ExportBar';
@@ -497,6 +498,8 @@ export function MigrationPage() {
           </div>
         </div>
       )}
+
+      <HowItWorks currentStep={stepIndex(phase)} />
 
       {/* Issue 15: Past analyses history */}
       {history.length > 0 && (

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useConnection } from '../../hooks/useConnection';
 import type { Connection } from '../../hooks/useConnection';
+import { useMigrationPlan } from '../../hooks/useMigrationPlan';
 import { fetchApi } from '../../api/client';
 import type { StartAnalysisResponse } from '@betterdb/shared';
 import { Button } from '../ui/button';
@@ -8,7 +9,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { ConnectionPicker } from './analysis-form/ConnectionPicker';
 import { EndpointPanel } from './analysis-form/EndpointPanel';
 import type { EndpointRole } from './analysis-form/EndpointPanel';
-import { HowItWorks } from './analysis-form/HowItWorks';
 import { MigrationPath } from './analysis-form/MigrationPath';
 import { NoConnectionsState } from './analysis-form/NoConnectionsState';
 import { PreflightNotes } from './analysis-form/PreflightNotes';
@@ -27,10 +27,15 @@ const SAMPLE_SIZES = [1000, 5000, 10000, 25000] as const;
 
 export function AnalysisForm({ onStart }: Props) {
   const { connections, currentConnection } = useConnection();
-  const [sourceId, setSourceId] = useState<string | null>(currentConnection?.id ?? null);
-  const [targetId, setTargetId] = useState<string | null>(null);
-  const [sourceChosen, setSourceChosen] = useState(false);
-  const [scanSampleSize, setScanSampleSize] = useState(10000);
+  const {
+    sourceId,
+    targetId,
+    sourceChosen,
+    scanSampleSize,
+    chooseSource,
+    chooseTarget,
+    setScanSampleSize,
+  } = useMigrationPlan();
   const [picking, setPicking] = useState<EndpointRole | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,11 +76,10 @@ export function AnalysisForm({ onStart }: Props) {
 
   const handleSelect = (connection: Connection) => {
     if (picking === 'source') {
-      setSourceId(connection.id);
-      setSourceChosen(true);
+      chooseSource(connection.id);
       return;
     }
-    setTargetId(connection.id);
+    chooseTarget(connection.id);
   };
 
   const handleSubmit = async () => {
@@ -198,8 +202,6 @@ export function AnalysisForm({ onStart }: Props) {
           <span className="text-xs text-muted-foreground">higher is more accurate, slower</span>
         </div>
       </div>
-
-      {complete === false && <HowItWorks />}
 
       <ConnectionPicker
         open={picking !== null}

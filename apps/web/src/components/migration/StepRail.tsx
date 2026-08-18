@@ -9,7 +9,7 @@ const STEPS = ['Configure', 'Analyse', 'Migrate'] as const;
 
 export function StepRail({ currentStep, onBack }: Props) {
   return (
-    <nav className="mb-2 flex flex-wrap items-center gap-3" aria-label="Migration progress">
+    <nav className="mb-6 flex flex-wrap items-center gap-3" aria-label="Migration progress">
       {onBack !== undefined && (
         <Button variant="outline" size="sm" onClick={onBack} className="mr-2">
           ← Change configuration

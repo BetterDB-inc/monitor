@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { Connection } from '../../../hooks/useConnection';
 import { AnalysisForm } from '../AnalysisForm';
+import { MigrationPlanProvider } from '../MigrationPlanProvider';
 import { fetchApi } from '../../../api/client';
 
 const state: { connections: Connection[]; currentConnection: Connection | null } = {
@@ -49,6 +50,14 @@ function setConnections(connections: Connection[], current: Connection | null = 
   state.currentConnection = current;
 }
 
+function renderForm(onStart: (analysisId: string) => void = vi.fn()) {
+  return render(
+    <MigrationPlanProvider>
+      <AnalysisForm onStart={onStart} />
+    </MigrationPlanProvider>,
+  );
+}
+
 async function pickTarget(name: string) {
   fireEvent.click(screen.getByRole('button', { name: /select target/i }));
   const row = await screen.findByRole('button', { name: new RegExp(name, 'i') });
@@ -63,7 +72,7 @@ describe('AnalysisForm', () => {
 
   it('blocks with an explanation when fewer than two connections exist', () => {
     setConnections([SOURCE], SOURCE);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
     expect(screen.getByText(/a migration needs two instances/i)).toBeInTheDocument();
     expect(screen.getByText(/connection menu at the top of the page/i)).toBeInTheDocument();
@@ -72,24 +81,21 @@ describe('AnalysisForm', () => {
 
   it('names the single connection you do have so the screen does not look broken', () => {
     setConnections([SOURCE], SOURCE);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
     expect(screen.getByText('prod-cache-eu')).toBeInTheDocument();
   });
 
-  it('explains the three steps while the plan is incomplete', () => {
+  it('cannot start until both endpoints are chosen', () => {
     setConnections([SOURCE, TARGET]);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
-    expect(screen.getByText('Configure')).toBeInTheDocument();
-    expect(screen.getByText('Analyse')).toBeInTheDocument();
-    expect(screen.getByText('Migrate')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /start analysis/i })).toBeDisabled();
   });
 
   it('offers both slots when nothing is pre-selected', () => {
     setConnections([SOURCE, TARGET]);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
     expect(screen.getByRole('button', { name: /select source/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /select target/i })).toBeInTheDocument();
@@ -98,7 +104,7 @@ describe('AnalysisForm', () => {
 
   it('marks a source that was pre-filled from the current connection', () => {
     setConnections([SOURCE, TARGET], SOURCE);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
     expect(screen.getByText(/current connection/i)).toBeInTheDocument();
     expect(screen.getByText('prod-cache-eu')).toBeInTheDocument();
@@ -107,7 +113,7 @@ describe('AnalysisForm', () => {
 
   it('states the direction once both endpoints are set', async () => {
     setConnections([SOURCE, TARGET], SOURCE);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
     await pickTarget('valkey-prod-01');
 
@@ -118,7 +124,7 @@ describe('AnalysisForm', () => {
 
   it('confirms that analysis does not modify either instance', async () => {
     setConnections([SOURCE, TARGET], SOURCE);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
     await pickTarget('valkey-prod-01');
 
@@ -127,7 +133,7 @@ describe('AnalysisForm', () => {
 
   it('will not let the source be chosen again as the target', async () => {
     setConnections([SOURCE, TARGET], SOURCE);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
     fireEvent.click(screen.getByRole('button', { name: /select target/i }));
 
@@ -139,7 +145,7 @@ describe('AnalysisForm', () => {
   it('disables an offline instance as a migration target', async () => {
     const offline = conn({ id: 'off', name: 'analytics-cache', isConnected: false });
     setConnections([SOURCE, TARGET, offline], SOURCE);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
     fireEvent.click(screen.getByRole('button', { name: /select target/i }));
 
@@ -152,7 +158,7 @@ describe('AnalysisForm', () => {
     const offline = conn({ id: 'off', name: 'analytics-cache', isConnected: false });
     const spare = conn({ id: 'spare', name: 'staging-cache' });
     setConnections([SOURCE, offline, TARGET, spare], SOURCE);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
     fireEvent.click(screen.getByRole('button', { name: /select target/i }));
 
@@ -171,7 +177,7 @@ describe('AnalysisForm', () => {
   it('blocks a plan that involves an agent-backed instance', async () => {
     const agent = conn({ id: 'agent', name: 'edge-agent-us', connectionType: 'agent' });
     setConnections([SOURCE, agent], agent);
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
 
     await pickTarget('prod-cache-eu');
 
@@ -184,7 +190,7 @@ describe('AnalysisForm', () => {
     const onStart = vi.fn();
     vi.mocked(fetchApi).mockResolvedValue({ id: 'analysis-1' });
 
-    render(<AnalysisForm onStart={onStart} />);
+    renderForm(onStart);
     await pickTarget('valkey-prod-01');
     fireEvent.click(screen.getByRole('button', { name: /start analysis/i }));
 
@@ -205,7 +211,7 @@ describe('AnalysisForm', () => {
     setConnections([SOURCE, TARGET], SOURCE);
     vi.mocked(fetchApi).mockRejectedValue(new Error('Stream isnt writeable'));
 
-    render(<AnalysisForm onStart={vi.fn()} />);
+    renderForm();
     await pickTarget('valkey-prod-01');
     fireEvent.click(screen.getByRole('button', { name: /start analysis/i }));
 
