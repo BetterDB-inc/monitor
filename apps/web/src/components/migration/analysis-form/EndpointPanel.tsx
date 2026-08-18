@@ -48,7 +48,7 @@ export function EndpointPanel({
 }: Props) {
   if (connection === null) {
     return (
-      <div className="flex min-h-[11rem] flex-col items-center justify-center gap-2 rounded-xl border border-dashed p-6 text-center">
+      <div className="flex min-h-[250px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed p-6 text-center">
         <span className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
           {ROLE_LABEL[role]}
         </span>
@@ -66,7 +66,7 @@ export function EndpointPanel({
   }
 
   return (
-    <div className="flex min-h-[11rem] flex-col gap-3 rounded-xl border bg-card p-5">
+    <div className="flex min-h-[250px] flex-col gap-3 rounded-xl border bg-card p-5">
       <div className="flex items-start justify-between gap-2">
         <span className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
           {ROLE_LABEL[role]}
