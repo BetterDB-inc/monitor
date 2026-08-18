@@ -74,7 +74,20 @@ export function AnalysisForm({ onStart }: Props) {
   const agentCount = connections.filter((connection) => {
     return connection.connectionType === 'agent';
   }).length;
-  const selectableCount = connections.length - agentCount;
+  const countSelectable = (role: EndpointRole, excludeId: string | null): number => {
+    return connections.filter((connection) => {
+      if (connection.id === excludeId) {
+        return false;
+      }
+      if (connection.connectionType === 'agent') {
+        return false;
+      }
+      if (role === 'target' && connection.isConnected === false) {
+        return false;
+      }
+      return true;
+    }).length;
+  };
 
   const handleSelect = (connection: Connection) => {
     if (picking === 'source') {
@@ -121,7 +134,7 @@ export function AnalysisForm({ onStart }: Props) {
           role="source"
           connection={source}
           isPrefilled={isPrefilled}
-          selectableCount={selectableCount}
+          selectableCount={countSelectable('source', targetId)}
           offlineCount={offlineCount}
           agentCount={agentCount}
           onChoose={() => {
@@ -129,12 +142,12 @@ export function AnalysisForm({ onStart }: Props) {
           }}
           onClear={clearSource}
         />
-        <MigrationPath direction={direction} />
+        <MigrationPath direction={direction} endpointsChosen={source !== null && target !== null} />
         <EndpointPanel
           role="target"
           connection={target}
           isPrefilled={false}
-          selectableCount={selectableCount}
+          selectableCount={countSelectable('target', sourceId)}
           offlineCount={offlineCount}
           agentCount={agentCount}
           onChoose={() => {

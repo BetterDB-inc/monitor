@@ -61,6 +61,13 @@ export function ConnectionPicker({
 }: Props) {
   const [filter, setFilter] = useState('');
 
+  const handleOpenChange = (next: boolean): void => {
+    if (next === false) {
+      setFilter('');
+    }
+    onOpenChange(next);
+  };
+
   const rows = connections
     .filter((connection) => {
       return matchesFilter(connection, filter);
@@ -79,7 +86,7 @@ export function ConnectionPicker({
   ];
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Select {role}</DialogTitle>
@@ -117,7 +124,7 @@ export function ConnectionPicker({
                 aria-current={isSelected}
                 onClick={() => {
                   onSelect(connection);
-                  onOpenChange(false);
+                  handleOpenChange(false);
                 }}
                 className={`flex w-full items-center gap-4 px-4 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                   isSelected ? 'bg-muted' : 'enabled:hover:bg-muted/60'
