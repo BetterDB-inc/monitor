@@ -12,6 +12,12 @@ interface Props {
    * "Flush target & retry" — the remediation the error text describes.
    */
   onRetryFlush?: () => void;
+  /**
+   * True while a start/retry request is in flight (the page's `migrationStarting`).
+   * The retry control disables and shows in-flight state so a second click can't
+   * fire another flush+job that races the first on the same target.
+   */
+  retryPending?: boolean;
 }
 
 function formatElapsed(startedAt: number, completedAt?: number): string {
@@ -50,7 +56,7 @@ function StatusBadge({ status }: { status: string }) {
   }
 }
 
-export function ExecutionPanel({ executionId, onStopped, onRetryFlush }: Props) {
+export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPending }: Props) {
   const [execution, setExecution] = useState<MigrationExecutionResult | null>(null);
   const [confirmingFlush, setConfirmingFlush] = useState(false);
   const onStoppedRef = useRef(onStopped);
@@ -183,7 +189,15 @@ export function ExecutionPanel({ executionId, onStopped, onRetryFlush }: Props) 
         <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-4 text-sm space-y-3">
           <p>{execution.error ?? 'Migration failed'}</p>
           {execution.failureCode === 'BUSYKEY' && onRetryFlush && (
-            confirmingFlush ? (
+            retryPending ? (
+              <button
+                disabled
+                className="px-3 py-1.5 text-sm rounded-md border border-destructive/30 inline-flex items-center gap-2 opacity-70 cursor-not-allowed"
+              >
+                <span className="h-3 w-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                Flushing target &amp; retrying…
+              </button>
+            ) : confirmingFlush ? (
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs">
                   This <strong>flushes all keys on the target</strong> before retrying and cannot be undone.

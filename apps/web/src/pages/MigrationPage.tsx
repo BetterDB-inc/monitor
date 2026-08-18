@@ -370,6 +370,7 @@ export function MigrationPage() {
           <ExecutionPanel
             executionId={executionId}
             onRetryFlush={handleRetryWithFlush}
+            retryPending={migrationStarting}
             onStopped={async () => {
               try {
                 const result = await fetchApi<MigrationExecutionResult>(`/migration/execution/${executionId}`);
@@ -387,6 +388,7 @@ export function MigrationPage() {
           <ExecutionPanel
             executionId={executionId}
             onRetryFlush={handleRetryWithFlush}
+            retryPending={migrationStarting}
             onStopped={() => {/* already stopped */ }}
           />
 
