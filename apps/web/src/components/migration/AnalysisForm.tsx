@@ -4,7 +4,6 @@ import type { Connection } from '../../hooks/useConnection';
 import { fetchApi } from '../../api/client';
 import type { StartAnalysisResponse } from '@betterdb/shared';
 import { Button } from '../ui/button';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { ConnectionPicker } from './analysis-form/ConnectionPicker';
 import { EndpointPanel } from './analysis-form/EndpointPanel';
@@ -161,7 +160,7 @@ export function AnalysisForm({ onStart }: Props) {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-4">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
         <Button
           size="lg"
           disabled={loading || complete === false || block !== null}
@@ -173,38 +172,31 @@ export function AnalysisForm({ onStart }: Props) {
           {loading ? 'Starting...' : 'Start Analysis'}
         </Button>
 
-        <Collapsible>
-          <CollapsibleTrigger className="text-sm text-muted-foreground hover:text-foreground">
-            Advanced
-          </CollapsibleTrigger>
-          <CollapsibleContent className="pt-3">
-            <label className="mb-1 block text-xs font-medium" htmlFor="scan-sample-size">
-              Sample size
-            </label>
-            <Select
-              value={String(scanSampleSize)}
-              onValueChange={(value) => {
-                setScanSampleSize(Number(value));
-              }}
-            >
-              <SelectTrigger id="scan-sample-size" className="w-56">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {SAMPLE_SIZES.map((size) => {
-                  return (
-                    <SelectItem key={size} value={String(size)}>
-                      {size.toLocaleString()} keys
-                    </SelectItem>
-                  );
-                })}
-              </SelectContent>
-            </Select>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Higher sample = more accurate estimates, slower analysis.
-            </p>
-          </CollapsibleContent>
-        </Collapsible>
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-muted-foreground" htmlFor="scan-sample-size">
+            Sample
+          </label>
+          <Select
+            value={String(scanSampleSize)}
+            onValueChange={(value) => {
+              setScanSampleSize(Number(value));
+            }}
+          >
+            <SelectTrigger id="scan-sample-size" className="w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SAMPLE_SIZES.map((size) => {
+                return (
+                  <SelectItem key={size} value={String(size)}>
+                    {size.toLocaleString()} keys
+                  </SelectItem>
+                );
+              })}
+            </SelectContent>
+          </Select>
+          <span className="text-xs text-muted-foreground">higher is more accurate, slower</span>
+        </div>
       </div>
 
       {complete === false && <HowItWorks />}
