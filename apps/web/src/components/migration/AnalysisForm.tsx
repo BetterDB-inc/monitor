@@ -144,8 +144,6 @@ export function AnalysisForm({ onStart }: Props) {
         />
       </div>
 
-      <PreflightNotes notes={notes} />
-
       {block !== null && (
         <p className="text-sm text-destructive" role="alert">
           {block}
@@ -206,6 +204,8 @@ export function AnalysisForm({ onStart }: Props) {
           <span className="text-xs text-muted-foreground">higher is more accurate, slower</span>
         </div>
       </div>
+
+      <PreflightNotes notes={notes} />
 
       <ConnectionPicker
         open={picking !== null}

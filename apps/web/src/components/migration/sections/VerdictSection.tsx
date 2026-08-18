@@ -60,22 +60,20 @@ export function VerdictSection({ job }: Props) {
   );
 
   return (
-    <section className="space-y-4">
-      <div className="bg-card border rounded-lg p-6 space-y-3">
-        <h2 className="text-lg font-semibold">Compatibility</h2>
-        <div className={`border rounded-lg px-4 py-3 flex items-start gap-3 ${bannerBg} ${bannerText}`}>
-          <BannerIcon className="w-5 h-5 mt-0.5 flex-shrink-0" />
-          <p className="font-medium">{bannerMessage}</p>
-        </div>
+    <section className="bg-card border rounded-lg p-6 space-y-4">
+      <h2 className="text-lg font-semibold">Compatibility</h2>
+      <div className={`border rounded-lg px-4 py-3 flex items-start gap-3 ${bannerBg} ${bannerText}`}>
+        <BannerIcon className="w-5 h-5 mt-0.5 flex-shrink-0" />
+        <p className="font-medium">{bannerMessage}</p>
       </div>
 
       {sorted.length > 0 && (
-        <div className="space-y-2">
+        <div className="border rounded-lg divide-y">
           {sorted.map((item, idx) => {
             const sev = SEVERITY_ICON_MAP[item.severity];
             const SevIcon = sev.icon;
             return (
-              <div key={idx} className="bg-card border rounded-lg p-4 flex items-start gap-3">
+              <div key={idx} className="p-4 flex items-start gap-3">
                 <SevIcon className={`w-5 h-5 mt-0.5 flex-shrink-0 ${sev.color}`} />
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">

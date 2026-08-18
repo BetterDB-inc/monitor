@@ -31,6 +31,17 @@ export function DataTypeSection({ job }: Props) {
     .map(name => ({ name, count: breakdown[name]?.count ?? 0 }))
     .filter(d => d.count > 0);
 
+  if (chartData.length === 0) {
+    return (
+      <section className="bg-card border rounded-lg p-6">
+        <h2 className="text-lg font-semibold mb-2">Data Types</h2>
+        <p className="text-sm text-muted-foreground">
+          No keys were sampled, so there is no breakdown to show.
+        </p>
+      </section>
+    );
+  }
+
   return (
     <section className="bg-card border rounded-lg p-6">
       <h2 className="text-lg font-semibold mb-4">Data Types</h2>
