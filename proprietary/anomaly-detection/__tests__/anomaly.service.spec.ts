@@ -5533,9 +5533,9 @@ describe('AnomalyService', () => {
       };
     }
 
-    function sentinelInfo(mode = 'sentinel') {
+    function sentinelInfo(mode = 'sentinel', modeField = 'redis_mode') {
       return {
-        server: { role: 'master', redis_mode: mode },
+        server: { role: 'master', [modeField]: mode },
         clients: { connected_clients: '10', blocked_clients: '0' },
         memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
         stats: {
@@ -5652,6 +5652,35 @@ describe('AnomalyService', () => {
 
     it('never issues a SENTINEL command on a non-Sentinel connection', async () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(sentinelInfo('standalone'));
+
+      await pollPastGate();
+
+      expect(dbClient.getSentinelMasters).not.toHaveBeenCalled();
+      expect(sentinelEvents()).toEqual([]);
+    });
+
+    it.each(['server_mode', 'valkey_mode'])(
+      'detects a Sentinel that reports its mode as %s',
+      async (modeField) => {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(
+          sentinelInfo('sentinel', modeField),
+        );
+        (dbClient.getSentinelReplicas as jest.Mock).mockResolvedValue([
+          healthyReplica,
+          driftedReplica,
+        ]);
+
+        await pollPastGate();
+
+        expect(dbClient.getSentinelMasters).toHaveBeenCalled();
+        expect(sentinelEvents()).toHaveLength(1);
+      },
+    );
+
+    it('never issues a SENTINEL command when server_mode is not sentinel', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(
+        sentinelInfo('standalone', 'server_mode'),
+      );
 
       await pollPastGate();
 

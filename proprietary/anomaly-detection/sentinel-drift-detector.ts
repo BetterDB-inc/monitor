@@ -26,6 +26,21 @@ import { SentinelNodeInfo } from '@app/common/types/metrics.types';
  * without it.
  */
 
+/**
+ * Whether an INFO snapshot describes a Sentinel.
+ *
+ * The field name is engine- and config-dependent: Valkey emits `server_mode`
+ * unless `extended-redis-compat` is enabled, in which case it emits `redis_mode`;
+ * Redis emits `redis_mode`. `valkey_mode` is carried too because ServerInfo has
+ * long modelled it. Any of them reading 'sentinel' means Sentinel.
+ */
+export function isSentinelMode(info: Record<string, string>): boolean {
+  const candidates = [info['server_mode'], info['redis_mode'], info['valkey_mode']];
+  return candidates.some((mode) => {
+    return mode === 'sentinel';
+  });
+}
+
 export type SentinelDriftReason = 'ip_for_hostname' | 'stale_master_pointer' | 'self_replication';
 
 export interface SentinelDrift {

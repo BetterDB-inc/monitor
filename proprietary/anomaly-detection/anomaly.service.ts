@@ -63,6 +63,7 @@ import {
 import {
   SentinelDrift,
   detectSentinelDrift,
+  isSentinelMode,
   sentinelDriftSignature,
 } from './sentinel-drift-detector';
 import {
@@ -1528,15 +1529,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * rescheduled, Sentinel and every client it steers point at a dead address. The
    * same issue also reports a node ending up as a replica of itself.
    *
-   * Sentinel deployments only: gated on `redis_mode:sentinel`, so a cluster or
-   * plain standalone connection never issues a SENTINEL command.
+   * Sentinel deployments only, so a cluster or plain standalone connection never
+   * issues a SENTINEL command. The mode field is spelled differently per engine:
+   * Valkey emits `server_mode` unless `extended-redis-compat` is on, in which case
+   * it emits `redis_mode`; Redis emits `redis_mode`. Gating on `redis_mode` alone
+   * left the detector silent on any default-configured Valkey Sentinel.
    */
   private async detectSentinelDrift(
     ctx: ConnectionContext,
     timestamp: number,
     info: Record<string, string>,
   ): Promise<void> {
-    if (info['redis_mode'] !== 'sentinel') {
+    if (isSentinelMode(info) === false) {
       return;
     }
 
