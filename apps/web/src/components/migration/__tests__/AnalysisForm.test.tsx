@@ -148,6 +148,26 @@ describe('AnalysisForm', () => {
     expect(screen.getByText(/offline — cannot accept writes/i)).toBeInTheDocument();
   });
 
+  it('lists selectable instances above the ones that cannot be chosen', async () => {
+    const offline = conn({ id: 'off', name: 'analytics-cache', isConnected: false });
+    const spare = conn({ id: 'spare', name: 'staging-cache' });
+    setConnections([SOURCE, offline, TARGET, spare], SOURCE);
+    render(<AnalysisForm onStart={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /select target/i }));
+
+    const rows = await screen.findAllByRole('button', { name: /:6379/i });
+    const names = rows.map((row) => {
+      return row.textContent ?? '';
+    });
+
+    expect(names).toHaveLength(4);
+    expect(names[0]).toMatch(/valkey-prod-01|staging-cache/);
+    expect(names[1]).toMatch(/valkey-prod-01|staging-cache/);
+    expect(names[2]).toMatch(/prod-cache-eu|analytics-cache/);
+    expect(names[3]).toMatch(/prod-cache-eu|analytics-cache/);
+  });
+
   it('blocks a plan that involves an agent-backed instance', async () => {
     const agent = conn({ id: 'agent', name: 'edge-agent-us', connectionType: 'agent' });
     setConnections([SOURCE, agent], agent);

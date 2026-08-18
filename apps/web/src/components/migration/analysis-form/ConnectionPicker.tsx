@@ -61,9 +61,22 @@ export function ConnectionPicker({
 }: Props) {
   const [filter, setFilter] = useState('');
 
-  const visible = connections.filter((connection) => {
-    return matchesFilter(connection, filter);
-  });
+  const rows = connections
+    .filter((connection) => {
+      return matchesFilter(connection, filter);
+    })
+    .map((connection) => {
+      return { connection, reason: unavailableReason(connection, role, excludeId) };
+    });
+
+  const visible = [
+    ...rows.filter((row) => {
+      return row.reason === null;
+    }),
+    ...rows.filter((row) => {
+      return row.reason !== null;
+    }),
+  ];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -93,8 +106,7 @@ export function ConnectionPicker({
             </p>
           )}
 
-          {visible.map((connection) => {
-            const reason = unavailableReason(connection, role, excludeId);
+          {visible.map(({ connection, reason }) => {
             const isSelected = connection.id === selectedId;
 
             return (
