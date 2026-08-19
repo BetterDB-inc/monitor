@@ -50,6 +50,7 @@ import {
   orphanedSlotKeysSignature,
 } from './orphaned-slot-keys-detector';
 import { GhostMember, detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
+import { ForgetRejoin, GhostMembershipHistory } from './ghost-membership-history';
 import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
 import {
@@ -201,6 +202,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // doesn't alert, `active` dedupes the alert once the gate has fired.
   private ghostMemberFirstSeen = new Map<string, Map<string, number>>();
   private activeGhostMembers = new Map<string, Set<string>>();
+  // Ghost-membership Layer 2 (valkey#2788): per-connection CLUSTER NODES
+  // membership history, the only way to see a FORGET-then-rejoin — no single
+  // snapshot distinguishes a resurrected node from an ordinary member.
+  private ghostHistories = new Map<string, GhostMembershipHistory>();
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
@@ -533,6 +538,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.activeHostnameStaleness.delete(connectionId);
     this.ghostMemberFirstSeen.delete(connectionId);
     this.activeGhostMembers.delete(connectionId);
+    this.ghostHistories.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
@@ -1122,6 +1128,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           await this.detectStuckReplicas(ctx, timestamp, nodes);
           await this.detectHostnameStaleness(ctx, timestamp, nodes, shards);
           await this.detectGhostMembers(ctx, timestamp, nodes);
+          await this.detectForgetRejoin(ctx, timestamp, nodes);
           await this.detectFailoverChurn(ctx, timestamp, nodes);
           // Replica migrating/importing markers are node-local — only the
           // queried node's own line carries them — so aggregate each replica's
@@ -3329,6 +3336,83 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         `so the old identity keeps re-joining and causing errors. Run \`${forgetCmds}\` on every ` +
         `other node in the cluster — primaries AND replicas — to fully evict the ghost; any node ` +
         `that still remembers it re-gossips it back after the 60s FORGET ban expires.`,
+    };
+  }
+
+  /**
+   * Known false positive: an INTENTIONAL re-add of the same node-id — a host that
+   * kept its `nodes.conf` and was brought back without a `CLUSTER RESET`, inside
+   * the 6h retention window — is indistinguishable from a self-reintroduction and
+   * alerts as one. Re-add-with-reset is correctly silent, since the id changes.
+   * The advisory copy says so, and the operator is the only one who knows intent.
+   *
+   * Ghost-membership Layer 2 (valkey-io/valkey#2788): a node the operator removed
+   * with `CLUSTER FORGET` that reintroduced itself once the ~60s blacklist window
+   * lapsed, because some peer never got the FORGET and kept gossiping it.
+   *
+   * Invisible in any single `CLUSTER NODES` snapshot — the returned node just
+   * looks like a member — so this reads the per-connection membership history
+   * instead. Fires on the departed→present transition, which is inherently once
+   * per rejoin, so it needs no dedupe set of its own; the history's minimum
+   * absence requirement is the noise gate.
+   */
+  private async detectForgetRejoin(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+  ): Promise<void> {
+    try {
+      let history = this.ghostHistories.get(ctx.connectionId);
+      if (history === undefined) {
+        history = new GhostMembershipHistory();
+        this.ghostHistories.set(ctx.connectionId, history);
+      }
+
+      for (const rejoin of history.observe(nodes, timestamp)) {
+        const event = this.buildForgetRejoinEvent(ctx, timestamp, rejoin);
+        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+        await this.addAnomaly(event, ctx);
+      }
+    } catch (rejoinErr) {
+      this.logger.debug(
+        `Failed to check forget-rejoin history for ${ctx.connectionName}: ${rejoinErr instanceof Error ? rejoinErr.message : rejoinErr}`,
+      );
+    }
+  }
+
+  private buildForgetRejoinEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    rejoin: ForgetRejoin,
+  ): AnomalyEvent {
+    const absentSeconds = Math.max(0, Math.round((rejoin.returnedAt - rejoin.departedAt) / 1000));
+    const absence =
+      absentSeconds >= 120 ? `${Math.round(absentSeconds / 60)}m` : `${absentSeconds}s`;
+    const stillJoining = rejoin.flags.includes('handshake') ? ' (still handshaking)' : '';
+
+    return {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.GHOST_MEMBERSHIP,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: rejoin.absentPolls,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: 0,
+      message:
+        `WARNING: Node ${rejoin.nodeId.substring(0, 8)} reintroduced itself at ` +
+        `${rejoin.endpoint}${stillJoining} after ${absence} away from the cluster view. ` +
+        `CLUSTER FORGET only blacklists a node-id for about 60s (valkey#2788) — any peer that ` +
+        `was not also given the FORGET keeps gossiping the removed node and re-adds it once the ` +
+        `ban lapses, so a scale-down silently undoes itself. Run ` +
+        `\`CLUSTER FORGET ${rejoin.nodeId}\` on EVERY remaining node — primaries AND replicas — ` +
+        `inside that window, and verify the node is gone from each node's view before ` +
+        `decommissioning the host. If you deliberately re-added this node, disregard this ` +
+        `advisory: a re-add that reuses the same node-id is indistinguishable from a rejoin.`,
+      resolved: false,
+      connectionId: ctx.connectionId,
     };
   }
 
