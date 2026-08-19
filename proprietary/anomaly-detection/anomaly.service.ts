@@ -3340,6 +3340,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   }
 
   /**
+   * Known false positive: an INTENTIONAL re-add of the same node-id — a host that
+   * kept its `nodes.conf` and was brought back without a `CLUSTER RESET`, inside
+   * the 6h retention window — is indistinguishable from a self-reintroduction and
+   * alerts as one. Re-add-with-reset is correctly silent, since the id changes.
+   * The advisory copy says so, and the operator is the only one who knows intent.
+   *
    * Ghost-membership Layer 2 (valkey-io/valkey#2788): a node the operator removed
    * with `CLUSTER FORGET` that reintroduced itself once the ~60s blacklist window
    * lapsed, because some peer never got the FORGET and kept gossiping it.
@@ -3403,7 +3409,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         `ban lapses, so a scale-down silently undoes itself. Run ` +
         `\`CLUSTER FORGET ${rejoin.nodeId}\` on EVERY remaining node — primaries AND replicas — ` +
         `inside that window, and verify the node is gone from each node's view before ` +
-        `decommissioning the host.`,
+        `decommissioning the host. If you deliberately re-added this node, disregard this ` +
+        `advisory: a re-add that reuses the same node-id is indistinguishable from a rejoin.`,
       resolved: false,
       connectionId: ctx.connectionId,
     };

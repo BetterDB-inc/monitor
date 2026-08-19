@@ -6,8 +6,9 @@ import { canonicalEndpoint } from './ghost-membership-detector';
  * layer explicitly defers, catching a node that **reintroduces itself after a
  * `CLUSTER FORGET`** (valkey-io/valkey#2788).
  *
- * Since 8.1, `CLUSTER FORGET` only blacklists a node-id for roughly
- * `cluster-node-timeout` (~60s). Any peer that was not also given the FORGET
+ * Since 8.1, `CLUSTER FORGET` only blacklists a node-id for `cluster-blacklist-ttl`
+ * (its own config, 60s by default — NOT `cluster-node-timeout`, which defaults to
+ * 15s and is tuned independently). Any peer that was not also given the FORGET
  * keeps gossiping the removed node, so once the ban lapses the handshake path
  * re-adds it. The operator believes they scaled the cluster down; the node
  * quietly comes back, often with a fresh `configEpoch`. Upstream PR #4090 only
@@ -58,7 +59,11 @@ const MIN_ABSENT_POLLS = 2;
 
 /**
  * Wall-clock absence required on top of the poll count, sized to the `CLUSTER
- * FORGET` blacklist window (~`cluster-node-timeout`, 60s by default).
+ * FORGET` blacklist window — `cluster-blacklist-ttl`, 60s by default. That is a
+ * distinct config from `cluster-node-timeout` (default 15s); conflating the two
+ * misleads anyone who has tuned either. A cluster that lowers
+ * `cluster-blacklist-ttl` below 60s can rejoin sooner than this gate allows and
+ * the rejoin goes unreported, since the constant does not read the live value.
  *
  * The poll count alone is not a meaningful gate: the anomaly loop polls once a
  * second by default, so two polls is two seconds — far inside the window a
@@ -176,6 +181,11 @@ export class GhostMembershipHistory {
     // node at a time from a view that otherwise stays intact, so a collapse to
     // (at most) ourselves is read as a view reset: departures are discarded and
     // the history rebuilt from the new baseline.
+    // The `<= 1` boundary is deliberate but arbitrary at the margin: it treats a
+    // poll that returns only ourselves (or nothing) as the cluster view collapsing
+    // rather than as real departures. The cost is that a genuine 3-node -> 1-node
+    // scale-down, polled on the surviving node, is read as a view reset and its
+    // departures are discarded, so a later rejoin of those ids is not reported.
     const viewReset = departing.length >= 2 && seenThisPoll.size <= 1;
 
     for (const nodeId of departing) {
