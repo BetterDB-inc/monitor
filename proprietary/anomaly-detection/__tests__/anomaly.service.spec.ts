@@ -5299,6 +5299,26 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('4355');
     });
 
+    it('re-alerts the drift on the next poll when the emit fails', async () => {
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
+      const addAnomaly = jest
+        .spyOn(service as any, 'addAnomaly')
+        .mockRejectedValueOnce(new Error('storage down'));
+
+      await expect(poll()).resolves.not.toThrow();
+      expect(addAnomaly).toHaveBeenCalledTimes(1);
+      expect(driftEvents()).toEqual([]);
+
+      // The failed emit must NOT leave the signature marked active, or this
+      // security alert stays suppressed until the drift clears and recurs.
+      addAnomaly.mockRestore();
+      await poll();
+
+      const events = driftEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+    });
+
     it('never puts rule material into the event', async () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
       await poll();

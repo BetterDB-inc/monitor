@@ -26,6 +26,20 @@ import { createHash } from 'crypto';
  *   4. Node digest = XOR of every per-user digest, as 8-byte values. XOR makes the
  *      node digest independent of user ordering and matches the upstream shape.
  *
+ * ## Scope: within a replication group, NOT cluster-wide
+ *
+ * `groupKey` is a shared `master_replid`, which on a cluster identifies ONE SHARD
+ * (a primary and its replicas) — not the cluster. So on a clustered deployment
+ * this confirms each shard is internally consistent and never compares shards
+ * against each other.
+ *
+ * That matters because cluster ACLs are expected to be uniform cluster-wide, and
+ * the likeliest real drift — an `ACL LOAD` that missed one primary — is precisely
+ * cross-shard, so it lands in separate groups and is NOT detected. The scoping
+ * matches config-drift's, so the two are consistent, but do not read this as
+ * cluster-wide ACL verification. Closing the gap needs a cluster-wide grouping
+ * path, which is not implemented here.
+ *
  * ## What is deliberately NOT carried out of this module
  *
  * Rule bodies. A finding names usernames and digests only — never key patterns,

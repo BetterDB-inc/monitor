@@ -1643,13 +1643,23 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         }
       }
 
+      // The signature is CLAIMED synchronously above so concurrent polls cannot both
+      // emit the same drift, but the claim is only kept if the emit succeeds. A
+      // throw here would otherwise leave the signature marked active and silently
+      // suppress the drift until it clears and recurs — unacceptable for a security
+      // alert. Releasing the claim on failure lets the next poll retry it.
       for (const drift of newDrifts) {
         const event = this.buildAclDriftEvent(timestamp, drift);
         this.logger.warn(`Anomaly detected: ${event.message}`);
         // Attributed to the first node of the group, which is frequently NOT the
         // connection whose poll ran this scan.
         const attributedCtx = this.buildConnectionContext(drift.nodes[0].connectionId);
-        await this.addAnomaly(event, attributedCtx);
+        try {
+          await this.addAnomaly(event, attributedCtx);
+        } catch (emitErr) {
+          this.activeAclDriftSignatures.delete(aclDriftSignature(drift));
+          throw emitErr;
+        }
       }
     } catch (err) {
       this.logger.debug(
