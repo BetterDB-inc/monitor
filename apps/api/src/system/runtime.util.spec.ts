@@ -81,7 +81,7 @@ describe('resolveDefaultDbPort', () => {
 describe('resolveDefaultDbHostChecked', () => {
   const resolves = () => Promise.resolve('resolved' as const);
   const doesNotResolve = () => Promise.resolve('not-found' as const);
-  const timesOut = () => Promise.resolve('timed-out' as const);
+  const indeterminate = () => Promise.resolve('indeterminate' as const);
   // Defaults for the unresolvable branch: bare Docker bridge with a gateway.
   const bridge = {
     isHostNetwork: () => false,
@@ -98,15 +98,16 @@ describe('resolveDefaultDbHostChecked', () => {
     ).resolves.toEqual({ host: 'host.docker.internal', source: 'docker' });
   });
 
-  it('offers host.docker.internal on a timed-out probe instead of falling through to the gateway', async () => {
+  it('offers host.docker.internal on an indeterminate probe (timeout or transient resolver failure) instead of falling through to the gateway', async () => {
     // A cold/contended resolver on Docker Desktop can be slower than the probe
-    // budget even though the name genuinely resolves; misreading that as
-    // "missing" would wrongly return the bridge gateway (the Docker Desktop
-    // Linux VM, not the real host). See issue #394.
+    // budget, or fail transiently (e.g. EAI_AGAIN), even though the name
+    // genuinely resolves; misreading that as "missing" would wrongly return the
+    // bridge gateway (the Docker Desktop Linux VM, not the real host). See
+    // issue #394.
     await expect(
       resolveDefaultDbHostChecked(
         { dbHost: undefined, containerized: true },
-        { canResolveHost: timesOut, ...bridge },
+        { canResolveHost: indeterminate, ...bridge },
       ),
     ).resolves.toEqual({ host: 'host.docker.internal', source: 'docker' });
   });
