@@ -47,11 +47,23 @@ import { StoredAclEntry } from '@betterdb/shared';
  * ## A limit worth knowing
  *
  * The server groups ACL LOG entries by reason/context/object/username and does
- * NOT compare client addresses, so one entry's count can in principle span
- * several clients while `client-info` reflects only the most recent one. The
- * address is therefore reported as the client recorded against those failures,
- * not as a proven sole origin. It is the best attribution `ACL LOG` supports —
- * and far better than the aggregate counter, which has none at all.
+ * NOT compare client addresses, so one entry's count can span several clients
+ * while `client-info` reflects only the most recent one — and the store refreshes
+ * that column on every upsert, so it really is the latest client, not the first.
+ *
+ * Read the reported address as "the client last seen against these failures",
+ * never as a proven sole origin. Two concrete consequences, because this advisory
+ * NAMES AN IP and an operator may act on it:
+ *
+ *   - Two attackers hitting one username merge into a single entry, and all the
+ *     growth is attributed to whichever of them wrote last.
+ *   - Attribution can FLIP between scans. With the per-address alert cooldown,
+ *     that surfaces as repeat advisories for the same underlying activity naming
+ *     different IPs — not as evidence of a second, distinct attack.
+ *
+ * Confirm against the raw `ACL LOG` before blocking an address. It is still the
+ * best attribution `ACL LOG` supports, and far better than the aggregate counter,
+ * which has none at all.
  */
 
 /** Rolling window over which failures from one address are accumulated. */

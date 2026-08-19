@@ -1457,10 +1457,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     try {
       // No time filter on the query. `captured_at` records when the poller last
-      // SAVED a row, and the store upserts one row per logical entry, so an entry
-      // under active attack keeps its original `captured_at` while its count
-      // climbs — filtering on it would hide exactly the entries that matter. The
-      // detector windows on observed growth instead.
+      // SAVED a row, and the upsert refreshes it on every save, so it tracks the
+      // last time we observed the entry — NOT when the failures happened. The
+      // server reports each ACL LOG entry's own age separately, and a restart or a
+      // newly-added connection stamps every entry currently in the ring with the
+      // current time, backfilling hours-old failures as if they were fresh.
+      // Filtering on `captured_at` would therefore select on poller behaviour
+      // rather than on attack activity. The detector windows on observed growth
+      // instead, which is the only signal that reflects real in-window failures.
+      //
+      // That refresh is also what makes AUTH_FAILURE_QUERY_LIMIT safe: the store
+      // orders by `captured_at DESC`, so entries still being written stay at the
+      // top of the result set and an entry under active attack cannot be pushed
+      // past the ceiling by a backlog of dormant ones.
       const entries = await this.storage.getAclEntries({
         connectionId: ctx.connectionId,
         limit: AUTH_FAILURE_QUERY_LIMIT,
