@@ -166,12 +166,44 @@ function Migrate() {
   );
 }
 
+function Verify() {
+  const left = SMALL;
+  const right = SMALL;
+
+  return (
+    <>
+      <g transform="translate(24 34)">
+        <StoredKeys cells={left} />
+      </g>
+      <g transform="translate(152 34)">
+        <StoredKeys cells={right} />
+      </g>
+      <path
+        d="M78 50 H140"
+        stroke="var(--muted-foreground)"
+        opacity={0.25}
+        strokeWidth={1.5}
+        fill="none"
+      />
+      <path
+        d="M100 50 l5 5 l9 -11"
+        stroke="var(--primary)"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+    </>
+  );
+}
+
 export function StepIllustration({ step }: Props) {
   return (
     <svg viewBox="0 0 220 100" className="h-auto w-full max-w-[300px]" aria-hidden="true">
       {step === 0 && <Configure />}
       {step === 1 && <Analyse />}
       {step === 2 && <Migrate />}
+      {step === 3 && <Verify />}
     </svg>
   );
 }

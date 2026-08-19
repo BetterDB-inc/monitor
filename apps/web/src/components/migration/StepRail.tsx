@@ -1,51 +1,49 @@
 import { Fragment } from 'react';
-import { Button } from '../ui/button';
+import { MIGRATION_STEPS } from './analysis-form/migration-steps';
 
 interface Props {
   currentStep: number;
-  onBack?: () => void;
 }
 
-const STEPS = ['Configure', 'Analyse', 'Migrate'] as const;
-
-export function StepRail({ currentStep, onBack }: Props) {
+export function StepRail({ currentStep }: Props) {
   return (
-    <div className="mb-6 flex flex-col gap-4">
-      <nav className="flex w-full items-center gap-5" aria-label="Migration progress">
-        {STEPS.map((label, index) => {
-          const isCurrent = index === currentStep;
-          const isDone = index < currentStep;
+    <nav className="mb-6 flex w-full items-start gap-5" aria-label="Migration progress">
+      {MIGRATION_STEPS.map((step, index) => {
+        const isCurrent = index === currentStep;
+        const isDone = index < currentStep;
 
-          return (
-            <Fragment key={label}>
-              {index > 0 && <span aria-hidden="true" className="h-px min-w-6 flex-1 bg-border" />}
+        return (
+          <Fragment key={step.title}>
+            {index > 0 && (
+              <span aria-hidden="true" className="mt-6 h-px min-w-4 flex-1 bg-border" />
+            )}
+            <span
+              aria-current={isCurrent ? 'step' : undefined}
+              className="flex min-w-0 shrink basis-0 flex-col items-center gap-2 text-center"
+            >
               <span
-                aria-current={isCurrent ? 'step' : undefined}
-                className={`flex shrink-0 items-center gap-3 text-xl ${
+                className={`grid size-12 shrink-0 place-items-center rounded-full border text-xl font-semibold ${
+                  isCurrent || isDone
+                    ? 'border-primary bg-primary text-primary-foreground'
+                    : 'border-border text-muted-foreground'
+                }`}
+              >
+                {index + 1}
+              </span>
+              <span
+                className={`text-base ${
                   isCurrent ? 'font-semibold text-foreground' : 'text-muted-foreground'
                 }`}
               >
-                <span
-                  className={`grid size-12 place-items-center rounded-full border text-xl font-semibold ${
-                    isCurrent || isDone
-                      ? 'border-primary bg-primary text-primary-foreground'
-                      : 'border-border'
-                  }`}
-                >
-                  {index + 1}
-                </span>
-                {label}
+                {step.title}
               </span>
-            </Fragment>
-          );
-        })}
-      </nav>
-
-      {onBack !== undefined && (
-        <Button variant="outline" size="sm" onClick={onBack} className="self-start">
-          ← Change configuration
-        </Button>
-      )}
-    </div>
+              <span className="hidden text-xs leading-relaxed text-muted-foreground sm:block">
+                {step.body}
+              </span>
+            </span>
+          </Fragment>
+        );
+      })}
+    </nav>
   );
 }

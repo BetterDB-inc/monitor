@@ -4,6 +4,7 @@ import { Feature } from '@betterdb/shared';
 import { fetchApi } from '../api/client';
 import { useLicense } from '../hooks/useLicense';
 import { AnalysisForm } from '../components/migration/AnalysisForm';
+import { Button } from '../components/ui/button';
 import { StepRail } from '../components/migration/StepRail';
 import { HowItWorks } from '../components/migration/analysis-form/HowItWorks';
 import { AnalysisProgressBar } from '../components/migration/AnalysisProgressBar';
@@ -24,9 +25,16 @@ function formatBytes(bytes: number): string {
 }
 
 function stepIndex(phase: Phase): number {
-  if (phase === 'idle') return 0;
-  if (phase === 'analyzing' || phase === 'analyzed') return 1;
-  return 2;
+  if (phase === 'idle') {
+    return 0;
+  }
+  if (phase === 'analyzing' || phase === 'analyzed') {
+    return 1;
+  }
+  if (phase === 'executing' || phase === 'executed') {
+    return 2;
+  }
+  return 3;
 }
 
 // ── Small shared components ──
@@ -155,17 +163,24 @@ export function MigrationPage() {
 
   return (
     <div className="space-y-6 pb-24">
-      <div>
-        <h1 className="text-2xl font-bold">Migration</h1>
-        <p className="text-muted-foreground mt-1">
-          Analyze your source instance to assess migration readiness.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold">Migration</h1>
+          <p className="text-muted-foreground mt-1">
+            Analyze your source instance to assess migration readiness.
+          </p>
+        </div>
+        {phase !== 'idle' && phase !== 'analyzing' && (
+          <Button variant="outline" size="sm" onClick={() => resetToIdle()}>
+            ← Change configuration
+          </Button>
+        )}
       </div>
 
-      <StepRail
-        currentStep={stepIndex(phase)}
-        onBack={phase !== 'idle' && phase !== 'analyzing' ? () => resetToIdle() : undefined}
-      />
+      {/* The rail and the step cards describe the same steps, so only one shows at
+          a time: the cards carry the illustrations that earn their space on the
+          opening screen, the rail carries progress once past it. */}
+      {stepIndex(phase) > 0 && <StepRail currentStep={stepIndex(phase)} />}
 
       {error && (
         <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-4">
@@ -499,7 +514,7 @@ export function MigrationPage() {
         </div>
       )}
 
-      <HowItWorks currentStep={stepIndex(phase)} />
+      {stepIndex(phase) === 0 && <HowItWorks />}
 
       {/* Issue 15: Past analyses history */}
       {history.length > 0 && (
