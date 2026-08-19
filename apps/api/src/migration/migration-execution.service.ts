@@ -247,6 +247,15 @@ export class MigrationExecutionService {
       // Pre-spawn work, now that the POST has already returned the job id. The notice
       // is pushed before the process starts, so it can never be missed by a UI that
       // stops polling once the job is terminal (a fast scan racing a slow probe).
+      //
+      // These awaits open a window where the job is still 'pending' with no process, so
+      // stopExecution() can only flip the status to 'cancelled' — it has nothing to
+      // kill. We must therefore re-check after every await and bail before doing
+      // anything destructive (flushing the target) or committing (spawning); the
+      // finally block then finalizes the cancelled job. Without this, a cancel issued
+      // during the probe/flush is silently dropped and RedisShake starts anyway.
+      if ((job.status as string) === 'cancelled') return;
+
       if (preSpawn.excludeFunctions) {
         await this.probeAndPushFunctionNotice(
           job,
@@ -256,18 +265,21 @@ export class MigrationExecutionService {
           preSpawn.sourceDbType,
           preSpawn.targetDbType,
         );
+        if ((job.status as string) === 'cancelled') return;
       }
 
       // Flush the target before spawning. A failure here is caught below and finalized
       // by the finally block (TOML unlinked, completedAt set) — the credential-bearing
-      // TOML never lingers, and the job doesn't stay half-finished.
-      if (preSpawn.emptyDbBeforeSync) {
+      // TOML never lingers, and the job doesn't stay half-finished. Guarded on cancel
+      // so we never wipe a target for a run the caller already stopped.
+      if (preSpawn.emptyDbBeforeSync && (job.status as string) !== 'cancelled') {
         try {
           await this.flushTargetBeforeSync(preSpawn.targetAdapter, preSpawn.targetConfig, preSpawn.targetIsCluster);
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           throw new Error(`Target pre-flush failed: ${message}`);
         }
+        if ((job.status as string) === 'cancelled') return;
       }
 
       const proc = spawn(binaryPath, [job.tomlPath!], {

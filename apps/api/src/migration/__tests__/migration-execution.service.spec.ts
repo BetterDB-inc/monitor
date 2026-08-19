@@ -273,6 +273,35 @@ describe('MigrationExecutionService', () => {
       expect(result!.notices!.some(n => /functions are excluded/i.test(n))).toBe(true);
     });
 
+    it('drops the migration when cancelled during pre-spawn work', async () => {
+      // Regression: the probe/pre-flush awaits leave the job 'pending' with no process,
+      // so stopExecution() can only flip the status to 'cancelled'. runRedisShake must
+      // notice that and bail before flushing the target or spawning RedisShake.
+      const { spawn } = require('child_process');
+      (spawn as jest.Mock).mockClear();
+
+      const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
+      const flushall = jest.fn().mockResolvedValue('OK');
+      crossForkRegistry.mockTargetAdapter.getClient = jest.fn().mockReturnValue({ flushall, quit: jest.fn() });
+      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+
+      const { id } = await crossForkService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake',
+        redisShakeOptions: { emptyDbBeforeSync: true },
+      });
+
+      // Cancel while runRedisShake is still suspended in its pre-spawn awaits.
+      crossForkService.stopExecution(id);
+      await new Promise(r => setTimeout(r, 30));
+
+      const result = crossForkService.getExecution(id);
+      expect(result!.status).toBe('cancelled');
+      expect(spawn).not.toHaveBeenCalled();
+      expect(flushall).not.toHaveBeenCalled();
+    });
+
     it('still surfaces the notice when the source probe fails (unknown presence)', async () => {
       // 'throw' -> 'unknown': the filter is written regardless, so an indeterminate
       // probe must not silently drop the warning.
