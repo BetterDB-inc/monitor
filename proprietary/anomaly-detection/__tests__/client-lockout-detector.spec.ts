@@ -61,12 +61,29 @@ describe('evaluateClientLockout', () => {
     }
   });
 
-  it('fires CRITICAL as soon as rejected_connections climbs, without waiting for the streak', () => {
+  it('reports WARNING, not CRITICAL, for refusals without sustained utilization', () => {
     expect(evaluateClientLockout(state, input({ rejectedConnections: 4 }))).toBeNull();
 
+    // Refusals are real, but the pool is not pinned at the ceiling — a transient
+    // burst the server absorbed, not a lockout.
     const finding = evaluateClientLockout(state, input({ rejectedConnections: 9 }));
-    expect(finding?.level).toBe('critical');
+    expect(finding?.level).toBe('warning');
     expect(finding?.rejectedDelta).toBe(5);
+  });
+
+  it('escalates that WARNING to CRITICAL once utilization is also sustained', () => {
+    expect(evaluateAndCommit(state, input({ rejectedConnections: 4 }))).toBeNull();
+    expect(evaluateAndCommit(state, input({ rejectedConnections: 9 }))?.level).toBe('warning');
+
+    const high = input({ connectedClients: 900, rejectedConnections: 9 });
+    for (let poll = 1; poll < LOCKOUT_MIN_STREAK; poll++) {
+      evaluateAndCommit(state, high);
+    }
+    const finding = evaluateAndCommit(
+      state,
+      input({ connectedClients: 900, rejectedConnections: 14 }),
+    );
+    expect(finding?.level).toBe('critical');
   });
 
   it('escalates warning to critical when refusals start, then stays quiet while steady', () => {
@@ -101,7 +118,10 @@ describe('evaluateClientLockout', () => {
     const at = (rejected: number) => {
       return input({ connectedClients: 1000, rejectedConnections: rejected });
     };
-    evaluateAndCommit(state, at(0));
+    // Pin utilization at the ceiling for the full streak so CRITICAL is reachable.
+    for (let poll = 0; poll < LOCKOUT_MIN_STREAK; poll++) {
+      evaluateAndCommit(state, at(0));
+    }
     expect(evaluateAndCommit(state, at(5))?.level).toBe('critical');
 
     // Refusals pause for a poll, then resume. The pressure never went away, so
@@ -133,11 +153,14 @@ describe('evaluateClientLockout', () => {
       evaluateAndCommit(state, input({ maxClients: null, rejectedConnections: 40 })),
     ).toBeNull();
 
+    // The point of this case is that the 36 refusals are NOT swallowed by the gap.
+    // Utilization is only 10%, so the level is WARNING — CRITICAL additionally
+    // requires a sustained streak at the ceiling.
     const finding = evaluateAndCommit(
       state,
       input({ connectedClients: 100, rejectedConnections: 40 }),
     );
-    expect(finding?.level).toBe('critical');
+    expect(finding?.level).toBe('warning');
     expect(finding?.rejectedDelta).toBe(36);
   });
 
@@ -190,19 +213,26 @@ describe('evaluateClientLockout', () => {
   });
 
   it('retries a CRITICAL whose emit failed, without needing fresh refusals', () => {
-    // Baseline the refusal counter.
-    expect(evaluateClientLockout(state, input({ rejectedConnections: 10 }))).toBeNull();
+    const high = (rejected: number) => {
+      return input({ connectedClients: 900, rejectedConnections: rejected });
+    };
+
+    // Baseline the refusal counter and build the utilization streak CRITICAL needs.
+    for (let poll = 0; poll < LOCKOUT_MIN_STREAK; poll++) {
+      evaluateClientLockout(state, high(10));
+    }
+    commitClientLockoutLevel(state, 'warning');
 
     // Refusals rise: CRITICAL, but the caller never commits (emit failed).
-    const first = evaluateClientLockout(state, input({ rejectedConnections: 25 }));
+    const first = evaluateClientLockout(state, high(25));
     expect(first?.level).toBe('critical');
 
     // Same counter next poll — no NEW refusals. The escalation must still stand.
-    const retry = evaluateClientLockout(state, input({ rejectedConnections: 25 }));
+    const retry = evaluateClientLockout(state, high(25));
     expect(retry?.level).toBe('critical');
 
     // Once it lands, the baseline advances and a flat counter goes quiet.
     commitClientLockoutLevel(state, 'critical');
-    expect(evaluateClientLockout(state, input({ rejectedConnections: 25 }))).toBeNull();
+    expect(evaluateClientLockout(state, high(25))).toBeNull();
   });
 });

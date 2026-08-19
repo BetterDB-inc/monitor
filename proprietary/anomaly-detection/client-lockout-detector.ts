@@ -108,11 +108,12 @@ export function createClientLockoutState(): ClientLockoutState {
  * recovers. This is the deliberate cost of not alerting every other poll, but a
  * worsening-after-a-lull case does go unreported.
  *
- * CRITICAL is deliberately hair-trigger: ANY `rejectedDelta > 0` reaches it, with
- * no minimum count and no utilization gate, so a single transient refused
- * connection pages critical. A refused connection means a client was actually
- * turned away, which is treated as never acceptable to miss; the escalate-only
- * rule above keeps it to one page per episode rather than a storm.
+ * CRITICAL needs refusals AND sustained utilization. A refused connection means a
+ * client was actually turned away, so it is never dropped — but on its own, during
+ * a brief burst that the server absorbs, it is not yet a lockout. It reports
+ * WARNING instead, and escalates to CRITICAL if utilization is still pinned at
+ * LOCKOUT_UTILIZATION_PCT for LOCKOUT_MIN_STREAK polls. Sustained utilization with
+ * no refusals stays WARNING as before.
  *
  * An unreadable ceiling (`maxclients` absent or ≤ 0) is treated as an
  * observation gap: the streak is left untouched rather than reset, and the
@@ -156,11 +157,16 @@ export function evaluateClientLockout(
     state.highUtilStreak = 0;
   }
 
+  // CRITICAL requires BOTH signals: connections are actually being refused AND
+  // utilization has sat at the ceiling long enough to rule out a brief spike. A
+  // lone refusal during a transient burst is real but not yet a lockout, so it
+  // reports WARNING and escalates only if the pressure persists.
   const sustained = state.highUtilStreak >= LOCKOUT_MIN_STREAK;
+  const refusing = rejectedDelta > 0;
   let level: LockoutLevel = 'none';
-  if (rejectedDelta > 0) {
+  if (refusing && sustained) {
     level = 'critical';
-  } else if (sustained) {
+  } else if (refusing || sustained) {
     level = 'warning';
   }
 

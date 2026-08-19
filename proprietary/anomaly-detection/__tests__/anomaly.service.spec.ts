@@ -5037,14 +5037,27 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('priority-net-sources');
     });
 
-    it('emits CRITICAL as soon as connections are actually refused', async () => {
+    it('emits CRITICAL when connections are refused against a sustained full pool', async () => {
       await pollWith({ connected_clients: '990', rejected_connections: '10' });
+      await pollWith({ connected_clients: '1000', rejected_connections: '10' });
+      await pollWith({ connected_clients: '1000', rejected_connections: '10' });
       await pollWith({ connected_clients: '1000', rejected_connections: '25' });
 
       const events = lockoutEvents();
+      const critical = events.find((e) => {
+        return e.severity === AnomalySeverity.CRITICAL;
+      });
+      expect(critical).toBeDefined();
+      expect(critical?.message).toContain('turning connections away right now');
+    });
+
+    it('reports only WARNING when refusals arrive without sustained utilization', async () => {
+      await pollWith({ connected_clients: '100', rejected_connections: '10' });
+      await pollWith({ connected_clients: '120', rejected_connections: '25' });
+
+      const events = lockoutEvents();
       expect(events).toHaveLength(1);
-      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
-      expect(events[0].message).toContain('turning connections away right now');
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
     });
 
     it('stays silent for a busy but sub-threshold pool', async () => {
