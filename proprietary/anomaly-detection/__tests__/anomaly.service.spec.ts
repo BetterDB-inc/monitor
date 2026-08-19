@@ -4751,6 +4751,41 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('replica of');
     });
 
+    it('escalates an already-alerted WARNING collision to CRITICAL when self-replication appears later', async () => {
+      const collision = (masterOfB: string) => {
+        return [
+          gnode('liveAAAAAAA', '10.0.0.1:6379@16379', ['master']),
+          gnode('liveBBBBBBB', '10.0.0.1:6379@16379', ['slave'], masterOfB),
+          gnode('otherCCCCCC', '10.0.0.2:6379@16379', ['myself', 'master']),
+        ];
+      };
+
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(collision('liveAAAAAAA'));
+      await pollPastGate();
+
+      const warned = ghostEvents();
+      expect(warned).toHaveLength(1);
+      expect(warned[0].severity).toBe(AnomalySeverity.WARNING);
+
+      // The escalation carries a new signature, so it re-enters the persistence
+      // gate and alerts on the poll after the grace window rather than instantly.
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(collision('liveBBBBBBB'));
+      now += 31_000;
+      await poll();
+      expect(ghostEvents()).toHaveLength(1);
+
+      now += 31_000;
+      await poll();
+
+      const events = ghostEvents();
+      expect(events).toHaveLength(2);
+      const escalation = events.find((e) => {
+        return e.severity === AnomalySeverity.CRITICAL;
+      });
+      expect(escalation).toBeDefined();
+      expect(escalation?.message).toContain('replica of');
+    });
+
     it('still emits the unchanged stale-twin WARNING with FORGET advice', async () => {
       dbClient.getClusterNodes = jest
         .fn()

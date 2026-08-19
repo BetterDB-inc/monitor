@@ -258,6 +258,13 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
       routableEndpoints += 1;
     }
   }
+  // Known blind spot: requiring a routable MAJORITY means a correlated flip stays
+  // silent. A host-wide misconfiguration that flips several nodes to loopback at
+  // once — arguably the worst case — produces an even split or a loopback majority
+  // and reports nothing, because at that point "which side is wrong" is no longer
+  // decidable from the census alone. Alerting on a loopback majority would fire on
+  // every all-loopback local cluster, so precision wins here deliberately. A
+  // near-parity census that suppresses a finding is currently not surfaced anywhere.
   const loopbackIsOddOneOut = routableEndpoints > 0 && routableEndpoints > loopbackEndpoints;
 
   const selfReplicatingAmong = (ids: string[]): string[] => {
@@ -346,7 +353,15 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
  * restart the persistence grace window when the occupant changes. The reason is
  * part of the signature so a stale twin and a live collision at the same endpoint
  * cannot dedupe each other out.
+ *
+ * Self-replication is part of it too, because it is what raises a finding from
+ * WARNING to CRITICAL. Without it, a collision that alerts as WARNING and only
+ * later gains a self-replicating member produces an identical signature, so the
+ * escalation dedupes against the WARNING already marked active and the operator
+ * is never told the fault got worse. The flag is carried rather than the ids, so
+ * severity is what re-alerts, not churn in which member is self-replicating.
  */
 export function ghostMemberSignature(g: GhostMember): string {
-  return `${g.reason}|${g.endpoint}|${[...g.stableIds].sort().join(',')}`;
+  const selfReplicating = g.selfReplicatingIds.length > 0 ? 'selfrep' : 'norep';
+  return `${g.reason}|${g.endpoint}|${[...g.stableIds].sort().join(',')}|${selfReplicating}`;
 }
