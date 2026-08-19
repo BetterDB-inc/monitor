@@ -60,6 +60,16 @@ import {
   createClientLockoutState,
   evaluateClientLockout,
 } from './client-lockout-detector';
+import {
+  AUTH_FAILURE_MIN_COUNT,
+  AUTH_FAILURE_QUERY_LIMIT,
+  AUTH_FAILURE_WINDOW_MS,
+  AuthFailureSource,
+  AuthFailureState,
+  createAuthFailureState,
+  observeAuthFailures,
+  takeAlertable,
+} from './auth-failure-detector';
 import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
 import {
@@ -218,6 +228,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // Connection-exhaustion / admin-lockout (valkey#3944) state: streak + last
   // level + last counters, one entry per connection.
   private clientLockoutState = new Map<string, ClientLockoutState>();
+  // Auth-failure burst (valkey#334) state: per-address alert cooldown, plus the
+  // last time the audit-store window was scanned for this connection.
+  private authFailureState = new Map<string, AuthFailureState>();
+  private authFailureLastScan = new Map<string, number>();
   // Replica-slot-state (valkey#1664) state, same discipline as stuck-replica:
   // `firstSeen` gates on persistence so a transient reshard snapshot doesn't
   // alert, `active` dedupes once the gate has fired.
@@ -552,6 +566,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.activeGhostMembers.delete(connectionId);
     this.ghostHistories.delete(connectionId);
     this.clientLockoutState.delete(connectionId);
+    this.authFailureState.delete(connectionId);
+    this.authFailureLastScan.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
     this.activeReplicaSlotAnomalies.delete(connectionId);
     this.replicaSlotEventIds.delete(connectionId);
@@ -1186,6 +1202,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // signal above by pairing utilization with live refusals.
       await this.detectClientLockoutRisk(info, ctx, timestamp);
 
+      // Authentication-failure / brute-force attribution (valkey-io/valkey#334):
+      // repeated auth failures from ONE client address, which the aggregate
+      // ACL_DENIED counter cannot tell you. Reads the audit store rather than
+      // polling ACL LOG a second time.
+      await this.detectAuthFailureBurst(ctx, timestamp);
+
       // Cross-node config drift (valkey-io/valkey#1193): CONFIG SET only ever
       // applies to the single node it's sent to today, so nodes in the same
       // replication group can silently drift on a critical setting (e.g. one
@@ -1401,6 +1423,132 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         `\`maxmemory-clients\`), hunt the connection leak or storm behind the climb, or — where ` +
         `available — reserve admin capacity with \`priority-net-sources\`/\`priority-maxclients\` ` +
         `so the control plane keeps a way in.`,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+  }
+
+  /**
+   * How often the audit store is scanned for an auth-failure burst. The poll
+   * loop runs at ANOMALY_POLL_INTERVAL_MS (1s by default), which would mean a
+   * storage query per second for a signal whose window is minutes wide.
+   */
+  private static readonly AUTH_FAILURE_SCAN_INTERVAL_MS = 30_000;
+
+  /**
+   * Authentication-failure / brute-force advisory (valkey-io/valkey#334):
+   * repeated failed AUTHs from ONE client address, which the aggregate
+   * `acl_access_denied_auth` counter cannot attribute.
+   *
+   * The source is the audit store, not a fresh `ACL LOG` call — `AuditService`
+   * already polls, dedupes and persists that log every cycle, and reading its
+   * output means this advisory inherits the capability gating, the ring-buffer
+   * handling and the `ACL LOG RESET` tolerance already built there.
+   */
+  private async detectAuthFailureBurst(ctx: ConnectionContext, timestamp: number): Promise<void> {
+    const lastScan = this.authFailureLastScan.get(ctx.connectionId);
+    if (
+      lastScan !== undefined &&
+      timestamp - lastScan < AnomalyService.AUTH_FAILURE_SCAN_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.authFailureLastScan.set(ctx.connectionId, timestamp);
+
+    try {
+      // No time filter on the query. `captured_at` records when the poller last
+      // SAVED a row, and the upsert refreshes it on every save, so it tracks the
+      // last time we observed the entry — NOT when the failures happened. The
+      // server reports each ACL LOG entry's own age separately, and a restart or a
+      // newly-added connection stamps every entry currently in the ring with the
+      // current time, backfilling hours-old failures as if they were fresh.
+      // Filtering on `captured_at` would therefore select on poller behaviour
+      // rather than on attack activity. The detector windows on observed growth
+      // instead, which is the only signal that reflects real in-window failures.
+      //
+      // That refresh is also what makes AUTH_FAILURE_QUERY_LIMIT safe: the store
+      // orders by `captured_at DESC`, so entries still being written stay at the
+      // top of the result set and an entry under active attack cannot be pushed
+      // past the ceiling by a backlog of dormant ones.
+      const entries = await this.storage.getAclEntries({
+        connectionId: ctx.connectionId,
+        limit: AUTH_FAILURE_QUERY_LIMIT,
+      });
+      let state = this.authFailureState.get(ctx.connectionId);
+      if (state === undefined) {
+        state = createAuthFailureState();
+        this.authFailureState.set(ctx.connectionId, state);
+      }
+
+      const sources = observeAuthFailures(
+        state,
+        entries,
+        timestamp,
+        AUTH_FAILURE_WINDOW_MS,
+        AUTH_FAILURE_MIN_COUNT,
+      );
+      for (const source of takeAlertable(state, sources, timestamp)) {
+        const event = this.buildAuthFailureEvent(ctx, timestamp, source);
+        this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+        await this.addAnomaly(event, ctx);
+      }
+    } catch (authErr) {
+      this.logger.debug(
+        `Failed to scan auth failures for ${ctx.connectionName}: ${authErr instanceof Error ? authErr.message : authErr}`,
+      );
+    }
+  }
+
+  /**
+   * Builds the auth-failure event. Deliberately carries only the client address,
+   * usernames, counts and reason breakdown — never the `object` field or the raw
+   * `client-info`, which would push key names and command arguments into the
+   * anomaly store and out through webhook payloads.
+   */
+  private buildAuthFailureEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    source: AuthFailureSource,
+  ): AnomalyEvent {
+    const windowMinutes = Math.round(AUTH_FAILURE_WINDOW_MS / 60_000);
+    const users = source.usernames.slice(0, 5).join(', ');
+    const moreUsers = source.usernames.length > 5 ? `, +${source.usernames.length - 5} more` : '';
+    const otherReasons = Object.entries(source.reasonBreakdown)
+      .filter(([reason]) => {
+        return reason !== 'auth';
+      })
+      .map(([reason, count]) => {
+        return `${reason}=${count}`;
+      });
+    const alsoDenied =
+      otherReasons.length > 0
+        ? ` The same address also hit other ACL denials (${otherReasons.join(', ')}), so it is ` +
+          `probing beyond the login itself.`
+        : '';
+    const usernameNote =
+      source.usernames.length > 1
+        ? ` across ${source.usernames.length} usernames (${users}${moreUsers}) — credential guessing rather than one stale client`
+        : ` against user '${users}'`;
+
+    return {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.AUTH_FAILURE_BURST,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: source.authFailures,
+      baseline: 0,
+      zScore: 0,
+      stdDev: 0,
+      threshold: AUTH_FAILURE_MIN_COUNT,
+      message:
+        `WARNING: ${source.authFailures} authentication failures recorded against ` +
+        `${source.clientAddress} in the last ${windowMinutes} minutes${usernameNote}.${alsoDenied} ` +
+        `ACL LOG groups failures by user and reason rather than by client, so treat the address as ` +
+        `the client recorded on those failures. Identify the client behind ` +
+        `that address; if it is not yours, restrict reachability (\`bind\`, firewall, security ` +
+        `group) before anything else, and rotate any credential it may have guessed. If it IS ` +
+        `yours, it is running with stale credentials and will keep retrying.`,
       resolved: false,
       connectionId: ctx.connectionId,
     };

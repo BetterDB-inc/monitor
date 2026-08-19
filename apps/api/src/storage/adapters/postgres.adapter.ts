@@ -429,6 +429,7 @@ export class PostgresAdapter implements StoragePort {
       DO UPDATE SET
         count = EXCLUDED.count,
         age_seconds = EXCLUDED.age_seconds,
+        client_info = EXCLUDED.client_info,
         timestamp_last_updated = EXCLUDED.timestamp_last_updated,
         captured_at = EXCLUDED.captured_at
     `;

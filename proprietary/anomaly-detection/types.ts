@@ -6,6 +6,8 @@ export enum MetricType {
   OUTPUT_KBPS = 'output_kbps',
   SLOWLOG_LAST_ID = 'slowlog_last_id',
   ACL_DENIED = 'acl_denied',
+  /** Repeated authentication failures from one client address, from ACL LOG (valkey#334) — state-based. */
+  AUTH_FAILURE_BURST = 'auth_failure_burst',
   /** New connections refused because maxclients was hit — per-poll delta of INFO stats rejected_connections. */
   REJECTED_CONNECTIONS = 'rejected_connections',
   /** connected_clients / maxclients saturation — state-based, emitted directly (not z-score buffered). */
@@ -82,6 +84,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.REJECTED_CONNECTIONS,
   MetricType.CLIENT_SATURATION,
   MetricType.CLIENT_LOCKOUT_RISK,
+  MetricType.AUTH_FAILURE_BURST,
   MetricType.EVICTED_CLIENTS,
   MetricType.RAFT_HEALTH,
   MetricType.FAILOVER_CHURN,
