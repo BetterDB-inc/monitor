@@ -1683,17 +1683,29 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // Attributed to the first node of the group, which is frequently NOT the
         // connection whose poll ran this scan.
         const attributedCtx = this.buildConnectionContext(drift.nodes[0].connectionId);
+        // Release and CONTINUE, not release and re-throw. Re-throwing abandoned the
+        // rest of the batch, leaving those drifts holding the claim they took in the
+        // reconcile step without ever emitting — the original bug, narrowed to the
+        // tail of a multi-drift poll. Each finding gets its own attempt.
+        //
+        // The release has to key off `persisted`, not off a rejection. addAnomaly
+        // CATCHES storage failures so one detector's write error cannot abort the
+        // rest of the poll, which means the real failure mode resolves normally with
+        // `persisted` unset — a rejection-only release would never fire for it and
+        // the drift would stay suppressed until it cleared and recurred. The catch
+        // is kept for a throw from anywhere else in the emit path.
+        let emitFailure: string | null = null;
         try {
           await this.addAnomaly(event, attributedCtx);
+          if (event.persisted !== true) {
+            emitFailure = 'anomaly was not persisted';
+          }
         } catch (emitErr) {
-          // Release and CONTINUE, not release and re-throw. Re-throwing abandoned
-          // the rest of the batch, leaving those drifts holding the claim they took
-          // in the reconcile step without ever emitting — the original bug, narrowed
-          // to the tail of a multi-drift poll. Each finding now gets its own attempt.
+          emitFailure = emitErr instanceof Error ? emitErr.message : String(emitErr);
+        }
+        if (emitFailure !== null) {
           this.activeAclDriftSignatures.delete(aclDriftSignature(drift));
-          this.logger.debug(
-            `ACL drift emit failed, released for retry: ${emitErr instanceof Error ? emitErr.message : emitErr}`,
-          );
+          this.logger.debug(`ACL drift emit failed, released for retry: ${emitFailure}`);
         }
       }
     } catch (err) {

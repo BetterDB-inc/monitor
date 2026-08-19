@@ -5350,6 +5350,25 @@ describe('AnomalyService', () => {
       expect(events[0].severity).toBe(AnomalySeverity.WARNING);
     });
 
+    it('re-alerts the drift when the storage write fails, not just when the emit throws', async () => {
+      // The production failure mode: addAnomaly CATCHES the storage error and
+      // resolves, leaving `persisted` unset. A rejection-only release would never
+      // fire here, so the drift would stay suppressed until it cleared and recurred.
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+
+      await expect(poll()).resolves.not.toThrow();
+      const first = driftEvents();
+      expect(first).toHaveLength(1);
+      expect(first[0].persisted).not.toBe(true);
+
+      await poll();
+
+      const events = driftEvents();
+      expect(events).toHaveLength(2);
+      expect(events.some((e) => e.persisted === true)).toBe(true);
+    });
+
     it('still emits the rest of the batch when one drift emit fails', async () => {
       // Two groups drift in the same poll. The first emit throws; the second must
       // still be delivered, and the failed one must re-alert on the next poll.
