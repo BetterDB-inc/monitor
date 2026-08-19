@@ -240,5 +240,23 @@ export function detectSentinelDrift(
  * of node, endpoint, or reason alerts again.
  */
 export function sentinelDriftSignature(drift: SentinelDrift): string {
-  return `${drift.reason}|${drift.masterName}|${drift.nodeName}|${drift.endpoint}`;
+  return [drift.reason, drift.masterName, drift.nodeName, drift.endpoint]
+    .map(encodeURIComponent)
+    .join('|');
+}
+
+/**
+ * The master name a signature belongs to.
+ *
+ * Components are percent-encoded before joining, so a master name containing the
+ * `|` separator cannot shift the segments — reading the raw signature with
+ * `split('|')[1]` would silently return only the part before that character and
+ * match the wrong master.
+ */
+export function sentinelDriftSignatureMaster(signature: string): string {
+  const encoded = signature.split('|')[1];
+  if (encoded === undefined) {
+    return '';
+  }
+  return decodeURIComponent(encoded);
 }

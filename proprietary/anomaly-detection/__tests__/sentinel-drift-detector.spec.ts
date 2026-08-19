@@ -1,4 +1,5 @@
 import { SentinelNodeInfo } from '@app/common/types/metrics.types';
+import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import {
   detectSentinelDrift,
   isIpLiteral,
@@ -309,5 +310,98 @@ describe('detectSentinelDrift — unknown-primary placeholder', () => {
 
     const findings = detectSentinelDrift(HOSTNAME_MASTER, replicas);
     expect(findings.map((f) => f.reason)).toEqual(['ip_for_hostname']);
+  });
+});
+
+// ─── End-to-end: raw reply → real parser → detector ──────────────────────────
+//
+// Every other test in this file and in anomaly.service.spec hand-builds
+// SentinelNodeInfo or mocks getSentinelMasters/getSentinelReplicas, so
+// MetricsParser.parseSentinelNodes never actually runs on the detector's behalf.
+// If the parser returned [] the detector would go quiet with no error and both
+// PRs would stay green while the feature did nothing. These cases wire the real
+// parser to the real detector so that whole path is exercised.
+//
+// NB this pins the parser to the reply SHAPE (flat key/value arrays, one per
+// entry) and to the field NAMES as modelled. It does not substitute for running
+// against a live Sentinel — if upstream names a field differently, this test is
+// wrong in the same direction as the parser.
+describe('raw SENTINEL reply through the real parser into the detector', () => {
+  const master = [
+    'name',
+    'mymaster',
+    'ip',
+    'valkey-0.valkey-headless',
+    'port',
+    '6379',
+    'runid',
+    'a1b2c3',
+    'flags',
+    'master',
+  ];
+  const healthyReplica = [
+    'name',
+    'valkey-1.valkey-headless:6379',
+    'ip',
+    'valkey-1.valkey-headless',
+    'port',
+    '6379',
+    'runid',
+    'd4e5f6',
+    'flags',
+    'slave',
+    'master-host',
+    'valkey-0.valkey-headless',
+    'master-port',
+    '6379',
+  ];
+  const driftedReplica = [
+    'name',
+    '10.244.3.7:6379',
+    'ip',
+    '10.244.3.7',
+    'port',
+    '6379',
+    'runid',
+    '778899',
+    'flags',
+    'slave',
+    'master-host',
+    'valkey-0.valkey-headless',
+    'master-port',
+    '6379',
+  ];
+
+  it('parses a real-shaped reply into nodes the detector understands', () => {
+    const [parsedMaster] = MetricsParser.parseSentinelNodes([master]);
+    expect(parsedMaster).toMatchObject({
+      name: 'mymaster',
+      ip: 'valkey-0.valkey-headless',
+      port: 6379,
+      flags: ['master'],
+    });
+
+    const replicas = MetricsParser.parseSentinelNodes([healthyReplica, driftedReplica]);
+    expect(replicas).toHaveLength(2);
+    expect(replicas[1].masterHost).toBe('valkey-0.valkey-headless');
+    expect(replicas[1].masterPort).toBe(6379);
+  });
+
+  it('flags the IP-for-hostname replica end to end', () => {
+    const [parsedMaster] = MetricsParser.parseSentinelNodes([master]);
+    const replicas = MetricsParser.parseSentinelNodes([healthyReplica, driftedReplica]);
+
+    const findings = detectSentinelDrift(parsedMaster, replicas);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].reason).toBe('ip_for_hostname');
+    expect(findings[0].endpoint).toContain('10.244.3.7');
+  });
+
+  it('stays silent end to end on a hostname-consistent group', () => {
+    const [parsedMaster] = MetricsParser.parseSentinelNodes([master]);
+    const replicas = MetricsParser.parseSentinelNodes([healthyReplica]);
+
+    expect(detectSentinelDrift(parsedMaster, replicas)).toEqual([]);
   });
 });

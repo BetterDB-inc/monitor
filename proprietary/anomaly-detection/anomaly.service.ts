@@ -65,6 +65,7 @@ import {
   detectSentinelDrift,
   isSentinelMode,
   sentinelDriftSignature,
+  sentinelDriftSignatureMaster,
 } from './sentinel-drift-detector';
 import {
   AclDrift,
@@ -1586,8 +1587,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // re-emit a finding that had already alerted. On a single-master Sentinel
         // one failed read empties the view entirely.
         preserveSignature: (signature) => {
-          // Signature shape is `reason|masterName|nodeName|endpoint`.
-          return unreadMasters.has(signature.split('|')[1] ?? '');
+          return unreadMasters.has(sentinelDriftSignatureMaster(signature));
         },
         buildEvent: (drift) => {
           return this.buildSentinelDriftEvent(ctx, timestamp, drift);
