@@ -116,7 +116,12 @@ function findFatalLine(logs: string[]): string | null {
     return null;
   }
   for (let i = candidates.length - 1; i >= 0; i--) {
-    if (/\bERR\b|panic:|\[PANIC\]|\bFATAL\b/i.test(candidates[i])) {
+    // Match the zerolog level token ERR case-sensitively: a lowercase field like
+    // `err=nil` on a routine INF line would otherwise satisfy a case-insensitive
+    // `\bERR\b` (`=` is a non-word char) and, because we walk backwards, shadow the
+    // real fatal line — dropping BUSYKEY to UNKNOWN. panic:/[PANIC]/FATAL stay
+    // case-insensitive fallbacks for a genuine Go runtime panic.
+    if (/(^|\s)ERR(\s|$)/.test(candidates[i]) || /panic:|\[PANIC\]|\bFATAL\b/i.test(candidates[i])) {
       return candidates[i];
     }
   }

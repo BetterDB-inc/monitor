@@ -70,21 +70,31 @@ export async function probeSourceFunctionsClusterAware(
     masters.map(async (master): Promise<FunctionPresence> => {
       const { host, port } = parseNodeAddress(master.address);
       if (!host || Number.isNaN(port)) return 'unknown';
-      const client = new Valkey({
-        host,
-        port,
-        username: config.username || undefined,
-        password: config.password || undefined,
-        tls: config.tls ? {} : undefined,
-        lazyConnect: true,
-      });
+      // Construct inside the try: a constructor throw must resolve to 'unknown' for
+      // this master, not reject Promise.all and bubble out of startExecution.
+      let client: Valkey | undefined;
       try {
+        client = new Valkey({
+          host,
+          port,
+          username: config.username || undefined,
+          password: config.password || undefined,
+          tls: config.tls ? {} : undefined,
+          lazyConnect: true,
+          // A dead master must not spawn an endless 2s reconnect loop for the life of
+          // the process. With no retry, a failed connect() rejects immediately and the
+          // client is disposable.
+          retryStrategy: () => null,
+          maxRetriesPerRequest: 1,
+        });
         await client.connect();
         return await probeSourceFunctions(client);
       } catch {
         return 'unknown';
       } finally {
-        try { await client.quit(); } catch { /* ignore */ }
+        // disconnect() tears down synchronously (sets manuallyClosing); quit() would
+        // queue into the offline queue of a still-reconnecting client and hang.
+        try { client?.disconnect(); } catch { /* ignore */ }
       }
     }),
   );

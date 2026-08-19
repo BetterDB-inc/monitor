@@ -13,7 +13,7 @@ import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-build
 import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/log-parser';
 import { runCommandMigration } from './execution/command-migration-worker';
 import { shouldExcludeFunctions } from './fork-compat';
-import { probeSourceFunctionsClusterAware } from './function-presence';
+import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
 
 @Injectable()
 export class MigrationExecutionService {
@@ -52,37 +52,6 @@ export class MigrationExecutionService {
     const targetInfo = await targetAdapter.getInfo(['cluster']);
     const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
     const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
-
-    // 3.5. If emptyDbBeforeSync requested, flush every target master now.
-    // RedisShake's own empty_db_before_sync only flushes the seed node in cluster
-    // mode, leaving other masters intact. We handle it here instead.
-    if ((mode === 'redis_shake' || mode === 'redis_shake_sync') && req.redisShakeOptions?.emptyDbBeforeSync) {
-      if (targetIsCluster) {
-        const nodes = await targetAdapter.getClusterNodes();
-        const masters = nodes.filter(n => n.flags.includes('master'));
-        await Promise.all(masters.map(async (master) => {
-          const addrPart = master.address?.split('@')[0] ?? '';
-          const lastColon = addrPart.lastIndexOf(':');
-          let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
-          const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
-          if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
-          if (!host || isNaN(port)) return;
-          const client = new Valkey({
-            host, port,
-            username: targetConfig?.username || undefined,
-            password: targetConfig?.password || undefined,
-            tls: targetConfig?.tls ? {} : undefined,
-            lazyConnect: true,
-          });
-          await client.connect();
-          await client.flushall();
-          await client.quit();
-        }));
-      } else {
-        await targetAdapter.getClient().flushall();
-      }
-      this.logger.log(`Execution pre-flush: flushed target before migration`);
-    }
 
     // 4. For redis_shake modes, locate the binary upfront
     let binaryPath: string | undefined;
@@ -132,20 +101,11 @@ export class MigrationExecutionService {
       const targetDbType = targetAdapter.getCapabilities().dbType;
       const excludeFunctions = shouldExcludeFunctions(sourceDbType, targetDbType);
       if (excludeFunctions) {
-        // Surface the exclusion as a durable job notice — otherwise it's invisible
-        // and the user only discovers missing functions from later FCALL errors.
-        // Gate it on the source actually having (or maybe having) functions, so a
-        // clean instance that just saw a warning-free analysis doesn't get a scary
-        // "functions excluded" message about functions it never had. The filter is
-        // written regardless, so 'unknown' (probe failed) still warrants the notice.
-        // Cluster-aware: FUNCTION LIST is node-local, so a clustered source is probed
-        // per master, matching the analysis warning.
-        const presence = await probeSourceFunctionsClusterAware(sourceAdapter, sourceConfig, clusterEnabled);
-        if (presence !== 'absent') {
-          const notice = `Cross-engine migration (${sourceDbType} → ${targetDbType}): server-side functions are excluded and will not be transferred to the target.`;
-          this.logger.log(`Execution ${id}: ${notice}`);
-          job.notices.push(notice);
-        }
+        // Fire-and-forget: the probe opens direct connections to every source master
+        // (up to iovalkey's connectTimeout on a wedged node), and awaiting it here
+        // would stall the POST before the job id is returned. The job is already in
+        // the map, so the notice lands on it a beat later once the probe resolves.
+        void this.probeAndPushFunctionNotice(job, sourceAdapter, sourceConfig, clusterEnabled, sourceDbType, targetDbType);
       }
 
       const tomlContent = mode === 'redis_shake_sync'
@@ -166,6 +126,25 @@ export class MigrationExecutionService {
       writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
       job.tomlPath = tomlPath;
 
+      // Flush the target only now — after the binary is resolved, the job is created,
+      // and the TOML is written. Doing it earlier meant a throw from
+      // findRedisShakeBinary()/evictOldJobs()/writeFileSync() could wipe the target
+      // with no migration started and nothing left to repopulate it.
+      if (req.redisShakeOptions?.emptyDbBeforeSync) {
+        try {
+          await this.flushTargetBeforeSync(targetAdapter, targetConfig, targetIsCluster);
+        } catch (err: unknown) {
+          // The job is already in the map; a flush failure must mark it failed rather
+          // than throw out of startExecution and leave a permanently-'pending' slot
+          // that evictOldJobs() never reclaims.
+          const message = err instanceof Error ? err.message : String(err);
+          job.status = 'failed';
+          job.error = `Target pre-flush failed: ${message}`;
+          job.failureCode = 'UNKNOWN';
+          throw new ServiceUnavailableException(job.error);
+        }
+      }
+
       this.runRedisShake(job, binaryPath!).catch(err => {
         this.logger.error(`Execution ${id} failed: ${err.message}`);
       });
@@ -176,6 +155,76 @@ export class MigrationExecutionService {
     }
 
     return { id, status: 'pending' };
+  }
+
+  /**
+   * Flush every target master before a sync. RedisShake's own `empty_db_before_sync`
+   * only flushes the seed node in cluster mode, leaving other masters intact, so we
+   * do it ourselves. Probe clients are built leak-safe (no reconnect loop) and torn
+   * down synchronously, matching the function-presence probe.
+   */
+  private async flushTargetBeforeSync(
+    targetAdapter: ReturnType<ConnectionRegistry['get']>,
+    targetConfig: NonNullable<ReturnType<ConnectionRegistry['getConfig']>>,
+    targetIsCluster: boolean,
+  ): Promise<void> {
+    if (targetIsCluster) {
+      const nodes = await targetAdapter.getClusterNodes();
+      const masters = nodes.filter(n => n.flags.includes('master'));
+      await Promise.all(masters.map(async (master) => {
+        const { host, port } = parseNodeAddress(master.address);
+        if (!host || Number.isNaN(port)) return;
+        let client: Valkey | undefined;
+        try {
+          client = new Valkey({
+            host, port,
+            username: targetConfig.username || undefined,
+            password: targetConfig.password || undefined,
+            tls: targetConfig.tls ? {} : undefined,
+            lazyConnect: true,
+            retryStrategy: () => null,
+            maxRetriesPerRequest: 1,
+          });
+          await client.connect();
+          await client.flushall();
+        } finally {
+          try { client?.disconnect(); } catch { /* ignore */ }
+        }
+      }));
+    } else {
+      await targetAdapter.getClient().flushall();
+    }
+    this.logger.log(`Execution pre-flush: flushed target before migration`);
+  }
+
+  /**
+   * Probe the source for server-side functions and, unless the source is provably
+   * clean, push a durable notice that they're being excluded from the cross-engine
+   * stream. Gated on `presence !== 'absent'` so a clean instance doesn't get a scary
+   * message about functions it never had; 'unknown' (probe failed) still warrants it
+   * since the filter is written regardless. Cluster-aware — FUNCTION LIST is
+   * node-local, so a clustered source is probed per master (matching the analysis
+   * warning). Runs detached from startExecution; never throws into its caller.
+   */
+  private async probeAndPushFunctionNotice(
+    job: ExecutionJob,
+    sourceAdapter: Parameters<typeof probeSourceFunctionsClusterAware>[0],
+    sourceConfig: Parameters<typeof probeSourceFunctionsClusterAware>[1],
+    clusterEnabled: boolean,
+    sourceDbType: string,
+    targetDbType: string,
+  ): Promise<void> {
+    try {
+      const presence = await probeSourceFunctionsClusterAware(sourceAdapter, sourceConfig, clusterEnabled);
+      if (presence !== 'absent') {
+        const notice = `Cross-engine migration (${sourceDbType} → ${targetDbType}): server-side functions are excluded and will not be transferred to the target.`;
+        this.logger.log(`Execution ${job.id}: ${notice}`);
+        job.notices.push(notice);
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Execution ${job.id}: function-presence probe failed: ${message}`);
+    }
   }
 
   // ── RedisShake mode ──

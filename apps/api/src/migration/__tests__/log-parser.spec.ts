@@ -118,6 +118,19 @@ describe('classifyRedisShakeFailure', () => {
     expect(result.message).toMatch(/flush the target/i);
   });
 
+  it('does not let a trailing lowercase `err=` field shadow the fatal BUSYKEY line', () => {
+    // Regression: a routine teardown/progress line carrying `err=nil` would satisfy a
+    // case-insensitive `\bERR\b` (`=` is a non-word char) and, since we walk backwards,
+    // win over the real fatal ERR line — dropping BUSYKEY to UNKNOWN. The level token
+    // must be matched case-sensitively so the lowercase field is ignored.
+    const logs = [
+      '2026-08-18 10:00:01 ERR [src-0] redisStandaloneWriter received BUSYKEY reply. cmd=[RESTORE mykey 0 ...]',
+      '2026-08-18 10:00:02 INF [src-0] closing writer connection err=nil',
+      '2026-08-18 10:00:02 INF [src-0] all workers stopped, err=<nil>',
+    ];
+    expect(classifyRedisShakeFailure(1, logs).code).toBe('BUSYKEY');
+  });
+
   it('keys off the last ERR line, so an earlier error is not misattributed as BUSYKEY', () => {
     // Defensive: if two ERR lines appear, the fatal one is last (it precedes os.Exit).
     // A BUSYKEY earlier in the buffer must not override a different final cause.
