@@ -49,7 +49,7 @@ import {
   detectOrphanedSlotKeys,
   orphanedSlotKeysSignature,
 } from './orphaned-slot-keys-detector';
-import { detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
+import { GhostMember, detectGhostMembers, ghostMemberSignature } from './ghost-membership-detector';
 import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
 import {
@@ -3205,12 +3205,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   private static readonly GHOST_MEMBER_MIN_PERSIST_MS = 30_000;
 
   /**
-   * Detects a ghost cluster member (valkey-io/valkey#1757) from this connection's
-   * `CLUSTER NODES` view: an endpoint claimed by a stale (`fail`/`fail?`/`noaddr`)
-   * node-id that peers never forgot after a `CLUSTER RESET`/restart, alongside the
-   * live id that now occupies it. Emits a WARNING once the ghost has persisted
-   * past the re-MEET grace window, dedupes per (endpoint, ids) signature, and
-   * clears state on recovery so a re-appearing ghost alerts again.
+   * Detects endpoint-identity faults from this connection's `CLUSTER NODES` view:
+   * a stale (`fail`/`fail?`/`noaddr`) node-id peers never forgot after a
+   * `CLUSTER RESET`/restart alongside the live id that now occupies its endpoint
+   * (valkey-io/valkey#1757), two established ids claiming one endpoint, and a node
+   * whose address flipped to loopback while its peers stayed routable
+   * (valkey-io/valkey#2768). Emits once a finding has persisted past the re-MEET
+   * grace window, dedupes per (reason, endpoint, ids) signature, and clears state
+   * on recovery so a re-appearing fault alerts again.
    */
   private async detectGhostMembers(
     ctx: ConnectionContext,
@@ -3227,27 +3229,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         activeByConn: this.activeGhostMembers,
         minPersistMs: AnomalyService.GHOST_MEMBER_MIN_PERSIST_MS,
         buildEvent: (g, signature) => {
-          const ghostLabel = g.ghostIds.map((id) => id.substring(0, 8)).join(', ');
-          const forgetCmds = g.ghostIds.map((id) => `CLUSTER FORGET ${id}`).join('; ');
-          const plural = g.ghostIds.length > 1;
+          const { severity, value, message } = this.describeGhostFinding(g);
           return {
-            id: `${ctx.connectionId}-ghost-member-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.GHOST_MEMBERSHIP,
             anomalyType: AnomalyType.SPIKE,
-            severity: AnomalySeverity.WARNING,
-            value: g.ghostIds.length,
+            severity,
+            value,
             baseline: 0,
             zScore: 0,
             stdDev: 0,
             threshold: 0,
-            message:
-              `WARNING: Endpoint ${g.endpoint} is now node ${g.liveId.substring(0, 8)}, but ` +
-              `stale node-id${plural ? 's' : ''} ${ghostLabel} still linger${plural ? '' : 's'} in the ` +
-              `cluster view. A CLUSTER RESET/restart does not make peers forget a node (valkey#1757), ` +
-              `so the old identity keeps re-joining and causing errors. Run \`${forgetCmds}\` on every ` +
-              `other node in the cluster — primaries AND replicas — to fully evict the ghost; any node ` +
-              `that still remembers it re-gossips it back after the 60s FORGET ban expires.`,
+            message,
             resolved: false,
             connectionId: ctx.connectionId,
           };
@@ -3258,6 +3252,84 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         `Failed to check ghost membership for ${ctx.connectionName}: ${ghostErr instanceof Error ? ghostErr.message : ghostErr}`,
       );
     }
+  }
+
+  /**
+   * Severity, magnitude and operator advice for one endpoint-identity finding.
+   * The three reasons share a metric but not a remedy: a stale twin is cleared
+   * with `CLUSTER FORGET`, while the live-twin cases need the mis-announcing node
+   * fixed — forgetting a live id would only evict a healthy node.
+   */
+  private describeGhostFinding(g: GhostMember): {
+    severity: AnomalySeverity;
+    value: number;
+    message: string;
+  } {
+    const shortIds = (ids: string[]): string => {
+      return ids
+        .map((id) => {
+          return id.substring(0, 8);
+        })
+        .join(', ');
+    };
+
+    const selfReplicationNote =
+      g.selfReplicatingIds.length > 0
+        ? ` Node ${shortIds(g.selfReplicatingIds)} is currently configured as a replica of ` +
+          `itself, which confirms the endpoint is being resolved to the wrong node.`
+        : '';
+
+    if (g.reason === 'loopback_flip') {
+      const alsoColliding =
+        g.collidingIds.length > 1
+          ? ` The endpoint is shared by ${g.collidingIds.length} live ids (${shortIds(g.collidingIds)}).`
+          : '';
+      return {
+        severity: AnomalySeverity.CRITICAL,
+        value: g.collidingIds.length,
+        message:
+          `CRITICAL: Node ${g.liveId.substring(0, 8)} advertises the loopback endpoint ` +
+          `${g.endpoint} while its peers use routable addresses. Its address discovery picked ` +
+          `up the wrong interface (valkey#2768), so peers and clients cannot reach it, and ` +
+          `failover cannot select it correctly.${alsoColliding}${selfReplicationNote} Set ` +
+          `\`cluster-announce-ip\` to the node's routable address and restart it, then check the ` +
+          `host for CPU steal — scheduling starvation is the usual trigger.`,
+      };
+    }
+
+    if (g.reason === 'live_endpoint_collision') {
+      return {
+        severity:
+          g.selfReplicatingIds.length > 0 ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+        value: g.collidingIds.length,
+        message:
+          `${g.selfReplicatingIds.length > 0 ? 'CRITICAL' : 'WARNING'}: Endpoint ${g.endpoint} is ` +
+          `claimed by ${g.collidingIds.length} live cluster nodes (${shortIds(g.collidingIds)}). ` +
+          `Two live nodes advertising one address (valkey#2768) breaks failover target selection, ` +
+          `can make a replica PSYNC to itself, and routes clients to the wrong ` +
+          `node.${selfReplicationNote} Do NOT run CLUSTER FORGET here — both ids are live. Check ` +
+          `the affected hosts for CPU steal, pin each node's address with \`cluster-announce-ip\`, ` +
+          `and restart the node that mis-discovered its address.`,
+      };
+    }
+
+    const plural = g.ghostIds.length > 1;
+    const forgetCmds = g.ghostIds
+      .map((id) => {
+        return `CLUSTER FORGET ${id}`;
+      })
+      .join('; ');
+    return {
+      severity: AnomalySeverity.WARNING,
+      value: g.ghostIds.length,
+      message:
+        `WARNING: Endpoint ${g.endpoint} is now node ${g.liveId.substring(0, 8)}, but ` +
+        `stale node-id${plural ? 's' : ''} ${shortIds(g.ghostIds)} still linger${plural ? '' : 's'} in the ` +
+        `cluster view. A CLUSTER RESET/restart does not make peers forget a node (valkey#1757), ` +
+        `so the old identity keeps re-joining and causing errors. Run \`${forgetCmds}\` on every ` +
+        `other node in the cluster — primaries AND replicas — to fully evict the ghost; any node ` +
+        `that still remembers it re-gossips it back after the 60s FORGET ban expires.`,
+    };
   }
 
   /**

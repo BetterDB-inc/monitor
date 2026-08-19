@@ -1,41 +1,81 @@
 import { ClusterNode } from '@app/common/types/metrics.types';
 
 /**
- * Detects the asymmetric-membership fault behind valkey-io/valkey#1757:
- * "CLUSTER RESET forgets other nodes, but they don't forget you."
+ * Detects endpoint-identity faults readable from a single node's `CLUSTER NODES`
+ * view. Three distinct upstream faults share one signature family — an `ip:port`
+ * endpoint that does not map cleanly to exactly one healthy node-id — so they are
+ * reported under one metric with a `reason` discriminator.
  *
- * A `CLUSTER RESET` (or a plain restart that re-provisions the node's identity)
- * wipes the resetting node's own view of the cluster, but the *other* nodes keep
- * it. On a HARD reset the node comes back with a brand-new node-id + fresh
- * `configEpoch 0`, while its *old* node-id lingers in every peer's table as
- * `fail`/`fail?`/`noaddr` — the peers never got a `CLUSTER FORGET`. The result,
- * readable from any single node's `CLUSTER NODES` view, is a **ghost**: one
- * `ip:port` endpoint claimed by two distinct node-ids — a stale dead identity
- * remembered alongside the live one that actually occupies the endpoint now.
+ * `stale_twin` (valkey-io/valkey#1757) — "CLUSTER RESET forgets other nodes, but
+ * they don't forget you." A `CLUSTER RESET` (or a plain restart that re-provisions
+ * the node's identity) wipes the resetting node's own view of the cluster, but the
+ * *other* nodes keep it. On a HARD reset the node comes back with a brand-new
+ * node-id + fresh `configEpoch 0`, while its *old* node-id lingers in every peer's
+ * table as `fail`/`fail?`/`noaddr` — the peers never got a `CLUSTER FORGET`. The
+ * result is a **ghost**: one endpoint claimed by two distinct node-ids, a stale
+ * dead identity remembered alongside the live one that occupies the endpoint now.
  *
- * The upstream fix (broadcast a FORGET on reset) is unresolved and lives in the
- * engine. We can't fix it, but we can surface the residue and tell the operator
- * exactly which stale id to `CLUSTER FORGET` to clear it.
+ * `live_endpoint_collision` (valkey-io/valkey#2768) — the same endpoint claimed by
+ * two or more distinct ids where **both twins are live**. Under CPU steal or
+ * scheduling starvation a node's address discovery picks up the wrong address and
+ * gossips it, so two healthy nodes advertise one endpoint. Failover then cannot
+ * select a correct primary, replicas try to `PSYNC` to themselves, and clients are
+ * routed to the wrong node. The dead-twin logic above explicitly excludes this
+ * case (it requires one twin to be a ghost), which is why it needs its own reason.
+ *
+ * `loopback_flip` (valkey-io/valkey#2768, severe variant) — the address a node
+ * mis-discovered is a loopback/localhost address while its peers use routable
+ * ones. This is the smoking gun for the same fault, and it is reported separately
+ * because it is unambiguous and unrecoverable without operator action
+ * (`cluster-announce-ip`). A cluster where *every* node is on loopback is a normal
+ * local development topology and is never flagged.
+ *
+ * The upstream fixes live in the engine and are unresolved. We can't fix them, but
+ * we can surface the residue and tell the operator exactly what to do about it.
  *
  * This is the stateless, high-precision Layer 1 of the detector: it fires only on
- * the persistent stale-twin signature (a ghost id + a live twin on the same
- * endpoint). The transient ~15s re-MEET/handshake churn window described in the
- * issue is left to a future stateful Layer 2 — it self-heals and would be noisy
- * without a time window.
+ * signatures visible in a single snapshot. The transient ~15s re-MEET/handshake
+ * churn window, and the FORGET-then-rejoin case that needs membership history, are
+ * left to the stateful Layer 2 — they self-heal or need memory, and would be noisy
+ * here.
  */
 
+/** Which endpoint-identity fault a finding describes. */
+export type GhostReason = 'stale_twin' | 'live_endpoint_collision' | 'loopback_flip';
+
 export interface GhostMember {
-  /** Canonical `ip:port` (cluster-bus `@cport` stripped) that two node-ids disagree over. */
+  /** Which fault this finding describes — drives severity and advice. */
+  reason: GhostReason;
+  /** Canonical `ip:port` (cluster-bus `@cport` stripped) the node-ids disagree over. */
   endpoint: string;
   /**
    * Stale node-ids still remembered at this endpoint — the `CLUSTER FORGET`
-   * targets. Sorted for a stable signature.
+   * targets. Populated for `stale_twin` only; empty for the live-twin reasons,
+   * where no id is safe to forget. Sorted for a stable signature.
    */
   ghostIds: string[];
   /** Node-id that actually occupies the endpoint now (the live/incoming twin). */
   liveId: string;
   /** Flags on the live occupant, for message context (e.g. whether it's still handshaking). */
   liveFlags: string[];
+  /**
+   * Every distinct LIVE id sharing this endpoint. Populated for the live-twin
+   * reasons — these are the ids in conflict, none of which is stale. Sorted.
+   */
+  collidingIds: string[];
+  /**
+   * Ids in this finding whose `master` points at their own node-id — a replica of
+   * itself. Corroborates the address-mis-discovery fault. Sorted.
+   */
+  selfReplicatingIds: string[];
+  /**
+   * The subset of ids the signature is built from: established members only,
+   * never a still-handshaking twin. A re-MEET churning through `handshake` on the
+   * same endpoint would otherwise rewrite the signature every poll, dropping the
+   * finding out of the persistence map and restarting its grace window — which
+   * would delay or suppress an alert that is continuously present. Sorted.
+   */
+  stableIds: string[];
 }
 
 /**
@@ -47,7 +87,42 @@ export interface GhostMember {
 const GHOST_FLAGS = ['fail', 'fail?', 'noaddr'];
 
 function isGhost(node: ClusterNode): boolean {
-  return GHOST_FLAGS.some((flag) => node.flags.includes(flag));
+  return GHOST_FLAGS.some((flag) => {
+    return node.flags.includes(flag);
+  });
+}
+
+/**
+ * Whether a node's address is evidence of how this cluster addresses itself.
+ *
+ * A `fail?` (PFAIL) node is a real member that one node currently cannot reach —
+ * its address is still meaningful, and excluding it would let a brief peer outage
+ * tip the census and silence an ongoing flip. A `fail` (agreed FAIL) or `noaddr`
+ * line is a stale identity whose address says nothing about the live cluster.
+ *
+ * A `handshake` line is excluded: the id has not joined yet, so the address we
+ * are MEETing it at is our own proposal rather than something the cluster has
+ * agreed on. Counting it would let a pair of stuck handshakes outvote the only
+ * established member and report that member as the odd one out.
+ */
+function countsForCensus(node: ClusterNode): boolean {
+  if (node.flags.includes('handshake')) {
+    return false;
+  }
+  return !node.flags.includes('fail') && !node.flags.includes('noaddr');
+}
+
+/**
+ * A node that has completed the join handshake. Handshaking ids are live but not
+ * yet established, so they never count toward an endpoint *collision* — a node
+ * re-MEETing an endpoint it is about to occupy is the normal rejoin path, not two
+ * nodes fighting over one address.
+ */
+function isEstablished(node: ClusterNode): boolean {
+  if (isGhost(node)) {
+    return false;
+  }
+  return !node.flags.includes('handshake');
 }
 
 /**
@@ -66,51 +141,207 @@ export function canonicalEndpoint(address: string): string {
   return host ? hostPort : '';
 }
 
+/** Host portion of a canonical `ip:port`, with any IPv6 brackets stripped. */
+export function endpointHost(endpoint: string): string {
+  const portColon = endpoint.lastIndexOf(':');
+  const host = portColon === -1 ? endpoint : endpoint.slice(0, portColon);
+  return host.replace(/^\[/, '').replace(/\]$/, '');
+}
+
 /**
- * Finds every endpoint claimed by more than one node-id where at least one id is
- * a ghost (`fail`/`fail?`/`noaddr`) and at least one *other* id is live — i.e. a
- * stale identity lingering next to the node that actually occupies the endpoint.
+ * Whether a host is a loopback/localhost address — the address a node
+ * mis-discovers when its own address detection fails (valkey#2768). Covers the
+ * whole 127.0.0.0/8 range, not just 127.0.0.1.
+ */
+export function isLoopbackHost(host: string): boolean {
+  const normalized = host.toLowerCase();
+  if (normalized === 'localhost' || normalized === '::1') {
+    return true;
+  }
+  return /^127\./.test(normalized);
+}
+
+/**
+ * The id that occupies an endpoint now: prefer an established node, but fall back
+ * to a still-handshaking one (a HARD-reset re-join caught mid-handshake, its old
+ * id already flagged fail).
+ */
+function preferredOccupant(live: ClusterNode[]): ClusterNode {
+  // Sorted first: CLUSTER NODES ordering is not guaranteed stable between polls,
+  // and the occupant id feeds the signature — picking by input order would let an
+  // identical snapshot produce a different signature and restart the grace window.
+  const sorted = [...live].sort((a, b) => {
+    return a.id.localeCompare(b.id);
+  });
+  const established = sorted.find((n) => {
+    return isEstablished(n);
+  });
+  return established ?? sorted[0];
+}
+
+function sortedDistinctIds(nodes: ClusterNode[]): string[] {
+  return [
+    ...new Set(
+      nodes.map((n) => {
+        return n.id;
+      }),
+    ),
+  ].sort();
+}
+
+/**
+ * Finds every endpoint whose node-ids do not resolve to exactly one healthy
+ * identity:
+ *
+ * - a stale ghost id (`fail`/`fail?`/`noaddr`) lingering next to the live id that
+ *   actually occupies the endpoint (`stale_twin`),
+ * - two or more established ids claiming one endpoint (`live_endpoint_collision`),
+ * - a node advertising loopback while its peers are routable (`loopback_flip`),
+ *   which supersedes the plain collision reason since it names the root cause.
  *
  * A single-id endpoint (the normal case, including a node that briefly failed and
  * recovered under its *same* id), and an endpoint whose ids are *all* ghosts (a
  * fully-dead node with no live twin — a different, failover-level concern) are
- * both ignored, so only the true identity-reuse ghost trips detection.
+ * both ignored.
  */
 export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
   const byEndpoint = new Map<string, ClusterNode[]>();
   for (const node of nodes) {
     const endpoint = canonicalEndpoint(node.address);
-    if (!endpoint) continue;
+    if (!endpoint) {
+      continue;
+    }
     const list = byEndpoint.get(endpoint) ?? [];
     list.push(node);
     byEndpoint.set(endpoint, list);
   }
 
+  const selfReplicating = new Set(
+    nodes
+      .filter((n) => {
+        return n.master !== '' && n.master !== '-' && n.master === n.id;
+      })
+      .map((n) => {
+        return n.id;
+      }),
+  );
+
+  // A loopback endpoint is only suspicious when it is the ODD ONE OUT: the fault
+  // is one node losing its address announcement while its peers keep theirs.
+  //
+  // The census counts distinct ENDPOINTS, not nodes, so two ids colliding on one
+  // loopback address count once — otherwise a collision would inflate the
+  // loopback side and demote a CRITICAL flip to a plain WARNING collision.
+  //
+  // Only addresses that describe the LIVE cluster are counted (see
+  // `countsForCensus`): a stale `fail`/`noaddr` record's address is not evidence
+  // of anything, while a `fail?` peer is a real member that happens to be
+  // unreachable right now and must keep its vote — otherwise a brief peer outage
+  // would tie the census and silence an ongoing flip.
+  const censusEndpoints = new Map<string, boolean>();
+  for (const n of nodes) {
+    if (!countsForCensus(n)) {
+      continue;
+    }
+    const nodeEndpoint = canonicalEndpoint(n.address);
+    if (!nodeEndpoint) {
+      continue;
+    }
+    censusEndpoints.set(nodeEndpoint, isLoopbackHost(endpointHost(nodeEndpoint)));
+  }
+  let loopbackEndpoints = 0;
+  let routableEndpoints = 0;
+  for (const isLoopback of censusEndpoints.values()) {
+    if (isLoopback) {
+      loopbackEndpoints += 1;
+    } else {
+      routableEndpoints += 1;
+    }
+  }
+  // Known blind spot: requiring a routable MAJORITY means a correlated flip stays
+  // silent. A host-wide misconfiguration that flips several nodes to loopback at
+  // once — arguably the worst case — produces an even split or a loopback majority
+  // and reports nothing, because at that point "which side is wrong" is no longer
+  // decidable from the census alone. Alerting on a loopback majority would fire on
+  // every all-loopback local cluster, so precision wins here deliberately. A
+  // near-parity census that suppresses a finding is currently not surfaced anywhere.
+  const loopbackIsOddOneOut = routableEndpoints > 0 && routableEndpoints > loopbackEndpoints;
+
+  const selfReplicatingAmong = (ids: string[]): string[] => {
+    return ids
+      .filter((id) => {
+        return selfReplicating.has(id);
+      })
+      .sort();
+  };
+
   const findings: GhostMember[] = [];
   for (const [endpoint, group] of byEndpoint) {
-    const distinctIds = new Set(group.map((n) => n.id));
-    if (distinctIds.size < 2) continue;
+    const ghosts = group.filter((n) => {
+      return isGhost(n);
+    });
+    const live = group.filter((n) => {
+      return !isGhost(n);
+    });
+    const established = group.filter((n) => {
+      return isEstablished(n);
+    });
 
-    const ghosts = group.filter(isGhost);
-    const nonGhosts = group.filter((n) => !isGhost(n));
-    if (ghosts.length === 0 || nonGhosts.length === 0) continue;
+    const isLoopbackFlip =
+      loopbackIsOddOneOut && isLoopbackHost(endpointHost(endpoint)) && live.length > 0;
 
-    // The live twin is whatever occupies the endpoint now: prefer an established
-    // node, but fall back to a still-handshaking one (a HARD-reset re-join caught
-    // mid-handshake, its old id already flagged fail).
-    const established = nonGhosts.find((n) => !n.flags.includes('handshake'));
-    const live = established ?? nonGhosts[0];
+    if (isLoopbackFlip) {
+      const occupant = preferredOccupant(live);
+      const collidingIds = sortedDistinctIds(live);
+      const establishedIds = sortedDistinctIds(established);
+      findings.push({
+        reason: 'loopback_flip',
+        endpoint,
+        ghostIds: [],
+        liveId: occupant.id,
+        liveFlags: occupant.flags,
+        collidingIds,
+        stableIds: establishedIds.length > 0 ? establishedIds : [occupant.id],
+        selfReplicatingIds: selfReplicatingAmong(collidingIds),
+      });
+    } else if (sortedDistinctIds(established).length >= 2) {
+      const occupant = preferredOccupant(established);
+      const collidingIds = sortedDistinctIds(established);
+      findings.push({
+        reason: 'live_endpoint_collision',
+        endpoint,
+        ghostIds: [],
+        liveId: occupant.id,
+        liveFlags: occupant.flags,
+        collidingIds,
+        stableIds: collidingIds,
+        selfReplicatingIds: selfReplicatingAmong(collidingIds),
+      });
+    }
 
-    const ghostIds = [...new Set(ghosts.map((g) => g.id))]
-      .filter((id) => id !== live.id)
-      .sort();
-    if (ghostIds.length === 0) continue;
+    // The dead-twin path is evaluated independently: a ghost id at an endpoint
+    // that ALSO has colliding live twins is two separate faults, and the FORGET
+    // advice stands regardless of the collision.
+    if (ghosts.length === 0 || live.length === 0) {
+      continue;
+    }
+    const occupant = preferredOccupant(live);
+    const ghostIds = sortedDistinctIds(ghosts).filter((id) => {
+      return id !== occupant.id;
+    });
+    if (ghostIds.length === 0) {
+      continue;
+    }
 
     findings.push({
+      reason: 'stale_twin',
       endpoint,
       ghostIds,
-      liveId: live.id,
-      liveFlags: live.flags,
+      liveId: occupant.id,
+      liveFlags: occupant.flags,
+      collidingIds: [],
+      stableIds: [occupant.id, ...ghostIds].sort(),
+      selfReplicatingIds: selfReplicatingAmong([occupant.id, ...ghostIds]),
     });
   }
 
@@ -118,9 +349,19 @@ export function detectGhostMembers(nodes: ClusterNode[]): GhostMember[] {
 }
 
 /**
- * Stable signature for a ghost finding, used to dedupe repeat alerts across polls
- * and to restart the persistence grace window when the occupant changes.
+ * Stable signature for a finding, used to dedupe repeat alerts across polls and to
+ * restart the persistence grace window when the occupant changes. The reason is
+ * part of the signature so a stale twin and a live collision at the same endpoint
+ * cannot dedupe each other out.
+ *
+ * Self-replication is part of it too, because it is what raises a finding from
+ * WARNING to CRITICAL. Without it, a collision that alerts as WARNING and only
+ * later gains a self-replicating member produces an identical signature, so the
+ * escalation dedupes against the WARNING already marked active and the operator
+ * is never told the fault got worse. The flag is carried rather than the ids, so
+ * severity is what re-alerts, not churn in which member is self-replicating.
  */
 export function ghostMemberSignature(g: GhostMember): string {
-  return `${g.endpoint}|${[g.liveId, ...g.ghostIds].sort().join(',')}`;
+  const selfReplicating = g.selfReplicatingIds.length > 0 ? 'selfrep' : 'norep';
+  return `${g.reason}|${g.endpoint}|${[...g.stableIds].sort().join(',')}|${selfReplicating}`;
 }
