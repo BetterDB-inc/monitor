@@ -1,67 +1,124 @@
 import { useState } from 'react';
 import { useConnection } from '../../hooks/useConnection';
 import type { Connection } from '../../hooks/useConnection';
+import { useMigrationPlan } from '../../hooks/useMigrationPlan';
 import { fetchApi } from '../../api/client';
 import type { StartAnalysisResponse } from '@betterdb/shared';
+import { Button } from '../ui/button';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
+import { ConnectionPicker } from './analysis-form/ConnectionPicker';
+import { EndpointPanel } from './analysis-form/EndpointPanel';
+import type { EndpointRole } from './analysis-form/EndpointPanel';
+import { MigrationPath } from './analysis-form/MigrationPath';
+import { NoConnectionsState } from './analysis-form/NoConnectionsState';
+import { PreflightNotes } from './analysis-form/PreflightNotes';
+import {
+  describeDirection,
+  isPlanComplete,
+  planBlock,
+  preflightNotes,
+} from './analysis-form/preflight';
 
 interface Props {
   onStart: (analysisId: string) => void;
 }
 
-function connectionLabel(c: Connection): string {
-  const base = `${c.name} (${c.host}:${c.port})`;
-  if (c.capabilities?.dbType && c.capabilities?.version) {
-    const type = c.capabilities.dbType === 'valkey' ? 'Valkey' : 'Redis';
-    return `${base} — ${type} ${c.capabilities.version}`;
-  }
-  return base;
-}
+const SAMPLE_SIZES = [1000, 5000, 10000, 25000] as const;
 
 export function AnalysisForm({ onStart }: Props) {
   const { connections, currentConnection } = useConnection();
-  const [sourceConnectionId, setSourceConnectionId] = useState(currentConnection?.id ?? '');
-  const [targetConnectionId, setTargetConnectionId] = useState('');
-  const [scanSampleSize, setScanSampleSize] = useState(10000);
+  const {
+    sourceId,
+    targetId,
+    sourceChosen,
+    scanSampleSize,
+    chooseSource,
+    chooseTarget,
+    clearSource,
+    clearTarget,
+    setScanSampleSize,
+  } = useMigrationPlan();
+  const [picking, setPicking] = useState<EndpointRole | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const sameConnection =
-    sourceConnectionId !== '' &&
-    targetConnectionId !== '' &&
-    sourceConnectionId === targetConnectionId;
-
-  const targetConnection = connections.find(c => c.id === targetConnectionId);
-  const targetIsOffline = targetConnectionId !== '' && targetConnection && !targetConnection.isConnected;
-
-  // The API returns connectionType on each connection but the Connection
-  // interface in useConnection doesn't surface it. Cast to access at runtime.
-  const isAgentConnection = (id: string): boolean => {
-    if (!id) return false;
-    const conn = connections.find(c => c.id === id) as
-      | (typeof connections[number] & { connectionType?: 'direct' | 'agent' })
-      | undefined;
-    return conn?.connectionType === 'agent';
-  };
-  const hasAgentConnection =
-    isAgentConnection(sourceConnectionId) || isAgentConnection(targetConnectionId);
-
   const isCloudMode = import.meta.env.VITE_CLOUD_MODE === 'true';
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!sourceConnectionId || !targetConnectionId || sameConnection) return;
+  if (connections.length < 2) {
+    return <NoConnectionsState connections={connections} />;
+  }
+
+  const findConnection = (id: string | null): Connection | null => {
+    if (id === null) {
+      return null;
+    }
+    return (
+      connections.find((connection) => {
+        return connection.id === id;
+      }) ?? null
+    );
+  };
+
+  const source = findConnection(sourceId);
+  const target = findConnection(targetId);
+  const direction = describeDirection(source, target);
+  const block = planBlock(source, target);
+  const notes = preflightNotes(source, target);
+  const complete = isPlanComplete(source, target);
+  const isPrefilled =
+    source !== null && source.id === currentConnection?.id && sourceChosen === false;
+
+  const offlineCount = connections.filter((connection) => {
+    return connection.isConnected === false;
+  }).length;
+  const agentCount = connections.filter((connection) => {
+    return connection.connectionType === 'agent';
+  }).length;
+  const countSelectable = (role: EndpointRole, excludeId: string | null): number => {
+    return connections.filter((connection) => {
+      if (connection.id === excludeId) {
+        return false;
+      }
+      if (connection.connectionType === 'agent') {
+        return false;
+      }
+      if (role === 'target' && connection.isConnected === false) {
+        return false;
+      }
+      return true;
+    }).length;
+  };
+
+  const handleSelect = (connection: Connection) => {
+    if (picking === 'source') {
+      chooseSource(connection.id);
+      return;
+    }
+    chooseTarget(connection.id);
+  };
+
+  const handleSubmit = async () => {
+    if (source === null || target === null || block !== null) {
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
       const res = await fetchApi<StartAnalysisResponse>('/migration/analysis', {
         method: 'POST',
-        body: JSON.stringify({ sourceConnectionId, targetConnectionId, scanSampleSize }),
+        body: JSON.stringify({
+          sourceConnectionId: source.id,
+          targetConnectionId: target.id,
+          scanSampleSize,
+        }),
       });
       onStart(res.id);
     } catch (err) {
       const raw = err instanceof Error ? err.message : 'Failed to start analysis';
       if (/writeable|enableOfflineQueue|offline/i.test(raw)) {
-        setError(`Could not connect to ${targetConnection?.name ?? 'target'} — the instance appears to be offline. Check the connection before running analysis.`);
+        setError(
+          `Could not connect to ${target.name} — the instance appears to be offline. Check the connection before running analysis.`,
+        );
       } else {
         setError(raw);
       }
@@ -71,105 +128,111 @@ export function AnalysisForm({ onStart }: Props) {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="bg-card border rounded-lg p-6 space-y-4 max-w-lg">
-      <div>
-        <label className="block text-sm font-medium mb-1">Source (migrating from)</label>
-        <select
-          value={sourceConnectionId}
-          onChange={e => setSourceConnectionId(e.target.value)}
-          className="w-full border rounded-md px-3 py-2 text-sm bg-background"
-          required
-        >
-          <option value="">Select a connection...</option>
-          {connections.map(c => (
-            <option key={c.id} value={c.id}>
-              {connectionLabel(c)}
-            </option>
-          ))}
-        </select>
+    <div className="flex flex-col gap-5">
+      <div className="grid items-stretch gap-0 md:grid-cols-[1fr_13rem_1fr]">
+        <EndpointPanel
+          role="source"
+          connection={source}
+          isPrefilled={isPrefilled}
+          selectableCount={countSelectable('source', targetId)}
+          offlineCount={offlineCount}
+          agentCount={agentCount}
+          onChoose={() => {
+            setPicking('source');
+          }}
+          onClear={clearSource}
+        />
+        <MigrationPath direction={direction} endpointsChosen={source !== null && target !== null} />
+        <EndpointPanel
+          role="target"
+          connection={target}
+          isPrefilled={false}
+          selectableCount={countSelectable('target', sourceId)}
+          offlineCount={offlineCount}
+          agentCount={agentCount}
+          onChoose={() => {
+            setPicking('target');
+          }}
+          onClear={clearTarget}
+        />
       </div>
 
-      <div>
-        <label className="block text-sm font-medium mb-1">Target (migrating to)</label>
-        <select
-          value={targetConnectionId}
-          onChange={e => setTargetConnectionId(e.target.value)}
-          className={`w-full border rounded-md px-3 py-2 text-sm bg-background${sameConnection ? ' border-destructive' : ''}`}
-          required
-        >
-          <option value="">Select a connection...</option>
-          {connections.map(c => (
-            <option
-              key={c.id}
-              value={c.id}
-              disabled={!c.isConnected}
-              title={!c.isConnected ? 'This instance is offline' : undefined}
-            >
-              {!c.isConnected ? `\u25CB ${connectionLabel(c)} (offline)` : connectionLabel(c)}
-            </option>
-          ))}
-        </select>
-        {sameConnection && (
-          <p className="text-sm text-destructive mt-1">
-            Source and target must be different connections
-          </p>
-        )}
-        {targetIsOffline && !sameConnection && (
-          <p className="text-sm text-amber-600 mt-1">
-            This instance appears to be offline and may not accept connections.
-          </p>
-        )}
-      </div>
-
-      {hasAgentConnection && (
-        <p className="text-sm text-amber-600">
-          One or more selected instances is connected via agent. Contact us at{' '}
-          <a href="mailto:support@betterdb.com" className="underline">support@betterdb.com</a> to
-          plan your migration — we'll help you do it safely.
+      {block !== null && (
+        <p className="text-sm text-destructive" role="alert">
+          {block}
         </p>
       )}
 
       {isCloudMode && (
-        <p className="text-sm text-amber-600">
+        <p className="text-sm text-chart-warning">
           Migration execution is not available in BetterDB Cloud. Contact us at{' '}
-          <a href="mailto:support@betterdb.com" className="underline">support@betterdb.com</a> to
-          plan your migration.
+          <a href="mailto:support@betterdb.com" className="underline">
+            support@betterdb.com
+          </a>{' '}
+          to plan your migration.
         </p>
       )}
 
-      <div>
-        <label className="block text-sm font-medium mb-1">Sample size</label>
-        <select
-          value={scanSampleSize}
-          onChange={e => setScanSampleSize(Number(e.target.value))}
-          className="w-full border rounded-md px-3 py-2 text-sm bg-background"
-        >
-          <option value={1000}>1,000 keys</option>
-          <option value={5000}>5,000 keys</option>
-          <option value={10000}>10,000 keys</option>
-          <option value={25000}>25,000 keys</option>
-        </select>
-        <p className="text-xs text-muted-foreground mt-1">
-          Higher sample = more accurate estimates, slower analysis.
-        </p>
-      </div>
-
-      {error && (
-        <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-3 text-sm">
+      {error !== null && (
+        <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">
           {error}
         </div>
       )}
 
-      <button
-        type="submit"
-        disabled={loading || !sourceConnectionId || !targetConnectionId || sameConnection || hasAgentConnection}
-        className="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium disabled:opacity-50 inline-flex items-center gap-2"
-      >
-        {loading && (
-          <span className="h-3 w-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-        )}
-        {loading ? 'Starting...' : 'Start Analysis'}
-      </button>
-    </form>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+        <Button
+          size="lg"
+          disabled={loading || complete === false || block !== null}
+          onClick={handleSubmit}
+        >
+          {loading && (
+            <span className="size-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+          )}
+          {loading ? 'Starting...' : 'Start Analysis'}
+        </Button>
+
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-muted-foreground" htmlFor="scan-sample-size">
+            Sample
+          </label>
+          <Select
+            value={String(scanSampleSize)}
+            onValueChange={(value) => {
+              setScanSampleSize(Number(value));
+            }}
+          >
+            <SelectTrigger id="scan-sample-size" className="w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SAMPLE_SIZES.map((size) => {
+                return (
+                  <SelectItem key={size} value={String(size)}>
+                    {size.toLocaleString()} keys
+                  </SelectItem>
+                );
+              })}
+            </SelectContent>
+          </Select>
+          <span className="text-xs text-muted-foreground">higher is more accurate, slower</span>
+        </div>
+      </div>
+
+      <PreflightNotes notes={notes} />
+
+      <ConnectionPicker
+        open={picking !== null}
+        role={picking ?? 'source'}
+        connections={connections}
+        selectedId={picking === 'source' ? sourceId : targetId}
+        excludeId={picking === 'source' ? targetId : sourceId}
+        onSelect={handleSelect}
+        onOpenChange={(open) => {
+          if (open === false) {
+            setPicking(null);
+          }
+        }}
+      />
+    </div>
   );
 }

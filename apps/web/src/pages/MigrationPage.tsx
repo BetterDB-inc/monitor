@@ -4,6 +4,9 @@ import { Feature } from '@betterdb/shared';
 import { fetchApi } from '../api/client';
 import { useLicense } from '../hooks/useLicense';
 import { AnalysisForm } from '../components/migration/AnalysisForm';
+import { Button } from '../components/ui/button';
+import { StepRail } from '../components/migration/StepRail';
+import { HowItWorks } from '../components/migration/analysis-form/HowItWorks';
 import { AnalysisProgressBar } from '../components/migration/AnalysisProgressBar';
 import { MigrationReport } from '../components/migration/MigrationReport';
 import { ExportBar } from '../components/migration/ExportBar';
@@ -22,9 +25,16 @@ function formatBytes(bytes: number): string {
 }
 
 function stepIndex(phase: Phase): number {
-  if (phase === 'idle') return 0;
-  if (phase === 'analyzing' || phase === 'analyzed') return 1;
-  return 2;
+  if (phase === 'idle') {
+    return 0;
+  }
+  if (phase === 'analyzing' || phase === 'analyzed') {
+    return 1;
+  }
+  if (phase === 'executing' || phase === 'executed') {
+    return 2;
+  }
+  return 3;
 }
 
 // ── Small shared components ──
@@ -34,40 +44,6 @@ function LockIcon() {
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
       <path fillRule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clipRule="evenodd" />
     </svg>
-  );
-}
-
-const STEPS = ['Configure', 'Analyse', 'Migrate'] as const;
-
-function StepIndicator({ phase, onBack }: { phase: Phase; onBack?: () => void }) {
-  const current = stepIndex(phase);
-  return (
-    <nav className="flex items-center gap-2 text-sm mb-2">
-      {onBack && (
-        <button
-          onClick={onBack}
-          className="px-3 py-1 text-sm border rounded-md hover:bg-muted mr-2"
-        >
-          &larr; Change configuration
-        </button>
-      )}
-      {STEPS.map((label, i) => (
-        <span key={label} className="flex items-center gap-2">
-          {i > 0 && <span className="text-muted-foreground">&rarr;</span>}
-          <span
-            className={
-              i === current
-                ? 'font-semibold text-primary'
-                : i < current
-                  ? 'text-muted-foreground'
-                  : 'text-muted-foreground/50'
-            }
-          >
-            {i + 1}. {label}
-          </span>
-        </span>
-      ))}
-    </nav>
   );
 }
 
@@ -197,19 +173,25 @@ export function MigrationPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Migration</h1>
-        <p className="text-muted-foreground mt-1">
-          Analyze your source instance to assess migration readiness.
-        </p>
+    <div className="space-y-6 pb-24">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold">Migration</h1>
+          <p className="text-muted-foreground mt-1">
+            Analyze your source instance to assess migration readiness.
+          </p>
+        </div>
+        {phase !== 'idle' && phase !== 'analyzing' && (
+          <Button variant="outline" size="sm" onClick={() => resetToIdle()}>
+            ← Change configuration
+          </Button>
+        )}
       </div>
 
-      {/* Issue 3: Step indicator */}
-      <StepIndicator
-        phase={phase}
-        onBack={phase !== 'idle' && phase !== 'analyzing' ? () => resetToIdle() : undefined}
-      />
+      {/* The rail and the step cards describe the same steps, so only one shows at
+          a time: the cards carry the illustrations that earn their space on the
+          opening screen, the rail carries progress once past it. */}
+      {stepIndex(phase) > 0 && <StepRail currentStep={stepIndex(phase)} />}
 
       {error && (
         <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-4">
@@ -546,6 +528,8 @@ export function MigrationPage() {
           </div>
         </div>
       )}
+
+      {stepIndex(phase) === 0 && <HowItWorks />}
 
       {/* Issue 15: Past analyses history */}
       {history.length > 0 && (

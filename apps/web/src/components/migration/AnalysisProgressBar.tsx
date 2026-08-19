@@ -64,7 +64,7 @@ export function AnalysisProgressBar({ analysisId, onComplete, onError, onCancel 
   const currentProgress = job?.progress ?? 0;
 
   return (
-    <div className="bg-card border rounded-lg p-6 space-y-4 max-w-lg">
+    <div className="bg-card border rounded-lg p-6 space-y-4">
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium">Analyzing...</span>
         <span className="text-sm text-muted-foreground">{currentProgress}%</span>
