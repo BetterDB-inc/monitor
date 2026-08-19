@@ -81,18 +81,15 @@ describe('CliService', () => {
       ['integer', 42, '(integer) 42', 'integer'],
       ['nil', null, '(nil)', 'nil'],
       ['empty array', [], '(empty array)', 'empty-array'],
-    ])(
-      'should format %s responses',
-      async (_label, mockResponse, expectedResult, expectedType) => {
-        mockCall.mockResolvedValueOnce(mockResponse);
-        const result = await service.execute('PING');
-        expect(result).toMatchObject({
-          type: 'result',
-          result: expectedResult,
-          resultType: expectedType,
-        });
-      },
-    );
+    ])('should format %s responses', async (_label, mockResponse, expectedResult, expectedType) => {
+      mockCall.mockResolvedValueOnce(mockResponse);
+      const result = await service.execute('PING');
+      expect(result).toMatchObject({
+        type: 'result',
+        result: expectedResult,
+        resultType: expectedType,
+      });
+    });
 
     it('should format array responses with numbered entries', async () => {
       mockCall.mockResolvedValueOnce(['entry1', 'entry2', 'entry3']);
@@ -104,7 +101,10 @@ describe('CliService', () => {
     });
 
     it('should format nested array responses', async () => {
-      mockCall.mockResolvedValueOnce([['a', 'b'], ['c', 'd']]);
+      mockCall.mockResolvedValueOnce([
+        ['a', 'b'],
+        ['c', 'd'],
+      ]);
       const result = await service.execute('LATENCY LATEST');
       const text = (result as { result: string }).result;
       expect(result).toMatchObject({ type: 'result', resultType: 'array' });
@@ -141,7 +141,7 @@ describe('CliService', () => {
     it.each([
       ['CONFIG', 'requires a sub-command'],
       ['CLIENT', 'requires a sub-command'],
-      ['SENTINEL MASTERS', 'not allowed in safe mode'],
+      ['SENTINEL FAILOVER mymaster', 'not allowed in safe mode'],
       ['CONFIG SET maxmemory 100mb', 'not allowed in safe mode'],
     ])('should reject %s in safe mode', async (command, expectedError) => {
       const result = await service.execute(command);
@@ -152,6 +152,12 @@ describe('CliService', () => {
     it('should allow SLOWLOG GET in safe mode', async () => {
       mockCall.mockResolvedValueOnce([]);
       const result = await service.execute('SLOWLOG GET');
+      expect(result.type).toBe('result');
+    });
+
+    it('should allow the read-only SENTINEL topology views in safe mode', async () => {
+      mockCall.mockResolvedValueOnce([]);
+      const result = await service.execute('SENTINEL MASTERS');
       expect(result.type).toBe('result');
     });
   });

@@ -393,6 +393,29 @@ export interface AclLogEntry {
   timestampLastUpdated: number;
 }
 
+/**
+ * One node as Sentinel sees it — a monitored master, one of its replicas, or a
+ * peer Sentinel. Sentinel replies are flat field/value lists whose exact field
+ * set varies by subcommand and version, so the modelled fields are the stable
+ * ones and `fields` keeps the rest rather than dropping information we may need
+ * without another round of plumbing.
+ */
+export interface SentinelNodeInfo {
+  /** Master name for a master entry; `<ip>:<port>` style identity for replicas. */
+  name: string;
+  /** Address Sentinel currently has recorded — the field that goes stale (valkey#2158). */
+  ip: string;
+  port: number;
+  runid: string;
+  /** Sentinel flags, e.g. `master`, `slave`, `s_down`, `o_down`, `disconnected`. */
+  flags: string[];
+  /** For a replica: the master it is configured to follow. */
+  masterHost?: string;
+  masterPort?: number;
+  /** Every field Sentinel returned, for anything not modelled above. */
+  fields: Record<string, string>;
+}
+
 export interface ReplicaInfo {
   ip: string;
   port: number;

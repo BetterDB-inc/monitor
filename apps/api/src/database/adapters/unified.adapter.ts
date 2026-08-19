@@ -1,6 +1,9 @@
 import Valkey from 'iovalkey';
 import { Logger } from '@nestjs/common';
-import { DatabasePort, DatabaseCapabilities } from '../../common/interfaces/database-port.interface';
+import {
+  DatabasePort,
+  DatabaseCapabilities,
+} from '../../common/interfaces/database-port.interface';
 import { InfoParser } from '../parsers/info.parser';
 import { MetricsParser } from '../parsers/metrics.parser';
 import { CLUSTER_TOTAL_SLOTS } from '../../common/constants/cluster.constants';
@@ -26,13 +29,24 @@ import {
   VectorSearchResult,
   TextSearchResult,
   ProfileResult,
+  SentinelNodeInfo,
 } from '../../common/types/metrics.types';
 import {
-  parseVectorIndexInfo, parseVectorSearchResponse, parseTextSearchResponse,
-  parseSearchConfig, parseProfileResponse,
-  sanitizeFilter, FIELD_NAME_RE, INDEX_NAME_RE,
+  parseVectorIndexInfo,
+  parseVectorSearchResponse,
+  parseTextSearchResponse,
+  parseSearchConfig,
+  parseProfileResponse,
+  sanitizeFilter,
+  FIELD_NAME_RE,
+  INDEX_NAME_RE,
 } from '../parsers/vector-index.parser';
-import type { KeyAnalyticsOptions, KeyAnalyticsResult, KeyDetail, KeyPatternData } from '@betterdb/shared';
+import type {
+  KeyAnalyticsOptions,
+  KeyAnalyticsResult,
+  KeyDetail,
+  KeyPatternData,
+} from '@betterdb/shared';
 import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT } from '@betterdb/shared';
 
 export interface UnifiedDatabaseAdapterConfig {
@@ -141,9 +155,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // feature — Redis <7 and forks like KeyDB reject it with "ERR syntax
       // error" (breaks e.g. KeyDB→Valkey migration analysis). Fetch each section
       // separately (single-section INFO is universal) and concatenate.
-      const parts = await Promise.all(
-        sections.map((section) => this.client.info(section)),
-      );
+      const parts = await Promise.all(sections.map((section) => this.client.info(section)));
       infoString = parts.join('\n');
     } else if (sections && sections.length === 1) {
       infoString = await this.client.info(sections[0]);
@@ -173,7 +185,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const majorVersion = versionParts[0] || 0;
     const minorVersion = versionParts[1] || 0;
 
-    const redisSupportsSlotStats = !isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 2));
+    const redisSupportsSlotStats =
+      !isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 2));
 
     // Probe whether CONFIG is available (disabled on managed services like AWS ElastiCache)
     let hasConfig = true;
@@ -181,7 +194,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       await this.client.config('GET', 'maxmemory');
     } catch {
       hasConfig = false;
-      this.logger.warn('CONFIG command is not available (common on managed Redis services like AWS ElastiCache). Config monitoring will be disabled.');
+      this.logger.warn(
+        'CONFIG command is not available (common on managed Redis services like AWS ElastiCache). Config monitoring will be disabled.',
+      );
     }
 
     // Probe whether FT._LIST is available (Search module loaded)
@@ -199,7 +214,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       dbType: isValkey ? 'valkey' : 'redis',
       version,
       hasSlotStats: (isValkey && majorVersion >= 8) || redisSupportsSlotStats,
-      hasCommandLog: isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 1)),  // Still Valkey-only
+      hasCommandLog: isValkey && (majorVersion > 8 || (majorVersion === 8 && minorVersion >= 1)), // Still Valkey-only
       hasClusterSlotStats: (isValkey && majorVersion >= 8) || redisSupportsSlotStats,
       hasLatencyMonitor: true,
       hasAclLog: majorVersion >= 6,
@@ -221,20 +236,20 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     endTime?: number,
   ): Promise<SlowLogEntry[]> {
     // Fetch more entries if filtering to ensure we return enough results
-    const fetchCount = (excludeClientName || startTime || endTime) ? count * 5 : count;
+    const fetchCount = excludeClientName || startTime || endTime ? count * 5 : count;
     const rawLog = await this.client.slowlog('GET', fetchCount);
     let entries = MetricsParser.parseSlowLog(rawLog as unknown[]);
 
     // Filter out entries from specified client (e.g., monitor's own commands)
     if (excludeClientName) {
-      entries = entries.filter(entry => entry.clientName !== excludeClientName);
+      entries = entries.filter((entry) => entry.clientName !== excludeClientName);
     }
 
     if (startTime) {
-      entries = entries.filter(entry => entry.timestamp >= startTime);
+      entries = entries.filter((entry) => entry.timestamp >= startTime);
     }
     if (endTime) {
-      entries = entries.filter(entry => entry.timestamp <= endTime);
+      entries = entries.filter((entry) => entry.timestamp <= endTime);
     }
 
     return entries.slice(0, count);
@@ -310,7 +325,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   async getLatencyHistogram(commands?: string[]): Promise<Record<string, LatencyHistogram>> {
-    const args: string[] = commands && commands.length > 0 ? ['LATENCY', 'HISTOGRAM', ...commands] : ['LATENCY', 'HISTOGRAM'];
+    const args: string[] =
+      commands && commands.length > 0
+        ? ['LATENCY', 'HISTOGRAM', ...commands]
+        : ['LATENCY', 'HISTOGRAM'];
     const rawData = await this.client.call(...(args as [string, ...string[]]));
 
     const result: Record<string, LatencyHistogram> = {};
@@ -473,6 +491,27 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
   }
 
+  /**
+   * `SENTINEL MASTERS` — every master this Sentinel monitors, with the address
+   * Sentinel currently has recorded for each.
+   */
+  async getSentinelMasters(): Promise<SentinelNodeInfo[]> {
+    const raw = await this.client.call('SENTINEL', 'MASTERS');
+    return MetricsParser.parseSentinelNodes(raw as unknown[]);
+  }
+
+  /** `SENTINEL REPLICAS <master>` — the replicas Sentinel believes follow a master. */
+  async getSentinelReplicas(masterName: string): Promise<SentinelNodeInfo[]> {
+    const raw = await this.client.call('SENTINEL', 'REPLICAS', masterName);
+    return MetricsParser.parseSentinelNodes(raw as unknown[]);
+  }
+
+  /** `SENTINEL SENTINELS <master>` — the other Sentinels monitoring a master. */
+  async getSentinelPeers(masterName: string): Promise<SentinelNodeInfo[]> {
+    const raw = await this.client.call('SENTINEL', 'SENTINELS', masterName);
+    return MetricsParser.parseSentinelNodes(raw as unknown[]);
+  }
+
   async getClusterInfo(): Promise<Record<string, string>> {
     const infoString = await this.client.call('CLUSTER', 'INFO');
     const lines = (infoString as string).trim().split('\n');
@@ -503,7 +542,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return MetricsParser.parseClusterShards(raw as unknown[]);
   }
 
-  async getClusterSlotStats(orderBy: 'key-count' | 'cpu-usec' = 'key-count', limit: number = 100): Promise<SlotStats> {
+  async getClusterSlotStats(
+    orderBy: 'key-count' | 'cpu-usec' = 'key-count',
+    limit: number = 100,
+  ): Promise<SlotStats> {
     if (!this.capabilities?.hasClusterSlotStats) {
       throw new Error('CLUSTER SLOT-STATS not supported on this database version');
     }
@@ -511,7 +553,14 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     // Validate and clamp limit to valid range (1 to total cluster slots)
     const validLimit = Math.max(1, Math.min(limit, CLUSTER_TOTAL_SLOTS));
 
-    const rawStats = await this.client.call('CLUSTER', 'SLOT-STATS', 'ORDERBY', orderBy, 'LIMIT', validLimit);
+    const rawStats = await this.client.call(
+      'CLUSTER',
+      'SLOT-STATS',
+      'ORDERBY',
+      orderBy,
+      'LIMIT',
+      validLimit,
+    );
     return MetricsParser.parseSlotStats(rawStats as unknown[]);
   }
 
@@ -586,8 +635,17 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
           const results = (await pipeline.exec()) || [];
           const [
-            memResult, idleResult, freqResult, ttlResult, typeResult,
-            strlenResult, llenResult, hlenResult, scardResult, zcardResult, xlenResult,
+            memResult,
+            idleResult,
+            freqResult,
+            ttlResult,
+            typeResult,
+            strlenResult,
+            llenResult,
+            hlenResult,
+            scardResult,
+            zcardResult,
+            xlenResult,
           ] = results;
 
           stats.count++;
@@ -595,33 +653,53 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
           const num = (r: [Error | null, unknown] | undefined): number | null =>
             r && !r[0] && r[1] != null ? (r[1] as number) : null;
 
-          const mem = (memResult && !memResult[0] && memResult[1] != null) ? memResult[1] as number : null;
+          const mem =
+            memResult && !memResult[0] && memResult[1] != null ? (memResult[1] as number) : null;
           if (mem !== null) {
             stats.totalMemory += mem;
             if (mem > stats.maxMemory) stats.maxMemory = mem;
           }
 
-          const keyType = (typeResult && !typeResult[0] && typeResult[1] != null) ? String(typeResult[1]) : null;
+          const keyType =
+            typeResult && !typeResult[0] && typeResult[1] != null ? String(typeResult[1]) : null;
           let cardinality: number | null = null;
           switch (keyType) {
-            case 'string': cardinality = num(strlenResult); break;
-            case 'list': cardinality = num(llenResult); break;
-            case 'hash': cardinality = num(hlenResult); break;
-            case 'set': cardinality = num(scardResult); break;
-            case 'zset': cardinality = num(zcardResult); break;
-            case 'stream': cardinality = num(xlenResult); break;
+            case 'string':
+              cardinality = num(strlenResult);
+              break;
+            case 'list':
+              cardinality = num(llenResult);
+              break;
+            case 'hash':
+              cardinality = num(hlenResult);
+              break;
+            case 'set':
+              cardinality = num(scardResult);
+              break;
+            case 'zset':
+              cardinality = num(zcardResult);
+              break;
+            case 'stream':
+              cardinality = num(xlenResult);
+              break;
           }
           if (cardinality !== null) {
             stats.totalCardinality += cardinality;
             if (cardinality > stats.maxCardinality) stats.maxCardinality = cardinality;
           }
 
-          const idle = (idleResult && !idleResult[0] && idleResult[1] != null) ? idleResult[1] as number : null;
+          const idle =
+            idleResult && !idleResult[0] && idleResult[1] != null
+              ? (idleResult[1] as number)
+              : null;
           if (idle !== null) {
             stats.totalIdleTime += idle;
           }
 
-          const freq = (freqResult && !freqResult[0] && freqResult[1] != null) ? freqResult[1] as number : null;
+          const freq =
+            freqResult && !freqResult[0] && freqResult[1] != null
+              ? (freqResult[1] as number)
+              : null;
           if (freq !== null) {
             stats.accessFrequencies.push(freq);
           }
@@ -669,20 +747,26 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   async getVectorIndexList(): Promise<string[]> {
     if (!this.capabilities?.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+      throw new Error(
+        'Vector search is not available on this connection (Search module not loaded)',
+      );
     }
     try {
       const result = await this.client.call('FT._LIST');
       return (result as string[]) || [];
     } catch (error) {
-      this.logger.error(`Failed to list vector indexes: ${error instanceof Error ? error.message : error}`);
+      this.logger.error(
+        `Failed to list vector indexes: ${error instanceof Error ? error.message : error}`,
+      );
       throw error;
     }
   }
 
   async getVectorIndexInfo(indexName: string): Promise<VectorIndexInfo> {
     if (!this.capabilities?.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+      throw new Error(
+        'Vector search is not available on this connection (Search module not loaded)',
+      );
     }
     if (!INDEX_NAME_RE.test(indexName)) {
       throw new Error(`Invalid index name: ${indexName}`);
@@ -691,7 +775,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       const raw = (await this.client.call('FT.INFO', indexName)) as unknown[];
       return parseVectorIndexInfo(indexName, raw);
     } catch (error) {
-      this.logger.error(`Failed to get vector index info for ${indexName}: ${error instanceof Error ? error.message : error}`);
+      this.logger.error(
+        `Failed to get vector index info for ${indexName}: ${error instanceof Error ? error.message : error}`,
+      );
       throw error;
     }
   }
@@ -708,7 +794,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     filter?: string,
   ): Promise<VectorSearchResult[]> {
     if (!this.capabilities?.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+      throw new Error(
+        'Vector search is not available on this connection (Search module not loaded)',
+      );
     }
     if (!INDEX_NAME_RE.test(indexName)) {
       throw new Error(`Invalid index name: ${indexName}`);
@@ -733,9 +821,16 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return parseVectorSearchResponse(result, vectorFieldName);
   }
 
-  async textSearch(indexName: string, query: string, offset = 0, limit = 20): Promise<TextSearchResult> {
+  async textSearch(
+    indexName: string,
+    query: string,
+    offset = 0,
+    limit = 20,
+  ): Promise<TextSearchResult> {
     if (!this.capabilities?.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+      throw new Error(
+        'Vector search is not available on this connection (Search module not loaded)',
+      );
     }
     if (!INDEX_NAME_RE.test(indexName)) {
       throw new Error(`Invalid index name: ${indexName}`);
@@ -745,7 +840,14 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
     const clampedLimit = Math.min(Math.max(limit, 1), 100);
     const clampedOffset = Math.max(offset, 0);
-    const args: string[] = ['FT.SEARCH', indexName, query, 'LIMIT', String(clampedOffset), String(clampedLimit)];
+    const args: string[] = [
+      'FT.SEARCH',
+      indexName,
+      query,
+      'LIMIT',
+      String(clampedOffset),
+      String(clampedLimit),
+    ];
     // DIALECT 2 is needed for RediSearch modern query syntax but not supported by Valkey Search
     if (this.capabilities?.dbType === 'redis') {
       args.push('DIALECT', '2');
@@ -756,7 +858,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   async getTagValues(indexName: string, fieldName: string): Promise<string[]> {
     if (!this.capabilities?.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+      throw new Error(
+        'Vector search is not available on this connection (Search module not loaded)',
+      );
     }
     if (!INDEX_NAME_RE.test(indexName)) {
       throw new Error(`Invalid index name: ${indexName}`);
@@ -780,7 +884,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         const values = new Set<string>();
         for (const doc of result.results) {
           const v = doc.fields[fieldName];
-          if (v) v.split(',').forEach(tag => values.add(tag.trim()));
+          if (v) v.split(',').forEach((tag) => values.add(tag.trim()));
         }
         return [...values].sort();
       } catch {
@@ -792,7 +896,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   async getSearchConfig(pattern?: string): Promise<Record<string, string>> {
     if (!this.capabilities?.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+      throw new Error(
+        'Vector search is not available on this connection (Search module not loaded)',
+      );
     }
     try {
       const raw = await this.client.call('FT.CONFIG', 'GET', pattern || '*');
@@ -805,7 +911,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   async profileSearch(indexName: string, query: string, limited = false): Promise<ProfileResult> {
     if (!this.capabilities?.hasVectorSearch) {
-      throw new Error('Vector search is not available on this connection (Search module not loaded)');
+      throw new Error(
+        'Vector search is not available on this connection (Search module not loaded)',
+      );
     }
     if (!INDEX_NAME_RE.test(indexName)) {
       throw new Error(`Invalid index name: ${indexName}`);
