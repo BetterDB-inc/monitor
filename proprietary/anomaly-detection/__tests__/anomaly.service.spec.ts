@@ -4987,4 +4987,93 @@ describe('AnomalyService', () => {
       expect((service as any).ghostHistories.has('conn-1')).toBe(false);
     });
   });
+
+  // ─── connection exhaustion / admin lockout (valkey#3944) ───────────────────
+
+  describe('client lockout risk', () => {
+    function infoWith(overrides: Record<string, string>) {
+      return {
+        server: { role: 'master' },
+        clients: {
+          connected_clients: overrides.connected_clients ?? '100',
+          blocked_clients: overrides.blocked_clients ?? '0',
+          maxclients: overrides.maxclients ?? '1000',
+        },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: overrides.rejected_connections ?? '0',
+          acl_access_denied_auth: '0',
+        },
+      };
+    }
+
+    async function pollWith(overrides: Record<string, string>): Promise<void> {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(overrides));
+      await poll();
+    }
+
+    const lockoutEvents = () => {
+      return service.getRecentEvents().filter((e) => {
+        return e.metricType === MetricType.CLIENT_LOCKOUT_RISK;
+      });
+    };
+
+    it('emits a WARNING only once the pressure is sustained', async () => {
+      await pollWith({ connected_clients: '900' });
+      await pollWith({ connected_clients: '900' });
+      expect(lockoutEvents()).toHaveLength(0);
+
+      await pollWith({ connected_clients: '900' });
+
+      const events = lockoutEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(events[0].message).toContain('maxclients');
+      expect(events[0].message).toContain('priority-net-sources');
+    });
+
+    it('emits CRITICAL when connections are refused against a sustained full pool', async () => {
+      await pollWith({ connected_clients: '990', rejected_connections: '10' });
+      await pollWith({ connected_clients: '1000', rejected_connections: '10' });
+      await pollWith({ connected_clients: '1000', rejected_connections: '10' });
+      await pollWith({ connected_clients: '1000', rejected_connections: '25' });
+
+      const events = lockoutEvents();
+      const critical = events.find((e) => {
+        return e.severity === AnomalySeverity.CRITICAL;
+      });
+      expect(critical).toBeDefined();
+      expect(critical?.message).toContain('turning connections away right now');
+    });
+
+    it('reports only WARNING when refusals arrive without sustained utilization', async () => {
+      await pollWith({ connected_clients: '100', rejected_connections: '10' });
+      await pollWith({ connected_clients: '120', rejected_connections: '25' });
+
+      const events = lockoutEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+    });
+
+    it('stays silent for a busy but sub-threshold pool', async () => {
+      for (let i = 0; i < 6; i++) {
+        await pollWith({ connected_clients: '700' });
+      }
+      expect(lockoutEvents()).toEqual([]);
+    });
+
+    it('clears lockout state on connection removal', async () => {
+      await pollWith({ connected_clients: '900' });
+      expect((service as any).clientLockoutState.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).clientLockoutState.has('conn-1')).toBe(false);
+    });
+  });
 });
