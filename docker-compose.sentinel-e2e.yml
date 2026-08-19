@@ -1,0 +1,70 @@
+# Sentinel topology for the Sentinel drift E2E (valkey-io/valkey#2158).
+#
+# Deliberately NOT part of docker-compose.test.yml: the default test run must not
+# pay this startup cost. Brought up and torn down by
+# apps/api/test/sentinel-topology.e2e-spec.ts, which only runs when
+# RUN_SENTINEL_TESTS=true. See `pnpm test:sentinel-topology`.
+#
+# The point of this file is to validate the FIELD NAMES the parser reads against a
+# real Sentinel reply. Hand-built fixtures cannot do that: if upstream spells a
+# field differently, the parser returns an empty list and the detector goes quiet
+# with no error.
+services:
+  sentinel-primary:
+    image: valkey/valkey:8-alpine
+    container_name: betterdb-sentinel-primary
+    command: valkey-server --port 6379 --appendonly no
+    ports:
+      - '6420:6379'
+    healthcheck:
+      test: ['CMD', 'valkey-cli', '-p', '6379', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # A replica so SENTINEL REPLICAS returns a populated entry — that reply is where
+  # master-host / master-port live, the fields the stale-pointer check reads.
+  sentinel-replica:
+    image: valkey/valkey:8-alpine
+    container_name: betterdb-sentinel-replica
+    command: valkey-server --port 6379 --appendonly no --replicaof sentinel-primary 6379
+    ports:
+      - '6421:6379'
+    depends_on:
+      sentinel-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'valkey-cli', '-p', '6379', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  sentinel:
+    image: valkey/valkey:8-alpine
+    container_name: betterdb-sentinel
+    # Written at start-up rather than mounted: Sentinel REWRITES its config file,
+    # so a read-only mount makes it fail on the first discovery.
+    command:
+      - sh
+      - -c
+      - |
+        cat > /tmp/sentinel.conf <<EOF
+        port 26379
+        sentinel monitor mymaster sentinel-primary 6379 1
+        sentinel down-after-milliseconds mymaster 2000
+        sentinel resolve-hostnames yes
+        sentinel announce-hostnames yes
+        EOF
+        exec valkey-sentinel /tmp/sentinel.conf
+    ports:
+      - '26420:26379'
+    depends_on:
+      sentinel-primary:
+        condition: service_healthy
+      sentinel-replica:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'valkey-cli', '-p', '26379', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 15
