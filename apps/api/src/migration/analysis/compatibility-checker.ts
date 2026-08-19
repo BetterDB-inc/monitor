@@ -1,5 +1,6 @@
 import type { Incompatibility } from '@betterdb/shared';
 import type { DatabaseCapabilities } from '../../common/interfaces/database-port.interface';
+import { shouldExcludeFunctions } from '../fork-compat';
 
 export interface InstanceMeta {
   dbType: 'valkey' | 'redis';
@@ -111,6 +112,7 @@ export function checkCompatibility(
   source: InstanceMeta,
   target: InstanceMeta,
   hfeDetected: boolean,
+  sourceHasFunctions: boolean = false,
 ): Incompatibility[] {
   const issues: Incompatibility[] = [];
 
@@ -123,6 +125,43 @@ export function checkCompatibility(
       detail:
         'Migrating from Valkey to Redis may lose Valkey-specific features and data structures. This direction is not recommended.',
     });
+  }
+
+  // 1b. Server-side function libraries. Only fires when the source actually has (or
+  // may have) functions, so a clean instance keeps its "no issues found" report.
+  // Two distinct cases — the analysis runs before the execution mode is chosen, so
+  // we surface both risks:
+  //   - Cross-fork (Valkey -> Redis): functions can never be carried (they register
+  //     against the engine-specific `server` global) and are filtered out entirely.
+  //   - Any other direction: functions are compatible with the target, but only the
+  //     Sync (PSYNC/RDB) transport carries them. Scan and Command modes migrate key
+  //     data only and would silently drop the libraries — hence a warning even for
+  //     same-engine migrations, so a Sync-vs-Scan choice is an informed one.
+  if (sourceHasFunctions) {
+    if (shouldExcludeFunctions(source.dbType, target.dbType)) {
+      issues.push({
+        severity: 'warning',
+        category: 'functions',
+        title: 'Functions not migrated to Redis',
+        detail:
+          `Source (${source.dbType}) has server-side function libraries, but the target ` +
+          `(${target.dbType}) is a different engine. Valkey libraries register against the ` +
+          'engine-specific `server` global, which Redis does not expose, so they would fail to ' +
+          'load on the target and are excluded from the migration. Key data still migrates — ' +
+          'recreate the functions on the target manually if you need them.',
+      });
+    } else {
+      issues.push({
+        severity: 'warning',
+        category: 'functions',
+        title: 'Functions require Sync mode to migrate',
+        detail:
+          'Source has server-side function libraries. Only Sync (PSYNC/RDB) mode transfers ' +
+          'them — Scan and Command modes migrate key data only and will silently drop function ' +
+          'libraries. Choose Sync mode to preserve them, or recreate the functions on the ' +
+          'target after migrating.',
+      });
+    }
   }
 
   // 2. HFE unsupported on target

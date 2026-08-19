@@ -1,4 +1,14 @@
-import { parseLogLine } from '../execution/log-parser';
+import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from '../execution/log-parser';
+
+describe('stripAnsi', () => {
+  it('removes CSI colour codes, including a wrapped level token', () => {
+    expect(stripAnsi('\x1b[1m\x1b[31mERR\x1b[0m done')).toBe('ERR done');
+    expect(stripAnsi('\x1b[90m2026-01-01\x1b[0m INF start')).toBe('2026-01-01 INF start');
+  });
+  it('is a no-op on plain text', () => {
+    expect(stripAnsi('plain line')).toBe('plain line');
+  });
+});
 
 describe('parseLogLine — sync_reader stage detection', () => {
   it('returns null syncStage for unrelated lines', () => {
@@ -90,5 +100,83 @@ describe('parseLogLine — scan_reader behavior preserved', () => {
     expect(result.bytesTransferred).toBeNull();
     expect(result.progress).toBeNull();
     expect(result.syncStage).toBeNull();
+  });
+});
+
+describe('classifyRedisShakeFailure', () => {
+  it('detects BUSYKEY on the real v4.6.1 fatal ERR line (log.Panicf: zerolog ERR + os.Exit)', () => {
+    // Actual shape RedisShake v4.6.1 produces: an `ERR` zerolog line carrying the
+    // BUSYKEY reply, followed by Panicf's appended call frame (`…/*.go:NN -> fn()`).
+    // No Go panic, no stack dump. The frame line is dropped; the ERR line classifies.
+    const logs = [
+      '2026-08-18 10:00:00 INF [src-0] start syncing rdb. path=[/tmp/dump.rdb]',
+      '2026-08-18 10:00:01 ERR [src-0] redisStandaloneWriter received BUSYKEY reply. cmd=[RESTORE mykey 0 ...]',
+      '\t\t\tRedisShake/internal/writer/redis_standalone_writer.go:168 -> processReply()',
+    ];
+    const result = classifyRedisShakeFailure(1, logs);
+    expect(result.code).toBe('BUSYKEY');
+    expect(result.message).toMatch(/flush the target/i);
+  });
+
+  it('does not let a trailing lowercase `err=` field shadow the fatal BUSYKEY line', () => {
+    // Regression: a routine teardown/progress line carrying `err=nil` would satisfy a
+    // case-insensitive `\bERR\b` (`=` is a non-word char) and, since we walk backwards,
+    // win over the real fatal ERR line — dropping BUSYKEY to UNKNOWN. The level token
+    // must be matched case-sensitively so the lowercase field is ignored.
+    const logs = [
+      '2026-08-18 10:00:01 ERR [src-0] redisStandaloneWriter received BUSYKEY reply. cmd=[RESTORE mykey 0 ...]',
+      '2026-08-18 10:00:02 INF [src-0] closing writer connection err=nil',
+      '2026-08-18 10:00:02 INF [src-0] all workers stopped, err=<nil>',
+    ];
+    expect(classifyRedisShakeFailure(1, logs).code).toBe('BUSYKEY');
+  });
+
+  it('keys off the last ERR line, so an earlier error is not misattributed as BUSYKEY', () => {
+    // Defensive: if two ERR lines appear, the fatal one is last (it precedes os.Exit).
+    // A BUSYKEY earlier in the buffer must not override a different final cause.
+    const logs = [
+      '2026-08-18 10:00:00 ERR [src-0] transient reply BUSYKEY on key foo',
+      '2026-08-18 10:00:05 INF [src-0] retrying',
+      '2026-08-18 10:00:10 ERR [src-0] OOM command not allowed when used memory > maxmemory',
+    ];
+    expect(classifyRedisShakeFailure(1, logs).code).toBe('UNKNOWN');
+  });
+
+  it('uses the last non-empty line when no ERR/panic/FATAL marker is present', () => {
+    const logs = ['some progress', 'BUSYKEY on final line', ''];
+    expect(classifyRedisShakeFailure(1, logs).code).toBe('BUSYKEY');
+  });
+
+  it('classifies BUSYKEY from real ANSI-coloured RedisShake output', () => {
+    // Exactly what v4.6.x emits on a BUSYKEY abort: an ANSI-wrapped ERR level token
+    // (so `\bERR\b` fails until stripped), then the appended .go and .s call frames.
+    // `\x1b` escapes reproduce the colour codes the binary actually writes.
+    const raw = [
+      '\x1b[90m2026-08-18 18:06:52\x1b[0m \x1b[1m\x1b[31mERR\x1b[0m [writer_127.0.0.1_6402] redisStandaloneWriter received BUSYKEY reply. cmd=[RESTORE foo 0 ...]',
+      '\t\t\tRedisShake/internal/writer/redis_standalone_writer.go:158 -> (*redisStandaloneWriter).processReply()',
+      '\t\t\truntime/asm_amd64.s:1650 -> goexit()',
+    ];
+    const logs = raw.map(stripAnsi); // mirrors processLine's per-line handling
+    expect(classifyRedisShakeFailure(1, logs).code).toBe('BUSYKEY');
+  });
+
+  it('is case-insensitive on the BUSYKEY token', () => {
+    expect(classifyRedisShakeFailure(1, ['busykey seen']).code).toBe('BUSYKEY');
+  });
+
+  it('appends the exit code to the BUSYKEY message', () => {
+    expect(classifyRedisShakeFailure(2, ['BUSYKEY']).message).toContain('(exit code 2)');
+  });
+
+  it('handles a null exit code without printing "null"', () => {
+    const result = classifyRedisShakeFailure(null, ['BUSYKEY']);
+    expect(result.message).toContain('(exit code unknown)');
+    expect(result.message).not.toContain('null');
+  });
+
+  it('falls back to UNKNOWN with the exit code when no signature matches', () => {
+    const result = classifyRedisShakeFailure(3, ['some unrelated failure']);
+    expect(result.code).toBe('UNKNOWN');
+    expect(result.message).toBe('RedisShake exited with code 3');
   });
 });

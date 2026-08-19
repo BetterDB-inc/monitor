@@ -101,10 +101,14 @@ export function MigrationPage() {
   const [history, setHistory] = useState<MigrationAnalysisResult[]>([]);
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
 
-  // Scroll to validation section when it appears
+  // When validation starts, scroll the validation panel into view with the minimum
+  // movement needed ('nearest'), keeping its top — header and controls — anchored.
+  // 'end' aligned the panel's bottom to the viewport bottom, which pushed the header
+  // above the fold for any panel taller than the viewport (and, since the effect
+  // never re-runs, everything rendered afterwards grew off-screen below it).
   useEffect(() => {
     if (phase === 'validating') {
-      validationRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      validationRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   }, [phase]);
 
@@ -130,14 +134,15 @@ export function MigrationPage() {
     setShowConfirmDialog(true);
   };
 
-  // Issue 4: actual API call after user confirms
-  const handleConfirmMigration = async () => {
+  // Start (or re-start) execution. `forceEmptyDb` forces a target flush regardless of
+  // the checkbox — used by the BUSYKEY "Flush target & retry" affordance.
+  const startMigrationExecution = async (forceEmptyDb: boolean) => {
     if (!job?.sourceConnectionId || !job?.targetConnectionId) return;
     setMigrationStarting(true);
     try {
       const rsOptions: RedisShakeOptions = {};
       if (tryDiskless) rsOptions.tryDiskless = true;
-      if (emptyDbBeforeSync) rsOptions.emptyDbBeforeSync = true;
+      if (emptyDbBeforeSync || forceEmptyDb) rsOptions.emptyDbBeforeSync = true;
       const hasRsOptions = Object.keys(rsOptions).length > 0;
 
       const result = await fetchApi<{ id: string }>('/migration/execution', {
@@ -153,6 +158,7 @@ export function MigrationPage() {
         }),
       });
       setShowConfirmDialog(false);
+      setExecutionResult(null);
       setExecutionId(result.id);
       setPhase('executing');
     } catch (err: unknown) {
@@ -163,6 +169,11 @@ export function MigrationPage() {
       setMigrationStarting(false);
     }
   };
+
+  // Issue 4: actual API call after user confirms
+  const handleConfirmMigration = () => startMigrationExecution(false);
+  // Re-run after a BUSYKEY failure, flushing the target first.
+  const handleRetryWithFlush = () => startMigrationExecution(true);
 
   const handleStartValidation = async () => {
     if (!job?.sourceConnectionId || !job?.targetConnectionId) return;
@@ -358,6 +369,8 @@ export function MigrationPage() {
           <MigrationReport job={job} />
           <ExecutionPanel
             executionId={executionId}
+            onRetryFlush={handleRetryWithFlush}
+            retryPending={migrationStarting}
             onStopped={async () => {
               try {
                 const result = await fetchApi<MigrationExecutionResult>(`/migration/execution/${executionId}`);
@@ -374,6 +387,8 @@ export function MigrationPage() {
           <MigrationReport job={job} />
           <ExecutionPanel
             executionId={executionId}
+            onRetryFlush={handleRetryWithFlush}
+            retryPending={migrationStarting}
             onStopped={() => {/* already stopped */ }}
           />
 

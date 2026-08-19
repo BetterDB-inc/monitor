@@ -10,8 +10,31 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { ExecutionJob } from './execution/execution-job';
 import { findRedisShakeBinary } from './execution/redisshake-runner';
 import { buildScanReaderToml, buildSyncReaderToml } from './execution/toml-builder';
-import { parseLogLine } from './execution/log-parser';
+import { parseLogLine, classifyRedisShakeFailure, stripAnsi } from './execution/log-parser';
 import { runCommandMigration } from './execution/command-migration-worker';
+import { shouldExcludeFunctions } from './fork-compat';
+import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
+
+/**
+ * Everything runRedisShake needs to do before it spawns the process: the
+ * function-presence notice and the optional target pre-flush. Both run inside
+ * runRedisShake (after the POST has already returned the job id) so the start call
+ * stays responsive, the notice is guaranteed to land before the job can go terminal,
+ * and a pre-flush failure is finalized by runRedisShake's own cleanup rather than
+ * leaking the credential-bearing TOML.
+ */
+interface RedisShakePreSpawn {
+  excludeFunctions: boolean;
+  sourceAdapter: Parameters<typeof probeSourceFunctionsClusterAware>[0];
+  sourceConfig: Parameters<typeof probeSourceFunctionsClusterAware>[1];
+  clusterEnabled: boolean;
+  sourceDbType: string;
+  targetDbType: string;
+  emptyDbBeforeSync: boolean;
+  targetAdapter: ReturnType<ConnectionRegistry['get']>;
+  targetConfig: NonNullable<ReturnType<ConnectionRegistry['getConfig']>>;
+  targetIsCluster: boolean;
+}
 
 @Injectable()
 export class MigrationExecutionService {
@@ -51,37 +74,6 @@ export class MigrationExecutionService {
     const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
     const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
 
-    // 3.5. If emptyDbBeforeSync requested, flush every target master now.
-    // RedisShake's own empty_db_before_sync only flushes the seed node in cluster
-    // mode, leaving other masters intact. We handle it here instead.
-    if ((mode === 'redis_shake' || mode === 'redis_shake_sync') && req.redisShakeOptions?.emptyDbBeforeSync) {
-      if (targetIsCluster) {
-        const nodes = await targetAdapter.getClusterNodes();
-        const masters = nodes.filter(n => n.flags.includes('master'));
-        await Promise.all(masters.map(async (master) => {
-          const addrPart = master.address?.split('@')[0] ?? '';
-          const lastColon = addrPart.lastIndexOf(':');
-          let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
-          const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
-          if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
-          if (!host || isNaN(port)) return;
-          const client = new Valkey({
-            host, port,
-            username: targetConfig?.username || undefined,
-            password: targetConfig?.password || undefined,
-            tls: targetConfig?.tls ? {} : undefined,
-            lazyConnect: true,
-          });
-          await client.connect();
-          await client.flushall();
-          await client.quit();
-        }));
-      } else {
-        await targetAdapter.getClient().flushall();
-      }
-      this.logger.log(`Execution pre-flush: flushed target before migration`);
-    }
-
     // 4. For redis_shake modes, locate the binary upfront
     let binaryPath: string | undefined;
     if (mode === 'redis_shake' || mode === 'redis_shake_sync') {
@@ -105,6 +97,7 @@ export class MigrationExecutionService {
       keysSkipped: 0,
       totalKeys: 0,
       logs: [],
+      notices: [],
       progress: null,
       syncStage: null,
       process: null,
@@ -119,21 +112,53 @@ export class MigrationExecutionService {
     // 7. Fire and forget based on mode
     if (mode === 'redis_shake' || mode === 'redis_shake_sync') {
       const rsOptions = req.redisShakeOptions ?? {};
+
+      // Server-side functions use engine-specific globals (e.g. Valkey's `server`)
+      // and fail to load on a different fork. When they'd be dropped for this
+      // direction (Valkey -> Redis) exclude them from the RedisShake stream so the
+      // key data still migrates. Only the RedisShake modes filter, so this is
+      // computed here rather than for command mode.
+      const sourceDbType = sourceAdapter.getCapabilities().dbType;
+      const targetDbType = targetAdapter.getCapabilities().dbType;
+      const excludeFunctions = shouldExcludeFunctions(sourceDbType, targetDbType);
+
       const tomlContent = mode === 'redis_shake_sync'
-        ? buildSyncReaderToml(
-            sourceConfig,
-            targetConfig,
-            clusterEnabled,
-            req.syncReaderOptions ?? {},
+        ? buildSyncReaderToml(sourceConfig, targetConfig, {
+            sourceIsCluster: clusterEnabled,
+            syncReaderOptions: req.syncReaderOptions ?? {},
             targetIsCluster,
             rsOptions,
-          )
-        : buildScanReaderToml(sourceConfig, targetConfig, clusterEnabled, targetIsCluster, rsOptions);
+            excludeFunctions,
+          })
+        : buildScanReaderToml(sourceConfig, targetConfig, {
+            sourceIsCluster: clusterEnabled,
+            targetIsCluster,
+            rsOptions,
+            excludeFunctions,
+          });
       const tomlPath = join(os.tmpdir(), `${id}.toml`);
       writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
       job.tomlPath = tomlPath;
 
-      this.runRedisShake(job, binaryPath!).catch(err => {
+      // The function-presence notice and the optional target pre-flush both run inside
+      // runRedisShake, before it spawns the process (see RedisShakePreSpawn): the POST
+      // returns the job id without waiting on source/target masters, yet the notice is
+      // guaranteed to be set before the job can go terminal, and a pre-flush failure is
+      // finalized by runRedisShake's cleanup instead of leaking the credential TOML.
+      const preSpawn: RedisShakePreSpawn = {
+        excludeFunctions,
+        sourceAdapter,
+        sourceConfig,
+        clusterEnabled,
+        sourceDbType,
+        targetDbType,
+        emptyDbBeforeSync: !!req.redisShakeOptions?.emptyDbBeforeSync,
+        targetAdapter,
+        targetConfig,
+        targetIsCluster,
+      };
+
+      this.runRedisShake(job, binaryPath!, preSpawn).catch(err => {
         this.logger.error(`Execution ${id} failed: ${err.message}`);
       });
     } else {
@@ -145,10 +170,118 @@ export class MigrationExecutionService {
     return { id, status: 'pending' };
   }
 
+  /**
+   * Flush every target master before a sync. RedisShake's own `empty_db_before_sync`
+   * only flushes the seed node in cluster mode, leaving other masters intact, so we
+   * do it ourselves. Probe clients are built leak-safe (no reconnect loop) and torn
+   * down synchronously, matching the function-presence probe.
+   */
+  private async flushTargetBeforeSync(
+    targetAdapter: ReturnType<ConnectionRegistry['get']>,
+    targetConfig: NonNullable<ReturnType<ConnectionRegistry['getConfig']>>,
+    targetIsCluster: boolean,
+  ): Promise<void> {
+    if (targetIsCluster) {
+      const nodes = await targetAdapter.getClusterNodes();
+      const masters = nodes.filter(n => n.flags.includes('master'));
+      await Promise.all(masters.map(async (master) => {
+        const { host, port } = parseNodeAddress(master.address);
+        if (!host || Number.isNaN(port)) return;
+        let client: Valkey | undefined;
+        try {
+          client = new Valkey({
+            host, port,
+            username: targetConfig.username || undefined,
+            password: targetConfig.password || undefined,
+            tls: targetConfig.tls ? {} : undefined,
+            lazyConnect: true,
+            retryStrategy: () => null,
+            maxRetriesPerRequest: 1,
+          });
+          await client.connect();
+          await client.flushall();
+        } finally {
+          try { client?.disconnect(); } catch { /* ignore */ }
+        }
+      }));
+    } else {
+      await targetAdapter.getClient().flushall();
+    }
+    this.logger.log(`Execution pre-flush: flushed target before migration`);
+  }
+
+  /**
+   * Probe the source for server-side functions and, unless the source is provably
+   * clean, push a durable notice that they're being excluded from the cross-engine
+   * stream. Gated on `presence !== 'absent'` so a clean instance doesn't get a scary
+   * message about functions it never had; 'unknown' (probe failed) still warrants it
+   * since the filter is written regardless. Cluster-aware — FUNCTION LIST is
+   * node-local, so a clustered source is probed per master (matching the analysis
+   * warning). Runs detached from startExecution; never throws into its caller.
+   */
+  private async probeAndPushFunctionNotice(
+    job: ExecutionJob,
+    sourceAdapter: Parameters<typeof probeSourceFunctionsClusterAware>[0],
+    sourceConfig: Parameters<typeof probeSourceFunctionsClusterAware>[1],
+    clusterEnabled: boolean,
+    sourceDbType: string,
+    targetDbType: string,
+  ): Promise<void> {
+    try {
+      const presence = await probeSourceFunctionsClusterAware(sourceAdapter, sourceConfig, clusterEnabled);
+      if (presence !== 'absent') {
+        const notice = `Cross-engine migration (${sourceDbType} → ${targetDbType}): server-side functions are excluded and will not be transferred to the target.`;
+        this.logger.log(`Execution ${job.id}: ${notice}`);
+        job.notices.push(notice);
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Execution ${job.id}: function-presence probe failed: ${message}`);
+    }
+  }
+
   // ── RedisShake mode ──
 
-  private async runRedisShake(job: ExecutionJob, binaryPath: string): Promise<void> {
+  private async runRedisShake(job: ExecutionJob, binaryPath: string, preSpawn: RedisShakePreSpawn): Promise<void> {
     try {
+      // Pre-spawn work, now that the POST has already returned the job id. The notice
+      // is pushed before the process starts, so it can never be missed by a UI that
+      // stops polling once the job is terminal (a fast scan racing a slow probe).
+      //
+      // These awaits open a window where the job is still 'pending' with no process, so
+      // stopExecution() can only flip the status to 'cancelled' — it has nothing to
+      // kill. We must therefore re-check after every await and bail before doing
+      // anything destructive (flushing the target) or committing (spawning); the
+      // finally block then finalizes the cancelled job. Without this, a cancel issued
+      // during the probe/flush is silently dropped and RedisShake starts anyway.
+      if ((job.status as string) === 'cancelled') return;
+
+      if (preSpawn.excludeFunctions) {
+        await this.probeAndPushFunctionNotice(
+          job,
+          preSpawn.sourceAdapter,
+          preSpawn.sourceConfig,
+          preSpawn.clusterEnabled,
+          preSpawn.sourceDbType,
+          preSpawn.targetDbType,
+        );
+        if ((job.status as string) === 'cancelled') return;
+      }
+
+      // Flush the target before spawning. A failure here is caught below and finalized
+      // by the finally block (TOML unlinked, completedAt set) — the credential-bearing
+      // TOML never lingers, and the job doesn't stay half-finished. Guarded on cancel
+      // so we never wipe a target for a run the caller already stopped.
+      if (preSpawn.emptyDbBeforeSync && (job.status as string) !== 'cancelled') {
+        try {
+          await this.flushTargetBeforeSync(preSpawn.targetAdapter, preSpawn.targetConfig, preSpawn.targetIsCluster);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          throw new Error(`Target pre-flush failed: ${message}`);
+        }
+        if ((job.status as string) === 'cancelled') return;
+      }
+
       const proc = spawn(binaryPath, [job.tomlPath!], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -162,27 +295,72 @@ export class MigrationExecutionService {
         job.pidPath = pidPath;
       } catch { /* non-fatal — orphan detection is best-effort */ }
 
-      const handleData = (chunk: Buffer) => {
-        const lines = chunk.toString().split('\n');
-        for (const line of lines) {
-          if (!line) continue;
-          job.logs.push(sanitizeLogLine(line));
-          if (job.logs.length > this.MAX_LOG_LINES) {
-            job.logs.shift();
-          }
-          const parsed = parseLogLine(line);
-          if (parsed.keysTransferred !== null) job.keysTransferred = parsed.keysTransferred;
-          if (parsed.bytesTransferred !== null) job.bytesTransferred = parsed.bytesTransferred;
-          if (parsed.progress !== null) job.progress = parsed.progress;
-          if (parsed.syncStage !== null && job.mode === 'redis_shake_sync') job.syncStage = parsed.syncStage;
+      const processLine = (rawLine: string) => {
+        // Strip ANSI first: RedisShake colourises output, and the codes otherwise
+        // break the log viewer, progress parsing, and failure classification alike.
+        const line = stripAnsi(rawLine);
+        if (line.length === 0) {
+          return;
         }
+        job.logs.push(sanitizeLogLine(line));
+        if (job.logs.length > this.MAX_LOG_LINES) {
+          job.logs.shift();
+        }
+        const parsed = parseLogLine(line);
+        if (parsed.keysTransferred !== null) job.keysTransferred = parsed.keysTransferred;
+        if (parsed.bytesTransferred !== null) job.bytesTransferred = parsed.bytesTransferred;
+        if (parsed.progress !== null) job.progress = parsed.progress;
+        if (parsed.syncStage !== null && job.mode === 'redis_shake_sync') job.syncStage = parsed.syncStage;
       };
 
-      proc.stdout.on('data', handleData);
-      proc.stderr.on('data', handleData);
+      // Decode both pipes as UTF-8 at the stream level so a multi-byte sequence
+      // straddling a chunk boundary is reassembled by Node rather than turning into
+      // replacement characters — the line-level carry-over below only handles
+      // newline splits, not mid-character splits. With an encoding set, 'data'
+      // delivers strings.
+      proc.stdout.setEncoding('utf8');
+      proc.stderr.setEncoding('utf8');
 
+      // Each stream gets its own carry-over buffer: a chunk boundary can split a
+      // line — and thus a token like BUSYKEY — across two 'data' events, so we emit
+      // only complete lines and hold the trailing partial until the next chunk or
+      // the final flush at 'close'.
+      const makeStreamHandler = () => {
+        let buffer = '';
+        const onData = (chunk: string) => {
+          buffer += chunk;
+          const parts = buffer.split('\n');
+          buffer = parts.pop() ?? '';
+          for (const line of parts) {
+            processLine(line);
+          }
+        };
+        const flush = () => {
+          if (buffer.length > 0) {
+            processLine(buffer);
+            buffer = '';
+          }
+        };
+        return { onData, flush };
+      };
+
+      const stdoutHandler = makeStreamHandler();
+      const stderrHandler = makeStreamHandler();
+      proc.stdout.on('data', stdoutHandler.onData);
+      proc.stderr.on('data', stderrHandler.onData);
+
+      // Resolve on 'close', not 'exit'. 'exit' can fire before the stdio pipes have
+      // drained, and RedisShake writes its fatal BUSYKEY line (via log.Panicf) last —
+      // classifying on 'exit' would race the very log we depend on. 'exit' only
+      // captures the code; 'close' flushes the buffers and resolves.
       const code = await new Promise<number>((resolve, reject) => {
-        proc.on('exit', (exitCode) => resolve(exitCode ?? 1));
+        let exitCode = 1;
+        proc.on('exit', (c) => { exitCode = c ?? 1; });
+        proc.on('close', () => {
+          stdoutHandler.flush();
+          stderrHandler.flush();
+          resolve(exitCode);
+        });
         proc.on('error', reject);
       });
 
@@ -194,8 +372,10 @@ export class MigrationExecutionService {
           job.progress = 100;
         }
       } else if (statusAfterExit !== 'cancelled') {
+        const failure = classifyRedisShakeFailure(code, job.logs);
         job.status = 'failed';
-        job.error = `RedisShake exited with code ${code}`;
+        job.error = failure.message;
+        job.failureCode = failure.code;
       }
     } catch (err: unknown) {
       if ((job.status as string) !== 'cancelled') {
@@ -302,11 +482,18 @@ export class MigrationExecutionService {
       startedAt: job.startedAt,
       completedAt: job.completedAt,
       error: job.error,
+      failureCode: job.failureCode,
       keysTransferred: job.keysTransferred,
       bytesTransferred: job.bytesTransferred,
       keysSkipped: job.keysSkipped,
       totalKeys: job.totalKeys ?? undefined,
       logs: [...job.logs],
+      // Durable job-level notices travel in their own field, not merged into `logs`.
+      // Merging put them at index 0 of a >500-line array that the viewer then renders
+      // via logs.slice(-500) — silently evicting the notice — and the autoscrolling
+      // pane scrolled it out of view regardless. The web layer renders these as a
+      // persistent banner above the log pane instead.
+      notices: [...job.notices],
       progress: job.progress,
       syncStage: job.syncStage,
     };

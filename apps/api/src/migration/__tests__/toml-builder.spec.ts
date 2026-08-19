@@ -17,7 +17,7 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig({ host: '10.0.0.1', port: 6379, password: 'srcpass' });
     const target = makeConfig({ host: '10.0.0.2', port: 6380, password: 'tgtpass' });
 
-    const toml = buildScanReaderToml(source, target, false);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('[scan_reader]');
     expect(toml).toContain('address = "10.0.0.1:6379"');
@@ -32,19 +32,19 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig();
     const target = makeConfig();
 
-    const toml = buildScanReaderToml(source, target, true);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: true });
 
     expect(toml).toContain('cluster = true');
   });
 
   it('should emit cluster = false in writer when target is standalone (default)', () => {
-    const toml = buildScanReaderToml(makeConfig(), makeConfig(), false);
+    const toml = buildScanReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false });
     const writerSection = toml.split('[redis_writer]')[1];
     expect(writerSection).toContain('cluster = false');
   });
 
   it('should emit cluster = true in writer when target is a cluster', () => {
-    const toml = buildScanReaderToml(makeConfig(), makeConfig(), false, true);
+    const toml = buildScanReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false, targetIsCluster: true });
     const writerSection = toml.split('[redis_writer]')[1];
     expect(writerSection).toContain('cluster = true');
   });
@@ -53,7 +53,7 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig({ password: 'pass"word\\with\nnewline' });
     const target = makeConfig({ password: 'simple' });
 
-    const toml = buildScanReaderToml(source, target, false);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('pass\\"word\\\\with\\nnewline');
     expect(toml).not.toContain('pass"word');
@@ -63,7 +63,7 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig({ tls: true });
     const target = makeConfig({ tls: true });
 
-    const toml = buildScanReaderToml(source, target, false);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false });
 
     // Both sections should have tls = true
     const scanSection = toml.split('[redis_writer]')[0];
@@ -76,7 +76,7 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig({ tls: false });
     const target = makeConfig({ tls: false });
 
-    const toml = buildScanReaderToml(source, target, false);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('tls = false');
   });
@@ -85,7 +85,7 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig({ username: 'default' });
     const target = makeConfig({ username: 'default' });
 
-    const toml = buildScanReaderToml(source, target, false);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('username = ""');
   });
@@ -94,7 +94,7 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig({ username: 'admin' });
     const target = makeConfig({ username: 'reader' });
 
-    const toml = buildScanReaderToml(source, target, false);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false });
 
     const scanSection = toml.split('[redis_writer]')[0];
     const writerSection = toml.split('[redis_writer]')[1];
@@ -106,7 +106,7 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig();
     const target = makeConfig();
 
-    const toml = buildScanReaderToml(source, target, false);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('[advanced]');
     expect(toml).toContain('log_level = "info"');
@@ -116,35 +116,35 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig({ password: 'pass\x00word' });
     const target = makeConfig();
 
-    expect(() => buildScanReaderToml(source, target, false)).toThrow('control characters');
+    expect(() => buildScanReaderToml(source, target, { sourceIsCluster: false })).toThrow('control characters');
   });
 
   it('should reject invalid port', () => {
     const source = makeConfig({ port: 99999 as any });
     const target = makeConfig();
 
-    expect(() => buildScanReaderToml(source, target, false)).toThrow('Invalid port');
+    expect(() => buildScanReaderToml(source, target, { sourceIsCluster: false })).toThrow('Invalid port');
   });
 
   it('should reject host with whitespace', () => {
     const source = makeConfig({ host: 'host name' });
     const target = makeConfig();
 
-    expect(() => buildScanReaderToml(source, target, false)).toThrow('Invalid host');
+    expect(() => buildScanReaderToml(source, target, { sourceIsCluster: false })).toThrow('Invalid host');
   });
 
   it('should reject empty host', () => {
     const source = makeConfig({ host: '' });
     const target = makeConfig();
 
-    expect(() => buildScanReaderToml(source, target, false)).toThrow('Invalid host');
+    expect(() => buildScanReaderToml(source, target, { sourceIsCluster: false })).toThrow('Invalid host');
   });
 
   it('should wrap bare IPv6 addresses in brackets for Go net.Dial', () => {
     const source = makeConfig({ host: '::1', port: 6379 });
     const target = makeConfig({ host: '2001:db8::1', port: 6380 });
 
-    const toml = buildScanReaderToml(source, target, false);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('address = "[::1]:6379"');
     expect(toml).toContain('address = "[2001:db8::1]:6380"');
@@ -154,7 +154,7 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig({ host: '[::1]', port: 6379 });
     const target = makeConfig();
 
-    const toml = buildScanReaderToml(source, target, false);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('address = "[::1]:6379"');
     expect(toml).not.toContain('[[');
@@ -164,7 +164,7 @@ describe('buildScanReaderToml', () => {
     const source = makeConfig({ host: '127.0.0.1', port: 6379 });
     const target = makeConfig();
 
-    const toml = buildScanReaderToml(source, target, false);
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('address = "127.0.0.1:6379"');
   });
@@ -175,7 +175,7 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig({ host: '10.0.0.1', port: 6379, password: 'srcpass' });
     const target = makeConfig({ host: '10.0.0.2', port: 6380, password: 'tgtpass' });
 
-    const toml = buildSyncReaderToml(source, target, false);
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('[sync_reader]');
     expect(toml).toContain('cluster = false');
@@ -193,26 +193,26 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig();
     const target = makeConfig();
 
-    const toml = buildSyncReaderToml(source, target, true);
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: true });
 
     expect(toml).toContain('cluster = true');
     expect(toml).not.toContain('[scan_reader]');
   });
 
   it('should emit cluster = false in writer when target is standalone (default)', () => {
-    const toml = buildSyncReaderToml(makeConfig(), makeConfig(), false);
+    const toml = buildSyncReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false });
     const writerSection = toml.split('[redis_writer]')[1];
     expect(writerSection).toContain('cluster = false');
   });
 
   it('should emit cluster = true in writer when target is a cluster', () => {
-    const toml = buildSyncReaderToml(makeConfig(), makeConfig(), false, {}, true);
+    const toml = buildSyncReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: false, targetIsCluster: true });
     const writerSection = toml.split('[redis_writer]')[1];
     expect(writerSection).toContain('cluster = true');
   });
 
   it('should combine cluster source, prefer_replica, and cluster target', () => {
-    const toml = buildSyncReaderToml(makeConfig(), makeConfig(), true, { preferReplica: true }, true);
+    const toml = buildSyncReaderToml(makeConfig(), makeConfig(), { sourceIsCluster: true, syncReaderOptions: { preferReplica: true }, targetIsCluster: true });
     // sync_reader section: cluster = true
     const readerSection = toml.split('[redis_writer]')[0];
     expect(readerSection).toContain('cluster = true');
@@ -226,7 +226,7 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig();
     const target = makeConfig();
 
-    const toml = buildSyncReaderToml(source, target, false, { preferReplica: true });
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false, syncReaderOptions: { preferReplica: true } });
 
     expect(toml).toContain('prefer_replica = true');
   });
@@ -235,7 +235,7 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig();
     const target = makeConfig();
 
-    const toml = buildSyncReaderToml(source, target, false);
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('prefer_replica = false');
   });
@@ -244,7 +244,7 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig();
     const target = makeConfig();
 
-    const toml = buildSyncReaderToml(source, target, false, {});
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('prefer_replica = false');
   });
@@ -253,7 +253,7 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig();
     const target = makeConfig();
 
-    const toml = buildSyncReaderToml(source, target, false, { preferReplica: false });
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false, syncReaderOptions: { preferReplica: false } });
 
     expect(toml).toContain('prefer_replica = false');
   });
@@ -262,7 +262,7 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig({ password: 'pass"word\\with\nnewline' });
     const target = makeConfig({ password: 'simple' });
 
-    const toml = buildSyncReaderToml(source, target, false);
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('pass\\"word\\\\with\\nnewline');
     expect(toml).not.toContain('pass"word');
@@ -272,7 +272,7 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig({ tls: true });
     const target = makeConfig({ tls: true });
 
-    const toml = buildSyncReaderToml(source, target, false);
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false });
 
     const readerSection = toml.split('[redis_writer]')[0];
     const writerSection = toml.split('[redis_writer]')[1];
@@ -284,7 +284,7 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig({ username: 'default' });
     const target = makeConfig({ username: 'default' });
 
-    const toml = buildSyncReaderToml(source, target, false);
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('username = ""');
   });
@@ -293,21 +293,21 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig({ password: 'pass\x00word' });
     const target = makeConfig();
 
-    expect(() => buildSyncReaderToml(source, target, false)).toThrow('control characters');
+    expect(() => buildSyncReaderToml(source, target, { sourceIsCluster: false })).toThrow('control characters');
   });
 
   it('should reject invalid port', () => {
     const source = makeConfig({ port: 99999 as any });
     const target = makeConfig();
 
-    expect(() => buildSyncReaderToml(source, target, false)).toThrow('Invalid port');
+    expect(() => buildSyncReaderToml(source, target, { sourceIsCluster: false })).toThrow('Invalid port');
   });
 
   it('should wrap bare IPv6 addresses in brackets for Go net.Dial', () => {
     const source = makeConfig({ host: '::1', port: 6379 });
     const target = makeConfig({ host: '2001:db8::1', port: 6380 });
 
-    const toml = buildSyncReaderToml(source, target, false);
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('address = "[::1]:6379"');
     expect(toml).toContain('address = "[2001:db8::1]:6380"');
@@ -317,7 +317,7 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig();
     const target = makeConfig();
 
-    const toml = buildSyncReaderToml(source, target, false);
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).toContain('[advanced]');
     expect(toml).toContain('log_level = "info"');
@@ -327,8 +327,33 @@ describe('buildSyncReaderToml', () => {
     const source = makeConfig();
     const target = makeConfig();
 
-    const toml = buildSyncReaderToml(source, target, false);
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false });
 
     expect(toml).not.toContain('[scan_reader]');
+  });
+});
+
+describe('function filtering (cross-fork)', () => {
+  const source = makeConfig();
+  const target = makeConfig({ port: 6380 });
+
+  it('does not add a [filter] block by default (same engine)', () => {
+    expect(buildScanReaderToml(source, target, { sourceIsCluster: false })).not.toContain('[filter]');
+    expect(buildSyncReaderToml(source, target, { sourceIsCluster: false })).not.toContain('[filter]');
+  });
+
+  it('blocks the FUNCTION command in scan mode when excludeFunctions is set', () => {
+    const toml = buildScanReaderToml(source, target, { sourceIsCluster: false, excludeFunctions: true });
+    expect(toml).toContain('[filter]');
+    expect(toml).toContain('block_command = ["FUNCTION-LOAD", "FUNCTION-RESTORE", "FUNCTION-DELETE", "FUNCTION-FLUSH"]');
+    // filter must precede the [advanced] section for valid ordering
+    expect(toml.indexOf('[filter]')).toBeLessThan(toml.indexOf('[advanced]'));
+  });
+
+  it('blocks the FUNCTION command in sync mode when excludeFunctions is set', () => {
+    const toml = buildSyncReaderToml(source, target, { sourceIsCluster: false, excludeFunctions: true });
+    expect(toml).toContain('[filter]');
+    expect(toml).toContain('block_command = ["FUNCTION-LOAD", "FUNCTION-RESTORE", "FUNCTION-DELETE", "FUNCTION-FLUSH"]');
+    expect(toml.indexOf('[filter]')).toBeLessThan(toml.indexOf('[advanced]'));
   });
 });

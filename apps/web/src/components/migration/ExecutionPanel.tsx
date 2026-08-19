@@ -6,6 +6,18 @@ import { ExecutionLogViewer } from './ExecutionLogViewer';
 interface Props {
   executionId: string;
   onStopped: () => void;
+  /**
+   * Re-run this migration with the target flushed first. Provided by the page (which
+   * holds the source/target/mode). When set, a BUSYKEY failure offers a one-click
+   * "Flush target & retry" — the remediation the error text describes.
+   */
+  onRetryFlush?: () => void;
+  /**
+   * True while a start/retry request is in flight (the page's `migrationStarting`).
+   * The retry control disables and shows in-flight state so a second click can't
+   * fire another flush+job that races the first on the same target.
+   */
+  retryPending?: boolean;
 }
 
 function formatElapsed(startedAt: number, completedAt?: number): string {
@@ -44,8 +56,9 @@ function StatusBadge({ status }: { status: string }) {
   }
 }
 
-export function ExecutionPanel({ executionId, onStopped }: Props) {
+export function ExecutionPanel({ executionId, onStopped, onRetryFlush, retryPending }: Props) {
   const [execution, setExecution] = useState<MigrationExecutionResult | null>(null);
+  const [confirmingFlush, setConfirmingFlush] = useState(false);
   const onStoppedRef = useRef(onStopped);
   onStoppedRef.current = onStopped;
 
@@ -173,8 +186,44 @@ export function ExecutionPanel({ executionId, onStopped }: Props) {
 
       {/* Status banners */}
       {execution.status === 'failed' && (
-        <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-4 text-sm">
-          {execution.error ?? 'Migration failed'}
+        <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-lg p-4 text-sm space-y-3">
+          <p>{execution.error ?? 'Migration failed'}</p>
+          {execution.failureCode === 'BUSYKEY' && onRetryFlush && (
+            retryPending ? (
+              <button
+                disabled
+                className="px-3 py-1.5 text-sm rounded-md border border-destructive/30 inline-flex items-center gap-2 opacity-70 cursor-not-allowed"
+              >
+                <span className="h-3 w-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                Flushing target &amp; retrying…
+              </button>
+            ) : confirmingFlush ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs">
+                  This <strong>flushes all keys on the target</strong> before retrying and cannot be undone.
+                </span>
+                <button
+                  onClick={() => { setConfirmingFlush(false); onRetryFlush(); }}
+                  className="px-3 py-1.5 text-sm rounded-md bg-destructive text-white hover:bg-destructive/90"
+                >
+                  Flush &amp; retry
+                </button>
+                <button
+                  onClick={() => setConfirmingFlush(false)}
+                  className="px-3 py-1.5 text-sm rounded-md border border-destructive/30 hover:bg-destructive/10"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmingFlush(true)}
+                className="px-3 py-1.5 text-sm rounded-md border border-destructive/30 hover:bg-destructive/10"
+              >
+                Flush target &amp; retry
+              </button>
+            )
+          )}
         </div>
       )}
       {execution.status === 'completed' && (
@@ -190,7 +239,7 @@ export function ExecutionPanel({ executionId, onStopped }: Props) {
       )}
 
       {/* Log viewer */}
-      <ExecutionLogViewer logs={execution.logs} />
+      <ExecutionLogViewer logs={execution.logs} notices={execution.notices} />
     </div>
   );
 }

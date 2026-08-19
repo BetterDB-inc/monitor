@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import Valkey from 'iovalkey';
 import type { MigrationAnalysisRequest, MigrationAnalysisResult, StartAnalysisResponse, DataTypeBreakdown, DataTypeCount, TtlDistribution } from '@betterdb/shared';
@@ -9,6 +9,8 @@ import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
 import { analyzeCommands } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
+import { probeSourceFunctions, aggregateFunctionPresence } from './fork-compat';
+import { parseNodeAddress } from './function-presence';
 
 @Injectable()
 export class MigrationService {
@@ -163,15 +165,8 @@ export class MigrationService {
         clusterMasterCount = masters.length;
 
         for (const master of masters) {
-          // Parse address: 'host:port@clusterport' (host may be IPv6)
-          const addrPart = master.address?.split('@')[0] ?? '';
-          const lastColon = addrPart.lastIndexOf(':');
-          let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
-          const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
-          // Strip IPv6 brackets — iovalkey expects bare addresses
-          if (host.startsWith('[') && host.endsWith(']')) {
-            host = host.slice(1, -1);
-          }
+          // Parse 'host:port@clusterport' (IPv6-aware) via the shared helper.
+          const { host, port } = parseNodeAddress(master.address);
           if (!host || isNaN(port)) continue;
 
           const client = new Valkey({
@@ -401,6 +396,28 @@ export class MigrationService {
         sourceAclUsers = result ?? [];
       } catch { /* ignore - ACL not supported or no permission */ }
 
+      // Detect whether the source holds server-side function libraries. The
+      // "functions not migrated" warning only makes sense when there's something to
+      // lose — a plain instance with none keeps its clean report. But a probe that
+      // *throws* (ACL user without `function|list`, an unroutable cluster command)
+      // must not be read as "no functions": we couldn't determine, and the executor
+      // will still drop any libraries that exist, so we treat 'unknown' as
+      // maybe-present and warn rather than silently green-light.
+      //
+      // FUNCTION LIST is node-local, so on a cluster we probe every master —
+      // scanClients already holds one connection per master (or the seed when
+      // standalone) — and aggregate, so a library on any master is not missed.
+      // If cluster discovery produced no master clients, fall back to the seed so a
+      // clean instance is still probed (and so this matches
+      // probeSourceFunctionsClusterAware, which the executor uses) rather than
+      // aggregating an empty list to 'unknown' and always warning.
+      const functionProbeClients = scanClients.length > 0 ? scanClients : [adapter.getClient()];
+      const functionPresences = await Promise.all(
+        functionProbeClients.map((client) => probeSourceFunctions(client)),
+      );
+      const functionPresence = aggregateFunctionPresence(functionPresences);
+      const sourceHasFunctions = functionPresence !== 'absent';
+
       // Fetch RDB save config from both instances for reliable persistence detection
       let sourceRdbSaveConfig: string | undefined;
       let targetRdbSaveConfig: string | undefined;
@@ -437,7 +454,7 @@ export class MigrationService {
         targetMeta.modules = parseModuleList(moduleResult);
       } catch { /* ignore */ }
 
-      const incompatibilities = checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false);
+      const incompatibilities = checkCompatibility(sourceMeta, targetMeta, job.result.hfeDetected ?? false, sourceHasFunctions);
       job.result.incompatibilities = incompatibilities;
       job.result.blockingCount = incompatibilities.filter(i => i.severity === 'blocking').length;
       job.result.warningCount = incompatibilities.filter(i => i.severity === 'warning').length;
