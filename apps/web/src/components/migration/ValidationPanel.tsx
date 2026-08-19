@@ -71,7 +71,7 @@ export function ValidationPanel({ validationId, onComplete }: Props) {
     <div className="space-y-4">
       {/* Progress bar — shown while in progress */}
       {inProgress && (
-        <div className="bg-card border rounded-lg p-6 space-y-3 max-w-lg">
+        <div className="bg-card border rounded-lg p-6 space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-sm font-medium">Validating...</span>
             <span className="text-sm text-muted-foreground">{validation.progress}%</span>
