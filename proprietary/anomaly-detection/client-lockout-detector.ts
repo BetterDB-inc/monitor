@@ -99,6 +99,21 @@ export function createClientLockoutState(): ClientLockoutState {
  * refuses intermittently: critical → (a poll with no new refusals) → critical
  * would otherwise read as a fresh escalation and alert every other poll forever.
  *
+ * Known limitation — a SECOND refusal episode at sustained high utilization is
+ * not reported. Re-arming needs `level` to reach `none`, which needs both no new
+ * refusals AND utilization back under LOCKOUT_UTILIZATION_PCT. A server parked at
+ * or above that ceiling settles on `warning`, never `none`, so once it has paged
+ * critical, refusals that stop and later resume do not escalate again: the
+ * operator sees the first episode and nothing after it until utilization actually
+ * recovers. This is the deliberate cost of not alerting every other poll, but a
+ * worsening-after-a-lull case does go unreported.
+ *
+ * CRITICAL is deliberately hair-trigger: ANY `rejectedDelta > 0` reaches it, with
+ * no minimum count and no utilization gate, so a single transient refused
+ * connection pages critical. A refused connection means a client was actually
+ * turned away, which is treated as never acceptable to miss; the escalate-only
+ * rule above keeps it to one page per episode rather than a storm.
+ *
  * An unreadable ceiling (`maxclients` absent or ≤ 0) is treated as an
  * observation gap: the streak is left untouched rather than reset, and the
  * `rejected_connections` baseline is NOT advanced, so refusals that happen
