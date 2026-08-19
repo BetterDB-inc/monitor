@@ -209,11 +209,37 @@ export function detectSentinelDrift(
   // `master-host` is what a REPLICAOF is pointed at, so a raw IP there goes stale
   // exactly the same way — and this is the field that decides where replication
   // traffic goes after a restart.
+  //
+  // But the mixture test has to be applied WITHIN this field, not borrowed from the
+  // `ip` census above. `master-host` is the replica's configured replication target,
+  // not an address Sentinel resolved, so the hostname-announce convention that
+  // governs `ip` says nothing about it: a healthy hostname-announced group can point
+  // every replica at a Service ClusterIP quite deliberately. Judging those by the
+  // `ip` census flagged every one of them, forever, past the persistence gate —
+  // precisely the false positive the ip-only guardrail exists to avoid.
+  //
+  // So the odd-one-out rule is re-derived here: only report a raw-IP master pointer
+  // when OTHER replicas in the same group show a hostname pointer. Uniformly-IP
+  // pointers are a convention, not a fault.
+  const masterPointers = replicas
+    .map((replica) => {
+      return replica.masterHost;
+    })
+    .filter((host): host is string => {
+      return host !== undefined && host !== '';
+    });
+  const pointerHostnameInUse = masterPointers.some((host) => {
+    return isHostname(host);
+  });
+
   for (const replica of replicas) {
     if (replica.masterHost === undefined || replica.masterHost === '') {
       continue;
     }
     if (!isIpLiteral(replica.masterHost)) {
+      continue;
+    }
+    if (!pointerHostnameInUse) {
       continue;
     }
     findings.push({

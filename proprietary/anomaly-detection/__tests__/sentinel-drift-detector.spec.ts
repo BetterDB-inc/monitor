@@ -232,6 +232,32 @@ describe('detectSentinelDrift — stale master pointer', () => {
     });
   });
 
+  it('stays silent when EVERY master pointer is a raw IP among hostname peers', () => {
+    // A hostname-announced group that deliberately points replication at a Service
+    // ClusterIP. Sentinel's own `ip` fields are hostnames, so the ip-level census
+    // says hostnames are in use — but the pointers are uniform, which is a
+    // convention, not drift. Judging them by the ip census flagged both replicas
+    // forever.
+    const replicas = [
+      node({
+        name: 'valkey-1.valkey-headless:6379',
+        ip: 'valkey-1.valkey-headless',
+        flags: ['slave'],
+        masterHost: '10.96.0.42',
+        masterPort: 6379,
+      }),
+      node({
+        name: 'valkey-2.valkey-headless:6379',
+        ip: 'valkey-2.valkey-headless',
+        flags: ['slave'],
+        masterHost: '10.96.0.42',
+        masterPort: 6379,
+      }),
+    ];
+
+    expect(detectSentinelDrift(HOSTNAME_MASTER, replicas)).toEqual([]);
+  });
+
   it('stays silent when the master pointer is a hostname', () => {
     expect(
       detectSentinelDrift(HOSTNAME_MASTER, [hostnameReplica('valkey-1.valkey-headless')]),
