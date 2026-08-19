@@ -5063,6 +5063,37 @@ describe('AnomalyService', () => {
       expect(events[0].severity).toBe(AnomalySeverity.WARNING);
     });
 
+    it('retries the advisory on the next poll when the storage write fails', async () => {
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+
+      await pollWith({ connected_clients: '100', rejected_connections: '10' });
+      await pollWith({ connected_clients: '120', rejected_connections: '25' });
+
+      // The event reached the in-memory ring but was never persisted, so the
+      // hysteresis must not have advanced.
+      expect(storage.saveAnomalyEvent).toHaveBeenCalled();
+      const first = lockoutEvents();
+      expect(first).toHaveLength(1);
+      expect(first[0].persisted).not.toBe(true);
+
+      await pollWith({ connected_clients: '130', rejected_connections: '25' });
+
+      const retried = lockoutEvents();
+      expect(retried).toHaveLength(2);
+      expect(retried.some((e) => e.persisted === true)).toBe(true);
+    });
+
+    it('describes a refusal-only WARNING as refusals, not as sustained saturation', async () => {
+      await pollWith({ connected_clients: '100', rejected_connections: '10' });
+      await pollWith({ connected_clients: '120', rejected_connections: '25' });
+
+      const [event] = lockoutEvents();
+      // Names the actual signal...
+      expect(event.message).toContain('15 new connection(s) refused');
+      // ...and must not claim the pool held above the ceiling, which it never did.
+      expect(event.message).not.toContain('consecutive polls');
+    });
+
     it('stays silent for a busy but sub-threshold pool', async () => {
       for (let i = 0; i < 6; i++) {
         await pollWith({ connected_clients: '700' });
@@ -5317,6 +5348,25 @@ describe('AnomalyService', () => {
       const events = driftEvents();
       expect(events).toHaveLength(1);
       expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+    });
+
+    it('still emits the rest of the batch when one drift emit fails', async () => {
+      // Two groups drift in the same poll. The first emit throws; the second must
+      // still be delivered, and the failed one must re-alert on the next poll.
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
+      seedPeer('conn-other-a', [DEFAULT_LINE], 'second-replid');
+      seedPeer('conn-other-b', [DEFAULT_LINE, APP_LINE_WIDER], 'second-replid');
+
+      const addAnomaly = jest.spyOn(service as any, 'addAnomaly');
+      addAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+      await expect(poll()).resolves.not.toThrow();
+      expect(addAnomaly).toHaveBeenCalledTimes(2);
+      expect(driftEvents()).toHaveLength(1);
+
+      await poll();
+      expect(driftEvents()).toHaveLength(2);
+      addAnomaly.mockRestore();
     });
 
     it('never puts rule material into the event', async () => {
