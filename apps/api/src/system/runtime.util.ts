@@ -63,21 +63,32 @@ export function resolveDefaultDbPort(dbPort?: string | null): number {
   return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : DEFAULT_DB_PORT;
 }
 
+/**
+ * Outcome of a DNS probe. `timed-out` is distinct from `not-found`: a slow
+ * answer means the name IS resolvable (just not yet), while `not-found` means
+ * the resolver came back and said no such name exists.
+ */
+export type HostResolution = 'resolved' | 'not-found' | 'timed-out';
+
 /** Can this hostname be resolved from the API process? Never throws. */
-export type HostResolver = (host: string) => Promise<boolean>;
+export type HostResolver = (host: string) => Promise<HostResolution>;
 
 const defaultCanResolveHost: HostResolver = async (host) => {
+  let timedOut = false;
   try {
     await Promise.race([
       dnsLookup(host),
       new Promise<never>((_, reject) => {
-        const t = setTimeout(() => reject(new Error('dns-timeout')), HOST_RESOLVE_TIMEOUT_MS);
+        const t = setTimeout(() => {
+          timedOut = true;
+          reject(new Error('dns-timeout'));
+        }, HOST_RESOLVE_TIMEOUT_MS);
         t.unref?.();
       }),
     ]);
-    return true;
+    return 'resolved';
   } catch {
-    return false;
+    return timedOut ? 'timed-out' : 'not-found';
   }
 };
 
@@ -148,7 +159,13 @@ export interface HostProbeDeps {
  * Like resolveDefaultDbHost, but resolves the containerized `host.docker.internal`
  * default to something that actually reaches the host, since that name only
  * resolves on Docker Desktop or with `--add-host=host.docker.internal:host-gateway`.
- * When it does NOT resolve, a failed lookup is ambiguous, so we disambiguate:
+ * A `timed-out` probe is NOT treated as unresolvable: on Docker Desktop the name
+ * is genuinely resolvable but a cold/contended embedded resolver can be slower
+ * than the probe budget, and misreading that as "missing" would fall through to
+ * the bridge-gateway IP — the Docker Desktop Linux VM, not the real host. The
+ * optimistic answer (host.docker.internal) is the safer default on timeout; the
+ * probe only runs once since the result is cached by the caller.
+ * When the resolver comes back with a definitive `not-found`, we disambiguate:
  *   - `--network host` (shared netns): the host is at `127.0.0.1`.
  *   - default/custom bridge (the README's primary `docker run`): the host is
  *     the default gateway (e.g. 172.17.0.1); `127.0.0.1` would be the container.
@@ -168,10 +185,14 @@ export async function resolveDefaultDbHostChecked(
   const hasDockerRuntime = deps.hasDockerRuntime ?? defaultHasDockerRuntime;
 
   const resolved = resolveDefaultDbHost(input);
-  if (resolved.source !== 'docker' || (await canResolveHost(resolved.host))) {
+  if (resolved.source !== 'docker') {
     return resolved;
   }
-  // host.docker.internal is unreachable — pick the right host for the netmode.
+  const resolution = await canResolveHost(resolved.host);
+  if (resolution === 'resolved' || resolution === 'timed-out') {
+    return resolved;
+  }
+  // host.docker.internal is definitively unreachable — pick the right host for the netmode.
   if (isHostNetwork()) {
     return { host: '127.0.0.1', source: 'local' };
   }
