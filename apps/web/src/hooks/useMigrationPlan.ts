@@ -51,6 +51,7 @@ export function useMigrationPlanState(): MigrationPlanContextValue {
 
   const clearSource = () => {
     setSourceId(null);
+    setSourceChosen(false);
   };
 
   const clearTarget = () => {
