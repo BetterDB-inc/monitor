@@ -397,18 +397,33 @@ export class MetricsParser {
         continue;
       }
 
-      const masterPort = Number(fields['master-port']);
+      // Number('') is 0, not NaN, so an EMPTY field must be rejected before the
+      // numeric check or a missing port silently becomes 0 — a value that looks
+      // real and collides across entries once anything keys on `ip:port`.
+      const numericField = (value: string | undefined): number | undefined => {
+        if (value === undefined || value.trim() === '') {
+          return undefined;
+        }
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      };
+
+      const port = numericField(fields['port']);
+      if (port === undefined) {
+        continue;
+      }
+
       nodes.push({
         name: fields['name'] ?? '',
         ip,
-        port: Number(fields['port']) || 0,
+        port,
         runid: fields['runid'] ?? '',
         flags: (fields['flags'] ?? '')
           .split(',')
           .map((flag) => flag.trim())
           .filter(Boolean),
         masterHost: fields['master-host'],
-        masterPort: isNaN(masterPort) ? undefined : masterPort,
+        masterPort: numericField(fields['master-port']),
         fields,
       });
     }

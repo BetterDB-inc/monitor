@@ -751,5 +751,34 @@ describe('MetricsParser - Sentinel', () => {
 
       expect(MetricsParser.parseSentinelNodes([entry])[0].masterPort).toBeUndefined();
     });
+    it('drops an entry whose port is empty rather than recording it at :0', () => {
+      const parsed = MetricsParser.parseSentinelNodes([
+        ['name', 'mymaster', 'ip', '10.0.0.1', 'port', '', 'runid', 'r1', 'flags', 'master'],
+      ]);
+      expect(parsed).toEqual([]);
+    });
+
+    it('leaves master-port undefined when the field is empty, not 0', () => {
+      const parsed = MetricsParser.parseSentinelNodes([
+        [
+          'name',
+          'replica-1',
+          'ip',
+          '10.0.0.2',
+          'port',
+          '6379',
+          'runid',
+          'r2',
+          'flags',
+          'slave',
+          'master-host',
+          '10.0.0.1',
+          'master-port',
+          '',
+        ],
+      ]);
+      expect(parsed).toHaveLength(1);
+      expect(parsed[0].masterPort).toBeUndefined();
+    });
   });
 });
