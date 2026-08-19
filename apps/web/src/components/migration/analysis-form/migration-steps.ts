@@ -1,5 +1,6 @@
 export interface MigrationStep {
   title: string;
+  /** Full explanation, for the opening screen's cards. The rail shows titles only. */
   body: string;
 }
 
