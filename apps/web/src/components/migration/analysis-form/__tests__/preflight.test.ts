@@ -80,6 +80,15 @@ describe('describeDirection', () => {
     expect(direction?.kind).toBe('engine-downgrade');
   });
 
+  it('returns no direction when a version cannot be ordered', () => {
+    const direction = describeDirection(
+      conn({ id: 'src', capabilities: { dbType: 'redis', version: 'unknown' } }),
+      conn({ id: 'tgt', capabilities: { dbType: 'redis', version: 'unknown' } }),
+    );
+    // Two unorderable strings must not compare EQUAL and read as 'identical'.
+    expect(direction).toBeNull();
+  });
+
   it('keeps a cross-engine move to a newer version as a plain engine change', () => {
     const direction = describeDirection(
       conn({ id: 'src', capabilities: { dbType: 'redis', version: '7.2' } }),

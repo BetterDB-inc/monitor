@@ -49,6 +49,20 @@ function compareVersions(left: string, right: string): number {
   return 0;
 }
 
+/**
+ * Whether a reported version can be ordered at all.
+ *
+ * `compareVersions` coerces a non-numeric segment to 0, so two unorderable strings
+ * compare EQUAL and would be classified 'identical' — a silent misclassification
+ * rather than an honest "unknown". Nothing in this repo currently reports a
+ * non-numeric `capabilities.version` (the direct adapter throws when it cannot
+ * detect one, and agent-backed instances are blocked from migration anyway), so
+ * this is a guard against a future source rather than a live bug.
+ */
+function isOrderableVersion(version: string): boolean {
+  return /^\d/.test(version.trim());
+}
+
 function directionKind(
   source: NonNullable<Connection['capabilities']>,
   target: NonNullable<Connection['capabilities']>,
@@ -84,6 +98,12 @@ export function describeDirection(
   const sourceCapabilities = source.capabilities;
   const targetCapabilities = target.capabilities;
   if (sourceCapabilities === undefined || targetCapabilities === undefined) {
+    return null;
+  }
+  if (
+    isOrderableVersion(sourceCapabilities.version) === false ||
+    isOrderableVersion(targetCapabilities.version) === false
+  ) {
     return null;
   }
 
