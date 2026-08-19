@@ -147,14 +147,25 @@ export function clientAddressFrom(clientInfo: string): string {
  * Identity of one logical `ACL LOG` entry across the several rows the audit
  * poller stores as its count grows.
  *
- * These are exactly the fields the server itself matches on when deciding
- * whether a new failure joins an existing entry or starts a new one, plus the
- * creation timestamp. `client-info` is deliberately absent: the server replaces
- * it on every update, so including it would make our key FINER than the server's
- * own grouping and split one entry's rows into several.
+ * The server's own grouping (`ACLLogMatchEntry`) matches on reason, context,
+ * object, username and a creation time within a grouping delta, so all five
+ * appear here. `context` was previously missing, which made this key COARSER than
+ * the server's: two entries that differ only by context — the same user denied at
+ * the top level and inside a Lua script, say — collapsed into one key and had
+ * their counts merged.
+ *
+ * `client-info` is deliberately absent: the server replaces it on every update, so
+ * including it would make the key FINER than the server's grouping and split one
+ * entry's rows into several.
+ *
+ * The timestamp is compared exactly here while the server allows a small delta.
+ * That is harmless — a grouped entry keeps the creation time of its first failure,
+ * so its rows all carry the same value.
  */
 function entryKey(entry: StoredAclEntry): string {
-  return [entry.timestampCreated, entry.username, entry.reason, entry.object].join('|');
+  return [entry.timestampCreated, entry.username, entry.reason, entry.context, entry.object].join(
+    '|',
+  );
 }
 
 /** Per-scan growth of one entry, kept only as long as the window needs it. */

@@ -270,3 +270,44 @@ describe('takeAlertable', () => {
     expect(state.lastAlertedAt.size).toBe(0);
   });
 });
+
+describe('entry identity', () => {
+  it('keeps entries that differ only by context apart', () => {
+    const state = createAuthFailureState();
+    const now = 1_700_000_000_000;
+    const base = {
+      timestampCreated: now - 1_000,
+      username: 'app',
+      reason: 'auth',
+      object: 'AUTH',
+      clientInfo: 'addr=10.0.0.1:5000',
+    };
+
+    // Same user, same reason, same object — different context. The server treats
+    // these as two entries, so their counts must not be merged into one key.
+    observeAuthFailures(
+      state,
+      [
+        entry({ ...base, context: 'toplevel', count: 5 }),
+        entry({ ...base, context: 'lua', count: 5 }),
+      ],
+      now,
+    );
+
+    const sources = observeAuthFailures(
+      state,
+      [
+        entry({ ...base, context: 'toplevel', count: 11 }),
+        entry({ ...base, context: 'lua', count: 5 }),
+      ],
+      now + 1_000,
+    );
+
+    // Two distinct keys are tracked, one per context. Sharing a key would leave
+    // one, and would mis-state the growth: the second row's lower count against the
+    // first row's baseline clamps to 0, losing 5 of the 16 observed failures.
+    expect(state.deltas.size).toBe(2);
+    expect(sources).toHaveLength(1);
+    expect(sources[0].authFailures).toBe(16);
+  });
+});
