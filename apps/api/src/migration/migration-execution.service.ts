@@ -15,6 +15,27 @@ import { runCommandMigration } from './execution/command-migration-worker';
 import { shouldExcludeFunctions } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
 
+/**
+ * Everything runRedisShake needs to do before it spawns the process: the
+ * function-presence notice and the optional target pre-flush. Both run inside
+ * runRedisShake (after the POST has already returned the job id) so the start call
+ * stays responsive, the notice is guaranteed to land before the job can go terminal,
+ * and a pre-flush failure is finalized by runRedisShake's own cleanup rather than
+ * leaking the credential-bearing TOML.
+ */
+interface RedisShakePreSpawn {
+  excludeFunctions: boolean;
+  sourceAdapter: Parameters<typeof probeSourceFunctionsClusterAware>[0];
+  sourceConfig: Parameters<typeof probeSourceFunctionsClusterAware>[1];
+  clusterEnabled: boolean;
+  sourceDbType: string;
+  targetDbType: string;
+  emptyDbBeforeSync: boolean;
+  targetAdapter: ReturnType<ConnectionRegistry['get']>;
+  targetConfig: NonNullable<ReturnType<ConnectionRegistry['getConfig']>>;
+  targetIsCluster: boolean;
+}
+
 @Injectable()
 export class MigrationExecutionService {
   private readonly logger = new Logger(MigrationExecutionService.name);
@@ -100,13 +121,6 @@ export class MigrationExecutionService {
       const sourceDbType = sourceAdapter.getCapabilities().dbType;
       const targetDbType = targetAdapter.getCapabilities().dbType;
       const excludeFunctions = shouldExcludeFunctions(sourceDbType, targetDbType);
-      if (excludeFunctions) {
-        // Fire-and-forget: the probe opens direct connections to every source master
-        // (up to iovalkey's connectTimeout on a wedged node), and awaiting it here
-        // would stall the POST before the job id is returned. The job is already in
-        // the map, so the notice lands on it a beat later once the probe resolves.
-        void this.probeAndPushFunctionNotice(job, sourceAdapter, sourceConfig, clusterEnabled, sourceDbType, targetDbType);
-      }
 
       const tomlContent = mode === 'redis_shake_sync'
         ? buildSyncReaderToml(sourceConfig, targetConfig, {
@@ -126,26 +140,25 @@ export class MigrationExecutionService {
       writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
       job.tomlPath = tomlPath;
 
-      // Flush the target only now — after the binary is resolved, the job is created,
-      // and the TOML is written. Doing it earlier meant a throw from
-      // findRedisShakeBinary()/evictOldJobs()/writeFileSync() could wipe the target
-      // with no migration started and nothing left to repopulate it.
-      if (req.redisShakeOptions?.emptyDbBeforeSync) {
-        try {
-          await this.flushTargetBeforeSync(targetAdapter, targetConfig, targetIsCluster);
-        } catch (err: unknown) {
-          // The job is already in the map; a flush failure must mark it failed rather
-          // than throw out of startExecution and leave a permanently-'pending' slot
-          // that evictOldJobs() never reclaims.
-          const message = err instanceof Error ? err.message : String(err);
-          job.status = 'failed';
-          job.error = `Target pre-flush failed: ${message}`;
-          job.failureCode = 'UNKNOWN';
-          throw new ServiceUnavailableException(job.error);
-        }
-      }
+      // The function-presence notice and the optional target pre-flush both run inside
+      // runRedisShake, before it spawns the process (see RedisShakePreSpawn): the POST
+      // returns the job id without waiting on source/target masters, yet the notice is
+      // guaranteed to be set before the job can go terminal, and a pre-flush failure is
+      // finalized by runRedisShake's cleanup instead of leaking the credential TOML.
+      const preSpawn: RedisShakePreSpawn = {
+        excludeFunctions,
+        sourceAdapter,
+        sourceConfig,
+        clusterEnabled,
+        sourceDbType,
+        targetDbType,
+        emptyDbBeforeSync: !!req.redisShakeOptions?.emptyDbBeforeSync,
+        targetAdapter,
+        targetConfig,
+        targetIsCluster,
+      };
 
-      this.runRedisShake(job, binaryPath!).catch(err => {
+      this.runRedisShake(job, binaryPath!, preSpawn).catch(err => {
         this.logger.error(`Execution ${id} failed: ${err.message}`);
       });
     } else {
@@ -229,8 +242,34 @@ export class MigrationExecutionService {
 
   // ── RedisShake mode ──
 
-  private async runRedisShake(job: ExecutionJob, binaryPath: string): Promise<void> {
+  private async runRedisShake(job: ExecutionJob, binaryPath: string, preSpawn: RedisShakePreSpawn): Promise<void> {
     try {
+      // Pre-spawn work, now that the POST has already returned the job id. The notice
+      // is pushed before the process starts, so it can never be missed by a UI that
+      // stops polling once the job is terminal (a fast scan racing a slow probe).
+      if (preSpawn.excludeFunctions) {
+        await this.probeAndPushFunctionNotice(
+          job,
+          preSpawn.sourceAdapter,
+          preSpawn.sourceConfig,
+          preSpawn.clusterEnabled,
+          preSpawn.sourceDbType,
+          preSpawn.targetDbType,
+        );
+      }
+
+      // Flush the target before spawning. A failure here is caught below and finalized
+      // by the finally block (TOML unlinked, completedAt set) — the credential-bearing
+      // TOML never lingers, and the job doesn't stay half-finished.
+      if (preSpawn.emptyDbBeforeSync) {
+        try {
+          await this.flushTargetBeforeSync(preSpawn.targetAdapter, preSpawn.targetConfig, preSpawn.targetIsCluster);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          throw new Error(`Target pre-flush failed: ${message}`);
+        }
+      }
+
       const proc = spawn(binaryPath, [job.tomlPath!], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });

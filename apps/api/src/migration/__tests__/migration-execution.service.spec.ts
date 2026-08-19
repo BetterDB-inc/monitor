@@ -252,6 +252,27 @@ describe('MigrationExecutionService', () => {
       expect(result!.notices!.some(n => /functions are excluded/i.test(n))).toBe(true);
     });
 
+    it('sets the notice before the job goes terminal, so a fast run cannot race it away', async () => {
+      // Regression: the probe runs inside runRedisShake *before* the process spawns, so
+      // the notice is present by the time the job first reports 'running' and long
+      // before it completes. A UI that stops polling once the job is terminal can never
+      // miss it, even if the migration finishes quickly.
+      const crossForkRegistry = createMockRegistry({ targetDbType: 'redis', sourceFunctions: 'present' });
+      const crossForkService = new MigrationExecutionService(crossForkRegistry as any);
+
+      const { id } = await crossForkService.startExecution({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        mode: 'redis_shake',
+      });
+
+      // Let the mocked process run to close (resolves at 20ms) so the job is terminal.
+      await new Promise(r => setTimeout(r, 30));
+      const result = crossForkService.getExecution(id);
+      expect(result!.status).toBe('completed');
+      expect(result!.notices!.some(n => /functions are excluded/i.test(n))).toBe(true);
+    });
+
     it('still surfaces the notice when the source probe fails (unknown presence)', async () => {
       // 'throw' -> 'unknown': the filter is written regardless, so an indeterminate
       // probe must not silently drop the warning.
