@@ -2,7 +2,12 @@ import type { Connection } from '../../../hooks/useConnection';
 
 export type PreflightTone = 'ok' | 'info' | 'warning';
 
-export type DirectionKind = 'engine-change' | 'version-upgrade' | 'version-downgrade' | 'identical';
+export type DirectionKind =
+  | 'engine-change'
+  | 'engine-downgrade'
+  | 'version-upgrade'
+  | 'version-downgrade'
+  | 'identical';
 
 export interface MigrationDirection {
   label: string;
@@ -48,11 +53,17 @@ function directionKind(
   source: NonNullable<Connection['capabilities']>,
   target: NonNullable<Connection['capabilities']>,
 ): DirectionKind {
+  const comparison = compareVersions(source.version, target.version);
+
+  // Versions across engines are not strictly comparable — Valkey forked at Redis
+  // 7.2, so the numbers share a lineage but not a release history, and the backend
+  // compatibility report has the real say. A cross-engine move to a LOWER version
+  // is still the riskier direction, so it is called out rather than getting the
+  // neutral engine-change note by accident of branch order.
   if (source.dbType !== target.dbType) {
-    return 'engine-change';
+    return comparison > 0 ? 'engine-downgrade' : 'engine-change';
   }
 
-  const comparison = compareVersions(source.version, target.version);
   if (comparison < 0) {
     return 'version-upgrade';
   }
@@ -114,6 +125,14 @@ function directionNote(direction: MigrationDirection): PreflightNote {
       id: 'direction',
       tone: 'warning',
       message: `${direction.label} — the target runs an older version and may not accept everything the source stores.`,
+    };
+  }
+
+  if (direction.kind === 'engine-downgrade') {
+    return {
+      id: 'direction',
+      tone: 'warning',
+      message: `${direction.label} — engine change to an older version. The target may not accept everything the source stores, and analysis will report anything it handles differently.`,
     };
   }
 

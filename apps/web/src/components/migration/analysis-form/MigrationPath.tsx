@@ -7,6 +7,7 @@ interface Props {
 
 const QUALIFIER: Record<MigrationDirection['kind'], string> = {
   'engine-change': 'engine change',
+  'engine-downgrade': 'engine change · older version',
   'version-upgrade': 'version upgrade',
   'version-downgrade': 'version downgrade',
   identical: 'same engine and version',

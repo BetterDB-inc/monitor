@@ -72,6 +72,21 @@ describe('describeDirection', () => {
     const patched = conn({ id: 'f', capabilities: { dbType: 'redis', version: '7.2.0' } });
     expect(describeDirection(REDIS_72, patched)?.kind).toBe('identical');
   });
+  it('flags a cross-engine move to an older version as a downgrade', () => {
+    const direction = describeDirection(
+      conn({ id: 'src', capabilities: { dbType: 'redis', version: '7.4' } }),
+      conn({ id: 'tgt', capabilities: { dbType: 'valkey', version: '7.2' } }),
+    );
+    expect(direction?.kind).toBe('engine-downgrade');
+  });
+
+  it('keeps a cross-engine move to a newer version as a plain engine change', () => {
+    const direction = describeDirection(
+      conn({ id: 'src', capabilities: { dbType: 'redis', version: '7.2' } }),
+      conn({ id: 'tgt', capabilities: { dbType: 'valkey', version: '8.0' } }),
+    );
+    expect(direction?.kind).toBe('engine-change');
+  });
 });
 
 describe('isPlanComplete', () => {
