@@ -63,8 +63,24 @@ export function resolveDefaultDbPort(dbPort?: string | null): number {
   return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : DEFAULT_DB_PORT;
 }
 
+/**
+ * Outcome of a DNS probe.
+ *   - `resolved`: the name has an address.
+ *   - `not-found`: the resolver came back with a confirmed "no such name"
+ *     (ENOTFOUND/ENODATA) — the name is genuinely absent.
+ *   - `indeterminate`: no answer arrived in time, or the resolver failed for a
+ *     reason other than a confirmed missing name (e.g. EAI_AGAIN). This does
+ *     NOT prove the name is unresolvable, only that we didn't get a definitive
+ *     answer, so callers should keep the optimistic default rather than
+ *     treating it as absent.
+ */
+export type HostResolution = 'resolved' | 'not-found' | 'indeterminate';
+
+/** dns.lookup error codes that mean "this name definitely does not exist". */
+const DNS_NAME_NOT_FOUND_CODES = new Set(['ENOTFOUND', 'ENODATA']);
+
 /** Can this hostname be resolved from the API process? Never throws. */
-export type HostResolver = (host: string) => Promise<boolean>;
+export type HostResolver = (host: string) => Promise<HostResolution>;
 
 const defaultCanResolveHost: HostResolver = async (host) => {
   try {
@@ -75,9 +91,10 @@ const defaultCanResolveHost: HostResolver = async (host) => {
         t.unref?.();
       }),
     ]);
-    return true;
-  } catch {
-    return false;
+    return 'resolved';
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code && DNS_NAME_NOT_FOUND_CODES.has(code) ? 'not-found' : 'indeterminate';
   }
 };
 
@@ -148,7 +165,15 @@ export interface HostProbeDeps {
  * Like resolveDefaultDbHost, but resolves the containerized `host.docker.internal`
  * default to something that actually reaches the host, since that name only
  * resolves on Docker Desktop or with `--add-host=host.docker.internal:host-gateway`.
- * When it does NOT resolve, a failed lookup is ambiguous, so we disambiguate:
+ * An `indeterminate` probe (timeout, or a resolver failure that isn't a
+ * confirmed missing name) is NOT treated as unresolvable: on Docker Desktop the
+ * name is genuinely resolvable but a cold/contended embedded resolver can be
+ * slower than the probe budget or hit a transient failure, and misreading that
+ * as "missing" would fall through to the bridge-gateway IP — the Docker
+ * Desktop Linux VM, not the real host. The optimistic answer
+ * (host.docker.internal) is the safer default when we lack a definitive
+ * answer; the probe only runs once since the result is cached by the caller.
+ * When the resolver comes back with a definitive `not-found`, we disambiguate:
  *   - `--network host` (shared netns): the host is at `127.0.0.1`.
  *   - default/custom bridge (the README's primary `docker run`): the host is
  *     the default gateway (e.g. 172.17.0.1); `127.0.0.1` would be the container.
@@ -168,10 +193,14 @@ export async function resolveDefaultDbHostChecked(
   const hasDockerRuntime = deps.hasDockerRuntime ?? defaultHasDockerRuntime;
 
   const resolved = resolveDefaultDbHost(input);
-  if (resolved.source !== 'docker' || (await canResolveHost(resolved.host))) {
+  if (resolved.source !== 'docker') {
     return resolved;
   }
-  // host.docker.internal is unreachable — pick the right host for the netmode.
+  const resolution = await canResolveHost(resolved.host);
+  if (resolution === 'resolved' || resolution === 'indeterminate') {
+    return resolved;
+  }
+  // host.docker.internal is definitively unreachable — pick the right host for the netmode.
   if (isHostNetwork()) {
     return { host: '127.0.0.1', source: 'local' };
   }
