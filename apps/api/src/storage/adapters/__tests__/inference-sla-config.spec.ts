@@ -15,6 +15,7 @@ function buildSettings(overrides: Partial<AppSettings> = {}): AppSettings {
     metricForecastingDefaultRollingWindowMs: 21_600_000,
     metricForecastingDefaultAlertThresholdMs: 7_200_000,
     inferenceSlaConfig: {},
+    anomalyDetectorConfig: {},
     updatedAt: now,
     createdAt: now,
     ...overrides,
