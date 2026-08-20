@@ -1,0 +1,96 @@
+{
+  "name": "@betterdb/ai",
+  "version": "0.1.0",
+  "description": "One install for the BetterDB AI stack on Valkey: agent cache, semantic cache, retrieval, agent memory, and search helpers",
+  "keywords": [
+    "valkey",
+    "redis",
+    "ai",
+    "llm",
+    "cache",
+    "semantic-cache",
+    "retrieval",
+    "agent-memory",
+    "vector-search"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BetterDB-inc/monitor",
+    "directory": "packages/ai"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@betterdb/agent-cache": "workspace:*",
+    "@betterdb/agent-memory": "workspace:*",
+    "@betterdb/retrieval": "workspace:*",
+    "@betterdb/semantic-cache": "workspace:*",
+    "@betterdb/valkey-search-kit": "workspace:*"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/sdk": ">=0.90.0",
+    "@langchain/core": ">=0.3.0",
+    "@langchain/langgraph-checkpoint": ">=0.1.0",
+    "@llamaindex/core": ">=0.6.0",
+    "ai": "^6.0.135",
+    "iovalkey": ">=0.3.0",
+    "openai": ">=6.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "@langchain/core": {
+      "optional": true
+    },
+    "@langchain/langgraph-checkpoint": {
+      "optional": true
+    },
+    "@llamaindex/core": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    },
+    "openai": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
+    "@langchain/core": "^1.1.35",
+    "@langchain/langgraph-checkpoint": "^0.1.0",
+    "@llamaindex/core": "^0.6.23",
+    "@types/node": "^22.19.15",
+    "ai": "^6.0.135",
+    "iovalkey": ">=0.3.0",
+    "openai": "^6.34.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "homepage": "https://betterdb.com"
+}
