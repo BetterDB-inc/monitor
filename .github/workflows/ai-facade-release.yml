@@ -17,6 +17,14 @@ on:
         required: false
         type: string
 
+# Publishes are serialised on this group. If two or three children release
+# around the same time, GitHub only keeps one pending run per concurrency
+# group — a caller's publish-facade job queued behind others can end up
+# cancelled, and that child's release run will report as cancelled even
+# though the child itself published fine. We accept this rather than adding
+# a dispatching wrapper job: any later child release re-pins all five
+# children here, so a skipped facade publish self-heals within one release
+# cycle.
 concurrency:
   group: publish-ai-facade
   cancel-in-progress: false
@@ -128,6 +136,10 @@ jobs:
             test -f "packages/ai/dist/$f.js"
             test -f "packages/ai/dist/$f.d.ts"
           done
+          for f in openai bedrock voyage cohere ollama; do
+            test -f "packages/ai/dist/embed/$f.js"
+            test -f "packages/ai/dist/embed/$f.d.ts"
+          done
 
       - name: Prepare for publishing
         run: |
@@ -154,7 +166,13 @@ jobs:
           cd "$CHECK_DIR"
 
           npm init -y >/dev/null
-          npm install "$TARBALL_PATH" typescript iovalkey
+          npm install "$TARBALL_PATH" typescript iovalkey \
+            "@langchain/core@^1.1.35" \
+            "@langchain/langgraph-checkpoint@^0.1.0" \
+            "ai@^6.0.135" \
+            "openai@^6.34.0" \
+            "@anthropic-ai/sdk@^0.91.1" \
+            "@llamaindex/core@^0.6.23"
 
           cat > check.ts <<'EOF'
           import { AgentCache, agentCache, semanticCache, retrieval, memory, searchKit } from '@betterdb/ai';
