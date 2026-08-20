@@ -2,7 +2,7 @@
 layout: default
 title: AI (all-in-one)
 parent: Packages
-nav_order: 1
+nav_order: 0
 ---
 
 # AI (all-in-one)
