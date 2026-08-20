@@ -1,3 +1,4 @@
+import { HttpStatus, NotFoundException } from '@nestjs/common';
 import { McpController } from '../mcp.controller';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { MetricsService } from '../../metrics/metrics.service';
@@ -67,5 +68,15 @@ describe('McpController getHealth', () => {
     const result = await controller.getHealth('conn-1');
     expect(result).toMatchObject(summary);
     expect(result.configHazards).toEqual([]);
+  });
+
+  it('propagates NotFoundException as a 404 instead of a generic 500 (issue #155)', async () => {
+    metricsService.getHealthSummary.mockRejectedValue(
+      new NotFoundException("Connection 'nonexistent' not found."),
+    );
+    const controller = build(false);
+    await expect(controller.getHealth('nonexistent')).rejects.toMatchObject({
+      status: HttpStatus.NOT_FOUND,
+    });
   });
 });
