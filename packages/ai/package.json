@@ -26,6 +26,66 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.js"
+    },
+    "./langchain": {
+      "types": "./dist/langchain.d.ts",
+      "import": "./dist/langchain.js",
+      "require": "./dist/langchain.js"
+    },
+    "./langgraph": {
+      "types": "./dist/langgraph.d.ts",
+      "import": "./dist/langgraph.js",
+      "require": "./dist/langgraph.js"
+    },
+    "./vercel": {
+      "types": "./dist/vercel.d.ts",
+      "import": "./dist/vercel.js",
+      "require": "./dist/vercel.js"
+    },
+    "./openai": {
+      "types": "./dist/openai.d.ts",
+      "import": "./dist/openai.js",
+      "require": "./dist/openai.js"
+    },
+    "./openai-responses": {
+      "types": "./dist/openai-responses.d.ts",
+      "import": "./dist/openai-responses.js",
+      "require": "./dist/openai-responses.js"
+    },
+    "./anthropic": {
+      "types": "./dist/anthropic.d.ts",
+      "import": "./dist/anthropic.js",
+      "require": "./dist/anthropic.js"
+    },
+    "./llamaindex": {
+      "types": "./dist/llamaindex.d.ts",
+      "import": "./dist/llamaindex.js",
+      "require": "./dist/llamaindex.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "langchain": [
+        "./dist/langchain.d.ts"
+      ],
+      "langgraph": [
+        "./dist/langgraph.d.ts"
+      ],
+      "vercel": [
+        "./dist/vercel.d.ts"
+      ],
+      "openai": [
+        "./dist/openai.d.ts"
+      ],
+      "openai-responses": [
+        "./dist/openai-responses.d.ts"
+      ],
+      "anthropic": [
+        "./dist/anthropic.d.ts"
+      ],
+      "llamaindex": [
+        "./dist/llamaindex.d.ts"
+      ]
     }
   },
   "files": [
