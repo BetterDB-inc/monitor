@@ -154,6 +154,7 @@ jobs:
   publish-facade:
     needs: [publish-npm, verify]
     if: ${{ !inputs.skip_npm }}
+    continue-on-error: true
     permissions:
       contents: write
       id-token: write

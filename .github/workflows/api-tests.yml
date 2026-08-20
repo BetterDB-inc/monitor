@@ -60,3 +60,27 @@ jobs:
           docker logs betterdb-test-redis 2>&1 | tail -50 || echo "Container not found"
           echo "=== PostgreSQL Logs ==="
           docker logs betterdb-test-postgres 2>&1 | tail -50 || echo "Container not found"
+
+  ai-facade-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build @betterdb/ai and its dependencies
+        run: pnpm build --filter @betterdb/ai...
+
+      - name: Run @betterdb/ai export completeness guard
+        run: pnpm --filter @betterdb/ai test

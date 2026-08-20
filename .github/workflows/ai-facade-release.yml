@@ -139,6 +139,99 @@ jobs:
             fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
+      - name: Validate packed artifact against pinned children
+        run: |
+          set -euo pipefail
+
+          cd packages/ai
+          TARBALL="$(npm pack --silent)"
+          TARBALL_PATH="$(pwd)/$TARBALL"
+          cd "$GITHUB_WORKSPACE"
+
+          CHECK_DIR="$RUNNER_TEMP/facade-check"
+          rm -rf "$CHECK_DIR"
+          mkdir -p "$CHECK_DIR"
+          cd "$CHECK_DIR"
+
+          npm init -y >/dev/null
+          npm install "$TARBALL_PATH" typescript iovalkey
+
+          cat > check.ts <<'EOF'
+          import { AgentCache, agentCache, semanticCache, retrieval, memory, searchKit } from '@betterdb/ai';
+          import { BetterDBLlmCache, BetterDBSemanticCache } from '@betterdb/ai/langchain';
+          import { BetterDBSaver, BetterDBSemanticStore } from '@betterdb/ai/langgraph';
+          import {
+            createAgentCacheMiddleware,
+            createSemanticCacheMiddleware,
+          } from '@betterdb/ai/vercel';
+          import {
+            prepareParams as openaiPrepareParams,
+            prepareSemanticParams as openaiPrepareSemanticParams,
+          } from '@betterdb/ai/openai';
+          import {
+            prepareParams as openaiResponsesPrepareParams,
+            prepareSemanticParams as openaiResponsesPrepareSemanticParams,
+          } from '@betterdb/ai/openai-responses';
+          import {
+            prepareParams as anthropicPrepareParams,
+            prepareSemanticParams as anthropicPrepareSemanticParams,
+          } from '@betterdb/ai/anthropic';
+          import {
+            prepareParams as llamaindexPrepareParams,
+            prepareSemanticParams as llamaindexPrepareSemanticParams,
+          } from '@betterdb/ai/llamaindex';
+          import { createOpenAIEmbed } from '@betterdb/ai/embed/openai';
+          import { createBedrockEmbed } from '@betterdb/ai/embed/bedrock';
+          import { createVoyageEmbed } from '@betterdb/ai/embed/voyage';
+          import { createCohereEmbed } from '@betterdb/ai/embed/cohere';
+          import { createOllamaEmbed } from '@betterdb/ai/embed/ollama';
+
+          const symbols: unknown[] = [
+            AgentCache,
+            agentCache,
+            semanticCache,
+            retrieval,
+            memory,
+            searchKit,
+            BetterDBLlmCache,
+            BetterDBSemanticCache,
+            BetterDBSaver,
+            BetterDBSemanticStore,
+            createAgentCacheMiddleware,
+            createSemanticCacheMiddleware,
+            openaiPrepareParams,
+            openaiPrepareSemanticParams,
+            openaiResponsesPrepareParams,
+            openaiResponsesPrepareSemanticParams,
+            anthropicPrepareParams,
+            anthropicPrepareSemanticParams,
+            llamaindexPrepareParams,
+            llamaindexPrepareSemanticParams,
+            createOpenAIEmbed,
+            createBedrockEmbed,
+            createVoyageEmbed,
+            createCohereEmbed,
+            createOllamaEmbed,
+          ];
+          void symbols;
+          EOF
+
+          cat > tsconfig.json <<'EOF'
+          {
+            "compilerOptions": {
+              "target": "es2022",
+              "module": "node16",
+              "moduleResolution": "node16",
+              "strict": true,
+              "skipLibCheck": false,
+              "noEmit": true
+            },
+            "files": ["check.ts"]
+          }
+          EOF
+
+          ./node_modules/.bin/tsc -p tsconfig.json
+
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
