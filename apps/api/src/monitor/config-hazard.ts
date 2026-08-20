@@ -74,6 +74,44 @@ export function evaluateAclAofHazard(input: ConfigHazardInput): ConfigHazardFind
   };
 }
 
+export interface ClusterCrcHazardInput {
+  /** Value of `CONFIG GET cluster-enabled` (`yes`/`no`), or null when unavailable. */
+  clusterEnabled: string | null;
+  /** Value of `CONFIG GET cluster-crc-enabled` (`yes`/`no`), or null when the build predates valkey#4201. */
+  clusterCrcEnabled: string | null;
+}
+
+const CLUSTER_CRC_HAZARD_MESSAGE =
+  'Cluster mode is on but the cluster-bus CRC integrity check is disabled ' +
+  '(`cluster-crc-enabled no`). A corrupted gossip message can then be accepted and ' +
+  'scramble slot ownership through a bogus configEpoch (valkey#4201). Enable it with ' +
+  '`CONFIG SET cluster-crc-enabled yes` on every node so corruption is rejected and ' +
+  'counted in cluster_stats_messages_crc_mismatch.';
+
+/**
+ * valkey#4201: a cluster running with `cluster-crc-enabled no` (the server
+ * default) only validates the magic string and message length on the bus, so a
+ * bit-flipped gossip packet can be accepted and permanently corrupt slot
+ * ownership. Only a positively verified state (cluster off, feature absent, or
+ * the check already on) returns null — never a silent false negative.
+ */
+export function evaluateClusterCrcHazard(input: ClusterCrcHazardInput): ConfigHazardFinding | null {
+  if (input.clusterEnabled !== 'yes') {
+    return null;
+  }
+  // A null value means the parameter is unknown to this build (pre-#4201), so
+  // there is nothing to advise. Only an explicit `no` is a hazard.
+  if (input.clusterCrcEnabled !== 'no') {
+    return null;
+  }
+  return {
+    id: 'cluster-crc-disabled',
+    severity: 'warning',
+    status: 'hazard',
+    message: CLUSTER_CRC_HAZARD_MESSAGE,
+  };
+}
+
 interface ParsedAclUser {
   flags: string[];
   commands: string;

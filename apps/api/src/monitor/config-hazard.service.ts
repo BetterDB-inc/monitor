@@ -4,6 +4,7 @@ import {
   ConfigHazardFinding,
   evaluateAclAofHazard,
   evaluateAppendfsyncHazard,
+  evaluateClusterCrcHazard,
 } from './config-hazard';
 
 interface CachedFindings {
@@ -76,38 +77,60 @@ export class ConfigHazardService {
       return null;
     }
 
-    if (appendonly !== 'yes') {
+    const findings: ConfigHazardFinding[] = [];
+
+    // valkey#3983 (AOF + default-user data loss) and valkey#3515 (appendfsync
+    // stalls) only apply when AOF is enabled.
+    if (appendonly === 'yes') {
+      let version: string | null;
+      try {
+        version = client.getCapabilities().version;
+      } catch {
+        version = null;
+      }
+
+      let aclGetUserResult: unknown;
+      try {
+        aclGetUserResult = await client.call('ACL', ['GETUSER', 'default']);
+      } catch (err) {
+        this.logger.debug(
+          `ACL GETUSER default failed for ${connectionId}: ${(err as Error).message}`,
+        );
+        aclGetUserResult = 'denied';
+      }
+
+      const aclFinding = evaluateAclAofHazard({ appendonly, version, aclGetUserResult });
+      if (aclFinding !== null) {
+        findings.push(aclFinding);
+      }
+
+      const fsyncFinding = await this.probeAppendfsync(connectionId, client, appendonly);
+      if (fsyncFinding !== null) {
+        findings.push(fsyncFinding);
+      }
+    } else {
       this.delayedFsyncTrend.delete(connectionId);
-      return [];
     }
 
-    let version: string | null;
+    // valkey#4201: cluster bus accepting unverified messages (cluster-crc-enabled
+    // off). Independent of AOF, so it runs for every connection.
+    let clusterEnabled: string | null;
+    let clusterCrcEnabled: string | null;
     try {
-      version = client.getCapabilities().version;
-    } catch {
-      version = null;
-    }
-
-    let aclGetUserResult: unknown;
-    try {
-      aclGetUserResult = await client.call('ACL', ['GETUSER', 'default']);
+      clusterEnabled = await client.getConfigValue('cluster-enabled');
+      clusterCrcEnabled = await client.getConfigValue('cluster-crc-enabled');
     } catch (err) {
       this.logger.debug(
-        `ACL GETUSER default failed for ${connectionId}: ${(err as Error).message}`,
+        `CONFIG GET cluster-crc probe failed for ${connectionId}: ${(err as Error).message}`,
       );
-      aclGetUserResult = 'denied';
+      return null;
     }
 
-    const findings: ConfigHazardFinding[] = [];
-    const aclFinding = evaluateAclAofHazard({ appendonly, version, aclGetUserResult });
-    if (aclFinding !== null) {
-      findings.push(aclFinding);
+    const crcFinding = evaluateClusterCrcHazard({ clusterEnabled, clusterCrcEnabled });
+    if (crcFinding !== null) {
+      findings.push(crcFinding);
     }
 
-    const fsyncFinding = await this.probeAppendfsync(connectionId, client, appendonly);
-    if (fsyncFinding !== null) {
-      findings.push(fsyncFinding);
-    }
     return findings;
   }
 

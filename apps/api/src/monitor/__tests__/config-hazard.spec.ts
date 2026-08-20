@@ -3,6 +3,7 @@ import {
   ConfigHazardInput,
   evaluateAclAofHazard,
   evaluateAppendfsyncHazard,
+  evaluateClusterCrcHazard,
 } from '../config-hazard';
 
 // ACL GETUSER shapes mirror acl-checker.ts: RESP2 flat pair array or RESP3 record.
@@ -219,5 +220,35 @@ describe('evaluateAppendfsyncHazard', () => {
   it('returns null for no/unknown appendfsync values', () => {
     expect(evaluateAppendfsyncHazard(fsyncInput({ appendfsync: 'no' }))).toBeNull();
     expect(evaluateAppendfsyncHazard(fsyncInput({ appendfsync: null }))).toBeNull();
+  });
+});
+
+describe('evaluateClusterCrcHazard', () => {
+  it('fires when cluster mode is on and cluster-crc-enabled is off', () => {
+    const finding = evaluateClusterCrcHazard({
+      clusterEnabled: 'yes',
+      clusterCrcEnabled: 'no',
+    });
+    expect(finding?.id).toBe('cluster-crc-disabled');
+    expect(finding?.status).toBe('hazard');
+    expect(finding?.severity).toBe('warning');
+  });
+
+  it('returns null when the CRC check is already enabled', () => {
+    expect(
+      evaluateClusterCrcHazard({ clusterEnabled: 'yes', clusterCrcEnabled: 'yes' }),
+    ).toBeNull();
+  });
+
+  it('returns null on a standalone (non-cluster) node', () => {
+    expect(
+      evaluateClusterCrcHazard({ clusterEnabled: 'no', clusterCrcEnabled: 'no' }),
+    ).toBeNull();
+  });
+
+  it('returns null when the parameter is absent (build predates valkey#4201)', () => {
+    expect(
+      evaluateClusterCrcHazard({ clusterEnabled: 'yes', clusterCrcEnabled: null }),
+    ).toBeNull();
   });
 });

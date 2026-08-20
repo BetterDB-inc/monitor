@@ -1084,18 +1084,34 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         // delta rather than a threshold. The first observation seeds the baseline
         // so a pre-existing counter value does not fire on startup.
         if (state.previousCrcMismatch !== null && crcMismatch > state.previousCrcMismatch) {
+          const crcMismatchDelta = crcMismatch - state.previousCrcMismatch;
+          const knownNodes = parseInt(clusterInfo.cluster_known_nodes) || 0;
+
+          // OTLP mirror is decoupled from the Pro webhook gate (parity with
+          // cluster.failover), so an OTLP-only deployment still sees corruption.
           try {
             this.otelEvents?.dispatch(
               WebhookEventType.CLUSTER_BUS_CORRUPTION,
-              {
-                crcMismatchTotal: crcMismatch,
-                crcMismatchDelta: crcMismatch - state.previousCrcMismatch,
-                knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
-              },
+              { crcMismatchTotal: crcMismatch, crcMismatchDelta, knownNodes },
               connectionId,
             );
           } catch (err) {
             this.logger.error('Failed to dispatch cluster.bus.corruption OTLP event', err);
+          }
+
+          if (this.webhookEventsProService) {
+            try {
+              await this.webhookEventsProService.dispatchClusterBusCorruption({
+                crcMismatchTotal: crcMismatch,
+                crcMismatchDelta,
+                knownNodes,
+                timestamp: Date.now(),
+                instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
+                connectionId,
+              });
+            } catch (err) {
+              this.logger.error('Failed to dispatch cluster.bus.corruption webhook', err);
+            }
           }
         }
         state.previousCrcMismatch = crcMismatch;

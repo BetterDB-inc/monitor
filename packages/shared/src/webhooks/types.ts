@@ -345,6 +345,15 @@ export interface IWebhookEventsProService {
     connectionId?: string;
   }): Promise<void>;
 
+  dispatchClusterBusCorruption(data: {
+    crcMismatchTotal: number;
+    crcMismatchDelta: number;
+    knownNodes: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+    connectionId?: string;
+  }): Promise<void>;
+
   dispatchFailoverStarted(data: {
     previousRole: string;
     newRole: string;

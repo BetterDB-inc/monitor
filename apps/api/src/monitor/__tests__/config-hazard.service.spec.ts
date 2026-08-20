@@ -58,6 +58,19 @@ describe('ConfigHazardService', () => {
     expect(findings[0].status).toBe('unverified');
   });
 
+  it('flags the cluster-bus CRC hazard when cluster-crc-enabled is off', async () => {
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'cluster-enabled') return Promise.resolve('yes');
+      if (param === 'cluster-crc-enabled') return Promise.resolve('no');
+      return Promise.resolve('no'); // appendonly off, so the AOF probe is skipped
+    });
+    const findings = await service.getHazards('conn-1');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].id).toBe('cluster-crc-disabled');
+    expect(findings[0].status).toBe('hazard');
+    expect(client.call).not.toHaveBeenCalled();
+  });
+
   it('serves from the cache within the TTL', async () => {
     await service.getHazards('conn-1');
     await service.getHazards('conn-1');
