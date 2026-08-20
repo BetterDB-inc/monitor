@@ -46,7 +46,13 @@ const cache = new AgentCache({ client });
 | `@betterdb/ai/anthropic`        | `prepareParams`, `prepareSemanticParams`                      |
 | `@betterdb/ai/llamaindex`       | `prepareParams`, `prepareSemanticParams`                      |
 
-All seven frameworks are optional peers — install the ones you use.
+Six framework peers are optional — install the ones you use (`/openai` and
+`/openai-responses` both use the `openai` peer). The seventh peer, `iovalkey`,
+is required.
+
+Subpath imports (everything but the root `@betterdb/ai` import) require
+`"moduleResolution"` set to `"node16"`, `"nodenext"`, or `"bundler"` in your
+`tsconfig.json`. The root import works under classic `"node"` resolution too.
 
 ## Namespaces
 
@@ -67,3 +73,9 @@ available here.
 
 There is no PyPI equivalent yet — Python users install the individual
 `betterdb-*` packages.
+
+## Versioning
+
+Facade releases are automatic patch bumps triggered by each child's own
+release, and may carry breaking changes from a child package. Consumers who
+need strict semver guarantees should pin `@betterdb/ai` to an exact version.

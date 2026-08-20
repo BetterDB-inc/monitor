@@ -28,7 +28,13 @@ const cache = new AgentCache({ client });
 | `@betterdb/ai/anthropic`        | `prepareParams`, `prepareSemanticParams`                      |
 | `@betterdb/ai/llamaindex`       | `prepareParams`, `prepareSemanticParams`                      |
 
-Install the matching framework yourself — all seven are optional peers.
+Install the matching framework yourself. Six framework peers are optional
+(`/openai` and `/openai-responses` both use the `openai` peer) — `iovalkey` is
+the seventh peer and is required.
+
+Subpath imports (everything but the root `@betterdb/ai` import) require
+`"moduleResolution"` set to `"node16"`, `"nodenext"`, or `"bundler"` in your
+`tsconfig.json`. The root import works under classic `"node"` resolution too.
 
 ## Namespaces
 
@@ -66,3 +72,9 @@ not available flat is available here.
 They remain published and supported. Install them directly if you want a
 narrower dependency; install `@betterdb/ai` if you want the whole stack at one
 mutually-compatible set of versions.
+
+## Versioning
+
+Facade releases are automatic patch bumps triggered by each child's own
+release, and may carry breaking changes from a child package. Consumers who
+need strict semver guarantees should pin `@betterdb/ai` to an exact version.
