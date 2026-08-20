@@ -13,6 +13,19 @@ const CHILDREN = [
 
 const FACADE = resolve(__dirname, '../index.ts');
 
+// Child subpaths that deliberately have no facade mirror, each with a reason.
+// A future subpath added to a child's `exports` map that isn't handled here
+// fails the `mirrors every child subpath export` test below instead of
+// silently going unreachable through the facade.
+const SUBPATH_EXCLUSIONS: Record<string, Record<string, string>> = {
+  'agent-cache': {
+    './ai': 'renamed to the facade ./vercel subpath',
+  },
+  'semantic-cache': {
+    './ai': 'renamed to the facade ./vercel subpath',
+  },
+};
+
 let checker: ts.TypeChecker;
 let program: ts.Program;
 
@@ -109,5 +122,32 @@ describe('@betterdb/ai export completeness', () => {
     ]) {
       expect(pkg.exports).toHaveProperty([sub]);
     }
+  });
+
+  it('mirrors every child subpath export', () => {
+    const facadePkg = JSON.parse(readFileSync(resolve(__dirname, '../../package.json'), 'utf8'));
+    const facadeSubpaths = new Set(Object.keys(facadePkg.exports ?? {}));
+    const unreachable: string[] = [];
+
+    for (const child of CHILDREN) {
+      const childPkg = JSON.parse(
+        readFileSync(resolve(__dirname, `../../../${child.dir}/package.json`), 'utf8'),
+      );
+      const exclusions = SUBPATH_EXCLUSIONS[child.dir] ?? {};
+
+      for (const subpath of Object.keys(childPkg.exports ?? {})) {
+        if (subpath === '.') {
+          continue;
+        }
+        if (subpath in exclusions) {
+          continue;
+        }
+        if (!facadeSubpaths.has(subpath)) {
+          unreachable.push(`${child.pkg}${subpath}`);
+        }
+      }
+    }
+
+    expect(unreachable).toEqual([]);
   });
 });

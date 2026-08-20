@@ -25,6 +25,7 @@ describe('@betterdb/ai adapter subpaths', () => {
       const m = await import(`../${name}`);
       expect(typeof m.prepareParams).toBe('function');
       expect(typeof m.prepareSemanticParams).toBe('function');
+      expect(m.prepareParams).not.toBe(m.prepareSemanticParams);
     },
   );
 });

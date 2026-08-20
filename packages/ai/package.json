@@ -61,6 +61,31 @@
       "types": "./dist/llamaindex.d.ts",
       "import": "./dist/llamaindex.js",
       "require": "./dist/llamaindex.js"
+    },
+    "./embed/openai": {
+      "types": "./dist/embed/openai.d.ts",
+      "import": "./dist/embed/openai.js",
+      "require": "./dist/embed/openai.js"
+    },
+    "./embed/bedrock": {
+      "types": "./dist/embed/bedrock.d.ts",
+      "import": "./dist/embed/bedrock.js",
+      "require": "./dist/embed/bedrock.js"
+    },
+    "./embed/voyage": {
+      "types": "./dist/embed/voyage.d.ts",
+      "import": "./dist/embed/voyage.js",
+      "require": "./dist/embed/voyage.js"
+    },
+    "./embed/cohere": {
+      "types": "./dist/embed/cohere.d.ts",
+      "import": "./dist/embed/cohere.js",
+      "require": "./dist/embed/cohere.js"
+    },
+    "./embed/ollama": {
+      "types": "./dist/embed/ollama.d.ts",
+      "import": "./dist/embed/ollama.js",
+      "require": "./dist/embed/ollama.js"
     }
   },
   "typesVersions": {
@@ -85,6 +110,21 @@
       ],
       "llamaindex": [
         "./dist/llamaindex.d.ts"
+      ],
+      "embed/openai": [
+        "./dist/embed/openai.d.ts"
+      ],
+      "embed/bedrock": [
+        "./dist/embed/bedrock.d.ts"
+      ],
+      "embed/voyage": [
+        "./dist/embed/voyage.d.ts"
+      ],
+      "embed/cohere": [
+        "./dist/embed/cohere.d.ts"
+      ],
+      "embed/ollama": [
+        "./dist/embed/ollama.d.ts"
       ]
     }
   },
