@@ -36,6 +36,26 @@ Subpath imports (everything but the root `@betterdb/ai` import) require
 `"moduleResolution"` set to `"node16"`, `"nodenext"`, or `"bundler"` in your
 `tsconfig.json`. The root import works under classic `"node"` resolution too.
 
+## Embedding functions
+
+`SemanticCache` requires an `embedFn` to turn text into a vector. Bring your
+own, or use one of these provider-backed factories:
+
+| Import                       | Provides             |
+| ---------------------------- | -------------------- |
+| `@betterdb/ai/embed/openai`  | `createOpenAIEmbed`  |
+| `@betterdb/ai/embed/bedrock` | `createBedrockEmbed` |
+| `@betterdb/ai/embed/voyage`  | `createVoyageEmbed`  |
+| `@betterdb/ai/embed/cohere`  | `createCohereEmbed`  |
+| `@betterdb/ai/embed/ollama`  | `createOllamaEmbed`  |
+
+```ts
+import { SemanticCache } from '@betterdb/ai';
+import { createOpenAIEmbed } from '@betterdb/ai/embed/openai';
+
+const cache = new SemanticCache({ client, embedFn: createOpenAIEmbed() });
+```
+
 ## Namespaces
 
 A handful of names are declared by more than one underlying package, so they are
