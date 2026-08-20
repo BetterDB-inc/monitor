@@ -67,8 +67,19 @@ describe('ConfigHazardService', () => {
     const findings = await service.getHazards('conn-1');
     expect(findings).toHaveLength(1);
     expect(findings[0].id).toBe('cluster-crc-disabled');
-    expect(findings[0].status).toBe('hazard');
+    expect(findings[0].status).toBe('advisory');
     expect(client.call).not.toHaveBeenCalled();
+  });
+
+  it('preserves an AOF finding when the cluster CRC read fails', async () => {
+    // appendonly on (AOF hazard collected), then the cluster read is rejected.
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'appendonly') return Promise.resolve('yes');
+      return Promise.reject(new Error('ERR unknown command'));
+    });
+    const findings = await service.getHazards('conn-1');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].id).toBe('default-user-aof-data-loss');
   });
 
   it('serves from the cache within the TTL', async () => {

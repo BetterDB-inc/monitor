@@ -120,10 +120,12 @@ export class ConfigHazardService {
       clusterEnabled = await client.getConfigValue('cluster-enabled');
       clusterCrcEnabled = await client.getConfigValue('cluster-crc-enabled');
     } catch (err) {
+      // A failed cluster read must not discard AOF findings already collected;
+      // return what we have rather than null (which would suppress them).
       this.logger.debug(
         `CONFIG GET cluster-crc probe failed for ${connectionId}: ${(err as Error).message}`,
       );
-      return null;
+      return findings;
     }
 
     const crcFinding = evaluateClusterCrcHazard({ clusterEnabled, clusterCrcEnabled });

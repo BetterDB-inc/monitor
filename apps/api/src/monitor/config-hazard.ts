@@ -107,7 +107,9 @@ export function evaluateClusterCrcHazard(input: ClusterCrcHazardInput): ConfigHa
   return {
     id: 'cluster-crc-disabled',
     severity: 'warning',
-    status: 'hazard',
+    // Risky configuration with no observed symptom yet, so 'advisory' rather
+    // than 'hazard' (which we reserve for confirmed dangerous state).
+    status: 'advisory',
     message: CLUSTER_CRC_HAZARD_MESSAGE,
   };
 }

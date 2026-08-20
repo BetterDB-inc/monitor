@@ -1083,8 +1083,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         // scramble slot ownership (valkey#4201/#4092), so we surface any nonzero
         // delta rather than a threshold. The first observation seeds the baseline
         // so a pre-existing counter value does not fire on startup.
-        if (state.previousCrcMismatch !== null && crcMismatch > state.previousCrcMismatch) {
-          const crcMismatchDelta = crcMismatch - state.previousCrcMismatch;
+        // Advance the baseline before any await so an overlapping poll cannot read
+        // the old value and re-dispatch the same delta.
+        const previousCrcMismatch = state.previousCrcMismatch;
+        state.previousCrcMismatch = crcMismatch;
+
+        if (previousCrcMismatch !== null && crcMismatch > previousCrcMismatch) {
+          const crcMismatchDelta = crcMismatch - previousCrcMismatch;
           const knownNodes = parseInt(clusterInfo.cluster_known_nodes) || 0;
 
           // OTLP mirror is decoupled from the Pro webhook gate (parity with
@@ -1114,7 +1119,6 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
             }
           }
         }
-        state.previousCrcMismatch = crcMismatch;
       }
 
       // cluster.failover: detect the edge, mirror to OTLP, and advance the

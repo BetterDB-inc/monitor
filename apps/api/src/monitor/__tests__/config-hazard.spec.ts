@@ -230,7 +230,7 @@ describe('evaluateClusterCrcHazard', () => {
       clusterCrcEnabled: 'no',
     });
     expect(finding?.id).toBe('cluster-crc-disabled');
-    expect(finding?.status).toBe('hazard');
+    expect(finding?.status).toBe('advisory');
     expect(finding?.severity).toBe('warning');
   });
 
