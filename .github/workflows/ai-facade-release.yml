@@ -17,6 +17,10 @@ on:
         required: false
         type: string
 
+concurrency:
+  group: publish-ai-facade
+  cancel-in-progress: false
+
 jobs:
   publish-npm:
     runs-on: ubuntu-latest
@@ -64,7 +68,13 @@ jobs:
             echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
             exit 0
           fi
-          CURRENT=$(npm view @betterdb/ai version 2>/dev/null || echo "0.0.0")
+          CURRENT=$(npm view @betterdb/ai version 2>/dev/null || echo "")
+          if [ -z "$CURRENT" ]; then
+            SEED=$(node -p "require('./packages/ai/package.json').version")
+            echo "No published @betterdb/ai yet — seeding from the committed manifest: $SEED"
+            echo "version=$SEED" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           NEXT=$(node -p "
             const [maj, min, patch] = process.argv[1].split('.').map(Number);
             [maj, min, patch + 1].join('.');
