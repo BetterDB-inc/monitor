@@ -29,6 +29,7 @@ import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatc
 interface ConnectionMetricState {
   previousClusterState: string | null;
   previousSlotsFail: number;
+  previousCrcMismatch: number | null;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
   // Storage-based metric labels (per-connection)
@@ -134,6 +135,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private clusterSlotsOk: Gauge;
   private clusterSlotsFail: Gauge;
   private clusterSlotsPfail: Gauge;
+  private clusterStatsMessagesCrcMismatch: Gauge;
 
   // Cluster Slot Metrics (Valkey 8.0+ specific)
   private clusterSlotKeys: Gauge;
@@ -262,6 +264,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.perConnectionState.set(connectionId, {
         previousClusterState: null,
         previousSlotsFail: 0,
+        previousCrcMismatch: null,
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
         // Storage-based metric labels
@@ -486,6 +489,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.clusterSlotsPfail = this.createGauge(
       'cluster_slots_pfail',
       'Number of slots in PFAIL state',
+    );
+    this.clusterStatsMessagesCrcMismatch = this.createGauge(
+      'cluster_stats_messages_crc_mismatch',
+      'Cluster bus messages rejected by the CRC integrity check (valkey#4201); any increase means on-wire corruption',
     );
 
     // Cluster Slot Metrics (Valkey 8.0+) - per connection, per slot
@@ -1061,6 +1068,37 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         this.clusterSlotsPfail
           .labels(connLabel)
           .set(parseInt(clusterInfo.cluster_slots_pfail) || 0);
+      }
+
+      // Cluster-bus CRC integrity (valkey#4201). The field is only present on
+      // builds shipping the check with `cluster-crc-enabled` on; a "0" value is
+      // still truthy, so an absent field (undefined) is the only skipped case.
+      const crcRaw = clusterInfo.cluster_stats_messages_crc_mismatch;
+      if (crcRaw) {
+        const crcMismatch = parseInt(crcRaw) || 0;
+        this.clusterStatsMessagesCrcMismatch.labels(connLabel).set(crcMismatch);
+
+        // Any increase means the bus rejected a corrupted gossip/message (bit
+        // flip, bad NIC/switch). A single bogus configEpoch can permanently
+        // scramble slot ownership (valkey#4201/#4092), so we surface any nonzero
+        // delta rather than a threshold. The first observation seeds the baseline
+        // so a pre-existing counter value does not fire on startup.
+        if (state.previousCrcMismatch !== null && crcMismatch > state.previousCrcMismatch) {
+          try {
+            this.otelEvents?.dispatch(
+              WebhookEventType.CLUSTER_BUS_CORRUPTION,
+              {
+                crcMismatchTotal: crcMismatch,
+                crcMismatchDelta: crcMismatch - state.previousCrcMismatch,
+                knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
+              },
+              connectionId,
+            );
+          } catch (err) {
+            this.logger.error('Failed to dispatch cluster.bus.corruption OTLP event', err);
+          }
+        }
+        state.previousCrcMismatch = crcMismatch;
       }
 
       // cluster.failover: detect the edge, mirror to OTLP, and advance the
