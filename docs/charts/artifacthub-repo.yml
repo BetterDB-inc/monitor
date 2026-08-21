@@ -4,13 +4,11 @@
 # Verified Publisher badge. This is a static file the publish workflow leaves
 # untouched (it only rewrites index.yaml), so it is committed once by hand.
 #
-# repositoryID: paste the ID shown in Artifact Hub AFTER adding the repo
-#   (Control Panel -> Repositories -> the repo's options -> "repositoryID").
-#   Until then the badge stays unverified; everything else still works.
-repositoryID: ""
-# The email MUST match the Artifact Hub account that owns this repo, or
-# ownership verification silently never succeeds. Set it to your AH account's
-# email (this is the address the repo was registered under).
-owners:
-  - name: BetterDB
-    email: k.ivanow@gmail.com
+# repositoryID from Artifact Hub (Control Panel -> Repositories -> repo options).
+# Ties this served file to the AH repo so the Verified Publisher badge is granted
+# on the next scrape.
+repositoryID: "2b423f31-56a9-4332-a0be-8e5a2b65c8ac"
+# `owners` is OPTIONAL and only used to auto-grant AH ownership to listed users
+# (each email must match an AH account). It is NOT needed for the Verified
+# Publisher badge — repositoryID above is what grants that. Left out to avoid
+# publishing a personal email; add an org address here if you want auto-claim.
