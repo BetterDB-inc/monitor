@@ -1,0 +1,16 @@
+# Artifact Hub repository metadata. Served at
+# https://docs.betterdb.com/charts/artifacthub-repo.yml (same base URL as
+# index.yaml). Artifact Hub reads it to verify repo ownership and grant the
+# Verified Publisher badge. This is a static file the publish workflow leaves
+# untouched (it only rewrites index.yaml), so it is committed once by hand.
+#
+# repositoryID: paste the ID shown in Artifact Hub AFTER adding the repo
+#   (Control Panel -> Repositories -> the repo's options -> "repositoryID").
+#   Until then the badge stays unverified; everything else still works.
+repositoryID: ""
+# The email MUST match the Artifact Hub account that owns this repo, or
+# ownership verification silently never succeeds. Set it to your AH account's
+# email (this is the address the repo was registered under).
+owners:
+  - name: BetterDB
+    email: k.ivanow@gmail.com

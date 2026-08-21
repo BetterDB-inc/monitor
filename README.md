@@ -54,6 +54,19 @@ Two image variants are published, both multi-arch (`linux/amd64`, `linux/arm64`)
 
 See [Docker Production Deployment](#docker-production-deployment) for persistent storage, custom ports, licensing, and air-gapped setups.
 
+## Quick Start (Kubernetes / Helm)
+
+```bash
+helm repo add betterdb https://docs.betterdb.com/charts
+helm repo update
+helm install betterdb-monitor betterdb/betterdb-monitor \
+  --namespace betterdb --create-namespace \
+  --set db.host=my-valkey.default.svc.cluster.local \
+  --set db.password=yourpassword
+```
+
+Then `kubectl port-forward -n betterdb svc/betterdb-monitor 3001:3001` and open `http://localhost:3001`, or enable the chart's ingress. PostgreSQL-backed history, bring-your-own Secrets, and air-gapped licensing are all covered in the [Kubernetes guide](https://docs.betterdb.com/kubernetes) and the [chart README](charts/betterdb-monitor/README.md).
+
 ## Quick Start (CLI)
 
 Run BetterDB Monitor without Docker:

@@ -1,0 +1,157 @@
+# Default values = the simple, self-host profile: in-memory storage, no
+# ingress, no persistence. Point db.host at the instance to monitor and go.
+
+# Keep this at 1. The monitor holds per-process state (MONITOR capture
+# sessions, in-memory storage, anomaly baselines); running multiple replicas
+# is only meaningful with storage.type=postgres and is not load-balanced work.
+replicaCount: 1
+
+image:
+  repository: betterdb/monitor
+  # Empty => "<appVersion>-no-ai", the standard image (every monitoring
+  # feature, without the experimental local-LLM AI Helper dependencies).
+  # Set to e.g. "0.39.0" for the AI-enabled variant, or "latest" to track
+  # the newest release (not recommended for reproducible deploys).
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# The Valkey/Redis instance to monitor. Leave host empty to configure the
+# connection later in the UI (Settings -> Connection).
+db:
+  host: ""
+  port: 6379
+  username: default
+  # auto | valkey | redis
+  type: auto
+  # Plaintext password -> rendered into a chart-managed Secret. Prefer
+  # existingSecret for anything beyond a quick trial.
+  password: ""
+  # Bring-your-own Secret holding the database password.
+  existingSecret: ""
+  existingSecretKey: db-password
+
+# Where the monitor persists its own history (slowlogs, metrics, events).
+# memory: simplest, but history is lost on pod restart.
+# postgres: durable; requires storage.url (or existingSecret) pointing at a
+#           PostgreSQL instance, e.g. postgresql://user:pass@host:5432/db
+storage:
+  type: memory
+  url: ""
+  # Bring-your-own Secret holding the PostgreSQL connection URL.
+  existingSecret: ""
+  existingSecretKey: storage-url
+
+license:
+  # Online license key (Pro/Enterprise), validated against betterdb.com.
+  key: ""
+  # Bring-your-own Secret holding the online license key.
+  existingSecret: ""
+  existingSecretKey: license-key
+  # Air-gapped: a Secret containing the signed offline license token (.jwt),
+  # downloaded from betterdb.com/account/licenses. Mounted read-only and
+  # wired up via BETTERDB_OFFLINE_LICENSE_FILE. With an offline token and no
+  # online key, the monitor makes zero outbound requests.
+  offline:
+    existingSecret: ""
+    existingSecretKey: license.jwt
+
+# Set false to disable anonymous telemetry (BETTERDB_TELEMETRY).
+telemetry: true
+
+# PVC mounted at /app/data (BETTERDB_DATA_DIR): persisted license state and
+# the online outage-grace token. NOT the metrics history - that lives in
+# storage.type above. Off by default; the app runs fine without it.
+persistence:
+  enabled: false
+  size: 1Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  existingClaim: ""
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 3001
+
+# HTTP port the app listens on (PORT env). The Service targets this.
+containerPort: 3001
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: monitor.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+# Gates liveness until the app has finished starting, so a slow first boot
+# (e.g. postgres schema init against a remote DB) is not restart-looped by the
+# liveness probe. failureThreshold*periodSeconds = up to 150s of startup grace.
+startupProbe:
+  httpGet:
+    path: /api/health
+    port: http
+  periodSeconds: 5
+  failureThreshold: 30
+  timeoutSeconds: 3
+
+livenessProbe:
+  httpGet:
+    path: /api/health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 3
+readinessProbe:
+  httpGet:
+    path: /api/health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+
+# Extra environment variables passed through verbatim, e.g. the OTLP export,
+# webhook tuning, and health-gate settings from docs/configuration.md:
+#   extraEnv:
+#     - name: ANOMALY_DETECTION_ENABLED
+#       value: "true"
+extraEnv: []
+# Extra envFrom sources (ConfigMaps/Secrets) passed through verbatim.
+extraEnvFrom: []
+
+podAnnotations: {}
+podLabels: {}
+
+# The image runs as the non-root user 1001 (betterdb). fsGroup makes a fresh
+# PVC writable by it - the k8s equivalent of the `chown 1001` the README
+# requires for Docker volumes.
+podSecurityContext:
+  fsGroup: 1001
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,41 @@
+BetterDB Monitor is installing as {{ include "betterdb-monitor.fullname" . }} (image {{ include "betterdb-monitor.image" . }}).
+
+{{- if .Values.ingress.enabled }}
+
+Open the dashboard:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+
+The dashboard is not exposed outside the cluster. Port-forward to reach it:
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "betterdb-monitor.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+
+then open http://localhost:{{ .Values.service.port }}
+{{- end }}
+
+{{- if not .Values.db.host }}
+
+No database is configured (db.host is empty). Add your Valkey/Redis connection
+in the UI, or set db.host / db.password in values and upgrade the release.
+Inside the cluster, use the service DNS name of your Valkey/Redis instance,
+e.g. my-valkey.default.svc.cluster.local.
+{{- end }}
+
+{{- if eq .Values.storage.type "memory" }}
+
+Storage is in-memory: monitoring history is lost when the pod restarts.
+For durable history, set storage.type=postgres and storage.url (or
+storage.existingSecret) to a PostgreSQL connection URL.
+{{- end }}
+
+{{- if gt (int .Values.replicaCount) 1 }}
+
+WARNING: replicaCount > 1. The monitor keeps per-process state (capture
+sessions, in-memory storage); run a single replica unless you know why not.
+{{- end }}
+
+Health:      /api/health
+Prometheus:  /api/prometheus/metrics
+API docs:    /docs

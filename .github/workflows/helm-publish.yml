@@ -1,0 +1,137 @@
+# Publishes charts/betterdb-monitor as a public Helm repo hosted on GitHub Pages:
+#   - chart tarball  -> docs/charts/betterdb-monitor-<version>.tgz
+#   - repo index     -> docs/charts/index.yaml
+# both served at https://docs.betterdb.com/charts (Pages already serves the
+# Jekyll site from docs/ on master, so the tarball + index sit alongside it and
+# index.yaml's urls: point back at the same host).
+#
+# This uses plain `helm package` + `helm repo index` rather than chart-releaser:
+# `cr index` unconditionally checks out a worktree of the `gh-pages` branch to
+# load the existing index (fatal: invalid reference: origin/gh-pages), which
+# does not exist in this docs/-on-master model. helm's own tooling has no such
+# dependency. Only betterdb-monitor is published; charts/valkey-search is
+# internal and deliberately excluded.
+#
+# A push whose chart version is already published (its .tgz exists in
+# docs/charts) is a no-op, so pushing chart changes without a version bump does
+# nothing.
+name: Publish Helm Chart
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "charts/betterdb-monitor/**"
+      - ".github/workflows/helm-publish.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: helm-publish
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Fail before anything is published if the publish token is missing or the
+      # chart's version has drifted from the app. Chart.yaml is not templated, so
+      # appVersion and the artifacthub.io/images tags are hand-maintained; this
+      # asserts they still match apps/api/package.json (the version source of
+      # truth) so a stale chart never ships.
+      - name: Preflight (token present, versions in sync)
+        env:
+          HELM_PUBLISH_TOKEN: ${{ secrets.HELM_PUBLISH_TOKEN }}
+        run: |
+          if [ -z "$HELM_PUBLISH_TOKEN" ]; then
+            echo "::error::HELM_PUBLISH_TOKEN is not set — required to commit the chart + index to protected master (a fine-grained PAT with contents:write from a user who bypasses branch protection). Set the secret and rerun."
+            exit 1
+          fi
+          app_version=$(node -p "require('./apps/api/package.json').version")
+          chart_app_version=$(grep '^appVersion:' charts/betterdb-monitor/Chart.yaml | sed 's/.*: *//; s/"//g')
+          if [ "$app_version" != "$chart_app_version" ]; then
+            echo "::error::Chart.yaml appVersion ($chart_app_version) != apps/api/package.json ($app_version). Bump appVersion AND the artifacthub.io/images tags in charts/betterdb-monitor/Chart.yaml."
+            exit 1
+          fi
+          if ! grep -q "betterdb/monitor:${app_version}-no-ai" charts/betterdb-monitor/Chart.yaml; then
+            echo "::error::artifacthub.io/images in Chart.yaml does not reference ${app_version}-no-ai — update the annotation tags to match appVersion."
+            exit 1
+          fi
+          echo "Versions in sync at $app_version"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          # Authenticate the latest-release lookup so it uses the runner's token
+          # budget instead of the shared anonymous rate limit.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lint chart
+        run: helm lint charts/betterdb-monitor
+
+      # Package into docs/charts (which the checkout already populated with every
+      # previously-published .tgz) and rebuild index.yaml over the whole dir, so
+      # the index carries all versions. Skips entirely when this version's
+      # tarball already exists — that is the "already published" no-op.
+      - name: Package chart and rebuild index
+        id: pkg
+        run: |
+          version=$(grep '^version:' charts/betterdb-monitor/Chart.yaml | sed 's/.*: *//; s/"//g')
+          tgz="betterdb-monitor-${version}.tgz"
+          mkdir -p docs/charts
+          if [ -f "docs/charts/${tgz}" ]; then
+            echo "Chart version ${version} already published (docs/charts/${tgz} exists) — nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          helm package charts/betterdb-monitor -d docs/charts
+          helm repo index docs/charts --url https://docs.betterdb.com/charts
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tgz=${tgz}" >> "$GITHUB_OUTPUT"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # Commit the new tarball + index via the GraphQL createCommitOnBranch API
+      # rather than `git push`, for two reasons dictated by master's protection:
+      #   1. Signed commits are required. Commits created via this mutation are
+      #      automatically GPG-signed by GitHub (verified); a plain git commit
+      #      from the runner would be rejected as unsigned.
+      #   2. A PR review is required, and GitHub refuses to add the built-in
+      #      Actions integration to any bypass list on this org. So the commit
+      #      uses HELM_PUBLISH_TOKEN — a fine-grained PAT from a user who
+      #      bypasses the review rule. (The preflight guarantees it is set.)
+      # expectedHeadOid pins the commit to the HEAD we read; if an unrelated push
+      # lands on master in the window the mutation fails safely and a rerun
+      # re-publishes (idempotent — the guard above skips an already-shipped .tgz).
+      - name: Commit chart + index to master (signed, via API)
+        if: steps.pkg.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.HELM_PUBLISH_TOKEN }}
+        run: |
+          tgz_path="docs/charts/${{ steps.pkg.outputs.tgz }}"
+          head_oid=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq .object.sha)
+          jq -n \
+            --arg repo "${GITHUB_REPOSITORY}" \
+            --arg oid "$head_oid" \
+            --arg version "${{ steps.pkg.outputs.version }}" \
+            --arg idx "$(base64 -w0 docs/charts/index.yaml)" \
+            --arg tgzpath "$tgz_path" \
+            --arg tgzdata "$(base64 -w0 "$tgz_path")" \
+            '{
+              query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+              variables: {input: {
+                branch: {repositoryNameWithOwner: $repo, branchName: "master"},
+                expectedHeadOid: $oid,
+                message: {headline: ("chore(helm): publish betterdb-monitor " + $version + " [skip ci]")},
+                fileChanges: {additions: [
+                  {path: "docs/charts/index.yaml", contents: $idx},
+                  {path: $tgzpath, contents: $tgzdata}
+                ]}
+              }}
+            }' > /tmp/commit-payload.json
+          gh api graphql --input /tmp/commit-payload.json
+          echo "Published betterdb-monitor ${{ steps.pkg.outputs.version }}"

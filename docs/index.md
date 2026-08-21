@@ -21,9 +21,19 @@ docker run -d \
 
 Open [http://localhost:3001](http://localhost:3001) to access the dashboard.
 
+Running Kubernetes? Install with Helm instead:
+
+```bash
+helm repo add betterdb https://docs.betterdb.com/charts
+helm install betterdb-monitor betterdb/betterdb-monitor \
+  --namespace betterdb --create-namespace \
+  --set db.host=my-valkey.default.svc.cluster.local
+```
+
 ## Documentation
 
 - [Configuration Reference](configuration) — Environment variables, Docker setup, and runtime settings
+- [Kubernetes (Helm)](kubernetes) — Helm chart install, storage options, Secrets, and air-gapped licensing
 - [Updating](updating) — How to upgrade to the latest version for each install method (Docker, CLI, Kubernetes)
 - [Prometheus Metrics](prometheus-metrics) — Metrics reference, PromQL queries, and alerting rules
 - [Anomaly Detection](anomaly-detection) — Understanding detection patterns and tuning sensitivity
