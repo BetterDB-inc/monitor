@@ -76,7 +76,8 @@ try {
   if (err instanceof agentCache.ValkeyCommandError) {
     // agent-cache errors extend AgentCacheError
   } else if (err instanceof semanticCache.ValkeyCommandError) {
-    // semantic-cache's extend Error — a different class with the same name
+    // semantic-cache's ValkeyCommandError extends Error — a different class
+    // that happens to share the name
   }
 }
 
