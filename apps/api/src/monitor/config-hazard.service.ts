@@ -12,6 +12,14 @@ interface CachedFindings {
   expiresAt: number;
 }
 
+interface ProbeResult {
+  findings: ConfigHazardFinding[];
+  // Only a fully-completed probe may be cached. A partial probe (e.g. the CRC
+  // read failed after AOF findings were collected) still returns what it has so
+  // this poll surfaces them, but must not seed the TTL cache as a clean result.
+  cacheable: boolean;
+}
+
 interface ProbeClientLike {
   getConfigValue(parameter: string): Promise<string | null>;
   call(command: string, args: string[]): Promise<unknown>;
@@ -45,18 +53,17 @@ export class ConfigHazardService {
       return cached.findings;
     }
 
-    const findings = await this.probe(connectionId);
-    if (findings === null) {
-      return [];
+    const result = await this.probe(connectionId);
+    if (result.cacheable) {
+      this.cache.set(connectionId, {
+        findings: result.findings,
+        expiresAt: Date.now() + ConfigHazardService.CACHE_TTL_MS,
+      });
     }
-    this.cache.set(connectionId, {
-      findings,
-      expiresAt: Date.now() + ConfigHazardService.CACHE_TTL_MS,
-    });
-    return findings;
+    return result.findings;
   }
 
-  private async probe(connectionId: string): Promise<ConfigHazardFinding[] | null> {
+  private async probe(connectionId: string): Promise<ProbeResult> {
     let client: ProbeClientLike;
     try {
       client = this.connectionRegistry.get(connectionId) as unknown as ProbeClientLike;
@@ -64,7 +71,7 @@ export class ConfigHazardService {
       this.logger.debug(
         `Config-hazard probe skipped for ${connectionId}: ${(err as Error).message}`,
       );
-      return null;
+      return { findings: [], cacheable: false };
     }
 
     let appendonly: string | null;
@@ -74,7 +81,7 @@ export class ConfigHazardService {
       this.logger.debug(
         `CONFIG GET appendonly failed for ${connectionId}: ${(err as Error).message}`,
       );
-      return null;
+      return { findings: [], cacheable: false };
     }
 
     const findings: ConfigHazardFinding[] = [];
@@ -120,12 +127,14 @@ export class ConfigHazardService {
       clusterEnabled = await client.getConfigValue('cluster-enabled');
       clusterCrcEnabled = await client.getConfigValue('cluster-crc-enabled');
     } catch (err) {
-      // A failed cluster read must not discard AOF findings already collected;
-      // return what we have rather than null (which would suppress them).
+      // A failed cluster read must not discard AOF findings already collected,
+      // so return what we have. But the probe is incomplete, so mark it
+      // uncacheable: caching now would mask the missing CRC check as a clean
+      // result for a full TTL and skip re-probing on the next poll.
       this.logger.debug(
         `CONFIG GET cluster-crc probe failed for ${connectionId}: ${(err as Error).message}`,
       );
-      return findings;
+      return { findings, cacheable: false };
     }
 
     const crcFinding = evaluateClusterCrcHazard({ clusterEnabled, clusterCrcEnabled });
@@ -133,7 +142,7 @@ export class ConfigHazardService {
       findings.push(crcFinding);
     }
 
-    return findings;
+    return { findings, cacheable: true };
   }
 
   /**

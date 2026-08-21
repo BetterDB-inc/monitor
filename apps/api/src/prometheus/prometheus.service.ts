@@ -63,6 +63,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
 
+  // Coalesces concurrent updateMetrics() passes onto one in-flight promise so
+  // overlapping /metrics scrapes cannot race on per-connection poll state.
+  private updateMetricsInFlight: Promise<void> | null = null;
+
   // ACL Audit Metrics
   private aclDeniedTotal: Gauge;
   private aclDeniedByReason: Gauge;
@@ -666,9 +670,25 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   /**
-   * Update metrics for ALL registered connections (used by /metrics endpoint)
+   * Update metrics for ALL registered connections (used by /metrics endpoint).
+   *
+   * Concurrent callers (e.g. overlapping /metrics scrapes) are coalesced onto a
+   * single in-flight pass. Without this, two passes would race on
+   * getClusterInfo() per connection: an older response completing after a newer
+   * one could move state.previousCrcMismatch backward and re-emit the same CRC
+   * corruption delta on the next poll.
    */
   async updateMetrics(): Promise<void> {
+    if (this.updateMetricsInFlight !== null) {
+      return this.updateMetricsInFlight;
+    }
+    this.updateMetricsInFlight = this.runUpdateMetrics().finally(() => {
+      this.updateMetricsInFlight = null;
+    });
+    return this.updateMetricsInFlight;
+  }
+
+  private async runUpdateMetrics(): Promise<void> {
     const connections = this.connectionRegistry.list();
     const connectedConnections = connections.filter((c) => c.isConnected);
 

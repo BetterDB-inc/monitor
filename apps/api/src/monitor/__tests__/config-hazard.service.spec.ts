@@ -82,6 +82,37 @@ describe('ConfigHazardService', () => {
     expect(findings[0].id).toBe('default-user-aof-data-loss');
   });
 
+  it('exercises the cluster-crc-enabled read and preserves AOF findings when it fails', async () => {
+    // cluster-enabled succeeds so the probe advances to cluster-crc-enabled;
+    // only that second read is rejected. The AOF finding must survive and both
+    // cluster reads must have been attempted.
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'appendonly') return Promise.resolve('yes');
+      if (param === 'cluster-enabled') return Promise.resolve('yes');
+      if (param === 'cluster-crc-enabled') return Promise.reject(new Error('ERR unknown command'));
+      return Promise.resolve('no');
+    });
+    const findings = await service.getHazards('conn-1');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].id).toBe('default-user-aof-data-loss');
+    expect(client.getConfigValue).toHaveBeenCalledWith('cluster-enabled');
+    expect(client.getConfigValue).toHaveBeenCalledWith('cluster-crc-enabled');
+  });
+
+  it('does not cache an incomplete probe when the cluster CRC read fails', async () => {
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'appendonly') return Promise.resolve('yes');
+      if (param === 'cluster-enabled') return Promise.resolve('yes');
+      if (param === 'cluster-crc-enabled') return Promise.reject(new Error('ERR unknown command'));
+      return Promise.resolve('no');
+    });
+    await service.getHazards('conn-1');
+    await service.getHazards('conn-1');
+    // A failed CRC read must re-probe on the next poll rather than serving a
+    // stale "clean" result from the cache.
+    expect(appendonlyProbeCount()).toBe(2);
+  });
+
   it('serves from the cache within the TTL', async () => {
     await service.getHazards('conn-1');
     await service.getHazards('conn-1');
