@@ -4,11 +4,20 @@ import {
   ConfigHazardFinding,
   evaluateAclAofHazard,
   evaluateAppendfsyncHazard,
+  evaluateClusterCrcHazard,
 } from './config-hazard';
 
 interface CachedFindings {
   findings: ConfigHazardFinding[];
   expiresAt: number;
+}
+
+interface ProbeResult {
+  findings: ConfigHazardFinding[];
+  // Only a fully-completed probe may be cached. A partial probe (e.g. the CRC
+  // read failed after AOF findings were collected) still returns what it has so
+  // this poll surfaces them, but must not seed the TTL cache as a clean result.
+  cacheable: boolean;
 }
 
 interface ProbeClientLike {
@@ -44,18 +53,17 @@ export class ConfigHazardService {
       return cached.findings;
     }
 
-    const findings = await this.probe(connectionId);
-    if (findings === null) {
-      return [];
+    const result = await this.probe(connectionId);
+    if (result.cacheable) {
+      this.cache.set(connectionId, {
+        findings: result.findings,
+        expiresAt: Date.now() + ConfigHazardService.CACHE_TTL_MS,
+      });
     }
-    this.cache.set(connectionId, {
-      findings,
-      expiresAt: Date.now() + ConfigHazardService.CACHE_TTL_MS,
-    });
-    return findings;
+    return result.findings;
   }
 
-  private async probe(connectionId: string): Promise<ConfigHazardFinding[] | null> {
+  private async probe(connectionId: string): Promise<ProbeResult> {
     let client: ProbeClientLike;
     try {
       client = this.connectionRegistry.get(connectionId) as unknown as ProbeClientLike;
@@ -63,7 +71,7 @@ export class ConfigHazardService {
       this.logger.debug(
         `Config-hazard probe skipped for ${connectionId}: ${(err as Error).message}`,
       );
-      return null;
+      return { findings: [], cacheable: false };
     }
 
     let appendonly: string | null;
@@ -73,42 +81,72 @@ export class ConfigHazardService {
       this.logger.debug(
         `CONFIG GET appendonly failed for ${connectionId}: ${(err as Error).message}`,
       );
-      return null;
-    }
-
-    if (appendonly !== 'yes') {
-      this.delayedFsyncTrend.delete(connectionId);
-      return [];
-    }
-
-    let version: string | null;
-    try {
-      version = client.getCapabilities().version;
-    } catch {
-      version = null;
-    }
-
-    let aclGetUserResult: unknown;
-    try {
-      aclGetUserResult = await client.call('ACL', ['GETUSER', 'default']);
-    } catch (err) {
-      this.logger.debug(
-        `ACL GETUSER default failed for ${connectionId}: ${(err as Error).message}`,
-      );
-      aclGetUserResult = 'denied';
+      return { findings: [], cacheable: false };
     }
 
     const findings: ConfigHazardFinding[] = [];
-    const aclFinding = evaluateAclAofHazard({ appendonly, version, aclGetUserResult });
-    if (aclFinding !== null) {
-      findings.push(aclFinding);
+
+    // valkey#3983 (AOF + default-user data loss) and valkey#3515 (appendfsync
+    // stalls) only apply when AOF is enabled.
+    if (appendonly === 'yes') {
+      let version: string | null;
+      try {
+        version = client.getCapabilities().version;
+      } catch {
+        version = null;
+      }
+
+      let aclGetUserResult: unknown;
+      try {
+        aclGetUserResult = await client.call('ACL', ['GETUSER', 'default']);
+      } catch (err) {
+        this.logger.debug(
+          `ACL GETUSER default failed for ${connectionId}: ${(err as Error).message}`,
+        );
+        aclGetUserResult = 'denied';
+      }
+
+      const aclFinding = evaluateAclAofHazard({ appendonly, version, aclGetUserResult });
+      if (aclFinding !== null) {
+        findings.push(aclFinding);
+      }
+
+      const fsyncFinding = await this.probeAppendfsync(connectionId, client, appendonly);
+      if (fsyncFinding !== null) {
+        findings.push(fsyncFinding);
+      }
+    } else {
+      this.delayedFsyncTrend.delete(connectionId);
     }
 
-    const fsyncFinding = await this.probeAppendfsync(connectionId, client, appendonly);
-    if (fsyncFinding !== null) {
-      findings.push(fsyncFinding);
+    // valkey#4201: cluster bus accepting unverified messages (cluster-crc-enabled
+    // off). Independent of AOF, so it runs for every connection.
+    let clusterEnabled: string | null;
+    let clusterCrcEnabled: string | null;
+    try {
+      clusterEnabled = await client.getConfigValue('cluster-enabled');
+      clusterCrcEnabled = await client.getConfigValue('cluster-crc-enabled');
+    } catch (err) {
+      // A failed cluster read must not discard AOF findings already collected,
+      // so return what we have. But the probe is incomplete, so mark it
+      // uncacheable: caching now would mask the missing CRC check as a clean
+      // result for a full TTL and skip re-probing on the next poll.
+      this.logger.debug(
+        `CONFIG GET cluster-crc probe failed for ${connectionId}: ${(err as Error).message}`,
+      );
+      return { findings, cacheable: false };
     }
-    return findings;
+
+    const crcFinding = evaluateClusterCrcHazard({ clusterEnabled, clusterCrcEnabled });
+    if (crcFinding !== null) {
+      findings.push(crcFinding);
+    }
+
+    // A null cluster-enabled read is a filtered/empty CONFIG GET, not a
+    // completed probe: the CRC verdict is unverified, so caching now would pin a
+    // false clean (or a transient unverified) for a full TTL. Re-probe next poll.
+    const clusterStateUnknown = clusterEnabled === null;
+    return { findings, cacheable: !clusterStateUnknown };
   }
 
   /**

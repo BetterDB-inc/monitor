@@ -57,6 +57,7 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'slowlog.threshold': 'Slowlog Threshold',
   'replication.lag': 'Replication Lag',
   'cluster.failover': 'Cluster Failover',
+  'cluster.bus.corruption': 'Cluster Bus Corruption',
   'failover.started': 'Failover Started',
   'failover.completed': 'Failover Completed',
   'data.loss.detected': 'Data Loss Detected',

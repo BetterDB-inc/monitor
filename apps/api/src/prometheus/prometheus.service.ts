@@ -29,6 +29,7 @@ import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatc
 interface ConnectionMetricState {
   previousClusterState: string | null;
   previousSlotsFail: number;
+  previousCrcMismatch: number | null;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
   // Storage-based metric labels (per-connection)
@@ -61,6 +62,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
+
+  // Per-connection in-flight INFO-metric updates, so the background poller and a
+  // /metrics scrape coalesce instead of racing on shared per-connection state.
+  private updateMetricsInFlight = new Map<string, Promise<void>>();
 
   // ACL Audit Metrics
   private aclDeniedTotal: Gauge;
@@ -134,6 +139,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private clusterSlotsOk: Gauge;
   private clusterSlotsFail: Gauge;
   private clusterSlotsPfail: Gauge;
+  private clusterStatsMessagesCrcMismatch: Gauge;
 
   // Cluster Slot Metrics (Valkey 8.0+ specific)
   private clusterSlotKeys: Gauge;
@@ -262,6 +268,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.perConnectionState.set(connectionId, {
         previousClusterState: null,
         previousSlotsFail: 0,
+        previousCrcMismatch: null,
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
         // Storage-based metric labels
@@ -487,6 +494,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'cluster_slots_pfail',
       'Number of slots in PFAIL state',
     );
+    this.clusterStatsMessagesCrcMismatch = this.createGauge(
+      'cluster_stats_messages_crc_mismatch',
+      'Cluster bus messages rejected by the CRC integrity check (valkey#4201); any increase means on-wire corruption',
+    );
 
     // Cluster Slot Metrics (Valkey 8.0+) - per connection, per slot
     this.clusterSlotKeys = this.createGauge('cluster_slot_keys', 'Keys in cluster slot', ['slot']);
@@ -659,7 +670,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   /**
-   * Update metrics for ALL registered connections (used by /metrics endpoint)
+   * Update metrics for ALL registered connections (used by /metrics endpoint).
    */
   async updateMetrics(): Promise<void> {
     const connections = this.connectionRegistry.list();
@@ -735,7 +746,35 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   /**
    * Update all INFO-based metrics for a specific connection
    */
-  private async updateMetricsForConnection(connectionId: string): Promise<void> {
+  /**
+   * Coalesces concurrent INFO-based metric updates for the SAME connection onto
+   * one in-flight pass. Two independent entry points reach here — the background
+   * poller (pollConnection) and the /metrics scrape (updateMetrics) — so without
+   * this a poll and a scrape could run getClusterInfo() concurrently for one
+   * connection; an older response completing last would move
+   * state.previousCrcMismatch backward and re-emit the same cluster.bus.corruption
+   * delta on the next poll. Serializing per connection (the granularity of the
+   * shared state) closes that race for both paths.
+   */
+  private updateMetricsForConnection(connectionId: string): Promise<void> {
+    const existing = this.updateMetricsInFlight.get(connectionId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const run = this.runUpdateMetricsForConnection(connectionId).finally(() => {
+      // Compare-and-delete: only clear the entry if it is still ours. If the
+      // connection was removed (cleanupConnectionMetrics) or re-added with a
+      // fresh in-flight update while this one ran, we must not evict that newer
+      // entry when this stale promise settles.
+      if (this.updateMetricsInFlight.get(connectionId) === run) {
+        this.updateMetricsInFlight.delete(connectionId);
+      }
+    });
+    this.updateMetricsInFlight.set(connectionId, run);
+    return run;
+  }
+
+  private async runUpdateMetricsForConnection(connectionId: string): Promise<void> {
     const client = this.connectionRegistry.get(connectionId);
     if (!client) {
       this.logger.warn(`No client for connection ${connectionId}, skipping metrics`);
@@ -1061,6 +1100,66 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         this.clusterSlotsPfail
           .labels(connLabel)
           .set(parseInt(clusterInfo.cluster_slots_pfail) || 0);
+      }
+
+      // Cluster-bus CRC integrity (valkey#4201). The field is only present on
+      // builds shipping the check with `cluster-crc-enabled` on; a "0" value is
+      // still truthy, so an absent field (undefined) is the only skipped case.
+      const crcRaw = clusterInfo.cluster_stats_messages_crc_mismatch;
+      if (!crcRaw) {
+        // Field gone (check disabled or counter no longer reported). Drop the
+        // baseline so a later re-appearance re-seeds from its first value rather
+        // than diffing against a stale pre-gap baseline and firing a false delta,
+        // and remove the gauge child so Prometheus stops exporting the last value
+        // as if it were current.
+        state.previousCrcMismatch = null;
+        this.clusterStatsMessagesCrcMismatch.remove(connLabel);
+      }
+      if (crcRaw) {
+        const crcMismatch = parseInt(crcRaw) || 0;
+        this.clusterStatsMessagesCrcMismatch.labels(connLabel).set(crcMismatch);
+
+        // Any increase means the bus rejected a corrupted gossip/message (bit
+        // flip, bad NIC/switch). A single bogus configEpoch can permanently
+        // scramble slot ownership (valkey#4201/#4092), so we surface any nonzero
+        // delta rather than a threshold. The first observation seeds the baseline
+        // so a pre-existing counter value does not fire on startup.
+        // Advance the baseline before any await so an overlapping poll cannot read
+        // the old value and re-dispatch the same delta.
+        const previousCrcMismatch = state.previousCrcMismatch;
+        state.previousCrcMismatch = crcMismatch;
+
+        if (previousCrcMismatch !== null && crcMismatch > previousCrcMismatch) {
+          const crcMismatchDelta = crcMismatch - previousCrcMismatch;
+          const knownNodes = parseInt(clusterInfo.cluster_known_nodes) || 0;
+
+          // OTLP mirror is decoupled from the Pro webhook gate (parity with
+          // cluster.failover), so an OTLP-only deployment still sees corruption.
+          try {
+            this.otelEvents?.dispatch(
+              WebhookEventType.CLUSTER_BUS_CORRUPTION,
+              { crcMismatchTotal: crcMismatch, crcMismatchDelta, knownNodes },
+              connectionId,
+            );
+          } catch (err) {
+            this.logger.error('Failed to dispatch cluster.bus.corruption OTLP event', err);
+          }
+
+          if (this.webhookEventsProService) {
+            try {
+              await this.webhookEventsProService.dispatchClusterBusCorruption({
+                crcMismatchTotal: crcMismatch,
+                crcMismatchDelta,
+                knownNodes,
+                timestamp: Date.now(),
+                instance: { host: config?.host || 'localhost', port: config?.port || 6379 },
+                connectionId,
+              });
+            } catch (err) {
+              this.logger.error('Failed to dispatch cluster.bus.corruption webhook', err);
+            }
+          }
+        }
       }
 
       // cluster.failover: detect the edge, mirror to OTLP, and advance the
@@ -1624,6 +1723,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    */
   cleanupConnectionMetrics(connectionId: string): void {
     this.perConnectionState.delete(connectionId);
+    // Drop any in-flight metric update so a reused connection ID cannot join
+    // stale work. The promise itself still settles; its compare-and-delete
+    // finally then no-ops because the entry is already gone.
+    this.updateMetricsInFlight.delete(connectionId);
     // Note: prom-client doesn't easily support removing specific label values
     // The metrics will be overwritten on next scrape or remain at last value
   }

@@ -58,6 +58,79 @@ describe('ConfigHazardService', () => {
     expect(findings[0].status).toBe('unverified');
   });
 
+  it('flags the cluster-bus CRC hazard when cluster-crc-enabled is off', async () => {
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'cluster-enabled') return Promise.resolve('yes');
+      if (param === 'cluster-crc-enabled') return Promise.resolve('no');
+      return Promise.resolve('no'); // appendonly off, so the AOF probe is skipped
+    });
+    const findings = await service.getHazards('conn-1');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].id).toBe('cluster-crc-disabled');
+    expect(findings[0].status).toBe('advisory');
+    expect(client.call).not.toHaveBeenCalled();
+  });
+
+  it('preserves an AOF finding when the cluster CRC read fails', async () => {
+    // appendonly on (AOF hazard collected), then the cluster read is rejected.
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'appendonly') return Promise.resolve('yes');
+      return Promise.reject(new Error('ERR unknown command'));
+    });
+    const findings = await service.getHazards('conn-1');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].id).toBe('default-user-aof-data-loss');
+  });
+
+  it('exercises the cluster-crc-enabled read and preserves AOF findings when it fails', async () => {
+    // cluster-enabled succeeds so the probe advances to cluster-crc-enabled;
+    // only that second read is rejected. The AOF finding must survive and both
+    // cluster reads must have been attempted.
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'appendonly') return Promise.resolve('yes');
+      if (param === 'cluster-enabled') return Promise.resolve('yes');
+      if (param === 'cluster-crc-enabled') return Promise.reject(new Error('ERR unknown command'));
+      return Promise.resolve('no');
+    });
+    const findings = await service.getHazards('conn-1');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].id).toBe('default-user-aof-data-loss');
+    expect(client.getConfigValue).toHaveBeenCalledWith('cluster-enabled');
+    expect(client.getConfigValue).toHaveBeenCalledWith('cluster-crc-enabled');
+  });
+
+  it('surfaces an unverified CRC finding and does not cache when cluster-enabled reads null', async () => {
+    // getConfigValue resolves a filtered CONFIG GET to null WITHOUT throwing, so
+    // the catch never fires; cluster mode is unknown and must not cache as clean.
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'appendonly') return Promise.resolve('no'); // AOF off, skip that probe
+      if (param === 'cluster-enabled') return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    const first = await service.getHazards('conn-1');
+    expect(first).toHaveLength(1);
+    expect(first[0].id).toBe('cluster-crc-disabled');
+    expect(first[0].status).toBe('unverified');
+
+    // Unknown cluster state is uncacheable: the next poll must re-probe.
+    await service.getHazards('conn-1');
+    expect(appendonlyProbeCount()).toBe(2);
+  });
+
+  it('does not cache an incomplete probe when the cluster CRC read fails', async () => {
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'appendonly') return Promise.resolve('yes');
+      if (param === 'cluster-enabled') return Promise.resolve('yes');
+      if (param === 'cluster-crc-enabled') return Promise.reject(new Error('ERR unknown command'));
+      return Promise.resolve('no');
+    });
+    await service.getHazards('conn-1');
+    await service.getHazards('conn-1');
+    // A failed CRC read must re-probe on the next poll rather than serving a
+    // stale "clean" result from the cache.
+    expect(appendonlyProbeCount()).toBe(2);
+  });
+
   it('serves from the cache within the TTL', async () => {
     await service.getHazards('conn-1');
     await service.getHazards('conn-1');
@@ -136,6 +209,11 @@ describe('ConfigHazardService', () => {
         }
         if (param === 'appendfsync') {
           return Promise.resolve(opts.appendfsync ?? 'always');
+        }
+        // Standalone node: cluster mode is explicitly off so the CRC probe
+        // resolves cleanly rather than reading as unverified.
+        if (param === 'cluster-enabled') {
+          return Promise.resolve('no');
         }
         return Promise.resolve(null);
       });
