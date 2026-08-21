@@ -158,4 +158,40 @@ describe('MemoryAdapter memory proposals', () => {
     // Idempotent: a second sweep finds nothing already-expired.
     expect(await adapter.expireMemoryProposalsBefore(500)).toEqual([]);
   });
+
+  it('fails only applying proposals whose reviewed_at is past the stale cutoff', async () => {
+    const adapter = new MemoryAdapter();
+    const stale = buildForget({ proposed_at: 1, expires_at: 10_000 });
+    const fresh = buildForget({
+      proposed_at: 1,
+      expires_at: 10_000,
+      proposal_payload: { target_kind: 'id', memory_id: 'mem-2' },
+    });
+    await adapter.createMemoryProposal(stale);
+    await adapter.createMemoryProposal(fresh);
+    await adapter.updateMemoryProposalStatus({
+      id: stale.id,
+      expected_status: ['pending'],
+      status: 'applying',
+      reviewed_at: 100,
+    });
+    await adapter.updateMemoryProposalStatus({
+      id: fresh.id,
+      expected_status: ['pending'],
+      status: 'applying',
+      reviewed_at: 1_000,
+    });
+
+    const failed = await adapter.failStaleApplyingMemoryProposalsBefore(500);
+    expect(failed.map((p) => p.id)).toEqual([stale.id]);
+    expect(failed[0].status).toBe('failed');
+    expect(failed[0].applied_result).toEqual({
+      success: false,
+      error: 'stale_apply',
+      details: { reviewed_at: 100 },
+    });
+    expect((await adapter.getMemoryProposal(fresh.id))?.status).toBe('applying');
+
+    expect(await adapter.failStaleApplyingMemoryProposalsBefore(500)).toEqual([]);
+  });
 });
