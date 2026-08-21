@@ -65,14 +65,19 @@ export function msToSeconds(value: string | undefined): number | undefined {
   return Math.floor(ms / 1000);
 }
 
-export function mapMcpError(logger: Logger, error: unknown, fallback: string): HttpException {
+export function mapMcpError(
+  logger: Logger,
+  error: unknown,
+  fallback: string,
+  logMessage: string = fallback,
+): HttpException {
   if (error instanceof HttpException) {
     return error;
   }
   if (error instanceof CapabilityUnavailableError) {
     return new HttpException(error.message, HttpStatus.NOT_IMPLEMENTED);
   }
-  logger.error(fallback, error instanceof Error ? error.stack : String(error));
+  logger.error(logMessage, error instanceof Error ? error.stack : String(error));
   const detail = error instanceof Error && error.message !== '' ? `: ${error.message}` : '';
   return new HttpException(`${fallback}${detail}`, HttpStatus.INTERNAL_SERVER_ERROR);
 }

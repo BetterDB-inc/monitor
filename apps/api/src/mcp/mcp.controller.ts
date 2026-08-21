@@ -82,7 +82,7 @@ export class McpController {
       const info = await client.getInfoParsed(sections);
       return info;
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get info');
+      throw mapMcpError(this.logger, error, 'Failed to get info', `Failed to get info for ${id}`);
     }
   }
 
@@ -96,7 +96,7 @@ export class McpController {
       const parsedCount = safeLimit(count, 25);
       return await client.getSlowLog(parsedCount);
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get slowlog');
+      throw mapMcpError(this.logger, error, 'Failed to get slowlog', `Failed to get slowlog for ${id}`);
     }
   }
 
@@ -106,7 +106,7 @@ export class McpController {
       const client = this.registry.get(id);
       return await client.getLatestLatencyEvents();
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get latency');
+      throw mapMcpError(this.logger, error, 'Failed to get latency', `Failed to get latency for ${id}`);
     }
   }
 
@@ -120,7 +120,12 @@ export class McpController {
       ]);
       return { doctor, stats };
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get memory diagnostics');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get memory diagnostics',
+        `Failed to get memory for ${id}`,
+      );
     }
   }
 
@@ -142,7 +147,7 @@ export class McpController {
       if (msg.includes('unknown command') || msg.includes('COMMANDLOG')) {
         return { entries: [], note: 'COMMANDLOG not available on this instance' };
       }
-      throw mapMcpError(this.logger, error, 'Failed to get commandlog');
+      throw mapMcpError(this.logger, error, 'Failed to get commandlog', `Failed to get commandlog for ${id}`);
     }
   }
 
@@ -152,7 +157,7 @@ export class McpController {
       const client = this.registry.get(id);
       return await client.getClients();
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get clients');
+      throw mapMcpError(this.logger, error, 'Failed to get clients', `Failed to get clients for ${id}`);
     }
   }
 
@@ -165,7 +170,12 @@ export class McpController {
       const parsedLimit = limit !== undefined ? safeLimit(limit, MAX_LIMIT) : undefined;
       return await this.metricsService.getSlowLogPatternAnalysis(parsedLimit, id);
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get slowlog patterns');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get slowlog patterns',
+        `Failed to get slowlog patterns for ${id}`,
+      );
     }
   }
 
@@ -193,7 +203,12 @@ export class McpController {
       if (msg.includes('unknown command') || msg.includes('COMMANDLOG')) {
         return { entries: [], note: 'COMMANDLOG not available on this instance' };
       }
-      throw mapMcpError(this.logger, error, 'Failed to get commandlog history');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get commandlog history',
+        `Failed to get commandlog history for ${id}`,
+      );
     }
   }
 
@@ -216,7 +231,12 @@ export class McpController {
       if (msg.includes('unknown command') || msg.includes('COMMANDLOG')) {
         return { entries: [], note: 'COMMANDLOG not available on this instance' };
       }
-      throw mapMcpError(this.logger, error, 'Failed to get commandlog patterns');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get commandlog patterns',
+        `Failed to get commandlog patterns for ${id}`,
+      );
     }
   }
 
@@ -237,7 +257,12 @@ export class McpController {
         id,
       );
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get client activity');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get client activity',
+        `Failed to get client activity for ${id}`,
+      );
     }
   }
 
@@ -250,7 +275,12 @@ export class McpController {
       if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
         return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
       }
-      throw mapMcpError(this.logger, error, 'Failed to get cluster nodes');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get cluster nodes',
+        `Failed to get cluster nodes for ${id}`,
+      );
     }
   }
 
@@ -263,7 +293,12 @@ export class McpController {
       if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
         return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
       }
-      throw mapMcpError(this.logger, error, 'Failed to get cluster node stats');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get cluster node stats',
+        `Failed to get cluster node stats for ${id}`,
+      );
     }
   }
 
@@ -280,7 +315,12 @@ export class McpController {
       if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
         return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
       }
-      throw mapMcpError(this.logger, error, 'Failed to get cluster slowlog');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get cluster slowlog',
+        `Failed to get cluster slowlog for ${id}`,
+      );
     }
   }
 
@@ -305,7 +345,12 @@ export class McpController {
       if (msg.includes('CLUSTERDOWN') || msg.includes('cluster mode')) {
         return { error: 'not_cluster', message: 'This instance is not running in cluster mode.' };
       }
-      throw mapMcpError(this.logger, error, 'Failed to get cluster slot stats');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get cluster slot stats',
+        `Failed to get cluster slot stats for ${id}`,
+      );
     }
   }
 
@@ -320,7 +365,12 @@ export class McpController {
     try {
       return await this.metricsService.getLatencyHistory(eventName, id);
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get latency history');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get latency history',
+        `Failed to get latency history for ${id}/${eventName}`,
+      );
     }
   }
 
@@ -343,7 +393,12 @@ export class McpController {
         connectionId: id,
       });
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get audit entries');
+      throw mapMcpError(
+        this.logger,
+        error,
+        'Failed to get audit entries',
+        `Failed to get audit entries for ${id}`,
+      );
     }
   }
 
@@ -364,7 +419,7 @@ export class McpController {
         latest: true,
       });
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get hot keys');
+      throw mapMcpError(this.logger, error, 'Failed to get hot keys', `Failed to get hot keys for ${id}`);
     }
   }
 
@@ -385,7 +440,7 @@ export class McpController {
       }
       return result;
     } catch (error) {
-      throw mapMcpError(this.logger, error, 'Failed to get health');
+      throw mapMcpError(this.logger, error, 'Failed to get health', `Failed to get health for ${id}`);
     }
   }
 
