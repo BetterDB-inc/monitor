@@ -54,7 +54,7 @@ describe('McpController', () => {
       throw new Error('Expected getInfo to fail');
     } catch (error) {
       expect(error).toBeInstanceOf(HttpException);
-      expect((error as HttpException).message).toBe('Failed to get info: socket closed');
+      expect((error as HttpException).message).toBe('Failed to get info');
       expect((error as HttpException).getStatus()).toBe(HttpStatus.INTERNAL_SERVER_ERROR);
     }
   });

@@ -78,6 +78,5 @@ export function mapMcpError(
     return new HttpException(error.message, HttpStatus.NOT_IMPLEMENTED);
   }
   logger.error(logMessage, error instanceof Error ? error.stack : String(error));
-  const detail = error instanceof Error && error.message !== '' ? `: ${error.message}` : '';
-  return new HttpException(`${fallback}${detail}`, HttpStatus.INTERNAL_SERVER_ERROR);
+  return new HttpException(fallback, HttpStatus.INTERNAL_SERVER_ERROR);
 }
