@@ -62,17 +62,25 @@ A handful of names are declared by more than one underlying package, so they are
 not exported flat. Reach them through the namespace for the package you want:
 
 ```ts
-import { agentCache, semanticCache } from '@betterdb/ai';
+import Valkey from 'iovalkey';
+import { AgentCache, agentCache, semanticCache } from '@betterdb/ai';
+
+const cache = new AgentCache({ client: new Valkey() });
 
 try {
-  await cache.get(params);
-} catch (e) {
-  if (e instanceof agentCache.ValkeyCommandError) {
+  await cache.llm.check({
+    model: 'claude-sonnet-4-5',
+    messages: [{ role: 'user', content: 'hello' }],
+  });
+} catch (err) {
+  if (err instanceof agentCache.ValkeyCommandError) {
     // agent-cache errors extend AgentCacheError
+  } else if (err instanceof semanticCache.ValkeyCommandError) {
+    // semantic-cache's extend Error — a different class with the same name
   }
 }
 
-let block: agentCache.ContentBlock;
+const block: agentCache.ContentBlock = { type: 'text', text: 'hello' };
 ```
 
 Namespaces: `agentCache`, `semanticCache`, `retrieval`, `memory`, `searchKit`.

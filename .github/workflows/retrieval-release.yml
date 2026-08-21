@@ -158,4 +158,5 @@ jobs:
       contents: write
       id-token: write
     uses: ./.github/workflows/ai-facade-release.yml
-    secrets: inherit
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -10,6 +10,10 @@ name: Publish AI Facade
 
 on:
   workflow_call:
+    secrets:
+      NPM_TOKEN:
+        description: 'npmjs.com automation token with publish access to @betterdb/ai'
+        required: true
   workflow_dispatch:
     inputs:
       version:
@@ -41,6 +45,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -83,10 +89,22 @@ jobs:
             echo "version=$SEED" >> $GITHUB_OUTPUT
             exit 0
           fi
-          NEXT=$(node -p "
-            const [maj, min, patch] = process.argv[1].split('.').map(Number);
-            [maj, min, patch + 1].join('.');
-          " "$CURRENT")
+          NEXT=$(node -e '
+            const current = process.argv[1];
+            const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(current);
+            if (!m) {
+              console.error(
+                `Refusing to auto-bump from "${current}": only plain MAJOR.MINOR.PATCH ` +
+                  `versions can be bumped automatically. Whether a prerelease should be ` +
+                  `promoted to a stable patch or incremented as a prerelease is a release ` +
+                  `decision, so make it explicitly: re-run this workflow via ` +
+                  `workflow_dispatch with an exact version input.`,
+              );
+              process.exit(1);
+            }
+            const [, maj, min, patch] = m;
+            console.log([maj, min, Number(patch) + 1].join("."));
+          ' "$CURRENT")
           echo "version=$NEXT" >> $GITHUB_OUTPUT
 
       - name: Build the workspace
