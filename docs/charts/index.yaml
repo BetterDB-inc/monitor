@@ -16,7 +16,44 @@ entries:
           url: https://github.com/BetterDB-inc/monitor
     apiVersion: v2
     appVersion: 0.39.0
-    created: "2026-08-21T18:40:46.253486826Z"
+    created: "2026-08-21T19:45:20.276716922Z"
+    description: BetterDB Monitor - monitoring, analytics, and anomaly detection for
+      Valkey and Redis
+    digest: 81acde69a4cf6a079288f6d3033e2f648960dc2d0ea3f00f493d97c358d1b6b4
+    home: https://betterdb.com
+    icon: https://docs.betterdb.com/assets/images/favicon.svg
+    keywords:
+    - valkey
+    - redis
+    - monitoring
+    - observability
+    - anomaly-detection
+    maintainers:
+    - name: BetterDB
+      url: https://betterdb.com
+    name: betterdb-monitor
+    sources:
+    - https://github.com/BetterDB-inc/monitor
+    type: application
+    urls:
+    - https://docs.betterdb.com/charts/betterdb-monitor-0.1.1.tgz
+    version: 0.1.1
+  - annotations:
+      artifacthub.io/images: |
+        - name: monitor
+          image: betterdb/monitor:0.39.0-no-ai
+        - name: monitor-ai
+          image: betterdb/monitor:0.39.0
+      artifacthub.io/links: |
+        - name: Documentation
+          url: https://docs.betterdb.com
+        - name: Kubernetes guide
+          url: https://docs.betterdb.com/kubernetes
+        - name: Source
+          url: https://github.com/BetterDB-inc/monitor
+    apiVersion: v2
+    appVersion: 0.39.0
+    created: "2026-08-21T19:45:20.276213716Z"
     description: BetterDB Monitor - monitoring, analytics, and anomaly detection for
       Valkey and Redis
     digest: 90c72cabd32bdff9c16b4c0979c8ffc79932241cf779f4472d98e543add39850
@@ -38,4 +75,4 @@ entries:
     urls:
     - https://docs.betterdb.com/charts/betterdb-monitor-0.1.0.tgz
     version: 0.1.0
-generated: "2026-08-21T18:40:46.252675073Z"
+generated: "2026-08-21T19:45:20.27555586Z"
