@@ -4,7 +4,7 @@ description: BetterDB Monitor - monitoring, analytics, and anomaly detection for
 type: application
 # Chart version — bump on chart changes. CI (helm-publish.yml) only releases
 # versions that do not already exist, so an unbumped version is a no-op.
-version: 0.1.0
+version: 0.1.1
 # Monitor release the chart defaults to. The default image tag is
 # "<appVersion>-no-ai" (the standard image); see values.yaml image.tag.
 appVersion: "0.39.0"
