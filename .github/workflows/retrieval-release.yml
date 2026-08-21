@@ -150,3 +150,13 @@ jobs:
           done
           echo "Package not available after 5 attempts"
           exit 1
+
+  publish-facade:
+    needs: [publish-npm, verify]
+    if: ${{ !inputs.skip_npm }}
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/ai-facade-release.yml
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

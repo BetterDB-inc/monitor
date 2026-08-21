@@ -548,6 +548,55 @@ importers:
         specifier: ^4.1.1
         version: 4.1.1(@opentelemetry/api@1.9.0)(@types/node@22.19.15)(happy-dom@20.8.9)(msw@2.12.14(@types/node@22.19.15)(typescript@5.9.3))(vite@8.0.16(@types/node@22.19.15)(esbuild@0.28.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0)(yaml@2.9.0))
 
+  packages/ai:
+    dependencies:
+      '@betterdb/agent-cache':
+        specifier: workspace:*
+        version: link:../agent-cache
+      '@betterdb/agent-memory':
+        specifier: workspace:*
+        version: link:../agent-memory
+      '@betterdb/retrieval':
+        specifier: workspace:*
+        version: link:../retrieval
+      '@betterdb/semantic-cache':
+        specifier: workspace:*
+        version: link:../semantic-cache
+      '@betterdb/valkey-search-kit':
+        specifier: workspace:*
+        version: link:../valkey-search-kit
+    devDependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.91.1
+        version: 0.91.1(zod@4.3.6)
+      '@langchain/core':
+        specifier: ^1.1.35
+        version: 1.1.36(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.9.0(@opentelemetry/api@1.9.0))(openai@6.34.0(ws@8.21.1)(zod@4.3.6))(ws@8.21.1)
+      '@langchain/langgraph-checkpoint':
+        specifier: ^0.1.0
+        version: 0.1.1(@langchain/core@1.1.36(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.9.0(@opentelemetry/api@1.9.0))(openai@6.34.0(ws@8.21.1)(zod@4.3.6))(ws@8.21.1))
+      '@llamaindex/core':
+        specifier: ^0.6.23
+        version: 0.6.23
+      '@types/node':
+        specifier: ^22.19.15
+        version: 22.19.15
+      ai:
+        specifier: ^6.0.135
+        version: 6.0.138(zod@4.3.6)
+      iovalkey:
+        specifier: '>=0.3.0'
+        version: 0.3.3
+      openai:
+        specifier: ^6.34.0
+        version: 6.34.0(ws@8.21.1)(zod@4.3.6)
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.1
+        version: 4.1.1(@opentelemetry/api@1.9.0)(@types/node@22.19.15)(happy-dom@20.8.9)(msw@2.12.14(@types/node@22.19.15)(typescript@5.9.3))(vite@8.0.16(@types/node@22.19.15)(esbuild@0.28.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0)(yaml@2.9.0))
+
   packages/cache-benchmark-ts:
     dependencies:
       '@betterdb/semantic-cache':
@@ -2300,7 +2349,6 @@ packages:
   '@lancedb/lancedb@0.23.0':
     resolution: {integrity: sha512-aYrIoEG24AC+wILCL57Ius/Y4yU+xFHDPKLvmjzzN4byAjzeIGF0TC86S5RBt4Ji+dxS7yIWV5Q/gE5/fybIFQ==}
     engines: {node: '>= 18'}
-    cpu: [x64, arm64]
     os: [darwin, linux, win32]
     peerDependencies:
       apache-arrow: '>=15.0.0 <=18.1.0'
@@ -15845,7 +15893,7 @@ snapshots:
       isstream: 0.1.2
       jsonwebtoken: 9.0.3
       mime-types: 2.1.35
-      retry-axios: 2.6.0(axios@1.18.0(debug@4.4.3))
+      retry-axios: 2.6.0(axios@1.18.0)
       tough-cookie: 4.1.4
     transitivePeerDependencies:
       - supports-color
@@ -17942,7 +17990,7 @@ snapshots:
 
   ret@0.5.0: {}
 
-  retry-axios@2.6.0(axios@1.18.0(debug@4.4.3)):
+  retry-axios@2.6.0(axios@1.18.0):
     dependencies:
       axios: 1.18.0(debug@4.4.3)
 
