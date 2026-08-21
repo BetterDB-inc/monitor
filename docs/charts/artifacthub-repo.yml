@@ -8,7 +8,9 @@
 # Ties this served file to the AH repo so the Verified Publisher badge is granted
 # on the next scrape.
 repositoryID: "2b423f31-56a9-4332-a0be-8e5a2b65c8ac"
-# `owners` is OPTIONAL and only used to auto-grant AH ownership to listed users
-# (each email must match an AH account). It is NOT needed for the Verified
-# Publisher badge — repositoryID above is what grants that. Left out to avoid
-# publishing a personal email; add an org address here if you want auto-claim.
+# `owners` auto-grants AH ownership to listed users; each email must match the
+# owner's Artifact Hub account. Not required for the Verified Publisher badge
+# (repositoryID above grants that) — kept so ownership is explicit.
+owners:
+  - name: Kristiyan Ivanov
+    email: kristiyan@betterdb.com
