@@ -32,8 +32,8 @@ helm install betterdb-monitor betterdb/betterdb-monitor \
 
 ## Documentation
 
+- [Install](install/) — Run BetterDB via Docker, Helm/Kubernetes, the npm CLI, or as an MCP server
 - [Configuration Reference](configuration) — Environment variables, Docker setup, and runtime settings
-- [Kubernetes (Helm)](kubernetes) — Helm chart install, storage options, Secrets, and air-gapped licensing
 - [Updating](updating) — How to upgrade to the latest version for each install method (Docker, CLI, Kubernetes)
 - [Prometheus Metrics](prometheus-metrics) — Metrics reference, PromQL queries, and alerting rules
 - [Anomaly Detection](anomaly-detection) — Understanding detection patterns and tuning sensitivity

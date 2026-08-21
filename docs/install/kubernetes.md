@@ -1,6 +1,10 @@
 ---
 title: Kubernetes (Helm)
-nav_order: 3
+parent: Install
+nav_order: 2
+# Keep the published URL stable (/kubernetes) now that the file lives under
+# install/ — README, the website, and other docs link to it absolutely.
+permalink: /kubernetes/
 ---
 
 # Kubernetes Guide
@@ -79,7 +83,7 @@ Two kinds of state, two knobs:
 
 ## Overriding configuration
 
-Every environment variable from [Configuration](configuration.md) can be set
+Every environment variable from [Configuration](../configuration.md) can be set
 through the chart. First-class values exist for the common ones (`db.*`,
 `storage.*`, `license.*`, `telemetry`); everything else goes under `extraEnv`:
 
@@ -112,7 +116,7 @@ persistence:
 ```
 
 With an offline token and no online key the monitor makes zero outbound
-requests. Details: [Offline licenses](offline-licenses.md).
+requests. Details: [Offline licenses](../offline-licenses.md).
 
 ## Upgrade the helm chart
 
@@ -125,4 +129,4 @@ helm upgrade betterdb-monitor betterdb/betterdb-monitor \
 The default image tag is pinned to the chart's `appVersion` (the `-no-ai`
 variant), so `helm upgrade` after a `repo update` moves you to the release the
 chart was published for — no `:latest` surprises. Release notes:
-[Updating](updating.md).
+[Updating](../updating.md).
