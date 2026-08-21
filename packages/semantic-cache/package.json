@@ -87,6 +87,11 @@
       "import": "./dist/embed/ollama.js",
       "require": "./dist/embed/ollama.js",
       "types": "./dist/embed/ollama.d.ts"
+    },
+    "./embed/google": {
+      "import": "./dist/embed/google.js",
+      "require": "./dist/embed/google.js",
+      "types": "./dist/embed/google.d.ts"
     }
   },
   "files": [
