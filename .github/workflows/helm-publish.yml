@@ -1,5 +1,6 @@
 # Publishes charts/betterdb-monitor as a public Helm repo hosted on GitHub Pages:
 #   - chart tarball  -> docs/charts/betterdb-monitor-<version>.tgz
+#   - PGP provenance -> docs/charts/betterdb-monitor-<version>.tgz.prov (signed)
 #   - repo index     -> docs/charts/index.yaml
 # both served at https://docs.betterdb.com/charts (Pages already serves the
 # Jekyll site from docs/ on master, so the tarball + index sit alongside it and
@@ -66,10 +67,6 @@ jobs:
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
-        with:
-          # Authenticate the latest-release lookup so it uses the runner's token
-          # budget instead of the shared anonymous rate limit.
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Lint chart
         run: helm lint charts/betterdb-monitor
@@ -80,6 +77,10 @@ jobs:
       # tarball already exists — that is the "already published" no-op.
       - name: Package chart and rebuild index
         id: pkg
+        env:
+          HELM_GPG_PRIVATE_KEY: ${{ secrets.HELM_GPG_PRIVATE_KEY }}
+          HELM_GPG_PASSPHRASE: ${{ secrets.HELM_GPG_PASSPHRASE }}
+          HELM_GPG_KEY: ${{ secrets.HELM_GPG_KEY }}
         run: |
           version=$(grep '^version:' charts/betterdb-monitor/Chart.yaml | sed 's/.*: *//; s/"//g')
           tgz="betterdb-monitor-${version}.tgz"
@@ -89,7 +90,20 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          helm package charts/betterdb-monitor -d docs/charts
+          # Import the signing key into a throwaway keyring and export the legacy
+          # secring.gpg that Helm reads directly (Helm does not use gpg-agent).
+          export GNUPGHOME="$(mktemp -d)"
+          echo "$HELM_GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+          gpg --batch --pinentry-mode loopback --passphrase "$HELM_GPG_PASSPHRASE" \
+            --export-secret-keys > "$GNUPGHOME/secring.gpg"
+          printf '%s' "$HELM_GPG_PASSPHRASE" > "$GNUPGHOME/pp"
+          # --sign writes betterdb-monitor-<version>.tgz.prov next to the tarball.
+          helm package charts/betterdb-monitor -d docs/charts \
+            --sign --key "$HELM_GPG_KEY" \
+            --keyring "$GNUPGHOME/secring.gpg" \
+            --passphrase-file "$GNUPGHOME/pp"
+          rm -rf "$GNUPGHOME"
+          test -f "docs/charts/${tgz}.prov"   # fail loudly if no provenance was produced
           helm repo index docs/charts --url https://docs.betterdb.com/charts
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tgz=${tgz}" >> "$GITHUB_OUTPUT"
@@ -121,6 +135,8 @@ jobs:
             --arg idx "$(base64 -w0 docs/charts/index.yaml)" \
             --arg tgzpath "$tgz_path" \
             --arg tgzdata "$(base64 -w0 "$tgz_path")" \
+            --arg provpath "${tgz_path}.prov" \
+            --arg provdata "$(base64 -w0 "${tgz_path}.prov")" \
             '{
               query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
               variables: {input: {
@@ -129,7 +145,8 @@ jobs:
                 message: {headline: ("chore(helm): publish betterdb-monitor " + $version + " [skip ci]")},
                 fileChanges: {additions: [
                   {path: "docs/charts/index.yaml", contents: $idx},
-                  {path: $tgzpath, contents: $tgzdata}
+                  {path: $tgzpath, contents: $tgzdata},
+                  {path: $provpath, contents: $provdata}
                 ]}
               }}
             }' > /tmp/commit-payload.json
