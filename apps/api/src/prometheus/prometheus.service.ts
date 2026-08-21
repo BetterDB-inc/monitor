@@ -762,7 +762,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       return existing;
     }
     const run = this.runUpdateMetricsForConnection(connectionId).finally(() => {
-      this.updateMetricsInFlight.delete(connectionId);
+      // Compare-and-delete: only clear the entry if it is still ours. If the
+      // connection was removed (cleanupConnectionMetrics) or re-added with a
+      // fresh in-flight update while this one ran, we must not evict that newer
+      // entry when this stale promise settles.
+      if (this.updateMetricsInFlight.get(connectionId) === run) {
+        this.updateMetricsInFlight.delete(connectionId);
+      }
     });
     this.updateMetricsInFlight.set(connectionId, run);
     return run;
@@ -1717,6 +1723,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    */
   cleanupConnectionMetrics(connectionId: string): void {
     this.perConnectionState.delete(connectionId);
+    // Drop any in-flight metric update so a reused connection ID cannot join
+    // stale work. The promise itself still settles; its compare-and-delete
+    // finally then no-ops because the entry is already gone.
+    this.updateMetricsInFlight.delete(connectionId);
     // Note: prom-client doesn't easily support removing specific label values
     // The metrics will be overwritten on next scrape or remain at last value
   }
