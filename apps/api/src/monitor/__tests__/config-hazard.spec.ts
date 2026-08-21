@@ -251,4 +251,13 @@ describe('evaluateClusterCrcHazard', () => {
       evaluateClusterCrcHazard({ clusterEnabled: 'yes', clusterCrcEnabled: null }),
     ).toBeNull();
   });
+
+  it('is unverified (not clean) when cluster-enabled cannot be read', () => {
+    // A filtered/empty CONFIG GET resolves cluster-enabled to null without
+    // throwing; cluster mode is then unknown and must not read as clean.
+    const finding = evaluateClusterCrcHazard({ clusterEnabled: null, clusterCrcEnabled: null });
+    expect(finding?.id).toBe('cluster-crc-disabled');
+    expect(finding?.status).toBe('unverified');
+    expect(finding?.severity).toBe('warning');
+  });
 });

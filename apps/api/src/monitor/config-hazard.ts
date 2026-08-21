@@ -75,7 +75,12 @@ export function evaluateAclAofHazard(input: ConfigHazardInput): ConfigHazardFind
 }
 
 export interface ClusterCrcHazardInput {
-  /** Value of `CONFIG GET cluster-enabled` (`yes`/`no`), or null when unavailable. */
+  /**
+   * Value of `CONFIG GET cluster-enabled` (`yes`/`no`), or null when the read
+   * returned no value. Note that `getConfigValue` resolves an empty/filtered
+   * reply to null WITHOUT throwing (managed offerings and proxies commonly
+   * filter CONFIG GET), so null here means "cluster mode unknown", not "off".
+   */
   clusterEnabled: string | null;
   /** Value of `CONFIG GET cluster-crc-enabled` (`yes`/`no`), or null when the build predates valkey#4201. */
   clusterCrcEnabled: string | null;
@@ -88,14 +93,32 @@ const CLUSTER_CRC_HAZARD_MESSAGE =
   '`CONFIG SET cluster-crc-enabled yes` on every node so corruption is rejected and ' +
   'counted in cluster_stats_messages_crc_mismatch.';
 
+const CLUSTER_CRC_UNVERIFIED_MESSAGE =
+  'Cluster-bus CRC integrity could not be verified because `CONFIG GET ' +
+  'cluster-enabled` returned no value (commonly a proxy or managed offering ' +
+  'filtering CONFIG GET). If this is a cluster running `cluster-crc-enabled no`, ' +
+  'a corrupted gossip message can scramble slot ownership (valkey#4201).';
+
 /**
  * valkey#4201: a cluster running with `cluster-crc-enabled no` (the server
  * default) only validates the magic string and message length on the bus, so a
  * bit-flipped gossip packet can be accepted and permanently corrupt slot
  * ownership. Only a positively verified state (cluster off, feature absent, or
- * the check already on) returns null — never a silent false negative.
+ * the check already on) returns null — never a silent false negative. A cluster
+ * state we could not read is surfaced as 'unverified', mirroring the AOF
+ * evaluator's denied path, so it is never cached as clean.
  */
 export function evaluateClusterCrcHazard(input: ClusterCrcHazardInput): ConfigHazardFinding | null {
+  // Cluster mode unknown: the read returned no value (filtered CONFIG GET), so
+  // we cannot conclude the bus is safe. Surface it rather than reading as clean.
+  if (input.clusterEnabled === null) {
+    return {
+      id: 'cluster-crc-disabled',
+      severity: 'warning',
+      status: 'unverified',
+      message: CLUSTER_CRC_UNVERIFIED_MESSAGE,
+    };
+  }
   if (input.clusterEnabled !== 'yes') {
     return null;
   }

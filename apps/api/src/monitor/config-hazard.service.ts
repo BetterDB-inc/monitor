@@ -142,7 +142,11 @@ export class ConfigHazardService {
       findings.push(crcFinding);
     }
 
-    return { findings, cacheable: true };
+    // A null cluster-enabled read is a filtered/empty CONFIG GET, not a
+    // completed probe: the CRC verdict is unverified, so caching now would pin a
+    // false clean (or a transient unverified) for a full TTL. Re-probe next poll.
+    const clusterStateUnknown = clusterEnabled === null;
+    return { findings, cacheable: !clusterStateUnknown };
   }
 
   /**

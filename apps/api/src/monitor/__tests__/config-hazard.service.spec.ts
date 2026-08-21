@@ -99,6 +99,24 @@ describe('ConfigHazardService', () => {
     expect(client.getConfigValue).toHaveBeenCalledWith('cluster-crc-enabled');
   });
 
+  it('surfaces an unverified CRC finding and does not cache when cluster-enabled reads null', async () => {
+    // getConfigValue resolves a filtered CONFIG GET to null WITHOUT throwing, so
+    // the catch never fires; cluster mode is unknown and must not cache as clean.
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'appendonly') return Promise.resolve('no'); // AOF off, skip that probe
+      if (param === 'cluster-enabled') return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    const first = await service.getHazards('conn-1');
+    expect(first).toHaveLength(1);
+    expect(first[0].id).toBe('cluster-crc-disabled');
+    expect(first[0].status).toBe('unverified');
+
+    // Unknown cluster state is uncacheable: the next poll must re-probe.
+    await service.getHazards('conn-1');
+    expect(appendonlyProbeCount()).toBe(2);
+  });
+
   it('does not cache an incomplete probe when the cluster CRC read fails', async () => {
     client.getConfigValue.mockImplementation((param: string) => {
       if (param === 'appendonly') return Promise.resolve('yes');
@@ -191,6 +209,11 @@ describe('ConfigHazardService', () => {
         }
         if (param === 'appendfsync') {
           return Promise.resolve(opts.appendfsync ?? 'always');
+        }
+        // Standalone node: cluster mode is explicitly off so the CRC probe
+        // resolves cleanly rather than reading as unverified.
+        if (param === 'cluster-enabled') {
+          return Promise.resolve('no');
         }
         return Promise.resolve(null);
       });

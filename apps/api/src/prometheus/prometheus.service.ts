@@ -1103,8 +1103,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (!crcRaw) {
         // Field gone (check disabled or counter no longer reported). Drop the
         // baseline so a later re-appearance re-seeds from its first value rather
-        // than diffing against a stale pre-gap baseline and firing a false delta.
+        // than diffing against a stale pre-gap baseline and firing a false delta,
+        // and remove the gauge child so Prometheus stops exporting the last value
+        // as if it were current.
         state.previousCrcMismatch = null;
+        this.clusterStatsMessagesCrcMismatch.remove(connLabel);
       }
       if (crcRaw) {
         const crcMismatch = parseInt(crcRaw) || 0;
