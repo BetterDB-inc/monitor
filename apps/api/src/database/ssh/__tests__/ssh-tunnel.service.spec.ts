@@ -57,6 +57,9 @@ jest.mock('ssh2', () => ({
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let lastServer: any;
+// When true, server.listen never invokes its callback, so setup stalls at the
+// listen stage (after the server is created) — used to exercise abort cleanup.
+let listenHangs = false;
 jest.mock('net', () => {
   const actual = jest.requireActual('events');
   return {
@@ -65,6 +68,9 @@ jest.mock('net', () => {
       const server = new actual.EventEmitter();
       server.connectionHandler = connectionHandler;
       server.listen = jest.fn((_port: number, _host: string, cb: () => void) => {
+        if (listenHangs) {
+          return;
+        }
         setImmediate(cb);
       });
       server.address = jest.fn(() => ({ port: 54321 }));
@@ -94,6 +100,7 @@ describe('SshTunnelService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     preflightHangs = false;
+    listenHangs = false;
     delete process.env[SSH_KEY_DIR_ENV];
     service = new SshTunnelService();
   });
@@ -366,6 +373,29 @@ describe('SshTunnelService', () => {
 
     await expect(promise).rejects.toThrow(/during tunnel setup/);
     expect(service.hasTunnel('c16')).toBe(false);
+  });
+
+  it('closes the local listener when setup aborts after the server is created', async () => {
+    listenHangs = true; // stall at the listen stage, after createServer
+    const promise = service.createTunnel('c17', {
+      sshHost: 'bastion',
+      sshPort: 22,
+      sshUsername: 'user',
+      authMethod: 'password',
+      password: 'secret',
+      remoteHost: 'db.internal',
+      remotePort: 6379,
+    });
+    // Let the handshake + pre-flight complete and the server get created.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const createdServer = lastServer;
+    lastClient.emit('close'); // drop before registration, while listen is pending
+
+    await expect(promise).rejects.toThrow(/during tunnel setup/);
+    // The orphaned listener must be reclaimed, not leaked.
+    expect(createdServer.close).toHaveBeenCalled();
+    expect(service.hasTunnel('c17')).toBe(false);
   });
 
   it('rejects a file key that escapes the key dir via a symlink', async () => {

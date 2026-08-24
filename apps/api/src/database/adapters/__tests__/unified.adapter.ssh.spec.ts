@@ -205,6 +205,33 @@ describe('UnifiedDatabaseAdapter — SSH tunnel wiring', () => {
     expect(harness._client).toBeNull();
   });
 
+  it('refuses to build a CLI client while the tunnel is down (A)', async () => {
+    const sshTunnelService = {
+      createTunnel: jest.fn().mockResolvedValue(54321),
+      closeTunnel: jest.fn(),
+      hasTunnel: jest.fn(),
+    };
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.internal',
+      port: 6379,
+      username: 'default',
+      password: 'pw',
+      connectionId: 'conn-a2',
+      sshTunnel: makeTunnelConfig(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      sshTunnelService: sshTunnelService as any,
+    });
+    const harness = adapter as unknown as TunnelHarness;
+    await harness.establishTunnel();
+    harness.initClient();
+    harness.handleTunnelDropped();
+
+    // A CLI call after the drop must not dial the real host directly.
+    await expect(adapter.call('PING', [], { cli: true })).rejects.toThrow(
+      /SSH tunnel is not established/,
+    );
+  });
+
   it('a discarded client\'s late close does not flip a healthy connection down (C)', () => {
     const adapter = new UnifiedDatabaseAdapter({
       host: 'db.internal',

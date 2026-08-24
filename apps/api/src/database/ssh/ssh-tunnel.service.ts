@@ -297,6 +297,10 @@ export class SshTunnelService implements OnModuleDestroy {
     // otherwise run the normal teardown + owner notification.
     let info: TunnelInfo | undefined;
     let abortSetup: ((err: Error) => void) | undefined;
+    // Declared out here so the catch below can reclaim a listener that was
+    // already opened when setup aborts before the tunnel is registered.
+    const sockets = new Set<net.Socket>();
+    let server: net.Server | undefined;
     const handleDrop = () => {
       if (info) {
         // Identity check: an explicit closeTunnel() deletes the map entry first,
@@ -354,8 +358,7 @@ export class SshTunnelService implements OnModuleDestroy {
         }),
       ]);
 
-      const sockets = new Set<net.Socket>();
-      const server = net.createServer((socket) => {
+      const createdServer = net.createServer((socket) => {
         sockets.add(socket);
         socket.on('close', () => sockets.delete(socket));
         // Attach an error listener immediately. Without it, a socket error
@@ -387,12 +390,14 @@ export class SshTunnelService implements OnModuleDestroy {
         );
       });
 
+      server = createdServer;
+
       const localPort = await Promise.race([
         aborted,
         new Promise<number>((resolve, reject) => {
-          server.on('error', reject);
-          server.listen(0, '127.0.0.1', () => {
-            const addr = server.address();
+          createdServer.on('error', reject);
+          createdServer.listen(0, '127.0.0.1', () => {
+            const addr = createdServer.address();
             if (addr && typeof addr === 'object') {
               resolve(addr.port);
             } else {
@@ -404,11 +409,18 @@ export class SshTunnelService implements OnModuleDestroy {
 
       // Register the tunnel. From here handleDrop takes the post-registration
       // teardown path instead of aborting setup.
-      info = { client: sshClient, server, localPort, sockets };
+      info = { client: sshClient, server: createdServer, localPort, sockets };
       this.tunnels.set(connectionId, info);
       this.logger.log(`[${connectionId}] SSH tunnel listening on 127.0.0.1:${localPort}`);
       return localPort;
     } catch (err) {
+      // Setup failed/aborted before registration: reclaim anything opened so a
+      // stalled listener or forwarded socket can't leak.
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      sockets.clear();
+      server?.close();
       sshClient.end();
       throw err;
     }

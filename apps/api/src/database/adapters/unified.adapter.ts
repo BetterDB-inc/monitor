@@ -1095,6 +1095,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       return this.cliClient;
     }
 
+    // After a tunnel drop, connectHost/connectPort are reset to the real
+    // (possibly bastion-only) database endpoint. Building a CLI client now would
+    // dial it directly and hang. Refuse until the tunnel is re-established.
+    if (this.usesTunnel && !this.tunnelActive) {
+      throw new Error(
+        'SSH tunnel is not established; reconnect the connection before running CLI commands.',
+      );
+    }
+
     this.cliClient = this.createValkeyClient('BetterDB-CLI');
     await this.cliClient.connect();
     this.logger.log('CLI client connected');
