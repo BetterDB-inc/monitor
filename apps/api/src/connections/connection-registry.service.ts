@@ -292,7 +292,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   ): DatabaseConnectionConfig['sshTunnel'] {
     if (!tunnel) return tunnel;
     const { secretsEncrypted: _ignored, ...rest } = tunnel;
-    return { ...rest, secretsEncrypted: false };
+    // Normalise a blank/whitespace-only fingerprint to undefined so the pinned
+    // status reported by list() matches the runtime behaviour (the tunnel
+    // service trims it and skips verification when empty).
+    const hostKeyFingerprint = rest.hostKeyFingerprint?.trim() || undefined;
+    return { ...rest, hostKeyFingerprint, secretsEncrypted: false };
   }
 
   /**

@@ -259,6 +259,12 @@ describe('hostKeyMatchesFingerprint', () => {
     expect(hostKeyMatchesFingerprint(key, b64)).toBe(true);
   });
 
+  it('matches a full ssh-keygen -lf line (the documented paste format)', () => {
+    const b64 = sha.toString('base64').replace(/=+$/, '');
+    const keygenLine = `256 SHA256:${b64} bastion.example.com (ED25519)`;
+    expect(hostKeyMatchesFingerprint(key, keygenLine)).toBe(true);
+  });
+
   it('matches a hex fingerprint case-insensitively, ignoring colons', () => {
     const hex = sha.toString('hex');
     const colonized = hex.match(/../g)!.join(':').toUpperCase();

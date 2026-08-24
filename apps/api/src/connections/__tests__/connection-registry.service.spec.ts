@@ -664,6 +664,33 @@ describe('ConnectionRegistry with encryption', () => {
     expect(enc.decrypt(tunnel.privateKey!)).toBe('PLAINTEXT-KEY');
   });
 
+  it('normalizes a blank host-key fingerprint to undefined (status matches runtime)', async () => {
+    mockStorage.getConnections.mockResolvedValue([]);
+    await registry.onModuleInit();
+
+    const id = await registry.addConnection({
+      name: 'Blank FP',
+      host: 'db.internal',
+      port: 6379,
+      sshTunnel: {
+        enabled: true,
+        host: 'bastion',
+        port: 22,
+        username: 'ec2-user',
+        authMethod: 'password',
+        password: 'pw',
+        hostKeyFingerprint: '   ',
+      },
+    });
+
+    // Persisted config has no fingerprint...
+    const savedConfig = mockStorage.saveConnection.mock.calls[1][0];
+    expect(savedConfig.sshTunnel!.hostKeyFingerprint).toBeUndefined();
+    // ...and the reported status is not "pinned".
+    const status = registry.list().find((c) => c.id === id);
+    expect(status?.sshTunnel?.hostKeyPinned).toBe(false);
+  });
+
   it('should decrypt password when loading saved connections', async () => {
     // Simulate a previously saved encrypted connection
     const { EnvelopeEncryptionService } = require('../../common/utils/encryption');

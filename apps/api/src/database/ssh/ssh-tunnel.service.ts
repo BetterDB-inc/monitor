@@ -56,11 +56,22 @@ export function hostKeyMatchesFingerprint(key: Buffer, pin: string): boolean {
   const base64 = sha.toString('base64').replace(/=+$/, '');
   const hex = sha.toString('hex');
 
-  const pinNoPrefix = pin.trim().replace(/^sha256:/i, '');
-  if (pinNoPrefix.replace(/=+$/, '') === base64) return true;
+  // Accept a full `ssh-keygen -lf` / `ssh-keyscan … | ssh-keygen -lf -` line
+  // such as `256 SHA256:<base64> host (ED25519)` by extracting the SHA256 token
+  // (base64 alphabet chars only, so the trailing `host (ED25519)` is dropped).
+  const sha256Token = pin.match(/SHA256:([A-Za-z0-9+/=]+)/i);
+  if (sha256Token) {
+    return sha256Token[1].replace(/=+$/, '') === base64;
+  }
 
-  const pinHex = pinNoPrefix.replace(/[^a-f0-9]/gi, '').toLowerCase();
-  return pinHex.length > 0 && pinHex === hex;
+  // Otherwise treat the input as a bare base64 or hex SHA256 digest.
+  const trimmed = pin.trim();
+  if (trimmed.replace(/=+$/, '') === base64) return true;
+
+  // Hex must be exactly the 64-char digest so stray chars can't accidentally
+  // concatenate into a match.
+  const pinHex = trimmed.replace(/[^a-f0-9]/gi, '').toLowerCase();
+  return pinHex.length === 64 && pinHex === hex;
 }
 
 /**
