@@ -17,7 +17,37 @@ export type GoogleEmbedTaskType =
   | 'SEMANTIC_SIMILARITY'
   | 'CLASSIFICATION'
   | 'CLUSTERING'
+  | 'QUESTION_ANSWERING'
+  | 'FACT_VERIFICATION'
+  | 'CODE_RETRIEVAL_QUERY'
   | (string & {});
+
+const TASK_INSTRUCTIONS: Record<string, string> = {
+  RETRIEVAL_QUERY: 'search result',
+  QUESTION_ANSWERING: 'question answering',
+  FACT_VERIFICATION: 'fact checking',
+  CODE_RETRIEVAL_QUERY: 'code retrieval',
+  CLASSIFICATION: 'classification',
+  CLUSTERING: 'clustering',
+  SEMANTIC_SIMILARITY: 'sentence similarity',
+};
+
+/**
+ * gemini-embedding-2 rejects the taskType field and expects the task to be
+ * carried by the input text instead. Documents use `title: … | text: …`;
+ * every other task uses `task: … | query: …`. Text is passed through
+ * unchanged when the task has no documented instruction.
+ */
+function applyTaskInstruction(text: string, taskType: string, title?: string): string {
+  if (taskType === 'RETRIEVAL_DOCUMENT') {
+    return `title: ${title ?? 'none'} | text: ${text}`;
+  }
+  const instruction = TASK_INSTRUCTIONS[taskType];
+  if (instruction === undefined) {
+    return text;
+  }
+  return `task: ${instruction} | query: ${text}`;
+}
 
 export interface GoogleEmbedOptions {
   /**
@@ -36,6 +66,10 @@ export interface GoogleEmbedOptions {
   /**
    * Task type hint for the embedding.
    * Default: 'RETRIEVAL_QUERY'. Use 'RETRIEVAL_DOCUMENT' when storing.
+   *
+   * Note: gemini-embedding-2 does not accept a taskType field. For that model
+   * the task is expressed as a prefix on the input text instead, so the same
+   * option keeps working and the request shape differs.
    */
   taskType?: GoogleEmbedTaskType;
   /**
@@ -65,6 +99,7 @@ export function createGoogleEmbed(opts?: GoogleEmbedOptions): EmbedFn {
   const baseUrl = opts?.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
   const taskType = opts?.taskType ?? 'RETRIEVAL_QUERY';
   const outputDimensionality = opts?.outputDimensionality ?? 768;
+  const taskInText = model === 'gemini-embedding-2';
 
   return async (text: string): Promise<number[]> => {
     const apiKey = opts?.apiKey ?? process.env.GOOGLE_API_KEY;
@@ -74,16 +109,19 @@ export function createGoogleEmbed(opts?: GoogleEmbedOptions): EmbedFn {
       );
     }
 
+    const content = taskInText ? applyTaskInstruction(text, taskType, opts?.title) : text;
     const requestBody: Record<string, unknown> = {
       model: `models/${model}`,
-      content: { parts: [{ text }] },
-      taskType,
+      content: { parts: [{ text: content }] },
+      outputDimensionality,
     };
 
-    if (opts?.title !== undefined) {
-      requestBody.title = opts.title;
+    if (!taskInText) {
+      requestBody.taskType = taskType;
+      if (opts?.title !== undefined) {
+        requestBody.title = opts.title;
+      }
     }
-    requestBody.outputDimensionality = outputDimensionality;
 
     const res = await fetch(`${baseUrl}/models/${model}:embedContent`, {
       method: 'POST',

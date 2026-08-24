@@ -60,4 +60,67 @@ describe('createGoogleEmbed', () => {
 
     expect(captured[0].body.model).toBe('models/gemini-embedding-001');
   });
+
+  describe('task handling', () => {
+    it('never sends taskType to gemini-embedding-2', async () => {
+      const captured = stubFetch();
+      await createGoogleEmbed({ apiKey: 'k' })('hello');
+
+      // The API rejects task_type for this model; the task rides in the text.
+      expect(captured[0].body).not.toHaveProperty('taskType');
+      expect(captured[0].body).not.toHaveProperty('title');
+    });
+
+    it('carries the task as a text prefix for gemini-embedding-2', async () => {
+      const captured = stubFetch();
+      await createGoogleEmbed({ apiKey: 'k' })('hello');
+
+      const content = captured[0].body.content as { parts: { text: string }[] };
+      expect(content.parts[0].text).toBe('task: search result | query: hello');
+    });
+
+    it('uses the document format when storing with gemini-embedding-2', async () => {
+      const captured = stubFetch();
+      await createGoogleEmbed({
+        apiKey: 'k',
+        taskType: 'RETRIEVAL_DOCUMENT',
+        title: 'Capitals',
+      })('Paris');
+
+      const content = captured[0].body.content as { parts: { text: string }[] };
+      expect(content.parts[0].text).toBe('title: Capitals | text: Paris');
+    });
+
+    it('falls back to a none title for untitled documents', async () => {
+      const captured = stubFetch();
+      await createGoogleEmbed({ apiKey: 'k', taskType: 'RETRIEVAL_DOCUMENT' })('Paris');
+
+      const content = captured[0].body.content as { parts: { text: string }[] };
+      expect(content.parts[0].text).toBe('title: none | text: Paris');
+    });
+
+    it('passes unknown task types through without a prefix', async () => {
+      const captured = stubFetch();
+      await createGoogleEmbed({ apiKey: 'k', taskType: 'SOMETHING_NEW' })('hello');
+
+      const content = captured[0].body.content as { parts: { text: string }[] };
+      expect(content.parts[0].text).toBe('hello');
+    });
+
+    it('still sends taskType and title as fields for gemini-embedding-001', async () => {
+      const captured = stubFetch();
+      await createGoogleEmbed({
+        apiKey: 'k',
+        model: 'gemini-embedding-001',
+        taskType: 'RETRIEVAL_DOCUMENT',
+        title: 'Capitals',
+      })('Paris');
+
+      expect(captured[0].body.taskType).toBe('RETRIEVAL_DOCUMENT');
+      expect(captured[0].body.title).toBe('Capitals');
+
+      const content = captured[0].body.content as { parts: { text: string }[] };
+      expect(content.parts[0].text).toBe('Paris');
+    });
+  });
 });
