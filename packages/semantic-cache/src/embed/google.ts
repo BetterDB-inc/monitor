@@ -79,9 +79,11 @@ export interface GoogleEmbedOptions {
   title?: string;
   /**
    * Output dimensionality (Matryoshka truncation).
-   * Default: 768, matching the dimensionality this provider has always
-   * produced, so an existing vector index stays compatible. Pass 3072 for
-   * gemini-embedding-2's full width.
+   *
+   * Defaults to 768 for gemini-embedding-2 only, matching the dimensionality
+   * this provider has always produced so an existing vector index stays
+   * compatible; pass 3072 for that model's full width. For any other model the
+   * field is omitted unless set, leaving the model's own default intact.
    *
    * Note: gemini-embedding-2 re-normalizes truncated dimensions itself, but
    * gemini-embedding-001 does not — normalize its output before cosine
@@ -98,8 +100,8 @@ export function createGoogleEmbed(opts?: GoogleEmbedOptions): EmbedFn {
   const model = opts?.model ?? 'gemini-embedding-2';
   const baseUrl = opts?.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
   const taskType = opts?.taskType ?? 'RETRIEVAL_QUERY';
-  const outputDimensionality = opts?.outputDimensionality ?? 768;
-  const taskInText = model === 'gemini-embedding-2';
+  const isGeminiEmbedding2 = model === 'gemini-embedding-2';
+  const outputDimensionality = opts?.outputDimensionality ?? (isGeminiEmbedding2 ? 768 : undefined);
 
   return async (text: string): Promise<number[]> => {
     const apiKey = opts?.apiKey ?? process.env.GOOGLE_API_KEY;
@@ -109,14 +111,17 @@ export function createGoogleEmbed(opts?: GoogleEmbedOptions): EmbedFn {
       );
     }
 
-    const content = taskInText ? applyTaskInstruction(text, taskType, opts?.title) : text;
+    const content = isGeminiEmbedding2 ? applyTaskInstruction(text, taskType, opts?.title) : text;
     const requestBody: Record<string, unknown> = {
       model: `models/${model}`,
       content: { parts: [{ text: content }] },
-      outputDimensionality,
     };
 
-    if (!taskInText) {
+    if (outputDimensionality !== undefined) {
+      requestBody.outputDimensionality = outputDimensionality;
+    }
+
+    if (!isGeminiEmbedding2) {
       requestBody.taskType = taskType;
       if (opts?.title !== undefined) {
         requestBody.title = opts.title;

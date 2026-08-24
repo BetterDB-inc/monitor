@@ -47,6 +47,27 @@ describe('createGoogleEmbed', () => {
     expect(captured[0].body.outputDimensionality).toBe(768);
   });
 
+  it('leaves dimensionality to the model when it is not gemini-embedding-2', async () => {
+    const captured = stubFetch();
+    await createGoogleEmbed({ apiKey: 'k', model: 'gemini-embedding-001' })('hello');
+
+    // The 768 default exists to keep gemini-embedding-2 compatible with an
+    // existing index. Applying it here would silently truncate a caller who
+    // was getting this model's native 3072 and break their index.
+    expect(captured[0].body).not.toHaveProperty('outputDimensionality');
+  });
+
+  it('honours an explicit dimensionality override on any model', async () => {
+    const captured = stubFetch();
+    await createGoogleEmbed({
+      apiKey: 'k',
+      model: 'gemini-embedding-001',
+      outputDimensionality: 1536,
+    })('hello');
+
+    expect(captured[0].body.outputDimensionality).toBe(1536);
+  });
+
   it('honours an explicit dimensionality override', async () => {
     const captured = stubFetch();
     await createGoogleEmbed({ apiKey: 'k', outputDimensionality: 3072 })('hello');
