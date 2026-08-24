@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`create_google_embed()` defaulted to a model Google has shut down.**
+  `text-embedding-004` stopped resolving on 2026-01-14 and `embedding-001` on
+  2025-10-30, so the provider failed at call time against its own defaults. The
+  default is now `gemini-embedding-2`.
+
+### Changed
+
+- **`create_google_embed()` request shape now depends on the model.**
+  `gemini-embedding-2` rejects the `taskType` field, so for that model the task
+  is carried by the input text instead — `task: … | query: …`, or
+  `title: … | text: …` for `RETRIEVAL_DOCUMENT`. `gemini-embedding-001` keeps
+  the field-based shape. `output_dimensionality` now defaults to 768 for
+  `gemini-embedding-2` only, preserving the width this provider has always
+  produced; other models keep their native width unless you set it. `task_type`
+  additionally accepts `QUESTION_ANSWERING`, `FACT_VERIFICATION`, and
+  `CODE_RETRIEVAL_QUERY`.
+
 ## [0.9.0] - 2026-07-12
 
 ### Added
