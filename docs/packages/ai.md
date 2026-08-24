@@ -66,6 +66,7 @@ own, or use one of these provider-backed factories:
 | `@betterdb/ai/embed/voyage`  | `createVoyageEmbed`  |
 | `@betterdb/ai/embed/cohere`  | `createCohereEmbed`  |
 | `@betterdb/ai/embed/ollama`  | `createOllamaEmbed`  |
+| `@betterdb/ai/embed/google`  | `createGoogleEmbed`  |
 
 ```ts
 import { SemanticCache } from '@betterdb/ai';
@@ -104,8 +105,9 @@ Namespaces: `agentCache`, `semanticCache`, `retrieval`, `memory`, `searchKit`.
 Each mirrors its package's full root surface, so anything unavailable flat is
 available here.
 
-There is no PyPI equivalent yet — Python users install the individual
-`betterdb-*` packages.
+The Python counterpart is [`betterdb-ai`](ai-python.html). It splits a
+different set of names — 22 rather than 25 — because the two ecosystems'
+packages are not identical, and it versions independently of this one.
 
 ## Versioning
 

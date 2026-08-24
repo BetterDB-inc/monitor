@@ -84,3 +84,35 @@ jobs:
 
       - name: Run @betterdb/ai export completeness guard
         run: pnpm --filter @betterdb/ai test
+
+  ai-py-facade-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install the five children and the facade
+        run: |
+          pip install \
+            -e packages/valkey-search-kit-py \
+            -e packages/agent-cache-py \
+            -e packages/semantic-cache-py \
+            -e packages/retrieval-py \
+            -e packages/agent-memory-py \
+            -e "packages/ai-py[dev]" \
+            httpx
+
+      - name: Run betterdb-ai export completeness guard
+        working-directory: packages/ai-py
+        run: pytest tests/ -q
+
+      - name: Run betterdb-semantic-cache tests
+        working-directory: packages/semantic-cache-py
+        run: pytest tests/ -q

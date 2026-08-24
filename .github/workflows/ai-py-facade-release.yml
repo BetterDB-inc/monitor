@@ -1,0 +1,242 @@
+# Publish betterdb-ai to PyPI
+#
+# Uses PyPI Trusted Publisher (OIDC) — no API token required. The trusted
+# publisher for `betterdb-ai` must be registered at
+# pypi.org/manage/account/publishing/ against THIS workflow filename before the
+# first release, exactly as the five child packages are.
+#
+# Invoked automatically by each child package's release workflow once that
+# child is verified live on PyPI, and manually via workflow_dispatch.
+
+name: Publish AI Facade (Python)
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.2.0). Defaults to a patch bump.'
+        required: false
+        type: string
+
+# Publishes are serialised on this group. If two or three children release
+# around the same time, GitHub only keeps one pending run per concurrency
+# group — a caller's publish-facade job queued behind others can end up
+# cancelled, and that child's release run will report as cancelled even
+# though the child itself published fine. `continue-on-error` is not a legal
+# key on a reusable-workflow-call job, so avoiding that would need a
+# dispatching wrapper job. We accept it instead: any later child release
+# re-pins all five children here, so a skipped facade publish self-heals
+# within one release cycle.
+concurrency:
+  group: publish-ai-py-facade
+  cancel-in-progress: false
+
+jobs:
+  publish-pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: pip install build hatchling
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # GitHub runs `run:` under `bash -eo pipefail`, so a cold start —
+          # betterdb-ai not on PyPI yet — must not abort the step here.
+          CURRENT=$(pip index versions betterdb-ai 2>/dev/null \
+            | sed -n 's/^betterdb-ai (\(.*\))$/\1/p' || true)
+          if [ -z "$CURRENT" ]; then
+            SEED=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('packages/ai-py/pyproject.toml').read_text())['project']['version'])")
+            echo "No published betterdb-ai yet — seeding from the committed manifest: $SEED"
+            echo "version=$SEED" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          NEXT=$(CURRENT="$CURRENT" python - <<'PY'
+          import os, re, sys
+          current = os.environ["CURRENT"]
+          m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", current)
+          if not m:
+              sys.exit(
+                  f'Refusing to auto-bump from "{current}": only plain MAJOR.MINOR.PATCH '
+                  "versions can be bumped automatically. Whether a prerelease should be "
+                  "promoted to a stable patch or incremented as a prerelease is a release "
+                  "decision, so make it explicitly: re-run this workflow via "
+                  "workflow_dispatch with an exact version input."
+              )
+          major, minor, patch = m.groups()
+          print(f"{major}.{minor}.{int(patch) + 1}")
+          PY
+          )
+          echo "version=$NEXT" >> $GITHUB_OUTPUT
+
+      - name: Set version and pin children from PyPI
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        working-directory: packages/ai-py
+        run: |
+          set -euo pipefail
+          for p in betterdb-agent-cache betterdb-semantic-cache betterdb-retrieval \
+                   betterdb-agent-memory betterdb-valkey-search-kit; do
+            V=$(pip index versions "$p" 2>/dev/null | sed -n "s/^$p (\(.*\))\$/\1/p" || true)
+            if [ -z "$V" ]; then
+              echo "Could not resolve a published version for $p"
+              exit 1
+            fi
+            echo "$p -> $V"
+            PKG="$p" PIN="$V" python - <<'PY'
+          import os, pathlib, re
+          path = pathlib.Path("pyproject.toml")
+          text = path.read_text()
+          pkg, pin = os.environ["PKG"], os.environ["PIN"]
+          pattern = re.compile(rf'^(\s*)"{re.escape(pkg)}[^"]*",$', re.MULTILINE)
+          text, count = pattern.subn(rf'\g<1>"{pkg}=={pin}",', text, count=1)
+          if count != 1:
+              raise SystemExit(f"Expected exactly one dependency line for {pkg}, replaced {count}")
+          path.write_text(text)
+          PY
+          done
+          VERSION="$VERSION" python - <<'PY'
+          import os, pathlib, re
+          path = pathlib.Path("pyproject.toml")
+          text = re.sub(
+              r'^version\s*=\s*"[^"]+"',
+              f'version = "{os.environ["VERSION"]}"',
+              path.read_text(),
+              count=1,
+              flags=re.MULTILINE,
+          )
+          path.write_text(text)
+          PY
+          python -c "import tomllib,pathlib;d=tomllib.loads(pathlib.Path('pyproject.toml').read_text());print(d['project']['version']);print(*d['project']['dependencies'],sep='\n')"
+
+      - name: Verify every child is pinned
+        working-directory: packages/ai-py
+        run: |
+          UNPINNED=$(python - <<'PY'
+          import pathlib, tomllib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          for dep in data["project"]["dependencies"]:
+              if "==" not in dep:
+                  print(dep)
+          PY
+          )
+          if [ -n "$UNPINNED" ]; then
+            echo "Dependencies left unpinned in the manifest about to be published:"
+            echo "$UNPINNED"
+            exit 1
+          fi
+          echo "all five children pinned to published versions"
+
+      - name: Build wheel and sdist
+        working-directory: packages/ai-py
+        run: python -m build
+
+      - name: Verify build artifacts
+        working-directory: packages/ai-py
+        run: |
+          ls dist/
+          test -n "$(ls dist/*.whl 2>/dev/null)"
+          test -n "$(ls dist/*.tar.gz 2>/dev/null)"
+
+      - name: Validate the built wheel against the pinned children
+        run: |
+          set -euo pipefail
+
+          # The only point in the pipeline where the artifact and the real
+          # published children coexist. Everything before this resolves the
+          # children from the working tree.
+          python -m venv "$RUNNER_TEMP/facade-check"
+          "$RUNNER_TEMP/facade-check/bin/pip" install --quiet \
+            "$(ls "$PWD"/packages/ai-py/dist/*.whl)[all]"
+
+          "$RUNNER_TEMP/facade-check/bin/python" - <<'PY'
+          import importlib
+
+          import betterdb_ai
+
+          for name in betterdb_ai.__all__:
+              assert hasattr(betterdb_ai, name), name
+
+          for module in [
+              "langchain",
+              "langgraph",
+              "openai",
+              "openai_responses",
+              "anthropic",
+              "llamaindex",
+              "openai_agents",
+              "pydantic_ai",
+              "embed.openai",
+              "embed.bedrock",
+              "embed.voyage",
+              "embed.cohere",
+              "embed.ollama",
+              "embed.google",
+          ]:
+              importlib.import_module(f"betterdb_ai.{module}")
+
+          print(f"betterdb_ai {betterdb_ai.__version__}: "
+                f"{len(betterdb_ai.__all__)} root names, 14 submodules, all importable")
+          PY
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/ai-py/dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ai-py-v${{ steps.version.outputs.version }}
+          name: AI Facade Python v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify PyPI package (with retry)
+        env:
+          VERSION: ${{ needs.publish-pypi.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if pip install "betterdb-ai==$VERSION" --dry-run --quiet 2>/dev/null; then
+              echo "Package betterdb-ai==$VERSION verified"
+              exit 0
+            fi
+            echo "Attempt $i: not yet available, retrying in 30s…"
+            sleep 30
+          done
+          echo "Package not available after 5 attempts"
+          exit 1
