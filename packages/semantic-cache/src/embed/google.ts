@@ -42,11 +42,10 @@ function applyTaskInstruction(text: string, taskType: string, title?: string): s
   if (taskType === 'RETRIEVAL_DOCUMENT') {
     return `title: ${title ?? 'none'} | text: ${text}`;
   }
-  const instruction = TASK_INSTRUCTIONS[taskType];
-  if (instruction === undefined) {
+  if (!Object.hasOwn(TASK_INSTRUCTIONS, taskType)) {
     return text;
   }
-  return `task: ${instruction} | query: ${text}`;
+  return `task: ${TASK_INSTRUCTIONS[taskType]} | query: ${text}`;
 }
 
 export interface GoogleEmbedOptions {

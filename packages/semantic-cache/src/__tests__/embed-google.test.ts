@@ -128,6 +128,19 @@ describe('createGoogleEmbed', () => {
       expect(content.parts[0].text).toBe('hello');
     });
 
+    it.each(['constructor', 'toString', 'valueOf'])(
+      'treats the inherited key %s as an unknown task',
+      async (taskType) => {
+        const captured = stubFetch();
+        await createGoogleEmbed({ apiKey: 'k', taskType })('hello');
+
+        // A plain-object lookup resolves prototype members, which would splice
+        // a stringified function into the prefix instead of passing text through.
+        const content = captured[0].body.content as { parts: { text: string }[] };
+        expect(content.parts[0].text).toBe('hello');
+      },
+    );
+
     it('still sends taskType and title as fields for gemini-embedding-001', async () => {
       const captured = stubFetch();
       await createGoogleEmbed({
