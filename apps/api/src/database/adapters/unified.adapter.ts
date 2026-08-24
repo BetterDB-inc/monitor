@@ -49,6 +49,9 @@ import type {
 } from '@betterdb/shared';
 import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT } from '@betterdb/shared';
 
+import type { SshTunnelConfig } from '@betterdb/shared';
+import { SshTunnelService } from '../ssh/ssh-tunnel.service';
+
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
   port: number;
@@ -56,6 +59,12 @@ export interface UnifiedDatabaseAdapterConfig {
   password: string;
   connectionName?: string;
   tls?: boolean;
+  /** Optional SSH tunnel used to reach the database (secrets already decrypted). */
+  sshTunnel?: SshTunnelConfig;
+  /** Tunnel manager; required when sshTunnel is enabled. */
+  sshTunnelService?: SshTunnelService;
+  /** Stable id used to key the tunnel (defaults to a generated id). */
+  connectionId?: string;
 }
 
 function isIpAddress(host: string): boolean {
@@ -65,16 +74,23 @@ function isIpAddress(host: string): boolean {
 
 export class UnifiedDatabaseAdapter implements DatabasePort {
   private readonly logger = new Logger(UnifiedDatabaseAdapter.name);
-  private client: Valkey;
+  private client!: Valkey;
   private connected: boolean = false;
   private capabilities: DatabaseCapabilities | null = null;
   private readonly config: UnifiedDatabaseAdapterConfig;
   private cliClient: Valkey | null = null;
+  private readonly connectionId: string;
+  private readonly usesTunnel: boolean;
+  private tunnelActive: boolean = false;
+  // Host/port the Valkey clients actually dial. Rewritten to 127.0.0.1:<localPort>
+  // once an SSH tunnel is established.
+  private connectHost: string;
+  private connectPort: number;
 
   private createValkeyClient(connectionName: string): Valkey {
     return new Valkey({
-      host: this.config.host,
-      port: this.config.port,
+      host: this.connectHost,
+      port: this.connectPort,
       username: this.config.username,
       password: this.config.password,
       lazyConnect: true,
@@ -84,7 +100,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // SNI-routed endpoints (e.g. Traefik HostSNI in front of managed Valkey)
       // would otherwise get the default cert and a non-RESP response
       // ("Protocol error, got 'H'"). Send the hostname as servername unless it
-      // is a bare IP, which SNI does not allow.
+      // is a bare IP, which SNI does not allow. Through a tunnel the socket
+      // points at localhost, but the certificate is still for the real host.
       tls: this.config.tls
         ? isIpAddress(this.config.host)
           ? {}
@@ -93,9 +110,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     });
   }
 
-  constructor(config: UnifiedDatabaseAdapterConfig) {
-    this.config = config;
-    this.client = this.createValkeyClient(config.connectionName ?? 'BetterDB-Monitor');
+  private initClient(): void {
+    this.client = this.createValkeyClient(this.config.connectionName ?? 'BetterDB-Monitor');
 
     this.client.on('connect', () => {
       this.connected = true;
@@ -111,8 +127,61 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     });
   }
 
+  constructor(config: UnifiedDatabaseAdapterConfig) {
+    this.config = config;
+    this.connectionId = config.connectionId ?? `conn:${config.host}:${config.port}`;
+    this.usesTunnel = !!config.sshTunnel?.enabled;
+    this.connectHost = config.host;
+    this.connectPort = config.port;
+
+    if (this.usesTunnel && !config.sshTunnelService) {
+      throw new Error('sshTunnelService is required when an SSH tunnel is configured');
+    }
+
+    // Without a tunnel, create the client eagerly (existing behaviour). With a
+    // tunnel we must open the tunnel first (async) to know the local port, so
+    // the client is created in connect().
+    if (!this.usesTunnel) {
+      this.initClient();
+    }
+  }
+
+  private async establishTunnel(): Promise<void> {
+    const tunnel = this.config.sshTunnel!;
+    const service = this.config.sshTunnelService!;
+    const localPort = await service.createTunnel(this.connectionId, {
+      sshHost: tunnel.host,
+      sshPort: tunnel.port,
+      sshUsername: tunnel.username,
+      authMethod: tunnel.authMethod,
+      password: tunnel.password,
+      keySource: tunnel.keySource,
+      privateKey: tunnel.privateKey,
+      privateKeyPath: tunnel.privateKeyPath,
+      passphrase: tunnel.passphrase,
+      remoteHost: this.config.host,
+      remotePort: this.config.port,
+    });
+    this.connectHost = '127.0.0.1';
+    this.connectPort = localPort;
+    this.tunnelActive = true;
+  }
+
+  private async teardownTunnel(): Promise<void> {
+    if (this.tunnelActive && this.config.sshTunnelService) {
+      await this.config.sshTunnelService.closeTunnel(this.connectionId).catch(() => {});
+      this.tunnelActive = false;
+    }
+  }
+
   async connect(): Promise<void> {
     try {
+      if (this.usesTunnel && !this.tunnelActive) {
+        await this.establishTunnel();
+      }
+      if (!this.client) {
+        this.initClient();
+      }
       this.logger.log(`Connecting to ${this.client.options.host}:${this.client.options.port}...`);
       await this.client.connect();
       this.connected = true;
@@ -121,6 +190,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       this.logger.log(`Detected ${this.capabilities?.dbType} ${this.capabilities?.version}`);
     } catch (error) {
       this.connected = false;
+      await this.teardownTunnel();
       this.logger.error(`Connection failed: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
@@ -131,12 +201,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       await this.cliClient.quit().catch(() => {});
       this.cliClient = null;
     }
-    await this.client.quit();
+    if (this.client) {
+      await this.client.quit();
+    }
+    await this.teardownTunnel();
     this.connected = false;
   }
 
   isConnected(): boolean {
-    return this.connected && this.client.status === 'ready';
+    return this.connected && this.client?.status === 'ready';
   }
 
   async ping(): Promise<boolean> {

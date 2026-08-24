@@ -5,6 +5,7 @@ import { ConnectionStatus, CreateConnectionRequest, TestConnectionResponse, Data
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
+import { SshTunnelService } from '../database/ssh/ssh-tunnel.service';
 import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils/encryption';
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
@@ -25,6 +26,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly configService: ConfigService,
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
+    private readonly sshTunnelService: SshTunnelService,
     @Optional() private readonly usageTelemetry?: UsageTelemetryService,
   ) {
     this.encryption = getEncryptionService();
@@ -254,6 +256,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: config.password || '',
       connectionName,
       tls: config.tls,
+      connectionId: config.id,
+      sshTunnel: config.sshTunnel,
+      sshTunnelService: config.sshTunnel?.enabled ? this.sshTunnelService : undefined,
     });
   }
 
@@ -262,15 +267,81 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    * Returns a new config object with encrypted password.
    */
   private encryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
-    if (!this.encryption || !config.password) {
-      return config;
+    let result = config;
+
+    if (this.encryption && config.password) {
+      result = {
+        ...result,
+        password: this.encryption.encrypt(config.password),
+        passwordEncrypted: true,
+      };
     }
 
+    result = { ...result, sshTunnel: this.encryptSshTunnel(result.sshTunnel) };
+    return result;
+  }
+
+  /**
+   * Encrypt the secret fields of an SSH tunnel config for storage. `privateKeyPath`
+   * is a filesystem path, not a secret, and is left as-is.
+   */
+  private encryptSshTunnel(
+    tunnel: DatabaseConnectionConfig['sshTunnel'],
+  ): DatabaseConnectionConfig['sshTunnel'] {
+    if (!tunnel || !this.encryption || tunnel.secretsEncrypted) {
+      return tunnel;
+    }
     return {
-      ...config,
-      password: this.encryption.encrypt(config.password),
-      passwordEncrypted: true,
+      ...tunnel,
+      password: tunnel.password ? this.encryption.encrypt(tunnel.password) : tunnel.password,
+      privateKey: tunnel.privateKey ? this.encryption.encrypt(tunnel.privateKey) : tunnel.privateKey,
+      passphrase: tunnel.passphrase ? this.encryption.encrypt(tunnel.passphrase) : tunnel.passphrase,
+      secretsEncrypted: true,
     };
+  }
+
+  /**
+   * Decrypt the secret fields of a persisted SSH tunnel config for use.
+   * Returns the tunnel unchanged (secrets dropped) if the key is unavailable.
+   */
+  private decryptSshTunnel(
+    tunnel: DatabaseConnectionConfig['sshTunnel'],
+  ): DatabaseConnectionConfig['sshTunnel'] {
+    if (!tunnel || !tunnel.secretsEncrypted) {
+      return tunnel;
+    }
+    if (!this.encryption) {
+      this.logger.error(
+        'ENCRYPTION_KEY not set but SSH tunnel secrets are encrypted; tunnel credentials unavailable',
+      );
+      return {
+        ...tunnel,
+        password: undefined,
+        privateKey: undefined,
+        passphrase: undefined,
+        secretsEncrypted: false,
+      };
+    }
+    try {
+      return {
+        ...tunnel,
+        password: tunnel.password ? this.encryption.decrypt(tunnel.password) : tunnel.password,
+        privateKey: tunnel.privateKey ? this.encryption.decrypt(tunnel.privateKey) : tunnel.privateKey,
+        passphrase: tunnel.passphrase ? this.encryption.decrypt(tunnel.passphrase) : tunnel.passphrase,
+        secretsEncrypted: false,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to decrypt SSH tunnel secrets: ${error instanceof Error ? error.message : error}`,
+      );
+      return {
+        ...tunnel,
+        password: undefined,
+        privateKey: undefined,
+        passphrase: undefined,
+        secretsEncrypted: false,
+      };
+    }
   }
 
   /**
@@ -279,8 +350,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    * Sets credentialStatus to 'decryption_failed' if decryption fails.
    */
   private decryptConfig(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    const sshTunnel = this.decryptSshTunnel(config.sshTunnel);
+
     if (!config.passwordEncrypted || !config.password) {
-      return { ...config, credentialStatus: 'unknown' };
+      return { ...config, sshTunnel, credentialStatus: 'unknown' };
     }
 
     if (!this.encryption) {
@@ -291,6 +364,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       );
       return {
         ...config,
+        sshTunnel,
         password: undefined,
         credentialStatus: 'decryption_failed',
         credentialError: errorMsg,
@@ -300,6 +374,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     try {
       return {
         ...config,
+        sshTunnel,
         password: this.encryption.decrypt(config.password),
         passwordEncrypted: false, // Mark as decrypted in memory
         credentialStatus: 'unknown', // Will be validated on connection attempt
@@ -311,6 +386,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       );
       return {
         ...config,
+        sshTunnel,
         password: undefined,
         credentialStatus: 'decryption_failed',
         credentialError: errorMsg,
@@ -361,6 +437,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: request.password,
       dbIndex: request.dbIndex,
       tls: request.tls,
+      sshTunnel: request.sshTunnel,
       isDefault: false, // Will be set via setDefault() if requested
       createdAt: now,
       updatedAt: now,
@@ -498,6 +575,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       username: request.username || 'default',
       password: request.password || '',
       tls: request.tls,
+      // Unique id so a test tunnel never collides with a live connection's tunnel.
+      connectionId: `test:${randomUUID()}`,
+      sshTunnel: request.sshTunnel,
+      sshTunnelService: request.sshTunnel?.enabled ? this.sshTunnelService : undefined,
     });
 
     try {
@@ -571,6 +652,16 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         username: config.username,
         dbIndex: config.dbIndex,
         tls: config.tls,
+        sshTunnel: config.sshTunnel
+          ? {
+              enabled: config.sshTunnel.enabled,
+              host: config.sshTunnel.host,
+              port: config.sshTunnel.port,
+              username: config.sshTunnel.username,
+              authMethod: config.sshTunnel.authMethod,
+              keySource: config.sshTunnel.keySource,
+            }
+          : undefined,
         isDefault: config.isDefault,
         createdAt: config.createdAt,
         updatedAt: config.updatedAt,

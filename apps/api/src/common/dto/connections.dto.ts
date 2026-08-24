@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNumber, IsBoolean, IsOptional, Min, Max, MinLength, MaxLength } from 'class-validator';
+import { IsString, IsNumber, IsBoolean, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ENV_DEFAULT_ID } from '../../connections/connection.constants';
 import type {
   ConnectionStatus,
@@ -9,7 +10,69 @@ import type {
   ConnectionListResponse,
   CurrentConnectionResponse,
   AllConnectionsHealthResponse,
+  SshTunnelConfig,
+  SshAuthMethod,
+  SshKeySource,
 } from '@betterdb/shared';
+
+/**
+ * DTO for an SSH tunnel used to reach the database.
+ */
+export class SshTunnelDto implements SshTunnelConfig {
+  @ApiProperty({ description: 'Whether the SSH tunnel is enabled', example: true })
+  @IsBoolean()
+  enabled: boolean;
+
+  @ApiProperty({ description: 'SSH server (bastion) host', example: 'bastion.example.com' })
+  @IsString()
+  @MinLength(1)
+  host: string;
+
+  @ApiProperty({ description: 'SSH server port', example: 22, minimum: 1, maximum: 65535 })
+  @IsNumber()
+  @Min(1)
+  @Max(65535)
+  port: number;
+
+  @ApiProperty({ description: 'SSH username', example: 'ec2-user' })
+  @IsString()
+  @MinLength(1)
+  username: string;
+
+  @ApiProperty({ description: 'SSH authentication method', enum: ['password', 'privateKey'], example: 'privateKey' })
+  @IsIn(['password', 'privateKey'])
+  authMethod: SshAuthMethod;
+
+  @ApiPropertyOptional({ description: 'Password for password auth' })
+  @IsOptional()
+  @IsString()
+  password?: string;
+
+  @ApiPropertyOptional({ description: "Private key source: 'inline' content or server-side 'file'", enum: ['inline', 'file'], example: 'inline' })
+  @IsOptional()
+  @IsIn(['inline', 'file'])
+  keySource?: SshKeySource;
+
+  @ApiPropertyOptional({ description: 'Inline PEM private key content (keySource=inline)' })
+  @IsOptional()
+  @IsString()
+  privateKey?: string;
+
+  @ApiPropertyOptional({ description: 'Server-side private key path (keySource=file); must be inside BETTERDB_SSH_KEY_DIR' })
+  @IsOptional()
+  @IsString()
+  privateKeyPath?: string;
+
+  @ApiPropertyOptional({ description: 'Passphrase protecting the private key' })
+  @IsOptional()
+  @IsString()
+  passphrase?: string;
+
+  @ApiPropertyOptional({ description: 'Internal: whether secrets are encrypted at rest' })
+  @IsOptional()
+  @IsBoolean()
+  secretsEncrypted?: boolean;
+}
 
 /**
  * DTO for connection capabilities
@@ -111,6 +174,12 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   @IsOptional()
   @IsBoolean()
   tls?: boolean;
+
+  @ApiPropertyOptional({ description: 'Optional SSH tunnel used to reach the database', type: SshTunnelDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SshTunnelDto)
+  sshTunnel?: SshTunnelDto;
 
   @ApiPropertyOptional({ description: 'Whether to set this as the default connection', example: false })
   @IsOptional()

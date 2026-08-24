@@ -1,5 +1,6 @@
 import { Pool, PoolConfig } from 'pg';
 import { randomUUID } from 'crypto';
+import { parseSshTunnel } from '@betterdb/shared';
 import {
   AnomalyQueryOptions,
   AnomalyStats,
@@ -1675,6 +1676,7 @@ export class PostgresAdapter implements StoragePort {
         password_encrypted BOOLEAN NOT NULL DEFAULT false,
         db_index INTEGER NOT NULL DEFAULT 0,
         tls BOOLEAN NOT NULL DEFAULT false,
+        ssh_tunnel TEXT,
         is_default BOOLEAN NOT NULL DEFAULT false,
         created_at BIGINT NOT NULL,
         updated_at BIGINT
@@ -1682,6 +1684,9 @@ export class PostgresAdapter implements StoragePort {
 
       -- Migration: add password_encrypted column if it doesn't exist
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS password_encrypted BOOLEAN NOT NULL DEFAULT false;
+
+      -- Migration: add ssh_tunnel column if it doesn't exist
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS ssh_tunnel TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_connections_is_default ON connections(is_default);
 
@@ -4030,8 +4035,8 @@ export class PostgresAdapter implements StoragePort {
 
     await this.pool.query(
       `
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, is_default, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, is_default, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT(id) DO UPDATE SET
         name = EXCLUDED.name,
         host = EXCLUDED.host,
@@ -4041,6 +4046,7 @@ export class PostgresAdapter implements StoragePort {
         password_encrypted = EXCLUDED.password_encrypted,
         db_index = EXCLUDED.db_index,
         tls = EXCLUDED.tls,
+        ssh_tunnel = EXCLUDED.ssh_tunnel,
         is_default = EXCLUDED.is_default,
         updated_at = EXCLUDED.updated_at
     `,
@@ -4054,6 +4060,7 @@ export class PostgresAdapter implements StoragePort {
         config.passwordEncrypted || false,
         config.dbIndex || 0,
         config.tls || false,
+        config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
         config.isDefault || false,
         config.createdAt,
         config.updatedAt || null,
@@ -4076,6 +4083,7 @@ export class PostgresAdapter implements StoragePort {
       passwordEncrypted: row.password_encrypted || false,
       dbIndex: row.db_index,
       tls: row.tls,
+      sshTunnel: parseSshTunnel(row.ssh_tunnel),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -4099,6 +4107,7 @@ export class PostgresAdapter implements StoragePort {
       passwordEncrypted: row.password_encrypted || false,
       dbIndex: row.db_index,
       tls: row.tls,
+      sshTunnel: parseSshTunnel(row.ssh_tunnel),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,

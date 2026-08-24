@@ -213,9 +213,22 @@ docker run -d \
 | `BETTERDB_OFFLINE_LICENSE_FILE` | No | - | Path to a signed offline license `.jwt` for **air-gapped** hosts (see below) |
 | `BETTERDB_OFFLINE_LICENSE` | No | - | Offline license token as an inline JWT string |
 | `BETTERDB_DATA_DIR` | No | `/app/data` | Directory for persisted license state (mount a writable volume) |
+| `ENCRYPTION_KEY` | No | - | Key (min 16 chars) used to envelope-encrypt stored connection passwords and SSH tunnel secrets at rest. Without it, secrets are stored in plaintext |
+| `BETTERDB_SSH_KEY_DIR` | No | - | Directory that server-side SSH private keys must live in. Enables the "server file path" key source for [SSH tunnels](#ssh-tunnels); a connection's key path must resolve inside it. Unset disables file-based keys (inline pasted keys still work) |
 | `BETTERDB_TELEMETRY` | No | `true` | Set `false` to disable anonymous telemetry |
 
 Full reference, including AI, OTLP export, webhook tuning, and health-gate thresholds: [docs/configuration.md](docs/configuration.md).
+
+### SSH Tunnels
+
+Connections can reach a database through an SSH bastion/jump host instead of connecting directly — useful for Valkey/Redis in a private subnet, ElastiCache, or MemoryDB. Enable **Connect via SSH tunnel** when adding a connection and provide the SSH host, port, and username. A single hop is supported.
+
+Authentication is either a password or a private key. Private keys come from one of two sources:
+
+- **Paste key** (inline): the PEM key content is submitted with the connection and stored encrypted at rest (envelope encryption via `ENCRYPTION_KEY`). Works everywhere, including managed/cloud deployments.
+- **Server file path**: the key already lives on the monitor server's filesystem and is referenced by path. This requires setting the `BETTERDB_SSH_KEY_DIR` environment variable to the directory holding the allowed keys — the referenced path must resolve inside it, so the API can never be coerced into reading arbitrary files. Leave `BETTERDB_SSH_KEY_DIR` unset to disable this option.
+
+The tunnel forwards to the database over `127.0.0.1`; when TLS is enabled the certificate is still validated against the real database hostname. Set `ENCRYPTION_KEY` so SSH passwords, key passphrases, and inline keys are encrypted at rest.
 
 ### Licensing & Air-Gapped Support
 

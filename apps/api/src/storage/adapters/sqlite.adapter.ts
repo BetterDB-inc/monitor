@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
+import { parseSshTunnel } from '@betterdb/shared';
 import {
   StoragePort,
   StoredAclEntry,
@@ -3726,6 +3727,7 @@ export class SqliteAdapter implements StoragePort {
         password_encrypted INTEGER DEFAULT 0,
         db_index INTEGER DEFAULT 0,
         tls INTEGER DEFAULT 0,
+        ssh_tunnel TEXT,
         is_default INTEGER DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER
@@ -3736,6 +3738,10 @@ export class SqliteAdapter implements StoragePort {
     const columns = this.db.prepare('PRAGMA table_info(connections)').all() as { name: string }[];
     if (!columns.some((c) => c.name === 'password_encrypted')) {
       this.db.exec('ALTER TABLE connections ADD COLUMN password_encrypted INTEGER DEFAULT 0');
+    }
+    // Migration: add ssh_tunnel column if it doesn't exist
+    if (!columns.some((c) => c.name === 'ssh_tunnel')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN ssh_tunnel TEXT');
     }
 
     // Agent Tokens Table (cloud-only, but created in all environments for interface compliance)
@@ -3759,8 +3765,8 @@ export class SqliteAdapter implements StoragePort {
     }
 
     const stmt = this.db.prepare(`
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, db_index, tls, ssh_tunnel, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
@@ -3770,6 +3776,7 @@ export class SqliteAdapter implements StoragePort {
         password_encrypted = excluded.password_encrypted,
         db_index = excluded.db_index,
         tls = excluded.tls,
+        ssh_tunnel = excluded.ssh_tunnel,
         is_default = excluded.is_default,
         updated_at = excluded.updated_at
     `);
@@ -3784,6 +3791,7 @@ export class SqliteAdapter implements StoragePort {
       config.passwordEncrypted ? 1 : 0,
       config.dbIndex || 0,
       config.tls ? 1 : 0,
+      config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
       config.isDefault ? 1 : 0,
       config.createdAt,
       config.updatedAt || null,
@@ -3813,6 +3821,7 @@ export class SqliteAdapter implements StoragePort {
       passwordEncrypted: row.password_encrypted === 1,
       dbIndex: row.db_index,
       tls: row.tls === 1,
+      sshTunnel: parseSshTunnel(row.ssh_tunnel),
       isDefault: row.is_default === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,
@@ -3840,6 +3849,7 @@ export class SqliteAdapter implements StoragePort {
       passwordEncrypted: row.password_encrypted === 1,
       dbIndex: row.db_index,
       tls: row.tls === 1,
+      sshTunnel: parseSshTunnel(row.ssh_tunnel),
       isDefault: row.is_default === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,

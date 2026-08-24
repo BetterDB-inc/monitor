@@ -4,6 +4,7 @@ import { NotFoundException } from '@nestjs/common';
 import { ConnectionRegistry } from '../connection-registry.service';
 import { ENV_DEFAULT_ID } from '../connection.constants';
 import { RuntimeCapabilityTracker } from '../runtime-capability-tracker.service';
+import { SshTunnelService } from '../../database/ssh/ssh-tunnel.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../../common/interfaces/database-port.interface';
 import { DatabaseConnectionConfig } from '@betterdb/shared';
@@ -114,6 +115,7 @@ describe('ConnectionRegistry', () => {
       providers: [
         ConnectionRegistry,
         RuntimeCapabilityTracker,
+        SshTunnelService,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],
@@ -204,6 +206,7 @@ describe('ConnectionRegistry', () => {
         providers: [
           ConnectionRegistry,
           RuntimeCapabilityTracker,
+          SshTunnelService,
           { provide: 'STORAGE_CLIENT', useValue: mockStorage },
           { provide: ConfigService, useValue: mockConfigService },
         ],
@@ -578,6 +581,7 @@ describe('ConnectionRegistry with encryption', () => {
       providers: [
         ConnectionRegistry,
         RuntimeCapabilityTracker,
+        SshTunnelService,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],
@@ -669,6 +673,7 @@ describe('ConnectionRegistry with encryption', () => {
       providers: [
         ConnectionRegistry,
         RuntimeCapabilityTracker,
+        SshTunnelService,
         { provide: 'STORAGE_CLIENT', useValue: mockStorage },
         { provide: ConfigService, useValue: mockConfigService },
       ],
