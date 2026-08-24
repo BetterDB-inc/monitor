@@ -86,6 +86,11 @@
       "types": "./dist/embed/ollama.d.ts",
       "import": "./dist/embed/ollama.js",
       "require": "./dist/embed/ollama.js"
+    },
+    "./embed/google": {
+      "types": "./dist/embed/google.d.ts",
+      "import": "./dist/embed/google.js",
+      "require": "./dist/embed/google.js"
     }
   },
   "typesVersions": {
@@ -125,6 +130,9 @@
       ],
       "embed/ollama": [
         "./dist/embed/ollama.d.ts"
+      ],
+      "embed/google": [
+        "./dist/embed/google.d.ts"
       ]
     }
   },
