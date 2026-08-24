@@ -100,18 +100,26 @@ genuinely different class in each cache. Reach those through the namespace for
 the package you mean:
 
 ```python
+import asyncio
+
 from betterdb_ai import AgentCache, agent_cache, semantic_cache
 
-cache = AgentCache(client=client)
 
-try:
-    await cache.llm.check(model="claude-sonnet-4-5", messages=[...])
-except agent_cache.ValkeyCommandError:
-    # agent-cache errors extend AgentCacheError
-    ...
-except semantic_cache.ValkeyCommandError:
-    # semantic-cache's ValkeyCommandError extends Exception — a different class
-    ...
+async def main() -> None:
+    cache = AgentCache(client=client)
+
+    try:
+        await cache.llm.check(model="claude-sonnet-4-5", messages=[...])
+    except agent_cache.ValkeyCommandError:
+        # agent-cache errors extend AgentCacheError
+        ...
+    except semantic_cache.ValkeyCommandError:
+        # semantic-cache's ValkeyCommandError extends Exception — a different
+        # class that happens to share the name
+        ...
+
+
+asyncio.run(main())
 ```
 
 The five namespaces are `agent_cache`, `semantic_cache`, `retrieval`, `memory`,

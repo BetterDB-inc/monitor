@@ -106,19 +106,26 @@ silently break `except` and `isinstance` for the other. Reach them through the
 namespace for the package you want:
 
 ```python
+import asyncio
+
 from betterdb_ai import AgentCache, agent_cache, semantic_cache
 
-cache = AgentCache(client=client)
 
-try:
-    await cache.llm.check(model="claude-sonnet-4-5", messages=[...])
-except agent_cache.ValkeyCommandError:
-    # agent-cache errors extend AgentCacheError
-    ...
-except semantic_cache.ValkeyCommandError:
-    # semantic-cache's ValkeyCommandError extends Exception — a different class
-    # that happens to share the name
-    ...
+async def main() -> None:
+    cache = AgentCache(client=client)
+
+    try:
+        await cache.llm.check(model="claude-sonnet-4-5", messages=[...])
+    except agent_cache.ValkeyCommandError:
+        # agent-cache errors extend AgentCacheError
+        ...
+    except semantic_cache.ValkeyCommandError:
+        # semantic-cache's ValkeyCommandError extends Exception — a different
+        # class that happens to share the name
+        ...
+
+
+asyncio.run(main())
 ```
 
 Namespaces: `agent_cache`, `semantic_cache`, `retrieval`, `memory`,

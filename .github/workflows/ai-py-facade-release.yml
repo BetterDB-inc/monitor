@@ -7,6 +7,14 @@
 #
 # Invoked automatically by each child package's release workflow once that
 # child is verified live on PyPI, and manually via workflow_dispatch.
+#
+# The version and the child `==` pins are written into pyproject.toml in the
+# runner and are never committed, so the ai-py-v* tag marks the commit a
+# release was built FROM, not a tree that reproduces it. The authoritative
+# pins live in the published artifact — read them with
+# `pip download --no-deps betterdb-ai==<version>`. @betterdb/ai has the same
+# property; changing it means a publish job that commits and tags, which is a
+# larger change than either facade has needed so far.
 
 name: Publish AI Facade (Python)
 
@@ -51,7 +59,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install build tools
-        run: pip install build hatchling
+        run: pip install build hatchling packaging
 
       - name: Resolve version
         id: version
@@ -95,40 +103,64 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         working-directory: packages/ai-py
         run: |
-          set -euo pipefail
-          for p in betterdb-agent-cache betterdb-semantic-cache betterdb-retrieval \
-                   betterdb-agent-memory betterdb-valkey-search-kit; do
-            V=$(pip index versions "$p" 2>/dev/null | sed -n "s/^$p (\(.*\))\$/\1/p" || true)
-            if [ -z "$V" ]; then
-              echo "Could not resolve a published version for $p"
-              exit 1
-            fi
-            echo "$p -> $V"
-            PKG="$p" PIN="$V" python - <<'PY'
-          import os, pathlib, re
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+          import tomllib
+
+          from packaging.requirements import Requirement
+
           path = pathlib.Path("pyproject.toml")
           text = path.read_text()
-          pkg, pin = os.environ["PKG"], os.environ["PIN"]
-          pattern = re.compile(rf'^(\s*)"{re.escape(pkg)}[^"]*",$', re.MULTILINE)
-          text, count = pattern.subn(rf'\g<1>"{pkg}=={pin}",', text, count=1)
-          if count != 1:
-              raise SystemExit(f"Expected exactly one dependency line for {pkg}, replaced {count}")
-          path.write_text(text)
-          PY
-          done
-          VERSION="$VERSION" python - <<'PY'
-          import os, pathlib, re
-          path = pathlib.Path("pyproject.toml")
+
+          for raw in tomllib.loads(text)["project"]["dependencies"]:
+              req = Requirement(raw)
+              listing = subprocess.run(
+                  [sys.executable, "-m", "pip", "index", "versions", req.name],
+                  capture_output=True,
+                  text=True,
+              ).stdout
+              found = re.search(rf"^{re.escape(req.name)} \((.+)\)$", listing, re.MULTILINE)
+              if found is None:
+                  raise SystemExit(f"Could not resolve a published version for {req.name}")
+
+              latest = found.group(1)
+              # A floor in the manifest states what the facade needs, so a child
+              # whose newest release is below it is a reason to stop, not a
+              # version to pin. Publishing anyway would ship a facade
+              # re-exporting the very code the floor exists to exclude.
+              if not req.specifier.contains(latest):
+                  raise SystemExit(
+                      f"{req.name} {latest} is the newest release on PyPI but does not "
+                      f"satisfy '{raw}'. Release {req.name} first, then re-run."
+                  )
+
+              print(f"{req.name} -> {latest}")
+              text, count = re.subn(
+                  rf'^(\s*)"{re.escape(raw)}",$',
+                  rf'\g<1>"{req.name}=={latest}",',
+                  text,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+              if count != 1:
+                  raise SystemExit(
+                      f"Expected exactly one dependency line for {req.name}, replaced {count}"
+                  )
+
           text = re.sub(
               r'^version\s*=\s*"[^"]+"',
               f'version = "{os.environ["VERSION"]}"',
-              path.read_text(),
+              text,
               count=1,
               flags=re.MULTILINE,
           )
           path.write_text(text)
+          print(text.split("[project.optional-dependencies]")[0])
           PY
-          python -c "import tomllib,pathlib;d=tomllib.loads(pathlib.Path('pyproject.toml').read_text());print(d['project']['version']);print(*d['project']['dependencies'],sep='\n')"
 
       - name: Verify every child is pinned
         working-directory: packages/ai-py

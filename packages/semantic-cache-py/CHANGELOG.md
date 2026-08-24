@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.11.0] - unreleased
 
 ### Fixed
 
@@ -20,6 +20,14 @@
   produced; other models keep their native width unless you set it. `task_type`
   additionally accepts `QUESTION_ANSWERING`, `FACT_VERIFICATION`, and
   `CODE_RETRIEVAL_QUERY`.
+
+  **Migration.** `gemini-embedding-2` embeds into a different vector space
+  from `text-embedding-004`, so vectors written by the old default are not
+  comparable to queries from the new one — distances come back meaningless
+  rather than merely worse, and a stored entry can be returned as a hit for an
+  unrelated prompt. Flush the cache index before upgrading if it holds entries
+  embedded with the old default. Detecting this automatically is tracked in
+  #411; there is no mechanism for it today.
 
 ## [0.9.0] - 2026-07-12
 

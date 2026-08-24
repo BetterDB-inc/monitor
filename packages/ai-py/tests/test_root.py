@@ -53,3 +53,11 @@ def test_shared_re_exports_are_flattened_once() -> None:
     # names point at one function and flattening is safe.
     assert betterdb_ai.escape_tag is betterdb_semantic_cache.escape_tag
     assert betterdb_ai.encode_float32 is betterdb_semantic_cache.encode_float32
+
+
+def test_version_is_read_from_the_installed_distribution() -> None:
+    from importlib.metadata import version
+
+    # Written into the module it would drift the moment the release workflow
+    # bumps pyproject.toml, which is the only file it rewrites.
+    assert betterdb_ai.__version__ == version("betterdb-ai")

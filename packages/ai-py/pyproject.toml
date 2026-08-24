@@ -28,12 +28,13 @@ classifiers = [
 ]
 # Floors only. The release workflow rewrites these to `==` pins resolved from
 # PyPI at publish time, so a published facade always names the exact child
-# versions it was tested against.
+# versions it was tested against — and refuses to publish when the latest
+# release of a child does not satisfy the floor declared here.
 dependencies = [
     "betterdb-agent-cache>=0.12.0",
     "betterdb-agent-memory>=0.7.0",
     "betterdb-retrieval>=0.5.0",
-    "betterdb-semantic-cache>=0.10.0",
+    "betterdb-semantic-cache>=0.11.0",
     "betterdb-valkey-search-kit>=0.1.1",
 ]
 

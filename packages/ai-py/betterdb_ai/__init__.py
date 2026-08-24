@@ -24,6 +24,9 @@ flattened, because picking one would silently break ``except`` and
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _distribution_version
+
 import betterdb_agent_cache as agent_cache
 import betterdb_agent_memory as memory
 import betterdb_retrieval as retrieval
@@ -168,7 +171,13 @@ from betterdb_valkey_search_kit import (
     parse_ft_search_response,
 )
 
-__version__ = "0.1.0"
+#: Read from the installed distribution rather than written here, so it
+#: cannot drift from pyproject.toml, which the release workflow rewrites at
+#: publish time.
+try:
+    __version__ = _distribution_version("betterdb-ai")
+except PackageNotFoundError:
+    __version__ = "0.0.0"
 
 #: The child packages, reachable as ``betterdb_ai.<name>``. Every name a child
 #: declares stays reachable here even when it is too ambiguous to flatten.
