@@ -28,7 +28,7 @@ type TunnelHarness = {
   connectHost: string;
   connectPort: number;
   tunnelActive: boolean;
-  client: unknown;
+  _client: unknown;
 };
 
 function makeTunnelConfig(overrides: Partial<SshTunnelConfig> = {}): SshTunnelConfig {
@@ -121,7 +121,7 @@ describe('UnifiedDatabaseAdapter — SSH tunnel wiring', () => {
     expect(closeTunnel).toHaveBeenCalledWith(createTunnel.mock.calls[0][0]);
     // The client bound to the now-dead local port is discarded, and the target
     // is restored so the next connect() rebuilds against a fresh tunnel.
-    expect(harness.client).toBeUndefined();
+    expect(harness._client).toBeNull();
     expect(harness.tunnelActive).toBe(false);
     expect(harness.connectHost).toBe('db.internal');
     expect(harness.connectPort).toBe(6379);

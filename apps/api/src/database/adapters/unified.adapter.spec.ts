@@ -5,7 +5,8 @@ import { UnifiedDatabaseAdapter } from './unified.adapter';
 function makeAdapter(infoImpl: (section?: string) => string) {
   const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
   const info = jest.fn((section?: string) => Promise.resolve(infoImpl(section)));
-  (adapter as unknown as { client: { info: typeof info } }).client = { info };
+  // `client` is a getter over `_client`; set the backing field.
+  (adapter as unknown as { _client: { info: typeof info } })._client = { info };
   return { adapter, info };
 }
 

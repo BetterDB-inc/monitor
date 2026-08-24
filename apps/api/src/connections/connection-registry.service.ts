@@ -125,6 +125,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           const adapter = this.createAdapter(decryptedConfig);
           await adapter.connect();
           this.connections.set(config.id, adapter);
+          // Trust-on-first-use: persist a newly-learned SSH host key so it is
+          // verified on the next startup.
+          if (this.captureLearnedHostKey(decryptedConfig, adapter)) {
+            await this.storage.saveConnection(this.encryptConfig(decryptedConfig)).catch((err) => {
+              this.logger.warn(`Failed to persist learned SSH host key for ${config.name}: ${err instanceof Error ? err.message : err}`);
+            });
+          }
           // Mark credentials as valid after successful connection
           this.configs.set(config.id, { ...decryptedConfig, credentialStatus: 'valid' });
           this.logger.log(`Connected to ${config.name} (${config.host}:${config.port})`);
@@ -297,6 +304,25 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     // service trims it and skips verification when empty).
     const hostKeyFingerprint = rest.hostKeyFingerprint?.trim() || undefined;
     return { ...rest, hostKeyFingerprint, secretsEncrypted: false };
+  }
+
+  /**
+   * Trust-on-first-use: if a tunnelled connection has no pinned host-key
+   * fingerprint and the adapter observed one on connect, fold it into the
+   * config (mutated in place) so the caller persists it. Returns whether a new
+   * fingerprint was captured. `hostKeyFingerprint` is not a secret.
+   */
+  private captureLearnedHostKey(config: DatabaseConnectionConfig, adapter: DatabasePort): boolean {
+    if (!config.sshTunnel?.enabled || config.sshTunnel.hostKeyFingerprint) {
+      return false;
+    }
+    const fingerprint = adapter.getObservedHostKeyFingerprint?.();
+    if (!fingerprint) {
+      return false;
+    }
+    config.sshTunnel = { ...config.sshTunnel, hostKeyFingerprint: fingerprint };
+    this.logger.log(`Pinned SSH host key for ${config.name} on first use (${fingerprint})`);
+    return true;
   }
 
   /**
@@ -486,6 +512,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     // If storage fails, disconnect the adapter to prevent leaks
     try {
       const caps = adapter.getCapabilities();
+      // Trust-on-first-use: capture the SSH host key so it is pinned from now on.
+      this.captureLearnedHostKey(config, adapter);
       // Store encrypted config in DB, decrypted config in memory
       await this.storage.saveConnection(this.encryptConfig(config));
       // Mark credentials as valid since connection succeeded
@@ -748,6 +776,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       this.connections.set(id, newAdapter);
       this.runtimeCapabilityTracker.resetConnection(id);
+
+      // Trust-on-first-use: persist a newly-learned SSH host key.
+      if (this.captureLearnedHostKey(config, newAdapter)) {
+        await this.storage.saveConnection(this.encryptConfig(config)).catch((err) => {
+          this.logger.warn(`Failed to persist learned SSH host key for ${config.name}: ${err instanceof Error ? err.message : err}`);
+        });
+      }
 
       // Update credential status to valid after successful reconnection
       this.configs.set(id, {

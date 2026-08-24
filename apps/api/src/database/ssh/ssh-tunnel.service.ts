@@ -36,6 +36,23 @@ export interface SshTunnelParams {
   /** Final destination reachable from the SSH server. */
   remoteHost: string;
   remotePort: number;
+  /**
+   * Called with the observed `SHA256:<base64>` host-key fingerprint during the
+   * handshake when no fingerprint was pinned — enables trust-on-first-use
+   * (the caller can persist it so subsequent connects are verified).
+   */
+  onHostKey?: (fingerprint: string) => void;
+  /**
+   * Called when an already-established tunnel drops on its own (SSH error or
+   * close), as opposed to an explicit `closeTunnel()`. Lets the owner stop
+   * dialing the now-dead local port and re-establish.
+   */
+  onUnexpectedClose?: () => void;
+}
+
+/** Compute the OpenSSH-style `SHA256:<base64>` fingerprint of a host key. */
+function hostKeyFingerprintOf(key: Buffer): string {
+  return `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`;
 }
 
 interface TunnelInfo {
@@ -122,10 +139,16 @@ export class SshTunnelService implements OnModuleDestroy {
       );
     }
 
-    const baseDir = path.resolve(keyDir);
+    // Resolve symlinks on the base dir itself so the containment comparison is
+    // against a canonical path.
+    const baseDir = fs.realpathSync(path.resolve(keyDir));
     const resolved = path.resolve(baseDir, params.privateKeyPath);
-    const rel = path.relative(baseDir, resolved);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    const contains = (candidate: string): boolean => {
+      const rel = path.relative(baseDir, candidate);
+      return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+    };
+    // Lexical check first (fast reject for `../` traversal on a non-existent path).
+    if (!contains(resolved)) {
       throw new Error(
         `SSH private key path must resolve inside ${SSH_KEY_DIR_ENV} (${baseDir})`,
       );
@@ -134,8 +157,17 @@ export class SshTunnelService implements OnModuleDestroy {
     if (!fs.existsSync(resolved)) {
       throw new Error(`SSH private key file not found: ${resolved}`);
     }
+    // Then resolve symlinks on the target and re-check: a symlink inside the key
+    // dir pointing at, say, /etc/shadow passes the lexical check but must not
+    // escape the allowlist once its real path is known.
+    const realResolved = fs.realpathSync(resolved);
+    if (!contains(realResolved)) {
+      throw new Error(
+        `SSH private key path escapes ${SSH_KEY_DIR_ENV} via a symlink (${baseDir})`,
+      );
+    }
     try {
-      return fs.readFileSync(resolved);
+      return fs.readFileSync(realResolved);
     } catch {
       throw new Error(
         'Could not read SSH private key — the file may be in an unsupported format or unreadable',
@@ -195,10 +227,17 @@ export class SshTunnelService implements OnModuleDestroy {
       });
 
       const pinnedFingerprint = params.hostKeyFingerprint?.trim();
-      if (!pinnedFingerprint) {
-        this.logger.warn(
-          `[${connectionId}] No SSH host-key fingerprint pinned for ${params.sshHost}:${params.sshPort}; ` +
-            'the server identity is not verified (set hostKeyFingerprint to prevent MITM).',
+
+      // ssh2 only attempts keyboard-interactive when told to. Many bastions run
+      // PAM (`KbdInteractiveAuthentication yes`) and advertise that instead of
+      // plain `password`, so answer the interactive prompts with the password.
+      const usePassword = params.authMethod === 'password';
+      if (usePassword && params.password) {
+        sshClient.on(
+          'keyboard-interactive',
+          (_name, _instructions, _lang, _prompts, finish) => {
+            finish([params.password as string]);
+          },
         );
       }
 
@@ -206,18 +245,35 @@ export class SshTunnelService implements OnModuleDestroy {
         host: params.sshHost,
         port: params.sshPort,
         username: params.sshUsername,
-        password: params.authMethod === 'password' ? params.password : undefined,
+        password: usePassword ? params.password : undefined,
+        tryKeyboard: usePassword,
         privateKey: params.authMethod === 'privateKey' ? privateKey : undefined,
         passphrase: params.authMethod === 'privateKey' ? params.passphrase : undefined,
-        // When a fingerprint is pinned, reject any server whose host key does
-        // not match. Without a pin we accept the key (and warned above).
         hostVerifier: (key: Buffer) => {
-          if (!pinnedFingerprint) return true;
+          const observed = hostKeyFingerprintOf(key);
+          // Trust-on-first-use: no pin yet. Accept, but hand the observed
+          // fingerprint back so the caller can persist and verify it next time.
+          if (!pinnedFingerprint) {
+            if (params.onHostKey) {
+              params.onHostKey(observed);
+              this.logger.log(
+                `[${connectionId}] Trusting SSH host key on first use (${observed}); it will be pinned.`,
+              );
+            } else {
+              this.logger.warn(
+                `[${connectionId}] SSH host key not verified for ${params.sshHost}:${params.sshPort} (${observed}); ` +
+                  'set hostKeyFingerprint to prevent MITM.',
+              );
+            }
+            return true;
+          }
+          // Pinned: reject any server whose key does not match.
           const ok = hostKeyMatchesFingerprint(key, pinnedFingerprint);
           if (!ok) {
             hostKeyRejected = true;
             this.logger.error(
-              `[${connectionId}] SSH host-key verification failed for ${params.sshHost}:${params.sshPort}`,
+              `[${connectionId}] SSH host-key verification failed for ${params.sshHost}:${params.sshPort} ` +
+                `(pinned ${pinnedFingerprint}, server presented ${observed})`,
             );
           }
           return ok;
@@ -247,6 +303,11 @@ export class SshTunnelService implements OnModuleDestroy {
       const server = net.createServer((socket) => {
         sockets.add(socket);
         socket.on('close', () => sockets.delete(socket));
+        // Attach an error listener immediately. Without it, a socket error
+        // during the async forwardOut window — or the destroy() on the
+        // forwarding-failure path below — would emit 'error' with no listener
+        // and crash the whole process via the global uncaughtException handler.
+        socket.on('error', () => socket.destroy());
         sshClient.forwardOut(
           '127.0.0.1',
           0,
@@ -254,15 +315,16 @@ export class SshTunnelService implements OnModuleDestroy {
           params.remotePort,
           (err, stream) => {
             if (err) {
-              socket.destroy(
-                new Error(
-                  `SSH tunnel forwarding failed to ${params.remoteHost}:${params.remotePort}: ${err.message}`,
-                ),
+              this.logger.warn(
+                `[${connectionId}] SSH forwarding failed to ${params.remoteHost}:${params.remotePort}: ${err.message}`,
               );
+              // destroy() with no argument does not emit 'error'.
+              socket.destroy();
               return;
             }
             socket.pipe(stream);
             stream.pipe(socket);
+            // Once piped, a socket error should also tear down the stream.
             socket.on('error', () => stream.destroy());
             stream.on('error', () => socket.destroy());
             stream.on('close', () => socket.destroy());
@@ -284,20 +346,29 @@ export class SshTunnelService implements OnModuleDestroy {
 
       const info: TunnelInfo = { client: sshClient, server, localPort, sockets };
 
-      // Tear the local listener down if the SSH connection drops. Compare
-      // identity so a stale handler from a replaced tunnel never closes the
-      // tunnel that superseded it under the same id.
-      sshClient.on('error', () => {
-        if (this.tunnels.get(connectionId) === info) {
-          this.closeTunnel(connectionId).catch(() => {});
+      // Handle an unexpected drop of an established tunnel (SSH error or close).
+      // Identity check: an explicit closeTunnel() deletes the map entry first,
+      // so this only fires for genuine drops — and only for the current tunnel,
+      // never a replacement registered under the same id. Whichever of
+      // error/close fires first does the cleanup; the other becomes a no-op.
+      const handleDrop = () => {
+        if (this.tunnels.get(connectionId) !== info) {
+          return;
         }
-      });
-      sshClient.on('close', () => {
-        if (this.tunnels.get(connectionId) === info) {
-          this.tunnels.delete(connectionId);
+        this.logger.warn(`[${connectionId}] SSH tunnel dropped; tearing it down`);
+        this.tunnels.delete(connectionId);
+        for (const socket of sockets) {
+          socket.destroy();
         }
+        sockets.clear();
         server.close();
-      });
+        sshClient.end();
+        // Tell the owner so it can stop dialing the now-dead local port (whose
+        // ephemeral number the OS may reassign) and re-establish on demand.
+        params.onUnexpectedClose?.();
+      };
+      sshClient.on('error', handleDrop);
+      sshClient.on('close', handleDrop);
 
       this.tunnels.set(connectionId, info);
       this.logger.log(`[${connectionId}] SSH tunnel listening on 127.0.0.1:${localPort}`);

@@ -192,6 +192,12 @@ A connection can reach its database through an SSH bastion/jump host (single hop
 
 The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through the tunnel. When TLS is enabled, the certificate is still validated against the real database hostname (SNI `servername`), not localhost.
 
+**Host key verification (TOFU):** if you leave `hostKeyFingerprint` unset, the SSH server's key is trusted on first connect and then pinned automatically — subsequent connects are refused if the key changes. Pin the fingerprint up front (see above) to avoid trusting the first key blind.
+
+**Password auth:** password and keyboard-interactive (PAM) bastions are both supported; a password is answered to interactive prompts automatically.
+
+**Known limitation — cluster/Sentinel:** only the configured connection is tunnelled. Cluster/Sentinel monitoring connects to peer nodes at the addresses they advertise, directly rather than through the tunnel, so nodes reachable only via the bastion (e.g. ElastiCache/MemoryDB in a private subnet) will not have per-node views. Use tunnels for single-node/primary monitoring.
+
 ### Audit Trail
 
 | Variable | Required | Default | Description |

@@ -107,4 +107,9 @@ export interface DatabasePort {
   profileSearch(indexName: string, query: string, limited?: boolean): Promise<ProfileResult>;
   call(command: string, args: string[], options?: { cli?: boolean }): Promise<unknown>;
   getClient(): Valkey;
+  /**
+   * The SSH host-key fingerprint observed on connect when none was pinned
+   * (trust-on-first-use). Present only on adapters that support SSH tunnels.
+   */
+  getObservedHostKeyFingerprint?(): string | undefined;
 }

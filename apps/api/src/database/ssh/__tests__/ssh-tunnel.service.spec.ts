@@ -75,6 +75,8 @@ jest.mock('net', () => {
 jest.mock('fs', () => ({
   existsSync: jest.fn(() => true),
   readFileSync: jest.fn(() => Buffer.from('FILE-KEY-CONTENT')),
+  // Identity realpath by default (no symlinks); individual tests override.
+  realpathSync: jest.fn((p: string) => p),
 }));
 
 import * as fs from 'fs';
@@ -246,6 +248,114 @@ describe('SshTunnelService', () => {
     await service.closeTunnel('c9');
     expect(socket.destroy).toHaveBeenCalled();
     expect(lastServer.close).toHaveBeenCalled();
+  });
+
+  it('does not crash when a forwarded socket errors on the forwarding-failure path', async () => {
+    await service.createTunnel('c10', {
+      sshHost: 'bastion',
+      sshPort: 22,
+      sshUsername: 'user',
+      authMethod: 'password',
+      password: 'secret',
+      remoteHost: 'db.internal',
+      remotePort: 6379,
+    });
+    // Now make the per-socket forward fail (pre-flight already succeeded).
+    lastClient.forwardOut = jest.fn((_i, _p, _h, _pt, cb) => {
+      cb(new Error('channel open failed'), undefined as unknown as never);
+    });
+
+    const socket = new EventEmitter() as EventEmitter & { destroy: jest.Mock; pipe: jest.Mock };
+    socket.destroy = jest.fn();
+    socket.pipe = jest.fn();
+    // Must not throw or emit an unhandled 'error' (which would crash the process
+    // via the global uncaughtException handler).
+    expect(() => lastServer.connectionHandler(socket)).not.toThrow();
+    expect(socket.destroy).toHaveBeenCalledWith(); // destroyed with no error arg
+  });
+
+  it('learns the host key (TOFU) when no fingerprint is pinned', async () => {
+    const onHostKey = jest.fn();
+    await service.createTunnel('c11', {
+      sshHost: 'bastion',
+      sshPort: 22,
+      sshUsername: 'user',
+      authMethod: 'password',
+      password: 'secret',
+      onHostKey,
+      remoteHost: 'db.internal',
+      remotePort: 6379,
+    });
+    const expected =
+      'SHA256:' + createHash('sha256').update(FAKE_HOST_KEY).digest('base64').replace(/=+$/, '');
+    expect(onHostKey).toHaveBeenCalledWith(expected);
+  });
+
+  it('sets tryKeyboard for password auth so PAM bastions work', async () => {
+    await service.createTunnel('c12', {
+      sshHost: 'bastion',
+      sshPort: 22,
+      sshUsername: 'user',
+      authMethod: 'password',
+      password: 'secret',
+      remoteHost: 'db.internal',
+      remotePort: 6379,
+    });
+    const opts = (lastClient.connect.mock.calls[0] as unknown[])[0] as Record<string, unknown>;
+    expect(opts.tryKeyboard).toBe(true);
+  });
+
+  it('signals onUnexpectedClose when an established tunnel drops', async () => {
+    const onUnexpectedClose = jest.fn();
+    await service.createTunnel('c13', {
+      sshHost: 'bastion',
+      sshPort: 22,
+      sshUsername: 'user',
+      authMethod: 'password',
+      password: 'secret',
+      onUnexpectedClose,
+      remoteHost: 'db.internal',
+      remotePort: 6379,
+    });
+    lastClient.emit('close');
+    expect(onUnexpectedClose).toHaveBeenCalled();
+    expect(service.hasTunnel('c13')).toBe(false);
+  });
+
+  it('does not signal onUnexpectedClose after an explicit closeTunnel', async () => {
+    const onUnexpectedClose = jest.fn();
+    await service.createTunnel('c14', {
+      sshHost: 'bastion',
+      sshPort: 22,
+      sshUsername: 'user',
+      authMethod: 'password',
+      password: 'secret',
+      onUnexpectedClose,
+      remoteHost: 'db.internal',
+      remotePort: 6379,
+    });
+    await service.closeTunnel('c14');
+    lastClient.emit('close'); // late close event from the ended client
+    expect(onUnexpectedClose).not.toHaveBeenCalled();
+  });
+
+  it('rejects a file key that escapes the key dir via a symlink', async () => {
+    process.env[SSH_KEY_DIR_ENV] = '/keys';
+    (fs.realpathSync as unknown as jest.Mock).mockImplementation((p: string) =>
+      p === '/keys/link' ? '/etc/shadow' : p,
+    );
+    await expect(
+      service.createTunnel('c15', {
+        sshHost: 'bastion',
+        sshPort: 22,
+        sshUsername: 'user',
+        authMethod: 'privateKey',
+        keySource: 'file',
+        privateKeyPath: 'link',
+        remoteHost: 'db.internal',
+        remotePort: 6379,
+      }),
+    ).rejects.toThrow(/escapes .* via a symlink/);
   });
 });
 

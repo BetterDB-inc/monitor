@@ -232,6 +232,8 @@ Optionally pin the SSH server's **host key fingerprint** (`SHA256:...`) on the c
 
 The tunnel forwards to the database over `127.0.0.1`; when TLS is enabled the certificate is still validated against the real database hostname. Set `ENCRYPTION_KEY` so SSH passwords, key passphrases, and inline keys are encrypted at rest.
 
+**Known limitation — cluster/Sentinel topologies:** only the connection you configure is tunnelled. Cluster and Sentinel monitoring fan out to the other nodes using the addresses those nodes advertise (`CLUSTER NODES` / Sentinel), and those per-node connections are made directly, not through the tunnel. If the other nodes are only reachable via the bastion (e.g. ElastiCache/MemoryDB in a private subnet), per-node views will be unavailable. Use SSH tunnels for single-node/primary monitoring, or place the monitor where it can reach the cluster nodes directly.
+
 ### Licensing & Air-Gapped Support
 
 BetterDB Monitor unlocks Pro/Enterprise features in one of two ways, depending on
