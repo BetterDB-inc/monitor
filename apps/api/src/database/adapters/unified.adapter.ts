@@ -135,16 +135,23 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const client = this.createValkeyClient(this.config.connectionName ?? 'BetterDB-Monitor');
     this._client = client;
 
+    // Identity-guard the state writes: iovalkey emits `close` asynchronously
+    // after disconnect(), so a discarded client can fire after a fresh client
+    // has already connected. Without the guard, that stale `close` would flip
+    // `connected` to false on a healthy connection.
     client.on('connect', () => {
+      if (this._client !== client) return;
       this.connected = true;
     });
 
     client.on('error', (err) => {
       this.logger.error(`Connection error: ${err.message}`);
+      if (this._client !== client) return;
       this.connected = false;
     });
 
     client.on('close', () => {
+      if (this._client !== client) return;
       this.connected = false;
     });
   }
@@ -214,6 +221,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     if (this._client) {
       this._client.disconnect();
       this._client = null;
+    }
+    // The CLI client rode the same tunnel, so it now points at the dead local
+    // port too. Discard it so getCliClient() rebuilds it after re-establish.
+    if (this.cliClient) {
+      this.cliClient.disconnect();
+      this.cliClient = null;
     }
     this.connectHost = this.config.host;
     this.connectPort = this.config.port;

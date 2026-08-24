@@ -10,6 +10,10 @@ import {
 
 const FAKE_HOST_KEY = Buffer.from('FAKE-HOST-KEY');
 
+// When true, the pre-flight forwardOut never invokes its callback, simulating
+// a tunnel whose setup stalls so a mid-setup SSH drop can be exercised.
+let preflightHangs = false;
+
 class MockSshClient extends EventEmitter {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   connect = jest.fn((opts?: any) => {
@@ -31,6 +35,9 @@ class MockSshClient extends EventEmitter {
       _dstPort: number,
       cb: (err: Error | undefined, stream: unknown) => void,
     ) => {
+      if (preflightHangs) {
+        return; // never calls back — setup stalls
+      }
       const stream = { end: jest.fn(), pipe: jest.fn(), on: jest.fn(), destroy: jest.fn() };
       cb(undefined, stream);
     },
@@ -86,6 +93,7 @@ describe('SshTunnelService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    preflightHangs = false;
     delete process.env[SSH_KEY_DIR_ENV];
     service = new SshTunnelService();
   });
@@ -337,6 +345,27 @@ describe('SshTunnelService', () => {
     await service.closeTunnel('c14');
     lastClient.emit('close'); // late close event from the ended client
     expect(onUnexpectedClose).not.toHaveBeenCalled();
+  });
+
+  it('aborts createTunnel when the SSH session drops mid-setup (B)', async () => {
+    preflightHangs = true; // stall in the pre-flight so setup is in flight
+    const promise = service.createTunnel('c16', {
+      sshHost: 'bastion',
+      sshPort: 22,
+      sshUsername: 'user',
+      authMethod: 'password',
+      password: 'secret',
+      remoteHost: 'db.internal',
+      remotePort: 6379,
+    });
+    // Let the handshake resolve and the lifecycle handler attach.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    // SSH drops before the tunnel is registered.
+    lastClient.emit('close');
+
+    await expect(promise).rejects.toThrow(/during tunnel setup/);
+    expect(service.hasTunnel('c16')).toBe(false);
   });
 
   it('rejects a file key that escapes the key dir via a symlink', async () => {

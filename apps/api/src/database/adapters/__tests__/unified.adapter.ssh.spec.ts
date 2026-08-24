@@ -1,20 +1,37 @@
 import type { SshTunnelConfig } from '@betterdb/shared';
 
-// Capture the options every `new Valkey(...)` is constructed with.
+// Capture the options every `new Valkey(...)` is constructed with, plus the
+// instances themselves (so tests can drive their event handlers).
 const valkeyConstructorCalls: Array<Record<string, unknown>> = [];
+interface MockValkey {
+  options: Record<string, unknown>;
+  status: string;
+  handlers: Record<string, (arg?: unknown) => void>;
+  on: jest.Mock;
+  connect: jest.Mock;
+  quit: jest.Mock;
+  disconnect: jest.Mock;
+}
+const valkeyInstances: MockValkey[] = [];
 jest.mock('iovalkey', () => {
   return {
     __esModule: true,
     default: jest.fn().mockImplementation((opts: Record<string, unknown>) => {
       valkeyConstructorCalls.push(opts);
-      return {
+      const handlers: Record<string, (arg?: unknown) => void> = {};
+      const instance: MockValkey = {
         options: opts,
         status: 'wait',
-        on: jest.fn(),
+        handlers,
+        on: jest.fn((event: string, cb: (arg?: unknown) => void) => {
+          handlers[event] = cb;
+        }),
         connect: jest.fn(() => Promise.resolve()),
         quit: jest.fn(() => Promise.resolve()),
         disconnect: jest.fn(),
       };
+      valkeyInstances.push(instance);
+      return instance;
     }),
   };
 });
@@ -24,11 +41,14 @@ import { UnifiedDatabaseAdapter } from '../unified.adapter';
 type TunnelHarness = {
   establishTunnel: () => Promise<void>;
   teardownTunnel: () => Promise<void>;
+  handleTunnelDropped: () => void;
   initClient: () => void;
   connectHost: string;
   connectPort: number;
   tunnelActive: boolean;
+  connected: boolean;
   _client: unknown;
+  cliClient: unknown;
 };
 
 function makeTunnelConfig(overrides: Partial<SshTunnelConfig> = {}): SshTunnelConfig {
@@ -47,6 +67,7 @@ function makeTunnelConfig(overrides: Partial<SshTunnelConfig> = {}): SshTunnelCo
 describe('UnifiedDatabaseAdapter — SSH tunnel wiring', () => {
   beforeEach(() => {
     valkeyConstructorCalls.length = 0;
+    valkeyInstances.length = 0;
   });
 
   it('routes the client through the tunnel local port while keeping TLS servername as the real host', async () => {
@@ -151,5 +172,65 @@ describe('UnifiedDatabaseAdapter — SSH tunnel wiring', () => {
           sshTunnel: makeTunnelConfig(),
         }),
     ).toThrow(/sshTunnelService is required/);
+  });
+
+  it('discards the CLI client too when the tunnel drops (A)', async () => {
+    const sshTunnelService = {
+      createTunnel: jest.fn().mockResolvedValue(54321),
+      closeTunnel: jest.fn(),
+      hasTunnel: jest.fn(),
+    };
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.internal',
+      port: 6379,
+      username: 'default',
+      password: 'pw',
+      connectionId: 'conn-a',
+      sshTunnel: makeTunnelConfig(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      sshTunnelService: sshTunnelService as any,
+    });
+    const harness = adapter as unknown as TunnelHarness;
+    await harness.establishTunnel();
+    harness.initClient();
+
+    // Simulate a CLI client that rode the same tunnel.
+    const cli = { disconnect: jest.fn() };
+    harness.cliClient = cli;
+
+    harness.handleTunnelDropped();
+
+    expect(cli.disconnect).toHaveBeenCalled();
+    expect(harness.cliClient).toBeNull();
+    expect(harness._client).toBeNull();
+  });
+
+  it('a discarded client\'s late close does not flip a healthy connection down (C)', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.internal',
+      port: 6379,
+      username: 'default',
+      password: 'pw',
+    });
+    const harness = adapter as unknown as TunnelHarness;
+
+    // First client built in the constructor.
+    const first = valkeyInstances[0];
+    // Rebuild the client (as reconnect would): a second instance becomes current.
+    harness.initClient();
+    const second = valkeyInstances[1];
+    expect(second).not.toBe(first);
+
+    // The new client connects — healthy.
+    second.handlers['connect']?.();
+    harness.connected = true;
+
+    // The discarded first client emits a late 'close'. It must NOT touch state.
+    first.handlers['close']?.();
+    expect(harness.connected).toBe(true);
+
+    // The current client's close still works.
+    second.handlers['close']?.();
+    expect(harness.connected).toBe(false);
   });
 });

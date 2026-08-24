@@ -194,13 +194,36 @@ export class SshTunnelService implements OnModuleDestroy {
 
     const sshClient = new Client();
     let hostKeyRejected = false;
+    const pinnedFingerprint = params.hostKeyFingerprint?.trim();
+
+    // ssh2 only attempts keyboard-interactive when told to. Many bastions run
+    // PAM (`KbdInteractiveAuthentication yes`) and advertise that instead of
+    // plain `password`, so answer the interactive prompts with the password.
+    const usePassword = params.authMethod === 'password';
+    if (usePassword && params.password) {
+      sshClient.on(
+        'keyboard-interactive',
+        (_name, _instructions, _lang, _prompts, finish) => {
+          finish([params.password as string]);
+        },
+      );
+    }
 
     await new Promise<void>((resolve, reject) => {
-      sshClient.on('ready', () => {
+      // Remove these once the handshake settles so a later (post-ready) drop is
+      // handled by the lifecycle handler below rather than hitting an
+      // already-resolved reject that silently no-ops.
+      const cleanup = () => {
+        sshClient.off('ready', onReady);
+        sshClient.off('error', onError);
+      };
+      const onReady = () => {
+        cleanup();
         this.logger.log(`[${connectionId}] SSH connection established`);
         resolve();
-      });
-      sshClient.on('error', (err: Error & { level?: string }) => {
+      };
+      const onError = (err: Error & { level?: string }) => {
+        cleanup();
         if (hostKeyRejected) {
           reject(
             new Error(
@@ -224,22 +247,9 @@ export class SshTunnelService implements OnModuleDestroy {
         } else {
           reject(new Error(`SSH connection error: ${err.message}`));
         }
-      });
-
-      const pinnedFingerprint = params.hostKeyFingerprint?.trim();
-
-      // ssh2 only attempts keyboard-interactive when told to. Many bastions run
-      // PAM (`KbdInteractiveAuthentication yes`) and advertise that instead of
-      // plain `password`, so answer the interactive prompts with the password.
-      const usePassword = params.authMethod === 'password';
-      if (usePassword && params.password) {
-        sshClient.on(
-          'keyboard-interactive',
-          (_name, _instructions, _lang, _prompts, finish) => {
-            finish([params.password as string]);
-          },
-        );
-      }
+      };
+      sshClient.on('ready', onReady);
+      sshClient.on('error', onError);
 
       sshClient.connect({
         host: params.sshHost,
@@ -281,23 +291,68 @@ export class SshTunnelService implements OnModuleDestroy {
       });
     });
 
+    // From the moment the handshake completes the tunnel can drop at any time —
+    // including during the setup awaits below, before it is registered. A single
+    // lifecycle handler covers both phases: abort setup if not yet registered,
+    // otherwise run the normal teardown + owner notification.
+    let info: TunnelInfo | undefined;
+    let abortSetup: ((err: Error) => void) | undefined;
+    const handleDrop = () => {
+      if (info) {
+        // Identity check: an explicit closeTunnel() deletes the map entry first,
+        // so this only fires for genuine drops of the current tunnel, never a
+        // replacement registered under the same id.
+        if (this.tunnels.get(connectionId) !== info) {
+          return;
+        }
+        this.logger.warn(`[${connectionId}] SSH tunnel dropped; tearing it down`);
+        this.tunnels.delete(connectionId);
+        for (const socket of info.sockets) {
+          socket.destroy();
+        }
+        info.sockets.clear();
+        info.server.close();
+        sshClient.end();
+        // Tell the owner so it can stop dialing the now-dead local port (whose
+        // ephemeral number the OS may reassign) and re-establish on demand.
+        params.onUnexpectedClose?.();
+      } else {
+        // Dropped mid-setup, before registration: abort createTunnel.
+        abortSetup?.(
+          new Error(
+            `SSH connection to ${params.sshHost}:${params.sshPort} dropped during tunnel setup`,
+          ),
+        );
+      }
+    };
+    sshClient.on('error', handleDrop);
+    sshClient.on('close', handleDrop);
+
     try {
+      // Rejects if the SSH session drops before the tunnel is registered.
+      const aborted = new Promise<never>((_, reject) => {
+        abortSetup = reject;
+      });
+
       // Pre-flight: verify the remote database port is reachable through the hop
       // before we expose a local listener, so bad host/port fails fast.
-      await new Promise<void>((resolve, reject) => {
-        sshClient.forwardOut('127.0.0.1', 0, params.remoteHost, params.remotePort, (err, stream) => {
-          if (err) {
-            reject(
-              new Error(
-                `Connected to SSH server, but ${params.remoteHost}:${params.remotePort} refused the connection`,
-              ),
-            );
-          } else {
-            stream.end();
-            resolve();
-          }
-        });
-      });
+      await Promise.race([
+        aborted,
+        new Promise<void>((resolve, reject) => {
+          sshClient.forwardOut('127.0.0.1', 0, params.remoteHost, params.remotePort, (err, stream) => {
+            if (err) {
+              reject(
+                new Error(
+                  `Connected to SSH server, but ${params.remoteHost}:${params.remotePort} refused the connection`,
+                ),
+              );
+            } else {
+              stream.end();
+              resolve();
+            }
+          });
+        }),
+      ]);
 
       const sockets = new Set<net.Socket>();
       const server = net.createServer((socket) => {
@@ -332,44 +387,24 @@ export class SshTunnelService implements OnModuleDestroy {
         );
       });
 
-      const localPort = await new Promise<number>((resolve, reject) => {
-        server.on('error', reject);
-        server.listen(0, '127.0.0.1', () => {
-          const addr = server.address();
-          if (addr && typeof addr === 'object') {
-            resolve(addr.port);
-          } else {
-            reject(new Error('Failed to bind local tunnel port'));
-          }
-        });
-      });
+      const localPort = await Promise.race([
+        aborted,
+        new Promise<number>((resolve, reject) => {
+          server.on('error', reject);
+          server.listen(0, '127.0.0.1', () => {
+            const addr = server.address();
+            if (addr && typeof addr === 'object') {
+              resolve(addr.port);
+            } else {
+              reject(new Error('Failed to bind local tunnel port'));
+            }
+          });
+        }),
+      ]);
 
-      const info: TunnelInfo = { client: sshClient, server, localPort, sockets };
-
-      // Handle an unexpected drop of an established tunnel (SSH error or close).
-      // Identity check: an explicit closeTunnel() deletes the map entry first,
-      // so this only fires for genuine drops — and only for the current tunnel,
-      // never a replacement registered under the same id. Whichever of
-      // error/close fires first does the cleanup; the other becomes a no-op.
-      const handleDrop = () => {
-        if (this.tunnels.get(connectionId) !== info) {
-          return;
-        }
-        this.logger.warn(`[${connectionId}] SSH tunnel dropped; tearing it down`);
-        this.tunnels.delete(connectionId);
-        for (const socket of sockets) {
-          socket.destroy();
-        }
-        sockets.clear();
-        server.close();
-        sshClient.end();
-        // Tell the owner so it can stop dialing the now-dead local port (whose
-        // ephemeral number the OS may reassign) and re-establish on demand.
-        params.onUnexpectedClose?.();
-      };
-      sshClient.on('error', handleDrop);
-      sshClient.on('close', handleDrop);
-
+      // Register the tunnel. From here handleDrop takes the post-registration
+      // teardown path instead of aborting setup.
+      info = { client: sshClient, server, localPort, sockets };
       this.tunnels.set(connectionId, info);
       this.logger.log(`[${connectionId}] SSH tunnel listening on 127.0.0.1:${localPort}`);
       return localPort;
