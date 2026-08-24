@@ -186,7 +186,7 @@ import { createGoogleEmbed } from '@betterdb/semantic-cache/embed/google';
 | `createVoyageEmbed` | `voyage-3-lite` | 512 |
 | `createCohereEmbed` | `embed-english-v3.0` | 1024 |
 | `createOllamaEmbed` | `nomic-embed-text` | 768 |
-| `createGoogleEmbed` | `text-embedding-004` | 768 |
+| `createGoogleEmbed` | `gemini-embedding-2` | 768 |
 
 ## Cost tracking
 

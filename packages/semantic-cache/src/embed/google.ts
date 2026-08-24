@@ -1,12 +1,12 @@
 /**
  * Google AI (Gemini) embedding helper for @betterdb/semantic-cache.
  *
- * Supports text-embedding-004 and other Gemini embedding models via the
+ * Supports gemini-embedding-2 and other Gemini embedding models via the
  * Google AI REST API. Uses native fetch - no SDK required.
  *
  * Usage:
  *   import { createGoogleEmbed } from '@betterdb/semantic-cache/embed/google';
- *   const embed = createGoogleEmbed({ model: 'text-embedding-004' });
+ *   const embed = createGoogleEmbed({ model: 'gemini-embedding-2' });
  *   const cache = new SemanticCache({ client, embedFn: embed });
  */
 import type { EmbedFn } from '../types';
@@ -22,8 +22,11 @@ export type GoogleEmbedTaskType =
 export interface GoogleEmbedOptions {
   /**
    * Google AI embedding model.
-   * Default: 'text-embedding-004' (768 dimensions).
-   * Other options: 'text-multilingual-embedding-002', 'embedding-001'.
+   * Default: 'gemini-embedding-2'.
+   * Other options: 'gemini-embedding-001'.
+   *
+   * Note: 'text-embedding-004' and 'embedding-001' were shut down by Google on
+   * 2026-01-14 and 2025-10-30 respectively and no longer resolve.
    */
   model?: string;
   /** Google AI (Gemini) API key. Default: GOOGLE_API_KEY env var. */
@@ -41,8 +44,14 @@ export interface GoogleEmbedOptions {
    */
   title?: string;
   /**
-   * Optional output dimensionality (truncation). Supported by text-embedding-004+.
-   * When omitted, the model's full dimensionality is returned.
+   * Output dimensionality (Matryoshka truncation).
+   * Default: 768, matching the dimensionality this provider has always
+   * produced, so an existing vector index stays compatible. Pass 3072 for
+   * gemini-embedding-2's full width.
+   *
+   * Note: gemini-embedding-2 re-normalizes truncated dimensions itself, but
+   * gemini-embedding-001 does not — normalize its output before cosine
+   * similarity when requesting anything other than 3072.
    */
   outputDimensionality?: number;
 }
@@ -52,9 +61,10 @@ export interface GoogleEmbedOptions {
  * Uses native fetch - no SDK required.
  */
 export function createGoogleEmbed(opts?: GoogleEmbedOptions): EmbedFn {
-  const model = opts?.model ?? 'text-embedding-004';
+  const model = opts?.model ?? 'gemini-embedding-2';
   const baseUrl = opts?.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
   const taskType = opts?.taskType ?? 'RETRIEVAL_QUERY';
+  const outputDimensionality = opts?.outputDimensionality ?? 768;
 
   return async (text: string): Promise<number[]> => {
     const apiKey = opts?.apiKey ?? process.env.GOOGLE_API_KEY;
@@ -73,9 +83,7 @@ export function createGoogleEmbed(opts?: GoogleEmbedOptions): EmbedFn {
     if (opts?.title !== undefined) {
       requestBody.title = opts.title;
     }
-    if (opts?.outputDimensionality !== undefined) {
-      requestBody.outputDimensionality = opts.outputDimensionality;
-    }
+    requestBody.outputDimensionality = outputDimensionality;
 
     const res = await fetch(`${baseUrl}/models/${model}:embedContent`, {
       method: 'POST',
