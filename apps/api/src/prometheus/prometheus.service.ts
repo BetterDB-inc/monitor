@@ -24,12 +24,14 @@ import {
 import { MetricForecastingService } from '../metric-forecasting/metric-forecasting.service';
 import { ALL_METRIC_KINDS } from '@betterdb/shared';
 import { OtelEventDispatcherService } from '../otel-telemetry/otel-event-dispatcher.service';
+import { diffClusterTopology, snapshotTopology, TopologySnapshot } from '../cluster/topology-diff';
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
   previousClusterState: string | null;
   previousSlotsFail: number;
   previousCrcMismatch: number | null;
+  previousTopology: TopologySnapshot | null;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
   // Storage-based metric labels (per-connection)
@@ -269,6 +271,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         previousClusterState: null,
         previousSlotsFail: 0,
         previousCrcMismatch: null,
+        previousTopology: null,
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
         // Storage-based metric labels
@@ -1170,7 +1173,41 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       const stateChanged = state.previousClusterState === 'ok' && clusterState === 'fail';
       const newSlotFailures = state.previousSlotsFail < slotsFail && slotsFail > 0;
 
-      if (stateChanged || newSlotFailures) {
+      // Both edges above read CLUSTER INFO, so they only see a cluster-wide
+      // outage. A clean master-replica failover leaves cluster_state:ok with no
+      // failed slots and produces nothing — and that is the common case under
+      // load and during rolling upgrades (valkey#4340). Diff the topology too.
+      let topology: TopologySnapshot | null = null;
+      let topologyReasons: string[] = [];
+      let changedNodes: Array<{ nodeId: string; reason: string; from: string; to: string }> = [];
+      try {
+        topology = snapshotTopology(await client.getClusterNodes());
+        const topologyDiff = diffClusterTopology(state.previousTopology, topology);
+        topologyReasons = topologyDiff.reasons;
+        changedNodes = topologyDiff.changedNodes;
+      } catch (err) {
+        // CLUSTER NODES can be denied or fail independently of CLUSTER INFO.
+        // Losing the topology signal must not take metric scraping down with
+        // it, and must not reset the baseline — keeping the last good snapshot
+        // means the next successful read still sees the change.
+        this.logger.debug(
+          `CLUSTER NODES failed for ${connectionId}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+
+      // One dispatch per poll no matter how many signals fired: a real outage
+      // trips the CLUSTER INFO edges and churns the topology at the same time,
+      // and two events for one failover would double-page.
+      const reasons: string[] = [];
+      if (stateChanged) {
+        reasons.push('cluster_state');
+      }
+      if (newSlotFailures) {
+        reasons.push('slot_failures');
+      }
+      reasons.push(...topologyReasons);
+
+      if (reasons.length > 0) {
         // OTLP mirror is decoupled from the Pro webhook gate (the dispatcher
         // no-ops unless OTEL_* is set).
         try {
@@ -1180,6 +1217,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
               clusterState,
               slotsFailed: slotsFail,
               knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
+              reasons,
+              changedNodes,
             },
             connectionId,
           );
@@ -1192,6 +1231,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
             await this.webhookEventsProService.dispatchClusterFailover({
               clusterState,
               previousState: state.previousClusterState ?? undefined,
+              reasons,
               slotsAssigned: parseInt(clusterInfo.cluster_slots_assigned) || 0,
               slotsFailed: slotsFail,
               knownNodes: parseInt(clusterInfo.cluster_known_nodes) || 0,
@@ -1207,6 +1247,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
       state.previousClusterState = clusterState;
       state.previousSlotsFail = slotsFail;
+      if (topology !== null) {
+        state.previousTopology = topology;
+      }
 
       const capabilities = client.getCapabilities();
       if (

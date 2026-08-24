@@ -337,6 +337,11 @@ export interface IWebhookEventsProService {
   dispatchClusterFailover(data: {
     clusterState: string;
     previousState?: string;
+    /**
+     * What tripped the detection. A clean failover leaves cluster_state
+     * unchanged, so the consumer needs this to know what happened.
+     */
+    reasons?: string[];
     slotsAssigned: number;
     slotsFailed: number;
     knownNodes: number;

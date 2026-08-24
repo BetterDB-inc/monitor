@@ -125,6 +125,12 @@ export class WebhookEventsProService implements OnModuleInit {
   async dispatchClusterFailover(data: {
     clusterState: string;
     previousState?: string;
+    /**
+     * What tripped the detection. A clean failover leaves cluster_state
+     * unchanged, so without this the message below reads "changed from ok to
+     * ok" and tells an operator nothing.
+     */
+    reasons?: string[];
     slotsAssigned: number;
     slotsFailed: number;
     knownNodes: number;
@@ -145,7 +151,8 @@ export class WebhookEventsProService implements OnModuleInit {
         slotsAssigned: data.slotsAssigned,
         slotsFailed: data.slotsFailed,
         knownNodes: data.knownNodes,
-        message: `Cluster state changed from ${data.previousState || 'unknown'} to ${data.clusterState}`,
+        reasons: data.reasons,
+        message: clusterFailoverMessage(data),
         timestamp: data.timestamp,
         instance: data.instance,
       },
@@ -496,4 +503,34 @@ export class WebhookEventsProService implements OnModuleInit {
       data.connectionId,
     );
   }
+}
+
+const TOPOLOGY_REASON_LABELS: Record<string, string> = {
+  role_change: 'a node changed role',
+  primary_change: "a shard's primary changed",
+  epoch_bump: 'a configEpoch advanced',
+  cluster_state: 'cluster state changed',
+  slot_failures: 'slots entered a failed state',
+};
+
+export function clusterFailoverMessage(data: {
+  clusterState: string;
+  previousState?: string;
+  reasons?: string[];
+}): string {
+  const stateMoved = data.previousState !== undefined && data.previousState !== data.clusterState;
+  if (stateMoved) {
+    return `Cluster state changed from ${data.previousState} to ${data.clusterState}`;
+  }
+  // cluster_state held steady, so the topology is what moved. Naming the signal
+  // is the only thing that tells an operator what happened.
+  const labels = (data.reasons ?? [])
+    .map((reason) => {
+      return TOPOLOGY_REASON_LABELS[reason] ?? reason;
+    })
+    .join(', ');
+  if (labels === '') {
+    return `Cluster failover detected (state ${data.clusterState})`;
+  }
+  return `Cluster failover detected while state stayed ${data.clusterState}: ${labels}`;
 }
