@@ -13,6 +13,7 @@ export enum WebhookEventType {
   CONFIG_CHANGED = 'config.changed',
   REPLICATION_LAG = 'replication.lag',
   CLUSTER_FAILOVER = 'cluster.failover',
+  CLUSTER_BUS_CORRUPTION = 'cluster.bus.corruption',
   FAILOVER_STARTED = 'failover.started',
   FAILOVER_COMPLETED = 'failover.completed',
   DATA_LOSS_DETECTED = 'data.loss.detected',
@@ -50,6 +51,7 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.SLOWLOG_THRESHOLD,
   WebhookEventType.REPLICATION_LAG,
   WebhookEventType.CLUSTER_FAILOVER,
+  WebhookEventType.CLUSTER_BUS_CORRUPTION,
   WebhookEventType.LATENCY_SPIKE,
   WebhookEventType.CONNECTION_SPIKE,
   WebhookEventType.METRIC_FORECAST_LIMIT,
@@ -98,6 +100,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.SLOWLOG_THRESHOLD]: Tier.pro,
   [WebhookEventType.REPLICATION_LAG]: Tier.pro,
   [WebhookEventType.CLUSTER_FAILOVER]: Tier.pro,
+  [WebhookEventType.CLUSTER_BUS_CORRUPTION]: Tier.pro,
   [WebhookEventType.LATENCY_SPIKE]: Tier.pro,
   [WebhookEventType.CONNECTION_SPIKE]: Tier.pro,
   [WebhookEventType.METRIC_FORECAST_LIMIT]: Tier.pro,
@@ -336,6 +339,15 @@ export interface IWebhookEventsProService {
     previousState?: string;
     slotsAssigned: number;
     slotsFailed: number;
+    knownNodes: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+    connectionId?: string;
+  }): Promise<void>;
+
+  dispatchClusterBusCorruption(data: {
+    crcMismatchTotal: number;
+    crcMismatchDelta: number;
     knownNodes: number;
     timestamp: number;
     instance: WebhookInstanceInfo;

@@ -153,6 +153,33 @@ export class WebhookEventsProService implements OnModuleInit {
     );
   }
 
+  async dispatchClusterBusCorruption(data: {
+    crcMismatchTotal: number;
+    crcMismatchDelta: number;
+    knownNodes: number;
+    timestamp: number;
+    instance: { host: string; port: number };
+    connectionId?: string;
+  }): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Cluster bus corruption event skipped - requires PRO license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.CLUSTER_BUS_CORRUPTION,
+      {
+        crcMismatchTotal: data.crcMismatchTotal,
+        crcMismatchDelta: data.crcMismatchDelta,
+        knownNodes: data.knownNodes,
+        message: `Cluster bus rejected ${data.crcMismatchDelta} corrupted message(s) via CRC check (total ${data.crcMismatchTotal})`,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
   /**
    * Dispatch failover started event (PRO+)
    * Called when a node transitions from master to replica (demotion detected)

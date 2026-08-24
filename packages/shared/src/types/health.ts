@@ -75,7 +75,11 @@ export interface LicenseWarmupStatus {
 
 /** Advisory finding for a hazardous static server configuration (e.g. valkey#3983, valkey#3515). */
 export interface ConfigHazardFinding {
-  id: 'default-user-aof-data-loss' | 'appendfsync-always-blocking' | 'appendfsync-everysec-backlog';
+  id:
+    | 'default-user-aof-data-loss'
+    | 'appendfsync-always-blocking'
+    | 'appendfsync-everysec-backlog'
+    | 'cluster-crc-disabled';
   severity: 'info' | 'warning';
   /**
    * 'hazard' = dangerous config confirmed (symptoms observed where applicable);
