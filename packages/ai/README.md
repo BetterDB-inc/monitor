@@ -48,6 +48,7 @@ own, or use one of these provider-backed factories:
 | `@betterdb/ai/embed/voyage`  | `createVoyageEmbed`  |
 | `@betterdb/ai/embed/cohere`  | `createCohereEmbed`  |
 | `@betterdb/ai/embed/ollama`  | `createOllamaEmbed`  |
+| `@betterdb/ai/embed/google`  | `createGoogleEmbed`  |
 
 ```ts
 import { SemanticCache } from '@betterdb/ai';

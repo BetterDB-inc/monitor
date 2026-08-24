@@ -176,6 +176,7 @@ import { createBedrockEmbed } from '@betterdb/semantic-cache/embed/bedrock';
 import { createVoyageEmbed } from '@betterdb/semantic-cache/embed/voyage';
 import { createCohereEmbed } from '@betterdb/semantic-cache/embed/cohere';
 import { createOllamaEmbed } from '@betterdb/semantic-cache/embed/ollama';
+import { createGoogleEmbed } from '@betterdb/semantic-cache/embed/google';
 ```
 
 | Helper | Model default | Dimensions |
@@ -185,6 +186,7 @@ import { createOllamaEmbed } from '@betterdb/semantic-cache/embed/ollama';
 | `createVoyageEmbed` | `voyage-3-lite` | 512 |
 | `createCohereEmbed` | `embed-english-v3.0` | 1024 |
 | `createOllamaEmbed` | `nomic-embed-text` | 768 |
+| `createGoogleEmbed` | `gemini-embedding-2` | 768 |
 
 ## Cost tracking
 

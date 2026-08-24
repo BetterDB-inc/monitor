@@ -227,6 +227,7 @@ Cost savings scale with the model. Observed values from live examples:
 | `@betterdb/semantic-cache/embed/voyage` | `voyage-3-lite` | 512 |
 | `@betterdb/semantic-cache/embed/cohere` | `embed-english-v3.0` | 1024 |
 | `@betterdb/semantic-cache/embed/ollama` | `nomic-embed-text` | 768 |
+| `@betterdb/semantic-cache/embed/google` | `gemini-embedding-2` | 768 |
 
 ### Discovery markers
 
