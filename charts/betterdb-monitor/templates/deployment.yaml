@@ -1,0 +1,156 @@
+{{/*
+Fail at install/template time for storage configs the container would only
+reject at startup (as a CrashLoopBackOff). Mirrors the app's env.schema:
+STORAGE_TYPE is a case-sensitive enum, and sqlite is not in the image build.
+*/}}
+{{- if not (has .Values.storage.type (list "memory" "postgres" "postgresql")) -}}
+{{- fail (printf "storage.type must be one of: memory, postgres, postgresql (got %q). Note sqlite is not available in the container image." .Values.storage.type) -}}
+{{- end -}}
+{{- if and (or (eq .Values.storage.type "postgres") (eq .Values.storage.type "postgresql")) (not .Values.storage.url) (not .Values.storage.existingSecret) -}}
+{{- fail "storage.type is postgres but no connection URL is set. Set storage.url or storage.existingSecret (see values.yaml)." -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "betterdb-monitor.fullname" . }}
+  labels:
+    {{- include "betterdb-monitor.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if .Values.persistence.enabled }}
+  # RWO volume: the old pod must release the claim before the new one starts.
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "betterdb-monitor.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "betterdb-monitor.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if include "betterdb-monitor.createSecret" . }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: monitor
+          image: {{ include "betterdb-monitor.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.containerPort | quote }}
+            {{- if .Values.db.host }}
+            - name: DB_HOST
+              value: {{ .Values.db.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.db.port | quote }}
+            - name: DB_USERNAME
+              value: {{ .Values.db.username | quote }}
+            - name: DB_TYPE
+              value: {{ .Values.db.type | quote }}
+            {{- end }}
+            {{- if or .Values.db.password .Values.db.existingSecret }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.existingSecret | default (include "betterdb-monitor.secretName" .) }}
+                  key: {{ ternary .Values.db.existingSecretKey "db-password" (ne .Values.db.existingSecret "") }}
+            {{- end }}
+            - name: STORAGE_TYPE
+              value: {{ .Values.storage.type | quote }}
+            {{- if or .Values.storage.url .Values.storage.existingSecret }}
+            - name: STORAGE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.existingSecret | default (include "betterdb-monitor.secretName" .) }}
+                  key: {{ ternary .Values.storage.existingSecretKey "storage-url" (ne .Values.storage.existingSecret "") }}
+            {{- end }}
+            {{- if or .Values.license.key .Values.license.existingSecret }}
+            - name: BETTERDB_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.license.existingSecret | default (include "betterdb-monitor.secretName" .) }}
+                  key: {{ ternary .Values.license.existingSecretKey "license-key" (ne .Values.license.existingSecret "") }}
+            {{- end }}
+            {{- if .Values.license.offline.existingSecret }}
+            - name: BETTERDB_OFFLINE_LICENSE_FILE
+              value: /run/secrets/betterdb/{{ .Values.license.offline.existingSecretKey }}
+            {{- end }}
+            {{- if not .Values.telemetry }}
+            - name: BETTERDB_TELEMETRY
+              value: "false"
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if or .Values.persistence.enabled .Values.license.offline.existingSecret }}
+          volumeMounts:
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              mountPath: /app/data
+            {{- end }}
+            {{- if .Values.license.offline.existingSecret }}
+            - name: offline-license
+              mountPath: /run/secrets/betterdb
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.persistence.enabled .Values.license.offline.existingSecret }}
+      volumes:
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "betterdb-monitor.fullname" .)) }}
+        {{- end }}
+        {{- if .Values.license.offline.existingSecret }}
+        - name: offline-license
+          secret:
+            secretName: {{ .Values.license.offline.existingSecret }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

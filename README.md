@@ -2,6 +2,7 @@
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/betterdb/monitor)](https://hub.docker.com/r/betterdb/monitor)
 [![Docker Image Version](https://img.shields.io/docker/v/betterdb/monitor?sort=semver&label=docker)](https://hub.docker.com/r/betterdb/monitor/tags)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/betterdb-monitor)](https://artifacthub.io/packages/search?repo=betterdb-monitor)
 [![npm](https://img.shields.io/npm/v/%40betterdb%2Fmonitor?label=npm)](https://www.npmjs.com/package/@betterdb/monitor)
 [![npm downloads](https://img.shields.io/npm/dm/%40betterdb%2Fmonitor)](https://www.npmjs.com/package/@betterdb/monitor)
 [![API Tests](https://github.com/betterdb-inc/monitor/actions/workflows/api-tests.yml/badge.svg)](https://github.com/betterdb-inc/monitor/actions/workflows/api-tests.yml)
@@ -53,6 +54,19 @@ Two image variants are published, both multi-arch (`linux/amd64`, `linux/arm64`)
 | `X.Y.Z` | Adds the experimental AI Helper (bring your own Ollama; disabled by default via `AI_ENABLED`) |
 
 See [Docker Production Deployment](#docker-production-deployment) for persistent storage, custom ports, licensing, and air-gapped setups.
+
+## Quick Start (Kubernetes / Helm)
+
+```bash
+helm repo add betterdb https://docs.betterdb.com/charts
+helm repo update
+helm install betterdb-monitor betterdb/betterdb-monitor \
+  --namespace betterdb --create-namespace \
+  --set db.host=my-valkey.default.svc.cluster.local \
+  --set db.password=yourpassword
+```
+
+Then `kubectl port-forward -n betterdb svc/betterdb-monitor 3001:3001` and open `http://localhost:3001`, or enable the chart's ingress. PostgreSQL-backed history, bring-your-own Secrets, and air-gapped licensing are all covered in the [Kubernetes guide](https://docs.betterdb.com/kubernetes) and the [chart README](charts/betterdb-monitor/README.md).
 
 ## Quick Start (CLI)
 

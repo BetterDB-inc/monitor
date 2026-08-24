@@ -24,6 +24,9 @@ can download an **offline license token** and never phone home.
    - **Env (file)**: `BETTERDB_OFFLINE_LICENSE_FILE=/run/secrets/betterdb-license.jwt`
      (ideal for Docker/Kubernetes secret mounts; default location is
      `data/license-offline.jwt`).
+   - **Helm**: create a Secret from the `.jwt` and set
+     `license.offline.existingSecret` — the chart mounts it and wires up the
+     env var for you. See the [Kubernetes guide](kubernetes#air-gapped-licensing).
 
 > **Persistence:** in containers, mount a volume at the persisted-state dir —
 > `/app/data` by default (the container's `<workdir>/data`), or wherever you
@@ -32,6 +35,8 @@ can download an **offline license token** and never phone home.
 > as UID 1001** — a freshly-mounted volume is root-owned, so persistence fails with
 > `EACCES … license.jwt`. Make it writable once:
 > `docker run --rm -v betterdb-data:/d alpine chown 1001:1001 /d`.
+> The Helm chart handles this for you: `persistence.enabled=true` mounts a PVC
+> at `/app/data` and sets `fsGroup: 1001`, so no manual chown is needed.
 
 When an offline license is present and no `BETTERDB_LICENSE_KEY` is configured,
 the monitor **never makes an outbound request**: license checks, telemetry, and

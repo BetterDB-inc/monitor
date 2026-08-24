@@ -50,7 +50,8 @@ docker run -d \
 ```
 
 Pin a specific version instead of `latest` when you want reproducible
-deployments, e.g. `betterdb/monitor:0.32.0`.
+deployments, e.g. `betterdb/monitor:<version>` using the tag from the
+[release notes](#release-notes).
 
 ### Docker Compose
 
@@ -101,20 +102,31 @@ and are untouched by re-installing.
 
 ## Kubernetes
 
-Update the image tag on your deployment. The exact command depends on how you
-deploy — a couple of common shapes:
+**Official Helm chart** (see the [Kubernetes guide](kubernetes)): each chart
+release pins the image to the version it was published for, so updating is
+just pulling the newer chart:
 
 ```bash
-# Plain manifests
-kubectl set image deployment/betterdb betterdb=betterdb/monitor:0.32.0
+helm repo update
+helm upgrade betterdb-monitor betterdb/betterdb-monitor \
+  --namespace betterdb --reuse-values
+```
 
-# Helm
-helm upgrade betterdb betterdb/monitor --set image.tag=0.32.0
+Don't override `image.tag` to update — leave it empty and let the chart's
+`appVersion` drive the image, so chart and app versions move together and
+`helm rollback` restores both.
+
+**Plain manifests**: update the image tag on your deployment:
+
+```bash
+# replace <version> with the release you are moving to (see the release notes below)
+kubectl set image deployment/betterdb betterdb=betterdb/monitor:<version>
 ```
 
 Use a versioned tag rather than `latest` so rollouts are deterministic and
-roll-backable. Ensure your PersistentVolumeClaim is retained across the rollout
-to keep historical data.
+roll-backable. Historical data lives in your storage backend (`STORAGE_TYPE`),
+not the pod, so it survives rollouts as long as you keep pointing at the same
+PostgreSQL instance — with in-memory storage it is lost on every restart.
 
 ## After updating
 

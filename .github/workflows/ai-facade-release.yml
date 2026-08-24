@@ -1,0 +1,310 @@
+# Publish @betterdb/ai to npm
+#
+# Invoked automatically by each child package's release workflow once that
+# child is live on npm, and manually via workflow_dispatch.
+#
+# Required secrets:
+#   NPM_TOKEN — npmjs.com automation token with publish access to @betterdb/ai
+
+name: Publish AI Facade
+
+on:
+  workflow_call:
+    secrets:
+      NPM_TOKEN:
+        description: 'npmjs.com automation token with publish access to @betterdb/ai'
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.2.0). Defaults to a patch bump.'
+        required: false
+        type: string
+
+# Publishes are serialised on this group. If two or three children release
+# around the same time, GitHub only keeps one pending run per concurrency
+# group — a caller's publish-facade job queued behind others can end up
+# cancelled, and that child's release run will report as cancelled even
+# though the child itself published fine. We accept this rather than adding
+# a dispatching wrapper job: any later child release re-pins all five
+# children here, so a skipped facade publish self-heals within one release
+# cycle.
+concurrency:
+  group: publish-ai-facade
+  cancel-in-progress: false
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=$INPUT_VERSION" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          CURRENT=$(npm view @betterdb/ai version 2>/dev/null || echo "")
+          if [ -z "$CURRENT" ]; then
+            SEED=$(node -p "require('./packages/ai/package.json').version")
+            echo "No published @betterdb/ai yet — seeding from the committed manifest: $SEED"
+            echo "version=$SEED" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          NEXT=$(node -e '
+            const current = process.argv[1];
+            const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(current);
+            if (!m) {
+              console.error(
+                `Refusing to auto-bump from "${current}": only plain MAJOR.MINOR.PATCH ` +
+                  `versions can be bumped automatically. Whether a prerelease should be ` +
+                  `promoted to a stable patch or incremented as a prerelease is a release ` +
+                  `decision, so make it explicitly: re-run this workflow via ` +
+                  `workflow_dispatch with an exact version input.`,
+              );
+              process.exit(1);
+            }
+            const [, maj, min, patch] = m;
+            console.log([maj, min, Number(patch) + 1].join("."));
+          ' "$CURRENT")
+          echo "version=$NEXT" >> $GITHUB_OUTPUT
+
+      - name: Build the workspace
+        run: pnpm build --filter @betterdb/ai...
+
+      - name: Run facade tests
+        run: pnpm --filter @betterdb/ai test
+
+      - name: Set version and pin children from npm
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd packages/ai
+          for p in agent-cache semantic-cache retrieval agent-memory valkey-search-kit; do
+            V=$(npm view "@betterdb/$p" version)
+            if [ -z "$V" ]; then
+              echo "Could not resolve a published version for @betterdb/$p"
+              exit 1
+            fi
+            echo "@betterdb/$p -> $V"
+            PKG="@betterdb/$p" PIN="$V" node -e "
+              const fs = require('fs');
+              const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+              pkg.dependencies[process.env.PKG] = process.env.PIN;
+              fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+            "
+          done
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Verify no workspace protocol survived
+        run: |
+          if grep -q '"workspace:' packages/ai/package.json; then
+            echo "workspace: protocol left in the manifest about to be published"
+            grep '"workspace:' packages/ai/package.json
+            exit 1
+          fi
+          echo "all child deps pinned to published versions"
+
+      - name: Verify build
+        run: |
+          for f in index langchain langgraph vercel openai openai-responses anthropic llamaindex; do
+            test -f "packages/ai/dist/$f.js"
+            test -f "packages/ai/dist/$f.d.ts"
+          done
+          for f in openai bedrock voyage cohere ollama; do
+            test -f "packages/ai/dist/embed/$f.js"
+            test -f "packages/ai/dist/embed/$f.d.ts"
+          done
+
+      - name: Prepare for publishing
+        run: |
+          cd packages/ai
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+            delete pkg.devDependencies;
+            fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Validate packed artifact against pinned children
+        run: |
+          set -euo pipefail
+
+          cd packages/ai
+          TARBALL="$(npm pack --silent)"
+          TARBALL_PATH="$(pwd)/$TARBALL"
+          cd "$GITHUB_WORKSPACE"
+
+          CHECK_DIR="$RUNNER_TEMP/facade-check"
+          rm -rf "$CHECK_DIR"
+          mkdir -p "$CHECK_DIR"
+          cd "$CHECK_DIR"
+
+          npm init -y >/dev/null
+          npm install "$TARBALL_PATH" typescript iovalkey \
+            "@langchain/core@^1.1.35" \
+            "@langchain/langgraph-checkpoint@^0.1.0" \
+            "ai@^6.0.135" \
+            "openai@^6.34.0" \
+            "@anthropic-ai/sdk@^0.91.1" \
+            "@llamaindex/core@^0.6.23"
+
+          cat > check.ts <<'EOF'
+          import { AgentCache, agentCache, semanticCache, retrieval, memory, searchKit } from '@betterdb/ai';
+          import { BetterDBLlmCache, BetterDBSemanticCache } from '@betterdb/ai/langchain';
+          import { BetterDBSaver, BetterDBSemanticStore } from '@betterdb/ai/langgraph';
+          import {
+            createAgentCacheMiddleware,
+            createSemanticCacheMiddleware,
+          } from '@betterdb/ai/vercel';
+          import {
+            prepareParams as openaiPrepareParams,
+            prepareSemanticParams as openaiPrepareSemanticParams,
+          } from '@betterdb/ai/openai';
+          import {
+            prepareParams as openaiResponsesPrepareParams,
+            prepareSemanticParams as openaiResponsesPrepareSemanticParams,
+          } from '@betterdb/ai/openai-responses';
+          import {
+            prepareParams as anthropicPrepareParams,
+            prepareSemanticParams as anthropicPrepareSemanticParams,
+          } from '@betterdb/ai/anthropic';
+          import {
+            prepareParams as llamaindexPrepareParams,
+            prepareSemanticParams as llamaindexPrepareSemanticParams,
+          } from '@betterdb/ai/llamaindex';
+          import { createOpenAIEmbed } from '@betterdb/ai/embed/openai';
+          import { createBedrockEmbed } from '@betterdb/ai/embed/bedrock';
+          import { createVoyageEmbed } from '@betterdb/ai/embed/voyage';
+          import { createCohereEmbed } from '@betterdb/ai/embed/cohere';
+          import { createOllamaEmbed } from '@betterdb/ai/embed/ollama';
+
+          const symbols: unknown[] = [
+            AgentCache,
+            agentCache,
+            semanticCache,
+            retrieval,
+            memory,
+            searchKit,
+            BetterDBLlmCache,
+            BetterDBSemanticCache,
+            BetterDBSaver,
+            BetterDBSemanticStore,
+            createAgentCacheMiddleware,
+            createSemanticCacheMiddleware,
+            openaiPrepareParams,
+            openaiPrepareSemanticParams,
+            openaiResponsesPrepareParams,
+            openaiResponsesPrepareSemanticParams,
+            anthropicPrepareParams,
+            anthropicPrepareSemanticParams,
+            llamaindexPrepareParams,
+            llamaindexPrepareSemanticParams,
+            createOpenAIEmbed,
+            createBedrockEmbed,
+            createVoyageEmbed,
+            createCohereEmbed,
+            createOllamaEmbed,
+          ];
+          void symbols;
+          EOF
+
+          cat > tsconfig.json <<'EOF'
+          {
+            "compilerOptions": {
+              "target": "es2022",
+              "module": "node16",
+              "moduleResolution": "node16",
+              "strict": true,
+              "skipLibCheck": false,
+              "noEmit": true
+            },
+            "files": ["check.ts"]
+          }
+          EOF
+
+          ./node_modules/.bin/tsc -p tsconfig.json
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: cd packages/ai && npm publish --provenance --access public
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ai-v${{ steps.version.outputs.version }}
+          name: AI Facade v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    needs: publish-npm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify npm package (with retry)
+        env:
+          VERSION: ${{ needs.publish-npm.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if npm view "@betterdb/ai@$VERSION" version; then
+              echo "Package verified successfully"
+              exit 0
+            fi
+            echo "Attempt $i: package not yet available, retrying in 30s..."
+            sleep 30
+          done
+          echo "Package not available after 5 attempts"
+          exit 1

@@ -104,19 +104,19 @@ jobs:
 
       - name: Verify build
         run: |
-            test -f packages/agent-cache/dist/index.js
-            test -f packages/agent-cache/dist/index.d.ts
-            test -f packages/agent-cache/dist/adapters/langchain.js
-            test -f packages/agent-cache/dist/adapters/ai.js
-            test -f packages/agent-cache/dist/adapters/langgraph.js
-            test -f packages/agent-cache/dist/adapters/openai-chat.js
-            test -f packages/agent-cache/dist/adapters/openai-chat.d.ts
-            test -f packages/agent-cache/dist/adapters/anthropic.js
-            test -f packages/agent-cache/dist/adapters/anthropic.d.ts
-            test -f packages/agent-cache/dist/adapters/llamaindex.js
-            test -f packages/agent-cache/dist/adapters/llamaindex.d.ts
-            test -f packages/agent-cache/dist/adapters/openai-responses.js
-            test -f packages/agent-cache/dist/adapters/openai-responses.d.ts
+          test -f packages/agent-cache/dist/index.js
+          test -f packages/agent-cache/dist/index.d.ts
+          test -f packages/agent-cache/dist/adapters/langchain.js
+          test -f packages/agent-cache/dist/adapters/ai.js
+          test -f packages/agent-cache/dist/adapters/langgraph.js
+          test -f packages/agent-cache/dist/adapters/openai-chat.js
+          test -f packages/agent-cache/dist/adapters/openai-chat.d.ts
+          test -f packages/agent-cache/dist/adapters/anthropic.js
+          test -f packages/agent-cache/dist/adapters/anthropic.d.ts
+          test -f packages/agent-cache/dist/adapters/llamaindex.js
+          test -f packages/agent-cache/dist/adapters/llamaindex.d.ts
+          test -f packages/agent-cache/dist/adapters/openai-responses.js
+          test -f packages/agent-cache/dist/adapters/openai-responses.d.ts
 
       - name: Prepare for publishing
         run: |
@@ -169,3 +169,13 @@ jobs:
           done
           echo "Package not available after 5 attempts"
           exit 1
+
+  publish-facade:
+    needs: [publish-npm, verify]
+    if: ${{ !inputs.skip_npm }}
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/ai-facade-release.yml
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

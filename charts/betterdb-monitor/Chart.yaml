@@ -1,0 +1,44 @@
+apiVersion: v2
+name: betterdb-monitor
+description: BetterDB Monitor - monitoring, analytics, and anomaly detection for Valkey and Redis
+type: application
+# Chart version — bump on chart changes. CI (helm-publish.yml) only releases
+# versions that do not already exist, so an unbumped version is a no-op.
+version: 0.2.0
+# Monitor release the chart defaults to. The default image tag is
+# "<appVersion>-no-ai" (the standard image); see values.yaml image.tag.
+appVersion: "0.39.0"
+icon: https://docs.betterdb.com/assets/images/favicon.svg
+keywords:
+  - valkey
+  - redis
+  - monitoring
+  - observability
+  - anomaly-detection
+home: https://betterdb.com
+sources:
+  - https://github.com/BetterDB-inc/monitor
+maintainers:
+  - name: BetterDB
+    url: https://betterdb.com
+# Artifact Hub reads these when it scrapes the repo index. Keep the images in
+# sync with docker-publish.yml's tag scheme (<appVersion>-no-ai = default,
+# <appVersion> = AI variant).
+annotations:
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://docs.betterdb.com
+    - name: Kubernetes guide
+      url: https://docs.betterdb.com/kubernetes
+    - name: Source
+      url: https://github.com/BetterDB-inc/monitor
+  artifacthub.io/images: |
+    - name: monitor
+      image: betterdb/monitor:0.39.0-no-ai
+    - name: monitor-ai
+      image: betterdb/monitor:0.39.0
+  # PGP provenance: the chart is signed in CI; this points Artifact Hub at the
+  # public key so it verifies the .prov and shows the Signed badge.
+  artifacthub.io/signKey: |
+    fingerprint: 16A10658BACC9E469EC1F988D75C3B25AD1783C8
+    url: https://docs.betterdb.com/charts/pubkey.asc
